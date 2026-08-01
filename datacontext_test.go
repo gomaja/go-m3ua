@@ -307,6 +307,47 @@ func TestDataPreservesNetworkAppearanceAndPresence(t *testing.T) {
 	}
 }
 
+func TestDataNetworkAppearanceValidationMatrix(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		configured *params.Param
+		peer       *params.Param
+		wantErr    error
+	}{
+		{name: "both omitted"},
+		{name: "both same", configured: params.NewNetworkAppearance(7), peer: params.NewNetworkAppearance(7)},
+		{name: "different values", configured: params.NewNetworkAppearance(7), peer: params.NewNetworkAppearance(8), wantErr: ErrInvalidNetworkAppearance},
+		{name: "peer present local omitted", peer: params.NewNetworkAppearance(7), wantErr: ErrInvalidNetworkAppearance},
+		{name: "local present peer omitted", configured: params.NewNetworkAppearance(7)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+			conn.cfg.NetworkAppearance = tt.configured
+			conn.handleData(context.Background(), messages.NewData(
+				tt.peer,
+				params.NewRoutingContext(7),
+				params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
+				nil,
+			))
+
+			err := firstErr(conn)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tt.wantErr)
+			}
+			delivered := len(conn.dataChan)
+			if tt.wantErr != nil {
+				if delivered != 0 {
+					t.Fatal("DATA with invalid Network Appearance was delivered")
+				}
+				return
+			}
+			if delivered != 1 {
+				t.Fatal("DATA with valid Network Appearance was not delivered")
+			}
+		})
+	}
+}
+
 func TestMalformedDataNetworkAppearanceIsAParameterFieldError(t *testing.T) {
 	for _, size := range []int{0, 1, 3, 5, 8} {
 		t.Run(string(rune('0'+size)), func(t *testing.T) {

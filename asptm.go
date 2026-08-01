@@ -355,6 +355,8 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 			return err
 		}
 	}
+	contextlessServed := served == nil && rcErr == nil &&
+		aspActive.RoutingContext == nil && len(c.configuredRoutingContexts()) == 0
 
 	if _, err := c.WriteSignal(
 		messages.NewAspActiveAck(acknowledgedMode, acknowledged, nil),
@@ -370,8 +372,11 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 	// The Ack has already told the peer that this subset is active; returning the
 	// accompanying Error before recording it would leave the two ends with
 	// opposite state for the same AS.
-	if served != nil {
-		servedContexts := served.RoutingContexts()
+	if served != nil || contextlessServed {
+		var servedContexts []uint32
+		if served != nil {
+			servedContexts = served.RoutingContexts()
+		}
 		c.noteRoutingContextsActive(servedContexts)
 
 		// Override, after the Ack and only after it. Section 4.3.4.3: "In the
@@ -382,7 +387,9 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 		// traffic from the SGP within the AS."
 		//
 		// The ordering is Section 4.3.4.5's: the Notify follows the related Ack.
-		c.overrideOtherASPs(aspActive, servedContexts)
+		if len(servedContexts) > 0 {
+			c.overrideOtherASPs(aspActive, servedContexts)
+		}
 	}
 	if rcErr != nil {
 		return rcErr
@@ -591,11 +598,20 @@ func (c *Conn) answerRoutingContexts(requested *params.Param, unservedAs, noKeys
 		// Active message and there are no RKs defined, the peer node SHOULD
 		// respond with and ERROR message with the Error Code 'Invalid Routing
 		// Context'." Section 4.3.4.4 says the same for ASP Inactive, with "No
-		// configured AS for ASP". With nothing configured there is no
-		// Application Server the request could refer to, so acknowledging it
-		// activated the ASP for nothing at all.
+		// configured AS for ASP".
+		//
+		// That is the no-RK case, not the dedicated-association case where local
+		// configuration intentionally carries a single AS without assigning it a
+		// numeric Routing Context. Config.RoutingContexts nil, and the empty
+		// parameter produced by the public constructors from an empty slice, both
+		// represent that contextless AS. The only "no AS" shape this API can
+		// express after ASP Up is an explicit authorizer that returned no
+		// membership.
 		if len(ours) == 0 {
-			return nil, noKeysAs()
+			if c.hasExplicitlyEmptyASPAuthorization() {
+				return nil, noKeysAs()
+			}
+			return nil, nil
 		}
 		// Otherwise the receiver knows by configuration which AS the ASP
 		// belongs to, and answers for the whole configured set.
@@ -731,6 +747,8 @@ func (c *Conn) handleAspInactive(aspInactive *messages.AspInactive) error {
 
 	served, rcErr := c.answerRoutingContexts(aspInactive.RoutingContext, NewInvalidRoutingContextError, NewNoConfiguredASError)
 	acknowledged := served
+	contextlessServed := served == nil && rcErr == nil &&
+		aspInactive.RoutingContext == nil && len(c.configuredRoutingContexts()) == 0
 
 	// Section 4.3.4.4 owes the Ack even when the ASP is already ASP-INACTIVE,
 	// so an unknown context withholds it only outside that state.
@@ -746,8 +764,11 @@ func (c *Conn) handleAspInactive(aspInactive *messages.AspInactive) error {
 	// snapshots, then wait for any DATA that selected it before that mark. No AS
 	// mutex is held while waiting for the socket write.
 	postAckNotify := func() {}
-	if served != nil && c.State() == StateAspActive {
-		routingContexts := served.RoutingContexts()
+	if (served != nil || contextlessServed) && c.State() == StateAspActive {
+		var routingContexts []uint32
+		if served != nil {
+			routingContexts = served.RoutingContexts()
+		}
 		c.noteRoutingContextsInactive(routingContexts)
 		if c.as != nil {
 			postAckNotify = c.as.quiesceASPFor(c, routingContexts)

@@ -195,7 +195,7 @@ func TestContextlessMultiASOverrideUsesConfiguredScopeFromTheWire(t *testing.T) 
 	}
 }
 
-func TestContextlessNotifyWithoutConfiguredMembershipIsRejectedFromTheWire(t *testing.T) {
+func TestContextlessNotifyIsAcceptedFromTheWire(t *testing.T) {
 	conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient)
 	raw, err := messages.NewNotify(
 		params.NewStatus(params.AspFailure), params.NewAspIdentifier(7), nil, nil,
@@ -205,12 +205,11 @@ func TestContextlessNotifyWithoutConfiguredMembershipIsRejectedFromTheWire(t *te
 	}
 
 	conn.dispatchRaw(context.Background(), inbound{data: raw, ppid: M3UAPPID})
-	rejected := firstErr(conn)
-	if !errors.Is(rejected, ErrNoConfiguredAS) {
-		t.Fatalf("wire NTFY error = %v, want ErrNoConfiguredAS", rejected)
+	if err := firstErr(conn); err != nil {
+		t.Fatalf("contextless wire NTFY was rejected: %v", err)
 	}
 	if got := conn.State(); got != StateAspActive {
-		t.Errorf("state = %v after rejected wire NTFY, want %v", got, StateAspActive)
+		t.Errorf("state = %v after contextless wire NTFY, want %v", got, StateAspActive)
 	}
 	select {
 	case got := <-conn.stateChan:
@@ -218,27 +217,21 @@ func TestContextlessNotifyWithoutConfiguredMembershipIsRejectedFromTheWire(t *te
 			t.Errorf("published state = %v, want stateUnchanged", got)
 		}
 	default:
-		t.Fatal("rejected NTFY published no state result")
+		t.Fatal("accepted NTFY published no state result")
 	}
-	if len(conn.mgmtChan) != 0 {
-		t.Error("a rejected wire NTFY reached Layer Management")
+	select {
+	case indication := <-conn.ManagementIndications():
+		if indication.RoutingContextSet || len(indication.RoutingContexts) != 0 {
+			t.Fatalf("contextless NTFY scope = %v (set=%v), want omitted",
+				indication.RoutingContexts, indication.RoutingContextSet)
+		}
+	default:
+		t.Fatal("accepted wire NTFY did not reach Layer Management")
 	}
-	if err := conn.handleErrors(rejected); err != nil {
-		t.Fatalf("handleErrors: %v", err)
-	}
-	response := lastError(t, *sent)
-	if response.ErrorCode == nil || response.ErrorCode.ErrorCode() != params.ErrNoConfiguredAsForAsp {
-		t.Fatalf("ERR code = %v, want No Configured AS for ASP", response.ErrorCode)
-	}
-	if response.RoutingContext != nil {
-		t.Errorf("contextless ERR quoted Routing Contexts %v", response.RoutingContext.RoutingContexts())
-	}
-	encoded, err := response.MarshalBinary()
-	if err != nil {
-		t.Fatalf("marshal No Configured AS ERR: %v", err)
-	}
-	if _, err := messages.Parse(encoded); err != nil {
-		t.Fatalf("parse No Configured AS ERR: %v", err)
+	for _, message := range *sent {
+		if _, ok := message.(*messages.Error); ok {
+			t.Fatalf("accepted contextless NTFY sent Error: %v", message)
+		}
 	}
 }
 
@@ -321,10 +314,6 @@ func FuzzNotifyRoutingContextScope(f *testing.F) {
 		err := conn.handleNotify(messages.NewNotify(params.NewStatus(status), nil, routing, nil))
 		var wantOffending []uint32
 		switch {
-		case routing == nil && len(configured) == 0:
-			if !errors.Is(err, ErrNoConfiguredAS) {
-				t.Fatalf("uninferable nil scope error = %v, want ErrNoConfiguredAS", err)
-			}
 		case routing == nil:
 			if err != nil {
 				t.Fatalf("inferred configured scope error = %v", err)

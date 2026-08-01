@@ -168,7 +168,7 @@ func (c *Conn) handleNotify(n *messages.Notify) error {
 		return err
 	}
 	configured := c.configuredRoutingContexts()
-	if n.RoutingContext == nil && len(configured) == 0 {
+	if n.RoutingContext == nil && len(configured) == 0 && c.hasExplicitlyEmptyASPAuthorization() {
 		// Section 3.8.1 assigns this exact case its own Error: no RC was
 		// present and configuration cannot identify any referenced AS.
 		return NewNoConfiguredASError()

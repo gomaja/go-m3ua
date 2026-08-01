@@ -178,6 +178,144 @@ func TestTwoASPsWithDistinctRoutingContextsBothActivate(t *testing.T) {
 	}
 }
 
+func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serverConfig := rcServerConfig()
+	serverConfig.AuthorizeASP = nil
+	serverConfig.EstablishTimeout = 500 * time.Millisecond
+	serverConfig.TAck = 20 * time.Millisecond
+	serverConfig.TAckRetries = 2
+	clientConfig := rcClientConfig(0xAA000001)
+	clientConfig.EstablishTimeout = 500 * time.Millisecond
+	clientConfig.TAck = 20 * time.Millisecond
+	clientConfig.TAckRetries = 2
+
+	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), serverConfig)
+	if err != nil {
+		if isUnsupportedSCTP(err) {
+			t.Skipf("skipping socket-backed test: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	srvAddr := ln.Addr().(*sctp.SCTPAddr)
+
+	type acceptResult struct {
+		conn *Conn
+		err  error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		c, err := ln.Accept(ctx)
+		accepted <- acceptResult{conn: c, err: err}
+	}()
+
+	cli, err := Dial(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, clientConfig)
+	if err != nil {
+		t.Fatalf("contextless ASP could not activate against a contextless SGP: %v", err)
+	}
+	defer func() { _ = cli.Close() }()
+	if got := cli.State(); got != StateAspActive {
+		t.Fatalf("client state = %v, want %v", got, StateAspActive)
+	}
+
+	select {
+	case result := <-accepted:
+		if result.conn != nil {
+			t.Cleanup(func() { _ = result.conn.Close() })
+		}
+		if result.err != nil {
+			t.Fatalf("Accept: %v", result.err)
+		}
+		if got := result.conn.State(); got != StateAspActive {
+			t.Fatalf("server state = %v, want %v", got, StateAspActive)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Accept never returned for the contextless association")
+	}
+}
+
+func TestRoutingContextHandshakeMatrix(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		clientRCs []uint32
+		serverRCs []uint32
+		wantOK    bool
+	}{
+		{name: "both omitted", wantOK: true},
+		{name: "both same", clientRCs: []uint32{7}, serverRCs: []uint32{7}, wantOK: true},
+		{name: "different values", clientRCs: []uint32{7}, serverRCs: []uint32{8}},
+		{name: "client explicit server omitted", clientRCs: []uint32{7}},
+		{name: "client omitted server explicit", serverRCs: []uint32{7}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			serverConfig := rcServerConfig(tt.serverRCs...)
+			serverConfig.AuthorizeASP = nil
+			serverConfig.EstablishTimeout = 500 * time.Millisecond
+			serverConfig.TAck = 20 * time.Millisecond
+			serverConfig.TAckRetries = 2
+			clientConfig := rcClientConfig(0xAA000001, tt.clientRCs...)
+			clientConfig.EstablishTimeout = 500 * time.Millisecond
+			clientConfig.TAck = 20 * time.Millisecond
+			clientConfig.TAckRetries = 2
+
+			ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), serverConfig)
+			if err != nil {
+				if isUnsupportedSCTP(err) {
+					t.Skipf("skipping socket-backed test: %v", err)
+				}
+				t.Fatal(err)
+			}
+			defer func() { _ = ln.Close() }()
+			srvAddr := ln.Addr().(*sctp.SCTPAddr)
+
+			type acceptResult struct {
+				conn *Conn
+				err  error
+			}
+			accepted := make(chan acceptResult, 1)
+			go func() {
+				c, err := ln.Accept(ctx)
+				accepted <- acceptResult{conn: c, err: err}
+			}()
+
+			cli, dialErr := Dial(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, clientConfig)
+			if cli != nil {
+				t.Cleanup(func() { _ = cli.Close() })
+			}
+
+			var acceptErr error
+			select {
+			case result := <-accepted:
+				if result.conn != nil {
+					t.Cleanup(func() { _ = result.conn.Close() })
+				}
+				acceptErr = result.err
+			case <-time.After(time.Second):
+				t.Fatal("Accept did not finish within the handshake budget")
+			}
+
+			if tt.wantOK {
+				if dialErr != nil {
+					t.Fatalf("Dial failed: %v", dialErr)
+				}
+				if acceptErr != nil {
+					t.Fatalf("Accept failed: %v", acceptErr)
+				}
+				return
+			}
+			if dialErr == nil && acceptErr == nil {
+				t.Fatal("mismatched Routing Context configuration established successfully")
+			}
+		})
+	}
+}
+
 // The Ack must name what the ASP asked about, not the SGP's whole inventory.
 func TestAspActiveAckEchoesTheASPsRoutingContext(t *testing.T) {
 	conn, sent := newTestConn(t, StateAspInactive, modeServer)
@@ -364,6 +502,18 @@ func lastAspActiveAck(t *testing.T, sent []messages.M3UA) *messages.AspActiveAck
 	return nil
 }
 
+func lastAspInactiveAck(t *testing.T, sent []messages.M3UA) *messages.AspInactiveAck {
+	t.Helper()
+
+	for i := len(sent) - 1; i >= 0; i-- {
+		if ack, ok := sent[i].(*messages.AspInactiveAck); ok {
+			return ack
+		}
+	}
+	t.Fatalf("no ASP Inactive Ack was sent (got %v)", typeNames(sent))
+	return nil
+}
+
 // isUnsupportedSCTP reports whether an error is the sctp package's
 // platform-support refusal, which is how the socket tests skip off Linux.
 func isUnsupportedSCTP(err error) bool {
@@ -500,40 +650,62 @@ func TestWhollyUnservedRoutingContextGetsNoAck(t *testing.T) {
 	}
 }
 
-// RFC 4666 Section 4.3.4.3: "If the RC parameter is not included in the ASP
-// Active message and there are no RKs defined, the peer node SHOULD respond
-// with and ERROR message with the Error Code 'Invalid Routing Context'."
-//
-// A Config with no Routing Contexts has no Routing Keys, so an ASP Active
-// without the parameter cannot be resolved to any Application Server. It was
-// acknowledged anyway, activating the ASP for nothing.
-func TestAspActiveWithNoContextAndNoRoutingKeysIsRefused(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
-	conn.cfg.RoutingContexts = nil
+func TestContextlessConfiguredASActivatesWithoutRoutingContext(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		configured *params.Param
+	}{
+		{name: "nil config"},
+		{name: "empty parameter", configured: params.NewRoutingContext()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, sent := newTestConn(t, StateAspInactive, modeServer)
+			conn.cfg.RoutingContexts = tt.configured
 
-	err := conn.handleAspActive(messages.NewAspActive(
-		params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil,
-	))
-	if !errors.Is(err, ErrInvalidRoutingContext) {
-		t.Errorf("error = %v, want an Invalid Routing Context error", err)
-	}
-	for _, m := range *sent {
-		if _, ok := m.(*messages.AspActiveAck); ok {
-			t.Error("acknowledged an ASP Active that names no context against a config with no routing keys")
-		}
+			if err := conn.handleAspActive(messages.NewAspActive(
+				params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil,
+			)); err != nil {
+				t.Fatalf("contextless ASP Active was refused: %v", err)
+			}
+
+			ack := lastAspActiveAck(t, *sent)
+			if ack.RoutingContext != nil {
+				t.Fatalf("contextless ASP Active Ack carried Routing Context %v, want omitted",
+					ack.RoutingContext.RoutingContexts())
+			}
+		})
 	}
 }
 
-// Section 4.3.4.4 gives ASP Inactive the other code for the same shape:
-// "the SGP/IPSP MUST respond with an ERROR message with the Error Code
-// 'No configured AS for ASP'."
-func TestAspInactiveWithNoContextAndNoRoutingKeysIsRefused(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
-	conn.cfg.RoutingContexts = nil
+func TestContextlessConfiguredASInactivatesWithoutRoutingContext(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		configured *params.Param
+	}{
+		{name: "nil config"},
+		{name: "empty parameter", configured: params.NewRoutingContext()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn.cfg.RoutingContexts = tt.configured
 
-	err := conn.handleAspInactive(messages.NewAspInactive(nil, nil))
-	if !errors.Is(err, ErrNoConfiguredAS) {
-		t.Errorf("error = %v, want a No Configured AS for ASP error", err)
+			conn.handleSignals(context.Background(), messages.NewAspInactive(nil, nil))
+
+			ack := lastAspInactiveAck(t, *sent)
+			if ack.RoutingContext != nil {
+				t.Fatalf("contextless ASP Inactive Ack carried Routing Context %v, want omitted",
+					ack.RoutingContext.RoutingContexts())
+			}
+			if err := firstErr(conn); err != nil {
+				t.Fatalf("contextless ASP Inactive reported error: %v", err)
+			}
+			if got := applyASPTMState(t, conn); got != StateAspInactive {
+				t.Fatalf("published state = %v, want %v", got, StateAspInactive)
+			}
+			if got := conn.State(); got != StateAspInactive {
+				t.Fatalf("association state = %v, want %v", got, StateAspInactive)
+			}
+		})
 	}
 }
 
