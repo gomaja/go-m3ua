@@ -30,12 +30,74 @@ import (
 // attempt is now a single bounded one — the caller loops if it wants to retry —
 // and the socket is released before Dial returns, on every path.
 //
-// One measured caveat, which the configuration cannot remove: the first
-// retransmission is scheduled at net.sctp.rto_initial, a system-wide sysctl
-// defaulting to 3 seconds, and InitMsg.MaxInitTimeout only caps each RTO rather
-// than moving the first one. So within a 5 second budget the kernel still puts
-// a second INIT on the wire at 3 seconds. Exactly one INIT needs
-// net.sctp.rto_initial raised beyond the budget.
+// The one-shot contract is enforced per socket: Dial raises SCTP_RTOINFO's
+// Initial and Max values beyond the attempt budget before connecting, because
+// InitMsg.MaxInitTimeout only caps each RTO rather than moving the first one.
+
+func TestOneShotSCTPDialPolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeout     time.Duration
+		wantInitial uint32
+	}{
+		{name: "sub-millisecond", timeout: time.Nanosecond, wantInitial: 1001},
+		{name: "default budget", timeout: DefaultInitTimeout, wantInitial: 6000},
+		{name: "longer than default kernel max", timeout: 2 * time.Minute, wantInitial: 121000},
+		{name: "saturates", timeout: time.Duration(1<<63 - 1), wantInitial: ^uint32(0)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy := oneShotSCTPDialPolicy(test.timeout)
+			if policy.init.NumOstreams != sctp.SCTP_MAX_STREAM {
+				t.Errorf("NumOstreams = %d, want %d", policy.init.NumOstreams, sctp.SCTP_MAX_STREAM)
+			}
+			if policy.init.MaxAttempts != 1 {
+				t.Errorf("MaxAttempts = %d, want 1", policy.init.MaxAttempts)
+			}
+			if policy.init.MaxInitTimeout != 1 {
+				t.Errorf("MaxInitTimeout = %d, want 1", policy.init.MaxInitTimeout)
+			}
+			if policy.rto.AssocID != sctp.SCTPAssocID(sctp.SCTP_FUTURE_ASSOC) {
+				t.Errorf("RTO AssocID = %d, want SCTP_FUTURE_ASSOC", policy.rto.AssocID)
+			}
+			if policy.rto.Initial != test.wantInitial {
+				t.Errorf("RTO Initial = %d, want %d", policy.rto.Initial, test.wantInitial)
+			}
+			if policy.rto.Max != policy.rto.Initial {
+				t.Errorf("RTO Max = %d, want Initial %d", policy.rto.Max, policy.rto.Initial)
+			}
+		})
+	}
+}
+
+func TestOneShotSCTPDialPolicyRTOStaysPastBudget(t *testing.T) {
+	tests := []time.Duration{
+		time.Millisecond,
+		time.Second,
+		DefaultInitTimeout,
+		30 * time.Second,
+		2 * time.Minute,
+		time.Hour,
+		24 * time.Hour,
+	}
+
+	for _, timeout := range tests {
+		t.Run(timeout.String(), func(t *testing.T) {
+			rto := oneShotSCTPDialPolicy(timeout).rto
+			budgetMillis := uint64(timeout / time.Millisecond)
+			if timeout%time.Millisecond != 0 {
+				budgetMillis++
+			}
+			if uint64(rto.Initial) <= budgetMillis {
+				t.Fatalf("RTO Initial = %dms, not beyond InitTimeout %dms", rto.Initial, budgetMillis)
+			}
+			if rto.Max < rto.Initial {
+				t.Fatalf("RTO Max = %dms, below Initial %dms", rto.Max, rto.Initial)
+			}
+		})
+	}
+}
 
 // blackholeAddr is an address in TEST-NET-1 (RFC 5737), reserved for
 // documentation, so an INIT sent there is never answered.
@@ -147,6 +209,7 @@ func TestDialWithACancelledContextDoesNotAttempt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	fdBaseline, haveFDs := openDescriptors()
 	start := time.Now()
 	conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
 	elapsed := time.Since(start)
@@ -159,6 +222,13 @@ func TestDialWithACancelledContextDoesNotAttempt(t *testing.T) {
 	}
 	if elapsed > time.Second {
 		t.Errorf("Dial took %v on an already-cancelled context; it performed the connect anyway", elapsed)
+	}
+	if haveFDs {
+		got, _ := openDescriptors()
+		if got != fdBaseline {
+			t.Errorf("open descriptors = %d after already-cancelled Dial, baseline %d: an attempt was opened",
+				got, fdBaseline)
+		}
 	}
 }
 
@@ -236,6 +306,69 @@ func TestRepeatedFailedDialsDoNotLeak(t *testing.T) {
 		got, _ := openDescriptors()
 		if got > fdBaseline+2 {
 			t.Errorf("open descriptors = %d after %d failed dials, baseline %d: "+
+				"an abandoned attempt is not releasing its socket",
+				got, rounds, fdBaseline)
+		}
+	}
+}
+
+// Repeated START/STOP cycles cancel in-flight attempts rather than waiting for
+// InitTimeout. They must release the same resources as timeout paths, because
+// this is the path an application uses for rapid shutdown.
+func TestRepeatedCancelledDialsDoNotLeak(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping: several cancellable dial attempts")
+	}
+
+	// One warm-up so lazily started machinery is not counted.
+	warmCtx, warmCancel := context.WithCancel(context.Background())
+	warmCancel()
+	conn, err := Dial(warmCtx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("warm-up Dial error = %v, want context.Canceled", err)
+	}
+
+	settle()
+	baseline := runtime.NumGoroutine()
+	fdBaseline, haveFDs := openDescriptors()
+
+	const rounds = 20
+	for i := 0; i < rounds; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(10*time.Millisecond, cancel)
+
+		start := time.Now()
+		conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
+		elapsed := time.Since(start)
+		cancel()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if err == nil {
+			t.Fatal("Dial reported success against an address that never answers")
+		}
+		skipUnlessBlackholed(t, err)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("round %d Dial error = %v, want context.Canceled", i, err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("round %d Dial took %v after cancellation", i, elapsed)
+		}
+	}
+
+	settle()
+	if got := runtime.NumGoroutine(); got > baseline+4 {
+		t.Errorf("goroutines = %d after %d cancelled dials, baseline %d: each attempt is leaking",
+			got, rounds, baseline)
+	}
+
+	if haveFDs {
+		got, _ := openDescriptors()
+		if got > fdBaseline+2 {
+			t.Errorf("open descriptors = %d after %d cancelled dials, baseline %d: "+
 				"an abandoned attempt is not releasing its socket",
 				got, rounds, fdBaseline)
 		}

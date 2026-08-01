@@ -80,8 +80,8 @@ type SCTPConfig struct {
 	*SctpSackInfo
 	*SctpNoDelayInfo
 
-	// InitTimeout bounds one SCTP association attempt. Zero selects
-	// DefaultInitTimeout.
+	// InitTimeout bounds Dial's one-shot SCTP association attempt. Zero
+	// selects DefaultInitTimeout.
 	InitTimeout time.Duration
 
 	// ReadBufferSize is the size of the buffer each read from the association
@@ -101,18 +101,17 @@ type SCTPConfig struct {
 // DefaultInitTimeout bounds one SCTP association attempt: how long Dial waits
 // for the INIT-ACK before giving up and releasing the socket.
 //
-// Dial makes exactly one attempt and never retries; a caller that wants to keep
+// Dial makes at most one attempt and never retries; a caller that wants to keep
 // trying loops over Dial and chooses its own cadence. Left to the kernel, the
 // attempt runs to net.sctp.max_init_retransmits with the RTO doubling from
 // net.sctp.rto_initial to net.sctp.rto_max — measured at nine INIT chunks over
 // 342 seconds on Linux defaults, which is far too long for an application to
 // react to anything.
 //
-// Note that the kernel still schedules its first retransmission at
-// net.sctp.rto_initial, 3 seconds by default, and InitMsg.MaxInitTimeout caps
-// each RTO rather than moving that first one. A budget longer than 3 seconds
-// therefore sees a second INIT on the wire. Sending literally one needs
-// net.sctp.rto_initial raised past the budget, which is a system-wide setting.
+// Dial enforces the one-shot contract per socket by raising SCTP_RTOINFO's
+// Initial and Max values beyond this budget before connecting. If no INIT-ACK
+// arrives before the timeout, Dial returns ErrInitTimeout; if ctx is cancelled
+// first, Dial aborts the in-flight socket promptly and returns ctx.Err().
 const DefaultInitTimeout = 5 * time.Second
 
 // DefaultEstablishTimeout bounds the M3UA handshake once the association is up:

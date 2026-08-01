@@ -13,7 +13,7 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// initialRTOFor is the SCTP_RTOINFO initial RTO to use for one attempt.
+// oneShotRTOMillisFor is the SCTP_RTOINFO RTO to use for one attempt.
 //
 // The kernel schedules its first INIT retransmission at this value, so putting
 // it beyond the caller's budget is what keeps the attempt to a single INIT.
@@ -21,21 +21,66 @@ import (
 // retransmissions and zero selects the kernel default, so the smallest usable
 // value still puts a second INIT on the wire at net.sctp.rto_initial.
 //
-// A margin is added so the retransmission timer never races the deadline.
-func initialRTOFor(timeout time.Duration) uint32 {
-	ms := timeout.Milliseconds() + rtoMarginMillis
-	if ms < 1 {
-		ms = 1
+// A margin is added so the retransmission timer never races the deadline. The
+// result saturates at SCTP_RTOINFO's uint32 millisecond limit; that still covers
+// any operationally useful InitTimeout by weeks.
+func oneShotRTOMillisFor(timeout time.Duration) uint32 {
+	if timeout <= 0 {
+		return 1
 	}
-	// srto_initial must stay under srto_max, whose default is 60 seconds.
-	if ms > 59000 {
-		ms = 59000
+
+	ms := uint64(timeout / time.Millisecond)
+	if timeout%time.Millisecond != 0 {
+		ms++
 	}
-	return uint32(ms)
+	if ms >= maxRTOInfoMillis-uint64(rtoMarginMillis) {
+		return ^uint32(0)
+	}
+	return uint32(ms + uint64(rtoMarginMillis))
 }
 
 // rtoMarginMillis keeps the first retransmission clear of the deadline.
 const rtoMarginMillis = 1000
+
+const maxRTOInfoMillis = uint64(^uint32(0))
+
+type sctpDialPolicy struct {
+	init sctp.InitMsg
+	rto  sctp.RtoInfo
+}
+
+func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
+	rtoMillis := oneShotRTOMillisFor(timeout)
+	return sctpDialPolicy{
+		init: sctp.InitMsg{
+			NumOstreams: sctp.SCTP_MAX_STREAM,
+			// Belt and braces: the deadline above ends the attempt first, and
+			// the raised RTO keeps the kernel from retransmitting inside it.
+			MaxAttempts:    1,
+			MaxInitTimeout: 1,
+		},
+		rto: sctp.RtoInfo{
+			AssocID: sctp.SCTPAssocID(sctp.SCTP_FUTURE_ASSOC),
+			Initial: rtoMillis,
+			// Initial can exceed the kernel default maximum when a caller
+			// deliberately uses a long InitTimeout. Set Max with it so the
+			// one-shot invariant does not silently disappear above 60 seconds.
+			Max: rtoMillis,
+		},
+	}
+}
+
+func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.PreconfiguredSocket {
+	base := &sctp.SocketConfig{
+		// A client's watcher serves one association, so its route ignores the
+		// association ID; it is set once Dial has a Conn to route to.
+		NotificationHandler: restarts.handle,
+		InitMsg:             p.init,
+	}
+	return base.WithPreAssociation(sctp.PreAssociationConfig{
+		RTOInfo: &p.rto,
+	})
+}
 
 // dialAssociation makes exactly one SCTP association attempt, bounded by
 // timeout and abandoned as soon as ctx is done.
@@ -50,24 +95,7 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	base := &sctp.SocketConfig{
-		// A client's watcher serves one association, so its route ignores the
-		// association ID; it is set once Dial has a Conn to route to.
-		NotificationHandler: restarts.handle,
-		InitMsg: sctp.InitMsg{
-			NumOstreams: sctp.SCTP_MAX_STREAM,
-			// Belt and braces: the deadline above ends the attempt first, and
-			// the raised RTO keeps the kernel from retransmitting inside it.
-			MaxAttempts:    1,
-			MaxInitTimeout: 1,
-		},
-	}
-	cfg := base.WithPreAssociation(sctp.PreAssociationConfig{
-		RTOInfo: &sctp.RtoInfo{
-			AssocID: sctp.SCTPAssocID(sctp.SCTP_FUTURE_ASSOC),
-			Initial: initialRTOFor(timeout),
-		},
-	})
+	cfg := oneShotSCTPDialPolicy(timeout).socketConfig(restarts)
 
 	conn, err := cfg.DialContext(attemptCtx, network, laddr, raddr)
 	if err != nil {
@@ -85,11 +113,12 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 // After successfully establishing the connection with peer, state-changing
 // signals and heartbeats are automatically handled background in another goroutine.
 //
-// Dial makes exactly one SCTP association attempt — one INIT — bounded by
-// Config.InitTimeout, and never retries. A caller that wants to keep trying
-// loops over Dial and chooses its own cadence, which is the point: left to the
-// kernel's defaults an unanswered attempt runs to nine INIT chunks over 342
-// seconds, far too long for an application to react to anything.
+// Dial makes at most one SCTP association attempt — one INIT if ctx is live,
+// none if ctx is already done — bounded by Config.InitTimeout, and never
+// retries. A caller that wants to keep trying loops over Dial and chooses its
+// own cadence, which is the point: left to the kernel's defaults an unanswered
+// attempt runs to nine INIT chunks over 342 seconds, far too long for an
+// application to react to anything.
 //
 // Every path releases the socket before returning. On a timeout or a cancelled
 // context the association is aborted at the deadline, so nothing further is put
