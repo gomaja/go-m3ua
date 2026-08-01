@@ -1,0 +1,28 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, build with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
+.glide/
+
+# Local-only artefacts: scratch data, images, and ad-hoc analysis or test
+# tooling stay on the local machine and are never published.
+temp/
+*.jpeg
+*.jpg
+*.png
+local/
+scripts/local/
+Dockerfile.test
+
+# Editor/IDE
+.idea/
+.vscode/

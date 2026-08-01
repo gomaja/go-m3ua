@@ -1,0 +1,456 @@
+package m3ua
+
+import (
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gomaja/go-m3ua/messages"
+	"github.com/gomaja/go-m3ua/messages/params"
+)
+
+func TestListenerDestinationUpdatesNotifyOnlyConcernedActiveASPs(t *testing.T) {
+	tests := []struct {
+		name  string
+		state DestinationState
+		kind  any
+	}{
+		{"unavailable", DestinationUnavailable, (*messages.DestinationUnavailable)(nil)},
+		{"available", DestinationAvailable, (*messages.DestinationAvailable)(nil)},
+		{"restricted", DestinationRestricted, (*messages.DestinationRestricted)(nil)},
+		{"congested", DestinationCongested, (*messages.SignallingCongestion)(nil)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			listener, firstApplicationServer, first, firstSent := distributionFixtureForContexts(
+				t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
+			)
+			secondApplicationServer := listener.as.get(2)
+			second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1, 2)
+			first.noteRoutingContextsActive([]uint32{1})
+			first.setState(StateAspActive)
+			second.noteRoutingContextsActive([]uint32{2})
+			second.setState(StateAspActive)
+			firstApplicationServer.setASPState(first, StateAspActive, time.Hour)
+			secondApplicationServer.setASPState(second, StateAspActive, time.Hour)
+			firstSent.reset()
+			secondSent.reset()
+
+			if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
+				7, 1, 0x123456, 8, test.state,
+			); err != nil {
+				t.Fatalf("set destination state: %v", err)
+			}
+			firstMessages := ssnmMessages(firstSent.snapshot())
+			if len(firstMessages) != 1 {
+				t.Fatalf("concerned ASP received %d SSNM messages, want 1", len(firstMessages))
+			}
+			if !sameSSNMKind(firstMessages[0], test.kind) {
+				t.Fatalf("destination state %v emitted %T, want %T", test.state, firstMessages[0], test.kind)
+			}
+			networkAppearance, routingContext, affectedPointCode := ssnmScope(t, firstMessages[0])
+			if networkAppearance == nil || networkAppearance.NetworkAppearance() != 7 {
+				t.Fatalf("SSNM Network Appearance = %v, want 7", networkAppearance)
+			}
+			if got := routingContext.RoutingContexts(); !equalTrafficModeContexts(got, []uint32{1}) {
+				t.Fatalf("SSNM Routing Contexts = %v, want [1]", got)
+			}
+			if got := affectedPointCode.AffectedPointCodes(); len(got) != 1 || got[0] != 0x123456 {
+				t.Fatalf("SSNM Affected Point Codes = %v, want [0x123456]", got)
+			}
+			if got := affectedPointCode.AffectedPointCodeMasks(); len(got) != 1 || got[0] != 8 {
+				t.Fatalf("SSNM Affected Point Code masks = %v, want [8]", got)
+			}
+			if got := len(ssnmMessages(secondSent.snapshot())); got != 0 {
+				t.Fatalf("unconcerned ASP received %d SSNM messages, want 0", got)
+			}
+		})
+	}
+}
+
+func TestAllContextDestinationUpdateDeduplicatesAnASPAndNamesItsActiveScopes(t *testing.T) {
+	listener, firstApplicationServer, asp, sent := distributionFixtureForContexts(
+		t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
+	)
+	secondApplicationServer := listener.as.get(2)
+	asp.noteRoutingContextsActive([]uint32{1, 2})
+	asp.setState(StateAspActive)
+	firstApplicationServer.setASPState(asp, StateAspActive, time.Hour)
+	secondApplicationServer.setASPState(asp, StateAspActive, time.Hour)
+	sent.reset()
+
+	if err := listener.ReportDestinationRangeForNetwork(7, 0x123456, 4, DestinationUnavailable); err != nil {
+		t.Fatalf("set destination state: %v", err)
+	}
+	got := ssnmMessages(sent.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("multi-AS ASP received %d copies of one DUNA, want 1", len(got))
+	}
+	_, routingContext, _ := ssnmScope(t, got[0])
+	if contexts := routingContext.RoutingContexts(); !equalTrafficModeContexts(contexts, []uint32{1, 2}) {
+		t.Fatalf("all-context DUNA Routing Contexts = %v, want [1 2]", contexts)
+	}
+}
+
+func TestDestinationUpdateContinuesAfterOneASPWriteFails(t *testing.T) {
+	listener, applicationServer, first, _ := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	first.noteRoutingContextsActive([]uint32{1})
+	first.setState(StateAspActive)
+	second.noteRoutingContextsActive([]uint32{1})
+	second.setState(StateAspActive)
+	applicationServer.setASPState(first, StateAspActive, time.Hour)
+	applicationServer.setASPState(second, StateAspActive, time.Hour)
+
+	writeFailure := errors.New("injected SSNM write failure")
+	first.signalWriter = func(messages.M3UA) (int, error) { return 0, writeFailure }
+	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationUnavailable,
+	); !errors.Is(err, writeFailure) {
+		t.Fatalf("set destination state error = %v, want injected write failure", err)
+	}
+	if got := len(ssnmMessages(secondSent.snapshot())); got != 1 {
+		t.Fatalf("healthy ASP received %d SSNM messages after peer failure, want 1", got)
+	}
+	if state, known := listener.DestinationStateForNetworkAndRoutingContext(
+		7, 1, 0x123456,
+	); !known || state != DestinationUnavailable {
+		t.Fatalf("recorded destination = (%v, %v), want (Unavailable, true)", state, known)
+	}
+}
+
+func TestDestinationUpdateRejectsUnknownStateAtomically(t *testing.T) {
+	listener, applicationServer, asp, sent := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	asp.noteRoutingContextsActive([]uint32{1})
+	asp.setState(StateAspActive)
+	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	sent.reset()
+
+	err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationState(255),
+	)
+	if !errors.Is(err, ErrInvalidParameterValue) {
+		t.Fatalf("unknown destination state error = %v, want ErrInvalidParameterValue", err)
+	}
+	if _, known := listener.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); known {
+		t.Fatal("unknown destination state was recorded")
+	}
+	if got := len(ssnmMessages(sent.snapshot())); got != 0 {
+		t.Fatalf("unknown destination state emitted %d SSNM messages, want 0", got)
+	}
+}
+
+func TestAcceptedConnDestinationUpdateUsesListenerWideBroadcast(t *testing.T) {
+	listener, applicationServer, first, firstSent := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	first.noteRoutingContextsActive([]uint32{1})
+	first.setState(StateAspActive)
+	second.noteRoutingContextsActive([]uint32{1})
+	second.setState(StateAspActive)
+	applicationServer.setASPState(first, StateAspActive, time.Hour)
+	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	listener.destinations = newDestinations()
+	first.destinations = listener.destinations
+	second.destinations = listener.destinations
+	first.listener = listener
+	second.listener = listener
+	firstSent.reset()
+	secondSent.reset()
+
+	if err := first.ReportDestinationStateForNetworkAndRoutingContext(
+		7, 1, 0x123456, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("set destination state through accepted Conn: %v", err)
+	}
+	if got := len(ssnmMessages(firstSent.snapshot())); got != 1 {
+		t.Fatalf("calling ASP received %d SSNM messages, want 1", got)
+	}
+	if got := len(ssnmMessages(secondSent.snapshot())); got != 1 {
+		t.Fatalf("peer ASP received %d SSNM messages, want 1", got)
+	}
+}
+
+func TestDestinationSetterMethodCompatibility(t *testing.T) {
+	listener := new(Listener)
+	connection := new(Conn)
+	listenerSetter := listener.SetDestinationState
+	connectionSetter := connection.SetDestinationState
+	if listenerSetter == nil || connectionSetter == nil {
+		t.Fatal("destination setter method value is nil")
+	}
+}
+
+func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
+	listener, applicationServer, blocked, _ := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	healthy, healthySent := addDistributionASP(t, listener, StateAspInactive, 1)
+	blocked.noteRoutingContextsActive([]uint32{1})
+	blocked.setState(StateAspActive)
+	healthy.noteRoutingContextsActive([]uint32{1})
+	healthy.setState(StateAspActive)
+	applicationServer.setASPState(blocked, StateAspActive, time.Hour)
+	applicationServer.setASPState(healthy, StateAspActive, time.Hour)
+
+	writeEntered := make(chan struct{})
+	writeRelease := make(chan struct{})
+	blocked.notificationQueue = make(chan mandatoryControl, defaultNotificationQueueSize)
+	blocked.notificationWriter = func(message messages.M3UA) (int, error) {
+		close(writeEntered)
+		<-writeRelease
+		return message.MarshalLen(), nil
+	}
+	returned := make(chan struct{})
+	go func() {
+		listener.SetDestinationRangeForNetworkAndRoutingContext(
+			7, 1, 0x123456, 0, DestinationUnavailable,
+		)
+		close(returned)
+	}()
+	select {
+	case <-writeEntered:
+	case <-time.After(time.Second):
+		close(writeRelease)
+		t.Fatal("blocked ASP never entered its control write")
+	}
+	select {
+	case <-returned:
+	case <-time.After(100 * time.Millisecond):
+		close(writeRelease)
+		t.Fatal("nonblocking destination setter waited for a blocked ASP")
+	}
+	if got := len(ssnmMessages(healthySent.snapshot())); got != 1 {
+		close(writeRelease)
+		t.Fatalf("healthy ASP received %d messages while peer was blocked, want 1", got)
+	}
+	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); !known || state != DestinationUnavailable {
+		close(writeRelease)
+		t.Fatalf("state committed before enqueue = (%v, %v), want (Unavailable, true)", state, known)
+	}
+	close(writeRelease)
+}
+
+func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
+	listener, applicationServer, asp, sent := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	asp.noteRoutingContextsActive([]uint32{1})
+	asp.setState(StateAspActive)
+	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	sent.reset()
+
+	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationCongested,
+	); err != nil {
+		t.Fatalf("report congestion: %v", err)
+	}
+	congested := ssnmMessages(sent.snapshot())
+	if len(congested) != 1 {
+		t.Fatalf("ordinary congestion report emitted %d messages, want one SCON", len(congested))
+	}
+	if _, ok := congested[0].(*messages.SignallingCongestion); !ok {
+		t.Fatalf("ordinary congestion report = %T, want SCON", congested[0])
+	}
+
+	sent.reset()
+	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationAvailable,
+	); err != nil {
+		t.Fatalf("report congestion abatement: %v", err)
+	}
+	abated := ssnmMessages(sent.snapshot())
+	if len(abated) != 2 {
+		t.Fatalf("congestion abatement emitted %d messages, want SCON(0), DAVA", len(abated))
+	}
+	scon, ok := abated[0].(*messages.SignallingCongestion)
+	if !ok || scon.CongestionIndications == nil || scon.CongestionIndications.CongestionLevel() != 0 {
+		t.Fatalf("first abatement message = %#v, want SCON with level 0", abated[0])
+	}
+	if _, ok := abated[1].(*messages.DestinationAvailable); !ok {
+		t.Fatalf("second abatement message = %T, want DAVA", abated[1])
+	}
+}
+
+func TestProactiveSSNMQueueOverflowClosesAssociation(t *testing.T) {
+	listener, applicationServer, asp, _ := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	asp.noteRoutingContextsActive([]uint32{1})
+	asp.setState(StateAspActive)
+	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.notificationQueue = make(chan mandatoryControl, 1)
+	asp.notificationOnce.Do(func() {})
+
+	listener.SetDestinationStateForNetworkAndRoutingContext(7, 1, 0x111111, DestinationUnavailable)
+	listener.SetDestinationStateForNetworkAndRoutingContext(7, 1, 0x222222, DestinationUnavailable)
+	select {
+	case <-asp.Done():
+	case <-time.After(time.Second):
+		t.Fatal("association remained open after mandatory SSNM queue overflow")
+	}
+	if !errors.Is(asp.Err(), ErrNotificationQueueFull) {
+		t.Fatalf("association close error = %v, want ErrNotificationQueueFull", asp.Err())
+	}
+}
+
+func TestDestinationReportValidatesScopeBeforeConcurrentCommit(t *testing.T) {
+	listener, applicationServer, asp, sent := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	asp.noteRoutingContextsActive([]uint32{1})
+	asp.setState(StateAspActive)
+	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	sent.reset()
+
+	var waitGroup sync.WaitGroup
+	errorsSeen := make(chan error, 200)
+	for iteration := 0; iteration < 100; iteration++ {
+		waitGroup.Add(2)
+		go func(pointCode uint32) {
+			defer waitGroup.Done()
+			if err := listener.ReportDestinationStateForNetworkAndRoutingContext(
+				7, 1, pointCode, DestinationUnavailable,
+			); err != nil {
+				errorsSeen <- err
+			}
+		}(uint32(0x100000 + iteration))
+		go func(pointCode uint32) {
+			defer waitGroup.Done()
+			err := listener.ReportDestinationStateForNetworkAndRoutingContext(
+				7, 2, pointCode, DestinationUnavailable,
+			)
+			if !errors.Is(err, ErrInvalidRoutingContext) {
+				errorsSeen <- err
+			}
+		}(uint32(0x200000 + iteration))
+	}
+	waitGroup.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		t.Errorf("unexpected concurrent report result: %v", err)
+	}
+	for iteration := 0; iteration < 100; iteration++ {
+		if _, known := listener.DestinationStateForNetworkAndRoutingContext(
+			7, 2, uint32(0x200000+iteration),
+		); known {
+			t.Fatalf("invalid RC 2 destination %#x was committed", 0x200000+iteration)
+		}
+	}
+	for _, message := range ssnmMessages(sent.snapshot()) {
+		_, routingContext, _ := ssnmScope(t, message)
+		if routingContext == nil || !equalTrafficModeContexts(routingContext.RoutingContexts(), []uint32{1}) {
+			t.Fatalf("invalid scope reached wire in %T: %v", message, routingContext)
+		}
+	}
+}
+
+func TestQueuedProactiveSSNMPrecedesAspInactiveAck(t *testing.T) {
+	listener, applicationServer, asp, _ := distributionFixture(
+		t, params.TrafficModeLoadshare,
+	)
+	asp.noteRoutingContextsActive([]uint32{1})
+	asp.setState(StateAspActive)
+	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.notificationQueue = make(chan mandatoryControl, defaultNotificationQueueSize)
+
+	writeEntered := make(chan struct{})
+	writeRelease := make(chan struct{})
+	var enteredOnce sync.Once
+	var eventsMu sync.Mutex
+	var events []string
+	asp.notificationWriter = func(message messages.M3UA) (int, error) {
+		eventsMu.Lock()
+		events = append(events, message.MessageTypeName())
+		eventsMu.Unlock()
+		if _, ok := message.(*messages.DestinationUnavailable); ok {
+			enteredOnce.Do(func() { close(writeEntered) })
+			<-writeRelease
+		}
+		return message.MarshalLen(), nil
+	}
+	listener.SetDestinationStateForNetworkAndRoutingContext(
+		7, 1, 0x123456, DestinationUnavailable,
+	)
+	select {
+	case <-writeEntered:
+	case <-time.After(time.Second):
+		close(writeRelease)
+		t.Fatal("proactive DUNA never entered the control worker")
+	}
+
+	inactiveDone := make(chan error, 1)
+	go func() {
+		inactiveDone <- asp.handleAspInactive(messages.NewAspInactive(
+			params.NewRoutingContext(1), nil,
+		))
+	}()
+	select {
+	case err := <-inactiveDone:
+		close(writeRelease)
+		t.Fatalf("ASP Inactive completed before queued DUNA: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(writeRelease)
+	if err := <-inactiveDone; err != nil {
+		t.Fatalf("handle ASP Inactive: %v", err)
+	}
+	eventsMu.Lock()
+	got := append([]string(nil), events...)
+	eventsMu.Unlock()
+	if len(got) < 2 || got[0] != "Destination Unavailable" || got[1] != "ASP Inactive Ack" {
+		t.Fatalf("control order = %v, want Destination Unavailable before ASP Inactive Ack", got)
+	}
+}
+
+func ssnmMessages(sent []messages.M3UA) []messages.M3UA {
+	out := make([]messages.M3UA, 0, len(sent))
+	for _, message := range sent {
+		if message.MessageClass() == messages.MsgClassSSNM {
+			out = append(out, message)
+		}
+	}
+	return out
+}
+
+func sameSSNMKind(message messages.M3UA, kind any) bool {
+	switch kind.(type) {
+	case *messages.DestinationUnavailable:
+		_, ok := message.(*messages.DestinationUnavailable)
+		return ok
+	case *messages.DestinationAvailable:
+		_, ok := message.(*messages.DestinationAvailable)
+		return ok
+	case *messages.DestinationRestricted:
+		_, ok := message.(*messages.DestinationRestricted)
+		return ok
+	case *messages.SignallingCongestion:
+		_, ok := message.(*messages.SignallingCongestion)
+		return ok
+	default:
+		return false
+	}
+}
+
+func ssnmScope(t *testing.T, message messages.M3UA) (*params.Param, *params.Param, *params.Param) {
+	t.Helper()
+	switch message := message.(type) {
+	case *messages.DestinationUnavailable:
+		return message.NetworkAppearance, message.RoutingContext, message.AffectedPointCode
+	case *messages.DestinationAvailable:
+		return message.NetworkAppearance, message.RoutingContext, message.AffectedPointCode
+	case *messages.DestinationRestricted:
+		return message.NetworkAppearance, message.RoutingContext, message.AffectedPointCode
+	case *messages.SignallingCongestion:
+		return message.NetworkAppearance, message.RoutingContext, message.AffectedPointCode
+	default:
+		t.Fatalf("message = %T, want destination SSNM", message)
+		return nil, nil, nil
+	}
+}

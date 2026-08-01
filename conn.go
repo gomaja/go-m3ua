@@ -1,0 +1,2456 @@
+// Copyright 2018-2024 go-m3ua authors. All rights reserved.
+// Use of this source code is governed by a MIT-style license that can be
+// found in the LICENSE file.
+
+package m3ua
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/gomaja/go-m3ua/messages"
+	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
+)
+
+// M3UAPPID is the SCTP Payload Protocol Identifier IANA assigned to M3UA.
+//
+// RFC 4666 Section 7.1 says value 3 SHOULD be included in each SCTP DATA chunk.
+// The value is in host order here, as expected by sctp.SCTPWrite; that method
+// performs the conversion required for the SCTP ancillary data on the wire.
+const M3UAPPID uint32 = 3
+
+type mode uint8
+
+const (
+	modeClient mode = iota
+	modeServer
+)
+
+// Conn represents a M3UA connection, which satisfies the standard net.Conn interface.
+type Conn struct {
+	// sctpConn is the SCTP association this Conn owns.
+	//
+	// It belongs to the Conn and not to the Config, because one Config is
+	// shared by every Conn a Listener accepts: while it lived on the Config,
+	// each Accept overwrote it, so the second accepted association rebound the
+	// first Conn's socket. That Conn then reported the wrong peer, read the
+	// other ASP's traffic, wrote to the other ASP, and closed the other ASP's
+	// socket on Close. See multiclient_test.go.
+	sctpConn *sctp.SCTPConn
+	// sctpInfo is the SndRcvInfo template for sends on this association. It is
+	// per-Conn for the same reason as sctpConn, and is copied by value at each
+	// send so the stream ID can vary per message.
+	//
+	// This is the SCTP_SNDRCV control message, which RFC 6458 Section 5.3.2
+	// deprecates in favour of SCTP_SNDINFO. The receive side has moved — see
+	// SetRecvRcvInfo in setUpSocket — but the send side deliberately has not.
+	//
+	// SCTPWrite byte-swaps PPID per message and SCTPWriteInfo passes it through
+	// untouched, matching SetDefaultSndInfo; the dependency documents the
+	// difference on both. Moving would put PPID 3 on the wire as 0x03000000
+	// unless this package byte-swapped it itself, which is knowledge of network
+	// byte order that the current call does not require of it, for no
+	// behavioural gain. The kernel accepts either form, and both can be mixed
+	// on one association.
+	sctpInfo *sctp.SndRcvInfo
+	// lastRecv is when the last successfully parsed M3UA message with PPID 0 or
+	// M3UAPPID was received from the peer, in Unix nanoseconds. RFC 4666 Section
+	// 4.3.4.6 counts "any other M3UA message" as evidence the peer is alive, so
+	// T(beat) consults this rather than treating a missing BEAT Ack as proof of
+	// death.
+	lastRecv atomic.Int64
+	// recvStream is the SCTP stream the message being handled arrived on.
+	//
+	// It is not sctpInfo.Stream: that is the *send* template, fixed at 0 for
+	// this Conn's lifetime because every send copies it by value before setting
+	// a stream. The receive-side checks in aspsm.go read this instead — they
+	// used to read the send template, so they compared 0 against 0 and could
+	// never fire. Written by the dispatcher before each handler runs, and read
+	// by the handlers on that same goroutine; atomic so a reader elsewhere
+	// cannot race the write.
+	recvStream atomic.Uint32
+	// hb is this Conn's resolved heartbeat settings, copied by value from the
+	// Config at construction.
+	//
+	// Resolving it per Conn keeps Accept from writing Enabled back onto the
+	// shared Config, and makes a Config built by NewConfig — which leaves
+	// HeartbeatInfo nil — usable instead of a nil dereference.
+	hb HeartbeatInfo
+	// maxMessageStreamID is the maximum negotiated sctp stream ID used,
+	// must not be zero, must vary from 1 to maxMessageStreamID
+	maxMessageStreamID uint16
+	// muState is to Lock when updating state
+	muState *sync.RWMutex
+	// mode represents the endpoint works as client or server
+	mode mode
+	// state is to see the current state
+	state State
+	// appliedState is the state the entry-action pass last ran for.
+	//
+	// It exists because state is now committed by sendState, on the dispatch
+	// goroutine, before the transition is published for its entry actions. That
+	// ordering is what stops a peer's next message being judged against a state
+	// this end has already decided to leave but not yet recorded. It does mean
+	// applyStateUpdate can no longer read the state it is moving away from out
+	// of state itself -- by then state holds the new value -- so the previous
+	// one is kept here. Guarded by muState, like state.
+	appliedState State
+	// stateEntered records that at least one state has been published, so the
+	// first update is treated as an entry rather than a restatement of the
+	// zero value. Guarded by muState, like state itself.
+	stateEntered bool
+	// resumeTo is how far a client climbs when it comes up: ASP-ACTIVE for an
+	// ordinary Dial, or ASP-INACTIVE when RFC 4666 Section 4.3.4.2 has it
+	// return to a previous state that was only ASP-INACTIVE. Guarded by muState.
+	resumeTo State
+	// stateChan is to update the state and handle it
+	stateChan chan State
+	// inboundChan serialises SCTP notifications with M3UA messages in the exact
+	// order the association reader observed them. It is deliberately
+	// unbuffered in a live Conn: the reader cannot move past a restart and hand
+	// the dispatcher a later M3UA message before the restart marker has entered
+	// the same queue. The inbound value is extensible for further per-message
+	// SCTP metadata.
+	inboundChan chan inbound
+	// established notifies client/server the conn is established
+	established chan struct{}
+	// beatAckChan notifies that heartbeat gets the ack as expected
+	beatAckChan chan struct{}
+	// dataChan passes received DATA (payload plus its network and traffic flow)
+	// to the user. Its bounded capacity is resolved from Config.DataQueueSize.
+	dataChan chan *DataMessage
+	// errChan is to pass errors to a goroutine that monitors status
+	errChan chan error
+	// done is closed once on Close() to signal all goroutines to stop sending on channels
+	done chan struct{}
+	// closeOnce ensures Close() channel cleanup runs exactly once
+	closeOnce sync.Once
+	// closeErr records why the association ended, reported by Err(). Written
+	// once, inside closeOnce, so the first cause is the one kept: a later Close
+	// must not overwrite the reason the association actually died.
+	closeErr atomic.Value
+	// cfg is a configuration required to communicate between M3UA endpoints
+	cfg *Config
+	// trafficModes is the immutable Traffic Mode policy copied from cfg at
+	// construction. Keeping the public Config pointer is necessary for the
+	// remaining settings, but ASPTM runs concurrently with caller code and must
+	// never read a mutable Param or map from it.
+	trafficModes trafficModeSnapshot
+	// peerAspIdentifier is the identifier an ASP supplied in ASP Up. It is
+	// distinct from cfg.AspIdentifier, which is this endpoint's own optional
+	// identifier and is shared by every association a Listener accepts.
+	muPeerAspIdentifier sync.RWMutex
+	peerAspIdentifier   *params.Param
+	// Condition to allow heartbeat, only after the state is AspUp
+	beatAllow *sync.Cond
+	// muBeat guards beatData: heartbeat() registers it, while the dispatch
+	// goroutine's handleHeartbeatAck compares the peer's echo against it.
+	muBeat sync.RWMutex
+	// beatData is the Heartbeat Data of the BEAT awaiting its Ack; empty
+	// when no BEAT is outstanding.
+	beatData []byte
+	// destinations tracks SS7 destination availability as reported by the peer
+	// through SSNM (RFC 4666 Section 4.5).
+	// resumeStray records that this Conn was pushed out of ASP-ACTIVE by a
+	// stray acknowledgement rather than by the peer taking traffic away.
+	//
+	// RFC 4666 Section 4.3.4.1 asks for a return in that case: "If the ASP
+	// receives an unexpected ASP Up Ack message, the ASP should consider itself
+	// in the ASP-INACTIVE state.  If the ASP was not in the ASP-INACTIVE state,
+	// it SHOULD send an Error message and then initiate procedures to return
+	// itself to its previous state." The peer-driven routes into ASP-INACTIVE —
+	// an ASP Inactive, an ASP Inactive Ack, an "Alternate ASP Active" Notify —
+	// must not resume, or an Override-mode AS ping-pongs between two ASPs, so
+	// the two causes are distinguished here rather than by the previous state
+	// alone.
+	//
+	// Atomic rather than guarded by muState: the entry action that reads it
+	// runs inside handleStateUpdate, which already holds that lock, and
+	// sync.RWMutex is not reentrant.
+	resumeStray atomic.Bool
+	// terminating suppresses the automatic ASP Up climb while Shutdown is
+	// completing the ASP Inactive/ASP Down sequence.
+	terminating atomic.Bool
+
+	// ackedRCs is the set of Routing Contexts the peer has acknowledged in an
+	// ASP Active Ack.
+	//
+	// Activation is per Routing Context: Section 4.3.4.3 has the SGP answer
+	// "For the Application Servers for which the ASP can be activated", so a
+	// partial Ack leaves the rest inactive. Tracking one state for the whole
+	// association sent DATA for contexts the SGP had never agreed to carry.
+	//
+	// muAckedRCs rather than muState: the entry actions that reset this run
+	// inside handleStateUpdate, which already holds muState, and sync.RWMutex
+	// is not reentrant.
+	muAckedRCs sync.RWMutex
+	ackedRCs   map[uint32]struct{}
+	// ackedRCsScoped distinguishes "no ASP Active Ack scope recorded" from
+	// "no Routing Context is active". Both have an empty map, but the former is
+	// the compatibility fallback for an association placed directly into
+	// ASP-ACTIVE while the latter follows an ASP Inactive Ack covering every AS.
+	ackedRCsScoped bool
+	// overriddenRCs are the Routing Contexts an alternate ASP has taken over,
+	// so this ASP may no longer send traffic for them while the association
+	// carries on serving the rest. Guarded by muAckedRCs, which already covers
+	// "what may I send for".
+	overriddenRCs map[uint32]struct{}
+
+	// activeRCs are the Routing Contexts this peer has activated, at an SGP.
+	//
+	// RFC 4666 Section 4.3.1 keeps ASP state per Application Server -- "The
+	// state of each remote ASP/IPSP, in each AS that it is configured to
+	// operate, is maintained in the peer M3UA layer", and Figure 3 is titled
+	// "ASP State Transition Diagram, per AS". An ASP Active naming a subset of
+	// the association's Routing Contexts activates the ASP in those Application
+	// Servers alone; in the rest it stays ASP-INACTIVE, which the same section
+	// says "SHOULD NOT be sent any DATA or SSNM messages for the AS for which
+	// the ASP/IPSP is inactive".
+	//
+	// nil means the whole configured set, which is what an ASP Active naming no
+	// context asks for. Guarded by muAckedRCs.
+	activeRCs map[uint32]struct{}
+	// activeRCsScoped distinguishes "activated for everything" from "activated
+	// for nothing", since both leave activeRCs empty.
+	activeRCsScoped bool
+
+	// nif is the SGP's view of its nodal interworking function, shared with the
+	// Listener that accepted this association and nil for a client.
+	nif *nifAvailability
+
+	// as is the Application Server registry this association belongs to, set by
+	// the Listener that accepted it and nil for a client.
+	//
+	// The AS state machine of RFC 4666 Section 4.3.2 lives on the SGP and spans
+	// every ASP serving a Routing Context, so a Conn reports its own ASP state
+	// changes into it rather than deciding anything itself.
+	as *applicationServers
+	// unscopedDeliveryMu covers DATA and SSNM on a dedicated association where
+	// no Routing Context was coordinated, so ASP Down can still drain traffic
+	// and network-management writes before Ack.
+	unscopedDeliveryMu sync.Mutex
+	// authorizedRCs is the immutable per-peer subset of the listener's Routing
+	// Context inventory resolved when ASP Up is received. Before resolution, a
+	// server retains the legacy all-configured policy; clients always use their
+	// own Config directly.
+	muAuthorizedRCs            sync.RWMutex
+	authorizedRCs              []uint32
+	authorizationResolved      bool
+	authorizationExplicit      bool
+	authorizationIdentifier    uint32
+	authorizationIdentifierSet bool
+
+	// peerCongestion is the congestion level the peer last reported about
+	// itself, from a SCON received at an SGP.
+	//
+	// It is kept apart from destinations because it means something different:
+	// RFC 4666 Section 3.4.4's ASP-to-peer SCON reports "the congestion level
+	// of the M3UA layer or the ASP", not the reachability of an SS7
+	// destination.
+	peerCongestion atomic.Uint32
+
+	// selectedRC is the Routing Context outbound DATA names, when the
+	// association carries more than one.
+	//
+	// RFC 4666 Section 3.3.1 makes the parameter singular and says what it is
+	// for: "Where multiple Routing Keys and Routing Contexts are used across a
+	// common association, the Routing Context MUST be sent to identify the
+	// traffic flow". Which flow a payload belongs to is the caller's knowledge,
+	// not this package's, so with several configured the caller chooses through
+	// SelectRoutingContext. Guarded by muState.
+	selectedRC    uint32
+	selectedRCSet bool
+
+	destinations *destinations
+	// tack retransmits unacknowledged ASPSM/ASPTM requests (T(ack)).
+	tack *tackRetransmitter
+	// listener is the Listener that accepted this Conn, if any, so closing the
+	// Conn deregisters it rather than leaving it in the listener's set for the
+	// lifetime of the server.
+	listener *Listener
+	// readDeadline bounds Read, ReadPD and ReadData, as Unix nanoseconds with
+	// zero meaning none. See SetReadDeadline for why it is not pushed down to
+	// the SCTP socket.
+	readDeadline atomic.Int64
+	// dataOverflow records that the inbound DATA queue is full, so the
+	// condition is reported on its onset rather than per discarded payload.
+	dataOverflow atomic.Bool
+	// malformedLogs bounds peer-triggered diagnostic logging per association.
+	malformedLogs malformedLogLimiter
+	// statusChan delivers SSNM destination state changes to the user. It is
+	// buffered; an overflow is represented by a ResyncRequired status.
+	statusChan chan *DestinationStatus
+	// muStatus guards statusChan's closure. Close closes the channel so a
+	// caller ranging over SignallingStatus() terminates instead of parking
+	// forever, and a send racing that close would otherwise panic.
+	muStatus sync.Mutex
+	// statusClosed records that statusChan has been closed, since a closed
+	// channel cannot be detected from the sending side.
+	statusClosed bool
+	// stateEventChan delivers ASP state transitions to the user. An overflow
+	// closes the association so Layer Management cannot mistake a partial event
+	// history for a complete one.
+	stateEventChan chan State
+	// muStateEvent guards stateEventChan's closure, as muStatus does for
+	// statusChan.
+	muStateEvent sync.Mutex
+	// stateEventClosed records that stateEventChan has been closed.
+	stateEventClosed bool
+	// mgmtChan delivers the M3UA-to-Layer-Management indications of RFC 4666
+	// Section 1.6.3. An overflow closes the association rather than dropping an
+	// unrecoverable indication.
+	mgmtChan chan *ManagementIndication
+	// muMgmt guards mgmtChan's closure, as muStatus does for statusChan.
+	muMgmt sync.Mutex
+	// mgmtClosed records that mgmtChan has been closed.
+	mgmtClosed bool
+	// indicationOverflow ensures one state or management queue overflow starts
+	// one asynchronous association teardown.
+	indicationOverflow atomic.Bool
+	// assocID is the kernel's ID for this association, recorded at setup so a
+	// notification handler shared across a Listener's associations can route an
+	// event to the Conn it concerns. Atomic: written on the goroutine that set
+	// the socket up, read on whichever reader receives a notification.
+	assocID atomic.Int32
+	// signalWriter, when non-nil, replaces the SCTP write performed by
+	// WriteSignal. It is only set in tests, where the M3UA state machine is
+	// exercised without an SCTP association.
+	signalWriter func(m3 messages.M3UA) (int, error)
+	// dataWriter is the raw DATA write test seam. Production leaves it nil and
+	// writes through sctpConn.
+	dataWriter func([]byte, *sctp.SndRcvInfo) (int, error)
+	// notificationQueue keeps peer-controlled socket backpressure out of the AS
+	// state machine and proactive SSNM paths. A full queue closes the association
+	// rather than silently dropping mandatory ordered control traffic.
+	notificationQueue    chan mandatoryControl
+	notificationOnce     sync.Once
+	notificationOverflow atomic.Bool
+	// notificationWriter is the asynchronous control-worker test seam. Production
+	// leaves it nil and writes through WriteSignal.
+	notificationWriter func(messages.M3UA) (int, error)
+}
+
+var netMap = map[string]string{
+	"m3ua":  "sctp",
+	"m3ua4": "sctp4",
+	"m3ua6": "sctp6",
+}
+
+const defaultNotificationQueueSize = 64
+
+type mandatoryControl struct {
+	messages            []messages.M3UA
+	enforceTrafficScope bool
+	result              chan error
+}
+
+// newConn builds an unconnected Conn for the given endpoint role.
+//
+// Dial and Accept previously each constructed a Conn inline, so every field
+// added to one had to be remembered in the other; the shared *Config write that
+// broke multi-ASP serving lived in exactly that duplicated code. Both now go
+// through here, and nothing in this function writes to cfg.
+func newConn(m mode, cfg *Config) *Conn {
+	return newConnWithTrafficModePolicy(m, cfg, newTrafficModePolicy(cfg))
+}
+
+func newConnWithTrafficModePolicy(m mode, cfg *Config, trafficModes trafficModePolicy) *Conn {
+	dataQueueSize := cfg.DataQueueSize
+	if dataQueueSize <= 0 {
+		dataQueueSize = DefaultDataQueueSize
+	}
+
+	c := &Conn{
+		muState:      new(sync.RWMutex),
+		mode:         m,
+		stateChan:    make(chan State),
+		inboundChan:  make(chan inbound),
+		established:  make(chan struct{}, 1),
+		done:         make(chan struct{}),
+		errChan:      make(chan error),
+		dataChan:     make(chan *DataMessage, dataQueueSize),
+		beatAckChan:  make(chan struct{}, 1), // see notifyBeatAck: buffers an Ack that beats heartbeat() to its select
+		destinations: newDestinations(),
+		tack:         newTAckRetransmitter(),
+		statusChan:   make(chan *DestinationStatus, 64),
+		// Sized for the handful of transitions an association makes in its
+		// lifetime rather than for an unbounded stream.
+		stateEventChan: make(chan State, 16),
+		// A peer under stress can emit Notifies steadily, so this is sized like
+		// statusChan rather than like the state channel.
+		mgmtChan:          make(chan *ManagementIndication, 64),
+		notificationQueue: make(chan mandatoryControl, defaultNotificationQueueSize),
+		cfg:               cfg,
+		sctpInfo:          &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
+		// A dialling client wants to carry traffic; Dial does not return until
+		// it does.
+		resumeTo: StateAspActive,
+	}
+	c.trafficModes.freeze(trafficModes)
+
+	// A nil HeartbeatInfo means the caller never asked for BEATs — NewConfig
+	// leaves it nil — so it resolves to disabled rather than dereferencing.
+	if cfg.HeartbeatInfo != nil {
+		c.hb = *cfg.HeartbeatInfo
+	}
+	// An interval of zero would make heartbeat() spin, so it disables BEATs
+	// however the Config was built.
+	if c.hb.Interval == 0 {
+		c.hb.Enabled = false
+	}
+	// RFC 4666 Section 4.3.4.6 derives the deadline from the interval —
+	// "within 2*T(beat)" — so an unset Timer means that, not zero. time.After(0)
+	// fires immediately, so enabling BEATs without a Timer used to tear the
+	// association down on the first round.
+	if c.hb.Timer <= 0 {
+		c.hb.Timer = 2 * c.hb.Interval
+	}
+
+	return c
+}
+
+func (c *Conn) trafficModePolicy() trafficModePolicy {
+	if c == nil {
+		return trafficModePolicy{}
+	}
+	return c.trafficModes.get(c.cfg)
+}
+
+// setUpSocket applies the configured SCTP options to the association this Conn
+// has just been given and records the negotiated stream count. On any failure
+// the association is closed, since the Conn is not usable without it.
+func (c *Conn) setUpSocket() error {
+	if sack := c.cfg.SctpSackInfo; sack != nil && sack.Enabled {
+		if err := validateSackDelay(sack.SackDelay); err != nil {
+			_ = c.sctpConn.Close()
+			return err
+		}
+		if err := c.sctpConn.SetSackTimer(&sctp.SackTimer{
+			SackDelay:     sack.SackDelay,
+			SackFrequency: sack.SackFrequency,
+		}); err != nil {
+			_ = c.sctpConn.Close()
+			return fmt.Errorf("failed to set sack timer: %w", err)
+		}
+	}
+
+	if nd := c.cfg.SctpNoDelayInfo; nd != nil && nd.Enabled {
+		optval := 0
+		if nd.NoDelay {
+			optval = 1
+		}
+		if err := c.sctpConn.SetNoDelay(optval); err != nil {
+			_ = c.sctpConn.Close()
+			return fmt.Errorf("failed to set no delay: %w", err)
+		}
+	}
+
+	// The stream a message arrived on is part of what makes it valid (RFC 4666
+	// Section 1.4.7 rules 1 to 3, and Section 3.8.1's "Invalid Stream
+	// Identifier" error), and the kernel reports it only when asked: without
+	// this, every read comes back with no ancillary data and the receive-side
+	// stream checks have nothing to check.
+	//
+	// SCTP_RECVRCVINFO is the non-deprecated way to ask. RFC 6458 Section 5.3.2
+	// splits the old sctp_sndrcvinfo into SCTP_SNDINFO for sending and
+	// SCTP_RCVINFO for receiving, and the read path accepts either form, so this
+	// asks for exactly the per-message information it needs. The alternative,
+	// SubscribeEvents(SCTP_EVENT_DATA_IO), goes through the deprecated
+	// SCTP_EVENTS and would also have to be kept clear of the notification
+	// flags, which deliver association and peer-address events into the same
+	// read stream where the dispatcher would try to parse them as M3UA.
+	if err := c.sctpConn.SetRecvRcvInfo(true); err != nil {
+		_ = c.sctpConn.Close()
+		return fmt.Errorf("failed to enable SCTP_RECVRCVINFO: %w", err)
+	}
+
+	r, err := c.sctpConn.GetStatus()
+	if err != nil {
+		_ = c.sctpConn.Close()
+		return fmt.Errorf("failed to get sctpConn status: %w", err)
+	}
+	// One less than the peer's outbound stream count, since stream 0 carries no
+	// DATA (RFC 4666 Section 1.4.7 rule 1). Guarded: RFC 9260 Section 3.3.2
+	// forbids advertising zero streams, but the count comes back from a
+	// getsockopt and an unsigned 0-1 would wrap to 65535 — every DATA would
+	// then go out on a stream the peer never opened and be discarded by it,
+	// silently and completely.
+	if r.Ostreams == 0 {
+		_ = c.sctpConn.Close()
+		return fmt.Errorf("peer negotiated %d outbound streams", r.Ostreams)
+	}
+	c.maxMessageStreamID = r.Ostreams - 1
+	// Recorded so a shared notification handler can tell which association an
+	// event belongs to: a Listener installs one handler for every association
+	// it accepts, and the kernel names the association only by this ID.
+	c.assocID.Store(int32(r.AssocID))
+	// Optional, and deliberately not fatal; see subscribeRestart.
+	c.subscribeRestart()
+
+	return nil
+}
+
+// DataMessage is one received DATA message: the MTP3 payload together with the
+// SS7 network and traffic flow the sending peer named for it.
+//
+// RFC 4666 Section 3.3.1 gives Network Appearance and Routing Context exactly
+// these jobs: Network Appearance identifies the SS7 network, while "Where
+// multiple Routing Keys and Routing Contexts are used across a common
+// association, the Routing Context MUST be sent to identify the traffic flow,
+// assisting in the internal distribution of Data messages" — so a receiver that
+// is handed the payload alone cannot perform the distribution those parameters
+// exist for, and cannot tell which network or flow to answer on either.
+type DataMessage struct {
+	// ProtocolData is the MTP3 payload and its routing label.
+	ProtocolData *params.ProtocolDataPayload
+
+	// NetworkAppearance is the SS7 network the DATA belongs to, valid only
+	// when NetworkAppearanceSet is true. Presence is separate because zero is
+	// a legitimate configured value and omission is permitted on a dedicated
+	// association.
+	NetworkAppearance    uint32
+	NetworkAppearanceSet bool
+
+	// RoutingContext is the traffic flow the DATA named, valid only when
+	// RoutingContextSet is true.
+	//
+	// The parameter is Conditional, so its absence is not a fault: "Where a
+	// Routing Key has not been coordinated between the SGP and ASP, sending of
+	// Routing Context is not required." A separate bool rather than a zero
+	// value, because 0 is a Routing Context a peer may legitimately use.
+	RoutingContext    uint32
+	RoutingContextSet bool
+}
+
+// Read reads data from the connection.
+//
+// M3UA is message-oriented, so one Read yields the payload of one DATA message
+// and never joins two together. If b is too small for it, the payload is
+// truncated to fit and io.ErrShortBuffer is returned alongside the number of
+// bytes actually written: the remainder cannot be recovered, because the
+// message has already left the queue. Use ReadPD to take the payload whole
+// without sizing a buffer for it, or ReadData when Network Appearance or
+// Routing Context matters.
+//
+// Read used to return len(pd.Data) regardless of how much it had copied, so a
+// caller with a short buffer was told it had received more bytes than exist in
+// b — and the idiomatic b[:n] then panicked with a slice-bounds error, on data
+// chosen by the peer.
+func (c *Conn) Read(b []byte) (n int, err error) {
+	d, err := c.ReadData()
+	if err != nil {
+		return 0, err
+	}
+
+	n = copy(b, d.ProtocolData.Data)
+	if n < len(d.ProtocolData.Data) {
+		return n, io.ErrShortBuffer
+	}
+	return n, nil
+}
+
+// ReadPD reads the next ProtocolDataPayload from the connection.
+//
+// The Network Appearance and Routing Context the message named are not reported
+// here; use ReadData when the association carries more than one SS7 network or
+// traffic flow.
+func (c *Conn) ReadPD() (pd *params.ProtocolDataPayload, err error) {
+	d, err := c.ReadData()
+	if err != nil {
+		return nil, err
+	}
+	return d.ProtocolData, nil
+}
+
+// ReadData reads the next DATA message from the connection, reporting the
+// payload together with its Network Appearance and Routing Context.
+//
+// It is the read-side counterpart of the WithRoutingContext writes: an
+// application serving several networks or Routing Contexts over one association
+// needs this to distribute an inbound message to the right network and flow,
+// and to answer in the scope the request arrived on. Read and ReadPD take from
+// the same queue, so a caller that does not care about that scope can keep using
+// either.
+func (c *Conn) ReadData() (*DataMessage, error) {
+	if c.State() != StateAspActive {
+		return nil, ErrNotEstablished
+	}
+
+	timeout, stop, expired := c.readTimeout()
+	if expired {
+		return nil, os.ErrDeadlineExceeded
+	}
+	defer stop()
+
+	select {
+	case d, ok := <-c.dataChan:
+		if !ok {
+			return nil, ErrNotEstablished
+		}
+		return d, nil
+	case <-timeout:
+		// Recoverable, unlike every other error here: the association is
+		// healthy and the caller may read again.
+		return nil, os.ErrDeadlineExceeded
+	case <-c.done:
+		return nil, ErrNotEstablished
+	}
+}
+
+// Write writes data to the connection.
+//
+// A successful call returns len(b), as io.Writer requires: the payload is
+// wrapped in an M3UA DATA message before it goes out, but the count reported is
+// the caller's, not the message's.
+func (c *Conn) Write(b []byte) (n int, err error) {
+	// Checked before choosing a stream: on a Conn that never established,
+	// maxMessageStreamID is still zero and there is no stream to choose.
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	// One Config, one SLS, so every Write shares a stream and stays ordered.
+	return c.WriteToStream(b, c.streamFor(c.cfg.SignalingLinkSelection))
+}
+
+// WriteWithRoutingContext writes data to the connection, naming the traffic flow
+// it belongs to.
+//
+// This is the concurrency-safe form of SelectRoutingContext followed by Write.
+// RFC 4666 Section 3.3.1 makes the Routing Context a property of the message —
+// it identifies "the traffic flow" the payload belongs to — so on an association
+// carrying several flows it has to travel with the payload. Held on the Conn
+// instead, a second goroutine's selection can land between this goroutine's
+// selection and its write, and the payload goes out naming the other flow.
+//
+// As with Write, a successful call returns len(b).
+func (c *Conn) WriteWithRoutingContext(b []byte, rtCtx uint32) (n int, err error) {
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	return c.WriteToStreamWithRoutingContext(b, c.streamFor(c.cfg.SignalingLinkSelection), rtCtx)
+}
+
+// WriteToStream writes data to the connection and specific stream.
+//
+// streamID must be between 1 and MaxMessageStreamID, inclusive. Stream 0
+// returns ErrNoDataStream; a value above the negotiated maximum returns an
+// *InvalidSCTPStreamIDError.
+//
+// As with Write, a successful call returns len(b): the count is the payload the
+// caller handed over, not the size of the M3UA message it was wrapped in.
+func (c *Conn) WriteToStream(b []byte, streamID uint16) (n int, err error) {
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	return c.writeData(b, streamID, nil)
+}
+
+// WriteToStreamWithRoutingContext writes data on a specific stream, naming the
+// traffic flow it belongs to.
+//
+// See WriteWithRoutingContext for why the flow belongs on the message and
+// WriteToStream for the permitted stream range.
+func (c *Conn) WriteToStreamWithRoutingContext(b []byte, streamID uint16, rtCtx uint32) (n int, err error) {
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	return c.writeData(b, streamID, &rtCtx)
+}
+
+// writeData is the shared body of the four payload writes. rtCtx names the
+// traffic flow for this one message, or is nil to fall back to the
+// association-wide selection.
+func (c *Conn) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, error) {
+	if err := c.checkDataStream(streamID); err != nil {
+		return 0, err
+	}
+	// The config Params are copied because NewData calls SetLength on each one,
+	// which writes to the caller's Param: two goroutines sending concurrently
+	// would otherwise write to the same shared config Param.
+	rc, err := c.resolveRoutingContext(rtCtx)
+	if err != nil {
+		return 0, err
+	}
+	release, err := c.lockResolvedOutboundDataScope(rc)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	d, err := messages.NewData(
+		c.cfg.NetworkAppearance.Copy(), rc, params.NewProtocolData(
+			c.cfg.OriginatingPointCode, c.cfg.DestinationPointCode,
+			c.cfg.ServiceIndicator, c.cfg.NetworkIndicator,
+			c.cfg.MessagePriority, c.cfg.SignalingLinkSelection, b,
+		), c.cfg.CorrelationID.Copy(),
+	).MarshalBinary()
+	if err != nil {
+		return 0, err
+	}
+
+	// taken by value to avoid race condition on the stream id
+	info := *c.sctpInfo
+	info.Stream = streamID
+	if _, err := c.writeSCTPData(d, &info); err != nil {
+		return 0, err
+	}
+
+	// io.Writer's contract: a successful Write reports the whole of b. The
+	// count used to be the encoded message length added to itself, which is
+	// both larger than b and unrelated to it.
+	return len(b), nil
+}
+
+// WritePD writes data with a specific mtp3 protocol data to the connection.
+//
+// A successful call reports the number of SS7 user octets carried inside
+// protocolData, so the count means the same thing as Write's.
+func (c *Conn) WritePD(protocolData *params.Param) (n int, err error) {
+	// As in Write: refuse before choosing a stream, since an unestablished
+	// Conn has no negotiated stream count to choose from.
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	pd, err := protocolData.ProtocolData()
+	if err != nil {
+		return 0, fmt.Errorf("invalid protocol data: %w", err)
+	}
+
+	// The routing label travels with the message here rather than coming from
+	// the Config, so the stream follows this message's own SLS.
+	return c.writePD(protocolData, pd, c.streamFor(pd.SignalingLinkSelection), nil)
+}
+
+// WritePDWithRoutingContext writes data with a specific mtp3 protocol data,
+// naming the traffic flow it belongs to.
+//
+// See WriteWithRoutingContext for why the flow belongs on the message. This is
+// the form to use when one association carries several Routing Contexts and
+// more than one goroutine writes to it.
+func (c *Conn) WritePDWithRoutingContext(protocolData *params.Param, rtCtx uint32) (n int, err error) {
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	pd, err := protocolData.ProtocolData()
+	if err != nil {
+		return 0, fmt.Errorf("invalid protocol data: %w", err)
+	}
+
+	return c.writePD(protocolData, pd, c.streamFor(pd.SignalingLinkSelection), &rtCtx)
+}
+
+// WritePDToStream writes data with a specific mtp3 protocol data to the
+// connection and specific stream.
+//
+// The stream range and errors are the same as WriteToStream.
+//
+// As with WritePD, a successful call reports the SS7 user octets carried.
+func (c *Conn) WritePDToStream(protocolData *params.Param, streamID uint16) (n int, err error) {
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	// Peeled before the send so a Protocol Data that marshals but cannot be
+	// parsed back is refused rather than put on the wire, and so the reported
+	// count is the SS7 user octets carried.
+	pd, err := protocolData.ProtocolData()
+	if err != nil {
+		return 0, fmt.Errorf("invalid protocol data: %w", err)
+	}
+
+	return c.writePD(protocolData, pd, streamID, nil)
+}
+
+// WritePDToStreamWithRoutingContext writes data with a specific mtp3 protocol
+// data on a specific stream, naming the traffic flow it belongs to.
+//
+// See WriteWithRoutingContext for why the flow belongs on the message and
+// WriteToStream for the permitted stream range.
+func (c *Conn) WritePDToStreamWithRoutingContext(protocolData *params.Param, streamID uint16, rtCtx uint32) (n int, err error) {
+	if c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	pd, err := protocolData.ProtocolData()
+	if err != nil {
+		return 0, fmt.Errorf("invalid protocol data: %w", err)
+	}
+
+	return c.writePD(protocolData, pd, streamID, &rtCtx)
+}
+
+// writePD is the shared body of the Protocol Data writes, taking the already
+// peeled payload so none of them has to parse it twice. rtCtx names the traffic
+// flow for this one message, or is nil to fall back to the association-wide
+// selection.
+func (c *Conn) writePD(protocolData *params.Param, pd *params.ProtocolDataPayload, streamID uint16, rtCtx *uint32) (int, error) {
+	if err := c.checkDataStream(streamID); err != nil {
+		return 0, err
+	}
+
+	// Copied for the same reason as in writeData: NewData writes to every
+	// Param it is given, and these are shared across every send on this Conn.
+	rc, err := c.resolveRoutingContext(rtCtx)
+	if err != nil {
+		return 0, err
+	}
+	release, err := c.lockResolvedOutboundDataScope(rc)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	d, err := messages.NewData(
+		c.cfg.NetworkAppearance.Copy(), // cannot be changed on an active connection
+		rc,                             // the one context identifying this traffic flow
+		protocolData,                   // custom mtp3 protocol data OPC, DPC, SI, NI, MP, and SLS, flexible on active connections
+		c.cfg.CorrelationID.Copy(),
+	).MarshalBinary()
+	if err != nil {
+		return 0, err
+	}
+
+	// taken by value to avoid race condition on the stream id
+	info := *c.sctpInfo
+	info.Stream = streamID
+	if _, err := c.writeSCTPData(d, &info); err != nil {
+		return 0, err
+	}
+
+	return len(pd.Data), nil
+}
+
+func (c *Conn) writeSCTPData(data []byte, info *sctp.SndRcvInfo) (int, error) {
+	if c.dataWriter != nil {
+		return c.dataWriter(data, info)
+	}
+	return c.sctpConn.SCTPWrite(data, info)
+}
+
+// WriteSignal writes any type of M3UA signals on top of SCTP Connection.
+//
+// It takes a message rather than a buffer, so a successful call reports the
+// encoded length of that message.
+func (c *Conn) WriteSignal(m3 messages.M3UA) (n int, err error) {
+	return c.writeSignal(m3, true)
+}
+
+// writeDistributedSignal writes a message whose Application Server has already
+// been selected and whose deliveryMu is already held by the distribution
+// engine. Re-entering the public scope barrier there would deadlock.
+func (c *Conn) writeDistributedSignal(m3 messages.M3UA) (n int, err error) {
+	return c.writeSignal(m3, false)
+}
+
+// writeMandatoryControls writes one ordered control batch. The queue-backed
+// implementation is shared by proactive SSNM and Notify; hand-built test Conns
+// without that queue retain synchronous observability.
+func (c *Conn) writeMandatoryControls(control []messages.M3UA, enforceTrafficScope, wait bool) error {
+	if c == nil || len(control) == 0 {
+		return nil
+	}
+	writeDirect := func() error {
+		for _, message := range control {
+			if _, err := c.writeSignal(message, enforceTrafficScope); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	// Hand-built state-machine tests intentionally omit the production queue so
+	// their signalWriter remains synchronous and directly observable.
+	if c.notificationQueue == nil {
+		return writeDirect()
+	}
+
+	entry := mandatoryControl{
+		messages:            append([]messages.M3UA(nil), control...),
+		enforceTrafficScope: enforceTrafficScope,
+	}
+	if wait {
+		entry.result = make(chan error, 1)
+	}
+	c.notificationOnce.Do(func() { go c.writeNotifications() })
+	select {
+	case <-c.done:
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ErrConnClosed
+	default:
+	}
+	select {
+	case c.notificationQueue <- entry:
+	case <-c.done:
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ErrConnClosed
+	default:
+		if c.notificationOverflow.CompareAndSwap(false, true) {
+			go func() { _ = c.closeWith(ErrNotificationQueueFull) }()
+		}
+		return ErrNotificationQueueFull
+	}
+	if !wait {
+		return nil
+	}
+	select {
+	case err := <-entry.result:
+		return err
+	case <-c.done:
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ErrConnClosed
+	}
+}
+
+func (c *Conn) writeSignal(m3 messages.M3UA, enforceTrafficScope bool) (n int, err error) {
+	if m3 == nil {
+		return 0, errors.New("cannot write a nil M3UA signal")
+	}
+	if data, ok := m3.(*messages.Data); ok &&
+		(data.ProtocolData == nil || data.ProtocolData.Tag != params.ProtocolData) {
+		return 0, ErrMissingProtocolData
+	}
+
+	n = m3.MarshalLen()
+	if n < 0 {
+		return 0, fmt.Errorf("invalid encoded length %d for %T", n, m3)
+	}
+	buf := make([]byte, n)
+	if err := m3.MarshalTo(buf); err != nil {
+		return 0, fmt.Errorf("failed to create %T: %w", m3, err)
+	}
+	payloadData := isPayloadData(buf)
+	trafficScoped := payloadData || isSSNM(buf)
+	if enforceTrafficScope && payloadData && c.State() != StateAspActive {
+		return 0, ErrNotEstablished
+	}
+
+	if c.signalWriter != nil {
+		if enforceTrafficScope && trafficScoped {
+			release, err := c.lockOutboundTrafficScope(buf)
+			if err != nil {
+				return 0, err
+			}
+			defer release()
+		}
+		return c.signalWriter(m3)
+	}
+
+	// taken by value to avoid race condition on the stream id
+	sctpInfo := *c.sctpInfo
+	sctpInfo.Stream, err = c.outboundSignalStream(buf)
+	if err != nil {
+		return 0, err
+	}
+	if enforceTrafficScope && trafficScoped {
+		release, err := c.lockOutboundTrafficScope(buf)
+		if err != nil {
+			return 0, err
+		}
+		defer release()
+	}
+
+	if _, err := c.sctpConn.SCTPWrite(buf, &sctpInfo); err != nil {
+		return 0, fmt.Errorf("failed to write M3UA: %w", err)
+	}
+
+	// The encoded length, counted once. It used to have the SCTPWrite return
+	// added to it, which is the same number again.
+	return n, nil
+}
+
+func (c *Conn) lockOutboundTrafficScope(raw []byte) (func(), error) {
+	if isPayloadData(raw) {
+		return c.lockOutboundDataScope(raw)
+	}
+	return c.lockOutboundSSNMScope(raw)
+}
+
+// lockOutboundDataScope validates the DATA traffic flow and, at an SGP, holds
+// that AS's delivery barrier across the socket write. ASP Inactive/Down first
+// removes the ASP from the AS and then waits for this lock, so its Ack cannot
+// overtake a direct public WriteSignal(DATA).
+func (c *Conn) lockOutboundDataScope(raw []byte) (func(), error) {
+	decoded, err := messages.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DATA: %w", err)
+	}
+	data, ok := decoded.(*messages.Data)
+	if !ok {
+		return nil, errors.New("transfer payload did not decode as DATA")
+	}
+	if err := c.validateOutboundNetworkAppearance(data.NetworkAppearance); err != nil {
+		return nil, err
+	}
+
+	configured := c.configuredRoutingContexts()
+	var rtCtx uint32
+	if data.RoutingContext == nil {
+		switch len(configured) {
+		case 0:
+			return c.lockResolvedOutboundDataScope(nil)
+		case 1:
+			rtCtx = configured[0]
+		default:
+			return nil, ErrMissingRoutingContext
+		}
+	} else {
+		routingContexts := data.RoutingContext.RoutingContexts()
+		if len(routingContexts) != 1 {
+			return nil, NewInvalidRoutingContextError(routingContexts...)
+		}
+		rtCtx = routingContexts[0]
+	}
+
+	if _, err := c.routingContextFor(rtCtx); err != nil {
+		return nil, err
+	}
+	return c.lockResolvedOutboundDataScope(params.NewRoutingContext(rtCtx))
+}
+
+func (c *Conn) lockResolvedOutboundDataScope(routingContext *params.Param) (func(), error) {
+	if c.mode != modeServer {
+		return func() {}, nil
+	}
+	if routingContext == nil {
+		c.unscopedDeliveryMu.Lock()
+		if c.State() != StateAspActive {
+			c.unscopedDeliveryMu.Unlock()
+			return nil, ErrNotEstablished
+		}
+		return c.unscopedDeliveryMu.Unlock, nil
+	}
+	release, err := c.lockServerApplicationServers(routingContext.RoutingContexts())
+	if err != nil {
+		if c.State() != StateAspActive {
+			return nil, ErrNotEstablished
+		}
+		return nil, err
+	}
+	return release, nil
+}
+
+func (c *Conn) quiesceUnscopedTraffic() {
+	if c == nil || c.mode != modeServer {
+		return
+	}
+	waitForTrafficBarrier(&c.unscopedDeliveryMu)
+}
+
+func (c *Conn) lockOutboundSSNMScope(raw []byte) (func(), error) {
+	decoded, err := messages.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SSNM: %w", err)
+	}
+	routingContext, known := ssnmRoutingContext(decoded)
+	if !known {
+		return func() {}, nil
+	}
+	if err := c.validateOutboundNetworkAppearance(ssnmNetworkAppearance(decoded)); err != nil {
+		return nil, err
+	}
+	if err := c.validateSSNMRoutingContext(routingContext); err != nil {
+		return nil, err
+	}
+
+	var routingContexts []uint32
+	if routingContext != nil {
+		routingContexts = routingContext.RoutingContexts()
+	} else {
+		routingContexts = c.configuredRoutingContexts()
+	}
+	if len(routingContexts) == 0 {
+		if c.State() != StateAspActive {
+			return nil, ErrNotEstablished
+		}
+		if c.mode == modeServer && c.cfg != nil && c.cfg.RoutingContexts != nil &&
+			len(c.cfg.RoutingContexts.RoutingContexts()) > 0 {
+			return nil, ErrNoConfiguredAS
+		}
+		if c.mode == modeServer {
+			return c.lockResolvedOutboundDataScope(nil)
+		}
+		return func() {}, nil
+	}
+	for _, rtCtx := range routingContexts {
+		if _, err := c.routingContextFor(rtCtx); err != nil {
+			return nil, err
+		}
+	}
+	return c.lockServerApplicationServers(routingContexts)
+}
+
+func ssnmNetworkAppearance(message messages.M3UA) *params.Param {
+	switch message := message.(type) {
+	case *messages.DestinationUnavailable:
+		return message.NetworkAppearance
+	case *messages.DestinationAvailable:
+		return message.NetworkAppearance
+	case *messages.DestinationStateAudit:
+		return message.NetworkAppearance
+	case *messages.SignallingCongestion:
+		return message.NetworkAppearance
+	case *messages.DestinationUserPartUnavailable:
+		return message.NetworkAppearance
+	case *messages.DestinationRestricted:
+		return message.NetworkAppearance
+	default:
+		return nil
+	}
+}
+
+func (c *Conn) validateOutboundNetworkAppearance(networkAppearance *params.Param) error {
+	if networkAppearance == nil {
+		return nil
+	}
+	if networkAppearance.Tag != params.NetworkAppearance || len(networkAppearance.Data) != 4 {
+		return ErrInvalidNetworkAppearance
+	}
+	var configured *params.Param
+	if c != nil && c.cfg != nil {
+		configured = c.cfg.NetworkAppearance
+	}
+	if configured == nil || configured.Tag != params.NetworkAppearance ||
+		len(configured.Data) != 4 ||
+		configured.NetworkAppearance() != networkAppearance.NetworkAppearance() {
+		return NewInvalidNetworkAppearanceError(networkAppearance.NetworkAppearance())
+	}
+	return nil
+}
+
+func ssnmRoutingContext(message messages.M3UA) (*params.Param, bool) {
+	switch message := message.(type) {
+	case *messages.DestinationUnavailable:
+		return message.RoutingContext, true
+	case *messages.DestinationAvailable:
+		return message.RoutingContext, true
+	case *messages.DestinationStateAudit:
+		return message.RoutingContext, true
+	case *messages.SignallingCongestion:
+		return message.RoutingContext, true
+	case *messages.DestinationUserPartUnavailable:
+		return message.RoutingContext, true
+	case *messages.DestinationRestricted:
+		return message.RoutingContext, true
+	default:
+		return nil, false
+	}
+}
+
+func (c *Conn) lockServerApplicationServers(routingContexts []uint32) (func(), error) {
+	if c.mode != modeServer || c.as == nil || len(routingContexts) == 0 {
+		return func() {}, nil
+	}
+
+	unique := make(map[uint32]struct{}, len(routingContexts))
+	ordered := make([]uint32, 0, len(routingContexts))
+	for _, rtCtx := range routingContexts {
+		if _, exists := unique[rtCtx]; exists {
+			continue
+		}
+		unique[rtCtx] = struct{}{}
+		ordered = append(ordered, rtCtx)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+
+	applicationServers := make([]*applicationServer, 0, len(ordered))
+	for _, rtCtx := range ordered {
+		applicationServer, ok := c.as.lookup(rtCtx)
+		if !ok {
+			return nil, ErrRoutingContextNotActive
+		}
+		applicationServers = append(applicationServers, applicationServer)
+	}
+	for _, applicationServer := range applicationServers {
+		applicationServer.deliveryMu.Lock()
+	}
+	unlock := func() {
+		for index := len(applicationServers) - 1; index >= 0; index-- {
+			applicationServers[index].deliveryMu.Unlock()
+		}
+	}
+	for index, applicationServer := range applicationServers {
+		applicationServer.mu.Lock()
+		active := !applicationServer.closed && applicationServer.asps[c] == StateAspActive
+		applicationServer.mu.Unlock()
+		if !active || !c.activeForRoutingContext(ordered[index]) {
+			unlock()
+			return nil, ErrRoutingContextNotActive
+		}
+	}
+	return unlock, nil
+}
+
+// enqueueNotify preserves Notify order per association without letting one peer
+// that stopped reading block another association's state transition or Close.
+func (c *Conn) enqueueNotify(notification *messages.Notify) {
+	if c == nil || notification == nil {
+		return
+	}
+	_ = c.writeMandatoryControls([]messages.M3UA{notification}, true, false)
+}
+
+func (c *Conn) writeNotifications() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case control := <-c.notificationQueue:
+			var writeErr error
+			for _, message := range control.messages {
+				if c.notificationWriter != nil {
+					_, writeErr = c.notificationWriter(message)
+				} else {
+					_, writeErr = c.writeSignal(message, control.enforceTrafficScope)
+				}
+				if writeErr != nil {
+					break
+				}
+			}
+			if control.result != nil {
+				control.result <- writeErr
+			}
+			if writeErr != nil {
+				_ = c.closeWith(writeErr)
+				return
+			}
+		}
+	}
+}
+
+// outboundSignalStream chooses from the bytes that will actually be written,
+// not from interface methods a custom M3UA value could make disagree with its
+// encoded header. Management remains on stream 0. DATA follows the SLS in its
+// own Protocol Data, exactly as WritePD does, so mixing the two write APIs
+// cannot split one sequenced traffic flow across SCTP streams.
+func (c *Conn) outboundSignalStream(raw []byte) (uint16, error) {
+	if len(raw) < 4 {
+		return 0, messages.ErrTooShortToParse
+	}
+	if !isPayloadData(raw) {
+		return 0, nil
+	}
+
+	decoded, err := messages.Parse(raw)
+	if err != nil {
+		if errors.Is(err, messages.ErrMissingParameter) {
+			return 0, ErrMissingProtocolData
+		}
+		return 0, fmt.Errorf("invalid DATA: %w", err)
+	}
+	data, ok := decoded.(*messages.Data)
+	if !ok {
+		return 0, errors.New("transfer payload did not decode as DATA")
+	}
+	if data.ProtocolData == nil {
+		return 0, ErrMissingProtocolData
+	}
+	pd, err := data.ProtocolData.ProtocolData()
+	if err != nil {
+		return 0, fmt.Errorf("invalid DATA Protocol Data: %w", err)
+	}
+
+	stream := c.streamFor(pd.SignalingLinkSelection)
+	if err := c.checkDataStream(stream); err != nil {
+		return 0, err
+	}
+	return stream, nil
+}
+
+func isPayloadData(raw []byte) bool {
+	return len(raw) >= 4 && raw[2] == messages.MsgClassTransfer &&
+		raw[3] == messages.MsgTypePayloadData
+}
+
+func isSSNM(raw []byte) bool {
+	return len(raw) >= 4 && raw[2] == messages.MsgClassSSNM
+}
+
+// Close closes the connection.
+//
+// Err then reports ErrConnClosed, unless the association had already ended for
+// some other reason, in which case that reason is kept.
+func (c *Conn) Close() error {
+	return c.closeWith(ErrConnClosed)
+}
+
+// Done returns a channel closed when the association ends, for whatever reason.
+//
+// It follows context.Context's shape: select on Done, then ask Err what
+// happened. Without it the only way to notice an association had gone was to
+// poll State until it read ASP-DOWN, or to wait for a Read or Write to start
+// failing — neither of which says why.
+func (c *Conn) Done() <-chan struct{} {
+	return c.done
+}
+
+// Err reports why the association ended, or nil while it is still up.
+//
+// It distinguishes the cases an application has to tell apart: ErrConnClosed
+// for its own shutdown, ErrHeartbeatExpired for a peer that stopped answering,
+// a context error for a cancelled owner, and the underlying read or protocol
+// error otherwise. Read and Write report ErrNotEstablished for all of them.
+func (c *Conn) Err() error {
+	if v := c.closeErr.Load(); v != nil {
+		if err, ok := v.(error); ok {
+			return err
+		}
+	}
+	return nil
+}
+
+// closeWith closes the connection, recording cause as the reason.
+func (c *Conn) closeWith(cause error) error {
+	var err error
+	c.closeOnce.Do(func() {
+		if cause != nil {
+			c.closeErr.Store(cause)
+		}
+		close(c.done)
+		// Retransmitters select on done, but cancel them explicitly so a
+		// pending request cannot be resent onto a socket that is closing.
+		c.stopAllTAck()
+		c.muState.Lock()
+		previousState := c.state
+		c.state = StateAspDown
+		c.appliedState = StateAspDown
+		c.muState.Unlock()
+		if previousState != StateAspDown {
+			c.notifyStateChange(StateAspDown)
+		}
+		// The association is the only route to whatever the peer had reported
+		// on, so those destinations are now unavailable and the MTP3-User is
+		// told before the channel closes behind them.
+		c.pauseDestinations()
+		// Ends any range over SignallingStatus(); see closeStatus.
+		c.closeStatus()
+		// Ends any range over StateChanges(); see closeStateChanges.
+		c.closeStateChanges()
+		c.notifyManagement(&ManagementIndication{
+			Kind:        ManagementSCTPRelease,
+			Description: causeDescription(cause),
+		})
+		// Ends any range over ManagementIndications().
+		c.closeManagement()
+		// Close the association before AS departure can notify siblings. Any
+		// control write already blocked on this socket is released first, and a
+		// nil socket is valid in the state-machine test harness.
+		if c.sctpConn != nil {
+			err = c.sctpConn.Close()
+		}
+		if c.listener != nil {
+			c.listener.forget(c)
+		}
+	})
+	return err
+}
+
+// LocalAddr returns the local network address.
+func (c *Conn) LocalAddr() net.Addr {
+	return c.sctpConn.LocalAddr()
+}
+
+// RemoteAddr returns the remote network address.
+func (c *Conn) RemoteAddr() net.Addr {
+	return c.sctpConn.RemoteAddr()
+}
+
+// SetDeadline sets the read and write deadlines associated.
+func (c *Conn) SetDeadline(t time.Time) error {
+	c.setReadDeadline(t)
+	return c.sctpConn.SetWriteDeadline(t)
+}
+
+// SetReadDeadline sets the deadline for future Read, ReadPD and ReadData calls.
+// A zero time removes it. An expired deadline makes those calls return
+// os.ErrDeadlineExceeded, which reports Timeout() true, and leaves the
+// association usable so the caller can read again.
+//
+// The deadline is kept here rather than pushed down to the SCTP socket. The only
+// reader of that socket is this package's own receive loop, which is meant to
+// wait indefinitely for the peer; a deadline reaching it did not bound the
+// caller's Read at all — Read has never consulted one — and instead expired the
+// receive loop, whose error path closes the association. Setting a read deadline
+// on an idle, healthy, ASP-ACTIVE association therefore tore it down, took the
+// state to ASP-DOWN, and turned every subsequent Read and Write into
+// ErrNotEstablished. That is the opposite of what net.Conn promises, where a
+// read timeout is recoverable.
+func (c *Conn) SetReadDeadline(t time.Time) error {
+	c.setReadDeadline(t)
+	return nil
+}
+
+// setReadDeadline stores the deadline as Unix nanoseconds, with zero meaning
+// none. time.Time has no atomic form, and a mutex here would be taken on every
+// read of an association carrying traffic.
+func (c *Conn) setReadDeadline(t time.Time) {
+	if t.IsZero() {
+		c.readDeadline.Store(0)
+		return
+	}
+	c.readDeadline.Store(t.UnixNano())
+}
+
+// readTimeout returns a channel that fires when the read deadline expires, and
+// whether the deadline has already passed. A nil channel blocks forever, which
+// is what "no deadline" means to a select.
+func (c *Conn) readTimeout() (<-chan time.Time, func(), bool) {
+	d := c.readDeadline.Load()
+	if d == 0 {
+		return nil, func() {}, false
+	}
+	remaining := time.Until(time.Unix(0, d))
+	if remaining <= 0 {
+		return nil, func() {}, true
+	}
+	timer := time.NewTimer(remaining)
+	return timer.C, func() { timer.Stop() }, false
+}
+
+// SetWriteDeadline sets the deadline for future Write calls.
+func (c *Conn) SetWriteDeadline(t time.Time) error {
+	return c.sctpConn.SetWriteDeadline(t)
+}
+
+// State returns current state of Conn.
+func (c *Conn) State() State {
+	c.muState.RLock()
+	defer c.muState.RUnlock()
+	return c.state
+}
+
+// StreamID returns sctpInfo.Stream of Conn.
+//
+// This is the outbound template, not the stream any received message arrived
+// on; see Conn.recvStream for that.
+func (c *Conn) StreamID() uint16 {
+	return c.sctpInfo.Stream
+}
+
+// PeerASPIdentifier returns the ASP Identifier the peer supplied in ASP Up.
+// The boolean is false when the peer omitted the optional parameter.
+func (c *Conn) PeerASPIdentifier() (uint32, bool) {
+	c.muPeerAspIdentifier.RLock()
+	defer c.muPeerAspIdentifier.RUnlock()
+	if c.peerAspIdentifier == nil {
+		return 0, false
+	}
+	return c.peerAspIdentifier.AspIdentifier(), true
+}
+
+// configuredRoutingContexts returns the traffic flows this association is
+// configured to carry. At an SGP that is the immutable per-peer authorization
+// resolved at ASP Up, not the Listener's aggregate inventory.
+func (c *Conn) configuredRoutingContexts() []uint32 {
+	if c == nil {
+		return nil
+	}
+	if c.mode == modeServer {
+		c.muAuthorizedRCs.RLock()
+		if c.authorizationResolved {
+			configured := append([]uint32(nil), c.authorizedRCs...)
+			c.muAuthorizedRCs.RUnlock()
+			return configured
+		}
+		c.muAuthorizedRCs.RUnlock()
+	}
+	if c.cfg == nil || c.cfg.RoutingContexts == nil {
+		return nil
+	}
+	return append([]uint32(nil), c.cfg.RoutingContexts.RoutingContexts()...)
+}
+
+func (c *Conn) configuredRoutingContextParam() *params.Param {
+	configured := c.configuredRoutingContexts()
+	if len(configured) == 0 {
+		return nil
+	}
+	return params.NewRoutingContext(configured...)
+}
+
+func (c *Conn) resolveASPAuthorization(identifier *params.Param) error {
+	identifierSet := identifier != nil
+	identifierValue := uint32(0)
+	if identifierSet {
+		identifierValue = identifier.AspIdentifier()
+	}
+
+	c.muAuthorizedRCs.RLock()
+	if c.authorizationResolved {
+		sameIdentity := c.authorizationIdentifierSet == identifierSet &&
+			(!identifierSet || c.authorizationIdentifier == identifierValue)
+		c.muAuthorizedRCs.RUnlock()
+		if !sameIdentity {
+			return ErrInvalidAspIdentifier
+		}
+		return nil
+	}
+	c.muAuthorizedRCs.RUnlock()
+
+	configured := []uint32(nil)
+	if c.cfg != nil && c.cfg.RoutingContexts != nil {
+		configured = append(configured, c.cfg.RoutingContexts.RoutingContexts()...)
+	}
+	authorized := append([]uint32(nil), configured...)
+	explicitAuthorization := c.cfg != nil && c.cfg.AuthorizeASP != nil
+	if explicitAuthorization {
+		var remoteAddress net.Addr
+		if c.sctpConn != nil {
+			remoteAddress = c.sctpConn.RemoteAddr()
+		}
+		authorized = append([]uint32(nil), c.cfg.AuthorizeASP(ASPIdentity{
+			ASPIdentifier:    identifierValue,
+			ASPIdentifierSet: identifierSet,
+			RemoteAddr:       remoteAddress,
+		})...)
+	}
+
+	configuredSet := make(map[uint32]struct{}, len(configured))
+	for _, rtCtx := range configured {
+		configuredSet[rtCtx] = struct{}{}
+	}
+	authorizedSet := make(map[uint32]struct{}, len(authorized))
+	for _, rtCtx := range authorized {
+		if _, exists := configuredSet[rtCtx]; !exists {
+			return ErrInvalidAspIdentifier
+		}
+		authorizedSet[rtCtx] = struct{}{}
+	}
+	owned := make([]uint32, 0, len(authorizedSet))
+	for _, rtCtx := range configured {
+		if _, allowed := authorizedSet[rtCtx]; allowed {
+			owned = append(owned, rtCtx)
+		}
+	}
+
+	c.muAuthorizedRCs.Lock()
+	if c.authorizationResolved {
+		sameIdentity := c.authorizationIdentifierSet == identifierSet &&
+			(!identifierSet || c.authorizationIdentifier == identifierValue)
+		c.muAuthorizedRCs.Unlock()
+		if !sameIdentity {
+			return ErrInvalidAspIdentifier
+		}
+		return nil
+	}
+	c.authorizedRCs = owned
+	c.authorizationResolved = true
+	c.authorizationExplicit = explicitAuthorization
+	c.authorizationIdentifier = identifierValue
+	c.authorizationIdentifierSet = identifierSet
+	c.muAuthorizedRCs.Unlock()
+	return nil
+}
+
+func (c *Conn) hasExplicitlyEmptyASPAuthorization() bool {
+	c.muAuthorizedRCs.RLock()
+	defer c.muAuthorizedRCs.RUnlock()
+	return c.authorizationResolved && c.authorizationExplicit && len(c.authorizedRCs) == 0
+}
+
+func (c *Conn) savePeerASPIdentifier(identifier *params.Param) {
+	c.muPeerAspIdentifier.Lock()
+	c.peerAspIdentifier = identifier.Copy()
+	c.muPeerAspIdentifier.Unlock()
+}
+
+func (c *Conn) peerASPIdentifierParam() *params.Param {
+	c.muPeerAspIdentifier.RLock()
+	defer c.muPeerAspIdentifier.RUnlock()
+	return c.peerAspIdentifier.Copy()
+}
+
+// notePeerActivity records a successfully parsed M3UA message received with
+// PPID 0 or M3UAPPID. RFC 4666 Section 4.3.4.6 treats that as evidence the peer
+// is alive; callers must reject every other PPID and malformed octets first.
+func (c *Conn) notePeerActivity() {
+	c.lastRecv.Store(time.Now().UnixNano())
+}
+
+// heardFromPeerSince reports whether any M3UA message arrived from the peer
+// after t.
+//
+// Measured against a point in time rather than a rolling window: the message
+// that proves the peer is alive typically arrives right at the start of the
+// window, where "within the last T(beat)" lands on the boundary and decides the
+// association's fate on a scheduling margin.
+func (c *Conn) heardFromPeerSince(t time.Time) bool {
+	last := c.lastRecv.Load()
+	if last == 0 {
+		return false
+	}
+	return last > t.UnixNano()
+}
+
+// receivedStreamID reports the SCTP stream the message currently being handled
+// arrived on.
+func (c *Conn) receivedStreamID() uint16 {
+	return uint16(c.recvStream.Load())
+}
+
+// MaxMessageStreamID returns the highest negotiated SCTP stream ID DATA may use.
+// Valid explicit DATA stream IDs run from 1 through this value; stream 0 is
+// reserved for management, and a zero result means no DATA stream is available.
+func (c *Conn) MaxMessageStreamID() uint16 {
+	return c.maxMessageStreamID
+}
+
+// maxSackDelayMillis is the ceiling RFC 9260 Section 6.2 puts on 'SACK.Delay'.
+const maxSackDelayMillis = 500
+
+// validateSackDelay refuses a delayed-SACK timer the current SCTP specification
+// does not allow to be configured.
+//
+// RFC 9260 Section 6.2: "An implementation MUST NOT allow the maximum delay
+// (protocol parameter 'SACK.Delay') to be configured to be more than 500 ms."
+// There is no lower bound to enforce — the 200 ms in the same section is the
+// target for generating an acknowledgement, not a floor, and zero is the
+// documented way to disable the delay.
+func validateSackDelay(sackDelay uint32) error {
+	if sackDelay > maxSackDelayMillis {
+		return fmt.Errorf("%w: %d ms requested", ErrSackDelayTooLarge, sackDelay)
+	}
+	return nil
+}
+
+// SetSctpSackConfig sets the SCTP SACK timer configuration on an active connection.
+//
+// sackDelay is the number of milliseconds for the delayed SACK timer. RFC 9260
+// Section 6.2 allows any value up to 500 ms and forbids more; anything above
+// that is refused with ErrSackDelayTooLarge rather than passed to the kernel.
+//
+// sackFrequency is the number of packets to receive before sending a SACK
+// without waiting for the delay timer. Setting to 1 disables the delayed
+// SACK algorithm.
+//
+// Note: sackDelay=0, sackFrequency=1 (disables delayed SACK)
+func (c *Conn) SetSctpSackConfig(sackDelay, sackFrequency uint32) error {
+	if err := validateSackDelay(sackDelay); err != nil {
+		return err
+	}
+	return c.sctpConn.SetSackTimer(&sctp.SackTimer{
+		SackDelay:     sackDelay,
+		SackFrequency: sackFrequency,
+	})
+}
+
+// SetSctpNoDelayConfig sets the SCTP_NODELAY option on an active connection.
+//
+// When noDelay is true, the Nagle-like bundling algorithm is disabled and
+// user messages are sent as soon as possible. When false, small messages
+// may be bundled to improve throughput.
+func (c *Conn) SetSctpNoDelayConfig(noDelay bool) error {
+	optval := 0
+	if noDelay {
+		optval = 1
+	}
+	return c.sctpConn.SetNoDelay(optval)
+}
+
+// streamFor maps a Signalling Link Selection value onto a data stream.
+//
+// RFC 4666 Section 1.4.7 (SCTP Stream Mapping): "Traffic that requires
+// sequencing SHOULD be assigned to the same stream. To accomplish this,
+// MTP3-User traffic may be assigned to individual streams based on, for
+// example, the SLS value in the MTP3 Routing Label, subject of course to the
+// maximum number of streams supported by the underlying SCTP association."
+//
+// SCTP guarantees ordering only within a stream, so every message sharing an
+// SLS has to travel the same one. This used to pick a stream at random per
+// message — from a math/rand source reseeded off the wall clock on every call —
+// which spread a single SLS across streams and discarded the sequencing the
+// same section asks for.
+//
+// maxMessageStreamID is the peer's outbound stream count less one, since
+// stream 0 is not available to DATA (see writeStream). A peer that negotiates a
+// single stream leaves it at 0, meaning there is no data stream at all; the
+// zero returned here is refused by the write paths rather than put on the wire.
+func (c *Conn) streamFor(sls uint8) uint16 {
+	if c.maxMessageStreamID <= 1 {
+		return c.maxMessageStreamID
+	}
+	return uint16(sls)%c.maxMessageStreamID + 1
+}
+
+// checkDataStream refuses a stream DATA may not travel on.
+//
+// RFC 4666 Section 1.4.7 rule 1 is unconditional: "The DATA message MUST NOT be
+// sent on stream 0." A peer that negotiates a single outbound stream therefore
+// offers nowhere legal to send DATA, and the association is unusable for
+// traffic; saying so is the only conformant answer, and beats quietly breaking
+// the MUST. Section 1.4.7 also limits selection to the streams supported by the
+// association, so an explicit stream above the negotiated maximum is reported
+// as Invalid Stream Identifier rather than handed to the kernel.
+func (c *Conn) checkDataStream(streamID uint16) error {
+	if streamID == 0 {
+		return ErrNoDataStream
+	}
+	if streamID > c.maxMessageStreamID {
+		return NewInvalidSCTPStreamIDError(streamID)
+	}
+	return nil
+}
+
+// setResumeTo records how far a client should climb when it next comes up.
+func (c *Conn) setResumeTo(s State) {
+	c.muState.Lock()
+	defer c.muState.Unlock()
+	c.resumeTo = s
+}
+
+// SelectRoutingContext chooses which Routing Context outbound DATA names by
+// default.
+//
+// It sets association state, so it suits a caller that carries one traffic flow
+// per association. It is NOT a way to switch flows from message to message:
+// where several goroutines write to one Conn, a second goroutine's selection can
+// land between this goroutine's selection and its write, and the payload goes
+// out naming the other flow — a silent mis-identification of exactly the thing
+// Section 3.3.1 requires the parameter to get right. Callers sending for more
+// than one flow use the WithRoutingContext writes, which carry the context on
+// the message it describes.
+//
+// It is needed only when several Routing Contexts are configured for the
+// association. RFC 4666 Section 3.3.1 declares the parameter singular —
+// "Routing Context: 32 bits (unsigned integer)" — and requires it to pick one
+// flow out of several: "Where multiple Routing Keys and Routing Contexts are
+// used across a common association, the Routing Context MUST be sent to
+// identify the traffic flow, assisting in the internal distribution of Data
+// messages." Sending the whole configured set instead identifies nothing.
+//
+// With one Routing Context configured there is nothing to choose and DATA uses
+// it; with none, the parameter is omitted, which the same section permits:
+// "Where a Routing Key has not been coordinated between the SGP and ASP,
+// sending of Routing Context is not required."
+//
+// The context must be one of those configured for this association.
+func (c *Conn) SelectRoutingContext(rtCtx uint32) error {
+	configured := c.configuredRoutingContexts()
+	for _, rc := range configured {
+		if rc == rtCtx {
+			c.muState.Lock()
+			c.selectedRC, c.selectedRCSet = rtCtx, true
+			c.muState.Unlock()
+			return nil
+		}
+	}
+	return NewInvalidRoutingContextError(rtCtx)
+}
+
+// resolveRoutingContext returns the Routing Context parameter for one DATA:
+// the flow the caller named for that message, or the association-wide selection
+// when it named none.
+func (c *Conn) resolveRoutingContext(rtCtx *uint32) (*params.Param, error) {
+	if rtCtx == nil {
+		return c.dataRoutingContext()
+	}
+	return c.routingContextFor(*rtCtx)
+}
+
+// routingContextFor returns the Routing Context parameter naming one traffic
+// flow, for a caller that has said which flow this message belongs to.
+//
+// Nothing is read from the Conn's own selection, which is what makes it safe to
+// call concurrently for different flows on one association.
+func (c *Conn) routingContextFor(rtCtx uint32) (*params.Param, error) {
+	for _, rc := range c.configuredRoutingContexts() {
+		if rc != rtCtx {
+			continue
+		}
+		// Activation is per Routing Context (Section 4.3.4.3). At an ASP the SGP
+		// must have acknowledged the context and no alternate may have taken it;
+		// at an SGP this particular ASP must still be active in that AS.
+		if !c.outboundRoutingContextActive(rtCtx) {
+			return nil, ErrRoutingContextNotActive
+		}
+		return params.NewRoutingContext(rtCtx), nil
+	}
+	// Including the case where no Routing Key was coordinated at all: naming a
+	// flow the association never agreed to carry is not the same as omitting
+	// the parameter, and must not be silently downgraded to it.
+	return nil, NewInvalidRoutingContextError(rtCtx)
+}
+
+func (c *Conn) outboundRoutingContextActive(rtCtx uint32) bool {
+	if c.mode == modeServer {
+		return c.activeForRoutingContext(rtCtx)
+	}
+	return c.routingContextAcked(rtCtx) && !c.routingContextOverridden(rtCtx)
+}
+
+// dataRoutingContext returns the Routing Context parameter to put on a DATA, or
+// nil if none is due.
+//
+// It reports an error only in the case the RFC leaves no default for: several
+// Routing Contexts coordinated on the association and none chosen, where any
+// choice this package made would be a guess at which traffic flow the payload
+// belongs to.
+func (c *Conn) dataRoutingContext() (*params.Param, error) {
+	configured := c.configuredRoutingContexts()
+
+	switch {
+	case len(configured) == 0:
+		// Conditional, and no Routing Key has been coordinated: omit it. A
+		// zero-length parameter is not the same thing — it names no context
+		// while still claiming to.
+		return nil, nil
+	case len(configured) == 1:
+		return c.routingContextFor(configured[0])
+	}
+
+	c.muState.RLock()
+	rc, ok := c.selectedRC, c.selectedRCSet
+	c.muState.RUnlock()
+	if !ok {
+		return nil, ErrAmbiguousRoutingContext
+	}
+	return c.routingContextFor(rc)
+}
+
+// setState replaces the Conn's state without going through the dispatcher. It
+// exists for tests that need to place a Conn in a given state directly.
+func (c *Conn) setState(s State) {
+	c.muState.Lock()
+	c.state = s
+	// Kept in step so a later transition measures itself against the state the
+	// Conn was actually placed in, not against a stale applied value.
+	c.appliedState = s
+	c.muState.Unlock()
+}
+
+// resumeAfterStrayAck reports whether a return to ASP-ACTIVE is owed because a
+// stray acknowledgement pushed this Conn out of it.
+func (c *Conn) resumeAfterStrayAck() bool {
+	return c.resumeStray.Load()
+}
+
+// armResumeAfterStrayAck records that the next entry into ASP-INACTIVE was
+// caused by a stray acknowledgement, so the entry action re-initiates.
+func (c *Conn) armResumeAfterStrayAck() {
+	c.resumeStray.Store(true)
+}
+
+// clearResumeAfterStrayAck cancels an armed return.
+func (c *Conn) clearResumeAfterStrayAck() {
+	c.resumeStray.Store(false)
+}
+
+// noteRoutingContextsAcked records the Routing Contexts an ASP Active Ack
+// acknowledged. An Ack with no Routing Context parameter acknowledges whatever
+// the association carries, so every configured context is marked.
+func (c *Conn) noteRoutingContextsAcked(acked *params.Param) {
+	rcs := c.configuredRoutingContexts()
+	if acked != nil {
+		if named := acked.RoutingContexts(); len(named) > 0 {
+			rcs = named
+		}
+	}
+
+	c.muAckedRCs.Lock()
+	defer c.muAckedRCs.Unlock()
+	if c.ackedRCs == nil {
+		c.ackedRCs = make(map[uint32]struct{})
+	}
+	c.ackedRCsScoped = true
+	for _, rc := range rcs {
+		c.ackedRCs[rc] = struct{}{}
+		delete(c.overriddenRCs, rc)
+	}
+}
+
+// routingContextAcked reports whether the peer has acknowledged this context,
+// or whether no Ack has named any context yet, in which case there is nothing
+// to withhold.
+func (c *Conn) routingContextAcked(rc uint32) bool {
+	c.muAckedRCs.RLock()
+	defer c.muAckedRCs.RUnlock()
+	if !c.ackedRCsScoped {
+		return true
+	}
+	_, ok := c.ackedRCs[rc]
+	return ok
+}
+
+// forgetAckedRoutingContexts drops the acknowledged set, so a new activation
+// starts from nothing. An override recorded against the old activation goes with
+// it: the next ASP Active decides afresh which contexts this ASP may carry.
+func (c *Conn) forgetAckedRoutingContexts() {
+	c.muAckedRCs.Lock()
+	c.ackedRCs = nil
+	c.ackedRCsScoped = false
+	c.overriddenRCs = nil
+	c.muAckedRCs.Unlock()
+}
+
+// noteRoutingContextsOverridden records that an alternate ASP has taken over
+// these Routing Contexts.
+//
+// RFC 4666 Section 4.3.4.3 makes the receiving ASP "consider itself now in the
+// ASP-INACTIVE state" when overridden, and Errata ID 2065 is about the scope of
+// that: an ASP serving several Application Servers becomes inactive "only for
+// that particular Application Server, rather than all of them". The ASP state
+// machine here is per association rather than per Routing Context, so the
+// association-wide move is kept only for an override that covers everything it
+// carries; a partial override is recorded here instead, which stops traffic for
+// those contexts and leaves the rest running.
+//
+// What this does not do is maintain a separate ASP state per Routing Context, as
+// Section 4.3.1 describes. State() therefore still reports ASP-ACTIVE while some
+// of the contexts are not sendable, and the per-context truth is what
+// routingContextFor enforces on each write.
+func (c *Conn) noteRoutingContextsOverridden(rcs []uint32) {
+	c.muAckedRCs.Lock()
+	defer c.muAckedRCs.Unlock()
+	if c.overriddenRCs == nil {
+		c.overriddenRCs = make(map[uint32]struct{})
+	}
+	for _, rc := range rcs {
+		c.overriddenRCs[rc] = struct{}{}
+	}
+}
+
+// noteRoutingContextsActive records, at an SGP, which Application Servers this
+// ASP has just been activated in. An empty set means every configured one, which
+// is what an ASP Active naming no Routing Context asks for.
+func (c *Conn) noteRoutingContextsActive(rcs []uint32) {
+	c.muAckedRCs.Lock()
+	defer c.muAckedRCs.Unlock()
+
+	if len(rcs) == 0 {
+		c.activeRCs, c.activeRCsScoped = nil, false
+		return
+	}
+	if c.activeRCs == nil {
+		c.activeRCs = make(map[uint32]struct{}, len(rcs))
+	}
+	c.activeRCsScoped = true
+	for _, rc := range rcs {
+		c.activeRCs[rc] = struct{}{}
+	}
+}
+
+// noteRoutingContextsInactive records that this ASP has stood down in these
+// Application Servers. An empty set means all of them.
+func (c *Conn) noteRoutingContextsInactive(rcs []uint32) {
+	c.muAckedRCs.Lock()
+	defer c.muAckedRCs.Unlock()
+
+	if len(rcs) == 0 {
+		c.activeRCs, c.activeRCsScoped = nil, true
+		return
+	}
+	if c.activeRCs == nil {
+		// Was active everywhere; narrowing it needs the full set to subtract
+		// from, so start from what the association carries.
+		c.activeRCs = make(map[uint32]struct{})
+		for _, rc := range c.configuredRoutingContexts() {
+			c.activeRCs[rc] = struct{}{}
+		}
+	}
+	c.activeRCsScoped = true
+	for _, rc := range rcs {
+		delete(c.activeRCs, rc)
+	}
+}
+
+// forgetActiveRoutingContexts drops the record, so a peer returning to
+// ASP-INACTIVE or ASP-DOWN starts again from nothing.
+func (c *Conn) forgetActiveRoutingContexts() {
+	c.muAckedRCs.Lock()
+	c.activeRCs, c.activeRCsScoped = nil, false
+	c.muAckedRCs.Unlock()
+}
+
+// activeForRoutingContext reports whether this ASP is ASP-ACTIVE in the
+// Application Server serving rtCtx. With nothing recorded it is active in all of
+// them, which is the answer for an ASP Active that named no context.
+func (c *Conn) activeForRoutingContext(rtCtx uint32) bool {
+	c.muAckedRCs.RLock()
+	defer c.muAckedRCs.RUnlock()
+
+	if !c.activeRCsScoped {
+		return true
+	}
+	_, ok := c.activeRCs[rtCtx]
+	return ok
+}
+
+// routingContextOverridden reports whether an alternate ASP holds this context.
+func (c *Conn) routingContextOverridden(rc uint32) bool {
+	c.muAckedRCs.RLock()
+	defer c.muAckedRCs.RUnlock()
+	_, ok := c.overriddenRCs[rc]
+	return ok
+}
+
+// Shutdown ends the association the orderly way, then closes it.
+//
+// RFC 4666 Section 4.9 offers a node two ways to stop communicating:
+//
+//	a) Send the sequence of ASP-INACTIVE, DEREG (optionally whenever
+//	   dynamic registration is used), and ASP-DOWN messages and perform
+//	   the SCTP Shutdown procedure after that.
+//
+//	b) Just do the SCTP Shutdown procedure.
+//
+// Close is (b), which is why it stays abrupt. Shutdown is (a): the peer is told
+// traffic is stopping and that this ASP is going down before the association
+// disappears underneath it, so it can move traffic rather than discover the
+// loss from a vanished socket. DEREG is not sent, since this library does not
+// support dynamic registration and the RFC makes it optional in any case.
+//
+// Each request completes its T(ack) procedure before the next is sent. Use
+// ShutdownContext to bound the operation more tightly than the configured
+// retry budget.
+func (c *Conn) Shutdown() error {
+	return c.ShutdownContext(context.Background())
+}
+
+// ShutdownContext is Shutdown with caller-controlled cancellation.
+// Cancellation stops the outstanding T(ack) request and still releases SCTP.
+func (c *Conn) ShutdownContext(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("nil shutdown context")
+	}
+	if !c.terminating.CompareAndSwap(false, true) {
+		select {
+		case <-c.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return c.finishTermination(err)
+	}
+
+	// ASP Inactive and ASP Down are initiated by an ASP. An SGP has no mirror
+	// request to send; Section 4.9's orderly option for it is the SCTP Shutdown
+	// procedure alone. Sending ASP requests from a server reverses the protocol
+	// roles and makes the peer report Unexpected Message while the socket closes.
+	if c.mode != modeClient {
+		return c.Close()
+	}
+
+	state := c.State()
+	if state == StateAspActive {
+		request, err := c.beginASPInactive(c.cfg.RoutingContexts)
+		if err == nil {
+			err = c.waitTAck(ctx, request)
+		}
+		if err != nil {
+			return c.finishTermination(err)
+		}
+	}
+
+	if state == StateAspActive || state == StateAspInactive {
+		request, err := c.initiateASPDown()
+		if err == nil {
+			err = c.waitTAck(ctx, request)
+		}
+		if err != nil {
+			return c.finishTermination(err)
+		}
+	}
+
+	return c.Close()
+}
+
+func (c *Conn) finishTermination(cause error) error {
+	closeErr := c.closeWith(cause)
+	if closeErr != nil {
+		return errors.Join(cause, closeErr)
+	}
+	return cause
+}
+
+// StateChanges reports every ASP state transition this association makes, in
+// order, and is closed when the association ends.
+//
+// RFC 4666 Section 1.6.3 gives Layer Management an indication for each of these
+// transitions -- M-ASP_UP, M-ASP_DOWN, M-ASP_ACTIVE and M-ASP_INACTIVE, in
+// their confirm and indication forms -- and Section 4.2.1 has the M3UA layer
+// invoke them "upon successful state changes". State() could only answer the
+// question when asked, so a management layer had to poll for edges the library
+// already knew about, and a transition that came and went between two polls was
+// simply lost.
+//
+// Delivery never stalls the dispatcher. A reader that allows the bounded queue
+// to fill closes the association with ErrIndicationQueueFull, rather than
+// receiving a partial transition history. Read it in a dedicated goroutine if
+// every edge matters.
+//
+//	go func() {
+//		for st := range conn.StateChanges() {
+//			log.Printf("ASP state: %v", st)
+//		}
+//		// the channel closes with the association
+//	}()
+func (c *Conn) StateChanges() <-chan State {
+	return c.stateEventChan
+}
+
+// notifyStateChange delivers a transition without blocking, and cannot send on
+// a channel that Close has already closed.
+func (c *Conn) notifyStateChange(s State) {
+	c.muStateEvent.Lock()
+	defer c.muStateEvent.Unlock()
+
+	if c.stateEventClosed {
+		return
+	}
+
+	select {
+	case c.stateEventChan <- s:
+	default:
+		c.closeForIndicationOverflow()
+	}
+}
+
+func (c *Conn) closeForIndicationOverflow() {
+	if c != nil && c.indicationOverflow.CompareAndSwap(false, true) {
+		go func() { _ = c.closeWith(ErrIndicationQueueFull) }()
+	}
+}
+
+// closeStateChanges closes stateEventChan exactly once, so a caller ranging
+// over StateChanges() sees the association end rather than parking forever.
+func (c *Conn) closeStateChanges() {
+	c.muStateEvent.Lock()
+	defer c.muStateEvent.Unlock()
+
+	if c.stateEventClosed {
+		return
+	}
+	c.stateEventClosed = true
+	close(c.stateEventChan)
+}
+
+// AssociationStatus is the SCTP-level status of the association underneath an
+// M3UA Conn.
+//
+// RFC 4666 Section 4.2 describes M-SCTP_STATUS as a Layer Management query that
+// "supports a Layer Management query of the local status of a particular SCTP
+// association", answered by mapping the SCTP layer's own status into a confirm
+// primitive; no peer protocol is involved. The values below are that status,
+// read from the association at the moment of the call.
+//
+// Round-trip time and retransmission timeout describe the primary path only.
+// SCTP associations are multi-homed, and a secondary path can be in a quite
+// different condition; this reports the path traffic is actually taking.
+type AssociationStatus struct {
+	// State is the association's SCTP state, as a name (for example
+	// "ESTABLISHED"). RFC 9260 Section 4 defines the state machine.
+	State string
+	// ReceiverWindow is the peer's advertised receiver window, in octets.
+	ReceiverWindow uint32
+	// UnackedDataChunks is how many DATA chunks this end has sent and not yet
+	// had acknowledged. A number that stays high is the peer, or the path, not
+	// keeping up.
+	UnackedDataChunks uint16
+	// PendingDataChunks is how many DATA chunks are queued here awaiting a
+	// send, which is this end's own backlog rather than the peer's.
+	PendingDataChunks uint16
+	// InboundStreams and OutboundStreams are the stream counts negotiated at
+	// association setup. OutboundStreams bounds the stream a message may be
+	// sent on; see MaxMessageStreamID.
+	InboundStreams  uint16
+	OutboundStreams uint16
+	// FragmentationPoint is the largest payload that will be sent without
+	// being fragmented across DATA chunks, in octets.
+	FragmentationPoint uint32
+	// PrimaryCongestionWindow is the primary path's congestion window, in
+	// octets.
+	PrimaryCongestionWindow uint32
+	// PrimarySmoothedRTT is the primary path's smoothed round-trip time.
+	PrimarySmoothedRTT time.Duration
+	// PrimaryRetransmissionTimeout is the primary path's current RTO. It is the
+	// delay before an unacknowledged chunk is resent, so it bounds how long a
+	// lost message can go unnoticed.
+	PrimaryRetransmissionTimeout time.Duration
+	// PrimaryMTU is the primary path's maximum transmission unit, in octets.
+	PrimaryMTU uint32
+}
+
+// associationStateName renders an SCTP association state as the name the
+// kernel's enum gives it.
+//
+// Written against the named constants rather than the numbers: the enum in
+// linux/sctp.h begins at SCTP_EMPTY, not SCTP_CLOSED, so a table numbered from
+// CLOSED = 0 is off by one throughout and reports an established association as
+// COOKIE_ECHOED. The dependency documents that trap on the constant block.
+func associationStateName(s sctp.StatusState) string {
+	switch s {
+	case sctp.SCTP_EMPTY:
+		return "EMPTY"
+	case sctp.SCTP_CLOSED:
+		return "CLOSED"
+	case sctp.SCTP_COOKIE_WAIT:
+		return "COOKIE-WAIT"
+	case sctp.SCTP_COOKIE_ECHOED:
+		return "COOKIE-ECHOED"
+	case sctp.SCTP_ESTABLISHED:
+		return "ESTABLISHED"
+	case sctp.SCTP_SHUTDOWN_PENDING:
+		return "SHUTDOWN-PENDING"
+	case sctp.SCTP_SHUTDOWN_SENT:
+		return "SHUTDOWN-SENT"
+	case sctp.SCTP_SHUTDOWN_RECEIVED:
+		return "SHUTDOWN-RECEIVED"
+	case sctp.SCTP_SHUTDOWN_ACK_SENT:
+		return "SHUTDOWN-ACK-SENT"
+	default:
+		return fmt.Sprintf("unknown(%d)", int32(s))
+	}
+}
+
+// AssociationStatus reports the SCTP association's own status, which is what
+// RFC 4666 Section 4.2 calls an M-SCTP_STATUS request and its confirm. No M3UA
+// peer protocol is invoked: the answer comes from the local SCTP layer.
+//
+// setUpSocket has always read this at construction and kept only the negotiated
+// outbound stream count, discarding the rest, so an operator had no way to see
+// the round-trip time, the retransmission timeout, or the queue depths of an
+// association they were running. Those are exactly the numbers that distinguish
+// a link that is slow from one that is failing.
+//
+// It returns an error once the association is gone.
+func (c *Conn) AssociationStatus() (*AssociationStatus, error) {
+	if c.sctpConn == nil {
+		return nil, ErrConnClosed
+	}
+
+	r, err := c.sctpConn.GetStatus()
+	if err != nil {
+		return nil, err
+	}
+
+	return &AssociationStatus{
+		State:                        associationStateName(r.State),
+		ReceiverWindow:               r.RWND,
+		UnackedDataChunks:            r.Unackdata,
+		PendingDataChunks:            r.Penddata,
+		InboundStreams:               r.Instreams,
+		OutboundStreams:              r.Ostreams,
+		FragmentationPoint:           r.FragmentationPoint,
+		PrimaryCongestionWindow:      r.PrimaryPeerAddr.CWND,
+		PrimarySmoothedRTT:           time.Duration(r.PrimaryPeerAddr.SRTT) * time.Millisecond,
+		PrimaryRetransmissionTimeout: time.Duration(r.PrimaryPeerAddr.RTO) * time.Millisecond,
+		PrimaryMTU:                   r.PrimaryPeerAddr.MTU,
+	}, nil
+}
+
+// ManagementIndicationKind identifies which of RFC 4666's Layer Management
+// indications a ManagementIndication carries.
+type ManagementIndicationKind uint8
+
+const (
+	// ManagementNotify is the M-NOTIFY indication of RFC 4666 Section 1.6.3:
+	// "M3UA reports that it has received a Notify message from its peer."
+	ManagementNotify ManagementIndicationKind = iota
+	// ManagementError is the M-ERROR indication: "M3UA reports that it has
+	// received an Error message from its peer or that a local operation has
+	// been unsuccessful."
+	ManagementError
+	// ManagementSCTPRestart is the M-SCTP_RESTART indication: "M3UA informs LM
+	// that an SCTP restart indication has been received."
+	ManagementSCTPRestart
+	// ManagementSCTPRelease is the M-SCTP_RELEASE indication/confirm emitted
+	// when the association is released locally, remotely, or by failure.
+	ManagementSCTPRelease
+)
+
+// String names the indication as Section 1.6.3 does.
+func (k ManagementIndicationKind) String() string {
+	switch k {
+	case ManagementNotify:
+		return "M-NOTIFY"
+	case ManagementError:
+		return "M-ERROR"
+	case ManagementSCTPRestart:
+		return "M-SCTP_RESTART"
+	case ManagementSCTPRelease:
+		return "M-SCTP_RELEASE"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(k))
+	}
+}
+
+func causeDescription(cause error) string {
+	if cause == nil {
+		return "SCTP association released"
+	}
+	return cause.Error()
+}
+
+// ManagementIndication is one report from the M3UA layer to Layer Management.
+//
+// Which fields carry meaning depends on Kind; the rest are zero. Description is
+// always set, and names the value as the RFC names it, so an indication can be
+// logged without a lookup table.
+type ManagementIndication struct {
+	Kind ManagementIndicationKind
+
+	// StatusType and StatusInfo are the two halves of the Status parameter of
+	// a received Notify (RFC 4666 Section 3.8.2). Set for ManagementNotify.
+	StatusType uint16
+	StatusInfo uint16
+
+	// ErrorCode is the Error Code of a received Error message (Section 3.8.1).
+	// Set for ManagementError.
+	ErrorCode uint32
+
+	// RoutingContexts is the complete Application Server scope of the
+	// indication. For ManagementNotify it contains every explicitly named
+	// Routing Context, or the configured AS memberships inferred under RFC 4666
+	// Section 4.3.4.5 when NTFY omitted the parameter. For ManagementError it
+	// contains every Routing Context the peer explicitly named. The slice is
+	// owned by the indication and may be retained or modified by the caller.
+	RoutingContexts []uint32
+
+	// RoutingContext is the first explicitly named traffic flow, valid only
+	// when RoutingContextSet is true. It is retained for source compatibility;
+	// RoutingContexts carries the complete explicit or inferred scope.
+	//
+	// It is what makes the indication actionable on an association carrying
+	// more than one Application Server. RFC 4666 Errata ID 2065 asks for the
+	// parameter to be Conditional rather than Optional in Notify for exactly
+	// this reason: when a second ASP becomes active for one of several
+	// Application Servers, the Notify names which one, "allow[ing] the first
+	// ASP to become inactive only for that particular Application Server,
+	// rather than all of them". Section 3.8.1 goes further for Error and makes
+	// it Mandatory for specific codes — an "Invalid Routing Context" error
+	// carries the context that was invalid.
+	RoutingContext    uint32
+	RoutingContextSet bool
+
+	// AspIdentifier is the ASP the indication concerns, valid only when
+	// AspIdentifierSet is true. Set for ManagementNotify: Section 3.8.2 lists
+	// it Conditional, and an "Alternate ASP Active" notification uses it to name
+	// the ASP that took the traffic over.
+	AspIdentifier    uint32
+	AspIdentifierSet bool
+
+	// NetworkAppearance is the network the indication concerns, valid only when
+	// NetworkAppearanceSet is true. Section 3.8.1 makes it Mandatory for the
+	// "Invalid Network Appearance" error, which "MUST be included in the
+	// Network Appearance parameter".
+	NetworkAppearance    uint32
+	NetworkAppearanceSet bool
+
+	// AffectedPointCodes are the destinations an Error concerns, empty when it
+	// named none. Section 3.8.1 on "Destination Status Unknown": "the invalid
+	// or unauthorized Point Code(s) MUST be included along with the Network
+	// Appearance and/or Routing Context associated with the Point Code(s)."
+	AffectedPointCodes []uint32
+
+	// Description names the status or the error code in the RFC's own words.
+	Description string
+}
+
+// firstRoutingContext projects a management message's first explicitly named
+// Routing Context into the compatibility fields on ManagementIndication. The
+// complete explicit or inferred scope is carried by RoutingContexts.
+//
+// The bool means the value was decoded, not merely that a parameter was
+// present: a value that is not a whole number of 32-bit words yields nothing,
+// and reporting a zero for it would be indistinguishable from Routing Context 0,
+// which a peer may legitimately use.
+func firstRoutingContext(p *params.Param) (uint32, bool) {
+	if p == nil {
+		return 0, false
+	}
+	rcs := p.RoutingContexts()
+	if len(rcs) == 0 {
+		return 0, false
+	}
+	return rcs[0], true
+}
+
+func routingContextsOf(p *params.Param) []uint32 {
+	if p == nil {
+		return nil
+	}
+	return append([]uint32(nil), p.RoutingContexts()...)
+}
+
+// uint32ParamOf reports a single-word parameter's value, and whether it decoded.
+// The accessors return zero for a mismatched tag, which is a real value for
+// every one of these fields, so the tag is checked here instead.
+func uint32ParamOf(p *params.Param, tag uint16, read func(*params.Param) uint32) (uint32, bool) {
+	if p == nil || p.Tag != tag {
+		return 0, false
+	}
+	return read(p), true
+}
+
+// ManagementIndications reports what RFC 4666 Section 1.6.3 calls the M3UA to
+// Layer Management indications, and is closed when the association ends.
+//
+// Section 4.2: "M-NOTIFY indication and M-ERROR indication primitives indicate
+// to Layer Management the notification or error information contained in a
+// received M3UA Notify or Error message, respectively." Both messages were
+// decoded correctly and then written to a log line and dropped, so the
+// information reached an operator reading logs and nothing else: an application
+// could not see that the peer had reported AS-INACTIVE, or Insufficient ASP
+// Resources, or refused something with an error code.
+//
+// Delivery never stalls the dispatcher. A reader that allows the bounded queue
+// to fill closes the association with ErrIndicationQueueFull, rather than
+// silently losing M-NOTIFY or M-ERROR.
+//
+//	go func() {
+//		for ind := range conn.ManagementIndications() {
+//			log.Printf("%v: %s", ind.Kind, ind.Description)
+//		}
+//	}()
+func (c *Conn) ManagementIndications() <-chan *ManagementIndication {
+	return c.mgmtChan
+}
+
+// notifyManagement delivers an indication without blocking, and cannot send on
+// a channel that Close has already closed.
+func (c *Conn) notifyManagement(ind *ManagementIndication) {
+	c.muMgmt.Lock()
+	defer c.muMgmt.Unlock()
+
+	if c.mgmtClosed {
+		return
+	}
+
+	select {
+	case c.mgmtChan <- ind:
+	default:
+		c.closeForIndicationOverflow()
+	}
+}
+
+// closeManagement closes mgmtChan exactly once, so a caller ranging over
+// ManagementIndications() sees the association end.
+func (c *Conn) closeManagement() {
+	c.muMgmt.Lock()
+	defer c.muMgmt.Unlock()
+
+	if c.mgmtClosed {
+		return
+	}
+	c.mgmtClosed = true
+	close(c.mgmtChan)
+}

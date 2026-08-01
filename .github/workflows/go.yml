@@ -1,0 +1,232 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: [v*]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.25.x
+          check-latest: true
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: diff check
+        run: git diff --check
+
+      - name: go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  test-linux:
+    name: test-linux / Go ${{ matrix.go-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: [1.23.x, 1.24.x, 1.25.x]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+          cache: true
+
+      - name: Install SCTP dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsctp-dev lksctp-tools iproute2 iptables
+
+      - name: Prepare SCTP test network
+        run: |
+          sudo modprobe sctp || true
+          test -e /proc/net/sctp/snmp
+          sudo sysctl -w net.sctp.auth_enable=1 >/dev/null 2>&1 || true
+          sudo sysctl -w net.sctp.intl_enable=1 >/dev/null 2>&1 || true
+          sudo iptables -C OUTPUT -d 192.0.2.1 -j DROP 2>/dev/null || sudo iptables -A OUTPUT -d 192.0.2.1 -j DROP
+          for addr in 127.0.0.2 127.0.0.3 127.0.0.4; do
+            ip addr show dev lo | grep -q "inet $addr" || sudo ip addr add "$addr/8" dev lo
+          done
+
+      - name: Test
+        run: go test ./... -count=1 -timeout=900s
+
+      - name: Bench
+        run: go test ./... -run '^$' -bench . -benchmem -timeout=900s
+
+  test-linux-race:
+    name: test-linux race
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.25.x
+          check-latest: true
+          cache: true
+
+      - name: Install SCTP dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsctp-dev lksctp-tools iproute2 iptables
+
+      - name: Prepare SCTP test network
+        run: |
+          sudo modprobe sctp || true
+          test -e /proc/net/sctp/snmp
+          sudo sysctl -w net.sctp.auth_enable=1 >/dev/null 2>&1 || true
+          sudo sysctl -w net.sctp.intl_enable=1 >/dev/null 2>&1 || true
+          sudo iptables -C OUTPUT -d 192.0.2.1 -j DROP 2>/dev/null || sudo iptables -A OUTPUT -d 192.0.2.1 -j DROP
+          for addr in 127.0.0.2 127.0.0.3 127.0.0.4; do
+            ip addr show dev lo | grep -q "inet $addr" || sudo ip addr add "$addr/8" dev lo
+          done
+
+      - name: Race
+        run: go test ./... -count=1 -race -timeout=900s
+
+  vet:
+    name: vet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.25.x
+          check-latest: true
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: cross vet
+        run: |
+          for target in linux/386 linux/arm linux/s390x linux/mips; do
+            echo "== $target =="
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 go vet ./...
+          done
+
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.25.x
+          check-latest: true
+          cache: true
+
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1.4.1
+        with:
+          version: latest
+          install-go: false
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9.3.0
+        with:
+          version: v2.12.2
+          args: --timeout=5m
+
+  portability:
+    name: portability / ${{ matrix.kind }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: darwin-amd64-cross-compile
+            os: ubuntu-24.04
+            command: GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go test ./... -run '^$' -count=0 -exec=true
+          - kind: freebsd-amd64-cross-compile
+            os: ubuntu-24.04
+            command: GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go test ./... -run '^$' -count=0 -exec=true
+          - kind: windows-amd64-cross-compile
+            os: ubuntu-24.04
+            command: GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test ./... -run '^$' -count=0 -exec=true
+          - kind: linux-386-cross-compile
+            os: ubuntu-24.04
+            command: GOOS=linux GOARCH=386 CGO_ENABLED=0 go test ./... -run '^$' -count=0 -exec=true
+          - kind: unsupported-macos
+            os: macos-latest
+            command: go test ./... -short -count=1 -timeout=900s
+          - kind: unsupported-windows
+            os: windows-latest
+            command: go test ./... -short -count=1 -timeout=900s
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.25.x
+          check-latest: true
+          cache: true
+
+      - name: Portability check
+        shell: bash
+        run: ${{ matrix.command }}
+
+  vuln:
+    name: vuln
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version: 1.25.x
+          check-latest: true
+          cache: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

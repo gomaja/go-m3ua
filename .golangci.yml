@@ -1,0 +1,66 @@
+# golangci-lint configuration.
+#
+# The repository had none, which meant the defaults applied, and two of those
+# defaults are actively misleading:
+#
+#   max-same-issues: 3        stops reporting an issue after the third instance
+#   max-issues-per-linter: 50 stops reporting a linter after the fiftieth
+#
+# With them in force this tree reported "16 issues". The real number was 140:
+# staticcheck alone was truncated from 129 to 8. A capped count is not a
+# baseline, because fixing an issue can make a previously hidden one appear and
+# the total move the wrong way. Both caps are off below so the number printed is
+# the number that exists.
+
+version: "2"
+
+issues:
+  # Report everything. See above: a truncated count cannot be compared over time.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  settings:
+    staticcheck:
+      # golangci-lint's own default list, reproduced verbatim so that pinning it
+      # here does not silently enable the style checks it leaves off, plus the
+      # one deliberate subtraction documented below. Equivalence was checked by
+      # running with and without this block: the issue set is identical.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        # QF1008 ("could remove embedded field from selector") accounted for 128
+        # of the 140 issues, all of the form msg.Header.Payload -> msg.Payload.
+        # It is off for four reasons, none of them "the number was large":
+        #
+        #  1. QF is staticcheck's quickfix category: editor and gopls fixes,
+        #     not a correctness or style class. The upstream staticcheck binary
+        #     does not ship these checks at all — it lists 149, none of them QF
+        #     — which is why `staticcheck ./...` reports this tree clean while
+        #     golangci-lint, which bundles the same honnef.co/go/tools v0.7.0
+        #     but exposes every category, reported 128.
+        #
+        #  2. Upstream narrowed this very check in 2026.1, "no longer offers to
+        #     delete all embedded fields from a selector expression to prevent
+        #     semantic changes". Dropping an embedded name changes which field a
+        #     selector resolves to if the outer type ever grows one that shadows
+        #     it — a silent behaviour change in wire-format marshalling code.
+        #
+        #  3. Naming Header at the access site is deliberate here and uniform:
+        #     the messages package accesses it explicitly 101 times, and the
+        #     only bare accesses are inside header.go, where the receiver is the
+        #     Header. In a codec, msg.Header.Payload says the field belongs to
+        #     the 8-byte common header rather than to the message body, which is
+        #     a distinction worth keeping.
+        #
+        #  4. Applying it would touch 128 sites across 22 files, change no
+        #     behaviour, and bury the history of every one of those lines.
+        #
+        # This is one line to revert if the project later prefers promoted
+        # selectors; it is recorded rather than silently excluded.
+        - -QF1008
