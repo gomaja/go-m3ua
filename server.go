@@ -569,6 +569,9 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 		}
 		return conn, nil
 	case <-conn.done:
+		if err := conn.Err(); err != nil {
+			return nil, err
+		}
 		return nil, ErrFailedToEstablish
 	case <-ctx.Done():
 		_ = conn.closeWith(ctx.Err())

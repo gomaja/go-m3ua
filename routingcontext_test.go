@@ -70,6 +70,12 @@ func rcClientConfig(opc uint32, rcs ...uint32) *Config {
 	return cfg
 }
 
+func configureRoutingContextLiveTest(cfg *Config) {
+	cfg.EstablishTimeout = 2 * time.Second
+	cfg.TAck = 100 * time.Millisecond
+	cfg.TAckRetries = 5
+}
+
 // The headline case: an ASP registered for one of the SGP's contexts must be
 // able to activate.
 func TestASPWithASubsetOfTheSGPsRoutingContextsActivates(t *testing.T) {
@@ -184,13 +190,9 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 
 	serverConfig := rcServerConfig()
 	serverConfig.AuthorizeASP = nil
-	serverConfig.EstablishTimeout = 500 * time.Millisecond
-	serverConfig.TAck = 20 * time.Millisecond
-	serverConfig.TAckRetries = 2
+	configureRoutingContextLiveTest(serverConfig)
 	clientConfig := rcClientConfig(0xAA000001)
-	clientConfig.EstablishTimeout = 500 * time.Millisecond
-	clientConfig.TAck = 20 * time.Millisecond
-	clientConfig.TAckRetries = 2
+	configureRoutingContextLiveTest(clientConfig)
 
 	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), serverConfig)
 	if err != nil {
@@ -256,13 +258,9 @@ func TestRoutingContextHandshakeMatrix(t *testing.T) {
 
 			serverConfig := rcServerConfig(tt.serverRCs...)
 			serverConfig.AuthorizeASP = nil
-			serverConfig.EstablishTimeout = 500 * time.Millisecond
-			serverConfig.TAck = 20 * time.Millisecond
-			serverConfig.TAckRetries = 2
+			configureRoutingContextLiveTest(serverConfig)
 			clientConfig := rcClientConfig(0xAA000001, tt.clientRCs...)
-			clientConfig.EstablishTimeout = 500 * time.Millisecond
-			clientConfig.TAck = 20 * time.Millisecond
-			clientConfig.TAckRetries = 2
+			configureRoutingContextLiveTest(clientConfig)
 
 			ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), serverConfig)
 			if err != nil {

@@ -158,17 +158,19 @@ func TestRepeatedReconnectCyclesDoNotLeakGoroutines(t *testing.T) {
 	defer cancel()
 
 	peer := newRawPeer(t, 3055, handshakeOnly)
+	heartbeat := &HeartbeatInfo{
+		Enabled:  true,
+		Interval: 100 * time.Millisecond,
+		Timer:    300 * time.Millisecond,
+	}
 
 	cycle := func(port int) {
-		conn := dialRawPeer(t, ctx, peer, port, &HeartbeatInfo{Enabled: false})
+		conn := dialRawPeer(t, ctx, peer, port, heartbeat)
 		if got := conn.State(); got != StateAspActive {
 			t.Fatalf("port %d: state = %v, want %v", port, got, StateAspActive)
 		}
 		peer.abort(t)
-		if !waitFor(func() bool {
-			_, _ = conn.Write([]byte("after-abort"))
-			return conn.State() != StateAspActive
-		}, 15*time.Second) {
+		if !waitFor(func() bool { return conn.State() != StateAspActive }, 15*time.Second) {
 			t.Fatalf("port %d: Conn still %v after abort", port, conn.State())
 		}
 		_ = conn.Close()

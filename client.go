@@ -178,6 +178,9 @@ func Dial(ctx context.Context, net string, laddr, raddr *sctp.SCTPAddr, cfg *Con
 	case <-conn.established:
 		return conn, nil
 	case <-conn.done:
+		if err := conn.Err(); err != nil {
+			return nil, err
+		}
 		return nil, ErrFailedToEstablish
 	case <-ctx.Done():
 		_ = conn.closeWith(ctx.Err())
