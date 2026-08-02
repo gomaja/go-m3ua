@@ -11,15 +11,30 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// HeartbeatInfo is a set of information for M3UA BEAT.
+// HeartbeatInfo configures RFC 4666 M3UA BEAT/BEAT Ack liveness.
+//
+// It does not configure SCTP HEARTBEAT chunks or SCTP path-management timers;
+// those stay in the SCTP transport stack. This package uses HeartbeatInfo only
+// for application-layer ASPSM BEAT messages after the ASP reaches ASP-ACTIVE.
 type HeartbeatInfo struct {
-	Enabled  bool
+	// Enabled turns on the managed M3UA BEAT loop.
+	Enabled bool
+	// Interval is T(beat), the delay before sending the next M3UA BEAT.
 	Interval time.Duration
-	Timer    time.Duration
-	Data     []byte
+	// Timer is the M3UA liveness deadline for a BEAT round. Zero resolves to
+	// 2*T(beat), per RFC 4666 Section 4.3.4.6.
+	Timer time.Duration
+	// Data is retained for API compatibility. The managed BEAT loop ignores this
+	// field and sends fresh opaque Heartbeat Data each round so BEAT Acks can be
+	// matched and replay attempts rejected.
+	Data []byte
 }
 
-// NewHeartbeatInfo creates a new HeartbeatInfo.
+// NewHeartbeatInfo creates M3UA BEAT configuration.
+//
+// The data argument is retained in the returned HeartbeatInfo for API
+// compatibility, but the managed BEAT loop generates fresh Heartbeat Data for
+// every transmitted M3UA BEAT.
 func NewHeartbeatInfo(interval, timer time.Duration, data []byte) *HeartbeatInfo {
 	return &HeartbeatInfo{
 		Enabled: true, Interval: interval, Timer: timer, Data: data,
@@ -185,6 +200,8 @@ type ASPAuthorizer func(ASPIdentity) []uint32
 
 // Config is a configuration that defines a M3UA server.
 type Config struct {
+	// HeartbeatInfo controls M3UA BEAT/BEAT Ack liveness only; it is separate
+	// from SCTP HEARTBEAT path management.
 	*HeartbeatInfo
 	*SCTPConfig
 	// TAck is the T(ack) timer: how long to wait for an ASPSM/ASPTM
@@ -280,8 +297,11 @@ func NewConfig(opc, dpc uint32, si, ni, mp, sls uint8) *Config {
 	}
 }
 
-// EnableHeartbeat enables M3UA BEAT with interval and expiration timer
-// given.
+// EnableHeartbeat enables RFC 4666 M3UA BEAT with the given interval and
+// expiration timer.
+//
+// It does not enable, disable, or tune SCTP HEARTBEAT chunks; SCTP heartbeat
+// behavior remains transport/kernel behavior.
 //
 // Each BEAT carries freshly generated random Heartbeat Data, and the BEAT
 // Ack's echo is validated against it, so BEAT/BEAT Ack pairs identify

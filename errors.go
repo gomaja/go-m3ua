@@ -15,11 +15,13 @@ import (
 
 // Error definitions.
 var (
-	ErrSCTPNotAlive        = errors.New("SCTP is no longer alive")
-	ErrInvalidState        = errors.New("invalid state")
-	ErrNotEstablished      = errors.New("M3UA Conn not established")
-	ErrFailedToEstablish   = errors.New("failed to establish M3UA Conn")
-	ErrTimeout             = errors.New("timed out")
+	ErrSCTPNotAlive      = errors.New("SCTP is no longer alive")
+	ErrInvalidState      = errors.New("invalid state")
+	ErrNotEstablished    = errors.New("M3UA Conn not established")
+	ErrFailedToEstablish = errors.New("failed to establish M3UA Conn")
+	ErrTimeout           = errors.New("timed out")
+	// ErrHeartbeatExpired reports expiry of the RFC 4666 M3UA T(beat) liveness
+	// timer. It is unrelated to SCTP HEARTBEAT path failure reporting.
 	ErrHeartbeatExpired    = errors.New("heartbeat timer expired")
 	ErrFailedToPeelOff     = errors.New("failed to peel off Protocol Data")
 	ErrFailedToWriteSignal = errors.New("failed to write signal")

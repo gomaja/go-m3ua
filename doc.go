@@ -10,6 +10,11 @@ To establish M3UA connection as client/server, you can use Dial() and Listen() /
 without caring about the underlying SCTP association, as go-m3ua handles it together
 with M3UA ASPSM & ASPTM procedures.
 
+M3UA BEAT/BEAT Ack liveness is application-layer logic from RFC 4666 and is
+configured with HeartbeatInfo. It is separate from SCTP HEARTBEAT chunks and
+SCTP path-management timers, which remain transport/kernel behavior below this
+package.
+
 This package relies much on github.com/gomaja/go-sctp, as M3UA requires underlying SCTP connection,
 
 Specification: https://www.rfc-editor.org/rfc/rfc4666.html

@@ -133,7 +133,8 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 
 // Dial establishes a M3UA connection as a client.
 // After successfully establishing the connection with peer, state-changing
-// signals and heartbeats are automatically handled background in another goroutine.
+// M3UA signals and M3UA BEAT messages are automatically handled in background
+// goroutines.
 //
 // Dial makes at most one SCTP association attempt — one INIT if ctx is live,
 // none if ctx is already done — bounded by Config.InitTimeout, and never

@@ -76,6 +76,10 @@ config := m3ua.NewClientConfig(
 config.CorrelationID = nil
 ```
 
+`HeartbeatInfo` controls RFC 4666 M3UA BEAT/BEAT Ack liveness only. It is
+separate from SCTP HEARTBEAT path management, which remains transport/kernel
+behavior below go-m3ua.
+
 RFC-strict parsing is the default. If a known peer sends an optional INFO String
 that is not valid UTF-8, enable the explicit compatibility policy for that peer:
 

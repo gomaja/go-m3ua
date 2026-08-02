@@ -197,6 +197,8 @@ func (c *Conn) consumeBeatData() bool {
 	return true
 }
 
+// heartbeat runs the RFC 4666 M3UA BEAT/BEAT Ack liveness loop. SCTP
+// HEARTBEAT chunks are transport-layer path management and are not handled here.
 func (c *Conn) heartbeat(ctx context.Context) {
 	c.beatAllow.Wait()
 	if !c.hb.Enabled {

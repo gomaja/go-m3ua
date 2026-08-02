@@ -321,7 +321,7 @@ func (c *Conn) notifyEstablished() {
 	}
 }
 
-// notifyBeatAck hands a validated BEAT Ack to the heartbeat goroutine.
+// notifyBeatAck hands a validated M3UA BEAT Ack to the heartbeat goroutine.
 //
 // beatAckChan has capacity 1 so an Ack that completes its round trip before
 // heartbeat() reaches its select — the goroutine can be descheduled between

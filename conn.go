@@ -78,8 +78,8 @@ type Conn struct {
 	// by the handlers on that same goroutine; atomic so a reader elsewhere
 	// cannot race the write.
 	recvStream atomic.Uint32
-	// hb is this Conn's resolved heartbeat settings, copied by value from the
-	// Config at construction.
+	// hb is this Conn's resolved M3UA BEAT settings, copied by value from the
+	// Config at construction. It is not SCTP HEARTBEAT configuration.
 	//
 	// Resolving it per Conn keeps Accept from writing Enabled back onto the
 	// shared Config, and makes a Config built by NewConfig — which leaves
@@ -123,7 +123,7 @@ type Conn struct {
 	inboundChan chan inbound
 	// established notifies client/server the conn is established
 	established chan struct{}
-	// beatAckChan notifies that heartbeat gets the ack as expected
+	// beatAckChan notifies the M3UA BEAT loop that a valid BEAT Ack arrived.
 	beatAckChan chan struct{}
 	// dataChan passes received DATA (payload plus its network and traffic flow)
 	// to the user. Its bounded capacity is resolved from Config.DataQueueSize.
@@ -150,7 +150,9 @@ type Conn struct {
 	// identifier and is shared by every association a Listener accepts.
 	muPeerAspIdentifier sync.RWMutex
 	peerAspIdentifier   *params.Param
-	// Condition to allow heartbeat, only after the state is AspUp
+	// beatAllow gates the M3UA BEAT loop until the ASP is ASP-ACTIVE. monitor
+	// also broadcasts it on exit so a Conn that never becomes active cannot
+	// leave the loop goroutine parked.
 	beatAllow *sync.Cond
 	// muBeat guards beatData: heartbeat() registers it, while the dispatch
 	// goroutine's handleHeartbeatAck compares the peer's echo against it.
@@ -397,7 +399,7 @@ func newConnWithTrafficModePolicy(m mode, cfg *Config, trafficModes trafficModeP
 	}
 	c.trafficModes.freeze(trafficModes)
 
-	// A nil HeartbeatInfo means the caller never asked for BEATs — NewConfig
+	// A nil HeartbeatInfo means the caller never asked for M3UA BEATs — NewConfig
 	// leaves it nil — so it resolves to disabled rather than dereferencing.
 	if cfg.HeartbeatInfo != nil {
 		c.hb = *cfg.HeartbeatInfo
@@ -1304,9 +1306,9 @@ func (c *Conn) Done() <-chan struct{} {
 // Err reports why the association ended, or nil while it is still up.
 //
 // It distinguishes the cases an application has to tell apart: ErrConnClosed
-// for its own shutdown, ErrHeartbeatExpired for a peer that stopped answering,
-// a context error for a cancelled owner, and the underlying read or protocol
-// error otherwise. Read and Write report ErrNotEstablished for all of them.
+// for its own shutdown, ErrHeartbeatExpired for an expired M3UA T(beat), a
+// context error for a cancelled owner, and the underlying read or protocol error
+// otherwise. Read and Write report ErrNotEstablished for all of them.
 func (c *Conn) Err() error {
 	if v := c.closeErr.Load(); v != nil {
 		if err, ok := v.(error); ok {
