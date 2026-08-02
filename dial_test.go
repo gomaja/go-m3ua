@@ -67,7 +67,43 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 			if policy.rto.Max != policy.rto.Initial {
 				t.Errorf("RTO Max = %d, want Initial %d", policy.rto.Max, policy.rto.Initial)
 			}
+			if policy.abandon != sctp.DialAbandonQuiet {
+				t.Errorf("abandon policy = %v, want DialAbandonQuiet", policy.abandon)
+			}
 		})
+	}
+}
+
+type captureAbandonPolicyDialer struct {
+	policy sctp.DialAbandonPolicy
+	err    error
+	calls  int
+}
+
+func (d *captureAbandonPolicyDialer) DialContextWithAbandonPolicy(
+	_ context.Context,
+	_ string,
+	_, _ *sctp.SCTPAddr,
+	policy sctp.DialAbandonPolicy,
+) (*sctp.SCTPConn, error) {
+	d.calls++
+	d.policy = policy
+	return nil, d.err
+}
+
+func TestOneShotSCTPDialPolicyUsesQuietAbandon(t *testing.T) {
+	dialer := &captureAbandonPolicyDialer{err: context.Canceled}
+	policy := oneShotSCTPDialPolicy(DefaultInitTimeout)
+
+	_, err := policy.dialContext(context.Background(), dialer, "sctp4", nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("dial error = %v, want context.Canceled", err)
+	}
+	if dialer.calls != 1 {
+		t.Fatalf("DialContextWithAbandonPolicy calls = %d, want 1", dialer.calls)
+	}
+	if dialer.policy != sctp.DialAbandonQuiet {
+		t.Fatalf("abandon policy = %v, want DialAbandonQuiet", dialer.policy)
 	}
 }
 

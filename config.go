@@ -111,7 +111,8 @@ type SCTPConfig struct {
 // Dial enforces the one-shot contract per socket by raising SCTP_RTOINFO's
 // Initial and Max values beyond this budget before connecting. If no INIT-ACK
 // arrives before the timeout, Dial returns ErrInitTimeout; if ctx is cancelled
-// first, Dial aborts the in-flight socket promptly and returns ctx.Err().
+// first, Dial quietly abandons the in-flight socket promptly and returns
+// ctx.Err().
 const DefaultInitTimeout = 5 * time.Second
 
 // DefaultEstablishTimeout bounds the M3UA handshake once the association is up:

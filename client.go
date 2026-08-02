@@ -45,8 +45,9 @@ const rtoMarginMillis = 1000
 const maxRTOInfoMillis = uint64(^uint32(0))
 
 type sctpDialPolicy struct {
-	init sctp.InitMsg
-	rto  sctp.RtoInfo
+	init    sctp.InitMsg
+	rto     sctp.RtoInfo
+	abandon sctp.DialAbandonPolicy
 }
 
 func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
@@ -67,6 +68,7 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 			// one-shot invariant does not silently disappear above 60 seconds.
 			Max: rtoMillis,
 		},
+		abandon: sctp.DialAbandonQuiet,
 	}
 }
 
@@ -82,12 +84,31 @@ func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.Preconfigur
 	})
 }
 
+type sctpAbandonPolicyDialer interface {
+	DialContextWithAbandonPolicy(
+		context.Context,
+		string,
+		*sctp.SCTPAddr,
+		*sctp.SCTPAddr,
+		sctp.DialAbandonPolicy,
+	) (*sctp.SCTPConn, error)
+}
+
+func (p sctpDialPolicy) dialContext(
+	ctx context.Context,
+	dialer sctpAbandonPolicyDialer,
+	network string,
+	laddr, raddr *sctp.SCTPAddr,
+) (*sctp.SCTPConn, error) {
+	return dialer.DialContextWithAbandonPolicy(ctx, network, laddr, raddr, p.abandon)
+}
+
 // dialAssociation makes exactly one SCTP association attempt, bounded by
-// timeout and abandoned as soon as ctx is done.
+// timeout and quietly abandoned as soon as ctx is done.
 //
-// DialContext does the hard part: it aborts the association and releases the
-// socket before returning, so an abandoned attempt puts nothing further on the
-// wire. What is left here is keeping the attempt to a single INIT, which needs
+// go-sctp's quiet abandon policy does the hard part: it releases the
+// non-established socket before returning without intentionally emitting a local
+// ABORT. What is left here is keeping the attempt to a single INIT, which needs
 // the initial RTO raised past the budget before the socket is connected.
 // PreAssociation.RTOInfo applies that through SCTP_FUTURE_ASSOC without
 // wrapping or taking ownership of the raw descriptor that go-sctp still owns.
@@ -95,9 +116,10 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cfg := oneShotSCTPDialPolicy(timeout).socketConfig(restarts)
+	policy := oneShotSCTPDialPolicy(timeout)
+	cfg := policy.socketConfig(restarts)
 
-	conn, err := cfg.DialContext(attemptCtx, network, laddr, raddr)
+	conn, err := policy.dialContext(attemptCtx, cfg, network, laddr, raddr)
 	if err != nil {
 		// Our own budget expiring is reported as such; the caller's context
 		// ending is reported as the caller's error.
@@ -121,9 +143,9 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 // application to react to anything.
 //
 // Every path releases the socket before returning. On a timeout or a cancelled
-// context the association is aborted at the deadline, so nothing further is put
-// on the wire and the descriptor and kernel-side association are gone by the
-// time Dial returns.
+// context the non-established attempt is quietly abandoned at the deadline, so
+// no local ABORT is intentionally emitted and the descriptor and kernel-side
+// association are gone by the time Dial returns.
 //
 // The M3UA handshake that follows has its own budget, Config.EstablishTimeout,
 // and observes ctx as well.
