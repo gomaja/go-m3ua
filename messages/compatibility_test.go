@@ -153,6 +153,40 @@ func TestParseWithOptionsRejectsWhenToleratorRejects(t *testing.T) {
 }
 
 func TestParseWithOptionsDoesNotTolerateUnsafeParameterFaults(t *testing.T) {
+	t.Run("DATA Network Appearance must stay first", func(t *testing.T) {
+		wire, err := New(
+			1,
+			MsgClassTransfer,
+			MsgTypePayloadData,
+			params.NewRoutingContext(7),
+			params.NewNetworkAppearance(8),
+			params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("data")),
+		).MarshalBinary()
+		if err != nil {
+			t.Fatalf("base MarshalBinary() error = %v", err)
+		}
+
+		if _, err := Parse(wire); !errors.Is(err, ErrInvalidParameter) {
+			t.Fatalf("strict Parse() error = %v, want ErrInvalidParameter", err)
+		}
+		if _, err := ParseWithOptions(wire, ParseOptions{Tolerator: acceptEveryViolation}); !errors.Is(err, ErrInvalidParameter) {
+			t.Fatalf("ParseWithOptions() error = %v, want ErrInvalidParameter", err)
+		}
+	})
+
+	t.Run("invalid INFO String does not mask missing mandatory parameter", func(t *testing.T) {
+		wire := NewHeader(1, MsgClassManagement, MsgTypeNotify,
+			rawParameter(params.InfoString, []byte{0xff}),
+		).mustMarshalForTest(t)
+
+		if _, err := Parse(wire); !errors.Is(err, params.ErrInvalidValue) {
+			t.Fatalf("strict Parse() error = %v, want params.ErrInvalidValue", err)
+		}
+		if _, err := ParseWithOptions(wire, ParseOptions{Tolerator: acceptEveryViolation}); !errors.Is(err, ErrMissingParameter) {
+			t.Fatalf("ParseWithOptions() error = %v, want ErrMissingParameter", err)
+		}
+	})
+
 	t.Run("oversized INFO String", func(t *testing.T) {
 		base, err := NewAspUp(params.NewAspIdentifier(7), params.NewInfoString("valid")).MarshalBinary()
 		if err != nil {

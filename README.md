@@ -83,6 +83,9 @@ that is not valid UTF-8, enable the explicit compatibility policy for that peer:
 config.Compatibility = m3ua.AcceptInvalidOptionalInfoString()
 ```
 
+Compatibility decisions are surgical: after the approved INFO String tolerance,
+the normal message-specific RFC validation still runs.
+
 For custom interop decisions, install a tolerator and accept only classified
 violations you have approved:
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"reflect"
 	"unicode/utf8"
 
@@ -76,98 +75,53 @@ func ParseWithOptions(b []byte, options ParseOptions) (M3UA, error) {
 	if options.Tolerator == nil {
 		return Parse(b)
 	}
-	if len(b) < 4 {
-		return nil, ErrTooShortToParse
+
+	strict, strictErr := Parse(b)
+	if strictErr == nil {
+		return strict, nil
 	}
 
+	if len(b) < 4 {
+		return nil, strictErr
+	}
 	m := newMessageFor(b[2], b[3])
 	if m == nil {
-		return Parse(b)
+		return nil, strictErr
 	}
 
 	header, err := parseTypedHeader(b, b[2], b[3])
 	if err != nil {
-		return nil, err
+		return nil, strictErr
 	}
-	prs, err := parseParamsWithOptions(header.Payload, b, header.Class, header.Type, messageHasInfoString(m), options)
+
+	fault, err := findTolerableParameterFault(
+		header.Payload,
+		b,
+		header.Class,
+		header.Type,
+		messageHasInfoString(m),
+	)
 	if err != nil {
-		return nil, err
+		return nil, strictErr
 	}
-	if err := populateMessageFromParams(m, header, prs); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
-
-func parseParamsWithOptions(payload, raw []byte, class, msgType uint8, allowInfoString bool, options ParseOptions) ([]*params.Param, error) {
-	var prms []*params.Param
-	for len(payload) > 0 {
-		if len(payload) < 4 {
-			return nil, params.ErrTooShortToParse
-		}
-		tag := binary.BigEndian.Uint16(payload[0:2])
-		parameterLength := int(binary.BigEndian.Uint16(payload[2:4]))
-		if parameterLength < 4 || parameterLength > len(payload) {
-			return nil, params.ErrInvalidLength
-		}
-
-		p, err := params.Parse(payload)
-		if err != nil {
-			var decision ProtocolDecision
-			p, decision, err = tolerateParameterParseError(payload[:parameterLength], raw, class, msgType, tag, allowInfoString, options, err)
-			if err != nil {
-				return nil, err
-			}
-			if decision == ProtocolDropParameter {
-				goto next
-			}
-		}
-		prms = append(prms, p)
-
-	next:
-		if len(payload) == parameterLength {
-			return prms, nil
-		}
-		paddedLength := parameterLength + (4-parameterLength%4)%4
-		if len(payload) < paddedLength {
-			return nil, params.ErrInvalidLength
-		}
-		payload = payload[paddedLength:]
-	}
-	return prms, nil
-}
-
-func tolerateParameterParseError(parameter, raw []byte, class, msgType uint8, tag uint16, allowInfoString bool, options ParseOptions, cause error) (*params.Param, ProtocolDecision, error) {
-	if !allowInfoString || tag != params.InfoString || !errors.Is(cause, params.ErrInvalidValue) {
-		return nil, ProtocolReject, cause
-	}
-	value := parameter[4:]
-	if len(value) > 255 || utf8.Valid(value) {
-		return nil, ProtocolReject, cause
+	if fault == nil {
+		return nil, strictErr
 	}
 
-	violation := ProtocolViolation{
-		Kind:         ViolationInvalidOptionalInfoString,
-		ErrorCode:    params.ErrInvalidParameterValue,
-		MessageClass: class,
-		MessageType:  msgType,
-		ParamTag:     tag,
-		Description:  "optional INFO String is not valid UTF-8",
-		RawMessage:   bytes.Clone(raw),
-		RawParameter: bytes.Clone(parameter),
-		Cause:        cause,
-	}
-	switch options.Tolerator.DecideProtocolViolation(violation) {
+	switch options.Tolerator.DecideProtocolViolation(fault.violation) {
 	case ProtocolAccept:
-		return &params.Param{
-			Tag:    params.InfoString,
-			Length: uint16(len(parameter)),
-			Data:   value,
-		}, ProtocolAccept, nil
+		msg, err := Parse(fault.acceptWire(b))
+		if err != nil {
+			return nil, err
+		}
+		if err := restoreInvalidInfoString(msg, fault.value); err != nil {
+			return nil, err
+		}
+		return msg, nil
 	case ProtocolDropParameter:
-		return nil, ProtocolDropParameter, nil
+		return Parse(fault.dropWire(b, header))
 	default:
-		return nil, ProtocolReject, cause
+		return nil, fault.violation.Cause
 	}
 }
 
@@ -176,103 +130,119 @@ func messageHasInfoString(message M3UA) bool {
 	return value.FieldByName("InfoString").IsValid()
 }
 
-func populateMessageFromParams(message M3UA, header *Header, prs []*params.Param) error {
-	value := reflect.ValueOf(message)
-	if value.Kind() != reflect.Pointer || value.IsNil() {
-		return fmt.Errorf("invalid message receiver %T", message)
-	}
-	elem := value.Elem()
-	elem.Set(reflect.Zero(elem.Type()))
-	elem.FieldByName("Header").Set(reflect.ValueOf(header))
-
-	for _, pr := range prs {
-		fieldName, known := parameterFieldName(pr.Tag)
-		if known {
-			field := elem.FieldByName(fieldName)
-			if field.IsValid() && field.Type() == paramType {
-				if !field.IsNil() {
-					return ErrInvalidParameter
-				}
-				field.Set(reflect.ValueOf(pr))
-				continue
-			}
-		}
-		others := elem.FieldByName("Others")
-		if !others.IsValid() || others.Type() != paramSliceType {
-			return ErrInvalidParameter
-		}
-		others.Set(reflect.Append(others, reflect.ValueOf(pr)))
-	}
-
-	return requireMandatoryParameters(message)
+type tolerableParameterFault struct {
+	offset       int
+	consumedSize int
+	value        []byte
+	violation    ProtocolViolation
 }
 
-var (
-	paramType      = reflect.TypeOf((*params.Param)(nil))
-	paramSliceType = reflect.TypeOf([]*params.Param(nil))
-)
+func findTolerableParameterFault(payload, raw []byte, class, msgType uint8, allowInfoString bool) (*tolerableParameterFault, error) {
+	for offset := 0; offset < len(payload); {
+		remaining := payload[offset:]
+		if len(remaining) < 4 {
+			return nil, params.ErrTooShortToParse
+		}
 
-func parameterFieldName(tag uint16) (string, bool) {
-	switch tag {
-	case params.NetworkAppearance:
-		return "NetworkAppearance", true
-	case params.RoutingContext:
-		return "RoutingContext", true
-	case params.ProtocolData:
-		return "ProtocolData", true
-	case params.CorrelationID:
-		return "CorrelationID", true
-	case params.AffectedPointCode:
-		return "AffectedPointCode", true
-	case params.ConcernedDestination:
-		return "ConcernedDestination", true
-	case params.CongestionIndications:
-		return "CongestionIndications", true
-	case params.UserCause:
-		return "UserCause", true
-	case params.AspIdentifier:
-		return "AspIdentifier", true
-	case params.InfoString:
-		return "InfoString", true
-	case params.TrafficModeType:
-		return "TrafficModeType", true
-	case params.ErrorCode:
-		return "ErrorCode", true
-	case params.DiagnosticInformation:
-		return "DiagnosticInformation", true
-	case params.HeartbeatData:
-		return "HeartbeatData", true
-	case params.Status:
-		return "Status", true
-	default:
-		return "", false
+		tag := binary.BigEndian.Uint16(remaining[0:2])
+		parameterSize := int(binary.BigEndian.Uint16(remaining[2:4]))
+		if parameterSize < 4 || parameterSize > len(remaining) {
+			return nil, params.ErrInvalidLength
+		}
+		consumed := consumedParameterSize(len(remaining), parameterSize)
+		if consumed > len(remaining) {
+			return nil, params.ErrInvalidLength
+		}
+
+		parameter := remaining[:parameterSize]
+		if _, err := params.Parse(remaining); err != nil {
+			return classifyInvalidOptionalInfoString(
+				parameter,
+				raw,
+				class,
+				msgType,
+				tag,
+				allowInfoString,
+				offset,
+				consumed,
+				err,
+			)
+		}
+
+		offset += consumed
 	}
+	return nil, nil
 }
 
-func requireMandatoryParameters(message M3UA) error {
-	switch m := message.(type) {
-	case *Data:
-		return requireParameter(m.ProtocolData, "Protocol Data")
-	case *DestinationUnavailable:
-		return requireParameter(m.AffectedPointCode, "Affected Point Code")
-	case *DestinationAvailable:
-		return requireParameter(m.AffectedPointCode, "Affected Point Code")
-	case *DestinationStateAudit:
-		return requireParameter(m.AffectedPointCode, "Affected Point Code")
-	case *SignallingCongestion:
-		return requireParameter(m.AffectedPointCode, "Affected Point Code")
-	case *DestinationUserPartUnavailable:
-		if err := requireParameter(m.AffectedPointCode, "Affected Point Code"); err != nil {
-			return err
-		}
-		return requireParameter(m.UserCause, "User/Cause")
-	case *DestinationRestricted:
-		return requireParameter(m.AffectedPointCode, "Affected Point Code")
-	case *Error:
-		return requireParameter(m.ErrorCode, "Error Code")
-	case *Notify:
-		return requireParameter(m.Status, "Status")
-	default:
-		return nil
+func consumedParameterSize(remainingLength, parameterSize int) int {
+	if remainingLength == parameterSize {
+		return parameterSize
 	}
+	return parameterSize + (4-parameterSize%4)%4
+}
+
+func classifyInvalidOptionalInfoString(
+	parameter, raw []byte,
+	class, msgType uint8,
+	tag uint16,
+	allowInfoString bool,
+	offset, consumedSize int,
+	cause error,
+) (*tolerableParameterFault, error) {
+	if !allowInfoString || tag != params.InfoString || !errors.Is(cause, params.ErrInvalidValue) {
+		return nil, cause
+	}
+	value := parameter[4:]
+	if len(value) > 255 || utf8.Valid(value) {
+		return nil, cause
+	}
+
+	return &tolerableParameterFault{
+		offset:       offset,
+		consumedSize: consumedSize,
+		value:        bytes.Clone(value),
+		violation: ProtocolViolation{
+			Kind:         ViolationInvalidOptionalInfoString,
+			ErrorCode:    params.ErrInvalidParameterValue,
+			MessageClass: class,
+			MessageType:  msgType,
+			ParamTag:     tag,
+			Description:  "optional INFO String is not valid UTF-8",
+			RawMessage:   bytes.Clone(raw),
+			RawParameter: bytes.Clone(parameter),
+			Cause:        cause,
+		},
+	}, nil
+}
+
+func (f *tolerableParameterFault) acceptWire(raw []byte) []byte {
+	wire := bytes.Clone(raw)
+	valueStart := 8 + f.offset + 4
+	copy(wire[valueStart:valueStart+len(f.value)], bytes.Repeat([]byte{'x'}, len(f.value)))
+	return wire
+}
+
+func (f *tolerableParameterFault) dropWire(raw []byte, header *Header) []byte {
+	payload := header.Payload
+	outPayload := make([]byte, 0, len(payload)-f.consumedSize)
+	outPayload = append(outPayload, payload[:f.offset]...)
+	outPayload = append(outPayload, payload[f.offset+f.consumedSize:]...)
+
+	out := make([]byte, 8+len(outPayload))
+	copy(out[:4], raw[:4])
+	binary.BigEndian.PutUint32(out[4:8], uint32(len(out)))
+	copy(out[8:], outPayload)
+	return out
+}
+
+func restoreInvalidInfoString(message M3UA, value []byte) error {
+	field := reflect.ValueOf(message).Elem().FieldByName("InfoString")
+	if !field.IsValid() || field.IsNil() {
+		return ErrInvalidParameter
+	}
+
+	infoString := field.Interface().(*params.Param)
+	infoString.Data = bytes.Clone(value)
+	infoString.Length = uint16(4 + len(value))
+	return nil
 }
