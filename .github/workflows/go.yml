@@ -22,6 +22,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Go
         uses: actions/setup-go@v7.0.0
@@ -32,7 +35,7 @@ jobs:
 
       - name: gofmt
         run: |
-          unformatted="$(gofmt -l $(git ls-files '*.go'))"
+          unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -l)"
           if [ -n "$unformatted" ]; then
             echo "not gofmt'd:"
             echo "$unformatted"
@@ -40,7 +43,15 @@ jobs:
           fi
 
       - name: diff check
-        run: git diff --check
+        run: |
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "$zero_sha" ]; then
+            git diff --check "${{ github.event.before }}...HEAD"
+          else
+            git diff-tree --check --root --no-commit-id -r HEAD
+          fi
 
       - name: go mod tidy
         run: |
@@ -58,6 +69,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Go
         uses: actions/setup-go@v7.0.0
@@ -93,6 +106,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Go
         uses: actions/setup-go@v7.0.0
@@ -125,6 +140,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Go
         uses: actions/setup-go@v7.0.0
@@ -150,6 +167,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Go
         uses: actions/setup-go@v7.0.0
@@ -161,7 +180,7 @@ jobs:
       - name: staticcheck
         uses: dominikh/staticcheck-action@v1.4.1
         with:
-          version: latest
+          version: v0.7.0
           install-go: false
 
       - name: golangci-lint
@@ -199,6 +218,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Go
         uses: actions/setup-go@v7.0.0
@@ -218,6 +239,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Go
         uses: actions/setup-go@v7.0.0
@@ -228,5 +251,5 @@ jobs:
 
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
