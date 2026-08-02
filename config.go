@@ -247,6 +247,9 @@ type Config struct {
 	// BroadcastFlowIdentifier. Values less than or equal to zero select the
 	// default. Oversized identifiers are rejected rather than truncated.
 	BroadcastFlowIdentifierBytes int
+	// Compatibility configures explicit receive-side tolerance for known peer
+	// protocol violations. The zero value keeps RFC-strict behaviour.
+	Compatibility CompatibilityPolicy
 
 	RoutingContexts        *params.Param
 	CorrelationID          *params.Param

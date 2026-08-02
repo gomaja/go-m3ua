@@ -76,6 +76,27 @@ config := m3ua.NewClientConfig(
 config.CorrelationID = nil
 ```
 
+RFC-strict parsing is the default. If a known peer sends an optional INFO String
+that is not valid UTF-8, enable the explicit compatibility policy for that peer:
+
+```go
+config.Compatibility = m3ua.AcceptInvalidOptionalInfoString()
+```
+
+For custom interop decisions, install a tolerator and accept only classified
+violations you have approved:
+
+```go
+config.Compatibility = m3ua.CompatibilityPolicy{
+    Tolerator: m3ua.ToleratorFunc(func(v m3ua.ProtocolViolation) m3ua.ProtocolDecision {
+        if v.Kind == m3ua.ViolationInvalidOptionalInfoString {
+            return m3ua.ProtocolAccept
+        }
+        return m3ua.ProtocolReject
+    }),
+}
+```
+
 Then, prepare network addresses and context and try to connect with `Dial()`.
 
 ```go

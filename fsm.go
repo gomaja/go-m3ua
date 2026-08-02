@@ -693,7 +693,7 @@ func (c *Conn) dispatchRaw(ctx context.Context, raw inbound) {
 	// validating the arrival stream sees this message's.
 	c.recvStream.Store(uint32(raw.stream))
 
-	msg, err := messages.Parse(raw.data)
+	msg, err := c.parseInboundMessage(raw.data)
 	if err != nil {
 		c.logMalformedInput(err, raw.data)
 
