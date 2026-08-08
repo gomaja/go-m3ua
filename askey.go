@@ -20,6 +20,15 @@ func routingContextASKey(routingContext uint32) ASKey {
 	return ASKey{RoutingContext: routingContext, RoutingContextSet: true}
 }
 
+const maxRoutingContextValue = ^uint32(0)
+
+func routingContextFromInt(value int) (uint32, bool) {
+	if value < 0 || uint64(value) > uint64(maxRoutingContextValue) {
+		return 0, false
+	}
+	return uint32(value), true
+}
+
 func normalizeASKey(scope any) (ASKey, bool) {
 	switch value := scope.(type) {
 	case ASKey:
@@ -27,10 +36,11 @@ func normalizeASKey(scope any) (ASKey, bool) {
 	case uint32:
 		return routingContextASKey(value), true
 	case int:
-		if value < 0 {
+		routingContext, ok := routingContextFromInt(value)
+		if !ok {
 			return ASKey{}, false
 		}
-		return routingContextASKey(uint32(value)), true
+		return routingContextASKey(routingContext), true
 	default:
 		return ASKey{}, false
 	}

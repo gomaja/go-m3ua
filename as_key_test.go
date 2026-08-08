@@ -2,6 +2,7 @@ package m3ua
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages"
@@ -98,6 +99,30 @@ func TestContextlessASAllowsDifferentNetworkAppearanceTrafficModes(t *testing.T)
 	second.as = registry
 	if err := second.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
 		t.Fatalf("second contextless ASP Active in another Network Appearance: %v", err)
+	}
+}
+
+func TestNormalizeASKeyRejectsOutOfRangeIntRoutingContext(t *testing.T) {
+	if _, ok := normalizeASKey(-1); ok {
+		t.Fatal("package AS key normalization accepted a negative int Routing Context")
+	}
+	if _, ok := legacyRoutingContextScope(-1); ok {
+		t.Fatal("legacy Routing Context scope accepted a negative int")
+	}
+
+	if strconv.IntSize <= 32 {
+		return
+	}
+	outOfRange := int(uint64(maxRoutingContextValue) + 1)
+	if _, ok := normalizeASKey(outOfRange); ok {
+		t.Fatal("package AS key normalization accepted an int above uint32")
+	}
+	if _, ok := legacyRoutingContextScope(outOfRange); ok {
+		t.Fatal("legacy Routing Context scope accepted an int above uint32")
+	}
+	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+	if _, ok := registry.normalizeASKey(outOfRange); ok {
+		t.Fatal("registry AS key normalization accepted an int above uint32")
 	}
 }
 

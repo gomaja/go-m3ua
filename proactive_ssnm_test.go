@@ -156,7 +156,10 @@ func TestDestinationUpdateScopesSameASPRoutingContextByNetworkAppearance(t *test
 	if len(got) != 1 {
 		t.Fatalf("ASP received %d SSNM messages, want 1", len(got))
 	}
-	_, routingContext, _ := ssnmScope(t, got[0])
+	networkAppearance, routingContext, _ := ssnmScope(t, got[0])
+	if networkAppearance == nil || networkAppearance.NetworkAppearance() != 10 {
+		t.Fatalf("DUNA Network Appearance = %v, want 10", networkAppearance)
+	}
 	if contexts := routingContext.RoutingContexts(); !equalTrafficModeContexts(contexts, []uint32{1}) {
 		t.Fatalf("DUNA Routing Contexts = %v, want one [1]", contexts)
 	}

@@ -427,10 +427,11 @@ func legacyRoutingContextScope(scope any) (uint32, bool) {
 	case uint32:
 		return value, true
 	case int:
-		if value < 0 {
+		routingContext, ok := routingContextFromInt(value)
+		if !ok {
 			return 0, false
 		}
-		return uint32(value), true
+		return routingContext, true
 	default:
 		return 0, false
 	}
@@ -441,10 +442,11 @@ func (r *applicationServers) normalizeASKey(scope any) (ASKey, bool) {
 	case uint32:
 		return r.routingContextASKey(value), true
 	case int:
-		if value < 0 {
+		routingContext, ok := routingContextFromInt(value)
+		if !ok {
 			return ASKey{}, false
 		}
-		return r.routingContextASKey(uint32(value)), true
+		return r.routingContextASKey(routingContext), true
 	default:
 		return normalizeASKey(scope)
 	}
