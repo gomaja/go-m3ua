@@ -100,8 +100,8 @@ const DefaultRecoveryTimer = 2 * time.Second
 // in the AS", or about a Notify going "to all ASPs in the AS" can be decided
 // from inside a single Conn.
 type applicationServer struct {
-	// rtCtx is the Routing Context this AS serves.
-	rtCtx uint32
+	// key is the Network Appearance plus Routing Context scope this AS serves.
+	key ASKey
 
 	// deliveryMu orders DATA messages within this AS. State changes use mu
 	// independently, so a peer that stops reading cannot hold teardown behind a
@@ -234,7 +234,7 @@ type queuedData struct {
 type asStateNotification struct {
 	state         ASState
 	targets       []*Conn
-	rtCtx         uint32
+	key           ASKey
 	aspIdentifier *params.Param
 	ready         chan struct{}
 	done          chan struct{}
@@ -242,17 +242,20 @@ type asStateNotification struct {
 	waitOnRelease bool
 }
 
-// applicationServers is the registry a Listener keeps, one entry per Routing
-// Context it serves.
+// applicationServers is the registry a Listener keeps, one entry per
+// Application Server traffic scope it serves.
 type applicationServers struct {
 	mu     sync.Mutex
-	as     map[uint32]*applicationServer
+	as     map[ASKey]*applicationServer
 	closed bool
 	// aspIdentifiers is the identifier each association supplied in ASP Up.
 	// Uniqueness is required only among ASPs that support a common AS.
 	aspIdentifiers map[*Conn]uint32
 	// recoveryTimer is T(r); zero means DefaultRecoveryTimer.
 	recoveryTimer time.Duration
+	// defaultNetworkAppearance is used only by legacy Routing Context-only
+	// accessors. Exact ASKey callers do not consult it.
+	defaultNetworkAppearance *params.Param
 	// distribution is immutable after construction, so DistributeData never
 	// races an application mutating its Config after the Listener starts.
 	distribution distributionPolicy
@@ -290,9 +293,15 @@ func newApplicationServersWithTrafficModePolicy(
 	}
 	budget := newRecoveryBudget(config)
 	return &applicationServers{
-		as:             make(map[uint32]*applicationServer),
+		as:             make(map[ASKey]*applicationServer),
 		aspIdentifiers: make(map[*Conn]uint32),
 		recoveryTimer:  recovery,
+		defaultNetworkAppearance: func() *params.Param {
+			if config == nil {
+				return nil
+			}
+			return config.NetworkAppearance.Copy()
+		}(),
 		distribution:   newDistributionPolicy(config),
 		trafficModes:   trafficModes,
 		recoveryBudget: budget,
@@ -323,54 +332,62 @@ func connsShareApplicationServer(first, second *Conn) bool {
 	if first == nil || second == nil {
 		return true
 	}
-	firstContexts := first.configuredRoutingContexts()
-	secondContexts := second.configuredRoutingContexts()
-	if len(firstContexts) == 0 || len(secondContexts) == 0 {
+	firstKeys := first.configuredASKeys()
+	secondKeys := second.configuredASKeys()
+	if len(firstKeys) == 0 || len(secondKeys) == 0 {
 		return true
 	}
-	set := make(map[uint32]struct{}, len(firstContexts))
-	for _, routingContext := range firstContexts {
-		set[routingContext] = struct{}{}
+	set := make(map[ASKey]struct{}, len(firstKeys))
+	for _, key := range firstKeys {
+		set[key] = struct{}{}
 	}
-	for _, routingContext := range secondContexts {
-		if _, ok := set[routingContext]; ok {
+	for _, key := range secondKeys {
+		if _, ok := set[key]; ok {
 			return true
 		}
 	}
 	return false
 }
 
-// get returns the AS for a Routing Context, creating it if this is the first
-// ASP to name it.
-func (r *applicationServers) get(rtCtx uint32) *applicationServer {
+// get returns the AS for a traffic scope, creating it if this is the first ASP
+// to name it.
+func (r *applicationServers) get(scope any) *applicationServer {
+	key := r.normalizeASKey(scope)
+	legacyRoutingContext, legacy := legacyRoutingContextScope(scope)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		if as, ok := r.as[rtCtx]; ok {
+		if as, ok := r.as[key]; ok {
 			return as
 		}
-		return &applicationServer{rtCtx: rtCtx, asps: make(map[*Conn]State), state: ASDown, closed: true}
+		return &applicationServer{key: key, asps: make(map[*Conn]State), state: ASDown, closed: true}
 	}
 	if r.as == nil {
-		r.as = make(map[uint32]*applicationServer)
+		r.as = make(map[ASKey]*applicationServer)
 	}
-	as, ok := r.as[rtCtx]
+	if legacy {
+		if _, as, ok, ambiguous := r.lookupRoutingContextLocked(legacyRoutingContext); ok && !ambiguous {
+			return as
+		}
+	}
+	as, ok := r.as[key]
 	if !ok {
 		as = &applicationServer{
-			rtCtx:              rtCtx,
+			key:                key,
 			asps:               make(map[*Conn]State),
 			broadcastFlowLimit: r.distribution.broadcastFlowCacheEntries,
 			recoveryBudget:     r.recoveryBudget,
 		}
-		r.as[rtCtx] = as
+		r.as[key] = as
 	}
 	return as
 }
 
-// lookup returns an existing AS without creating one. Local distribution uses
-// it so an invalid Routing Context cannot grow the registry merely by being
-// queried.
-func (r *applicationServers) lookup(rtCtx uint32) (*applicationServer, bool) {
+// lookup returns an existing AS without creating one. Local distribution uses it
+// so an invalid traffic scope cannot grow the registry merely by being queried.
+func (r *applicationServers) lookup(scope any) (*applicationServer, bool) {
+	key := r.normalizeASKey(scope)
+	legacyRoutingContext, legacy := legacyRoutingContextScope(scope)
 	if r == nil {
 		return nil, false
 	}
@@ -379,8 +396,74 @@ func (r *applicationServers) lookup(rtCtx uint32) (*applicationServer, bool) {
 	if r.closed {
 		return nil, false
 	}
-	as, ok := r.as[rtCtx]
+	if legacy {
+		if _, as, ok, ambiguous := r.lookupRoutingContextLocked(legacyRoutingContext); ok && !ambiguous {
+			return as, true
+		}
+		if _, _, _, ambiguous := r.lookupRoutingContextLocked(legacyRoutingContext); ambiguous {
+			return nil, false
+		}
+	}
+	as, ok := r.as[key]
 	return as, ok
+}
+
+func legacyRoutingContextScope(scope any) (uint32, bool) {
+	switch value := scope.(type) {
+	case uint32:
+		return value, true
+	case int:
+		return uint32(value), true
+	default:
+		return 0, false
+	}
+}
+
+func (r *applicationServers) normalizeASKey(scope any) ASKey {
+	switch value := scope.(type) {
+	case uint32:
+		return r.routingContextASKey(value)
+	case int:
+		return r.routingContextASKey(uint32(value))
+	default:
+		return normalizeASKey(scope)
+	}
+}
+
+func (r *applicationServers) routingContextASKey(routingContext uint32) ASKey {
+	key := routingContextASKey(routingContext)
+	if r != nil {
+		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(r.defaultNetworkAppearance)
+	}
+	return key
+}
+
+func (r *applicationServers) lookupRoutingContext(rtCtx uint32) (ASKey, *applicationServer, bool, bool) {
+	if r == nil {
+		return ASKey{}, nil, false, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return ASKey{}, nil, false, false
+	}
+	return r.lookupRoutingContextLocked(rtCtx)
+}
+
+func (r *applicationServers) lookupRoutingContextLocked(rtCtx uint32) (ASKey, *applicationServer, bool, bool) {
+	var foundKey ASKey
+	var found *applicationServer
+	for key, as := range r.as {
+		if !key.RoutingContextSet || key.RoutingContext != rtCtx {
+			continue
+		}
+		if found != nil {
+			return ASKey{}, nil, false, true
+		}
+		foundKey = key
+		found = as
+	}
+	return foundKey, found, found != nil, false
 }
 
 // activeSSNMTargets snapshots each currently active association and the ASes
@@ -392,7 +475,7 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 		return nil
 	}
 	type scopedApplicationServer struct {
-		routingContext    uint32
+		key               ASKey
 		applicationServer *applicationServer
 	}
 
@@ -403,16 +486,18 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 	}
 	applicationServers := make([]scopedApplicationServer, 0, len(r.as))
 	if routingContext != nil {
-		if applicationServer, ok := r.as[*routingContext]; ok {
-			applicationServers = append(applicationServers, scopedApplicationServer{
-				routingContext:    *routingContext,
-				applicationServer: applicationServer,
-			})
+		for key, applicationServer := range r.as {
+			if key.RoutingContextSet && key.RoutingContext == *routingContext {
+				applicationServers = append(applicationServers, scopedApplicationServer{
+					key:               key,
+					applicationServer: applicationServer,
+				})
+			}
 		}
 	} else {
-		for rtCtx, applicationServer := range r.as {
+		for key, applicationServer := range r.as {
 			applicationServers = append(applicationServers, scopedApplicationServer{
-				routingContext:    rtCtx,
+				key:               key,
 				applicationServer: applicationServer,
 			})
 		}
@@ -420,13 +505,13 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 	r.mu.Unlock()
 
 	sort.Slice(applicationServers, func(i, j int) bool {
-		return applicationServers[i].routingContext < applicationServers[j].routingContext
+		return compareASKey(applicationServers[i].key, applicationServers[j].key) < 0
 	})
 	targets := make([]activeSSNMTarget, 0)
 	targetIndex := make(map[*Conn]int)
 	for _, scoped := range applicationServers {
 		for _, connection := range scoped.applicationServer.activeASPs() {
-			if connection == nil || !connection.activeForRoutingContext(scoped.routingContext) {
+			if connection == nil || !connection.activeForASKey(scoped.key) {
 				continue
 			}
 			index, exists := targetIndex[connection]
@@ -435,9 +520,11 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 				targetIndex[connection] = index
 				targets = append(targets, activeSSNMTarget{connection: connection})
 			}
-			targets[index].routingContexts = append(
-				targets[index].routingContexts, scoped.routingContext,
-			)
+			if scoped.key.RoutingContextSet {
+				targets[index].routingContexts = append(
+					targets[index].routingContexts, scoped.key.RoutingContext,
+				)
+			}
 		}
 	}
 	return targets
@@ -445,22 +532,22 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 
 // sole returns the only registered AS, when omission of Routing Context is
 // unambiguous even without a Config value.
-func (r *applicationServers) sole() (uint32, *applicationServer, bool) {
+func (r *applicationServers) sole() (ASKey, *applicationServer, bool) {
 	if r == nil {
-		return 0, nil, false
+		return ASKey{}, nil, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return 0, nil, false
+		return ASKey{}, nil, false
 	}
 	if len(r.as) != 1 {
-		return 0, nil, false
+		return ASKey{}, nil, false
 	}
-	for rtCtx, as := range r.as {
-		return rtCtx, as, true
+	for key, as := range r.as {
+		return key, as, true
 	}
-	return 0, nil, false
+	return ASKey{}, nil, false
 }
 
 // close ends every AS-owned timer and releases all retained traffic. The
@@ -515,9 +602,9 @@ func (r *applicationServers) restrictASP(c *Conn) {
 	if r == nil || c == nil {
 		return
 	}
-	allowed := make(map[uint32]struct{})
-	for _, rtCtx := range c.configuredRoutingContexts() {
-		allowed[rtCtx] = struct{}{}
+	allowed := make(map[ASKey]struct{})
+	for _, key := range c.configuredASKeys() {
+		allowed[key] = struct{}{}
 	}
 	r.mu.Lock()
 	if r.closed {
@@ -525,8 +612,8 @@ func (r *applicationServers) restrictASP(c *Conn) {
 		return
 	}
 	unauthorized := make([]*applicationServer, 0)
-	for rtCtx, applicationServer := range r.as {
-		if _, ok := allowed[rtCtx]; !ok {
+	for key, applicationServer := range r.as {
+		if _, ok := allowed[key]; !ok {
 			unauthorized = append(unauthorized, applicationServer)
 		}
 	}
@@ -586,7 +673,7 @@ func (r *applicationServers) aspStateChangedFrom(c *Conn, st State, published bo
 	recovery := r.recoveryTimer
 	r.mu.Unlock()
 
-	for _, rtCtx := range c.configuredRoutingContexts() {
+	for _, key := range c.configuredASKeys() {
 		// RFC 4666 Section 4.3.1: "The state of each remote ASP/IPSP, in each AS
 		// that it is configured to operate, is maintained in the peer M3UA
 		// layer", and Figure 3 is "ASP State Transition Diagram, per AS". An ASP
@@ -605,13 +692,13 @@ func (r *applicationServers) aspStateChangedFrom(c *Conn, st State, published bo
 		// of the association -- Figure 3 reaches ASP-DOWN by ASP Down or SCTP
 		// CDI, neither of which is per-AS -- so they apply everywhere.
 		state := st
-		if st == StateAspActive && !c.activeForRoutingContext(rtCtx) {
+		if st == StateAspActive && !c.activeForASKey(key) {
 			state = StateAspInactive
 		}
 		if published {
-			r.get(rtCtx).setASPStateIfAssociationState(c, st, state, recovery)
+			r.get(key).setASPStateIfAssociationState(c, st, state, recovery)
 		} else {
-			r.get(rtCtx).setASPState(c, state, recovery)
+			r.get(key).setASPState(c, state, recovery)
 		}
 	}
 }
@@ -620,19 +707,29 @@ func (r *applicationServers) aspStateChangedFrom(c *Conn, st State, published bo
 // before ASP Active Ack is sent. All AS locks are held in Routing Context order,
 // so simultaneous first activations with conflicting modes cannot both win.
 func (r *applicationServers) agreeTrafficMode(rtCtxs []uint32, requested *params.Param) (*params.Param, error) {
-	unique := make(map[uint32]struct{}, len(rtCtxs))
-	contexts := make([]uint32, 0, len(rtCtxs))
+	keys := make([]ASKey, 0, len(rtCtxs))
+	seen := make(map[ASKey]struct{}, len(rtCtxs))
 	for _, rtCtx := range rtCtxs {
-		if _, duplicate := unique[rtCtx]; duplicate {
+		key := routingContextASKey(rtCtx)
+		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
-		unique[rtCtx] = struct{}{}
-		contexts = append(contexts, rtCtx)
+		seen[key] = struct{}{}
+		keys = append(keys, key)
 	}
-	sort.Slice(contexts, func(i, j int) bool { return contexts[i] < contexts[j] })
-	servers := make([]*applicationServer, 0, len(contexts))
-	for _, rtCtx := range contexts {
-		servers = append(servers, r.get(rtCtx))
+	return r.agreeTrafficModeForKeys(keys, r.trafficModes, requested)
+}
+
+func (r *applicationServers) agreeTrafficModeForConn(c *Conn, rtCtxs []uint32, requested *params.Param) (*params.Param, error) {
+	keys := c.asKeysForRoutingContexts(rtCtxs)
+	return r.agreeTrafficModeForKeys(keys, c.trafficModePolicy(), requested)
+}
+
+func (r *applicationServers) agreeTrafficModeForKeys(keys []ASKey, trafficModes trafficModePolicy, requested *params.Param) (*params.Param, error) {
+	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
+	servers := make([]*applicationServer, 0, len(keys))
+	for _, key := range keys {
+		servers = append(servers, r.get(key))
 	}
 	for _, applicationServer := range servers {
 		applicationServer.mu.Lock()
@@ -653,7 +750,10 @@ func (r *applicationServers) agreeTrafficMode(rtCtxs []uint32, requested *params
 		if applicationServer.closed {
 			return nil, ErrConnClosed
 		}
-		configuredMode, configured := r.trafficModes.configured(applicationServer.rtCtx)
+		configuredMode, configured := trafficModes.defaultMode, trafficModes.defaultModeSet
+		if applicationServer.key.RoutingContextSet {
+			configuredMode, configured = trafficModes.configured(applicationServer.key.RoutingContext)
+		}
 		if configured && !validTrafficMode(configuredMode) {
 			return nil, ErrUnsupportedTrafficMode
 		}
@@ -720,14 +820,15 @@ func (r *applicationServers) quiesceASPFor(c *Conn, rtCtxs []uint32) func() {
 		applicationServer *applicationServer
 		notify            func()
 	}
-	seen := make(map[uint32]struct{}, len(rtCtxs))
-	transitions := make([]transition, 0, len(rtCtxs))
-	for _, rtCtx := range rtCtxs {
-		if _, duplicate := seen[rtCtx]; duplicate {
+	keys := c.asKeysForRoutingContexts(rtCtxs)
+	seen := make(map[ASKey]struct{}, len(keys))
+	transitions := make([]transition, 0, len(keys))
+	for _, key := range keys {
+		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
-		seen[rtCtx] = struct{}{}
-		applicationServer := r.get(rtCtx)
+		seen[key] = struct{}{}
+		applicationServer := r.get(key)
 		transitions = append(transitions, transition{
 			applicationServer: applicationServer,
 			notify:            applicationServer.markASPsInactive([]*Conn{c}, recovery),
@@ -931,7 +1032,7 @@ func (as *applicationServer) remove(c *Conn, recovery time.Duration) {
 
 	notify()
 	if failedState != StateAspDown {
-		notifyASPFailure(failureTargets, as.rtCtx, failedIdentifier)
+		notifyASPFailure(failureTargets, as.key, failedIdentifier)
 	}
 }
 
@@ -1088,7 +1189,7 @@ func (as *applicationServer) enqueueStateNotificationLocked(state ASState, targe
 	event := &asStateNotification{
 		state:         state,
 		targets:       append([]*Conn(nil), targets...),
-		rtCtx:         as.rtCtx,
+		key:           as.key,
 		aspIdentifier: aspIdentifier.Copy(),
 		ready:         make(chan struct{}),
 		done:          make(chan struct{}),
@@ -1123,7 +1224,7 @@ func (as *applicationServer) deliverStateNotifications() {
 		closed := as.closed
 		as.mu.Unlock()
 		if !closed {
-			notifyASState(event.targets, event.state, event.rtCtx, event.aspIdentifier)
+			notifyASState(event.targets, event.state, event.key, event.aspIdentifier)
 		}
 		close(event.done)
 
@@ -1220,7 +1321,7 @@ func (as *applicationServer) State() ASState {
 //
 // RFC 4666 Section 3.8.2 fixes the Status Type: "1  Application Server State
 // Change (AS-State_Change)", with the new state in Status Information.
-func notifyASState(targets []*Conn, state ASState, rtCtx uint32, aspIdentifier *params.Param) {
+func notifyASState(targets []*Conn, state ASState, key ASKey, aspIdentifier *params.Param) {
 	info, ok := state.statusInformation()
 	if !ok {
 		return
@@ -1232,18 +1333,18 @@ func notifyASState(targets []*Conn, state ASState, rtCtx uint32, aspIdentifier *
 		c.enqueueNotify(messages.NewNotify(
 			params.NewStatus(info),
 			aspIdentifier.Copy(),
-			params.NewRoutingContext(rtCtx),
+			routingContextParamForASKey(key),
 			nil,
 		))
 	}
 }
 
-func notifyASPFailure(targets []*Conn, rtCtx uint32, failedIdentifier *params.Param) {
+func notifyASPFailure(targets []*Conn, key ASKey, failedIdentifier *params.Param) {
 	for _, target := range targets {
 		target.enqueueNotify(messages.NewNotify(
 			params.NewStatus(params.AspFailure),
 			failedIdentifier.Copy(),
-			params.NewRoutingContext(rtCtx),
+			routingContextParamForASKey(key),
 			nil,
 		))
 	}
@@ -1260,13 +1361,13 @@ func notifyASPFailure(targets []*Conn, rtCtx uint32, failedIdentifier *params.Pa
 // Status Type is "Other" here rather than AS-State_Change, since Section 3.8.2
 // puts "2  Alternate ASP Active" under that type: it reports what another ASP
 // did, not a change in the AS's own state.
-func notifyAlternateASPActive(target *Conn, rtCtx uint32, overriding *params.Param) {
+func notifyAlternateASPActive(target *Conn, key ASKey, overriding *params.Param) {
 	target.enqueueNotify(messages.NewNotify(
 		params.NewStatus(params.AlternateAspActive),
 		// "The ASP Identifier (if available) of the [overriding ASP]" — the
 		// receiver needs to know which ASP took over, not its own identity.
 		overriding.Copy(),
-		params.NewRoutingContext(rtCtx),
+		routingContextParamForASKey(key),
 		nil,
 	))
 }
@@ -1333,7 +1434,7 @@ type nifAvailability struct {
 	isolated bool
 	// unavailable holds the Routing Contexts the SGP can no longer service
 	// while it is only partially isolated.
-	unavailable map[uint32]struct{}
+	unavailable map[ASKey]struct{}
 }
 
 func (n *nifAvailability) setIsolated(isolated bool) {
@@ -1343,16 +1444,20 @@ func (n *nifAvailability) setIsolated(isolated bool) {
 }
 
 func (n *nifAvailability) setASAvailable(rtCtx uint32, available bool) {
+	n.setASAvailableForAS(routingContextASKey(rtCtx), available)
+}
+
+func (n *nifAvailability) setASAvailableForAS(key ASKey, available bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if available {
-		delete(n.unavailable, rtCtx)
+		delete(n.unavailable, key)
 		return
 	}
 	if n.unavailable == nil {
-		n.unavailable = make(map[uint32]struct{})
+		n.unavailable = make(map[ASKey]struct{})
 	}
-	n.unavailable[rtCtx] = struct{}{}
+	n.unavailable[key] = struct{}{}
 }
 
 // isolatedEntirely reports full isolation from the NIF.
@@ -1365,8 +1470,7 @@ func (n *nifAvailability) isolatedEntirely() bool {
 	return n.isolated
 }
 
-// servicable reports whether traffic for these Routing Contexts can be carried.
-func (n *nifAvailability) servicable(rtCtxs []uint32) bool {
+func (n *nifAvailability) servicableASKeys(keys []ASKey) bool {
 	if n == nil {
 		return true
 	}
@@ -1375,8 +1479,8 @@ func (n *nifAvailability) servicable(rtCtxs []uint32) bool {
 	if n.isolated {
 		return false
 	}
-	for _, rc := range rtCtxs {
-		if _, bad := n.unavailable[rc]; bad {
+	for _, key := range keys {
+		if _, bad := n.unavailable[key]; bad {
 			return false
 		}
 	}

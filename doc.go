@@ -15,6 +15,10 @@ configured with HeartbeatInfo. It is separate from SCTP HEARTBEAT chunks and
 SCTP path-management timers, which remain transport/kernel behavior below this
 package.
 
+Servers pass a ListenerConfig to Listen. Its optional SelectConnConfig hook runs
+after SCTP accept and before M3UA parsing so each accepted association can use a
+separate immutable ConnConfig.
+
 This package relies much on github.com/gomaja/go-sctp, as M3UA requires underlying SCTP connection,
 
 Specification: https://www.rfc-editor.org/rfc/rfc4666.html

@@ -1063,6 +1063,7 @@ func addDistributionASP(t *testing.T, listener *Listener, state State, routingCo
 	asp, _ := newTestConn(t, state, modeServer)
 	asp.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
 	asp.cfg.CorrelationID = nil
+	asp.cfg.NetworkAppearance = listener.Config.NetworkAppearance.Copy()
 	asp.as = listener.as
 	capture := new(distributionCapture)
 	asp.signalWriter = capture.write

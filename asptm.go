@@ -301,7 +301,7 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 			requested = named
 		}
 	}
-	if !c.nif.servicable(requested) {
+	if !c.nif.servicableASKeys(c.asKeysForRoutingContexts(requested)) {
 		return ErrManagementBlocking
 	}
 
@@ -345,9 +345,15 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 	if aspActive.TrafficModeType != nil {
 		acknowledgedMode = aspActive.TrafficModeType.Copy()
 	}
-	if served != nil && c.as != nil {
+	contextlessServed := served == nil && rcErr == nil &&
+		aspActive.RoutingContext == nil && len(c.configuredRoutingContexts()) == 0
+	if (served != nil || contextlessServed) && c.as != nil {
 		var err error
-		acknowledgedMode, err = c.as.agreeTrafficMode(served.RoutingContexts(), aspActive.TrafficModeType)
+		var servedContexts []uint32
+		if served != nil {
+			servedContexts = served.RoutingContexts()
+		}
+		acknowledgedMode, err = c.as.agreeTrafficModeForConn(c, servedContexts, aspActive.TrafficModeType)
 		if err != nil {
 			return err
 		}
@@ -357,8 +363,6 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 			return err
 		}
 	}
-	contextlessServed := served == nil && rcErr == nil &&
-		aspActive.RoutingContext == nil && len(c.configuredRoutingContexts()) == 0
 
 	if _, err := c.WriteSignal(
 		messages.NewAspActiveAck(acknowledgedMode, acknowledged, nil),
@@ -989,8 +993,8 @@ func (c *Conn) overrideOtherASPs(aspActive *messages.AspActive, activated []uint
 		return
 	}
 
-	for _, rtCtx := range activated {
-		as := c.as.get(rtCtx)
+	for _, key := range c.asKeysForRoutingContexts(activated) {
+		as := c.as.get(key)
 		if as.TrafficMode() != params.TrafficModeOverride {
 			continue
 		}
@@ -1003,7 +1007,11 @@ func (c *Conn) overrideOtherASPs(aspActive *messages.AspActive, activated []uint
 			// the state ASP-INACTIVE" in this AS, not every AS on the
 			// association. Record the scoped state before Notify so no further
 			// traffic is selected for the displaced ASP after it is told.
-			peer.noteRoutingContextsInactive([]uint32{rtCtx})
+			if key.RoutingContextSet {
+				peer.noteRoutingContextsInactive([]uint32{key.RoutingContext})
+			} else {
+				peer.noteRoutingContextsInactive(nil)
+			}
 		}
 		waitForTrafficBarrier(&as.deliveryMu)
 		postBarrierNotify()
@@ -1014,7 +1022,7 @@ func (c *Conn) overrideOtherASPs(aspActive *messages.AspActive, activated []uint
 			if peer.stateForActiveRoutingContexts() == StateAspInactive {
 				peer.sendState(StateAspInactive)
 			}
-			notifyAlternateASPActive(peer, rtCtx, c.peerASPIdentifierParam())
+			notifyAlternateASPActive(peer, key, c.peerASPIdentifierParam())
 		}
 	}
 }

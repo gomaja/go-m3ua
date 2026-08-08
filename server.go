@@ -20,7 +20,8 @@ import (
 type Listener struct {
 	sctpListener *sctp.SCTPListener
 	*Config
-	// trafficModes is copied from Config when Listen constructs the Listener.
+	listenerConfig *ListenerConfig
+	// trafficModes is copied from ListenerConfig when Listen constructs the Listener.
 	// Every accepted Conn and the shared AS registry inherit this one immutable
 	// policy, even if the caller later reuses or mutates the Config.
 	trafficModes trafficModeSnapshot
@@ -73,7 +74,24 @@ func (l *Listener) ApplicationServerState(rtCtx uint32) ASState {
 	if as == nil {
 		return ASDown
 	}
-	return as.get(rtCtx).State()
+	_, scoped, ok, ambiguous := as.lookupRoutingContext(rtCtx)
+	if !ok || ambiguous {
+		return ASDown
+	}
+	return scoped.State()
+}
+
+// ApplicationServerStateForAS returns the AS state for an exact ASKey.
+func (l *Listener) ApplicationServerStateForAS(key ASKey) ASState {
+	as := l.applicationServers()
+	if as == nil {
+		return ASDown
+	}
+	scoped, ok := as.lookup(key)
+	if !ok {
+		return ASDown
+	}
+	return scoped.State()
 }
 
 // applicationServers returns the Application Server registry, or nil if no
@@ -135,9 +153,19 @@ func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinati
 	return l.as, l.nif, l.destinations
 }
 
-func newListener(config *Config) *Listener {
-	listener := &Listener{Config: config}
-	listener.trafficModes.freeze(newTrafficModePolicy(config))
+func newListener(config *ListenerConfig) *Listener {
+	listenerConfig := NewListenerConfig(nil)
+	if config != nil {
+		listenerConfig = &ListenerConfig{
+			DefaultConnConfig: snapshotConnConfig(config.DefaultConnConfig),
+			SelectConnConfig:  config.SelectConnConfig,
+		}
+	}
+	listener := &Listener{
+		Config:         listenerConfig.DefaultConnConfig,
+		listenerConfig: listenerConfig,
+	}
+	listener.trafficModes.freeze(newTrafficModePolicy(listener.Config))
 	return listener
 }
 
@@ -448,7 +476,7 @@ func (l *Listener) forget(c *Conn) {
 }
 
 // Listen returns a M3UA listener.
-func Listen(net string, laddr *sctp.SCTPAddr, cfg *Config) (*Listener, error) {
+func Listen(net string, laddr *sctp.SCTPAddr, cfg *ListenerConfig) (*Listener, error) {
 	var err error
 	l := newListener(cfg)
 
@@ -534,7 +562,12 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	// live on the Conn: while they lived on the Config, this Accept would
 	// rebind the previously accepted Conn's socket to the association just
 	// taken, and that Conn would go on to serve the wrong ASP.
-	conn := newConnWithTrafficModePolicy(modeServer, l.Config, l.trafficModePolicy())
+	connConfig, err := l.listenerConfig.connConfigForAccept(newAcceptInfo(c.LocalAddr(), c.RemoteAddr()))
+	if err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	conn := newConnWithTrafficModePolicy(modeServer, connConfig, newTrafficModePolicy(connConfig))
 	conn.sctpConn = c
 	// Set at construction, before any goroutine can observe this Conn, so
 	// the field is immutable for its lifetime: Close reads it concurrently
@@ -552,7 +585,7 @@ func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
 	// starts dispatching, rather than published from a goroutine here that
 	// raced the reader for it.
 	go conn.monitor(ctx)
-	establishTimeout := l.Config.EstablishTimeout
+	establishTimeout := conn.cfg.EstablishTimeout
 	if establishTimeout <= 0 {
 		establishTimeout = DefaultEstablishTimeout
 	}
@@ -651,7 +684,25 @@ func (l *Listener) ActiveASPs(rtCtx uint32) []*Conn {
 	if as == nil {
 		return nil
 	}
-	return as.get(rtCtx).activeASPs()
+	_, scoped, ok, ambiguous := as.lookupRoutingContext(rtCtx)
+	if !ok || ambiguous {
+		return nil
+	}
+	return scoped.activeASPs()
+}
+
+// ActiveASPsForAS returns the associations currently able to carry traffic for
+// an exact ASKey.
+func (l *Listener) ActiveASPsForAS(key ASKey) []*Conn {
+	as := l.applicationServers()
+	if as == nil {
+		return nil
+	}
+	scoped, ok := as.lookup(key)
+	if !ok {
+		return nil
+	}
+	return scoped.activeASPs()
 }
 
 // ASPsForTraffic returns the associations a message for this Routing Context
@@ -681,7 +732,31 @@ func (l *Listener) ASPsForTraffic(rtCtx uint32, sls uint8) []*Conn {
 	if registry == nil {
 		return nil
 	}
-	as := registry.get(rtCtx)
+	_, as, ok, ambiguous := registry.lookupRoutingContext(rtCtx)
+	if !ok || ambiguous {
+		return nil
+	}
+	return aspsForTraffic(as, sls)
+}
+
+// ASPsForTrafficForAS returns the associations a message for this exact ASKey
+// should be sent to, applying the AS's traffic mode.
+func (l *Listener) ASPsForTrafficForAS(key ASKey, sls uint8) []*Conn {
+	registry := l.applicationServers()
+	if registry == nil {
+		return nil
+	}
+	as, ok := registry.lookup(key)
+	if !ok {
+		return nil
+	}
+	return aspsForTraffic(as, sls)
+}
+
+func aspsForTraffic(as *applicationServer, sls uint8) []*Conn {
+	if as == nil {
+		return nil
+	}
 	active := as.activeASPs()
 	if len(active) == 0 {
 		return nil
@@ -753,6 +828,21 @@ func (l *Listener) SetNIFAvailable(available bool) {
 //	partially isolated from the NIF, the SGP should respond with an
 //	Error ("Refused - Management Blocking").
 func (l *Listener) SetASAvailable(rtCtx uint32, available bool) {
+	registry, _, _ := l.registry()
+	if key, _, ok, ambiguous := registry.lookupRoutingContext(rtCtx); ok && !ambiguous {
+		l.SetASAvailableForAS(key, available)
+		return
+	}
+	if key, ok := l.singleTrackedASKeyForRoutingContext(rtCtx); ok {
+		l.SetASAvailableForAS(key, available)
+		return
+	}
+	l.SetASAvailableForAS(registry.routingContextASKey(rtCtx), available)
+}
+
+// SetASAvailableForAS declares whether this SGP can still service one exact
+// Application Server.
+func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
 	as, nif, _ := l.registry()
 
 	l.muConns.Lock()
@@ -762,7 +852,7 @@ func (l *Listener) SetASAvailable(rtCtx uint32, available bool) {
 	}
 	l.muConns.Unlock()
 
-	nif.setASAvailable(rtCtx, available)
+	nif.setASAvailableForAS(key, available)
 	if available {
 		return
 	}
@@ -771,19 +861,40 @@ func (l *Listener) SetASAvailable(rtCtx uint32, available bool) {
 	// affected AS" — only those serving it.
 	var isolated sync.WaitGroup
 	for _, c := range conns {
-		for _, rc := range c.configuredRoutingContexts() {
-			if rc != rtCtx {
+		for _, connKey := range c.configuredASKeys() {
+			if connKey != key {
 				continue
 			}
 			isolated.Add(1)
 			go func(c *Conn) {
 				defer isolated.Done()
-				isolateApplicationServerConnection(c, as, rtCtx)
+				isolateApplicationServerConnection(c, as, key)
 			}(c)
 			break
 		}
 	}
 	isolated.Wait()
+}
+
+func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, bool) {
+	l.muConns.Lock()
+	defer l.muConns.Unlock()
+
+	var found ASKey
+	foundSet := false
+	for c := range l.conns {
+		for _, key := range c.configuredASKeys() {
+			if !key.RoutingContextSet || key.RoutingContext != rtCtx {
+				continue
+			}
+			if foundSet && key != found {
+				return ASKey{}, false
+			}
+			found = key
+			foundSet = true
+		}
+	}
+	return found, foundSet
 }
 
 func isolateNIFConnection(c *Conn) {
@@ -801,20 +912,28 @@ func isolateNIFConnection(c *Conn) {
 	c.sendState(StateAspDown)
 }
 
-func isolateApplicationServerConnection(c *Conn, as *applicationServers, rtCtx uint32) {
+func isolateApplicationServerConnection(c *Conn, as *applicationServers, key ASKey) {
 	if c == nil {
 		return
 	}
 	postAckNotify := func() {}
 	if c.State() == StateAspActive {
-		c.noteRoutingContextsInactive([]uint32{rtCtx})
+		if key.RoutingContextSet {
+			c.noteRoutingContextsInactive([]uint32{key.RoutingContext})
+		} else {
+			c.noteRoutingContextsInactive(nil)
+		}
 		if as != nil {
-			postAckNotify = as.quiesceASPFor(c, []uint32{rtCtx})
+			if key.RoutingContextSet {
+				postAckNotify = as.quiesceASPFor(c, []uint32{key.RoutingContext})
+			} else {
+				postAckNotify = as.quiesceASPFor(c, nil)
+			}
 		}
 	}
 	c.quiesceUnscopedTraffic()
 	_ = c.writeMandatoryControls([]messages.M3UA{
-		messages.NewAspInactiveAck(params.NewRoutingContext(rtCtx), nil),
+		messages.NewAspInactiveAck(routingContextParamForASKey(key), nil),
 	}, false, true)
 	postAckNotify()
 	if c.stateForActiveRoutingContexts() == StateAspInactive {

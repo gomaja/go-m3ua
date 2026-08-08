@@ -82,7 +82,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		return nil, nil, err
 	}
 
-	listener, err := Listen("m3ua", raddr, srvCfg)
+	listener, err := Listen("m3ua", raddr, NewListenerConfig(srvCfg))
 	if err != nil {
 		// The sctp package returns this on platforms without SCTP support
 		// (e.g. darwin); the socket-backed tests are meaningful only where a

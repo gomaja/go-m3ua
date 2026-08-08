@@ -5,10 +5,12 @@
 package m3ua
 
 import (
+	"errors"
 	"net"
 	"time"
 
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
 )
 
 // HeartbeatInfo configures RFC 4666 M3UA BEAT/BEAT Ack liveness.
@@ -198,8 +200,12 @@ type ASPIdentity struct {
 // resolved once at ASP Up and remains immutable for that association.
 type ASPAuthorizer func(ASPIdentity) []uint32
 
-// Config is a configuration that defines a M3UA server.
-type Config struct {
+// ConnConfig configures one M3UA association.
+//
+// A server Listener owns the shared SCTP socket and shared SGP state; each
+// accepted SCTP association uses an immutable ConnConfig snapshot selected by
+// ListenerConfig before any M3UA message is parsed.
+type ConnConfig struct {
 	// HeartbeatInfo controls M3UA BEAT/BEAT Ack liveness only; it is separate
 	// from SCTP HEARTBEAT path management.
 	*HeartbeatInfo
@@ -279,14 +285,138 @@ type Config struct {
 	SignalingLinkSelection uint8
 }
 
-// NewConfig creates a new Config.
+// Config is retained as the historical name for ConnConfig.
+type Config = ConnConfig
+
+// AcceptInfo identifies an SCTP association before its M3UA handshake starts.
+//
+// The addresses are owned copies of the SCTP addresses returned by the
+// association so a selector can inspect or retain full multi-homing data
+// without mutating transport-owned address objects.
+type AcceptInfo struct {
+	LocalAddr  *sctp.SCTPAddr
+	RemoteAddr *sctp.SCTPAddr
+}
+
+// ConnConfigSelector chooses the immutable per-association ConnConfig for an
+// accepted SCTP association.
+type ConnConfigSelector func(AcceptInfo) (*ConnConfig, error)
+
+// ListenerConfig configures a shared M3UA listener.
+//
+// DefaultConnConfig is the fallback per-association configuration. If
+// SelectConnConfig is set, it runs after SCTP accept and before socket options,
+// monitor goroutines, ASP Up parsing, or compatibility handling.
+type ListenerConfig struct {
+	DefaultConnConfig *ConnConfig
+	SelectConnConfig  ConnConfigSelector
+}
+
+// NewListenerConfig creates a listener configuration with an immutable default
+// per-association ConnConfig snapshot.
+func NewListenerConfig(defaultConnConfig *ConnConfig) *ListenerConfig {
+	if defaultConnConfig == nil {
+		defaultConnConfig = NewConfig(0, 0, 0, 0, 0, 0)
+	}
+	return &ListenerConfig{
+		DefaultConnConfig: snapshotConnConfig(defaultConnConfig),
+	}
+}
+
+func (l *ListenerConfig) connConfigForAccept(info AcceptInfo) (*ConnConfig, error) {
+	if l == nil {
+		return nil, errors.New("nil ListenerConfig")
+	}
+	selected := l.DefaultConnConfig
+	if l.SelectConnConfig != nil {
+		var err error
+		selected, err = l.SelectConnConfig(info)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if selected == nil {
+		return nil, errors.New("nil ConnConfig")
+	}
+	return snapshotConnConfig(selected), nil
+}
+
+func snapshotConnConfig(config *ConnConfig) *ConnConfig {
+	if config == nil {
+		return nil
+	}
+	snapshot := *config
+	if config.HeartbeatInfo != nil {
+		heartbeat := *config.HeartbeatInfo
+		heartbeat.Data = append([]byte(nil), config.HeartbeatInfo.Data...)
+		snapshot.HeartbeatInfo = &heartbeat
+	}
+	if config.SCTPConfig != nil {
+		sctpConfig := *config.SCTPConfig
+		if config.SCTPConfig.SctpSackInfo != nil {
+			sack := *config.SCTPConfig.SctpSackInfo
+			sctpConfig.SctpSackInfo = &sack
+		}
+		if config.SCTPConfig.SctpNoDelayInfo != nil {
+			noDelay := *config.SCTPConfig.SctpNoDelayInfo
+			sctpConfig.SctpNoDelayInfo = &noDelay
+		}
+		snapshot.SCTPConfig = &sctpConfig
+	}
+	snapshot.AspIdentifier = config.AspIdentifier.Copy()
+	snapshot.TrafficModeType = config.TrafficModeType.Copy()
+	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
+	snapshot.RoutingContexts = config.RoutingContexts.Copy()
+	snapshot.CorrelationID = config.CorrelationID.Copy()
+	if config.TrafficModes != nil {
+		snapshot.TrafficModes = make(map[uint32]uint32, len(config.TrafficModes))
+		for routingContext, trafficMode := range config.TrafficModes {
+			snapshot.TrafficModes[routingContext] = trafficMode
+		}
+	}
+	return &snapshot
+}
+
+func newAcceptInfo(local, remote net.Addr) AcceptInfo {
+	return AcceptInfo{
+		LocalAddr:  cloneSCTPAddrFromNetAddr(local),
+		RemoteAddr: cloneSCTPAddrFromNetAddr(remote),
+	}
+}
+
+func cloneSCTPAddrFromNetAddr(addr net.Addr) *sctp.SCTPAddr {
+	sctpAddr, ok := addr.(*sctp.SCTPAddr)
+	if !ok {
+		return nil
+	}
+	return cloneSCTPAddr(sctpAddr)
+}
+
+func cloneSCTPAddr(addr *sctp.SCTPAddr) *sctp.SCTPAddr {
+	if addr == nil {
+		return nil
+	}
+	clone := &sctp.SCTPAddr{Port: addr.Port}
+	if len(addr.IPAddrs) > 0 {
+		clone.IPAddrs = make([]net.IPAddr, len(addr.IPAddrs))
+		for index, ipAddr := range addr.IPAddrs {
+			clone.IPAddrs[index] = net.IPAddr{
+				IP:   append(net.IP(nil), ipAddr.IP...),
+				Zone: ipAddr.Zone,
+			}
+		}
+	}
+	return clone
+}
+
+// NewConfig creates a new ConnConfig.
 //
 // To set additional parameters, use constructors in param package or
 // setters defined in this package. Note that the params left nil won't
 // appear in the packets but the initialized params will, with zero
 // values.
-func NewConfig(opc, dpc uint32, si, ni, mp, sls uint8) *Config {
-	return &Config{
+func NewConfig(opc, dpc uint32, si, ni, mp, sls uint8) *ConnConfig {
+	return &ConnConfig{
 		SCTPConfig:             &SCTPConfig{},
 		OriginatingPointCode:   opc,
 		DestinationPointCode:   dpc,
@@ -388,8 +518,8 @@ func (c *Config) SetCorrelationID(id uint32) *Config {
 //
 // The optional parameters that is not required (like CorrelationID)
 // can be omitted by setting it to nil after created *Config.
-func NewClientConfig(hbInfo *HeartbeatInfo, opc, dpc, aspID, tmt, nwApr, corrID uint32, rtCtxs []uint32, si, ni, mp, sls uint8) *Config {
-	return &Config{
+func NewClientConfig(hbInfo *HeartbeatInfo, opc, dpc, aspID, tmt, nwApr, corrID uint32, rtCtxs []uint32, si, ni, mp, sls uint8) *ConnConfig {
+	return &ConnConfig{
 		HeartbeatInfo:          hbInfo,
 		SCTPConfig:             &SCTPConfig{},
 		AspIdentifier:          params.NewAspIdentifier(aspID),
@@ -410,8 +540,8 @@ func NewClientConfig(hbInfo *HeartbeatInfo, opc, dpc, aspID, tmt, nwApr, corrID 
 //
 // The optional parameters that is not required (like CorrelationID)
 // can be omitted by setting it to nil after created *Config.
-func NewServerConfig(hbInfo *HeartbeatInfo, opc, dpc, aspID, tmt, nwApr, corrID uint32, rtCtxs []uint32, si, ni, mp, sls uint8) *Config {
-	return &Config{
+func NewServerConfig(hbInfo *HeartbeatInfo, opc, dpc, aspID, tmt, nwApr, corrID uint32, rtCtxs []uint32, si, ni, mp, sls uint8) *ConnConfig {
+	return &ConnConfig{
 		HeartbeatInfo:          hbInfo,
 		SCTPConfig:             &SCTPConfig{},
 		AspIdentifier:          params.NewAspIdentifier(aspID),

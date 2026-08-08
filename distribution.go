@@ -76,11 +76,11 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
 	policy := registry.distribution
-	owned, protocolData, encodedSize, rtCtx, err := l.prepareDistributionData(registry, policy, data)
+	owned, protocolData, encodedSize, key, err := l.prepareDistributionData(registry, policy, data)
 	if err != nil {
 		return TrafficDistribution{}, err
 	}
-	applicationServer, ok := registry.lookup(rtCtx)
+	applicationServer, ok := registry.lookup(key)
 	if !ok {
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
@@ -95,95 +95,98 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 	return applicationServer.distribute(owned, protocolData, flow, encodedSize, policy.messageLimit, policy.byteLimit)
 }
 
-func (l *Listener) prepareDistributionData(registry *applicationServers, policy distributionPolicy, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, uint32, error) {
+func (l *Listener) prepareDistributionData(registry *applicationServers, policy distributionPolicy, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, ASKey, error) {
 	if data == nil {
-		return nil, nil, 0, 0, errors.New("cannot distribute nil DATA")
+		return nil, nil, 0, ASKey{}, errors.New("cannot distribute nil DATA")
 	}
 	if data.Header == nil {
-		return nil, nil, 0, 0, errors.New("cannot distribute DATA without a common header")
+		return nil, nil, 0, ASKey{}, errors.New("cannot distribute DATA without a common header")
 	}
 	if data.Version() != 1 {
-		return nil, nil, 0, 0, NewInvalidVersionError(data.Version())
+		return nil, nil, 0, ASKey{}, NewInvalidVersionError(data.Version())
 	}
 	if data.Reserved != 0 {
-		return nil, nil, 0, 0, fmt.Errorf("%w: DATA reserved byte is %#x", ErrInvalidParameterValue, data.Reserved)
+		return nil, nil, 0, ASKey{}, fmt.Errorf("%w: DATA reserved byte is %#x", ErrInvalidParameterValue, data.Reserved)
 	}
 	if data.Class != messages.MsgClassTransfer || data.Type != messages.MsgTypePayloadData {
-		return nil, nil, 0, 0, fmt.Errorf("%w: DATA header has class %d type %d", messages.ErrUnexpectedMessageType, data.Class, data.Type)
+		return nil, nil, 0, ASKey{}, fmt.Errorf("%w: DATA header has class %d type %d", messages.ErrUnexpectedMessageType, data.Class, data.Type)
 	}
 
 	owned := copyData(data)
 	if owned.ProtocolData == nil {
-		return nil, nil, 0, 0, ErrMissingProtocolData
+		return nil, nil, 0, ASKey{}, ErrMissingProtocolData
 	}
 	if owned.ProtocolData.Tag != params.ProtocolData {
-		return nil, nil, 0, 0, fmt.Errorf("invalid DATA Protocol Data: %w", params.ErrInvalidType)
+		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", params.ErrInvalidType)
 	}
 
-	rtCtx, err := resolveDistributionRoutingContext(registry, policy, owned)
+	key, err := resolveDistributionRoutingContext(registry, policy, owned)
 	if err != nil {
-		return nil, nil, 0, 0, err
+		return nil, nil, 0, ASKey{}, err
 	}
 	if err := validateDistributionNetworkAppearance(policy, owned.NetworkAppearance); err != nil {
-		return nil, nil, 0, 0, err
+		return nil, nil, 0, ASKey{}, err
 	}
 
 	raw, err := owned.MarshalBinary()
 	if err != nil {
 		if errors.Is(err, messages.ErrMissingParameter) {
-			return nil, nil, 0, 0, ErrMissingProtocolData
+			return nil, nil, 0, ASKey{}, ErrMissingProtocolData
 		}
-		return nil, nil, 0, 0, fmt.Errorf("invalid DATA: %w", err)
+		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA: %w", err)
 	}
 	validated, err := messages.ParseData(raw)
 	if err != nil {
-		return nil, nil, 0, 0, fmt.Errorf("invalid DATA: %w", err)
+		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA: %w", err)
 	}
 	validatedProtocolData, err := validated.ProtocolData.ProtocolData()
 	if err != nil {
-		return nil, nil, 0, 0, fmt.Errorf("invalid DATA Protocol Data: %w", err)
+		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", err)
 	}
-	return validated, validatedProtocolData, len(raw), rtCtx, nil
+	return validated, validatedProtocolData, len(raw), key, nil
 }
 
-func resolveDistributionRoutingContext(registry *applicationServers, policy distributionPolicy, data *messages.Data) (uint32, error) {
+func resolveDistributionRoutingContext(registry *applicationServers, policy distributionPolicy, data *messages.Data) (ASKey, error) {
 	configured := policy.routingContexts
 
 	if data.RoutingContext == nil {
 		switch len(configured) {
 		case 0:
-			if rtCtx, _, ok := registry.sole(); ok {
-				data.RoutingContext = params.NewRoutingContext(rtCtx)
-				return rtCtx, nil
+			if key, _, ok := registry.sole(); ok {
+				if key.RoutingContextSet {
+					data.RoutingContext = params.NewRoutingContext(key.RoutingContext)
+				}
+				return key, nil
 			}
-			return 0, ErrNoActiveASP
+			return ASKey{}, ErrNoActiveASP
 		case 1:
 			data.RoutingContext = params.NewRoutingContext(configured[0])
-			return configured[0], nil
+			return asKeyFromDistributionScope(policy, data.NetworkAppearance, configured[0]), nil
 		default:
-			return 0, ErrMissingRoutingContext
+			return ASKey{}, ErrMissingRoutingContext
 		}
 	}
 	if data.RoutingContext.Tag != params.RoutingContext {
-		return 0, fmt.Errorf("invalid DATA Routing Context: %w", params.ErrInvalidType)
+		return ASKey{}, fmt.Errorf("invalid DATA Routing Context: %w", params.ErrInvalidType)
 	}
 	if len(data.RoutingContext.Data) != 4 {
-		return 0, fmt.Errorf("invalid DATA Routing Context: %w", params.ErrInvalidLength)
+		return ASKey{}, fmt.Errorf("invalid DATA Routing Context: %w", params.ErrInvalidLength)
 	}
 	routingContexts := data.RoutingContext.RoutingContexts()
 	rtCtx := routingContexts[0]
+	key := asKeyFromDistributionScope(policy, data.NetworkAppearance, rtCtx)
 	if len(configured) > 0 {
 		for _, candidate := range configured {
 			if candidate == rtCtx {
-				return rtCtx, nil
+				return key, nil
 			}
 		}
-		return 0, NewInvalidRoutingContextError(rtCtx)
+		return ASKey{}, NewInvalidRoutingContextError(rtCtx)
 	}
-	if _, ok := registry.lookup(rtCtx); !ok {
-		return 0, NewInvalidRoutingContextError(rtCtx)
+	if _, ok := registry.lookup(key); !ok {
+		return ASKey{}, NewInvalidRoutingContextError(rtCtx)
 	}
-	return rtCtx, nil
+	return key, nil
 }
 
 func validateDistributionNetworkAppearance(policy distributionPolicy, networkAppearance *params.Param) error {
@@ -205,6 +208,16 @@ func validateDistributionNetworkAppearance(policy distributionPolicy, networkApp
 		return NewInvalidNetworkAppearanceError(networkAppearance.NetworkAppearance())
 	}
 	return nil
+}
+
+func asKeyFromDistributionScope(policy distributionPolicy, networkAppearance *params.Param, routingContext uint32) ASKey {
+	key := routingContextASKey(routingContext)
+	if networkAppearance != nil {
+		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(networkAppearance)
+		return key
+	}
+	key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(policy.networkAppearance)
+	return key
 }
 
 func newDistributionPolicy(config *Config) distributionPolicy {
@@ -632,7 +645,7 @@ func (as *applicationServer) drainRecoveryQueue() {
 		as.mu.Unlock()
 		as.deliveryMu.Unlock()
 		if restored {
-			logf("m3ua: retained recovery DATA for Routing Context %d after delivery failed: %v", as.rtCtx, err)
+			logf("m3ua: retained recovery DATA for AS %v after delivery failed: %v", as.key, err)
 		}
 		return
 	}
