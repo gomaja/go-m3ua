@@ -113,7 +113,9 @@ func TestNormalizeASKeyRejectsOutOfRangeIntRoutingContext(t *testing.T) {
 	if strconv.IntSize <= 32 {
 		return
 	}
-	outOfRange := int(uint64(maxRoutingContextValue) + 1)
+	aboveMax := uint64(maxRoutingContextValue)
+	aboveMax++
+	outOfRange := int(aboveMax)
 	if _, ok := normalizeASKey(outOfRange); ok {
 		t.Fatal("package AS key normalization accepted an int above uint32")
 	}
