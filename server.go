@@ -827,16 +827,23 @@ func (l *Listener) SetNIFAvailable(available bool) {
 //	Error ("Refused - Management Blocking").
 func (l *Listener) SetASAvailable(rtCtx uint32, available bool) {
 	registry, _, _ := l.registry()
-	if key, _, ok, ambiguous := registry.lookupRoutingContext(rtCtx); ambiguous {
-		return
-	} else if ok {
-		l.SetASAvailableForAS(key, available)
+	registryKey, _, registryOK, registryAmbiguous := registry.lookupRoutingContext(rtCtx)
+	if registryAmbiguous {
 		return
 	}
-	if key, ok, ambiguous := l.singleTrackedASKeyForRoutingContext(rtCtx); ambiguous {
+	trackedKey, trackedOK, trackedAmbiguous := l.singleTrackedASKeyForRoutingContext(rtCtx)
+	if trackedAmbiguous {
 		return
-	} else if ok {
-		l.SetASAvailableForAS(key, available)
+	}
+	if registryOK && trackedOK && registryKey != trackedKey {
+		return
+	}
+	if registryOK {
+		l.SetASAvailableForAS(registryKey, available)
+		return
+	}
+	if trackedOK {
+		l.SetASAvailableForAS(trackedKey, available)
 		return
 	}
 	l.SetASAvailableForAS(registry.routingContextASKey(rtCtx), available)

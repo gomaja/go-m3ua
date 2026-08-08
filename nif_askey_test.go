@@ -57,3 +57,32 @@ func TestSetASAvailableIgnoresAmbiguousLegacyRoutingContext(t *testing.T) {
 		t.Fatalf("ambiguous legacy availability isolated %v", key20)
 	}
 }
+
+func TestSetASAvailableIgnoresLegacyRoutingContextWhenRegistryAndTrackedDisagree(t *testing.T) {
+	config := mcServerConfig()
+	config.NetworkAppearance = params.NewNetworkAppearance(10)
+	listener := newListener(NewListenerConfig(config))
+	registry, nif, _ := listener.registry()
+
+	registryKey := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	trackedKey := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	registry.get(registryKey).setTrafficMode(params.TrafficModeLoadshare)
+
+	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	conn.listener = listener
+	conn.noteRoutingContextsActive([]uint32{1})
+	conn.setState(StateAspActive)
+	if !listener.track(conn) {
+		t.Fatal("track refused an association")
+	}
+
+	listener.SetASAvailable(1, false)
+
+	if !nif.servicableASKeys([]ASKey{registryKey}) {
+		t.Fatalf("disagreeing legacy availability isolated registry key %v", registryKey)
+	}
+	if !nif.servicableASKeys([]ASKey{trackedKey}) {
+		t.Fatalf("disagreeing legacy availability isolated tracked key %v", trackedKey)
+	}
+}

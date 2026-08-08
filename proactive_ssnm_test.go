@@ -132,7 +132,7 @@ func TestAllContextDestinationUpdateScopesTargetsByNetworkAppearance(t *testing.
 	}
 }
 
-func TestAllContextDestinationUpdateDeduplicatesSameRoutingContextForOneASP(t *testing.T) {
+func TestDestinationUpdateScopesSameASPRoutingContextByNetworkAppearance(t *testing.T) {
 	listener, _, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1}, nil,
 	)

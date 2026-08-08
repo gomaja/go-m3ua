@@ -115,6 +115,17 @@ func TestContextlessOverrideDisplacesOnlySameASKey(t *testing.T) {
 		t.Fatalf("first contextless Override state update: %v", err)
 	}
 
+	third, _ := newTestConnWithContexts(t, StateAspInactive, modeServer)
+	third.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	third.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	third.as = registry
+	if err := third.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
+		t.Fatalf("third contextless Override ASP Active in another Network Appearance: %v", err)
+	}
+	if err := third.handleStateUpdate(StateAspActive); err != nil {
+		t.Fatalf("third contextless Override state update: %v", err)
+	}
+
 	second, _ := newTestConnWithContexts(t, StateAspInactive, modeServer)
 	second.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 	second.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
@@ -130,5 +141,12 @@ func TestContextlessOverrideDisplacesOnlySameASKey(t *testing.T) {
 	}
 	if first.activeForASKey(key) {
 		t.Fatal("first ASP remained locally active after contextless Override displacement")
+	}
+	otherKey := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true}
+	if got := registry.get(otherKey).activeASPs(); len(got) != 1 || got[0] != third {
+		t.Fatalf("foreign contextless Override active ASPs = %v, want only third ASP", got)
+	}
+	if !third.activeForASKey(otherKey) {
+		t.Fatal("foreign ASP was locally inactivated by contextless Override displacement")
 	}
 }
