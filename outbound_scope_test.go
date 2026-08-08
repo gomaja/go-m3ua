@@ -39,6 +39,7 @@ func TestWriteSignalDataEnforcesServerPerApplicationServerState(t *testing.T) {
 
 func TestWriteSignalDataEnforcesClientAcknowledgedScope(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
 	asp.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	var writes atomic.Int32
 	asp.signalWriter = func(message messages.M3UA) (int, error) {

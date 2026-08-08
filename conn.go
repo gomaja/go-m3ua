@@ -1161,20 +1161,12 @@ func (c *Conn) lockServerApplicationServers(routingContexts []uint32) (func(), e
 		return func() {}, nil
 	}
 
-	unique := make(map[uint32]struct{}, len(routingContexts))
-	ordered := make([]uint32, 0, len(routingContexts))
-	for _, rtCtx := range routingContexts {
-		if _, exists := unique[rtCtx]; exists {
-			continue
-		}
-		unique[rtCtx] = struct{}{}
-		ordered = append(ordered, rtCtx)
-	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	ordered := c.asKeysForRoutingContexts(routingContexts)
+	sort.Slice(ordered, func(i, j int) bool { return compareASKey(ordered[i], ordered[j]) < 0 })
 
 	applicationServers := make([]*applicationServer, 0, len(ordered))
-	for _, rtCtx := range ordered {
-		applicationServer, ok := c.as.lookup(rtCtx)
+	for _, key := range ordered {
+		applicationServer, ok := c.as.lookup(key)
 		if !ok {
 			return nil, ErrRoutingContextNotActive
 		}
@@ -1192,7 +1184,7 @@ func (c *Conn) lockServerApplicationServers(routingContexts []uint32) (func(), e
 		applicationServer.mu.Lock()
 		active := !applicationServer.closed && applicationServer.asps[c] == StateAspActive
 		applicationServer.mu.Unlock()
-		if !active || !c.activeForRoutingContext(ordered[index]) {
+		if !active || !c.activeForASKey(ordered[index]) {
 			unlock()
 			return nil, ErrRoutingContextNotActive
 		}
@@ -1485,6 +1477,36 @@ func (c *Conn) configuredRoutingContextParam() *params.Param {
 		return nil
 	}
 	return params.NewRoutingContext(configured...)
+}
+
+func (c *Conn) configuredASKeys() []ASKey {
+	if c == nil {
+		return nil
+	}
+	if c.hasExplicitlyEmptyASPAuthorization() {
+		return nil
+	}
+	return c.asKeysForRoutingContexts(c.configuredRoutingContexts())
+}
+
+func (c *Conn) asKeysForRoutingContexts(routingContexts []uint32) []ASKey {
+	if c == nil {
+		return nil
+	}
+	if len(routingContexts) == 0 {
+		return []ASKey{contextlessASKeyForConfig(c.cfg)}
+	}
+	keys := make([]ASKey, 0, len(routingContexts))
+	seen := make(map[ASKey]struct{}, len(routingContexts))
+	for _, routingContext := range routingContexts {
+		key := asKeyForConfigRoutingContext(c.cfg, routingContext)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func (c *Conn) resolveASPAuthorization(identifier *params.Param) error {
@@ -1992,6 +2014,15 @@ func (c *Conn) activeForRoutingContext(rtCtx uint32) bool {
 	}
 	_, ok := c.activeRCs[rtCtx]
 	return ok
+}
+
+func (c *Conn) activeForASKey(key ASKey) bool {
+	if !key.RoutingContextSet {
+		c.muAckedRCs.RLock()
+		defer c.muAckedRCs.RUnlock()
+		return !c.activeRCsScoped
+	}
+	return c.activeForRoutingContext(key.RoutingContext)
 }
 
 // routingContextOverridden reports whether an alternate ASP holds this context.

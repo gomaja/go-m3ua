@@ -51,7 +51,8 @@ The API design is kept as similar as possible to other protocols in standard `ne
 
 Here is an example to develop your own M3UA client using go-m3ua.
 
-First, you need to create `*Config` used to setup/maintain M3UA connection.
+First, you need to create a `*ConnConfig` used to setup/maintain one M3UA
+association. The historical `*Config` name is kept as an alias.
 
 ```go
 config := m3ua.NewClientConfig(
@@ -142,6 +143,18 @@ log.Printf("Successfully read M3UA data: %x", buf[:n])
 ```
 
 See [example/server directory](./examples/server) for server example.
+
+Server listeners use `*ListenerConfig` so one SCTP listener can select a
+separate immutable `*ConnConfig` per accepted association:
+
+```go
+listenerConfig := m3ua.NewListenerConfig(defaultConnConfig)
+listenerConfig.SelectConnConfig = func(info m3ua.AcceptInfo) (*m3ua.ConnConfig, error) {
+    return configForPeer(info.RemoteAddr)
+}
+
+listener, err := m3ua.Listen("m3ua", laddr, listenerConfig)
+```
 
 ## Supported Features
 

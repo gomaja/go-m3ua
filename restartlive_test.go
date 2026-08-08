@@ -82,7 +82,7 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen("m3ua", srvAddr, srvCfg)
+	ln, err := Listen("m3ua", srvAddr, NewListenerConfig(srvCfg))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)

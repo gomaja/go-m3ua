@@ -258,7 +258,7 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen("m3ua", raddr, srvCfg)
+	ln, err := Listen("m3ua", raddr, NewListenerConfig(srvCfg))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -404,7 +404,7 @@ func TestConfigWithoutHeartbeatInfoAccepts(t *testing.T) {
 		t.Fatalf("NewConfig set HeartbeatInfo = %+v; this test exists to cover the nil case", srvCfg.HeartbeatInfo)
 	}
 
-	ln, err := Listen("m3ua", mcAddr(port, "127.0.0.1"), srvCfg)
+	ln, err := Listen("m3ua", mcAddr(port, "127.0.0.1"), NewListenerConfig(srvCfg))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -457,11 +457,11 @@ func TestListenRejectsInvalidNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ln, err := Listen("not-a-network", addr, NewServerConfig(
+	ln, err := Listen("not-a-network", addr, NewListenerConfig(NewServerConfig(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	))
+	)))
 	if err == nil {
 		_ = ln.Close()
 		t.Fatal("Listen accepted an invalid network name")

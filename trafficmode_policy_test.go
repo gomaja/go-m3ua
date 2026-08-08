@@ -147,7 +147,7 @@ func TestListenerTrafficModePolicyIsInheritedByRegistryAndAcceptedConnections(t 
 	)
 	configuredModes := map[uint32]uint32{1: params.TrafficModeOverride}
 	config.TrafficModes = configuredModes
-	listener := newListener(config)
+	listener := newListener(NewListenerConfig(config))
 
 	configuredModes[1] = params.TrafficModeBroadcast
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)

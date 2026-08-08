@@ -65,7 +65,7 @@ func mcClientConfig(opc uint32) *Config {
 func mcListen(t *testing.T, laddr *sctp.SCTPAddr) *Listener {
 	t.Helper()
 
-	ln, err := Listen("m3ua", laddr, mcServerConfig())
+	ln, err := Listen("m3ua", laddr, NewListenerConfig(mcServerConfig()))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)

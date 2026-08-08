@@ -82,7 +82,7 @@ func TestASPWithASubsetOfTheSGPsRoutingContextsActivates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), rcServerConfig(1, 2, 3))
+	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(rcServerConfig(1, 2, 3)))
 	if err != nil {
 		if isUnsupportedSCTP(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -131,7 +131,7 @@ func TestTwoASPsWithDistinctRoutingContextsBothActivate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), rcServerConfig(1, 2, 3))
+	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(rcServerConfig(1, 2, 3)))
 	if err != nil {
 		if isUnsupportedSCTP(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -194,7 +194,7 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 	clientConfig := rcClientConfig(0xAA000001)
 	configureRoutingContextLiveTest(clientConfig)
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), serverConfig)
+	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(serverConfig))
 	if err != nil {
 		if isUnsupportedSCTP(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -262,7 +262,7 @@ func TestRoutingContextHandshakeMatrix(t *testing.T) {
 			clientConfig := rcClientConfig(0xAA000001, tt.clientRCs...)
 			configureRoutingContextLiveTest(clientConfig)
 
-			ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), serverConfig)
+			ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(serverConfig))
 			if err != nil {
 				if isUnsupportedSCTP(err) {
 					t.Skipf("skipping socket-backed test: %v", err)

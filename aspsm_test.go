@@ -46,6 +46,7 @@ func newTestConn(t *testing.T, state State, m mode) (*Conn, *[]messages.M3UA) {
 		1,                           // SignalingLinkSelection
 	)
 	cfg.CorrelationID = nil
+	cfg.NetworkAppearance = nil
 
 	conn := &Conn{
 		// The association is per-Conn, so the send template lives here rather

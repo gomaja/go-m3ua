@@ -78,7 +78,7 @@ func main() {
 		log.Fatalf("Failed to resolve SCTP address: %s", err)
 	}
 
-	listener, err := m3ua.Listen("m3ua", laddr, config)
+	listener, err := m3ua.Listen("m3ua", laddr, m3ua.NewListenerConfig(config))
 	if err != nil {
 		log.Fatalf("Failed to listen: %s", err)
 	}
