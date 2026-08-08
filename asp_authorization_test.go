@@ -124,6 +124,43 @@ func TestEmptyASPAuthorizationCannotActivateAnyApplicationServer(t *testing.T) {
 	}
 }
 
+func TestEmptyASPAuthorizationDoesNotJoinContextlessApplicationServer(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	empty, _ := asTestConn(t, registry, StateAspDown, 1)
+	empty.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
+	if err := empty.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); err != nil {
+		t.Fatalf("empty-authorized ASP Up: %v", err)
+	}
+	if err := empty.handleStateUpdate(StateAspInactive); err != nil {
+		t.Fatalf("empty-authorized ASP state update: %v", err)
+	}
+
+	authorized, _ := asTestConn(t, registry, StateAspDown, 1)
+	authorized.cfg.RoutingContexts = nil
+	if err := authorized.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(101), nil)); err != nil {
+		t.Fatalf("contextless ASP Up: %v", err)
+	}
+	if err := authorized.handleStateUpdate(StateAspInactive); err != nil {
+		t.Fatalf("contextless ASP state update: %v", err)
+	}
+
+	active := registry.get(ASKey{}).activeASPs()
+	if len(active) != 0 {
+		t.Fatalf("contextless AS active ASPs before activation = %v, want none", active)
+	}
+	applicationServer := registry.get(ASKey{})
+	applicationServer.mu.Lock()
+	_, leaked := applicationServer.asps[empty]
+	_, member := applicationServer.asps[authorized]
+	applicationServer.mu.Unlock()
+	if leaked {
+		t.Fatal("empty-authorized ASP joined the contextless AS")
+	}
+	if !member {
+		t.Fatal("legitimate contextless ASP did not join the contextless AS")
+	}
+}
+
 func TestDuplicateASPIdentifierUniquenessUsesAuthorizedApplicationServers(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	first, _ := asTestConn(t, registry, StateAspDown, 1, 2)

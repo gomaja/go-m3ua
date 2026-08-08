@@ -275,7 +275,6 @@ func (l *Listener) hasLocalRoutingContext(routingContext uint32) bool {
 					return true
 				}
 			}
-			return false
 		}
 	}
 	l.muConns.Lock()
@@ -284,8 +283,7 @@ func (l *Listener) hasLocalRoutingContext(routingContext uint32) bool {
 	if registry == nil {
 		return false
 	}
-	_, ok := registry.lookup(routingContext)
-	return ok
+	return len(registry.asKeysForRoutingContext(routingContext)) > 0
 }
 
 func restartEpochCovers(epoch *mtp3RestartEpoch, rangeValue DestinationRange) bool {
@@ -414,11 +412,15 @@ func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completio
 		if completion && rangeValue.State == DestinationUnavailable {
 			continue
 		}
-		var routingContext *uint32
-		if rangeValue.RoutingContextSet {
-			routingContext = &rangeValue.RoutingContext
+		scope := destinationKey{
+			networkAppearance:    rangeValue.NetworkAppearance,
+			networkAppearanceSet: rangeValue.NetworkAppearanceSet,
 		}
-		for _, target := range registry.activeSSNMTargets(routingContext) {
+		if rangeValue.RoutingContextSet {
+			scope.routingContext = rangeValue.RoutingContext
+			scope.routingContextSet = true
+		}
+		for _, target := range registry.activeSSNMTargets(scope) {
 			index, ok := indices[target.connection]
 			if !ok {
 				index = len(batches)

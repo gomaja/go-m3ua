@@ -1161,15 +1161,7 @@ func (c *Conn) lockServerApplicationServers(routingContexts []uint32) (func(), e
 		return func() {}, nil
 	}
 
-	unique := make(map[ASKey]struct{}, len(routingContexts))
-	ordered := make([]ASKey, 0, len(routingContexts))
-	for _, key := range c.asKeysForRoutingContexts(routingContexts) {
-		if _, exists := unique[key]; exists {
-			continue
-		}
-		unique[key] = struct{}{}
-		ordered = append(ordered, key)
-	}
+	ordered := c.asKeysForRoutingContexts(routingContexts)
 	sort.Slice(ordered, func(i, j int) bool { return compareASKey(ordered[i], ordered[j]) < 0 })
 
 	applicationServers := make([]*applicationServer, 0, len(ordered))
@@ -1489,6 +1481,9 @@ func (c *Conn) configuredRoutingContextParam() *params.Param {
 
 func (c *Conn) configuredASKeys() []ASKey {
 	if c == nil {
+		return nil
+	}
+	if c.hasExplicitlyEmptyASPAuthorization() {
 		return nil
 	}
 	return c.asKeysForRoutingContexts(c.configuredRoutingContexts())

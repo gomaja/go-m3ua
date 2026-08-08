@@ -80,3 +80,55 @@ func TestContextlessASRejectsIncompatibleTrafficModeForSameASKey(t *testing.T) {
 		t.Fatalf("second contextless ASP Active error = %v, want ErrUnsupportedTrafficMode", err)
 	}
 }
+
+func TestContextlessASAllowsDifferentNetworkAppearanceTrafficModes(t *testing.T) {
+	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+
+	first, _ := newTestConnWithContexts(t, StateAspInactive, modeServer)
+	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	first.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	first.as = registry
+	if err := first.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
+		t.Fatalf("first contextless ASP Active: %v", err)
+	}
+
+	second, _ := newTestConnWithContexts(t, StateAspInactive, modeServer)
+	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	second.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
+	second.as = registry
+	if err := second.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
+		t.Fatalf("second contextless ASP Active in another Network Appearance: %v", err)
+	}
+}
+
+func TestContextlessOverrideDisplacesOnlySameASKey(t *testing.T) {
+	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+
+	first, _ := newTestConnWithContexts(t, StateAspInactive, modeServer)
+	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	first.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	first.as = registry
+	if err := first.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
+		t.Fatalf("first contextless Override ASP Active: %v", err)
+	}
+	if err := first.handleStateUpdate(StateAspActive); err != nil {
+		t.Fatalf("first contextless Override state update: %v", err)
+	}
+
+	second, _ := newTestConnWithContexts(t, StateAspInactive, modeServer)
+	second.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	second.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	second.as = registry
+	if err := second.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
+		t.Fatalf("second contextless Override ASP Active: %v", err)
+	}
+
+	key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true}
+	got := registry.get(key).activeASPs()
+	if len(got) != 1 || got[0] != second {
+		t.Fatalf("contextless Override active ASPs = %v, want only second ASP", got)
+	}
+	if first.activeForASKey(key) {
+		t.Fatal("first ASP remained locally active after contextless Override displacement")
+	}
+}

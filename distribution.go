@@ -120,11 +120,14 @@ func (l *Listener) prepareDistributionData(registry *applicationServers, policy 
 		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", params.ErrInvalidType)
 	}
 
+	if err := validateDistributionNetworkAppearanceShape(owned.NetworkAppearance); err != nil {
+		return nil, nil, 0, ASKey{}, err
+	}
 	key, err := resolveDistributionRoutingContext(registry, policy, owned)
 	if err != nil {
 		return nil, nil, 0, ASKey{}, err
 	}
-	if err := validateDistributionNetworkAppearance(policy, owned.NetworkAppearance); err != nil {
+	if err := validateDistributionNetworkAppearance(registry, policy, key, owned.NetworkAppearance); err != nil {
 		return nil, nil, 0, ASKey{}, err
 	}
 
@@ -161,7 +164,7 @@ func resolveDistributionRoutingContext(registry *applicationServers, policy dist
 			return ASKey{}, ErrNoActiveASP
 		case 1:
 			data.RoutingContext = params.NewRoutingContext(configured[0])
-			return asKeyFromDistributionScope(policy, data.NetworkAppearance, configured[0]), nil
+			return resolveExplicitDistributionRoutingContext(registry, policy, data.NetworkAppearance, configured[0])
 		default:
 			return ASKey{}, ErrMissingRoutingContext
 		}
@@ -174,22 +177,66 @@ func resolveDistributionRoutingContext(registry *applicationServers, policy dist
 	}
 	routingContexts := data.RoutingContext.RoutingContexts()
 	rtCtx := routingContexts[0]
-	key := asKeyFromDistributionScope(policy, data.NetworkAppearance, rtCtx)
-	if len(configured) > 0 {
-		for _, candidate := range configured {
-			if candidate == rtCtx {
+	return resolveExplicitDistributionRoutingContext(registry, policy, data.NetworkAppearance, rtCtx)
+}
+
+func resolveExplicitDistributionRoutingContext(registry *applicationServers, policy distributionPolicy, networkAppearance *params.Param, rtCtx uint32) (ASKey, error) {
+	if networkAppearance == nil {
+		matches := registry.asKeysForRoutingContext(rtCtx)
+		switch len(matches) {
+		case 0:
+		case 1:
+			return matches[0], nil
+		default:
+			key := asKeyFromDistributionScope(policy, nil, rtCtx)
+			if _, ok := registry.lookup(key); ok || distributionScopeConfigured(policy, key) {
 				return key, nil
 			}
+			return ASKey{}, ErrInvalidNetworkAppearance
+		}
+
+		key := asKeyFromDistributionScope(policy, nil, rtCtx)
+		if distributionScopeConfigured(policy, key) {
+			return key, nil
 		}
 		return ASKey{}, NewInvalidRoutingContextError(rtCtx)
 	}
-	if _, ok := registry.lookup(key); !ok {
-		return ASKey{}, NewInvalidRoutingContextError(rtCtx)
+
+	key := asKeyFromDistributionScope(policy, networkAppearance, rtCtx)
+	if _, ok := registry.lookup(key); ok || distributionScopeConfigured(policy, key) {
+		return key, nil
 	}
-	return key, nil
+	if distributionRoutingContextKnown(registry, policy, rtCtx) {
+		return key, nil
+	}
+	return ASKey{}, NewInvalidRoutingContextError(rtCtx)
 }
 
-func validateDistributionNetworkAppearance(policy distributionPolicy, networkAppearance *params.Param) error {
+func distributionRoutingContextKnown(registry *applicationServers, policy distributionPolicy, rtCtx uint32) bool {
+	if distributionRoutingContextConfigured(policy, rtCtx) {
+		return true
+	}
+	return len(registry.asKeysForRoutingContext(rtCtx)) > 0
+}
+
+func distributionRoutingContextConfigured(policy distributionPolicy, rtCtx uint32) bool {
+	for _, configured := range policy.routingContexts {
+		if configured == rtCtx {
+			return true
+		}
+	}
+	return false
+}
+
+func distributionScopeConfigured(policy distributionPolicy, key ASKey) bool {
+	if !key.RoutingContextSet || !distributionRoutingContextConfigured(policy, key.RoutingContext) {
+		return false
+	}
+	appearance, set := appearanceOf(policy.networkAppearance)
+	return key.NetworkAppearanceSet == set && (!set || key.NetworkAppearance == appearance)
+}
+
+func validateDistributionNetworkAppearanceShape(networkAppearance *params.Param) error {
 	if networkAppearance == nil {
 		return nil
 	}
@@ -199,12 +246,18 @@ func validateDistributionNetworkAppearance(policy distributionPolicy, networkApp
 	if len(networkAppearance.Data) != 4 {
 		return fmt.Errorf("invalid DATA Network Appearance: %w", params.ErrInvalidLength)
 	}
-	if policy.networkAppearance == nil {
+	return nil
+}
+
+func validateDistributionNetworkAppearance(registry *applicationServers, policy distributionPolicy, key ASKey, networkAppearance *params.Param) error {
+	if networkAppearance == nil {
 		return nil
 	}
-	configured := policy.networkAppearance
-	if configured.Tag != params.NetworkAppearance || len(configured.Data) != 4 ||
-		configured.NetworkAppearance() != networkAppearance.NetworkAppearance() {
+	if _, ok := registry.lookup(key); ok || distributionScopeConfigured(policy, key) {
+		return nil
+	}
+	appearance, set := appearanceOf(policy.networkAppearance)
+	if !set || appearance != networkAppearance.NetworkAppearance() {
 		return NewInvalidNetworkAppearanceError(networkAppearance.NetworkAppearance())
 	}
 	return nil

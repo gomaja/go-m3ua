@@ -393,7 +393,7 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 		// traffic from the SGP within the AS."
 		//
 		// The ordering is Section 4.3.4.5's: the Notify follows the related Ack.
-		if len(servedContexts) > 0 {
+		if len(servedContexts) > 0 || contextlessServed {
 			c.overrideOtherASPs(aspActive, servedContexts)
 		}
 	}

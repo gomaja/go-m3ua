@@ -394,6 +394,56 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 			t.Fatalf("foreign-network DATA delivered %d messages", got)
 		}
 	})
+
+	t.Run("registered per-peer Network Appearance", func(t *testing.T) {
+		listener, _, first, firstSent := distributionFixtureForContexts(
+			t, params.TrafficModeLoadshare, []uint32{1}, nil,
+		)
+		first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+		first.cfg.RoutingContexts = params.NewRoutingContext(2)
+		first.noteRoutingContextsActive([]uint32{2})
+		first.setState(StateAspActive)
+		key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 2, RoutingContextSet: true}
+		applicationServer := listener.as.get(key)
+		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
+		applicationServer.setASPState(first, StateAspActive, time.Hour)
+		firstSent.reset()
+
+		data := distributionData(2, 1, "selected")
+		data.NetworkAppearance = params.NewNetworkAppearance(10)
+		result, err := listener.DistributeData(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Delivered != 1 || result.Queued {
+			t.Fatalf("distribution result = %#v, want one immediate delivery", result)
+		}
+		delivered := onlyData(t, firstSent.data())
+		if got := delivered.NetworkAppearance.NetworkAppearance(); got != 10 {
+			t.Fatalf("delivered Network Appearance = %d, want 10", got)
+		}
+		if got := delivered.RoutingContext.RoutingContext(); got != 2 {
+			t.Fatalf("delivered Routing Context = %d, want 2", got)
+		}
+	})
+
+	t.Run("unknown Network Appearance without configured default", func(t *testing.T) {
+		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+			config.NetworkAppearance = nil
+			config.RoutingContexts = nil
+		})
+		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		sent.reset()
+
+		data := distributionData(1, 1, "foreign network")
+		data.NetworkAppearance = params.NewNetworkAppearance(99)
+		if _, err := listener.DistributeData(data); !errors.Is(err, ErrInvalidNetworkAppearance) {
+			t.Fatalf("DistributeData() error = %v, want ErrInvalidNetworkAppearance", err)
+		}
+		if got := sent.dataCount(); got != 0 {
+			t.Fatalf("foreign-network DATA delivered %d messages", got)
+		}
+	})
 }
 
 func TestBroadcastFlowIdentifierAcceptsExactConfiguredLimit(t *testing.T) {

@@ -156,10 +156,8 @@ func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinati
 func newListener(config *ListenerConfig) *Listener {
 	listenerConfig := NewListenerConfig(nil)
 	if config != nil {
-		listenerConfig = &ListenerConfig{
-			DefaultConnConfig: snapshotConnConfig(config.DefaultConnConfig),
-			SelectConnConfig:  config.SelectConnConfig,
-		}
+		listenerConfig = NewListenerConfig(config.DefaultConnConfig)
+		listenerConfig.SelectConnConfig = config.SelectConnConfig
 	}
 	listener := &Listener{
 		Config:         listenerConfig.DefaultConnConfig,
@@ -829,11 +827,15 @@ func (l *Listener) SetNIFAvailable(available bool) {
 //	Error ("Refused - Management Blocking").
 func (l *Listener) SetASAvailable(rtCtx uint32, available bool) {
 	registry, _, _ := l.registry()
-	if key, _, ok, ambiguous := registry.lookupRoutingContext(rtCtx); ok && !ambiguous {
+	if key, _, ok, ambiguous := registry.lookupRoutingContext(rtCtx); ambiguous {
+		return
+	} else if ok {
 		l.SetASAvailableForAS(key, available)
 		return
 	}
-	if key, ok := l.singleTrackedASKeyForRoutingContext(rtCtx); ok {
+	if key, ok, ambiguous := l.singleTrackedASKeyForRoutingContext(rtCtx); ambiguous {
+		return
+	} else if ok {
 		l.SetASAvailableForAS(key, available)
 		return
 	}
@@ -876,7 +878,7 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
 	isolated.Wait()
 }
 
-func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, bool) {
+func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, bool, bool) {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
 
@@ -888,13 +890,13 @@ func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, boo
 				continue
 			}
 			if foundSet && key != found {
-				return ASKey{}, false
+				return ASKey{}, false, true
 			}
 			found = key
 			foundSet = true
 		}
 	}
-	return found, foundSet
+	return found, foundSet, false
 }
 
 func isolateNIFConnection(c *Conn) {

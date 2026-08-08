@@ -100,6 +100,33 @@ func TestListenerConfigSelectorErrorIsReturned(t *testing.T) {
 	}
 }
 
+func TestListenerConfigSelectorOnlyUsesDefaultConnConfigFallback(t *testing.T) {
+	selected := NewServerConfig(
+		&HeartbeatInfo{Enabled: false},
+		1, 2, 3, params.TrafficModeLoadshare, 10, 0,
+		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
+	)
+	listener := newListener(&ListenerConfig{
+		SelectConnConfig: func(AcceptInfo) (*ConnConfig, error) {
+			return selected, nil
+		},
+	})
+
+	if listener.Config == nil {
+		t.Fatal("selector-only ListenerConfig left Listener.Config nil")
+	}
+	if listener.listenerConfig.DefaultConnConfig == nil {
+		t.Fatal("selector-only ListenerConfig left DefaultConnConfig nil")
+	}
+	snapshot, err := listener.listenerConfig.connConfigForAccept(AcceptInfo{})
+	if err != nil {
+		t.Fatalf("connConfigForAccept: %v", err)
+	}
+	if got := snapshot.NetworkAppearance.NetworkAppearance(); got != 10 {
+		t.Fatalf("selected Network Appearance = %d, want 10", got)
+	}
+}
+
 func TestListenerConfigSelectorIsFrozenWhenListenerIsBuilt(t *testing.T) {
 	first := NewServerConfig(
 		&HeartbeatInfo{Enabled: false},

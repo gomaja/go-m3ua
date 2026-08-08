@@ -23,11 +23,14 @@ func TestListenerDestinationUpdatesNotifyOnlyConcernedActiveASPs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			listener, firstApplicationServer, first, firstSent := distributionFixtureForContexts(
+			listener, _, first, firstSent := distributionFixtureForContexts(
 				t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 			)
-			secondApplicationServer := listener.as.get(2)
 			second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1, 2)
+			first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			firstApplicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
+			secondApplicationServer := proactiveSSNMApplicationServer(listener, 7, 2)
 			first.noteRoutingContextsActive([]uint32{1})
 			first.setState(StateAspActive)
 			second.noteRoutingContextsActive([]uint32{2})
@@ -70,10 +73,12 @@ func TestListenerDestinationUpdatesNotifyOnlyConcernedActiveASPs(t *testing.T) {
 }
 
 func TestAllContextDestinationUpdateDeduplicatesAnASPAndNamesItsActiveScopes(t *testing.T) {
-	listener, firstApplicationServer, asp, sent := distributionFixtureForContexts(
+	listener, _, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 	)
-	secondApplicationServer := listener.as.get(2)
+	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	firstApplicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
+	secondApplicationServer := proactiveSSNMApplicationServer(listener, 7, 2)
 	asp.noteRoutingContextsActive([]uint32{1, 2})
 	asp.setState(StateAspActive)
 	firstApplicationServer.setASPState(asp, StateAspActive, time.Hour)
@@ -93,11 +98,78 @@ func TestAllContextDestinationUpdateDeduplicatesAnASPAndNamesItsActiveScopes(t *
 	}
 }
 
+func TestAllContextDestinationUpdateScopesTargetsByNetworkAppearance(t *testing.T) {
+	listener, _, first, firstSent := distributionFixtureForContexts(
+		t, params.TrafficModeLoadshare, []uint32{1}, nil,
+	)
+	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	first.noteRoutingContextsActive([]uint32{1})
+	first.setState(StateAspActive)
+	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	applicationServer10 := listener.as.get(key10)
+	applicationServer10.setTrafficMode(params.TrafficModeLoadshare)
+	applicationServer10.setASPState(first, StateAspActive, time.Hour)
+
+	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	second.noteRoutingContextsActive([]uint32{1})
+	second.setState(StateAspActive)
+	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	applicationServer20 := listener.as.get(key20)
+	applicationServer20.setTrafficMode(params.TrafficModeLoadshare)
+	applicationServer20.setASPState(second, StateAspActive, time.Hour)
+	firstSent.reset()
+	secondSent.reset()
+
+	if err := listener.ReportDestinationRangeForNetwork(10, 0x123456, 4, DestinationUnavailable); err != nil {
+		t.Fatalf("set destination state: %v", err)
+	}
+	if got := len(ssnmMessages(firstSent.snapshot())); got != 1 {
+		t.Fatalf("matching Network Appearance ASP received %d SSNM messages, want 1", got)
+	}
+	if got := len(ssnmMessages(secondSent.snapshot())); got != 0 {
+		t.Fatalf("foreign Network Appearance ASP received %d SSNM messages, want 0", got)
+	}
+}
+
+func TestAllContextDestinationUpdateDeduplicatesSameRoutingContextForOneASP(t *testing.T) {
+	listener, _, asp, sent := distributionFixtureForContexts(
+		t, params.TrafficModeLoadshare, []uint32{1}, nil,
+	)
+	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	asp.noteRoutingContextsActive([]uint32{1})
+	asp.setState(StateAspActive)
+	for _, key := range []ASKey{
+		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
+		{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
+	} {
+		applicationServer := listener.as.get(key)
+		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
+		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	}
+	sent.reset()
+
+	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(10, 1, 0x123456, 4, DestinationUnavailable); err != nil {
+		t.Fatalf("set destination state: %v", err)
+	}
+	got := ssnmMessages(sent.snapshot())
+	if len(got) != 1 {
+		t.Fatalf("ASP received %d SSNM messages, want 1", len(got))
+	}
+	_, routingContext, _ := ssnmScope(t, got[0])
+	if contexts := routingContext.RoutingContexts(); !equalTrafficModeContexts(contexts, []uint32{1}) {
+		t.Fatalf("DUNA Routing Contexts = %v, want one [1]", contexts)
+	}
+}
+
 func TestDestinationUpdateContinuesAfterOneASPWriteFails(t *testing.T) {
-	listener, applicationServer, first, _ := distributionFixture(
+	listener, _, first, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
 	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	first.noteRoutingContextsActive([]uint32{1})
 	first.setState(StateAspActive)
 	second.noteRoutingContextsActive([]uint32{1})
@@ -146,10 +218,13 @@ func TestDestinationUpdateRejectsUnknownStateAtomically(t *testing.T) {
 }
 
 func TestAcceptedConnDestinationUpdateUsesListenerWideBroadcast(t *testing.T) {
-	listener, applicationServer, first, firstSent := distributionFixture(
+	listener, _, first, firstSent := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
 	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	first.noteRoutingContextsActive([]uint32{1})
 	first.setState(StateAspActive)
 	second.noteRoutingContextsActive([]uint32{1})
@@ -178,20 +253,19 @@ func TestAcceptedConnDestinationUpdateUsesListenerWideBroadcast(t *testing.T) {
 }
 
 func TestDestinationSetterMethodCompatibility(t *testing.T) {
-	listener := new(Listener)
-	connection := new(Conn)
-	listenerSetter := listener.SetDestinationState
-	connectionSetter := connection.SetDestinationState
-	if listenerSetter == nil || connectionSetter == nil {
-		t.Fatal("destination setter method value is nil")
-	}
+	assertDestinationSetter := func(func(uint32, DestinationState)) {}
+	assertDestinationSetter(new(Listener).SetDestinationState)
+	assertDestinationSetter(new(Conn).SetDestinationState)
 }
 
 func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
-	listener, applicationServer, blocked, _ := distributionFixture(
+	listener, _, blocked, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
 	healthy, healthySent := addDistributionASP(t, listener, StateAspInactive, 1)
+	blocked.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	healthy.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	blocked.noteRoutingContextsActive([]uint32{1})
 	blocked.setState(StateAspActive)
 	healthy.noteRoutingContextsActive([]uint32{1})
@@ -238,9 +312,11 @@ func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
 }
 
 func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixture(
+	listener, _, asp, sent := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
+	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateAspActive)
 	applicationServer.setASPState(asp, StateAspActive, time.Hour)
@@ -279,9 +355,11 @@ func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
 }
 
 func TestProactiveSSNMQueueOverflowClosesAssociation(t *testing.T) {
-	listener, applicationServer, asp, _ := distributionFixture(
+	listener, _, asp, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
+	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateAspActive)
 	applicationServer.setASPState(asp, StateAspActive, time.Hour)
@@ -301,9 +379,11 @@ func TestProactiveSSNMQueueOverflowClosesAssociation(t *testing.T) {
 }
 
 func TestDestinationReportValidatesScopeBeforeConcurrentCommit(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixture(
+	listener, _, asp, sent := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
+	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateAspActive)
 	applicationServer.setASPState(asp, StateAspActive, time.Hour)
@@ -352,9 +432,11 @@ func TestDestinationReportValidatesScopeBeforeConcurrentCommit(t *testing.T) {
 }
 
 func TestQueuedProactiveSSNMPrecedesAspInactiveAck(t *testing.T) {
-	listener, applicationServer, asp, _ := distributionFixture(
+	listener, _, asp, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
+	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateAspActive)
 	applicationServer.setASPState(asp, StateAspActive, time.Hour)
@@ -417,6 +499,18 @@ func ssnmMessages(sent []messages.M3UA) []messages.M3UA {
 		}
 	}
 	return out
+}
+
+func proactiveSSNMApplicationServer(listener *Listener, networkAppearance, routingContext uint32) *applicationServer {
+	key := ASKey{
+		NetworkAppearance:    networkAppearance,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+	}
+	applicationServer := listener.as.get(key)
+	applicationServer.setTrafficMode(params.TrafficModeLoadshare)
+	return applicationServer
 }
 
 func sameSSNMKind(message messages.M3UA, kind any) bool {

@@ -352,7 +352,13 @@ func connsShareApplicationServer(first, second *Conn) bool {
 // get returns the AS for a traffic scope, creating it if this is the first ASP
 // to name it.
 func (r *applicationServers) get(scope any) *applicationServer {
-	key := r.normalizeASKey(scope)
+	if r == nil {
+		return closedApplicationServer(ASKey{})
+	}
+	key, ok := r.normalizeASKey(scope)
+	if !ok {
+		return closedApplicationServer(ASKey{})
+	}
 	legacyRoutingContext, legacy := legacyRoutingContextScope(scope)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -360,7 +366,7 @@ func (r *applicationServers) get(scope any) *applicationServer {
 		if as, ok := r.as[key]; ok {
 			return as
 		}
-		return &applicationServer{key: key, asps: make(map[*Conn]State), state: ASDown, closed: true}
+		return closedApplicationServer(key)
 	}
 	if r.as == nil {
 		r.as = make(map[ASKey]*applicationServer)
@@ -383,24 +389,32 @@ func (r *applicationServers) get(scope any) *applicationServer {
 	return as
 }
 
+func closedApplicationServer(key ASKey) *applicationServer {
+	return &applicationServer{key: key, asps: make(map[*Conn]State), state: ASDown, closed: true}
+}
+
 // lookup returns an existing AS without creating one. Local distribution uses it
 // so an invalid traffic scope cannot grow the registry merely by being queried.
 func (r *applicationServers) lookup(scope any) (*applicationServer, bool) {
-	key := r.normalizeASKey(scope)
-	legacyRoutingContext, legacy := legacyRoutingContextScope(scope)
 	if r == nil {
 		return nil, false
 	}
+	key, ok := r.normalizeASKey(scope)
+	if !ok {
+		return nil, false
+	}
+	legacyRoutingContext, legacy := legacyRoutingContextScope(scope)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return nil, false
 	}
 	if legacy {
-		if _, as, ok, ambiguous := r.lookupRoutingContextLocked(legacyRoutingContext); ok && !ambiguous {
+		_, as, ok, ambiguous := r.lookupRoutingContextLocked(legacyRoutingContext)
+		if ok && !ambiguous {
 			return as, true
 		}
-		if _, _, _, ambiguous := r.lookupRoutingContextLocked(legacyRoutingContext); ambiguous {
+		if ambiguous {
 			return nil, false
 		}
 	}
@@ -413,18 +427,24 @@ func legacyRoutingContextScope(scope any) (uint32, bool) {
 	case uint32:
 		return value, true
 	case int:
+		if value < 0 {
+			return 0, false
+		}
 		return uint32(value), true
 	default:
 		return 0, false
 	}
 }
 
-func (r *applicationServers) normalizeASKey(scope any) ASKey {
+func (r *applicationServers) normalizeASKey(scope any) (ASKey, bool) {
 	switch value := scope.(type) {
 	case uint32:
-		return r.routingContextASKey(value)
+		return r.routingContextASKey(value), true
 	case int:
-		return r.routingContextASKey(uint32(value))
+		if value < 0 {
+			return ASKey{}, false
+		}
+		return r.routingContextASKey(uint32(value)), true
 	default:
 		return normalizeASKey(scope)
 	}
@@ -466,11 +486,30 @@ func (r *applicationServers) lookupRoutingContextLocked(rtCtx uint32) (ASKey, *a
 	return foundKey, found, found != nil, false
 }
 
+func (r *applicationServers) asKeysForRoutingContext(rtCtx uint32) []ASKey {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	keys := make([]ASKey, 0)
+	for key := range r.as {
+		if key.RoutingContextSet && key.RoutingContext == rtCtx {
+			keys = append(keys, key)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
+	return keys
+}
+
 // activeSSNMTargets snapshots each currently active association and the ASes
 // a destination-state update concerns for it. A Conn serving several ASes is
 // returned once with a Routing Context list, so one SS7 event cannot be
 // duplicated merely because the ASP is active in several Application Servers.
-func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeSSNMTarget {
+func (r *applicationServers) activeSSNMTargets(scope destinationKey) []activeSSNMTarget {
 	if r == nil {
 		return nil
 	}
@@ -485,17 +524,8 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 		return nil
 	}
 	applicationServers := make([]scopedApplicationServer, 0, len(r.as))
-	if routingContext != nil {
-		for key, applicationServer := range r.as {
-			if key.RoutingContextSet && key.RoutingContext == *routingContext {
-				applicationServers = append(applicationServers, scopedApplicationServer{
-					key:               key,
-					applicationServer: applicationServer,
-				})
-			}
-		}
-	} else {
-		for key, applicationServer := range r.as {
+	for key, applicationServer := range r.as {
+		if asKeyMatchesDestinationScope(key, scope) {
 			applicationServers = append(applicationServers, scopedApplicationServer{
 				key:               key,
 				applicationServer: applicationServer,
@@ -509,6 +539,7 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 	})
 	targets := make([]activeSSNMTarget, 0)
 	targetIndex := make(map[*Conn]int)
+	seenContexts := make(map[*Conn]map[uint32]struct{})
 	for _, scoped := range applicationServers {
 		for _, connection := range scoped.applicationServer.activeASPs() {
 			if connection == nil || !connection.activeForASKey(scoped.key) {
@@ -519,8 +550,13 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 				index = len(targets)
 				targetIndex[connection] = index
 				targets = append(targets, activeSSNMTarget{connection: connection})
+				seenContexts[connection] = make(map[uint32]struct{})
 			}
 			if scoped.key.RoutingContextSet {
+				if _, duplicate := seenContexts[connection][scoped.key.RoutingContext]; duplicate {
+					continue
+				}
+				seenContexts[connection][scoped.key.RoutingContext] = struct{}{}
 				targets[index].routingContexts = append(
 					targets[index].routingContexts, scoped.key.RoutingContext,
 				)
@@ -528,6 +564,17 @@ func (r *applicationServers) activeSSNMTargets(routingContext *uint32) []activeS
 		}
 	}
 	return targets
+}
+
+func asKeyMatchesDestinationScope(key ASKey, scope destinationKey) bool {
+	if key.NetworkAppearanceSet != scope.networkAppearanceSet ||
+		key.NetworkAppearance != scope.networkAppearance {
+		return false
+	}
+	if scope.routingContextSet {
+		return key.RoutingContextSet && key.RoutingContext == scope.routingContext
+	}
+	return true
 }
 
 // sole returns the only registered AS, when omission of Routing Context is
@@ -710,7 +757,7 @@ func (r *applicationServers) agreeTrafficMode(rtCtxs []uint32, requested *params
 	keys := make([]ASKey, 0, len(rtCtxs))
 	seen := make(map[ASKey]struct{}, len(rtCtxs))
 	for _, rtCtx := range rtCtxs {
-		key := routingContextASKey(rtCtx)
+		key := r.routingContextASKey(rtCtx)
 		if _, duplicate := seen[key]; duplicate {
 			continue
 		}

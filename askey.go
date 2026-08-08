@@ -20,16 +20,19 @@ func routingContextASKey(routingContext uint32) ASKey {
 	return ASKey{RoutingContext: routingContext, RoutingContextSet: true}
 }
 
-func normalizeASKey(scope any) ASKey {
+func normalizeASKey(scope any) (ASKey, bool) {
 	switch value := scope.(type) {
 	case ASKey:
-		return value
+		return value, true
 	case uint32:
-		return routingContextASKey(value)
+		return routingContextASKey(value), true
 	case int:
-		return routingContextASKey(uint32(value))
+		if value < 0 {
+			return ASKey{}, false
+		}
+		return routingContextASKey(uint32(value)), true
 	default:
-		return ASKey{}
+		return ASKey{}, false
 	}
 }
 
