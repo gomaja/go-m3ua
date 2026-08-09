@@ -32,33 +32,32 @@ const (
 
 // BitLength returns the defined bit length of Variant in int.
 func (v Variant) BitLength() int {
-	switch v {
-	case Variant383, Variant437, Variant4343, Variant545, Variant662, Variant68, Variant77:
-		return 14
-	case Variant745:
-		return 16
-	case Variant888:
-		return 24
-	default:
+	_, bitLength, ok := v.bitFields()
+	if !ok {
 		return 0
 	}
+	return int(bitLength)
 }
 
-func (v Variant) slice() []uint32 {
+func (v Variant) bitFields() ([]uint32, uint32, bool) {
 	if v == VariantNone {
-		return nil
+		return nil, 0, false
 	}
-
 	ss := strings.Split(v.String(), "-")
-	s := make([]uint32, len(ss))
+	fields := make([]uint32, len(ss))
+	var total uint32
 	for i, digit := range ss {
-		d, err := strconv.Atoi(digit)
-		if err != nil {
-			return nil
+		width, err := strconv.ParseUint(digit, 10, 32)
+		if err != nil || width == 0 || width > 32 {
+			return nil, 0, false
 		}
-		s[i] = uint32(d)
+		if total > 32-uint32(width) {
+			return nil, 0, false
+		}
+		fields[i] = uint32(width)
+		total += fields[i]
 	}
-	return s
+	return fields, total, true
 }
 
 // String returns Variant in string representation.
@@ -75,11 +74,15 @@ type PointCode struct {
 
 // NewPointCode creates a new PointCode from raw(uint32) value.
 func NewPointCode(raw uint32, variant Variant) *PointCode {
+	_, bitLength, ok := variant.bitFields()
+	if !ok {
+		return nil
+	}
 	p := &PointCode{
 		raw: raw, form: variant,
 	}
 	// apply bitmask
-	p.raw &= (1 << uint32(variant.BitLength())) - 1
+	p.raw &= bitMask(bitLength)
 
 	var err error
 	p.formatted, err = p.ConvertTo(variant)
@@ -128,26 +131,27 @@ func (pc *PointCode) ConvertTo(variant Variant) (string, error) {
 }
 
 func convRawToStr(n uint32, v Variant) (string, error) {
-	if v == VariantNone {
+	fields, bitLength, ok := v.bitFields()
+	if !ok {
 		return "", errors.New("invalid Variant given")
 	}
 
-	s := v.slice()
-	r := uint32(v.BitLength())
-	n &= (1 << r) - 1 // apply bitmask
+	r := bitLength
+	n &= bitMask(r) // apply bitmask
 
-	d := make([]string, len(s))
-	for i, v := range s {
-		x := n & ((1 << r) - (1 << (r - v)))
-		r -= v
-		d[i] = strconv.Itoa(int(x >> r))
+	d := make([]string, len(fields))
+	for i, width := range fields {
+		r -= width
+		x := (n >> r) & bitMask(width)
+		d[i] = strconv.FormatUint(uint64(x), 10)
 	}
 
 	return strings.Join(d, "-"), nil
 }
 
 func convStrToRaw(f string, v Variant) (uint32, error) {
-	if v == VariantNone {
+	fields, bitLength, ok := v.bitFields()
+	if !ok {
 		return 0, errors.New("invalid Variant given")
 	}
 
@@ -155,23 +159,40 @@ func convStrToRaw(f string, v Variant) (uint32, error) {
 	if len(ds) == 0 {
 		return 0, fmt.Errorf("PC: %s is invalid; digits should be splitted with \"-\"", f)
 	}
-	s := v.slice()
-	if len(ds) != len(s) {
+	if len(ds) != len(fields) {
 		return 0, fmt.Errorf("PC: %s and Variant: %s doesn't match", f, v)
 	}
 
-	r := uint32(v.BitLength())
+	r := bitLength
 	var n uint32
 	for i, d := range ds {
-		x, err := strconv.Atoi(d)
+		x, err := parsePointCodeSegment(d, fields[i])
 		if err != nil {
 			return 0, err
 		}
-		r -= s[i]
-		n |= (uint32(x) << r)
+		r -= fields[i]
+		n |= x << r
 	}
 
 	return n, nil
+}
+
+func parsePointCodeSegment(digit string, width uint32) (uint32, error) {
+	value, err := strconv.ParseUint(digit, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	if value > uint64(bitMask(width)) {
+		return 0, fmt.Errorf("PC digit %q exceeds %d-bit field", digit, width)
+	}
+	return uint32(value), nil
+}
+
+func bitMask(width uint32) uint32 {
+	if width >= 32 {
+		return ^uint32(0)
+	}
+	return (uint32(1) << width) - 1
 }
 
 // String returns PointCode in formatted string.
