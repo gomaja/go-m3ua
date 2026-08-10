@@ -1,5 +1,5 @@
-github.com/gomaja/go-sctp v0.0.0-20260802071254-1c16b11d98d0 h1:YlZ6AS2HdT28yKgV80FQ/QrZlRIg9fcZDJUbgg/gFJE=
-github.com/gomaja/go-sctp v0.0.0-20260802071254-1c16b11d98d0/go.mod h1:xBckQOVp88sgf5+VXthsPEtTQiCdNy8RTuAV1RG9LBo=
+github.com/gomaja/go-sctp v1.0.0 h1:OoYufJ2X2POUjs2ZDfI+ooY3o9FB7v5iG6zNaHVProg=
+github.com/gomaja/go-sctp v1.0.0/go.mod h1:xBckQOVp88sgf5+VXthsPEtTQiCdNy8RTuAV1RG9LBo=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/pascaldekloe/goe v0.1.1 h1:Ah6WQ56rZONR3RW3qWa2NCZ6JAVvSpUcoLBaOmYFt9Q=
