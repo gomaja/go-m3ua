@@ -8,7 +8,6 @@ package pc
 import (
 	"errors"
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 )
@@ -182,9 +181,6 @@ func parsePointCodeSegment(digit string, width int) (uint32, error) {
 	value, err := strconv.ParseUint(digit, 10, 32)
 	if err != nil {
 		return 0, err
-	}
-	if value > math.MaxUint32 {
-		return 0, fmt.Errorf("PC digit %q exceeds uint32", digit)
 	}
 	if value > uint64(bitMask(width)) {
 		return 0, fmt.Errorf("PC digit %q exceeds %d-bit field", digit, width)
