@@ -115,16 +115,16 @@ jobs:
           cache: true
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.4
+        uses: github/codeql-action/init@v4.37.6
         with:
           languages: go
           queries: security-extended,security-and-quality
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v4.37.4
+        uses: github/codeql-action/autobuild@v4.37.6
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v4.37.4
+        uses: github/codeql-action/analyze@v4.37.6
         with:
           category: codeql-go
 
@@ -218,7 +218,7 @@ jobs:
 
       - name: Upload secret-detection SARIF
         if: always() && hashFiles('gitleaks.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4.37.4
+        uses: github/codeql-action/upload-sarif@v4.37.6
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
