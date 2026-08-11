@@ -36,25 +36,25 @@ func (v Variant) BitLength() int {
 	if !ok {
 		return 0
 	}
-	return int(bitLength)
+	return bitLength
 }
 
-func (v Variant) bitFields() ([]uint32, uint32, bool) {
+func (v Variant) bitFields() ([]int, int, bool) {
 	if v == VariantNone {
 		return nil, 0, false
 	}
 	ss := strings.Split(v.String(), "-")
-	fields := make([]uint32, len(ss))
-	var total uint32
+	fields := make([]int, len(ss))
+	var total int
 	for i, digit := range ss {
-		width, err := strconv.ParseUint(digit, 10, 32)
+		width, err := strconv.Atoi(digit)
 		if err != nil || width == 0 || width > 32 {
 			return nil, 0, false
 		}
-		if total > 32-uint32(width) {
+		if total > 32-width {
 			return nil, 0, false
 		}
-		fields[i] = uint32(width)
+		fields[i] = width
 		total += fields[i]
 	}
 	return fields, total, true
@@ -177,7 +177,7 @@ func convStrToRaw(f string, v Variant) (uint32, error) {
 	return n, nil
 }
 
-func parsePointCodeSegment(digit string, width uint32) (uint32, error) {
+func parsePointCodeSegment(digit string, width int) (uint32, error) {
 	value, err := strconv.ParseUint(digit, 10, 32)
 	if err != nil {
 		return 0, err
@@ -188,7 +188,7 @@ func parsePointCodeSegment(digit string, width uint32) (uint32, error) {
 	return uint32(value), nil
 }
 
-func bitMask(width uint32) uint32 {
+func bitMask(width int) uint32 {
 	if width >= 32 {
 		return ^uint32(0)
 	}
