@@ -46,7 +46,7 @@ func normalizeASKey(scope any) (ASKey, bool) {
 	}
 }
 
-func asKeyForConfigRoutingContext(config *Config, routingContext uint32) ASKey {
+func asKeyForConfigRoutingContext(config *AssociationConfig, routingContext uint32) ASKey {
 	key := routingContextASKey(routingContext)
 	if config != nil {
 		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
@@ -54,7 +54,7 @@ func asKeyForConfigRoutingContext(config *Config, routingContext uint32) ASKey {
 	return key
 }
 
-func contextlessASKeyForConfig(config *Config) ASKey {
+func contextlessASKeyForConfig(config *AssociationConfig) ASKey {
 	var key ASKey
 	if config != nil {
 		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)

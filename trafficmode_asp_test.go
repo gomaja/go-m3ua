@@ -8,8 +8,8 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func TestClientActivationSplitsRoutingContextsByTrafficMode(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2, 3)
+func TestASPActivationSplitsRoutingContextsByTrafficMode(t *testing.T) {
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2, 3)
 	asp.cfg.TrafficModeType = nil
 	asp.cfg.TrafficModes = map[uint32]uint32{
 		1: params.TrafficModeLoadshare,
@@ -55,8 +55,8 @@ func TestClientActivationSplitsRoutingContextsByTrafficMode(t *testing.T) {
 	}
 }
 
-func TestClientRejectsActiveAckWithWrongRequestedTrafficMode(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+func TestASPRejectsActiveAckWithWrongRequestedTrafficMode(t *testing.T) {
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 	asp.cfg.TrafficModeType = nil
 	asp.cfg.TrafficModes = map[uint32]uint32{
 		1: params.TrafficModeLoadshare,
@@ -96,8 +96,8 @@ func TestClientRejectsActiveAckWithWrongRequestedTrafficMode(t *testing.T) {
 	}
 }
 
-func TestClientRefusesInvalidConfiguredPerRoutingContextTrafficModeBeforeWriting(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1)
+func TestASPRefusesInvalidConfiguredPerRoutingContextTrafficModeBeforeWriting(t *testing.T) {
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1)
 	asp.cfg.TrafficModes = map[uint32]uint32{1: 99}
 	writes := 0
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
@@ -125,7 +125,7 @@ func equalTrafficModeContexts(left, right []uint32) bool {
 	return true
 }
 
-func hasRecordedRoutingContextAck(connection *Conn, routingContext uint32) bool {
+func hasRecordedRoutingContextAck(connection *Association, routingContext uint32) bool {
 	connection.muAckedRCs.RLock()
 	defer connection.muAckedRCs.RUnlock()
 	if !connection.ackedRCsScoped {

@@ -17,8 +17,8 @@ import (
 var (
 	ErrSCTPNotAlive      = errors.New("SCTP is no longer alive")
 	ErrInvalidState      = errors.New("invalid state")
-	ErrNotEstablished    = errors.New("M3UA Conn not established")
-	ErrFailedToEstablish = errors.New("failed to establish M3UA Conn")
+	ErrNotEstablished    = errors.New("M3UA association not established")
+	ErrFailedToEstablish = errors.New("failed to establish M3UA association")
 	ErrTimeout           = errors.New("timed out")
 	// ErrHeartbeatExpired reports expiry of the RFC 4666 M3UA T(beat) liveness
 	// timer. It is unrelated to SCTP HEARTBEAT path failure reporting.
@@ -76,13 +76,13 @@ var (
 	// parameter, which RFC 4666 Section 3.8.2 lists as Mandatory.
 	ErrMissingStatus = errors.New("notify without Status parameter")
 
-	// ErrAspIDRequired is used by an SGP in response to an ASP Up message that
+	// ErrASPIdentifierRequired is used by an SGP in response to an ASP Up message that
 	// does not contain an ASP Identifier parameter when the SGP requires one.
-	ErrAspIDRequired = errors.New("ASP Identifier required")
+	ErrASPIdentifierRequired = errors.New("ASP Identifier required")
 
-	// ErrInvalidAspIdentifier is returned when another ASP supporting the same
+	// ErrInvalidASPIdentifier is returned when another ASP supporting the same
 	// Application Server already claimed the identifier supplied in ASP Up.
-	ErrInvalidAspIdentifier = errors.New("non-unique ASP identifier")
+	ErrInvalidASPIdentifier = errors.New("non-unique ASP identifier")
 
 	// ErrUnsupportedTrafficMode is used by an SGP whose configured traffic
 	// handling mode is incompatible with the one a peer requested in ASP
@@ -99,7 +99,7 @@ var (
 	ErrMissingAffectedPointCode = errors.New("SSNM message without Affected Point Code parameter")
 
 	// ErrInvalidRoutingContext is used when a peer names a Routing Context
-	// this connection is not configured for, per RFC 4666 Section 3.8.1.
+	// this association is not configured for, per RFC 4666 Section 3.8.1.
 	// RoutingContextError matches it through errors.Is.
 	ErrInvalidRoutingContext = errors.New("invalid routing context")
 
@@ -110,13 +110,21 @@ var (
 	ErrInvalidNetworkAppearance = errors.New("invalid network appearance")
 
 	// ErrInitTimeout is used when one SCTP association attempt did not complete
-	// within Config.InitTimeout. Dial does not retry; the caller decides
+	// within AssociationConfig.InitTimeout. Dial does not retry; the caller decides
 	// whether to attempt again.
 	ErrInitTimeout = errors.New("SCTP association attempt timed out")
 
-	// ErrConnClosed is reported by Conn.Err when the association ended because
-	// the owner closed it, rather than through any failure.
-	ErrConnClosed = errors.New("connection closed by the local endpoint")
+	// ErrAssociationClosed is reported by Association.Err when the association
+	// ended because the owner closed it, rather than through any failure.
+	ErrAssociationClosed = errors.New("association closed by the local endpoint")
+
+	// ErrNilAssociationConfig reports a Dial without the immutable M3UA policy
+	// required to construct the Association.
+	ErrNilAssociationConfig = errors.New("nil M3UA AssociationConfig")
+
+	// ErrInvalidRoleConfiguration reports an AssociationConfig field that has
+	// no RFC 4666 meaning for the selected endpoint role.
+	ErrInvalidRoleConfiguration = errors.New("invalid M3UA role configuration")
 
 	// ErrMissingUserCause is used when a DUPU arrives without the User/Cause
 	// parameter, which RFC 4666 Section 3.4.5 lists as Mandatory.
@@ -186,10 +194,10 @@ var (
 	// through every T(ack) retry, so the peer is not completing the handshake.
 	ErrTAckExpired = errors.New("T(ack) expired: peer never acknowledged the request")
 
-	// ErrUnsupportedMode is used when a Conn holds a mode the state machine has
-	// no procedures for. Only client and server exist today; IPSP (RFC 4666
-	// Section 1.4.3.4) would add a third.
-	ErrUnsupportedMode = errors.New("unsupported M3UA mode")
+	// ErrUnsupportedRole reports a role for which the requested association
+	// operation has no protocol procedures. IPSP roles require an explicit
+	// exchange mode and are enabled by the IPSP API rather than guessed.
+	ErrUnsupportedRole = errors.New("unsupported M3UA role")
 )
 
 // InvalidVersionError is used if a message with an unsupported version is received.
@@ -428,7 +436,7 @@ func (e *NetworkAppearanceError) Is(target error) bool {
 }
 
 // NewInvalidRoutingContextError reports contexts a peer named that this
-// connection is not configured for.
+// association is not configured for.
 func NewInvalidRoutingContextError(rcs ...uint32) *RoutingContextError {
 	return &RoutingContextError{Code: params.ErrInvalidRoutingContext, Contexts: rcs}
 }
@@ -460,7 +468,7 @@ func (e *RoutingContextError) Is(target error) bool {
 	}
 }
 
-func (c *Conn) handleErrors(e error) error {
+func (c *Association) handleErrors(e error) error {
 	var res messages.M3UA
 	var InvalidVersionError *InvalidVersionError
 	if errors.As(e, &InvalidVersionError) {
@@ -555,13 +563,13 @@ func (c *Conn) handleErrors(e error) error {
 			nil, nil, nil, nil,
 		)
 	}
-	if errors.Is(e, ErrAspIDRequired) {
+	if errors.Is(e, ErrASPIdentifierRequired) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrAspIdentifierRequired),
 			nil, nil, nil, nil,
 		)
 	}
-	if errors.Is(e, ErrInvalidAspIdentifier) {
+	if errors.Is(e, ErrInvalidASPIdentifier) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrInvalidAspIdentifier),
 			nil, nil, nil, nil,

@@ -7,7 +7,8 @@ import (
 )
 
 // trafficModePolicy is the immutable traffic-handling policy resolved when a
-// Conn or Listener is constructed. Config is intentionally public and may be
+// Association or Listener is constructed. AssociationConfig is intentionally
+// public and may be
 // reused by callers, so protocol goroutines must not retain live reads of its
 // TrafficModeType Param or TrafficModes map.
 type trafficModePolicy struct {
@@ -16,7 +17,7 @@ type trafficModePolicy struct {
 	modes          map[uint32]uint32
 }
 
-func newTrafficModePolicy(config *Config) trafficModePolicy {
+func newTrafficModePolicy(config *AssociationConfig) trafficModePolicy {
 	policy := trafficModePolicy{}
 	if config == nil {
 		return policy
@@ -49,7 +50,7 @@ func (p trafficModePolicy) defaultParam() *params.Param {
 }
 
 // trafficModeSnapshot supplies a once-only fallback for package tests that
-// build Conn or Listener values directly. Production constructors freeze the
+// build Association or Listener values directly. Production constructors freeze the
 // snapshot before publishing either value.
 type trafficModeSnapshot struct {
 	once   sync.Once
@@ -62,7 +63,7 @@ func (s *trafficModeSnapshot) freeze(policy trafficModePolicy) {
 	})
 }
 
-func (s *trafficModeSnapshot) get(config *Config) trafficModePolicy {
+func (s *trafficModeSnapshot) get(config *AssociationConfig) trafficModePolicy {
 	s.once.Do(func() {
 		s.policy = newTrafficModePolicy(config)
 	})

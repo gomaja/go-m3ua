@@ -54,7 +54,7 @@ type broadcastFlowKey struct {
 }
 
 // DistributeData sends one DATA message to the ASPs serving its Application
-// Server. It applies Override, Loadshare, and Broadcast traffic modes, retains
+// Application Server. It applies Override, Loadshare, and Broadcast traffic modes, retains
 // traffic while the AS is AS-PENDING, and adds the Broadcast synchronization
 // marker RFC 4666 Section 4.3.4.3 requires after an ASP becomes active.
 //
@@ -68,7 +68,7 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 	l.muConns.Lock()
 	if l.closed {
 		l.muConns.Unlock()
-		return TrafficDistribution{}, ErrConnClosed
+		return TrafficDistribution{}, ErrAssociationClosed
 	}
 	registry := l.as
 	l.muConns.Unlock()
@@ -273,7 +273,7 @@ func asKeyFromDistributionScope(policy distributionPolicy, networkAppearance *pa
 	return key
 }
 
-func newDistributionPolicy(config *Config) distributionPolicy {
+func newDistributionPolicy(config *AssociationConfig) distributionPolicy {
 	policy := distributionPolicy{
 		messageLimit:                 DefaultRecoveryQueueMessages,
 		byteLimit:                    DefaultRecoveryQueueBytes,
@@ -325,7 +325,7 @@ func (as *applicationServer) distribute(data *messages.Data, protocolData *param
 	as.mu.Lock()
 	if as.closed {
 		as.mu.Unlock()
-		return TrafficDistribution{}, ErrConnClosed
+		return TrafficDistribution{}, ErrAssociationClosed
 	}
 	if as.state == ASPending || as.draining || as.activeSending || (as.state == ASActive && len(as.recoveryQueue) > 0) {
 		startDrain, err := as.enqueueRecoveryLocked(data, flow, encodedSize, messageLimit, byteLimit)
@@ -360,7 +360,7 @@ func (as *applicationServer) distribute(data *messages.Data, protocolData *param
 		as.activeSending = false
 		as.mu.Unlock()
 		as.deliveryMu.Unlock()
-		return TrafficDistribution{}, ErrConnClosed
+		return TrafficDistribution{}, ErrAssociationClosed
 	}
 	if as.state == ASPending || as.draining || (as.state == ASActive && len(as.recoveryQueue) > 0) {
 		as.activeSending = false
@@ -465,26 +465,26 @@ func (as *applicationServer) deliverAttemptLocked(
 	data *messages.Data,
 	protocolData *params.ProtocolDataPayload,
 	flow broadcastFlowKey,
-	broadcastTargets []*Conn,
+	broadcastTargets []*Association,
 	broadcastTargetsSet bool,
 	epoch uint64,
 	tagged bool,
-) (TrafficDistribution, []*Conn, bool, uint64, bool, error) {
+) (TrafficDistribution, []*Association, bool, uint64, bool, error) {
 	as.mu.Lock()
 	broadcast := as.trafficMode == params.TrafficModeBroadcast
 	var (
-		targets []*Conn
+		targets []*Association
 		err     error
 	)
 	if broadcastTargetsSet {
-		targets = make([]*Conn, 0, len(broadcastTargets))
+		targets = make([]*Association, 0, len(broadcastTargets))
 		for _, target := range broadcastTargets {
-			if as.asps[target] == StateAspActive {
+			if as.asps[target] == StateASPActive {
 				targets = append(targets, target)
 			}
 		}
 	} else {
-		targets, err = as.targetsLocked(protocolData.SignalingLinkSelection)
+		targets, err = as.targetsLocked(protocolData.SignallingLinkSelection)
 		if err == nil {
 			epoch = as.broadcastEpoch
 			if broadcast && epoch != 0 && as.broadcastTagged[flow] != epoch {
@@ -500,7 +500,7 @@ func (as *applicationServer) deliverAttemptLocked(
 	}
 
 	delivered := 0
-	failed := make([]*Conn, 0, len(targets))
+	failed := make([]*Association, 0, len(targets))
 	var deliveryErrors []error
 	for _, target := range targets {
 		message := copyData(data)
@@ -539,7 +539,7 @@ func dataBroadcastFlowKey(data *messages.Data, protocolData *params.ProtocolData
 		destinationPointCode: protocolData.DestinationPointCode,
 		serviceIndicator:     protocolData.ServiceIndicator,
 		networkIndicator:     protocolData.NetworkIndicator,
-		signalingLink:        protocolData.SignalingLinkSelection,
+		signalingLink:        protocolData.SignallingLinkSelection,
 	}
 	if data.NetworkAppearance != nil {
 		key.networkAppearance = data.NetworkAppearance.NetworkAppearance()
@@ -571,30 +571,30 @@ func classifyBroadcastFlow(policy distributionPolicy, data *messages.Data, proto
 	return key, nil
 }
 
-func (as *applicationServer) targetsLocked(sls uint8) ([]*Conn, error) {
+func (as *applicationServer) targetsLocked(sls uint8) ([]*Association, error) {
 	active := as.active
 	if len(active) == 0 {
 		return nil, ErrNoActiveASP
 	}
 	switch as.trafficMode {
 	case params.TrafficModeBroadcast:
-		return append([]*Conn(nil), active...), nil
+		return append([]*Association(nil), active...), nil
 	case params.TrafficModeOverride:
 		return active[:1], nil
 	case 0, params.TrafficModeLoadshare:
-		return []*Conn{active[int(sls)%len(active)]}, nil
+		return []*Association{active[int(sls)%len(active)]}, nil
 	default:
 		return nil, ErrUnsupportedTrafficMode
 	}
 }
 
-func (as *applicationServer) activeASPsLocked() []*Conn {
-	return append([]*Conn(nil), as.active...)
+func (as *applicationServer) activeASPsLocked() []*Association {
+	return append([]*Association(nil), as.active...)
 }
 
 func (as *applicationServer) hasActiveASPLocked() bool {
 	for _, state := range as.asps {
-		if state == StateAspActive {
+		if state == StateASPActive {
 			return true
 		}
 	}

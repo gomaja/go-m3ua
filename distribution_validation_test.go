@@ -87,7 +87,7 @@ func TestDistributeDataRejectsMalformedKnownParameterLengths(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-			applicationServer.setASPState(asp, StateAspActive, time.Hour)
+			applicationServer.setASPState(asp, StateASPActive, time.Hour)
 			sent.reset()
 
 			data := distributionData(1, 1, "payload")
@@ -144,7 +144,7 @@ func TestDistributeDataRejectsWrongKnownParameterTypes(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-			applicationServer.setASPState(asp, StateAspActive, time.Hour)
+			applicationServer.setASPState(asp, StateASPActive, time.Hour)
 			sent.reset()
 
 			data := distributionData(1, 1, "payload")
@@ -207,7 +207,7 @@ func TestDistributeDataRejectsInvalidEnvelopeAndDuplicateKnownParameters(t *test
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-			applicationServer.setASPState(asp, StateAspActive, time.Hour)
+			applicationServer.setASPState(asp, StateASPActive, time.Hour)
 			sent.reset()
 
 			_, err := listener.DistributeData(test.data)
@@ -240,7 +240,7 @@ func TestDistributeDataAcceptsProtocolDataLengthBoundaries(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-			applicationServer.setASPState(asp, StateAspActive, time.Hour)
+			applicationServer.setASPState(asp, StateASPActive, time.Hour)
 			sent.reset()
 
 			data := distributionData(1, 1, "")
@@ -271,7 +271,7 @@ func TestDistributeDataAcceptsProtocolDataLengthBoundaries(t *testing.T) {
 func TestDistributeDataResolvesAndValidatesRoutingContext(t *testing.T) {
 	t.Run("omitted with one configured AS", func(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		data := distributionData(1, 1, "implicit")
@@ -291,7 +291,7 @@ func TestDistributeDataResolvesAndValidatesRoutingContext(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixtureForContexts(
 			t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 		)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		data := distributionData(1, 1, "ambiguous")
@@ -306,7 +306,7 @@ func TestDistributeDataResolvesAndValidatesRoutingContext(t *testing.T) {
 
 	t.Run("explicit unconfigured AS", func(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		if _, err := listener.DistributeData(distributionData(99, 1, "foreign")); !errors.Is(err, ErrInvalidRoutingContext) {
@@ -323,10 +323,10 @@ func TestDistributeDataResolvesAndValidatesRoutingContext(t *testing.T) {
 	})
 
 	t.Run("omitted with one registered AS and no Config parameter", func(t *testing.T) {
-		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 			config.RoutingContexts = nil
 		})
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		data := distributionData(1, 1, "registered")
@@ -343,7 +343,7 @@ func TestDistributeDataResolvesAndValidatesRoutingContext(t *testing.T) {
 func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *testing.T) {
 	t.Run("matching values", func(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		data := distributionData(1, 1, "matching")
@@ -362,7 +362,7 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 
 	t.Run("omitted optional Network Appearance", func(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		data := distributionData(1, 1, "omitted")
@@ -377,7 +377,7 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 
 	t.Run("unconfigured value", func(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		data := distributionData(1, 1, "foreign network")
@@ -402,11 +402,11 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 		first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 		first.cfg.RoutingContexts = params.NewRoutingContext(2)
 		first.noteRoutingContextsActive([]uint32{2})
-		first.setState(StateAspActive)
+		first.setState(StateASPActive)
 		key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 2, RoutingContextSet: true}
 		applicationServer := listener.as.get(key)
 		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
-		applicationServer.setASPState(first, StateAspActive, time.Hour)
+		applicationServer.setASPState(first, StateASPActive, time.Hour)
 		firstSent.reset()
 
 		data := distributionData(2, 1, "selected")
@@ -428,11 +428,11 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 	})
 
 	t.Run("unknown Network Appearance without configured default", func(t *testing.T) {
-		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 			config.NetworkAppearance = nil
 			config.RoutingContexts = nil
 		})
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
 
 		data := distributionData(1, 1, "foreign network")
@@ -447,13 +447,13 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 }
 
 func TestBroadcastFlowIdentifierAcceptsExactConfiguredLimit(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
 		config.BroadcastFlowIdentifierBytes = 4
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			return "1234", nil
 		}
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	if _, err := listener.DistributeData(distributionData(1, 1, "exact boundary")); err != nil {
@@ -466,7 +466,7 @@ func TestBroadcastFlowIdentifierAcceptsExactConfiguredLimit(t *testing.T) {
 
 func TestDistributeDataOwnsAllCallerParametersAndUnknownExtensions(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	unknownValue := []byte{0x11, 0x22, 0x33}
@@ -516,9 +516,9 @@ func TestDistributeDataOwnsAllCallerParametersAndUnknownExtensions(t *testing.T)
 
 func TestBroadcastRecipientsReceiveIsolatedDataCopies(t *testing.T) {
 	listener, applicationServer, first, _ := distributionFixture(t, params.TrafficModeBroadcast)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 	secondSent.reset()
 
 	var firstCopy *messages.Data
@@ -567,17 +567,17 @@ func TestBroadcastRecipientsReceiveIsolatedDataCopies(t *testing.T) {
 
 func TestDistributionPolicyDoesNotRaceConcurrentConfigMutation(t *testing.T) {
 	var classifierCalls atomic.Int32
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			classifierCalls.Add(1)
 			return "snapshotted", nil
 		}
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
-	configuredRoutingContexts := listener.Config.RoutingContexts
-	configuredNetworkAppearance := listener.Config.NetworkAppearance
+	configuredRoutingContexts := listener.AssociationConfig.RoutingContexts
+	configuredNetworkAppearance := listener.AssociationConfig.NetworkAppearance
 	stop := make(chan struct{})
 	var mutations sync.WaitGroup
 	mutations.Add(1)
@@ -591,13 +591,13 @@ func TestDistributionPolicyDoesNotRaceConcurrentConfigMutation(t *testing.T) {
 			}
 			configuredRoutingContexts.Data[3] = byte(2 + iteration%200)
 			configuredNetworkAppearance.Data[3] = byte(2 + iteration%200)
-			listener.Config.RoutingContexts = params.NewRoutingContext(uint32(2 + iteration%200))
-			listener.Config.NetworkAppearance = params.NewNetworkAppearance(uint32(2 + iteration%200))
-			listener.Config.RecoveryQueueMessages = iteration + 1
-			listener.Config.RecoveryQueueBytes = iteration + 1
-			listener.Config.BroadcastFlowCacheEntries = iteration + 1
-			listener.Config.BroadcastFlowIdentifierBytes = iteration + 1
-			listener.Config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
+			listener.AssociationConfig.RoutingContexts = params.NewRoutingContext(uint32(2 + iteration%200))
+			listener.AssociationConfig.NetworkAppearance = params.NewNetworkAppearance(uint32(2 + iteration%200))
+			listener.AssociationConfig.RecoveryQueueMessages = iteration + 1
+			listener.AssociationConfig.RecoveryQueueBytes = iteration + 1
+			listener.AssociationConfig.BroadcastFlowCacheEntries = iteration + 1
+			listener.AssociationConfig.BroadcastFlowIdentifierBytes = iteration + 1
+			listener.AssociationConfig.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 				return "live Config callback must not run", errors.New("live Config callback ran")
 			}
 		}
@@ -638,13 +638,13 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 		if len(value) > int(^uint16(0)) {
 			t.Skip()
 		}
-		config := NewServerConfig(
+		config := newSGPAssociationConfigForTest(
 			&HeartbeatInfo{Enabled: false}, 1, 2, 0, params.TrafficModeLoadshare, 0, 0,
 			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
 		)
 		registry := newApplicationServers(time.Hour, config)
 		registry.get(1)
-		listener := &Listener{Config: config, as: registry}
+		listener := &Listener{AssociationConfig: config, as: registry}
 		data := distributionData(1, 1, "payload")
 		data.CorrelationID = params.NewCorrelationID(1)
 

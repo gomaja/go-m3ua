@@ -97,7 +97,7 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 	closed := l.closed
 	l.muConns.Unlock()
 	if closed {
-		return nil, ErrConnClosed
+		return nil, ErrAssociationClosed
 	}
 
 	registry.mu.Lock()
@@ -250,8 +250,8 @@ func (l *Listener) prepareLocalDestinationRange(rangeValue DestinationRange) (De
 	if !validDestinationState(rangeValue.State) {
 		return DestinationRange{}, fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
 	}
-	if !rangeValue.NetworkAppearanceSet && l.Config != nil {
-		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(l.Config.NetworkAppearance)
+	if !rangeValue.NetworkAppearanceSet && l.AssociationConfig != nil {
+		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(l.AssociationConfig.NetworkAppearance)
 	}
 	rangeValue = normalizeDestinationRange(rangeValue)
 	if !rangeValue.RoutingContextSet {
@@ -267,8 +267,8 @@ func (l *Listener) hasLocalRoutingContext(routingContext uint32) bool {
 	if l == nil {
 		return false
 	}
-	if l.Config != nil && l.Config.RoutingContexts != nil {
-		configured := l.Config.RoutingContexts.RoutingContexts()
+	if l.AssociationConfig != nil && l.AssociationConfig.RoutingContexts != nil {
+		configured := l.AssociationConfig.RoutingContexts.RoutingContexts()
 		if len(configured) > 0 {
 			for _, candidate := range configured {
 				if candidate == routingContext {
@@ -320,11 +320,10 @@ func destinationRangesOverlap(first, second DestinationRange) bool {
 		destinationRangeCovers(second, first.PointCode, first.Mask)
 }
 
-func (l *Listener) restartForcesUnavailable(scope destinationKey, pointCode uint32, mask uint8) bool {
-	if l == nil {
+func restartForcesUnavailable(registry *mtp3RestartRegistry, scope destinationKey, pointCode uint32, mask uint8) bool {
+	if registry == nil {
 		return false
 	}
-	registry := &l.mtp3Restarts
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	query := DestinationRange{
@@ -345,11 +344,10 @@ func (l *Listener) restartForcesUnavailable(scope destinationKey, pointCode uint
 	return false
 }
 
-func (l *Listener) writeMTP3RestartStatusBeforeAck(connection *Conn, served []uint32) error {
-	if l == nil || connection == nil || len(served) == 0 {
+func writeMTP3RestartStatusBeforeAck(registry *mtp3RestartRegistry, association *Association, served []uint32) error {
+	if registry == nil || association == nil || len(served) == 0 {
 		return nil
 	}
-	registry := &l.mtp3Restarts
 	registry.procedureMu.RLock()
 	defer registry.procedureMu.RUnlock()
 	registry.mu.Lock()
@@ -378,7 +376,7 @@ func (l *Listener) writeMTP3RestartStatusBeforeAck(connection *Conn, served []ui
 			rangeValue, contexts, DestinationUnavailable, false,
 		)...)
 	}
-	return connection.writeMandatoryControls(messagesToWrite, false, true)
+	return association.writeMandatoryControls(messagesToWrite, false, true)
 }
 
 func containsRoutingContext(routingContexts []uint32, want uint32) bool {
@@ -402,12 +400,12 @@ func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completio
 	}
 
 	type batch struct {
-		connection *Conn
-		messages   []messages.M3UA
-		contexts   []uint32
+		association *Association
+		messages    []messages.M3UA
+		contexts    []uint32
 	}
 	batches := make([]batch, 0)
-	indices := make(map[*Conn]int)
+	indices := make(map[*Association]int)
 	for _, rangeValue := range ranges {
 		if completion && rangeValue.State == DestinationUnavailable {
 			continue
@@ -421,11 +419,11 @@ func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completio
 			scope.routingContextSet = true
 		}
 		for _, target := range registry.activeSSNMTargets(scope) {
-			index, ok := indices[target.connection]
+			index, ok := indices[target.association]
 			if !ok {
 				index = len(batches)
-				indices[target.connection] = index
-				batches = append(batches, batch{connection: target.connection})
+				indices[target.association] = index
+				batches = append(batches, batch{association: target.association})
 			}
 			batches[index].contexts = append([]uint32(nil), target.routingContexts...)
 			if abateCongestion {
@@ -445,7 +443,7 @@ func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completio
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			errorsByBatch[index] = batches[index].connection.writeMandatoryControls(
+			errorsByBatch[index] = batches[index].association.writeMandatoryControls(
 				batches[index].messages, false, wait,
 			)
 		}()

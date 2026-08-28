@@ -30,15 +30,15 @@ var scopedNotifyStatuses = []uint32{
 func TestContextlessNotifyUsesConfiguredScopeForEveryDefinedStatus(t *testing.T) {
 	for _, status := range scopedNotifyStatuses {
 		t.Run(notifyStatusName(status), func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 10, 20)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 10, 20)
 
 			err := conn.handleNotify(messages.NewNotify(
 				params.NewStatus(status), nil, nil, nil))
 			if err != nil {
 				t.Fatalf("handleNotify: %v", err)
 			}
-			if got := conn.State(); got != StateAspActive {
-				t.Errorf("state = %v after advisory handler, want %v", got, StateAspActive)
+			if got := conn.State(); got != StateASPActive {
+				t.Errorf("state = %v after advisory handler, want %v", got, StateASPActive)
 			}
 			indication := <-conn.ManagementIndications()
 			if indication.RoutingContextSet {
@@ -59,7 +59,7 @@ func TestContextlessNotifyUsesConfiguredScopeForEveryDefinedStatus(t *testing.T)
 func TestNotifyPreservesEveryExplicitRoutingContext(t *testing.T) {
 	for _, status := range scopedNotifyStatuses {
 		t.Run(notifyStatusName(status), func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 10, 20, 30)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 10, 20, 30)
 			routing := params.NewRoutingContext(20, 10)
 
 			if err := conn.handleNotify(messages.NewNotify(
@@ -84,7 +84,7 @@ func TestNotifyPreservesEveryExplicitRoutingContext(t *testing.T) {
 }
 
 func TestForeignNotifyScopeIsRejectedAtomicallyAndQuoted(t *testing.T) {
-	conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	raw, err := messages.NewNotify(
 		params.NewStatus(params.AlternateAspActive),
 		params.NewAspIdentifier(7), params.NewRoutingContext(1, 99, 2, 100), nil,
@@ -110,8 +110,8 @@ func TestForeignNotifyScopeIsRejectedAtomicallyAndQuoted(t *testing.T) {
 	default:
 		t.Fatal("rejected NTFY published no state result")
 	}
-	if got := conn.State(); got != StateAspActive {
-		t.Errorf("state = %v after rejected override, want %v", got, StateAspActive)
+	if got := conn.State(); got != StateASPActive {
+		t.Errorf("state = %v after rejected override, want %v", got, StateASPActive)
 	}
 	for _, routingContext := range []uint32{1, 2} {
 		if conn.routingContextOverridden(routingContext) {
@@ -136,7 +136,7 @@ func TestForeignNotifyScopeIsRejectedAtomicallyAndQuoted(t *testing.T) {
 }
 
 func TestEveryExplicitNotifyScopeIsInvalidWithoutConfiguredMembership(t *testing.T) {
-	conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient)
+	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP)
 	conn.handleSignals(context.Background(), messages.NewNotify(
 		params.NewStatus(params.AspFailure), params.NewAspIdentifier(7),
 		params.NewRoutingContext(99, 100), nil))
@@ -166,7 +166,7 @@ func TestEveryExplicitNotifyScopeIsInvalidWithoutConfiguredMembership(t *testing
 }
 
 func TestContextlessMultiASOverrideUsesConfiguredScopeFromTheWire(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	raw, err := messages.NewNotify(
 		params.NewStatus(params.AlternateAspActive), params.NewAspIdentifier(7), nil, nil,
 	).MarshalBinary()
@@ -180,8 +180,8 @@ func TestContextlessMultiASOverrideUsesConfiguredScopeFromTheWire(t *testing.T) 
 	}
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspInactive {
-			t.Errorf("published state = %v, want %v", got, StateAspInactive)
+		if got != StateASPInactive {
+			t.Errorf("published state = %v, want %v", got, StateASPInactive)
 		}
 	default:
 		t.Fatal("accepted override published no state result")
@@ -196,7 +196,7 @@ func TestContextlessMultiASOverrideUsesConfiguredScopeFromTheWire(t *testing.T) 
 }
 
 func TestContextlessNotifyIsAcceptedFromTheWire(t *testing.T) {
-	conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient)
+	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP)
 	raw, err := messages.NewNotify(
 		params.NewStatus(params.AspFailure), params.NewAspIdentifier(7), nil, nil,
 	).MarshalBinary()
@@ -208,8 +208,8 @@ func TestContextlessNotifyIsAcceptedFromTheWire(t *testing.T) {
 	if err := firstErr(conn); err != nil {
 		t.Fatalf("contextless wire NTFY was rejected: %v", err)
 	}
-	if got := conn.State(); got != StateAspActive {
-		t.Errorf("state = %v after contextless wire NTFY, want %v", got, StateAspActive)
+	if got := conn.State(); got != StateASPActive {
+		t.Errorf("state = %v after contextless wire NTFY, want %v", got, StateASPActive)
 	}
 	select {
 	case got := <-conn.stateChan:
@@ -242,7 +242,7 @@ func TestContextlessNotifyIsAcceptedFromTheWire(t *testing.T) {
 func TestMalformedNotifyRoutingContextIsRejectedFromTheWire(t *testing.T) {
 	for _, size := range []int{0, 1, 2, 3, 5, 6, 7, 9} {
 		t.Run(string(rune('0'+size))+" value octets", func(t *testing.T) {
-			conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+			conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 			raw := rawNotifyWithRoutingContextValue(t, bytes.Repeat([]byte{0xa5}, size))
 
 			conn.dispatchRaw(context.Background(), inbound{data: raw, ppid: M3UAPPID})
@@ -254,8 +254,8 @@ func TestMalformedNotifyRoutingContextIsRejectedFromTheWire(t *testing.T) {
 			if fault.Code != params.ErrParameterFieldError {
 				t.Errorf("fault code = %#x, want Parameter Field Error", fault.Code)
 			}
-			if got := conn.State(); got != StateAspActive {
-				t.Errorf("state = %v after malformed NTFY, want %v", got, StateAspActive)
+			if got := conn.State(); got != StateASPActive {
+				t.Errorf("state = %v after malformed NTFY, want %v", got, StateASPActive)
 			}
 			if len(conn.stateChan) != 0 {
 				t.Error("a NTFY rejected by the decoder published a handler state")
@@ -298,7 +298,7 @@ func FuzzNotifyRoutingContextScope(f *testing.F) {
 		if routingMode&0x80 != 0 {
 			configured = nil
 		}
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, configured...)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, configured...)
 		status := scopedNotifyStatuses[int(statusIndex)%len(scopedNotifyStatuses)]
 
 		var routing *params.Param
@@ -344,8 +344,8 @@ func FuzzNotifyRoutingContextScope(f *testing.F) {
 			}
 		}
 
-		if got := conn.State(); got != StateAspActive {
-			t.Errorf("state = %v after handleNotify, want %v", got, StateAspActive)
+		if got := conn.State(); got != StateASPActive {
+			t.Errorf("state = %v after handleNotify, want %v", got, StateASPActive)
 		}
 		if err != nil && len(conn.mgmtChan) != 0 {
 			t.Error("a rejected NTFY reached Layer Management")

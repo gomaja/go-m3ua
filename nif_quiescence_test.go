@@ -20,11 +20,11 @@ import (
 // write escape after that Ack.
 func TestPartialNIFIsolationWaitsForScopedDirectDataBeforeAspInactiveAck(t *testing.T) {
 	listener, applicationServer, asp, _ := distributionFixture(t, params.TrafficModeLoadshare)
-	listener.conns = map[*Conn]struct{}{asp: {}}
+	listener.conns = map[*Association]struct{}{asp: {}}
 	asp.listener = listener
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})
@@ -97,12 +97,12 @@ func TestPartialNIFIsolationWaitsForScopedDirectDataBeforeAspInactiveAck(t *test
 // dedicated connection with no Routing Context. Its ASP Down Ack has the same
 // halt-before-Ack ordering requirement as the scoped partial-failure path.
 func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.T) {
-	asp, _ := newTestConn(t, StateAspActive, modeServer)
+	asp, _ := newTestConn(t, StateASPActive, RoleSGP)
 	asp.maxMessageStreamID = 4
 	asp.cfg.RoutingContexts = nil
 	listener := &Listener{
-		Config: asp.cfg,
-		conns:  map[*Conn]struct{}{asp: {}},
+		AssociationConfig: asp.cfg,
+		conns:             map[*Association]struct{}{asp: {}},
 	}
 	asp.listener = listener
 

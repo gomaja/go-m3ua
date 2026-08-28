@@ -10,8 +10,8 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-func TestListenerConfigSelectsAndSnapshotsConnConfig(t *testing.T) {
-	selected := NewServerConfig(
+func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
+	selected := newSGPAssociationConfigForTest(
 		NewHeartbeatInfo(time.Second, 2*time.Second, []byte("beat")),
 		1, 2, 3, params.TrafficModeLoadshare, 10, 11,
 		[]uint32{7}, params.ServiceIndSCCP, 1, 2, 3,
@@ -22,19 +22,19 @@ func TestListenerConfigSelectsAndSnapshotsConnConfig(t *testing.T) {
 	selected.TAckRetries = 4
 	selected.EstablishTimeout = 3 * time.Second
 	selected.TrafficModes = map[uint32]uint32{7: params.TrafficModeOverride}
-	selected.SetSackConfig(10, 1)
-	selected.SetNoDelayConfig(true)
+	selected.SetSCTPSACK(10, 1)
+	selected.SetSCTPNoDelay(true)
 
-	listenerConfig := NewListenerConfig(NewServerConfig(
+	listenerConfig := NewListenerConfig(newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		1, 2, 3, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
 	))
-	listenerConfig.SelectConnConfig = func(AcceptInfo) (*ConnConfig, error) {
+	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
 		return selected, nil
 	}
 
-	snapshot, err := listenerConfig.connConfigForAccept(AcceptInfo{
+	snapshot, err := listenerConfig.associationConfigForAccept(AcceptInfo{
 		LocalAddr:  mcAddr(2900, "127.0.0.1"),
 		RemoteAddr: mcAddr(2901, "127.0.0.2"),
 	})
@@ -48,13 +48,13 @@ func TestListenerConfigSelectsAndSnapshotsConnConfig(t *testing.T) {
 	selected.RoutingContexts.Data[3] = 99
 	selected.TrafficModeType.Data[3] = 99
 	selected.TrafficModes[7] = params.TrafficModeBroadcast
-	selected.SctpSackInfo.SackDelay = 500
-	selected.SctpNoDelayInfo.NoDelay = false
+	selected.SCTPSACKInfo.SackDelay = 500
+	selected.SCTPNoDelayInfo.NoDelay = false
 	selected.Compatibility = CompatibilityPolicy{}
 	selected.DataQueueSize = 1
 
 	if snapshot == selected {
-		t.Fatal("selected ConnConfig was reused; want an immutable snapshot")
+		t.Fatal("selected AssociationConfig was reused; want an immutable snapshot")
 	}
 	if snapshot.HeartbeatInfo.Interval != time.Second {
 		t.Fatalf("HeartbeatInfo.Interval = %v, want 1s snapshot", snapshot.HeartbeatInfo.Interval)
@@ -74,10 +74,10 @@ func TestListenerConfigSelectsAndSnapshotsConnConfig(t *testing.T) {
 	if got := snapshot.TrafficModes[7]; got != params.TrafficModeOverride {
 		t.Fatalf("TrafficModes[7] = %d, want Override", got)
 	}
-	if snapshot.SctpSackInfo.SackDelay != 10 {
-		t.Fatalf("SackDelay = %d, want 10", snapshot.SctpSackInfo.SackDelay)
+	if snapshot.SCTPSACKInfo.SackDelay != 10 {
+		t.Fatalf("SackDelay = %d, want 10", snapshot.SCTPSACKInfo.SackDelay)
 	}
-	if !snapshot.SctpNoDelayInfo.NoDelay {
+	if !snapshot.SCTPNoDelayInfo.NoDelay {
 		t.Fatal("NoDelay snapshot changed after selected config mutation")
 	}
 	if snapshot.Compatibility.Tolerator == nil {
@@ -90,35 +90,35 @@ func TestListenerConfigSelectsAndSnapshotsConnConfig(t *testing.T) {
 
 func TestListenerConfigSelectorErrorIsReturned(t *testing.T) {
 	want := errors.New("peer rejected")
-	listenerConfig := NewListenerConfig(mcServerConfig())
-	listenerConfig.SelectConnConfig = func(AcceptInfo) (*ConnConfig, error) {
+	listenerConfig := NewListenerConfig(mcSGPConfig())
+	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
 		return nil, want
 	}
 
-	if _, err := listenerConfig.connConfigForAccept(AcceptInfo{}); !errors.Is(err, want) {
+	if _, err := listenerConfig.associationConfigForAccept(AcceptInfo{}); !errors.Is(err, want) {
 		t.Fatalf("connConfigForAccept error = %v, want %v", err, want)
 	}
 }
 
-func TestListenerConfigSelectorOnlyUsesDefaultConnConfigFallback(t *testing.T) {
-	selected := NewServerConfig(
+func TestListenerConfigSelectorOnlyUsesDefaultAssociationConfigFallback(t *testing.T) {
+	selected := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		1, 2, 3, params.TrafficModeLoadshare, 10, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
 	)
-	listener := newListener(&ListenerConfig{
-		SelectConnConfig: func(AcceptInfo) (*ConnConfig, error) {
+	listener := newSGPListener(&ListenerConfig{
+		SelectAssociationConfig: func(AcceptInfo) (*AssociationConfig, error) {
 			return selected, nil
 		},
 	})
 
-	if listener.Config == nil {
+	if listener.AssociationConfig == nil {
 		t.Fatal("selector-only ListenerConfig left Listener.Config nil")
 	}
-	if listener.listenerConfig.DefaultConnConfig == nil {
-		t.Fatal("selector-only ListenerConfig left DefaultConnConfig nil")
+	if listener.listenerConfig.DefaultAssociationConfig == nil {
+		t.Fatal("selector-only ListenerConfig left DefaultAssociationConfig nil")
 	}
-	snapshot, err := listener.listenerConfig.connConfigForAccept(AcceptInfo{})
+	snapshot, err := listener.listenerConfig.associationConfigForAccept(AcceptInfo{})
 	if err != nil {
 		t.Fatalf("connConfigForAccept: %v", err)
 	}
@@ -128,27 +128,27 @@ func TestListenerConfigSelectorOnlyUsesDefaultConnConfigFallback(t *testing.T) {
 }
 
 func TestListenerConfigSelectorIsFrozenWhenListenerIsBuilt(t *testing.T) {
-	first := NewServerConfig(
+	first := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		1, 2, 3, params.TrafficModeLoadshare, 10, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
 	)
-	second := NewServerConfig(
+	second := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		1, 2, 3, params.TrafficModeLoadshare, 20, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
 	)
 	listenerConfig := NewListenerConfig(first)
-	listenerConfig.SelectConnConfig = func(AcceptInfo) (*ConnConfig, error) {
+	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
 		return first, nil
 	}
-	listener := newListener(listenerConfig)
+	listener := newSGPListener(listenerConfig)
 
-	listenerConfig.SelectConnConfig = func(AcceptInfo) (*ConnConfig, error) {
+	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
 		return second, nil
 	}
 
-	selected, err := listener.listenerConfig.connConfigForAccept(AcceptInfo{})
+	selected, err := listener.listenerConfig.associationConfigForAccept(AcceptInfo{})
 	if err != nil {
 		t.Fatalf("connConfigForAccept: %v", err)
 	}
@@ -181,20 +181,20 @@ func TestAcceptInfoCarriesOwnedSCTPAddressCopies(t *testing.T) {
 }
 
 func TestListenerASKeyAPIsSeparateSameRoutingContextByNetworkAppearance(t *testing.T) {
-	listener := newListener(NewListenerConfig(mcServerConfig()))
+	listener := newSGPListener(NewListenerConfig(mcSGPConfig()))
 	registry, _, _ := listener.registry()
 
-	first, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	first, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 	first.as = registry
 	first.noteRoutingContextsActive([]uint32{1})
-	registry.aspStateChanged(first, StateAspActive)
+	registry.aspStateChanged(first, StateASPActive)
 
-	second, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	second, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
 	second.as = registry
 	second.noteRoutingContextsActive([]uint32{1})
-	registry.aspStateChanged(second, StateAspActive)
+	registry.aspStateChanged(second, StateASPActive)
 
 	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}

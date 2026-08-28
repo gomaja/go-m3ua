@@ -288,7 +288,7 @@ func TestRegistrationResultDecodesByTagNotPosition(t *testing.T) {
 // message that can carry one, and a Config may leave it unset, so callers hold
 // a nil *Param as a matter of course rather than as a mistake. Dereferencing it
 // terminated the process: no recover() is installed, so one association's
-// unset configuration took down every association in the server.
+// unset configuration took down every association at the SGP.
 func TestRoutingContextAccessorsTolerateNil(t *testing.T) {
 	var p *Param
 

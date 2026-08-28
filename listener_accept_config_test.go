@@ -11,12 +11,12 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-func TestConcurrentAcceptsUseSelectedConnConfigPerAssociation(t *testing.T) {
+func TestConcurrentAcceptsUseSelectedAssociationConfig(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	listenerConfig := NewListenerConfig(mcServerConfig())
-	listenerConfig.SelectConnConfig = func(info AcceptInfo) (*ConnConfig, error) {
+	listenerConfig := NewListenerConfig(mcSGPConfig())
+	listenerConfig.SelectAssociationConfig = func(info AcceptInfo) (*AssociationConfig, error) {
 		switch {
 		case acceptInfoHasRemoteIP(info, "127.0.0.2"):
 			return selectedAcceptConfig(10, time.Hour, CompatibilityPolicy{}), nil
@@ -27,7 +27,7 @@ func TestConcurrentAcceptsUseSelectedConnConfigPerAssociation(t *testing.T) {
 		}
 	}
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), listenerConfig)
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), listenerConfig)
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -35,45 +35,45 @@ func TestConcurrentAcceptsUseSelectedConnConfigPerAssociation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	serverAddr := ln.Addr()
+	listenerAddr := ln.Addr()
 
 	type acceptResult struct {
-		conn *Conn
-		err  error
+		association *Association
+		err         error
 	}
 	accepted := make(chan acceptResult, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			conn, err := ln.Accept(ctx)
-			accepted <- acceptResult{conn: conn, err: err}
+			association, err := ln.Accept(ctx)
+			accepted <- acceptResult{association: association, err: err}
 		}()
 	}
 
 	for index, ip := range []string{"127.0.0.2", "127.0.0.3"} {
-		clientConfig := mcClientConfig(0xCC000001 + uint32(index))
-		clientConfig.RoutingContexts = params.NewRoutingContext(1)
-		clientConfig.EstablishTimeout = 5 * time.Second
-		clientConfig.TAck = 100 * time.Millisecond
-		clientConfig.TAckRetries = 5
-		client, err := Dial(ctx, "m3ua", mcAddr(0, ip), serverAddr.(*sctp.SCTPAddr), clientConfig)
+		aspConfig := mcASPConfig(0xCC000001 + uint32(index))
+		aspConfig.RoutingContexts = params.NewRoutingContext(1)
+		aspConfig.EstablishTimeout = 5 * time.Second
+		aspConfig.TAck = 100 * time.Millisecond
+		aspConfig.TAckRetries = 5
+		aspAssociation, err := dialASP(ctx, "m3ua", mcAddr(0, ip), listenerAddr.(*sctp.SCTPAddr), aspConfig)
 		if err != nil {
 			t.Fatalf("Dial from %s: %v", ip, err)
 		}
-		t.Cleanup(func() { _ = client.Close() })
+		t.Cleanup(func() { _ = aspAssociation.Close() })
 	}
 
-	seenNetworkAppearance := make(map[uint32]*Conn)
+	seenNetworkAppearance := make(map[uint32]*Association)
 	for i := 0; i < 2; i++ {
 		select {
 		case result := <-accepted:
-			if result.conn != nil {
-				t.Cleanup(func() { _ = result.conn.Close() })
+			if result.association != nil {
+				t.Cleanup(func() { _ = result.association.Close() })
 			}
 			if result.err != nil {
 				t.Fatalf("Accept %d: %v", i, result.err)
 			}
-			networkAppearance := result.conn.cfg.NetworkAppearance.NetworkAppearance()
-			seenNetworkAppearance[networkAppearance] = result.conn
+			networkAppearance := result.association.cfg.NetworkAppearance.NetworkAppearance()
+			seenNetworkAppearance[networkAppearance] = result.association
 		case <-time.After(15 * time.Second):
 			t.Fatal("Accept did not return for both peers")
 		}
@@ -91,10 +91,10 @@ func TestConcurrentAcceptsUseSelectedConnConfigPerAssociation(t *testing.T) {
 		t.Fatalf("second heartbeat interval = %v, want 2h", second.hb.Interval)
 	}
 	if first.cfg.Compatibility.Tolerator != nil {
-		t.Fatal("first Conn unexpectedly inherited the second peer's compatibility policy")
+		t.Fatal("first Association unexpectedly inherited the second peer's compatibility policy")
 	}
 	if second.cfg.Compatibility.Tolerator == nil {
-		t.Fatal("second Conn did not receive its selected compatibility policy")
+		t.Fatal("second Association did not receive its selected compatibility policy")
 	}
 
 	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
@@ -115,15 +115,15 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 	defer cancel()
 
 	want := errors.New("first peer rejected")
-	listenerConfig := NewListenerConfig(mcServerConfig())
-	listenerConfig.SelectConnConfig = func(info AcceptInfo) (*ConnConfig, error) {
+	listenerConfig := NewListenerConfig(mcSGPConfig())
+	listenerConfig.SelectAssociationConfig = func(info AcceptInfo) (*AssociationConfig, error) {
 		if acceptInfoHasRemoteIP(info, "127.0.0.2") {
 			return nil, want
 		}
 		return selectedAcceptConfig(30, time.Hour, CompatibilityPolicy{}), nil
 	}
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), listenerConfig)
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), listenerConfig)
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -131,28 +131,28 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	serverAddr := ln.Addr().(*sctp.SCTPAddr)
+	listenerAddr := ln.Addr().(*sctp.SCTPAddr)
 
 	type acceptResult struct {
-		conn *Conn
-		err  error
+		association *Association
+		err         error
 	}
 	accepted := make(chan acceptResult, 1)
 	go func() {
-		conn, err := ln.Accept(ctx)
-		accepted <- acceptResult{conn: conn, err: err}
+		association, err := ln.Accept(ctx)
+		accepted <- acceptResult{association: association, err: err}
 	}()
 
-	rejectedClientConfig := mcClientConfig(0xDD000001)
-	rejectedClientConfig.RoutingContexts = params.NewRoutingContext(1)
-	if rejected, err := Dial(ctx, "m3ua", mcAddr(0, "127.0.0.2"), serverAddr, rejectedClientConfig); err == nil {
+	rejectedASPConfig := mcASPConfig(0xDD000001)
+	rejectedASPConfig.RoutingContexts = params.NewRoutingContext(1)
+	if rejected, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), listenerAddr, rejectedASPConfig); err == nil {
 		_ = rejected.Close()
-		t.Fatal("Dial succeeded even though the server selector rejected the association")
+		t.Fatal("Dial succeeded even though the SGP selector rejected the association")
 	}
 	select {
 	case result := <-accepted:
-		if result.conn != nil {
-			_ = result.conn.Close()
+		if result.association != nil {
+			_ = result.association.Close()
 		}
 		if !errors.Is(result.err, want) {
 			t.Fatalf("first Accept error = %v, want selector error %v", result.err, want)
@@ -163,26 +163,26 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 
 	accepted = make(chan acceptResult, 1)
 	go func() {
-		conn, err := ln.Accept(ctx)
-		accepted <- acceptResult{conn: conn, err: err}
+		association, err := ln.Accept(ctx)
+		accepted <- acceptResult{association: association, err: err}
 	}()
-	acceptedClientConfig := mcClientConfig(0xDD000002)
-	acceptedClientConfig.RoutingContexts = params.NewRoutingContext(1)
-	client, err := Dial(ctx, "m3ua", mcAddr(0, "127.0.0.3"), serverAddr, acceptedClientConfig)
+	acceptedASPConfig := mcASPConfig(0xDD000002)
+	acceptedASPConfig.RoutingContexts = params.NewRoutingContext(1)
+	aspAssociation, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.3"), listenerAddr, acceptedASPConfig)
 	if err != nil {
 		t.Fatalf("second Dial after selector rejection: %v", err)
 	}
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = aspAssociation.Close() })
 
 	select {
 	case result := <-accepted:
-		if result.conn != nil {
-			t.Cleanup(func() { _ = result.conn.Close() })
+		if result.association != nil {
+			t.Cleanup(func() { _ = result.association.Close() })
 		}
 		if result.err != nil {
 			t.Fatalf("second Accept after selector rejection: %v", result.err)
 		}
-		if got := result.conn.cfg.NetworkAppearance.NetworkAppearance(); got != 30 {
+		if got := result.association.cfg.NetworkAppearance.NetworkAppearance(); got != 30 {
 			t.Fatalf("second accepted Network Appearance = %d, want selected config 30", got)
 		}
 	case <-time.After(10 * time.Second):
@@ -190,8 +190,8 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 	}
 }
 
-func selectedAcceptConfig(networkAppearance uint32, heartbeatInterval time.Duration, compatibility CompatibilityPolicy) *ConnConfig {
-	config := mcServerConfig()
+func selectedAcceptConfig(networkAppearance uint32, heartbeatInterval time.Duration, compatibility CompatibilityPolicy) *AssociationConfig {
+	config := mcSGPConfig()
 	config.RoutingContexts = params.NewRoutingContext(1)
 	config.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
 	config.HeartbeatInfo = NewHeartbeatInfo(heartbeatInterval, 2*heartbeatInterval, nil)

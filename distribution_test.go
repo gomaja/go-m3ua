@@ -19,7 +19,7 @@ import (
 
 func TestBroadcastDistributionTagsFirstDataAfterEveryActivation(t *testing.T) {
 	listener, applicationServer, first, firstSent := distributionFixture(t, params.TrafficModeBroadcast)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
 
 	firstResult, err := listener.DistributeData(distributionData(1, 3, "first epoch"))
 	if err != nil {
@@ -42,8 +42,8 @@ func TestBroadcastDistributionTagsFirstDataAfterEveryActivation(t *testing.T) {
 			correlation.CorrelationID())
 	}
 
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 	firstSent.reset()
 
 	secondResult, err := listener.DistributeData(distributionData(1, 3, "second epoch"))
@@ -68,7 +68,7 @@ func TestBroadcastDistributionTagsFirstDataAfterEveryActivation(t *testing.T) {
 
 func TestBroadcastDistributionTagsEveryRoutingLabelFlow(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeBroadcast)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	first := distributionData(1, 9, "first label")
@@ -96,7 +96,7 @@ func TestBroadcastDistributionTagsEveryRoutingLabelFlow(t *testing.T) {
 
 func TestBroadcastActivationDropsThePreviousFlowEpoch(t *testing.T) {
 	listener, applicationServer, first, _ := distributionFixture(t, params.TrafficModeBroadcast)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
 	if _, err := listener.DistributeData(distributionData(1, 1, "old epoch")); err != nil {
 		t.Fatal(err)
 	}
@@ -107,8 +107,8 @@ func TestBroadcastActivationDropsThePreviousFlowEpoch(t *testing.T) {
 		t.Fatalf("old epoch flow entries = %d, want 1", before)
 	}
 
-	second, _ := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	second, _ := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 	applicationServer.mu.Lock()
 	after := len(applicationServer.broadcastTagged)
 	applicationServer.mu.Unlock()
@@ -118,10 +118,10 @@ func TestBroadcastActivationDropsThePreviousFlowEpoch(t *testing.T) {
 }
 
 func TestBroadcastFlowCacheIsBoundedAndEvictionRetags(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
 		config.BroadcastFlowCacheEntries = 2
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	for sls := uint8(1); sls <= 3; sls++ {
@@ -146,13 +146,13 @@ func TestBroadcastFlowCacheIsBoundedAndEvictionRetags(t *testing.T) {
 }
 
 func TestBroadcastFlowIdentifierLengthIsBounded(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
 		config.BroadcastFlowIdentifierBytes = 4
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			return "12345", nil
 		}
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	if _, err := listener.DistributeData(distributionData(1, 1, "oversized key")); !errors.Is(err, ErrBroadcastFlowIdentifierTooLong) {
@@ -165,9 +165,9 @@ func TestBroadcastFlowIdentifierLengthIsBounded(t *testing.T) {
 
 func TestBroadcastPartialWriteKeepsSynchronizationPending(t *testing.T) {
 	listener, applicationServer, first, firstSent := distributionFixture(t, params.TrafficModeBroadcast)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 	firstSent.reset()
 	secondSent.reset()
 
@@ -210,14 +210,14 @@ func TestBroadcastPartialWriteKeepsSynchronizationPending(t *testing.T) {
 }
 
 func TestBroadcastFlowIdentifierRefinesRoutingLabelAndOwnsInput(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
 		config.BroadcastFlowIdentifier = func(protocolData *params.ProtocolDataPayload) (string, error) {
 			identifier := fmt.Sprintf("circuit-%d", protocolData.Data[0])
 			protocolData.Data[0] = 0xff
 			return identifier, nil
 		}
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	for circuit := byte(1); circuit <= 2; circuit++ {
@@ -242,12 +242,12 @@ func TestBroadcastFlowIdentifierRefinesRoutingLabelAndOwnsInput(t *testing.T) {
 
 func TestBroadcastFlowIdentifierOnlyRunsForBroadcast(t *testing.T) {
 	want := errors.New("classifier should not run")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			return "", want
 		}
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	if _, err := listener.DistributeData(distributionData(1, 1, "loadshare")); err != nil {
@@ -277,10 +277,10 @@ func TestBroadcastFlowIdentifierFailuresDoNotDeliver(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *Config) {
+			listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
 				config.BroadcastFlowIdentifier = test.classifier
 			})
-			applicationServer.setASPState(asp, StateAspActive, time.Hour)
+			applicationServer.setASPState(asp, StateASPActive, time.Hour)
 			sent.reset()
 			if _, err := listener.DistributeData(distributionData(1, 1, "payload")); err == nil {
 				t.Fatal("classifier failure returned nil error")
@@ -293,12 +293,12 @@ func TestBroadcastFlowIdentifierFailuresDoNotDeliver(t *testing.T) {
 }
 
 func TestRecoveryQueuePolicyIsSnapshotted(t *testing.T) {
-	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 1
 	})
-	listener.Config.RecoveryQueueMessages = 100
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	listener.AssociationConfig.RecoveryQueueMessages = 100
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	if _, err := listener.DistributeData(distributionData(1, 1, "first")); err != nil {
 		t.Fatal(err)
 	}
@@ -309,8 +309,8 @@ func TestRecoveryQueuePolicyIsSnapshotted(t *testing.T) {
 
 func TestPendingApplicationServerQueuesAndFlushesInOrder(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	if got := applicationServer.State(); got != ASPending {
 		t.Fatalf("AS state = %v, want AS-PENDING", got)
 	}
@@ -329,7 +329,7 @@ func TestPendingApplicationServerQueuesAndFlushesInOrder(t *testing.T) {
 		t.Fatalf("AS-PENDING traffic was sent immediately: %d messages", sent.dataCount())
 	}
 
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	if !waitFor(func() bool { return sent.dataCount() == 3 }, time.Second) {
 		t.Fatalf("queued DATA count after recovery = %d, want 3", sent.dataCount())
 	}
@@ -344,8 +344,8 @@ func TestPendingApplicationServerQueuesAndFlushesInOrder(t *testing.T) {
 
 func TestRecoveryDrainIsAsyncAndQueuesNewTrafficBehindBacklog(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	sent.reset()
 	for _, payload := range []string{"old one", "old two"} {
 		if _, err := listener.DistributeData(distributionData(1, 2, payload)); err != nil {
@@ -369,7 +369,7 @@ func TestRecoveryDrainIsAsyncAndQueuesNewTrafficBehindBacklog(t *testing.T) {
 
 	activationDone := make(chan struct{})
 	go func() {
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		close(activationDone)
 	}()
 	select {
@@ -430,11 +430,11 @@ func TestRecoveryDrainIsAsyncAndQueuesNewTrafficBehindBacklog(t *testing.T) {
 
 func TestBlockedActiveDeliveryUsesTheBoundedFIFO(t *testing.T) {
 	message := distributionData(1, 2, "same size")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = 2 * message.MarshalLen()
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	writeEntered := make(chan struct{})
@@ -513,12 +513,12 @@ func TestBlockedActiveDeliveryUsesTheBoundedFIFO(t *testing.T) {
 
 func TestRecoveryQueueBoundsIncludeBlockedInFlightData(t *testing.T) {
 	message := distributionData(1, 2, "same size")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = 2 * message.MarshalLen()
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	for range 2 {
 		if _, err := listener.DistributeData(distributionData(1, 2, "same size")); err != nil {
 			t.Fatal(err)
@@ -535,7 +535,7 @@ func TestRecoveryQueueBoundsIncludeBlockedInFlightData(t *testing.T) {
 		}
 		return sent.write(message)
 	}
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	select {
 	case <-writeEntered:
 	case <-time.After(time.Second):
@@ -554,8 +554,8 @@ func TestRecoveryQueueBoundsIncludeBlockedInFlightData(t *testing.T) {
 
 func TestExpiredInFlightRecoveryDataIsNeverResurrected(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-	applicationServer.setASPState(asp, StateAspActive, 20*time.Millisecond)
-	applicationServer.setASPState(asp, StateAspInactive, 20*time.Millisecond)
+	applicationServer.setASPState(asp, StateASPActive, 20*time.Millisecond)
+	applicationServer.setASPState(asp, StateASPInactive, 20*time.Millisecond)
 	if _, err := listener.DistributeData(distributionData(1, 2, "must expire")); err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +572,7 @@ func TestExpiredInFlightRecoveryDataIsNeverResurrected(t *testing.T) {
 		}
 		return sent.write(message)
 	}
-	applicationServer.setASPState(asp, StateAspActive, 20*time.Millisecond)
+	applicationServer.setASPState(asp, StateASPActive, 20*time.Millisecond)
 	select {
 	case <-writeEntered:
 	case <-time.After(time.Second):
@@ -580,12 +580,12 @@ func TestExpiredInFlightRecoveryDataIsNeverResurrected(t *testing.T) {
 		t.Fatal("drain did not begin")
 	}
 
-	applicationServer.setASPState(asp, StateAspInactive, 20*time.Millisecond)
+	applicationServer.setASPState(asp, StateASPInactive, 20*time.Millisecond)
 	if !waitFor(func() bool { return applicationServer.State() == ASInactive }, time.Second) {
 		close(writeRelease)
 		t.Fatalf("AS state after T(r) = %v, want AS-INACTIVE", applicationServer.State())
 	}
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	close(writeRelease)
 	time.Sleep(25 * time.Millisecond)
 
@@ -599,8 +599,8 @@ func TestExpiredInFlightRecoveryDataIsNeverResurrected(t *testing.T) {
 
 func TestRecoveryDrainRetriesWithoutNewTraffic(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	if _, err := listener.DistributeData(distributionData(1, 2, "retry me")); err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +615,7 @@ func TestRecoveryDrainRetriesWithoutNewTraffic(t *testing.T) {
 		}
 		return sent.write(message)
 	}
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	select {
 	case <-firstAttempt:
 	case <-time.After(time.Second):
@@ -631,11 +631,11 @@ func TestRecoveryDrainRetriesWithoutNewTraffic(t *testing.T) {
 
 func TestBroadcastRecoveryRetriesOnlyFailedRecipients(t *testing.T) {
 	listener, applicationServer, first, firstSent := distributionFixture(t, params.TrafficModeBroadcast)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
-	applicationServer.setASPState(first, StateAspInactive, time.Hour)
-	applicationServer.setASPState(second, StateAspInactive, time.Hour)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
+	applicationServer.setASPState(first, StateASPInactive, time.Hour)
+	applicationServer.setASPState(second, StateASPInactive, time.Hour)
 	firstSent.reset()
 	secondSent.reset()
 	if _, err := listener.DistributeData(distributionData(1, 8, "recover once")); err != nil {
@@ -654,8 +654,8 @@ func TestBroadcastRecoveryRetriesOnlyFailedRecipients(t *testing.T) {
 	// Hold the delivery lock until both ASPs are active, otherwise the first
 	// activation may legitimately start draining before the second joins.
 	applicationServer.deliveryMu.Lock()
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 	applicationServer.deliveryMu.Unlock()
 
 	if !waitFor(func() bool { return secondSent.dataCount() == 1 }, time.Second) {
@@ -677,8 +677,8 @@ func TestBroadcastRecoveryRetriesOnlyFailedRecipients(t *testing.T) {
 
 func TestRecoveryExpiryDiscardsQueuedTraffic(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
-	applicationServer.setASPState(asp, StateAspActive, 30*time.Millisecond)
-	applicationServer.setASPState(asp, StateAspInactive, 30*time.Millisecond)
+	applicationServer.setASPState(asp, StateASPActive, 30*time.Millisecond)
+	applicationServer.setASPState(asp, StateASPInactive, 30*time.Millisecond)
 	if _, err := listener.DistributeData(distributionData(1, 1, "discard me")); err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func TestRecoveryExpiryDiscardsQueuedTraffic(t *testing.T) {
 		t.Fatalf("AS state after T(r) = %v, want AS-INACTIVE", applicationServer.State())
 	}
 
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	time.Sleep(25 * time.Millisecond)
 	if sent.dataCount() != 0 {
 		t.Fatalf("T(r)-expired queue flushed %d stale messages", sent.dataCount())
@@ -696,12 +696,12 @@ func TestRecoveryExpiryDiscardsQueuedTraffic(t *testing.T) {
 func TestRecoveryQueueIsBoundedAndOwnsMessages(t *testing.T) {
 	first := distributionData(1, 1, "owned")
 	second := distributionData(1, 1, "second")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = first.MarshalLen() + second.MarshalLen()
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 
 	if _, err := listener.DistributeData(first); err != nil {
 		t.Fatal(err)
@@ -716,7 +716,7 @@ func TestRecoveryQueueIsBoundedAndOwnsMessages(t *testing.T) {
 		t.Fatalf("third queued message error = %v, want ErrRecoveryQueueFull", err)
 	}
 
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	if !waitFor(func() bool { return sent.dataCount() == 2 }, time.Second) {
 		t.Fatalf("flushed DATA count = %d, want 2", sent.dataCount())
 	}
@@ -727,14 +727,14 @@ func TestRecoveryQueueIsBoundedAndOwnsMessages(t *testing.T) {
 
 func TestListenerCloseStopsDistributionAndReleasesRecoveryState(t *testing.T) {
 	var classifierCalls atomic.Int32
-	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *Config) {
+	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			classifierCalls.Add(1)
 			return "flow", nil
 		}
 	})
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	if _, err := listener.DistributeData(distributionData(1, 1, "queued")); err != nil {
 		t.Fatal(err)
 	}
@@ -743,8 +743,8 @@ func TestListenerCloseStopsDistributionAndReleasesRecoveryState(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := listener.DistributeData(distributionData(1, 1, "after close")); !errors.Is(err, ErrConnClosed) {
-		t.Fatalf("distribution after Listener.Close error = %v, want ErrConnClosed", err)
+	if _, err := listener.DistributeData(distributionData(1, 1, "after close")); !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("distribution after Listener.Close error = %v, want ErrAssociationClosed", err)
 	}
 	if got := classifierCalls.Load(); got != 0 {
 		t.Fatalf("closed Listener invoked BroadcastFlowIdentifier %d times", got)
@@ -765,9 +765,9 @@ func TestListenerCloseStopsDistributionAndReleasesRecoveryState(t *testing.T) {
 
 func TestDistributionLoadsharesBySLSAndRejectsInactiveAS(t *testing.T) {
 	listener, applicationServer, first, firstSent := distributionFixture(t, params.TrafficModeLoadshare)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 
 	for range 10 {
 		result, err := listener.DistributeData(distributionData(1, 7, "same flow"))
@@ -782,8 +782,8 @@ func TestDistributionLoadsharesBySLSAndRejectsInactiveAS(t *testing.T) {
 		t.Fatalf("one SLS did not stay on exactly one ASP: first=%d second=%d", firstSent.dataCount(), secondSent.dataCount())
 	}
 
-	applicationServer.setASPState(first, StateAspDown, time.Hour)
-	applicationServer.setASPState(second, StateAspDown, time.Hour)
+	applicationServer.setASPState(first, StateASPDown, time.Hour)
+	applicationServer.setASPState(second, StateASPDown, time.Hour)
 	applicationServer.recoveryExpired(applicationServer.recoveryGen)
 	if _, err := listener.DistributeData(distributionData(1, 7, "nobody")); !errors.Is(err, ErrNoActiveASP) {
 		t.Fatalf("inactive AS distribution error = %v, want ErrNoActiveASP", err)
@@ -792,8 +792,8 @@ func TestDistributionLoadsharesBySLSAndRejectsInactiveAS(t *testing.T) {
 
 func TestConcurrentDistributionAndActivationIsRaceFree(t *testing.T) {
 	listener, applicationServer, first, _ := distributionFixture(t, params.TrafficModeBroadcast)
-	second, _ := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
+	second, _ := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
 
 	var wait sync.WaitGroup
 	for worker := 0; worker < 8; worker++ {
@@ -806,19 +806,19 @@ func TestConcurrentDistributionAndActivationIsRaceFree(t *testing.T) {
 		}(worker)
 	}
 	for iteration := 0; iteration < 50; iteration++ {
-		applicationServer.setASPState(second, StateAspActive, time.Hour)
-		applicationServer.setASPState(second, StateAspInactive, time.Hour)
+		applicationServer.setASPState(second, StateASPActive, time.Hour)
+		applicationServer.setASPState(second, StateASPInactive, time.Hour)
 	}
 	wait.Wait()
 }
 
 func TestLoadshareTargetSelectionDoesNotRebuildMembership(t *testing.T) {
 	applicationServer := &applicationServer{
-		asps:        make(map[*Conn]State),
+		asps:        make(map[*Association]State),
 		trafficMode: params.TrafficModeLoadshare,
 	}
 	for range 128 {
-		applicationServer.asps[&Conn{}] = StateAspActive
+		applicationServer.asps[&Association{}] = StateASPActive
 	}
 	applicationServer.mu.Lock()
 	applicationServer.rebuildActiveLocked()
@@ -846,9 +846,9 @@ func TestASPInactiveAckWaitsUntilScopedTrafficIsHalted(t *testing.T) {
 	secondApplicationServer := listener.as.get(2)
 	secondApplicationServer.setTrafficMode(params.TrafficModeLoadshare)
 	asp.noteRoutingContextsActive([]uint32{1, 2})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	secondApplicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	secondApplicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	events := make(chan string, 16)
@@ -908,7 +908,7 @@ func TestASPInactiveAckWaitsUntilScopedTrafficIsHalted(t *testing.T) {
 	if got := listener.ApplicationServerState(2); got != ASActive {
 		t.Errorf("unaffected RC 2 state = %v, want AS-ACTIVE", got)
 	}
-	if got := asp.State(); got != StateAspActive {
+	if got := asp.State(); got != StateASPActive {
 		t.Errorf("association state = %v, want ASP-ACTIVE while RC 2 remains active", got)
 	}
 	rc2Answer := make(chan distributionAnswer, 1)
@@ -968,11 +968,11 @@ func TestASPInactiveAckWaitsUntilScopedTrafficIsHalted(t *testing.T) {
 
 func TestASStateNotifiesRemainOrderedAcrossInactiveBarrier(t *testing.T) {
 	listener, applicationServer, first, firstSent := distributionFixture(t, params.TrafficModeLoadshare)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspInactive, time.Hour)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPInactive, time.Hour)
 	first.noteRoutingContextsActive([]uint32{1})
-	first.setState(StateAspActive)
+	first.setState(StateASPActive)
 	firstSent.reset()
 	secondSent.reset()
 
@@ -1007,7 +1007,7 @@ func TestASStateNotifiesRemainOrderedAcrossInactiveBarrier(t *testing.T) {
 		t.Fatalf("AS state = %v, want AS-PENDING", applicationServer.State())
 	}
 
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 	time.Sleep(20 * time.Millisecond)
 	if got := len(notifies(secondSent.snapshot())); got != 0 {
 		close(writeRelease)
@@ -1033,37 +1033,37 @@ func TestASStateNotifiesRemainOrderedAcrossInactiveBarrier(t *testing.T) {
 	}
 }
 
-func distributionFixture(t *testing.T, trafficMode uint32) (*Listener, *applicationServer, *Conn, *distributionCapture) {
+func distributionFixture(t *testing.T, trafficMode uint32) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	return distributionFixtureConfigured(t, trafficMode, nil)
 }
 
-func distributionFixtureConfigured(t *testing.T, trafficMode uint32, configure func(*Config)) (*Listener, *applicationServer, *Conn, *distributionCapture) {
+func distributionFixtureConfigured(t *testing.T, trafficMode uint32, configure func(*AssociationConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	return distributionFixtureForContexts(t, trafficMode, []uint32{1}, configure)
 }
 
-func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingContexts []uint32, configure func(*Config)) (*Listener, *applicationServer, *Conn, *distributionCapture) {
+func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingContexts []uint32, configure func(*AssociationConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	t.Helper()
-	listener := &Listener{Config: NewServerConfig(
+	listener := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false}, 1, 2, 0, trafficMode, 0, 0,
 		routingContexts, params.ServiceIndSCCP, 0, 0, 1,
 	)}
-	listener.Config.CorrelationID = nil
+	listener.AssociationConfig.CorrelationID = nil
 	if configure != nil {
-		configure(listener.Config)
+		configure(listener.AssociationConfig)
 	}
-	listener.as = newApplicationServers(time.Hour, listener.Config)
+	listener.as = newApplicationServers(time.Hour, listener.AssociationConfig)
 	applicationServer := listener.as.get(1)
 	applicationServer.setTrafficMode(trafficMode)
-	asp, sent := addDistributionASP(t, listener, StateAspInactive, routingContexts...)
+	asp, sent := addDistributionASP(t, listener, StateASPInactive, routingContexts...)
 	return listener, applicationServer, asp, sent
 }
 
-func addDistributionASP(t *testing.T, listener *Listener, state State, routingContexts ...uint32) (*Conn, *distributionCapture) {
+func addDistributionASP(t *testing.T, listener *Listener, state State, routingContexts ...uint32) (*Association, *distributionCapture) {
 	t.Helper()
-	asp, _ := newTestConn(t, state, modeServer)
+	asp, _ := newTestConn(t, state, RoleSGP)
 	asp.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
 	asp.cfg.CorrelationID = nil
-	asp.cfg.NetworkAppearance = listener.Config.NetworkAppearance.Copy()
+	asp.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
 	asp.as = listener.as
 	capture := new(distributionCapture)
 	asp.signalWriter = capture.write

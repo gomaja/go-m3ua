@@ -21,7 +21,7 @@ import (
 
 // rawPeer is a scriptable M3UA peer built directly on SCTP, so a test can
 // decide exactly what the far end answers — including answering nothing at
-// all. The library's own server always replies correctly, which is why the
+// all. The library's own SGP always replies correctly, which is why the
 // deadlock these tests cover stayed invisible: only a peer that goes silent
 // after the handshake can expire T(beat).
 type rawPeer struct {
@@ -63,7 +63,7 @@ func newRawPeer(t *testing.T, port int, reply func(messages.M3UA) messages.M3UA)
 }
 
 // serve accepts associations one after another, so a test can tear one down and
-// have the client re-establish against the same peer. Tests that use a single
+// have the ASP re-establish against the same peer. Tests that use a single
 // association are unaffected: the loop simply waits in Accept afterwards.
 func (p *rawPeer) serve() {
 	for {
@@ -113,7 +113,7 @@ func (p *rawPeer) serveConn(conn *sctp.SCTPConn) {
 	}
 }
 
-// send transmits raw bytes to the connected client, for traffic the peer must
+// send transmits raw bytes to the connected ASP, for traffic the peer must
 // originate rather than answer. It waits for the association to be accepted.
 // sendOn writes b on the given stream.
 //
@@ -142,7 +142,7 @@ func (p *rawPeer) sendOn(t *testing.T, b []byte, stream uint16) {
 
 // sendBest is send() on a best-effort basis: it gives up quietly if no
 // association has been accepted or the write fails, for tests where the peer
-// races the client's teardown and a failed send is not itself a defect.
+// races the ASP's teardown and a failed send is not itself a defect.
 func (p *rawPeer) sendBest(b []byte) {
 	p.mu.Lock()
 	conn := p.conn
@@ -169,7 +169,7 @@ func (p *rawPeer) count(typeName string) int {
 	return n
 }
 
-// handshakeOnly answers ASP Up and ASP Active so the client reaches
+// handshakeOnly answers ASP Up and ASP Active so the ASP reaches
 // ASP-ACTIVE, then stays silent for everything else — notably BEAT.
 func handshakeOnly(msg messages.M3UA) messages.M3UA {
 	switch msg.(type) {
@@ -184,8 +184,8 @@ func handshakeOnly(msg messages.M3UA) messages.M3UA {
 	}
 }
 
-// dialRawPeer connects a client to a rawPeer with the given heartbeat config.
-func dialRawPeer(t *testing.T, ctx context.Context, p *rawPeer, port int, hb *HeartbeatInfo) *Conn {
+// dialRawPeer connects an ASP to a rawPeer with the given heartbeat config.
+func dialRawPeer(t *testing.T, ctx context.Context, p *rawPeer, port int, hb *HeartbeatInfo) *Association {
 	t.Helper()
 
 	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -193,14 +193,14 @@ func dialRawPeer(t *testing.T, ctx context.Context, p *rawPeer, port int, hb *He
 		t.Fatal(err)
 	}
 
-	cfg := NewClientConfig(
+	cfg := newASPAssociationConfigForTest(
 		hb,
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
 	)
 	cfg.CorrelationID = nil
 
-	conn, err := Dial(ctx, "m3ua", laddr, p.addr, cfg)
+	conn, err := dialASP(ctx, "m3ua", laddr, p.addr, cfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -262,12 +262,12 @@ func TestHeartbeatExpiryIsDetectedAgainstSilentPeer(t *testing.T) {
 		NewHeartbeatInfo(50*time.Millisecond, 200*time.Millisecond, nil))
 
 	// T(beat) is 200ms after a 50ms interval; give many rounds of headroom.
-	if !waitFor(func() bool { return conn.State() != StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() != StateASPActive }, 5*time.Second) {
 		t.Errorf("state = %v after T(beat) expiry against a silent peer, want the association torn down",
 			conn.State())
 	}
 
-	if blocked := goroutinesBlockedIn("go-m3ua.(*Conn).sendErr"); len(blocked) > 0 {
+	if blocked := goroutinesBlockedIn("go-m3ua.(*Association).sendErr"); len(blocked) > 0 {
 		t.Errorf("%d goroutine(s) wedged in sendErr; the error report never reached monitor():\n%s",
 			len(blocked), strings.Join(blocked, "\n"))
 	}
@@ -289,16 +289,16 @@ func TestHeartbeatGoroutineDoesNotLeakAfterExpiry(t *testing.T) {
 	conn := dialRawPeer(t, ctx, peer, 2961,
 		NewHeartbeatInfo(50*time.Millisecond, 150*time.Millisecond, nil))
 
-	if !waitFor(func() bool { return conn.State() != StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() != StateASPActive }, 5*time.Second) {
 		t.Fatalf("association never torn down; state = %v", conn.State())
 	}
 
 	// Once the expiry is processed, no goroutine may remain in heartbeat().
 	if !waitFor(func() bool {
-		return len(goroutinesBlockedIn("go-m3ua.(*Conn).heartbeat")) == 0
+		return len(goroutinesBlockedIn("go-m3ua.(*Association).heartbeat")) == 0
 	}, 2*time.Second) {
 		t.Errorf("heartbeat goroutine leaked:\n%s",
-			strings.Join(goroutinesBlockedIn("go-m3ua.(*Conn).heartbeat"), "\n"))
+			strings.Join(goroutinesBlockedIn("go-m3ua.(*Association).heartbeat"), "\n"))
 	}
 }
 
@@ -319,15 +319,15 @@ func TestHeartbeatSurvivesAgainstAnsweringPeer(t *testing.T) {
 	conn := dialRawPeer(t, ctx, peer, 2962,
 		NewHeartbeatInfo(30*time.Millisecond, 500*time.Millisecond, nil))
 
-	if !waitFor(func() bool { return conn.State() == StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
 	}
 
 	// Many T(beat) rounds against a peer that answers correctly.
 	time.Sleep(600 * time.Millisecond)
 
-	if got := conn.State(); got != StateAspActive {
-		t.Errorf("state = %v after a healthy heartbeat soak, want %v", got, StateAspActive)
+	if got := conn.State(); got != StateASPActive {
+		t.Errorf("state = %v after a healthy heartbeat soak, want %v", got, StateASPActive)
 	}
 	if got := peer.count("Heartbeat"); got < 2 {
 		t.Errorf("peer received %d BEATs, want several rounds", got)
@@ -367,7 +367,7 @@ func TestErrorFromIdleAssociationIsReported(t *testing.T) {
 	})
 
 	conn := dialRawPeer(t, ctx, peer, 2963, &HeartbeatInfo{Enabled: false})
-	if !waitFor(func() bool { return conn.State() == StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
 	}
 
@@ -384,12 +384,12 @@ func TestErrorFromIdleAssociationIsReported(t *testing.T) {
 		t.Error("no ERR reached the peer from an idle association; the report path is starved")
 	}
 
-	if blocked := goroutinesBlockedIn("go-m3ua.(*Conn).sendErr"); len(blocked) > 0 {
+	if blocked := goroutinesBlockedIn("go-m3ua.(*Association).sendErr"); len(blocked) > 0 {
 		t.Errorf("%d goroutine(s) wedged in sendErr:\n%s", len(blocked), strings.Join(blocked, "\n"))
 	}
 }
 
-// Closing a Conn must stop the reader goroutine. readLoop() blocks in SCTPRead,
+// Closing an Association must stop the reader goroutine. readLoop() blocks in SCTPRead,
 // so it is released by the socket close rather than by c.done; this pins that
 // it does not survive the association.
 func TestReaderGoroutineStopsOnClose(t *testing.T) {
@@ -399,7 +399,7 @@ func TestReaderGoroutineStopsOnClose(t *testing.T) {
 	peer := newRawPeer(t, 2964, handshakeOnly)
 	conn := dialRawPeer(t, ctx, peer, 2964, &HeartbeatInfo{Enabled: false})
 
-	if !waitFor(func() bool { return conn.State() == StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
 	}
 	if err := conn.Close(); err != nil {
@@ -407,10 +407,10 @@ func TestReaderGoroutineStopsOnClose(t *testing.T) {
 	}
 
 	if !waitFor(func() bool {
-		return len(goroutinesBlockedIn("go-m3ua.(*Conn).readLoop")) == 0
+		return len(goroutinesBlockedIn("go-m3ua.(*Association).readLoop")) == 0
 	}, 2*time.Second) {
 		t.Errorf("readLoop goroutine leaked after Close:\n%s",
-			strings.Join(goroutinesBlockedIn("go-m3ua.(*Conn).readLoop"), "\n"))
+			strings.Join(goroutinesBlockedIn("go-m3ua.(*Association).readLoop"), "\n"))
 	}
 }
 
@@ -423,14 +423,14 @@ func TestGoroutinesStopOnContextCancel(t *testing.T) {
 	conn := dialRawPeer(t, ctx, peer, 2965,
 		NewHeartbeatInfo(50*time.Millisecond, 5*time.Second, nil))
 
-	if !waitFor(func() bool { return conn.State() == StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		cancel()
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
 	}
 
 	cancel()
 
-	for _, fn := range []string{"go-m3ua.(*Conn).readLoop", "go-m3ua.(*Conn).heartbeat"} {
+	for _, fn := range []string{"go-m3ua.(*Association).readLoop", "go-m3ua.(*Association).heartbeat"} {
 		if !waitFor(func() bool { return len(goroutinesBlockedIn(fn)) == 0 }, 3*time.Second) {
 			t.Errorf("%s goroutine leaked after context cancel:\n%s",
 				fn, strings.Join(goroutinesBlockedIn(fn), "\n"))
@@ -525,7 +525,7 @@ func TestOversizedMessageIsReportedNotDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := NewClientConfig(
+	cfg := newASPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
@@ -533,13 +533,13 @@ func TestOversizedMessageIsReportedNotDropped(t *testing.T) {
 	cfg.CorrelationID = nil
 	cfg.SCTPConfig.ReadBufferSize = 256
 
-	conn, err := Dial(ctx, "m3ua", laddr, peer.addr, cfg)
+	conn, err := dialASP(ctx, "m3ua", laddr, peer.addr, cfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
 
-	if !waitFor(func() bool { return conn.State() == StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
 	}
 
@@ -556,7 +556,7 @@ func TestOversizedMessageIsReportedNotDropped(t *testing.T) {
 	// a message it never saw the start of. ReadMsg leaves the remainder of an
 	// oversized message queued, so there is no way to resynchronise on a
 	// message boundary: continuing would feed the state machine fragments.
-	if !waitFor(func() bool { return conn.State() != StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() != StateASPActive }, 5*time.Second) {
 		t.Errorf("state = %v after an oversized message; want the association torn down rather than resuming mid-message",
 			conn.State())
 	}
@@ -606,7 +606,7 @@ func TestMessageExactlyAtCeilingIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := NewClientConfig(
+	cfg := newASPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
@@ -614,13 +614,13 @@ func TestMessageExactlyAtCeilingIsAccepted(t *testing.T) {
 	cfg.CorrelationID = nil
 	cfg.SCTPConfig.ReadBufferSize = len(rawData) // exactly the message size
 
-	conn, err := Dial(ctx, "m3ua", laddr, peer.addr, cfg)
+	conn, err := dialASP(ctx, "m3ua", laddr, peer.addr, cfg)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
 
-	if !waitFor(func() bool { return conn.State() == StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
 	}
 
@@ -645,7 +645,7 @@ func TestMessageExactlyAtCeilingIsAccepted(t *testing.T) {
 			"a full buffer is being mistaken for a truncated message", len(rawData), len(rawData))
 	}
 
-	if got := conn.State(); got != StateAspActive {
+	if got := conn.State(); got != StateASPActive {
 		t.Errorf("state = %v after an exactly-sized message; the association must survive", got)
 	}
 }

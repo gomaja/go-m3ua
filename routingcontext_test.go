@@ -30,14 +30,14 @@ import (
 // library is being built for, no ASP could ever reach ASP-ACTIVE. A single
 // tenant hid it, because there the two sets are identical.
 
-// rcServerConfig is an SGP configured for several tenants' contexts.
-func rcServerConfig(rcs ...uint32) *Config {
-	cfg := NewServerConfig(
+// rcSGPConfig is an SGP configured for several tenants' contexts.
+func rcSGPConfig(rcs ...uint32) *AssociationConfig {
+	cfg := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		rcs, params.ServiceIndSCCP, 0, 0, 1,
 	)
-	cfg.AspIdentifier = nil
+	cfg.ASPIdentifier = nil
 	cfg.CorrelationID = nil
 	served := make(map[uint32]struct{}, len(rcs))
 	for _, rc := range rcs {
@@ -55,13 +55,13 @@ func rcServerConfig(rcs ...uint32) *Config {
 	return cfg
 }
 
-// rcClientConfig is one tenant's ASP, registered for its own context only.
-func rcClientConfig(opc uint32, rcs ...uint32) *Config {
+// rcASPConfig is one tenant's ASP, registered for its own context only.
+func rcASPConfig(opc uint32, rcs ...uint32) *AssociationConfig {
 	aspID := opc
 	if len(rcs) == 1 {
 		aspID = rcs[0]
 	}
-	cfg := NewClientConfig(
+	cfg := newASPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		opc, 0x22222222, aspID, params.TrafficModeLoadshare, 0, 0,
 		rcs, params.ServiceIndSCCP, 0, 0, 1,
@@ -70,7 +70,7 @@ func rcClientConfig(opc uint32, rcs ...uint32) *Config {
 	return cfg
 }
 
-func configureRoutingContextLiveTest(cfg *Config) {
+func configureRoutingContextLiveTest(cfg *AssociationConfig) {
 	cfg.EstablishTimeout = 2 * time.Second
 	cfg.TAck = 100 * time.Millisecond
 	cfg.TAckRetries = 5
@@ -82,7 +82,7 @@ func TestASPWithASubsetOfTheSGPsRoutingContextsActivates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(rcServerConfig(1, 2, 3)))
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(rcSGPConfig(1, 2, 3)))
 	if err != nil {
 		if isUnsupportedSCTP(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -93,7 +93,7 @@ func TestASPWithASubsetOfTheSGPsRoutingContextsActivates(t *testing.T) {
 	srvAddr := ln.Addr().(*sctp.SCTPAddr)
 
 	type acceptResult struct {
-		conn *Conn
+		conn *Association
 		err  error
 	}
 	accepted := make(chan acceptResult, 1)
@@ -103,14 +103,14 @@ func TestASPWithASubsetOfTheSGPsRoutingContextsActivates(t *testing.T) {
 	}()
 
 	// This tenant is registered for context 2 only.
-	cli, err := Dial(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, rcClientConfig(0xAA000001, 2))
+	cli, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, rcASPConfig(0xAA000001, 2))
 	if err != nil {
 		t.Fatalf("an ASP registered for context 2 could not activate against an SGP serving {1,2,3}: %v", err)
 	}
 	defer func() { _ = cli.Close() }()
 
-	if got := cli.State(); got != StateAspActive {
-		t.Errorf("ASP state = %v, want %v", got, StateAspActive)
+	if got := cli.State(); got != StateASPActive {
+		t.Errorf("ASP state = %v, want %v", got, StateASPActive)
 	}
 	select {
 	case result := <-accepted:
@@ -131,7 +131,7 @@ func TestTwoASPsWithDistinctRoutingContextsBothActivate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(rcServerConfig(1, 2, 3)))
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(rcSGPConfig(1, 2, 3)))
 	if err != nil {
 		if isUnsupportedSCTP(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -142,7 +142,7 @@ func TestTwoASPsWithDistinctRoutingContextsBothActivate(t *testing.T) {
 	srvAddr := ln.Addr().(*sctp.SCTPAddr)
 
 	type acceptResult struct {
-		conn *Conn
+		conn *Association
 		err  error
 	}
 	accepts := make(chan acceptResult, 2)
@@ -160,15 +160,15 @@ func TestTwoASPsWithDistinctRoutingContextsBothActivate(t *testing.T) {
 		{"127.0.0.2", 1},
 		{"127.0.0.3", 3},
 	} {
-		cli, err := Dial(ctx, "m3ua", mcAddr(0, tenant.ip), srvAddr,
-			rcClientConfig(0xBB000000+uint32(i), tenant.rc))
+		cli, err := dialASP(ctx, "m3ua", mcAddr(0, tenant.ip), srvAddr,
+			rcASPConfig(0xBB000000+uint32(i), tenant.rc))
 		if err != nil {
 			t.Fatalf("tenant with routing context %d could not activate: %v", tenant.rc, err)
 		}
 		defer func() { _ = cli.Close() }()
 
-		if got := cli.State(); got != StateAspActive {
-			t.Errorf("tenant %d state = %v, want %v", tenant.rc, got, StateAspActive)
+		if got := cli.State(); got != StateASPActive {
+			t.Errorf("tenant %d state = %v, want %v", tenant.rc, got, StateASPActive)
 		}
 		select {
 		case result := <-accepts:
@@ -188,13 +188,13 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	serverConfig := rcServerConfig()
-	serverConfig.AuthorizeASP = nil
-	configureRoutingContextLiveTest(serverConfig)
-	clientConfig := rcClientConfig(0xAA000001)
-	configureRoutingContextLiveTest(clientConfig)
+	sgpConfig := rcSGPConfig()
+	sgpConfig.AuthorizeASP = nil
+	configureRoutingContextLiveTest(sgpConfig)
+	aspConfig := rcASPConfig(0xAA000001)
+	configureRoutingContextLiveTest(aspConfig)
 
-	ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(serverConfig))
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(sgpConfig))
 	if err != nil {
 		if isUnsupportedSCTP(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -205,7 +205,7 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 	srvAddr := ln.Addr().(*sctp.SCTPAddr)
 
 	type acceptResult struct {
-		conn *Conn
+		conn *Association
 		err  error
 	}
 	accepted := make(chan acceptResult, 1)
@@ -214,13 +214,13 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 		accepted <- acceptResult{conn: c, err: err}
 	}()
 
-	cli, err := Dial(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, clientConfig)
+	cli, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, aspConfig)
 	if err != nil {
 		t.Fatalf("contextless ASP could not activate against a contextless SGP: %v", err)
 	}
 	defer func() { _ = cli.Close() }()
-	if got := cli.State(); got != StateAspActive {
-		t.Fatalf("client state = %v, want %v", got, StateAspActive)
+	if got := cli.State(); got != StateASPActive {
+		t.Fatalf("ASP state = %v, want %v", got, StateASPActive)
 	}
 
 	select {
@@ -231,8 +231,8 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 		if result.err != nil {
 			t.Fatalf("Accept: %v", result.err)
 		}
-		if got := result.conn.State(); got != StateAspActive {
-			t.Fatalf("server state = %v, want %v", got, StateAspActive)
+		if got := result.conn.State(); got != StateASPActive {
+			t.Fatalf("SGP association state = %v, want %v", got, StateASPActive)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Accept never returned for the contextless association")
@@ -241,28 +241,28 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 
 func TestRoutingContextHandshakeMatrix(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		clientRCs []uint32
-		serverRCs []uint32
-		wantOK    bool
+		name   string
+		aspRCs []uint32
+		sgpRCs []uint32
+		wantOK bool
 	}{
 		{name: "both omitted", wantOK: true},
-		{name: "both same", clientRCs: []uint32{7}, serverRCs: []uint32{7}, wantOK: true},
-		{name: "different values", clientRCs: []uint32{7}, serverRCs: []uint32{8}},
-		{name: "client explicit server omitted", clientRCs: []uint32{7}},
-		{name: "client omitted server explicit", serverRCs: []uint32{7}},
+		{name: "both same", aspRCs: []uint32{7}, sgpRCs: []uint32{7}, wantOK: true},
+		{name: "different values", aspRCs: []uint32{7}, sgpRCs: []uint32{8}},
+		{name: "ASP explicit SGP omitted", aspRCs: []uint32{7}},
+		{name: "ASP omitted SGP explicit", sgpRCs: []uint32{7}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
-			serverConfig := rcServerConfig(tt.serverRCs...)
-			serverConfig.AuthorizeASP = nil
-			configureRoutingContextLiveTest(serverConfig)
-			clientConfig := rcClientConfig(0xAA000001, tt.clientRCs...)
-			configureRoutingContextLiveTest(clientConfig)
+			sgpConfig := rcSGPConfig(tt.sgpRCs...)
+			sgpConfig.AuthorizeASP = nil
+			configureRoutingContextLiveTest(sgpConfig)
+			aspConfig := rcASPConfig(0xAA000001, tt.aspRCs...)
+			configureRoutingContextLiveTest(aspConfig)
 
-			ln, err := Listen("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(serverConfig))
+			ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(sgpConfig))
 			if err != nil {
 				if isUnsupportedSCTP(err) {
 					t.Skipf("skipping socket-backed test: %v", err)
@@ -273,7 +273,7 @@ func TestRoutingContextHandshakeMatrix(t *testing.T) {
 			srvAddr := ln.Addr().(*sctp.SCTPAddr)
 
 			type acceptResult struct {
-				conn *Conn
+				conn *Association
 				err  error
 			}
 			accepted := make(chan acceptResult, 1)
@@ -282,7 +282,7 @@ func TestRoutingContextHandshakeMatrix(t *testing.T) {
 				accepted <- acceptResult{conn: c, err: err}
 			}()
 
-			cli, dialErr := Dial(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, clientConfig)
+			cli, dialErr := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), srvAddr, aspConfig)
 			if cli != nil {
 				t.Cleanup(func() { _ = cli.Close() })
 			}
@@ -316,7 +316,7 @@ func TestRoutingContextHandshakeMatrix(t *testing.T) {
 
 // The Ack must name what the ASP asked about, not the SGP's whole inventory.
 func TestAspActiveAckEchoesTheASPsRoutingContext(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	if err := conn.handleAspActive(
@@ -334,7 +334,7 @@ func TestAspActiveAckEchoesTheASPsRoutingContext(t *testing.T) {
 // An ASP that omits the parameter is answered with the SGP's configured set, as
 // before: there is nothing else to name.
 func TestAspActiveAckWithoutARequestedContextUsesTheConfiguredSet(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	if err := conn.handleAspActive(
@@ -358,7 +358,7 @@ func TestAspActiveAckWithoutARequestedContextUsesTheConfiguredSet(t *testing.T) 
 // Not "Invalid Routing Context": that code has its own, more general use in
 // Section 3.8.1, and this rule is the specific one for ASP Active.
 func TestAspActiveForAnUnservedRoutingContextIsRefused(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	err := conn.handleAspActive(
@@ -381,7 +381,7 @@ func TestAspActiveForAnUnservedRoutingContextIsRefused(t *testing.T) {
 // be included in the Error message." The Error used to carry the SGP's own
 // configured contexts, telling the peer that ours were the invalid ones.
 func TestErrorForAnUnservedRoutingContextNamesTheOffendingContexts(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	err := conn.handleAspActive(
@@ -420,7 +420,7 @@ func TestErrorForAnUnservedRoutingContextNamesTheOffendingContexts(t *testing.T)
 // already active. Refusing it once the ASP *is* active contradicts the MUST —
 // which the first version of this change did.
 func TestAspActiveWhileAlreadyActiveIsAckedWhateverTheRoutingContext(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	err := conn.handleAspActive(
@@ -446,7 +446,7 @@ func TestAspActiveWhileAlreadyActiveIsAckedWhateverTheRoutingContext(t *testing.
 // The same rule for ASP Inactive, whose Ack Section 4.3.4.4 owes even when the
 // ASP is already ASP-INACTIVE.
 func TestAspInactiveWhileAlreadyInactiveIsAckedWhateverTheRoutingContext(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	err := conn.handleAspInactive(messages.NewAspInactive(params.NewRoutingContext(9), nil))
@@ -468,7 +468,7 @@ func TestAspInactiveWhileAlreadyInactiveIsAckedWhateverTheRoutingContext(t *test
 // ASP Inactive Ack carries the Routing Context too, and must follow the same
 // rule.
 func TestAspInactiveAckEchoesTheASPsRoutingContext(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	if err := conn.handleAspInactive(
@@ -529,13 +529,13 @@ func TestUnservedRoutingContextUsesThePerMessageErrorCode(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		state State
-		send  func(*Conn) error
+		send  func(*Association) error
 		want  uint32
 	}{
 		{
 			name:  "ASP Active",
-			state: StateAspInactive,
-			send: func(c *Conn) error {
+			state: StateASPInactive,
+			send: func(c *Association) error {
 				return c.handleAspActive(messages.NewAspActive(
 					params.NewTrafficModeType(params.TrafficModeLoadshare),
 					params.NewRoutingContext(9), nil))
@@ -544,15 +544,15 @@ func TestUnservedRoutingContextUsesThePerMessageErrorCode(t *testing.T) {
 		},
 		{
 			name:  "ASP Inactive",
-			state: StateAspActive,
-			send: func(c *Conn) error {
+			state: StateASPActive,
+			send: func(c *Association) error {
 				return c.handleAspInactive(messages.NewAspInactive(params.NewRoutingContext(9), nil))
 			},
 			want: params.ErrInvalidRoutingContext,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, tt.state, modeServer)
+			conn, sent := newTestConn(t, tt.state, RoleSGP)
 			conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 			err := tt.send(conn)
@@ -594,7 +594,7 @@ func TestUnservedRoutingContextUsesThePerMessageErrorCode(t *testing.T) {
 // one context it is registered for and one it is not got an Error and nothing
 // else — and never activated for the context it was entitled to.
 func TestMixedRoutingContextAcksTheServedOnesAndRefusesTheRest(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	err := conn.handleAspActive(messages.NewAspActive(
@@ -631,7 +631,7 @@ func TestMixedRoutingContextAcksTheServedOnesAndRefusesTheRest(t *testing.T) {
 // A request naming only unserved contexts gets no Ack at all: there is nothing
 // to acknowledge.
 func TestWhollyUnservedRoutingContextGetsNoAck(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
 
 	err := conn.handleAspActive(messages.NewAspActive(
@@ -657,7 +657,7 @@ func TestContextlessConfiguredASActivatesWithoutRoutingContext(t *testing.T) {
 		{name: "empty parameter", configured: params.NewRoutingContext()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, StateAspInactive, modeServer)
+			conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 			conn.cfg.RoutingContexts = tt.configured
 
 			if err := conn.handleAspActive(messages.NewAspActive(
@@ -684,7 +684,7 @@ func TestContextlessConfiguredASInactivatesWithoutRoutingContext(t *testing.T) {
 		{name: "empty parameter", configured: params.NewRoutingContext()},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			conn.cfg.RoutingContexts = tt.configured
 
 			conn.handleSignals(context.Background(), messages.NewAspInactive(nil, nil))
@@ -697,11 +697,11 @@ func TestContextlessConfiguredASInactivatesWithoutRoutingContext(t *testing.T) {
 			if err := firstErr(conn); err != nil {
 				t.Fatalf("contextless ASP Inactive reported error: %v", err)
 			}
-			if got := applyASPTMState(t, conn); got != StateAspInactive {
-				t.Fatalf("published state = %v, want %v", got, StateAspInactive)
+			if got := applyASPTMState(t, conn); got != StateASPInactive {
+				t.Fatalf("published state = %v, want %v", got, StateASPInactive)
 			}
-			if got := conn.State(); got != StateAspInactive {
-				t.Fatalf("association state = %v, want %v", got, StateAspInactive)
+			if got := conn.State(); got != StateASPInactive {
+				t.Fatalf("association state = %v, want %v", got, StateASPInactive)
 			}
 		})
 	}
@@ -711,14 +711,14 @@ func TestExplicitContextCannotCreateItsOwnRoutingKey(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		state   State
-		handle  func(*Conn) error
+		handle  func(*Association) error
 		want    error
 		ackType string
 	}{
 		{
 			name:  "ASP Active",
-			state: StateAspInactive,
-			handle: func(connection *Conn) error {
+			state: StateASPInactive,
+			handle: func(connection *Association) error {
 				return connection.handleAspActive(messages.NewAspActive(
 					params.NewTrafficModeType(params.TrafficModeLoadshare),
 					params.NewRoutingContext(77), nil,
@@ -729,8 +729,8 @@ func TestExplicitContextCannotCreateItsOwnRoutingKey(t *testing.T) {
 		},
 		{
 			name:  "ASP Inactive",
-			state: StateAspActive,
-			handle: func(connection *Conn) error {
+			state: StateASPActive,
+			handle: func(connection *Association) error {
 				return connection.handleAspInactive(messages.NewAspInactive(
 					params.NewRoutingContext(77), nil,
 				))
@@ -741,7 +741,7 @@ func TestExplicitContextCannotCreateItsOwnRoutingKey(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, empty := range []bool{false, true} {
-				connection, sent := newTestConn(t, test.state, modeServer)
+				connection, sent := newTestConn(t, test.state, RoleSGP)
 				connection.cfg.RoutingContexts = nil
 				if empty {
 					connection.cfg.RoutingContexts = params.NewRoutingContext()

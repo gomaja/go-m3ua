@@ -50,7 +50,7 @@ func TestInboundSSNMBatchedScopesRemainLinear(t *testing.T) {
 		t.Fatalf("decoded message = %T, want *messages.DestinationUnavailable", decoded)
 	}
 
-	connection, _ := newTestConnWithContexts(t, StateAspActive, modeClient, routingContexts...)
+	connection, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContexts...)
 	if err := connection.handleDestinationUnavailable(duna); err != nil {
 		t.Fatalf("handle DUNA: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestInboundSSNMBatchedScopesRemainLinear(t *testing.T) {
 }
 
 func TestInboundSSNMBatchedScopesCanonicalizeAndRespectNewerSubset(t *testing.T) {
-	connection, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 0, 1, 2)
+	connection, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 0, 1, 2)
 	const firstPointCode = uint32(0x101001)
 	const secondPointCode = uint32(0x101002)
 

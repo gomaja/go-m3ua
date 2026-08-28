@@ -11,7 +11,7 @@ import (
 
 func TestASPAuthorizationRestrictsEveryRoutingContextProcedure(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, sent := asTestConn(t, registry, StateAspDown, 1, 2)
+	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	allowed := []uint32{1}
 	authorizations := 0
 	asp.cfg.AuthorizeASP = func(identity ASPIdentity) []uint32 {
@@ -39,7 +39,7 @@ func TestASPAuthorizationRestrictsEveryRoutingContextProcedure(t *testing.T) {
 		t.Fatal("authorized ASP remained a member of unauthorized AS 2")
 	}
 	allowed[0] = 2
-	asp.setState(StateAspInactive)
+	asp.setState(StateASPInactive)
 	*sent = nil
 
 	if err := asp.validateRoutingContext(params.NewRoutingContext(1)); err != nil {
@@ -73,12 +73,12 @@ func TestASPAuthorizationRestrictsEveryRoutingContextProcedure(t *testing.T) {
 
 func TestOmittedASPActiveExpandsOnlyToAuthorizedApplicationServers(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, sent := asTestConn(t, registry, StateAspDown, 1, 2)
+	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	asp.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{1} }
 	if err := asp.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); err != nil {
 		t.Fatal(err)
 	}
-	asp.setState(StateAspInactive)
+	asp.setState(StateASPInactive)
 	*sent = nil
 
 	if err := asp.handleAspActive(messages.NewAspActive(
@@ -105,12 +105,12 @@ func TestOmittedASPActiveExpandsOnlyToAuthorizedApplicationServers(t *testing.T)
 
 func TestEmptyASPAuthorizationCannotActivateAnyApplicationServer(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, sent := asTestConn(t, registry, StateAspDown, 1, 2)
+	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	asp.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
 	if err := asp.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); err != nil {
 		t.Fatalf("ASP Up with no AS membership: %v", err)
 	}
-	asp.setState(StateAspInactive)
+	asp.setState(StateASPInactive)
 	*sent = nil
 
 	err := asp.handleAspActive(messages.NewAspActive(
@@ -126,21 +126,21 @@ func TestEmptyASPAuthorizationCannotActivateAnyApplicationServer(t *testing.T) {
 
 func TestEmptyASPAuthorizationDoesNotJoinContextlessApplicationServer(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	empty, _ := asTestConn(t, registry, StateAspDown, 1)
+	empty, _ := asTestConn(t, registry, StateASPDown, 1)
 	empty.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
 	if err := empty.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); err != nil {
 		t.Fatalf("empty-authorized ASP Up: %v", err)
 	}
-	if err := empty.handleStateUpdate(StateAspInactive); err != nil {
+	if err := empty.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("empty-authorized ASP state update: %v", err)
 	}
 
-	authorized, _ := asTestConn(t, registry, StateAspDown, 1)
+	authorized, _ := asTestConn(t, registry, StateASPDown, 1)
 	authorized.cfg.RoutingContexts = nil
 	if err := authorized.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(101), nil)); err != nil {
 		t.Fatalf("contextless ASP Up: %v", err)
 	}
-	if err := authorized.handleStateUpdate(StateAspInactive); err != nil {
+	if err := authorized.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("contextless ASP state update: %v", err)
 	}
 
@@ -163,21 +163,21 @@ func TestEmptyASPAuthorizationDoesNotJoinContextlessApplicationServer(t *testing
 
 func TestDuplicateASPIdentifierUniquenessUsesAuthorizedApplicationServers(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspDown, 1, 2)
-	second, _ := asTestConn(t, registry, StateAspDown, 1, 2)
+	first, _ := asTestConn(t, registry, StateASPDown, 1, 2)
+	second, _ := asTestConn(t, registry, StateASPDown, 1, 2)
 	first.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{1} }
 	second.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{2} }
 
-	for index, asp := range []*Conn{first, second} {
+	for index, asp := range []*Association{first, second} {
 		if err := asp.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); err != nil {
 			t.Fatalf("disjoint authorized ASP %d handleAspUp: %v", index, err)
 		}
 	}
 
-	spoof, _ := asTestConn(t, registry, StateAspDown, 1, 2)
+	spoof, _ := asTestConn(t, registry, StateASPDown, 1, 2)
 	spoof.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{1} }
-	if err := spoof.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); !errors.Is(err, ErrInvalidAspIdentifier) {
-		t.Fatalf("duplicate identifier in authorized AS 1 error = %v, want %v", err, ErrInvalidAspIdentifier)
+	if err := spoof.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); !errors.Is(err, ErrInvalidASPIdentifier) {
+		t.Fatalf("duplicate identifier in authorized AS 1 error = %v, want %v", err, ErrInvalidASPIdentifier)
 	}
 }
 
@@ -191,12 +191,12 @@ func TestEmptyASPAuthorizationDoesNotClaimAnASPIdentifier(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			registry := newApplicationServers(time.Hour)
-			empty, _ := asTestConn(t, registry, StateAspDown, 1)
+			empty, _ := asTestConn(t, registry, StateASPDown, 1)
 			empty.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
-			authorized, _ := asTestConn(t, registry, StateAspDown, 1)
+			authorized, _ := asTestConn(t, registry, StateASPDown, 1)
 			authorized.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{1} }
 
-			connections := []*Conn{empty, authorized}
+			connections := []*Association{empty, authorized}
 			if !tc.emptyFirst {
 				connections[0], connections[1] = connections[1], connections[0]
 			}
@@ -211,11 +211,11 @@ func TestEmptyASPAuthorizationDoesNotClaimAnASPIdentifier(t *testing.T) {
 
 func TestASPAuthorizationCannotInventAListenerRoutingContext(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, sent := asTestConn(t, registry, StateAspDown, 1, 2)
+	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	asp.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{99} }
 
-	if err := asp.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); !errors.Is(err, ErrInvalidAspIdentifier) {
-		t.Fatalf("foreign authorization result error = %v, want %v", err, ErrInvalidAspIdentifier)
+	if err := asp.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); !errors.Is(err, ErrInvalidASPIdentifier) {
+		t.Fatalf("foreign authorization result error = %v, want %v", err, ErrInvalidASPIdentifier)
 	}
 	if got := countType(*sent, "ASP Up Ack"); got != 0 {
 		t.Fatalf("invalid authorization drew %d ASP Up Acks, want 0", got)

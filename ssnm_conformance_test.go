@@ -24,7 +24,7 @@ import (
 // answers a DAUD from (Section 4.5.3). Any ASP could therefore make the SG
 // report SS7 congestion that does not exist, to every other ASP that audited it.
 func TestSCONFromAnASPDoesNotRewriteTheSGsRoutingState(t *testing.T) {
-	sgp, _ := newSSNMTestConn(t, StateAspActive, modeServer)
+	sgp, _ := newSSNMTestConn(t, StateASPActive, RoleSGP)
 
 	if err := sgp.handleSignallingCongestion(messages.NewSignallingCongestion(
 		nil, nil, params.NewAffectedPointCodeWithMask(0, 0x222222),
@@ -49,7 +49,7 @@ func TestSCONFromAnASPDoesNotRewriteTheSGsRoutingState(t *testing.T) {
 
 // At an ASP the SCON does describe an SS7 destination, so it is applied.
 func TestSCONFromAnSGPDoesUpdateTheDestination(t *testing.T) {
-	asp, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+	asp, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 	if err := asp.handleSignallingCongestion(messages.NewSignallingCongestion(
 		nil, nil, params.NewAffectedPointCodeWithMask(0, 0x222222),
@@ -78,7 +78,7 @@ func TestSCONFromAnSGPDoesUpdateTheDestination(t *testing.T) {
 // Recording it as congestion inverts the message: the destination is throttled
 // by the very report that said it had recovered.
 func TestSCONWithCongestionLevelZeroIsNotCongestion(t *testing.T) {
-	asp, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+	asp, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 	// Congested first, so clearing is observable.
 	asp.SetDestinationState(0x222222, DestinationCongested)
@@ -100,7 +100,7 @@ func TestSCONWithCongestionLevelZeroIsNotCongestion(t *testing.T) {
 // congestion levels (e.g., the ITU international method) the parameter is not
 // included."
 func TestSCONWithoutCongestionIndicationsIsStillCongestion(t *testing.T) {
-	asp, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+	asp, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 	if err := asp.handleSignallingCongestion(messages.NewSignallingCongestion(
 		nil, nil, params.NewAffectedPointCodeWithMask(0, 0x222222), nil, nil, nil,
@@ -123,7 +123,7 @@ func TestSCONWithoutCongestionIndicationsIsStillCongestion(t *testing.T) {
 // told an auditing ASP that a point code it had never heard of was reachable —
 // and the ASP then sent traffic to it.
 func TestDAUDForAnUnknownPointCodeIsAnsweredWithDUNA(t *testing.T) {
-	sgp, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+	sgp, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 
 	if err := sgp.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		nil, nil, params.NewAffectedPointCodeWithMask(0, 0x999999), nil,
@@ -141,7 +141,7 @@ func TestDAUDForAnUnknownPointCodeIsAnsweredWithDUNA(t *testing.T) {
 // A point code the SG does know about, and which is available, still draws a
 // DAVA.
 func TestDAUDForAKnownAvailablePointCodeIsAnsweredWithDAVA(t *testing.T) {
-	sgp, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+	sgp, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 	sgp.SetDestinationState(0x999999, DestinationAvailable)
 
 	if err := sgp.handleDestinationStateAudit(messages.NewDestinationStateAudit(
@@ -178,7 +178,7 @@ func TestDUPUWithAMaskOrSeveralPointCodesIsRejected(t *testing.T) {
 		{"several Affected DPCs", params.NewAffectedPointCode(0x222222, 0x333333)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			asp, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+			asp, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 			err := asp.handleDestinationUserPartUnavailable(
 				messages.NewDestinationUserPartUnavailable(
@@ -197,7 +197,7 @@ func TestDUPUWithAMaskOrSeveralPointCodesIsRejected(t *testing.T) {
 
 // The ordinary DUPU — one destination, no mask — is still accepted.
 func TestDUPUWithASingleUnmaskedPointCodeIsAccepted(t *testing.T) {
-	asp, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+	asp, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 	if err := asp.handleDestinationUserPartUnavailable(
 		messages.NewDestinationUserPartUnavailable(
@@ -220,25 +220,25 @@ func TestSSNMValidatesTheRoutingContext(t *testing.T) {
 	// newSSNMTestConn configures Routing Context 1.
 	for _, tt := range []struct {
 		name string
-		call func(*Conn, *params.Param) error
+		call func(*Association, *params.Param) error
 	}{
-		{"DUNA", func(c *Conn, rc *params.Param) error {
+		{"DUNA", func(c *Association, rc *params.Param) error {
 			return c.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 				nil, rc, params.NewAffectedPointCodeWithMask(0, 0x222222), nil))
 		}},
-		{"DAVA", func(c *Conn, rc *params.Param) error {
+		{"DAVA", func(c *Association, rc *params.Param) error {
 			return c.handleDestinationAvailable(messages.NewDestinationAvailable(
 				nil, rc, params.NewAffectedPointCodeWithMask(0, 0x222222), nil))
 		}},
-		{"DRST", func(c *Conn, rc *params.Param) error {
+		{"DRST", func(c *Association, rc *params.Param) error {
 			return c.handleDestinationRestricted(messages.NewDestinationRestricted(
 				nil, rc, params.NewAffectedPointCodeWithMask(0, 0x222222), nil))
 		}},
-		{"SCON", func(c *Conn, rc *params.Param) error {
+		{"SCON", func(c *Association, rc *params.Param) error {
 			return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 				nil, rc, params.NewAffectedPointCodeWithMask(0, 0x222222), nil, nil, nil))
 		}},
-		{"DUPU", func(c *Conn, rc *params.Param) error {
+		{"DUPU", func(c *Association, rc *params.Param) error {
 			return c.handleDestinationUserPartUnavailable(
 				messages.NewDestinationUserPartUnavailable(
 					nil, rc, params.NewAffectedPointCodeWithMask(0, 0x222222),
@@ -246,7 +246,7 @@ func TestSSNMValidatesTheRoutingContext(t *testing.T) {
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			asp, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+			asp, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 			err := tt.call(asp, params.NewRoutingContext(4242))
 			if err == nil {
@@ -258,7 +258,7 @@ func TestSSNMValidatesTheRoutingContext(t *testing.T) {
 			}
 
 			// A configured context is accepted.
-			asp2, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+			asp2, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 			if err := tt.call(asp2, params.NewRoutingContext(1)); err != nil {
 				t.Errorf("a configured Routing Context was rejected: %v", err)
 			}
@@ -268,7 +268,7 @@ func TestSSNMValidatesTheRoutingContext(t *testing.T) {
 
 // A DAUD naming an unconfigured Routing Context is refused at the SGP too.
 func TestDAUDValidatesTheRoutingContext(t *testing.T) {
-	sgp, _ := newSSNMTestConn(t, StateAspActive, modeServer)
+	sgp, _ := newSSNMTestConn(t, StateASPActive, RoleSGP)
 
 	err := sgp.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		nil, params.NewRoutingContext(4242),

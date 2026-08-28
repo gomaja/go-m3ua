@@ -19,15 +19,15 @@ import (
 // when asked, so a management layer had to poll for edges the library already
 // knew about, and any transition between two polls was lost outright.
 func TestStateChangesReportsEveryTransitionInOrder(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeServer)
+	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 
-	for _, s := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+	for _, s := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		if err := conn.handleStateUpdate(s); err != nil {
 			t.Fatalf("handleStateUpdate(%v): %v", s, err)
 		}
 	}
 
-	want := []State{StateAspDown, StateAspInactive, StateAspActive}
+	want := []State{StateASPDown, StateASPInactive, StateASPActive}
 	for i, w := range want {
 		select {
 		case got := <-conn.StateChanges():
@@ -43,9 +43,9 @@ func TestStateChangesReportsEveryTransitionInOrder(t *testing.T) {
 // A restatement of the state the association is already in is not an edge. A
 // caller counting transitions must not be handed one that did not happen.
 func TestStateChangesDoesNotReportRestatements(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeServer)
+	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 
-	if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("handleStateUpdate: %v", err)
 	}
 	// Drain the genuine one.
@@ -53,7 +53,7 @@ func TestStateChangesDoesNotReportRestatements(t *testing.T) {
 
 	// The same state again, twice: neither is an entry.
 	for i := 0; i < 2; i++ {
-		if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+		if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 			t.Fatalf("handleStateUpdate: %v", err)
 		}
 	}
@@ -69,14 +69,14 @@ func TestStateChangesDoesNotReportRestatements(t *testing.T) {
 // reading, or never reads at all, is a nuisance and not an outage: State()
 // stays authoritative and the association carries on.
 func TestStateChangesNeverBlocksTheDispatcher(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeServer)
+	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 
 	// Far more transitions than the buffer holds, with nothing reading.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for i := 0; i < 500; i++ {
-			conn.notifyStateChange(StateAspInactive)
+			conn.notifyStateChange(StateASPInactive)
 		}
 	}()
 
@@ -89,9 +89,9 @@ func TestStateChangesNeverBlocksTheDispatcher(t *testing.T) {
 }
 
 // A caller ranging over the channel has to see the association end, or it parks
-// forever on a Conn that is already gone.
-func TestStateChangesClosesWithTheConn(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeServer)
+// forever on an Association that is already gone.
+func TestStateChangesClosesWithTheAssociation(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 
 	conn.closeStateChanges()
 
@@ -110,32 +110,32 @@ func TestStateChangesClosesWithTheConn(t *testing.T) {
 // Closing twice must not panic on an already-closed channel. Close and a
 // teardown path can both reach it.
 func TestStateChangesCloseIsIdempotent(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeServer)
+	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 
 	conn.closeStateChanges()
 	conn.closeStateChanges()
 }
 
-// Teardown is itself the final ASP state transition. Writing StateAspDown
+// Teardown is itself the final ASP state transition. Writing StateASPDown
 // directly and then closing the channel leaves Layer Management seeing an
 // active association simply disappear with no M-ASP_DOWN indication.
 func TestClosePublishesOneFinalAspDownTransition(t *testing.T) {
-	for _, initial := range []State{StateAspActive, StateAspInactive, StateAspDown} {
+	for _, initial := range []State{StateASPActive, StateASPInactive, StateASPDown} {
 		t.Run(initial.String(), func(t *testing.T) {
-			conn, _ := newTestConn(t, initial, modeServer)
+			conn, _ := newTestConn(t, initial, RoleSGP)
 			_ = conn.Close()
 
 			var got []State
 			for state := range conn.StateChanges() {
 				got = append(got, state)
 			}
-			if initial == StateAspDown {
+			if initial == StateASPDown {
 				if len(got) != 0 {
 					t.Errorf("closing an already ASP-DOWN association published %v", got)
 				}
 				return
 			}
-			if len(got) != 1 || got[0] != StateAspDown {
+			if len(got) != 1 || got[0] != StateASPDown {
 				t.Errorf("final state transitions = %v, want [AspDown]", got)
 			}
 		})
@@ -146,20 +146,20 @@ func TestClosePublishesOneFinalAspDownTransition(t *testing.T) {
 // closed association after closeWith records ASP-DOWN. Both the publisher and
 // the entry-action consumer race Close in production, so each boundary is
 // pinned independently.
-func TestClosedConnectionCannotReenterAnASPState(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+func TestClosedAssociationCannotReenterAnASPState(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	_ = conn.Close()
 
-	conn.sendState(StateAspActive)
-	if got := conn.State(); got != StateAspDown {
-		t.Errorf("State after sendState on closed Conn = %v, want AspDown", got)
+	conn.sendState(StateASPActive)
+	if got := conn.State(); got != StateASPDown {
+		t.Errorf("State after sendState on closed Association = %v, want ASP-DOWN", got)
 	}
 
-	if err := conn.applyStateUpdate(StateAspActive); err != nil {
+	if err := conn.applyStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("applyStateUpdate after Close: %v", err)
 	}
-	if got := conn.State(); got != StateAspDown {
-		t.Errorf("State after applyStateUpdate on closed Conn = %v, want AspDown", got)
+	if got := conn.State(); got != StateASPDown {
+		t.Errorf("State after applyStateUpdate on closed Association = %v, want ASP-DOWN", got)
 	}
 }
 
@@ -212,13 +212,13 @@ func TestAssociationStatusReportsTheLiveAssociation(t *testing.T) {
 	}
 }
 
-// The query has to fail rather than dereference a nil association once the Conn
+// The query has to fail rather than dereference a nil SCTP association once the M3UA Association
 // has never been given one.
 func TestAssociationStatusWithoutAnAssociation(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeClient)
+	conn, _ := newTestConn(t, StateASPDown, RoleASP)
 
 	if _, err := conn.AssociationStatus(); err == nil {
-		t.Error("AssociationStatus succeeded on a Conn with no SCTP association")
+		t.Error("AssociationStatus succeeded on an Association with no SCTP association")
 	}
 }
 
@@ -232,7 +232,7 @@ func TestAssociationStatusWithoutAnAssociation(t *testing.T) {
 // so the decision belongs to the application, which could not see there was one
 // to make.
 func TestNotifyReachesLayerManagement(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	if err := conn.handleNotify(messages.NewNotify(
 		params.NewStatus(params.AsStatePending), nil, nil, nil)); err != nil {
@@ -264,7 +264,7 @@ func TestNotifyReachesLayerManagement(t *testing.T) {
 }
 
 func TestInvalidVersionNotifiesLayerManagement(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	raw := []byte{0x02, 0x00, messages.MsgClassASPSM, messages.MsgTypeAspUp, 0, 0, 0, 8}
 
 	conn.dispatchRaw(context.Background(), inbound{data: raw, ppid: M3UAPPID})
@@ -282,7 +282,7 @@ func TestInvalidVersionNotifiesLayerManagement(t *testing.T) {
 }
 
 func TestClosePublishesSCTPReleaseBeforeClosingManagement(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	_ = conn.closeWith(ErrHeartbeatExpired)
 
 	indication, ok := <-conn.ManagementIndications()
@@ -304,7 +304,7 @@ func TestClosePublishesSCTPReleaseBeforeClosingManagement(t *testing.T) {
 // does not tear the association down (Section 3.8.1), which is exactly why it
 // has to be reported: nothing else about it is observable.
 func TestPeerErrorReachesLayerManagement(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	if err := conn.handleError(messages.NewError(
 		params.NewErrorCode(params.UnexpectedMessageError), nil, nil, nil, nil)); err != nil {
@@ -330,7 +330,7 @@ func TestPeerErrorReachesLayerManagement(t *testing.T) {
 // As with the other two channels, a caller that stops reading must not be able
 // to stall the dispatcher.
 func TestManagementIndicationsNeverBlockTheDispatcher(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	done := make(chan struct{})
 	go func() {
@@ -348,8 +348,8 @@ func TestManagementIndicationsNeverBlockTheDispatcher(t *testing.T) {
 }
 
 // A caller ranging over the channel has to see the association end.
-func TestManagementIndicationsCloseWithTheConn(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+func TestManagementIndicationsCloseWithTheAssociation(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	conn.closeManagement()
 	// Idempotent: Close and a teardown path can both reach it.
@@ -390,7 +390,7 @@ func TestAssociationEventsAreSubscribedOnALiveAssociation(t *testing.T) {
 		_ = srvConn.Close()
 	}()
 
-	for name, c := range map[string]*Conn{"client": cliConn, "server": srvConn} {
+	for name, c := range map[string]*Association{"ASP": cliConn, "SGP": srvConn} {
 		on, err := c.sctpConn.EventSubscribed(sctp.SCTP_ASSOC_CHANGE)
 		if err != nil {
 			t.Errorf("%s: EventSubscribed: %v", name, err)
@@ -401,9 +401,9 @@ func TestAssociationEventsAreSubscribedOnALiveAssociation(t *testing.T) {
 				"deliver an association restart and M-SCTP_RESTART can never fire", name)
 		}
 		// The association id is what a shared handler routes on, so a zero here
-		// would send every restart to the wrong Conn, or to none.
+		// would send every restart to the wrong Association, or to none.
 		if c.assocID.Load() == 0 {
-			t.Errorf("%s: assocID is 0; a Listener's shared handler cannot route to this Conn", name)
+			t.Errorf("%s: assocID is 0; a Listener's shared handler cannot route to this Association", name)
 		}
 	}
 }

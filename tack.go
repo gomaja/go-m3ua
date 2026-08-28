@@ -53,7 +53,7 @@ type pendingRequest struct {
 type tackRetransmitter struct {
 	mu sync.Mutex
 	// retryMu orders the small number of T(ack) retransmission writes against
-	// association-epoch boundaries. It does not serialize ordinary Conn writes:
+	// association-epoch boundaries. It does not serialize ordinary Association writes:
 	// only retries take it. A restart or orderly termination can therefore wait
 	// for an already-started old request to leave the wire, cancel the rest, and
 	// then send the new epoch's first request without an old retry overtaking it.
@@ -71,7 +71,7 @@ func newTAckRetransmitter() *tackRetransmitter {
 }
 
 // tackInterval reports the configured T(ack), or the RFC default.
-func (c *Conn) tackInterval() time.Duration {
+func (c *Association) tackInterval() time.Duration {
 	if c.cfg != nil && c.cfg.TAck > 0 {
 		return c.cfg.TAck
 	}
@@ -79,14 +79,14 @@ func (c *Conn) tackInterval() time.Duration {
 }
 
 // startTAck begins retransmitting msg every T(ack) until stopTAck is called for
-// the matching acknowledgement, the connection closes, or the retry budget is
+// the matching acknowledgement, the association closes, or the retry budget is
 // exhausted.
 //
 // Retransmission is deliberately bounded. The RFC's "until it receives the Ack"
 // is unbounded, but an ASP that resends forever against a peer that will never
 // answer just adds load to a network already in trouble; the budget converts a
 // silent hang into a reportable failure. TAckRetries configures it.
-func (c *Conn) startTAck(msg messages.M3UA, ackFor requestKind) *pendingRequest {
+func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingRequest {
 	if c.tack == nil {
 		return nil
 	}
@@ -158,7 +158,7 @@ func (c *Conn) startTAck(msg messages.M3UA, ackFor requestKind) *pendingRequest 
 }
 
 func (p *pendingRequest) cancel() {
-	p.finish(ErrConnClosed)
+	p.finish(ErrAssociationClosed)
 }
 
 func (p *pendingRequest) acknowledge() {
@@ -173,7 +173,7 @@ func (p *pendingRequest) finish(err error) {
 	})
 }
 
-func (c *Conn) runTAck(req *pendingRequest, kind requestKind) {
+func (c *Association) runTAck(req *pendingRequest, kind requestKind) {
 	interval := c.tackInterval()
 	retries := DefaultTAckRetries
 	if c.cfg != nil && c.cfg.TAckRetries > 0 {
@@ -237,7 +237,7 @@ func cloneTAckMessage(message messages.M3UA) (messages.M3UA, error) {
 // for from one it never asked for. RFC 4666 Section 4.3.4.1 attaches
 // consequences to the second — "If the ASP receives an unexpected ASP Up Ack
 // message..." — and none to the first.
-func (c *Conn) stopTAck(kind requestKind) bool {
+func (c *Association) stopTAck(kind requestKind) bool {
 	return c.forgetTAck(kind)
 }
 
@@ -245,7 +245,7 @@ func (c *Conn) stopTAck(kind requestKind) bool {
 // set in the outstanding request. Configuration membership alone is
 // insufficient: an association can carry several Application Servers while
 // one request activates or deactivates only a subset.
-func (c *Conn) validateTAckRoutingContexts(kind requestKind, acknowledged *params.Param) error {
+func (c *Association) validateTAckRoutingContexts(kind requestKind, acknowledged *params.Param) error {
 	if c.tack == nil {
 		return nil
 	}
@@ -292,7 +292,7 @@ func (c *Conn) validateTAckRoutingContexts(kind requestKind, acknowledged *param
 // covered. RFC 4666 permits multiple ASP Active and ASP Inactive Acks for
 // different RC subsets, so the retransmitter remains armed until all explicit
 // contexts have been acknowledged.
-func (c *Conn) acknowledgeTAck(kind requestKind, acknowledged *params.Param) bool {
+func (c *Association) acknowledgeTAck(kind requestKind, acknowledged *params.Param) bool {
 	if c.tack == nil {
 		return false
 	}
@@ -340,7 +340,7 @@ func (c *Conn) acknowledgeTAck(kind requestKind, acknowledged *params.Param) boo
 // pendingTAckRoutingContexts returns the explicit RCs still awaiting an Ack.
 // It is also the activation-window scope in which an SGP may send DUNA, DRST,
 // and SCON before the corresponding ASP Active Ack.
-func (c *Conn) pendingTAckRoutingContexts(kind requestKind) []uint32 {
+func (c *Association) pendingTAckRoutingContexts(kind requestKind) []uint32 {
 	if c.tack == nil {
 		return nil
 	}
@@ -364,7 +364,7 @@ type pendingRequestEntry struct {
 	request *pendingRequest
 }
 
-func (c *Conn) pendingRequestEntriesLocked(kind requestKind) []pendingRequestEntry {
+func (c *Association) pendingRequestEntriesLocked(kind requestKind) []pendingRequestEntry {
 	requests := make([]pendingRequestEntry, 0)
 	for message, request := range c.tack.pending {
 		if request.kind == kind {
@@ -374,7 +374,7 @@ func (c *Conn) pendingRequestEntriesLocked(kind requestKind) []pendingRequestEnt
 	return requests
 }
 
-func (c *Conn) pendingRequestsLocked(kind requestKind) []*pendingRequest {
+func (c *Association) pendingRequestsLocked(kind requestKind) []*pendingRequest {
 	entries := c.pendingRequestEntriesLocked(kind)
 	requests := make([]*pendingRequest, 0, len(entries))
 	for _, entry := range entries {
@@ -383,7 +383,7 @@ func (c *Conn) pendingRequestsLocked(kind requestKind) []*pendingRequest {
 	return requests
 }
 
-func (c *Conn) forgetTAck(kind requestKind) bool {
+func (c *Association) forgetTAck(kind requestKind) bool {
 	if c.tack == nil {
 		return false
 	}
@@ -415,7 +415,7 @@ func (c *Conn) forgetTAck(kind requestKind) bool {
 // A pending request of this kind is intentionally left to the normal scoped
 // validator. Its Ack may be partial, malformed, or for the wrong RC, and those
 // cases already produce the precise RFC error without changing state.
-func (c *Conn) rejectStaleASPTMAck(kind requestKind) bool {
+func (c *Association) rejectStaleASPTMAck(kind requestKind) bool {
 	if c.tack == nil {
 		return false
 	}
@@ -431,7 +431,7 @@ func (c *Conn) rejectStaleASPTMAck(kind requestKind) bool {
 // kind. A superseded retransmitter can finish an in-flight write after its
 // replacement was armed; it must not retire or report expiry for that newer
 // request.
-func (c *Conn) forgetTAckRequest(req *pendingRequest, kind requestKind, result error) bool {
+func (c *Association) forgetTAckRequest(req *pendingRequest, kind requestKind, result error) bool {
 	if c.tack == nil {
 		return false
 	}
@@ -451,7 +451,7 @@ func (c *Conn) forgetTAckRequest(req *pendingRequest, kind requestKind, result e
 
 // cancelTAckRequest removes one exact request without mistaking it for an Ack.
 // It is used when the initial write fails or a caller abandons a wait.
-func (c *Conn) cancelTAckRequest(req *pendingRequest) {
+func (c *Association) cancelTAckRequest(req *pendingRequest) {
 	if c.tack == nil || req == nil {
 		return
 	}
@@ -468,7 +468,7 @@ func (c *Conn) cancelTAckRequest(req *pendingRequest) {
 }
 
 // waitTAck waits for one request to be acknowledged, fail, or be cancelled.
-func (c *Conn) waitTAck(ctx context.Context, req *pendingRequest) error {
+func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 	if req == nil {
 		return nil
 	}
@@ -482,13 +482,13 @@ func (c *Conn) waitTAck(ctx context.Context, req *pendingRequest) error {
 		if err := c.Err(); err != nil {
 			return err
 		}
-		return ErrConnClosed
+		return ErrAssociationClosed
 	}
 }
 
 // stopAllTAck cancels every outstanding retransmission, used when the
 // association goes down.
-func (c *Conn) stopAllTAck() {
+func (c *Association) stopAllTAck() {
 	if c.tack == nil {
 		return
 	}
@@ -503,19 +503,19 @@ func (c *Conn) stopAllTAck() {
 // The retry fence is acquired before the pending-map lock: runTAck and
 // startTAck use the same order, so an already-started retry drains first and a
 // not-yet-started one observes its closed stop channel before writing.
-func (c *Conn) resetTAckEpoch() {
+func (c *Association) resetTAckEpoch() {
 	if c.tack == nil {
 		return
 	}
 	c.tack.retryMu.Lock()
 	c.tack.mu.Lock()
-	c.tack.awaitingRestartAspUp = c.mode == modeClient
+	c.tack.awaitingRestartAspUp = c.role == RoleASP
 	c.cancelAllTAckLocked()
 	c.tack.mu.Unlock()
 	c.tack.retryMu.Unlock()
 }
 
-func (c *Conn) cancelAllTAckLocked() {
+func (c *Association) cancelAllTAckLocked() {
 	for message, request := range c.tack.pending {
 		request.cancel()
 		delete(c.tack.pending, message)
@@ -524,7 +524,7 @@ func (c *Conn) cancelAllTAckLocked() {
 
 // pendingTAck reports how many requests are awaiting acknowledgement, for tests
 // and for callers that want to surface handshake progress.
-func (c *Conn) pendingTAck() int {
+func (c *Association) pendingTAck() int {
 	if c.tack == nil {
 		return 0
 	}

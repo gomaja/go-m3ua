@@ -11,8 +11,8 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func TestInvalidInfoStringIsStrictByDefaultOnConn(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeServer)
+func TestInvalidInfoStringIsStrictByDefaultOnAssociation(t *testing.T) {
+	conn, sent := newTestConn(t, StateASPDown, RoleSGP)
 	conn.dispatchRaw(context.Background(), inbound{
 		data: invalidInfoStringAspUp(t),
 		ppid: M3UAPPID,
@@ -34,8 +34,8 @@ func TestInvalidInfoStringIsStrictByDefaultOnConn(t *testing.T) {
 	}
 }
 
-func TestCompatibilityAcceptsInvalidInfoStringOnConn(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeServer)
+func TestCompatibilityAcceptsInvalidInfoStringOnAssociation(t *testing.T) {
+	conn, sent := newTestConn(t, StateASPDown, RoleSGP)
 	conn.cfg.Compatibility = AcceptInvalidOptionalInfoString()
 	conn.dispatchRaw(context.Background(), inbound{
 		data: invalidInfoStringAspUp(t),
@@ -50,8 +50,8 @@ func TestCompatibilityAcceptsInvalidInfoStringOnConn(t *testing.T) {
 	}
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspInactive {
-			t.Fatalf("published state = %v, want %v", got, StateAspInactive)
+		if got != StateASPInactive {
+			t.Fatalf("published state = %v, want %v", got, StateASPInactive)
 		}
 	default:
 		t.Fatal("accepted ASP Up published no state")
@@ -59,7 +59,7 @@ func TestCompatibilityAcceptsInvalidInfoStringOnConn(t *testing.T) {
 }
 
 func TestCompatibilityToleratorReceivesOwnedViolationBytes(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeServer)
+	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 	raw := invalidInfoStringAspUp(t)
 	var captured ProtocolViolation
 	conn.cfg.Compatibility = CompatibilityPolicy{

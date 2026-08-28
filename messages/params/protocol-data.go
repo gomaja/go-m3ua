@@ -30,13 +30,13 @@ const (
 
 // ProtocolDataPayload is a M3UA ProtocolDataPayload.
 type ProtocolDataPayload struct {
-	OriginatingPointCode   uint32
-	DestinationPointCode   uint32
-	ServiceIndicator       uint8
-	NetworkIndicator       uint8
-	MessagePriority        uint8
-	SignalingLinkSelection uint8
-	Data                   []byte
+	OriginatingPointCode    uint32
+	DestinationPointCode    uint32
+	ServiceIndicator        uint8
+	NetworkIndicator        uint8
+	MessagePriority         uint8
+	SignallingLinkSelection uint8
+	Data                    []byte
 }
 
 // NewProtocolDataPayload creates a new ProtocolDataPayload payload.
@@ -44,13 +44,13 @@ type ProtocolDataPayload struct {
 // You need to create new Param using serialized ProtocolDataPayload.
 func NewProtocolDataPayload(opc, dpc uint32, si, ni, mp, sls uint8, data []byte) *ProtocolDataPayload {
 	return &ProtocolDataPayload{
-		OriginatingPointCode:   opc,
-		DestinationPointCode:   dpc,
-		ServiceIndicator:       si,
-		NetworkIndicator:       ni,
-		MessagePriority:        mp,
-		SignalingLinkSelection: sls,
-		Data:                   data,
+		OriginatingPointCode:    opc,
+		DestinationPointCode:    dpc,
+		ServiceIndicator:        si,
+		NetworkIndicator:        ni,
+		MessagePriority:         mp,
+		SignallingLinkSelection: sls,
+		Data:                    data,
 	}
 }
 
@@ -97,7 +97,7 @@ func (p *ProtocolDataPayload) MarshalTo(b []byte) error {
 	b[8] = p.ServiceIndicator
 	b[9] = p.NetworkIndicator
 	b[10] = p.MessagePriority
-	b[11] = p.SignalingLinkSelection
+	b[11] = p.SignallingLinkSelection
 	copy(b[12:p.MarshalLen()], p.Data)
 	return nil
 }
@@ -123,7 +123,7 @@ func (p *ProtocolDataPayload) UnmarshalBinary(b []byte) error {
 	p.ServiceIndicator = b[8]
 	p.NetworkIndicator = b[9]
 	p.MessagePriority = b[10]
-	p.SignalingLinkSelection = b[11]
+	p.SignallingLinkSelection = b[11]
 	p.Data = b[12:]
 	return nil
 }
@@ -135,13 +135,13 @@ func (p *ProtocolDataPayload) MarshalLen() int {
 
 // String returns the M3UA header values in human readable format.
 func (p *ProtocolDataPayload) String() string {
-	return fmt.Sprintf("{OriginatingPointCode: %d, DestinationPointCode: %d, ServiceIndicator: %d, NetworkIndicator: %d, MessagePriority: %d, SignalingLinkSelection: %d, Data: %x}",
+	return fmt.Sprintf("{OriginatingPointCode: %d, DestinationPointCode: %d, ServiceIndicator: %d, NetworkIndicator: %d, MessagePriority: %d, SignallingLinkSelection: %d, Data: %x}",
 		p.OriginatingPointCode,
 		p.DestinationPointCode,
 		p.ServiceIndicator,
 		p.NetworkIndicator,
 		p.MessagePriority,
-		p.SignalingLinkSelection,
+		p.SignallingLinkSelection,
 		p.Data,
 	)
 }

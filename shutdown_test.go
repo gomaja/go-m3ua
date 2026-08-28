@@ -16,7 +16,7 @@ import (
 )
 
 func TestSolicitedAspDownAckIsAccepted(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspInactive, modeClient)
+	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 	conn.startTAck(messages.NewAspDown(nil), requestAspDown)
 
 	if err := conn.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
@@ -28,7 +28,7 @@ func TestSolicitedAspDownAckIsAccepted(t *testing.T) {
 }
 
 func TestShutdownWaitsForEachAckBeforeAdvancing(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Second
 	conn.cfg.TAckRetries = 2
 
@@ -77,7 +77,7 @@ func TestShutdownWaitsForEachAckBeforeAdvancing(t *testing.T) {
 // to be outstanding. Every old timer must be cancelled before the first
 // shutdown message reaches the wire.
 func TestShutdownCancelsOldTAckBeforeEachOrderlyRequest(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
 	conn.startTAck(messages.NewAspUp(nil, params.NewInfoString("old")), requestAspUp)
 	conn.startTAck(messages.NewAspActive(
@@ -125,7 +125,7 @@ func TestShutdownCancelsOldTAckBeforeEachOrderlyRequest(t *testing.T) {
 // write. The shutdown ASP Inactive must wait behind that write so the old ASP
 // Active cannot complete later and appear after the withdrawal on stream 0.
 func TestShutdownFencesAnInFlightOldTAckBeforeAspInactive(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = 10 * time.Millisecond
 	conn.cfg.TAckRetries = 100
 
@@ -188,7 +188,7 @@ func TestShutdownFencesAnInFlightOldTAckBeforeAspInactive(t *testing.T) {
 // cancelled establishment request belongs to the retired epoch and must not
 // reverse the withdrawal state.
 func TestShutdownIgnoresDelayedCancelledAspActiveAck(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
 	conn.startTAck(messages.NewAspActive(
 		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
@@ -210,14 +210,14 @@ func TestShutdownIgnoresDelayedCancelledAspActiveAck(t *testing.T) {
 	if _, ok := receiveSignal(t, writes).(*messages.AspDown); !ok {
 		t.Fatal("shutdown did not send ASP Down")
 	}
-	if got := conn.State(); got != StateAspInactive {
+	if got := conn.State(); got != StateASPInactive {
 		t.Fatalf("state while waiting for ASP Down Ack = %v, want ASP-INACTIVE", got)
 	}
 
 	conn.handleSignals(context.Background(), messages.NewAspActiveAck(
 		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
 	))
-	if got := conn.State(); got != StateAspInactive {
+	if got := conn.State(); got != StateASPInactive {
 		t.Errorf("delayed cancelled ASP Active Ack changed shutdown state to %v", got)
 	}
 
@@ -230,7 +230,7 @@ func TestShutdownIgnoresDelayedCancelledAspActiveAck(t *testing.T) {
 }
 
 func TestShutdownWaitsForEveryPartialInactiveAck(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Second
 
 	writes := make(chan messages.M3UA, 8)
@@ -262,7 +262,7 @@ func TestShutdownWaitsForEveryPartialInactiveAck(t *testing.T) {
 }
 
 func TestShutdownContextCancellationStopsTAckAndCloses(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Second
 
 	writes := make(chan messages.M3UA, 4)
@@ -298,7 +298,7 @@ func TestShutdownContextCancellationStopsTAckAndCloses(t *testing.T) {
 }
 
 func TestShutdownRetransmitsAspDownUntilAcked(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspInactive, modeClient)
+	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 	conn.cfg.TAck = 10 * time.Millisecond
 	conn.cfg.TAckRetries = 20
 
@@ -324,7 +324,7 @@ func TestShutdownRetransmitsAspDownUntilAcked(t *testing.T) {
 }
 
 func TestShutdownWhileAlreadyDownUsesSCTPOnly(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeClient)
+	conn, sent := newTestConn(t, StateASPDown, RoleASP)
 	_ = conn.Shutdown()
 	if len(*sent) != 0 {
 		t.Fatalf("ASP-DOWN Shutdown sent %v, want SCTP shutdown only", typeNames(*sent))
@@ -332,7 +332,7 @@ func TestShutdownWhileAlreadyDownUsesSCTPOnly(t *testing.T) {
 }
 
 func TestShutdownWriteFailureStopsTAckAndCloses(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	want := errors.New("write failed")
 	conn.signalWriter = func(messages.M3UA) (int, error) { return 0, want }
 
@@ -351,12 +351,12 @@ func TestShutdownWriteFailureStopsTAckAndCloses(t *testing.T) {
 }
 
 func TestShutdownDownEntryDoesNotRestartAspUp(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeClient)
+	conn, sent := newTestConn(t, StateASPInactive, RoleASP)
 	conn.terminating.Store(true)
 	conn.startTAck(messages.NewAspDown(nil), requestAspDown)
 	conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 
-	if err := conn.handleStateUpdate(StateAspDown); err != nil {
+	if err := conn.handleStateUpdate(StateASPDown); err != nil {
 		t.Fatalf("ASP-DOWN entry during shutdown: %v", err)
 	}
 	if got := countType(*sent, "ASP Up"); got != 0 {
@@ -365,7 +365,7 @@ func TestShutdownDownEntryDoesNotRestartAspUp(t *testing.T) {
 }
 
 func TestShutdownContextAlreadyCanceledSendsNothing(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -383,7 +383,7 @@ func TestShutdownContextAlreadyCanceledSendsNothing(t *testing.T) {
 	}
 }
 
-func installImmediateShutdownPeer(conn *Conn, sent *[]messages.M3UA) {
+func installImmediateShutdownPeer(conn *Association, sent *[]messages.M3UA) {
 	conn.signalWriter = func(message messages.M3UA) (int, error) {
 		*sent = append(*sent, message)
 		switch request := message.(type) {

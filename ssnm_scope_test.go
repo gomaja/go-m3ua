@@ -19,29 +19,29 @@ const ssnmScopePointCode = 0x252525
 
 type ssnmScopeCase struct {
 	name string
-	call func(*Conn, *params.Param) error
+	call func(*Association, *params.Param) error
 }
 
 func aspBoundSSNMScopeCases() []ssnmScopeCase {
 	return []ssnmScopeCase{
-		{name: "DUNA", call: func(c *Conn, routingContext *params.Param) error {
+		{name: "DUNA", call: func(c *Association, routingContext *params.Param) error {
 			return c.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 				nil, routingContext, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode), nil))
 		}},
-		{name: "DAVA", call: func(c *Conn, routingContext *params.Param) error {
+		{name: "DAVA", call: func(c *Association, routingContext *params.Param) error {
 			return c.handleDestinationAvailable(messages.NewDestinationAvailable(
 				nil, routingContext, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode), nil))
 		}},
-		{name: "DRST", call: func(c *Conn, routingContext *params.Param) error {
+		{name: "DRST", call: func(c *Association, routingContext *params.Param) error {
 			return c.handleDestinationRestricted(messages.NewDestinationRestricted(
 				nil, routingContext, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode), nil))
 		}},
-		{name: "SCON", call: func(c *Conn, routingContext *params.Param) error {
+		{name: "SCON", call: func(c *Association, routingContext *params.Param) error {
 			return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 				nil, routingContext, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 				nil, params.NewCongestionIndications(2), nil))
 		}},
-		{name: "DUPU", call: func(c *Conn, routingContext *params.Param) error {
+		{name: "DUPU", call: func(c *Association, routingContext *params.Param) error {
 			return c.handleDestinationUserPartUnavailable(messages.NewDestinationUserPartUnavailable(
 				nil, routingContext, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 				params.NewUserCause(params.SCCP, params.Unequipped), nil))
@@ -51,11 +51,11 @@ func aspBoundSSNMScopeCases() []ssnmScopeCase {
 
 func sgpBoundSSNMScopeCases() []ssnmScopeCase {
 	return []ssnmScopeCase{
-		{name: "DAUD", call: func(c *Conn, routingContext *params.Param) error {
+		{name: "DAUD", call: func(c *Association, routingContext *params.Param) error {
 			return c.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 				nil, routingContext, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode), nil))
 		}},
-		{name: "SCON", call: func(c *Conn, routingContext *params.Param) error {
+		{name: "SCON", call: func(c *Association, routingContext *params.Param) error {
 			return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 				nil, routingContext, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 				nil, params.NewCongestionIndications(2), nil))
@@ -63,7 +63,7 @@ func sgpBoundSSNMScopeCases() []ssnmScopeCase {
 	}
 }
 
-func assertNoSSNMScopeStatus(t *testing.T, c *Conn) {
+func assertNoSSNMScopeStatus(t *testing.T, c *Association) {
 	t.Helper()
 	select {
 	case status := <-c.SignallingStatus():
@@ -80,16 +80,16 @@ func TestSSNMRoutingContextConditionality(t *testing.T) {
 	t.Run("multi-flow association requires it", func(t *testing.T) {
 		for _, role := range []struct {
 			name  string
-			mode  mode
+			mode  associationRole
 			cases []ssnmScopeCase
 		}{
-			{name: "ASP receives", mode: modeClient, cases: aspBoundSSNMScopeCases()},
-			{name: "SGP receives", mode: modeServer, cases: sgpBoundSSNMScopeCases()},
+			{name: "ASP receives", mode: RoleASP, cases: aspBoundSSNMScopeCases()},
+			{name: "SGP receives", mode: RoleSGP, cases: sgpBoundSSNMScopeCases()},
 		} {
 			t.Run(role.name, func(t *testing.T) {
 				for _, message := range role.cases {
 					t.Run(message.name, func(t *testing.T) {
-						conn, sent := newTestConnWithContexts(t, StateAspActive, role.mode, 1, 2)
+						conn, sent := newTestConnWithContexts(t, StateASPActive, role.mode, 1, 2)
 						err := message.call(conn, nil)
 						if !errors.Is(err, ErrMissingRoutingContext) {
 							t.Fatalf("error = %v, want ErrMissingRoutingContext", err)
@@ -107,16 +107,16 @@ func TestSSNMRoutingContextConditionality(t *testing.T) {
 	t.Run("single-flow association permits omission", func(t *testing.T) {
 		for _, role := range []struct {
 			name  string
-			mode  mode
+			mode  associationRole
 			cases []ssnmScopeCase
 		}{
-			{name: "ASP receives", mode: modeClient, cases: aspBoundSSNMScopeCases()},
-			{name: "SGP receives", mode: modeServer, cases: sgpBoundSSNMScopeCases()},
+			{name: "ASP receives", mode: RoleASP, cases: aspBoundSSNMScopeCases()},
+			{name: "SGP receives", mode: RoleSGP, cases: sgpBoundSSNMScopeCases()},
 		} {
 			t.Run(role.name, func(t *testing.T) {
 				for _, message := range role.cases {
 					t.Run(message.name, func(t *testing.T) {
-						conn, _ := newTestConnWithContexts(t, StateAspActive, role.mode, 7)
+						conn, _ := newTestConnWithContexts(t, StateASPActive, role.mode, 7)
 						if err := message.call(conn, nil); err != nil {
 							t.Fatalf("single-flow %s without Routing Context: %v", message.name, err)
 						}
@@ -144,7 +144,7 @@ func TestSSNMHonoursPerRoutingContextActiveState(t *testing.T) {
 				{name: "mixed active and inactive", rcs: []uint32{1, 2}},
 			} {
 				t.Run(message.name+"/"+scope.name, func(t *testing.T) {
-					conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+					conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 					conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 
 					if err := message.call(conn, params.NewRoutingContext(scope.rcs...)); err != nil {
@@ -165,7 +165,7 @@ func TestSSNMHonoursPerRoutingContextActiveState(t *testing.T) {
 	t.Run("ASP still applies active scope", func(t *testing.T) {
 		for _, message := range aspBoundSSNMScopeCases() {
 			t.Run(message.name, func(t *testing.T) {
-				conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+				conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 				conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 				if err := message.call(conn, params.NewRoutingContext(1)); err != nil {
 					t.Fatalf("active-flow %s: %v", message.name, err)
@@ -185,7 +185,7 @@ func TestSSNMHonoursPerRoutingContextActiveState(t *testing.T) {
 				{name: "mixed active and inactive", rcs: []uint32{1, 2}},
 			} {
 				t.Run(message.name+"/"+scope.name, func(t *testing.T) {
-					conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+					conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 					conn.noteRoutingContextsActive([]uint32{1})
 
 					err := message.call(conn, params.NewRoutingContext(scope.rcs...))
@@ -208,7 +208,7 @@ func TestSSNMHonoursPerRoutingContextActiveState(t *testing.T) {
 	t.Run("SGP still handles active scope", func(t *testing.T) {
 		for _, message := range sgpBoundSSNMScopeCases() {
 			t.Run(message.name, func(t *testing.T) {
-				conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+				conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 				conn.noteRoutingContextsActive([]uint32{1})
 				if err := message.call(conn, params.NewRoutingContext(1)); err != nil {
 					t.Fatalf("active-flow %s: %v", message.name, err)
@@ -231,7 +231,7 @@ func TestSSNMHonoursPerRoutingContextActiveState(t *testing.T) {
 // activating ASP, not to an inactive ASP sending SCON toward an SGP.
 func TestScopedSSNMActivationWindow(t *testing.T) {
 	t.Run("requires an outstanding ASP Active", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+		conn, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 		err := aspBoundSSNMScopeCases()[0].call(conn, params.NewRoutingContext(2))
 		var unexpected *UnexpectedMessageError
 		if !errors.As(err, &unexpected) {
@@ -247,7 +247,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 		aspBoundSSNMScopeCases()[3],
 	} {
 		t.Run(message.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+			conn, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 			conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 			conn.startTAck(messages.NewAspActive(
 				conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
@@ -260,7 +260,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 	}
 
 	t.Run("does not apply at the SGP", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspInactive, modeServer, 1)
+		conn, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1)
 		err := sgpBoundSSNMScopeCases()[1].call(conn, nil)
 		var unexpected *UnexpectedMessageError
 		if !errors.As(err, &unexpected) {
@@ -284,7 +284,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 				{name: "active and pending", rcs: []uint32{1, 2}},
 			} {
 				t.Run(message.name+"/"+scope.name, func(t *testing.T) {
-					conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2, 3)
+					conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2, 3)
 					conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 					conn.startTAck(messages.NewAspActive(
 						conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
@@ -300,7 +300,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 	})
 
 	t.Run("does not widen beyond the pending RC", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2, 3)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2, 3)
 		conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 		conn.startTAck(messages.NewAspActive(
 			conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
@@ -319,7 +319,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 func TestDestinationStatusPreservesSSNMRoutingContexts(t *testing.T) {
 	for _, message := range aspBoundSSNMScopeCases() {
 		t.Run("ASP receives/"+message.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 			if err := message.call(conn, params.NewRoutingContext(2, 1)); err != nil {
 				t.Fatal(err)
 			}
@@ -332,7 +332,7 @@ func TestDestinationStatusPreservesSSNMRoutingContexts(t *testing.T) {
 	}
 
 	t.Run("SGP receives SCON", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 		if err := sgpBoundSSNMScopeCases()[1].call(conn, params.NewRoutingContext(2, 1)); err != nil {
 			t.Fatal(err)
 		}
@@ -353,7 +353,7 @@ func TestDestinationStatusPreservesSSNMRoutingContexts(t *testing.T) {
 		{name: "omitted", param: nil, want: nil, wantSet: false},
 	} {
 		t.Run(presence.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 0)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 0)
 			if err := aspBoundSSNMScopeCases()[0].call(conn, presence.param); err != nil {
 				t.Fatal(err)
 			}
@@ -367,7 +367,7 @@ func TestDestinationStatusPreservesSSNMRoutingContexts(t *testing.T) {
 	}
 
 	t.Run("statuses do not alias their RC lists", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 		err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 			nil, params.NewRoutingContext(1, 2),
 			params.NewAffectedPointCode(0x111111, 0x222222), nil))
@@ -386,7 +386,7 @@ func TestDestinationStatusPreservesSSNMRoutingContexts(t *testing.T) {
 	})
 
 	t.Run("wire-decoded list reaches the status", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 		message := messages.NewDestinationUnavailable(
 			nil, params.NewRoutingContext(2, 1),
 			params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode), nil,
@@ -420,7 +420,7 @@ func TestSCONConcernedDestinationDirectionAndStatus(t *testing.T) {
 		{name: "omitted", param: nil, want: 0, wantSet: false},
 	} {
 		t.Run("ASP to SGP/"+presence.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 			err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 				nil, nil, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 				presence.param, params.NewCongestionIndications(1), nil))
@@ -438,7 +438,7 @@ func TestSCONConcernedDestinationDirectionAndStatus(t *testing.T) {
 	}
 
 	t.Run("SGP to ASP is rejected", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 		err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 			nil, nil, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 			params.NewConcernedDestination(0x123456), params.NewCongestionIndications(1), nil))
@@ -457,15 +457,15 @@ func TestSCONConcernedDestinationDirectionAndStatus(t *testing.T) {
 func TestSCONRejectsUndefinedCongestionLevels(t *testing.T) {
 	for _, role := range []struct {
 		name string
-		mode mode
+		mode associationRole
 	}{
-		{name: "SGP to ASP", mode: modeClient},
-		{name: "ASP to SGP", mode: modeServer},
+		{name: "SGP to ASP", mode: RoleASP},
+		{name: "ASP to SGP", mode: RoleSGP},
 	} {
 		t.Run(role.name, func(t *testing.T) {
 			for _, level := range []uint8{4, 255} {
 				t.Run(strconv.Itoa(int(level)), func(t *testing.T) {
-					conn, _ := newTestConnWithContexts(t, StateAspActive, role.mode, 1)
+					conn, _ := newTestConnWithContexts(t, StateASPActive, role.mode, 1)
 					err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 						nil, nil, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 						nil, params.NewCongestionIndications(level), nil))
@@ -487,14 +487,14 @@ func TestSCONRejectsUndefinedCongestionLevels(t *testing.T) {
 	t.Run("all defined levels remain accepted", func(t *testing.T) {
 		for _, role := range []struct {
 			name string
-			mode mode
+			mode associationRole
 		}{
-			{name: "SGP to ASP", mode: modeClient},
-			{name: "ASP to SGP", mode: modeServer},
+			{name: "SGP to ASP", mode: RoleASP},
+			{name: "ASP to SGP", mode: RoleSGP},
 		} {
 			for level := uint8(0); level <= 3; level++ {
 				t.Run(role.name+"/"+string(rune('0'+level)), func(t *testing.T) {
-					conn, _ := newTestConnWithContexts(t, StateAspActive, role.mode, 1)
+					conn, _ := newTestConnWithContexts(t, StateASPActive, role.mode, 1)
 					err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 						nil, nil, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 						nil, params.NewCongestionIndications(level), nil))
@@ -515,7 +515,7 @@ func TestSCONRejectsUndefinedCongestionLevels(t *testing.T) {
 // cannot keep unit tests green while reporting the wrong fault to the peer.
 func TestSSNMScopeErrorsProduceRFCErrorMessages(t *testing.T) {
 	t.Run("missing Routing Context", func(t *testing.T) {
-		conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+		conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 		err := aspBoundSSNMScopeCases()[0].call(conn, nil)
 		if handleErr := conn.handleErrors(err); handleErr != nil {
 			t.Fatalf("handleErrors: %v", handleErr)
@@ -527,7 +527,7 @@ func TestSSNMScopeErrorsProduceRFCErrorMessages(t *testing.T) {
 	})
 
 	t.Run("invalid congestion level", func(t *testing.T) {
-		conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+		conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 		err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 			nil, nil, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 			nil, params.NewCongestionIndications(4), nil))
@@ -541,7 +541,7 @@ func TestSSNMScopeErrorsProduceRFCErrorMessages(t *testing.T) {
 	})
 
 	t.Run("inactive SGP scope", func(t *testing.T) {
-		conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+		conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 		conn.noteRoutingContextsActive([]uint32{1})
 		err := sgpBoundSSNMScopeCases()[0].call(conn, params.NewRoutingContext(2))
 		if handleErr := conn.handleErrors(err); handleErr != nil {

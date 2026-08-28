@@ -15,7 +15,7 @@ import (
 // A bounded exchange must produce a bounded number of messages.
 //
 // The state machine publishes a state after every message, and entering a state
-// runs its entry action — for a client, "send ASP Up" on ASP-DOWN and "send ASP
+// runs its entry action — for an ASP, "send ASP Up" on ASP-DOWN and "send ASP
 // Active" on ASP-INACTIVE. When a handler restated its current state to mean
 // "hold", the entry action used to run again, so any peer whose answer the
 // handler rejected closed a loop: reject, restate, re-send, be answered,
@@ -58,33 +58,33 @@ func peerReply(msg messages.M3UA, rc *params.Param, tm *params.Param, silent boo
 }
 
 // runExchange drives conn until nothing further is pending, or the budget runs
-// out. It reports the number of steps taken and everything the Conn sent.
+// out. It reports the number of steps taken and everything the Association sent.
 //
 // It is the in-process equivalent of monitor(): pull a published state and
 // apply it, and when nothing is pending, hand the peer's answer to the
 // dispatcher.
-func runExchange(t *testing.T, conn *Conn, sent *[]messages.M3UA, rc, tm *params.Param, silent bool) (steps int, settled bool) {
+func runExchange(t *testing.T, association *Association, sent *[]messages.M3UA, rc, tm *params.Param, silent bool) (steps int, settled bool) {
 	t.Helper()
 
 	ctx := context.Background()
 	answered := 0
 
 	// Bootstrap exactly as Dial and Accept do.
-	conn.stateChan <- StateAspDown
+	association.stateChan <- StateASPDown
 
 	for steps = 0; steps < settleBudget; steps++ {
 		// Errors are reported to monitor(), which logs them; drain so a full
 		// channel cannot be mistaken for a settled exchange.
 		select {
-		case <-conn.errChan:
+		case <-association.errChan:
 			continue
 		default:
 		}
 
 		select {
-		case st := <-conn.stateChan:
+		case st := <-association.stateChan:
 			// Entry actions run here, and may write through signalWriter.
-			_ = conn.handleStateUpdate(st)
+			_ = association.handleStateUpdate(st)
 			continue
 		default:
 		}
@@ -94,7 +94,7 @@ func runExchange(t *testing.T, conn *Conn, sent *[]messages.M3UA, rc, tm *params
 			req := (*sent)[answered]
 			answered++
 			if reply := peerReply(req, rc, tm, silent); reply != nil {
-				conn.handleSignals(ctx, reply)
+				association.handleSignals(ctx, reply)
 			}
 			continue
 		}
@@ -111,7 +111,7 @@ func FuzzExchangeAlwaysSettles(f *testing.F) {
 		rcs    []uint32
 		tm     uint32
 		silent bool
-		server bool
+		sgp    bool
 	}{
 		{[]uint32{1, 2}, params.TrafficModeLoadshare, false, false}, // agreeing peer
 		{[]uint32{99}, params.TrafficModeLoadshare, false, false},   // foreign RC: the storm
@@ -124,26 +124,26 @@ func FuzzExchangeAlwaysSettles(f *testing.F) {
 		for _, v := range seed.rcs {
 			rcBytes = append(rcBytes, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 		}
-		f.Add(rcBytes, seed.tm, seed.silent, seed.server)
+		f.Add(rcBytes, seed.tm, seed.silent, seed.sgp)
 	}
 
-	f.Fuzz(func(t *testing.T, rcData []byte, tmValue uint32, silent, server bool) {
+	f.Fuzz(func(t *testing.T, rcData []byte, tmValue uint32, silent, sgp bool) {
 		// A Routing Context parameter is a list of 32-bit values; anything else
 		// exercises the decoder's own guards, which other targets cover.
 		if len(rcData) > 64 {
 			return
 		}
 
-		m := modeClient
-		if server {
-			m = modeServer
+		role := RoleASP
+		if sgp {
+			role = RoleSGP
 		}
-		conn, sent := newTestConn(t, StateAspDown, m)
+		association, sent := newTestConn(t, StateASPDown, role)
 
 		rc := params.NewParam(int(params.RoutingContext), rcData)
 		tm := params.NewTrafficModeType(tmValue)
 
-		steps, settled := runExchange(t, conn, sent, rc, tm, silent)
+		steps, settled := runExchange(t, association, sent, rc, tm, silent)
 		if !settled {
 			t.Fatalf("exchange did not settle in %d steps: %d messages sent (%v). "+
 				"A bounded conversation must produce a bounded number of messages",
@@ -162,7 +162,7 @@ func FuzzExchangeAlwaysSettles(f *testing.F) {
 // The agreeing case must still complete the handshake, so the fuzz target above
 // is not satisfied by a state machine that simply does nothing.
 func TestExchangeWithAgreeingPeerReachesActive(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeClient)
+	conn, sent := newTestConn(t, StateASPDown, RoleASP)
 
 	steps, settled := runExchange(t, conn, sent,
 		params.NewRoutingContext(1, 2),
@@ -171,8 +171,8 @@ func TestExchangeWithAgreeingPeerReachesActive(t *testing.T) {
 		t.Fatalf("agreeing exchange did not settle in %d steps", steps)
 	}
 
-	if got := conn.State(); got != StateAspActive {
-		t.Errorf("state = %v after a complete handshake, want %v (sent %v)", got, StateAspActive, typeNames(*sent))
+	if got := conn.State(); got != StateASPActive {
+		t.Errorf("state = %v after a complete handshake, want %v (sent %v)", got, StateASPActive, typeNames(*sent))
 	}
 	want := []string{"ASP Up", "ASP Active"}
 	if got := typeNames(*sent); len(got) != len(want) {

@@ -23,30 +23,30 @@ func TestNIFAvailabilityKeysPartialIsolationByASKey(t *testing.T) {
 }
 
 func TestSetASAvailableIgnoresAmbiguousLegacyRoutingContext(t *testing.T) {
-	config := mcServerConfig()
+	config := mcSGPConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(10)
-	listener := newListener(NewListenerConfig(config))
+	listener := newSGPListener(NewListenerConfig(config))
 	registry, nif, _ := listener.registry()
 
 	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
-	first, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	first, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 	first.as = registry
 	first.listener = listener
 	first.noteRoutingContextsActive([]uint32{1})
-	first.setState(StateAspActive)
-	second, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	first.setState(StateASPActive)
+	second, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
 	second.as = registry
 	second.listener = listener
 	second.noteRoutingContextsActive([]uint32{1})
-	second.setState(StateAspActive)
+	second.setState(StateASPActive)
 	if !listener.track(first) || !listener.track(second) {
 		t.Fatal("track refused an association")
 	}
-	registry.get(key10).setASPState(first, StateAspActive, time.Hour)
-	registry.get(key20).setASPState(second, StateAspActive, time.Hour)
+	registry.get(key10).setASPState(first, StateASPActive, time.Hour)
+	registry.get(key20).setASPState(second, StateASPActive, time.Hour)
 
 	listener.SetASAvailable(1, false)
 
@@ -59,20 +59,20 @@ func TestSetASAvailableIgnoresAmbiguousLegacyRoutingContext(t *testing.T) {
 }
 
 func TestSetASAvailableIgnoresLegacyRoutingContextWhenRegistryAndTrackedDisagree(t *testing.T) {
-	config := mcServerConfig()
+	config := mcSGPConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(10)
-	listener := newListener(NewListenerConfig(config))
+	listener := newSGPListener(NewListenerConfig(config))
 	registry, nif, _ := listener.registry()
 
 	registryKey := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	trackedKey := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	registry.get(registryKey).setTrafficMode(params.TrafficModeLoadshare)
 
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
 	conn.listener = listener
 	conn.noteRoutingContextsActive([]uint32{1})
-	conn.setState(StateAspActive)
+	conn.setState(StateASPActive)
 	if !listener.track(conn) {
 		t.Fatal("track refused an association")
 	}

@@ -23,11 +23,11 @@ import (
 // Error code 0x0d was never sent by any path, because there was nothing that
 // could record the SGP being cut off from the SS7 network in the first place.
 func TestAspUpWhileIsolatedFromTheNIFIsRefused(t *testing.T) {
-	sgp, sent := newTestConn(t, StateAspDown, modeServer)
+	sgp, sent := newTestConn(t, StateASPDown, RoleSGP)
 	sgp.nif = &nifAvailability{}
 	sgp.nif.setIsolated(true)
 
-	err := sgp.handleAspUp(messages.NewAspUp(sgp.cfg.AspIdentifier, nil))
+	err := sgp.handleAspUp(messages.NewAspUp(sgp.cfg.ASPIdentifier, nil))
 	if err == nil {
 		t.Fatal("an ASP Up was accepted while the SGP was isolated from the NIF")
 	}
@@ -53,12 +53,12 @@ func TestAspUpWhileIsolatedFromTheNIFIsRefused(t *testing.T) {
 
 // With the NIF back, the same ASP Up is answered normally.
 func TestAspUpIsAcceptedOnceTheNIFReturns(t *testing.T) {
-	sgp, sent := newTestConn(t, StateAspDown, modeServer)
+	sgp, sent := newTestConn(t, StateASPDown, RoleSGP)
 	sgp.nif = &nifAvailability{}
 	sgp.nif.setIsolated(true)
 	sgp.nif.setIsolated(false)
 
-	if err := sgp.handleAspUp(messages.NewAspUp(sgp.cfg.AspIdentifier, nil)); err != nil {
+	if err := sgp.handleAspUp(messages.NewAspUp(sgp.cfg.ASPIdentifier, nil)); err != nil {
 		t.Fatalf("handleAspUp: %v", err)
 	}
 	if got := typeNames(*sent); len(got) != 1 || got[0] != "ASP Up Ack" {
@@ -73,7 +73,7 @@ func TestAspUpIsAcceptedOnceTheNIFReturns(t *testing.T) {
 //	partially isolated from the NIF, the SGP should respond with an
 //	Error ("Refused - Management Blocking").
 func TestAspActiveForAnUnservicableASIsRefused(t *testing.T) {
-	sgp, sent := newTestConn(t, StateAspInactive, modeServer)
+	sgp, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	sgp.nif = &nifAvailability{}
 	sgp.nif.setASAvailable(1, false)
 
@@ -97,7 +97,7 @@ func TestAspActiveForAnUnservicableASIsRefused(t *testing.T) {
 // An Application Server the SGP can still service is unaffected, so a partial
 // failure stays partial.
 func TestAspActiveForAServicableASIsUnaffected(t *testing.T) {
-	sgp, sent := newTestConn(t, StateAspInactive, modeServer)
+	sgp, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	sgp.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
 	sgp.nif = &nifAvailability{}
 	sgp.nif.setASAvailable(2, false) // a different AS is the broken one
@@ -115,7 +115,7 @@ func TestAspActiveForAServicableASIsUnaffected(t *testing.T) {
 // TestSetNIFAvailableTellsEveryASP covers the other half of the first
 // guideline: "the SGP should send ASP Down Ack to all its connected ASPs".
 func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
-	l := &Listener{Config: NewServerConfig(
+	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x111111, 0x222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, 3, 2, 1, 0,
@@ -123,7 +123,7 @@ func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
 
 	var sentPerConn []*[]messages.M3UA
 	for i := 0; i < 2; i++ {
-		c, sent := newTestConn(t, StateAspActive, modeServer)
+		c, sent := newTestConn(t, StateASPActive, RoleSGP)
 		c.cfg.RoutingContexts = params.NewRoutingContext(1)
 		if !l.track(c) {
 			t.Fatal("track refused an association")
@@ -149,17 +149,17 @@ func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
 
 // The partial case tells only the ASPs serving the affected Application Server.
 func TestSetASAvailableTellsOnlyTheAffectedASPs(t *testing.T) {
-	l := &Listener{Config: NewServerConfig(
+	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x111111, 0x222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, 3, 2, 1, 0,
 	)}
 
-	affected, affectedSent := newTestConn(t, StateAspActive, modeServer)
+	affected, affectedSent := newTestConn(t, StateASPActive, RoleSGP)
 	affected.cfg.RoutingContexts = params.NewRoutingContext(1)
 	l.track(affected)
 
-	other, otherSent := newTestConn(t, StateAspActive, modeServer)
+	other, otherSent := newTestConn(t, StateASPActive, RoleSGP)
 	other.cfg.RoutingContexts = params.NewRoutingContext(2)
 	l.track(other)
 

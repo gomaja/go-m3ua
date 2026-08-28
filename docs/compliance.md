@@ -33,14 +33,14 @@ Application/plugin hits from GitHub code search were not treated as competing li
 | Upstream item | Risk | Local status |
 | --- | --- | --- |
 | Original upstream #62 | M3UA BEAT naming confused with SCTP heartbeat | Behavior is unaffected; docs distinguish M3UA BEAT from SCTP transport controls. |
-| Original upstream #51 | `Conn` data races and shared parameter mutation | Covered by parameter copying, atomics/mutexes, queue isolation, and `go test ./... -race`. |
+| Original upstream #51 | Association data races and shared parameter mutation | Covered by parameter copying, atomics/mutexes, queue isolation, and `go test ./... -race`. |
 | Original upstream #47 / PR #48 | Receive buffer reuse overwrote earlier SCTP messages | Covered by inbound copy handling and regression tests for received octets. |
 | Original upstream #28 / PR #27 | Broken SCTP connections did not close correctly | Covered by close/reconnect/read-deadline tests. |
 | Original upstream #25 / PR #26 | M3UA BEAT started before ASP Up and dropped connections | Covered by state-gated heartbeat tests and echo validation. |
 | Original upstream #17 / PR #18 | M3UA length calculation errors | Covered by codec invariant and wire length tests. |
 | Original upstream #3 | RKM not implemented | Deliberately answered as Unsupported Message Class per RFC 4666 Section 4.4.1. |
-| Original upstream #59 / PR #60 | ASPDN server-to-client handling | Covered by ASP Down state/quiescence tests. |
-| Original upstream PR #61 | Optional SCTP SACK timer control | Implemented through `SetSackConfig` / `SetSctpSackConfig`, with RFC 9260 500 ms validation. |
+| Original upstream #59 / PR #60 | ASP Down handling from SGP to ASP | Covered by ASP Down state/quiescence tests. |
+| Original upstream PR #61 | Optional SCTP SACK timer control | Implemented through `AssociationConfig.SetSCTPSACK` / `Association.SetSCTPSACK`, with RFC 9260 500 ms validation. |
 | Original upstream PR #63 | SCTP dependency PPID handling | Implemented and tested with exported `M3UAPPID == 3` and inbound PPID filtering. |
 
 ## Current validation commands

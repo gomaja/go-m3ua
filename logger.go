@@ -141,7 +141,7 @@ func (limiter *malformedLogLimiter) suppressedCount() uint64 {
 	return limiter.suppressed
 }
 
-func (c *Conn) logMalformedInput(parseErr error, raw []byte) {
+func (c *Association) logMalformedInput(parseErr error, raw []byte) {
 	suppressed, allowed := c.malformedLogs.allow(time.Now())
 	if !allowed {
 		return

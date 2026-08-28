@@ -31,21 +31,21 @@ import (
 func TestASPTMFromAspDownIsRefused(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
-		send    func(*Conn) error
+		send    func(*Association) error
 		wantAck string
 	}{
-		{"ASP Active", func(c *Conn) error {
+		{"ASP Active", func(c *Association) error {
 			return c.handleAspActive(messages.NewAspActive(
 				params.NewTrafficModeType(params.TrafficModeLoadshare),
 				params.NewRoutingContext(1), nil))
 		}, "ASP Active Ack"},
-		{"ASP Inactive", func(c *Conn) error {
+		{"ASP Inactive", func(c *Association) error {
 			return c.handleAspInactive(messages.NewAspInactive(
 				params.NewRoutingContext(1), nil))
 		}, "ASP Inactive Ack"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			sgp, sent := newTestConn(t, StateAspDown, modeServer)
+			sgp, sent := newTestConn(t, StateASPDown, RoleSGP)
 
 			err := tt.send(sgp)
 			if err == nil {
@@ -65,10 +65,10 @@ func TestASPTMFromAspDownIsRefused(t *testing.T) {
 	}
 }
 
-// The dispatcher must not publish the transition either, or the Conn ends up in
+// The dispatcher must not publish the transition either, or the Association ends up in
 // ASP-ACTIVE for a peer that never sent an ASP Up.
 func TestAspActiveFromAspDownDoesNotReachAspActive(t *testing.T) {
-	sgp, _ := newTestConn(t, StateAspDown, modeServer)
+	sgp, _ := newTestConn(t, StateASPDown, RoleSGP)
 
 	sgp.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -76,8 +76,8 @@ func TestAspActiveFromAspDownDoesNotReachAspActive(t *testing.T) {
 
 	select {
 	case got := <-sgp.stateChan:
-		if got == StateAspActive {
-			t.Error("an ASP Active from ASP-DOWN drove the Conn to ASP-ACTIVE, " +
+		if got == StateASPActive {
+			t.Error("an ASP Active from ASP-DOWN drove the Association to ASP-ACTIVE, " +
 				"a transition Figure 3 does not define")
 		}
 	default:
@@ -86,7 +86,7 @@ func TestAspActiveFromAspDownDoesNotReachAspActive(t *testing.T) {
 
 // From ASP-INACTIVE the same message is the defined transition and still works.
 func TestAspActiveFromAspInactiveStillActivates(t *testing.T) {
-	sgp, sent := newTestConn(t, StateAspInactive, modeServer)
+	sgp, sent := newTestConn(t, StateASPInactive, RoleSGP)
 
 	if err := sgp.handleAspActive(messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -115,7 +115,7 @@ func TestAspActiveFromAspInactiveStillActivates(t *testing.T) {
 // ASP Active" Notify, must not fight the peer's decision. A stray ASP Up Ack is
 // not the peer taking traffic away, so the two causes have to be told apart.
 func TestUnexpectedAspUpAckReturnsToThePreviousState(t *testing.T) {
-	asp, _ := newTestConn(t, StateAspActive, modeClient)
+	asp, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	if err := asp.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err == nil {
 		t.Fatal("an ASP Up Ack while ASP-ACTIVE was accepted silently")
@@ -132,7 +132,7 @@ func TestUnexpectedAspUpAckReturnsToThePreviousState(t *testing.T) {
 // deactivation path. Unlike an unsolicited Ack, it must not fight the request
 // by immediately activating again.
 func TestSolicitedAspInactiveAckDoesNotReactivate(t *testing.T) {
-	asp, _ := newTestConn(t, StateAspActive, modeClient)
+	asp, _ := newTestConn(t, StateASPActive, RoleASP)
 	asp.startTAck(messages.NewAspInactive(asp.cfg.RoutingContexts.Copy(), nil), requestAspInactive)
 
 	if err := asp.handleAspInactiveAck(messages.NewAspInactiveAck(asp.cfg.RoutingContexts.Copy(), nil)); err != nil {
@@ -147,18 +147,18 @@ func TestSolicitedAspInactiveAckDoesNotReactivate(t *testing.T) {
 // activation in RFC 4666 Section 4.3.4.3, where the SGP acknowledges the
 // contexts it can serve and may answer separately for others.
 //
-// Requiring ASP-INACTIVE meant the first Ack moved the Conn to ASP-ACTIVE and
+// Requiring ASP-INACTIVE meant the first Ack moved the Association to ASP-ACTIVE and
 // every later one was rejected as unexpected, so an SGP acknowledging a second
 // Routing Context had its message thrown away.
 func TestSecondAspActiveAckIsAccepted(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 
 	if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
 		params.NewRoutingContext(1), nil)); err != nil {
 		t.Fatalf("first ASP Active Ack: %v", err)
 	}
-	asp.setState(StateAspActive)
+	asp.setState(StateASPActive)
 
 	if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -174,11 +174,11 @@ func TestSecondAspActiveAckIsAccepted(t *testing.T) {
 //	For the Application Servers for which the ASP can be activated, the
 //	SGP responds with an ASP Active Ack message
 //
-// Activation is per Routing Context, but the Conn tracked one state for the
+// Activation is per Routing Context, but the Association tracked one state for the
 // whole association, so a partial Ack took everything active and DATA went out
 // for contexts the SGP had never agreed to carry.
 func TestDataOnlyFlowsForAnAcknowledgedRoutingContext(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 
 	// Only context 1 is acknowledged.
 	if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
@@ -186,7 +186,7 @@ func TestDataOnlyFlowsForAnAcknowledgedRoutingContext(t *testing.T) {
 		params.NewRoutingContext(1), nil)); err != nil {
 		t.Fatalf("handleAspActiveAck: %v", err)
 	}
-	asp.setState(StateAspActive)
+	asp.setState(StateASPActive)
 
 	if err := asp.SelectRoutingContext(1); err != nil {
 		t.Fatalf("SelectRoutingContext(1): %v", err)
@@ -221,7 +221,7 @@ func TestDataOnlyFlowsForAnAcknowledgedRoutingContext(t *testing.T) {
 // acknowledged as though it had been agreed.
 func TestTrafficModeTypeOutsideTheDefinedValuesIsRejected(t *testing.T) {
 	for _, mode := range []uint32{0, 4, 99} {
-		sgp, _ := newTestConn(t, StateAspInactive, modeServer)
+		sgp, _ := newTestConn(t, StateASPInactive, RoleSGP)
 		sgp.cfg.TrafficModeType = nil // nothing configured locally
 
 		err := sgp.validateTrafficMode(params.NewTrafficModeType(mode))
@@ -239,7 +239,7 @@ func TestDefinedTrafficModeTypesAreAccepted(t *testing.T) {
 		params.TrafficModeLoadshare,
 		params.TrafficModeBroadcast,
 	} {
-		sgp, _ := newTestConn(t, StateAspInactive, modeServer)
+		sgp, _ := newTestConn(t, StateASPInactive, RoleSGP)
 		sgp.cfg.TrafficModeType = nil
 
 		if err := sgp.validateTrafficMode(params.NewTrafficModeType(mode)); err != nil {
@@ -262,10 +262,10 @@ func TestDefinedTrafficModeTypesAreAccepted(t *testing.T) {
 // message having gone wrong. It showed up as an oscillation once the Notify
 // traffic of Section 4.3.4.5 gave the dispatcher more messages to handle.
 func TestUnchangedStateDoesNotRerunAnEntryAction(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeClient)
+	conn, sent := newTestConn(t, StateASPDown, RoleASP)
 
 	// Entering ASP-DOWN runs the entry action, which starts the handshake.
-	if err := conn.handleStateUpdate(StateAspDown); err != nil {
+	if err := conn.handleStateUpdate(StateASPDown); err != nil {
 		t.Fatalf("handleStateUpdate(ASP-DOWN): %v", err)
 	}
 	afterEntry := len(typeNames(*sent))
@@ -283,8 +283,8 @@ func TestUnchangedStateDoesNotRerunAnEntryAction(t *testing.T) {
 	}
 
 	// And it must not disturb the recorded state.
-	if got := conn.State(); got != StateAspDown {
-		t.Errorf("state = %v after stateUnchanged, want %v", got, StateAspDown)
+	if got := conn.State(); got != StateASPDown {
+		t.Errorf("state = %v after stateUnchanged, want %v", got, StateASPDown)
 	}
 }
 
@@ -294,11 +294,11 @@ func TestUnchangedStateIsNotReportedToTheApplicationServer(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 	as := reg.get(1)
 
-	conn, _ := newTestConn(t, StateAspInactive, modeServer)
+	conn, _ := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1)
 	conn.as = reg
 
-	if err := conn.handleStateUpdate(StateAspActive); err != nil {
+	if err := conn.handleStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("handleStateUpdate: %v", err)
 	}
 	if got := as.State(); got != ASActive {
@@ -325,10 +325,10 @@ func TestUnchangedStateIsNotReportedToTheApplicationServer(t *testing.T) {
 // ends oscillate: this node dropped to ASP-INACTIVE and re-activated, the SGP
 // dropped it again on the next retransmission, and so on.
 func TestSolicitedAspUpAckIsAbsorbed(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 
 	// An ASP Up is outstanding: this is the retransmission's answer.
-	conn.startTAck(messages.NewAspUp(conn.cfg.AspIdentifier, nil), requestAspUp)
+	conn.startTAck(messages.NewAspUp(conn.cfg.ASPIdentifier, nil), requestAspUp)
 
 	if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
 		t.Errorf("an ASP Up Ack answering our own ASP Up was reported as an "+
@@ -345,7 +345,7 @@ func TestSolicitedAspUpAckIsAbsorbed(t *testing.T) {
 // With nothing outstanding the Ack really is unexpected, and Section 4.3.4.1
 // applies in full.
 func TestUnsolicitedAspUpAckStillDropsToInactive(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil))
 	if err == nil {
@@ -377,7 +377,7 @@ func TestUnsolicitedAspUpAckStillDropsToInactive(t *testing.T) {
 // the transition is published but unapplied, which is the same situation the
 // dispatcher is in when it picks up the next message.
 func TestAspActiveInTheAckWindowIsNotRefused(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeServer)
+	conn, sent := newTestConn(t, StateASPDown, RoleSGP)
 	ctx := context.Background()
 
 	conn.handleSignals(ctx, messages.NewAspUp(nil, nil))
@@ -414,7 +414,7 @@ func TestAspActiveInTheAckWindowIsNotRefused(t *testing.T) {
 	}
 }
 
-// setState places a Conn in a state without going through the dispatcher, and
+// setState places an Association in a state without going through the dispatcher, and
 // it has to leave the bookkeeping the next transition reads consistent with the
 // value it wrote.
 //
@@ -422,25 +422,25 @@ func TestAspActiveInTheAckWindowIsNotRefused(t *testing.T) {
 // which state it came from, from appliedState rather than from state -- state
 // having already been committed by sendState by then. A setState that moved
 // only one of the two would make the next transition measure itself against a
-// state the Conn had long since left. Here that would look like a client that
+// state the Association had long since left. Here that would look like an ASP that
 // was placed in ASP-ACTIVE, told to go ASP-INACTIVE, and then re-activated
 // itself off its own back, taking traffic the peer had just removed.
 //
 // The first update has a seed that reads state directly, so this drives one
 // transition beforehand; without it the seed would hide the difference.
 func TestSetStateKeepsTheTransitionBookkeepingConsistent(t *testing.T) {
-	asp, sent := newTestConn(t, StateAspDown, modeClient)
+	asp, sent := newTestConn(t, StateASPDown, RoleASP)
 
 	// Get past the first update, so the seed no longer applies and the next
 	// transition genuinely consults appliedState.
-	if err := asp.handleStateUpdate(StateAspDown); err != nil {
+	if err := asp.handleStateUpdate(StateASPDown); err != nil {
 		t.Fatalf("handleStateUpdate(ASP-DOWN): %v", err)
 	}
 	before := len(*sent)
 
-	asp.setState(StateAspActive)
+	asp.setState(StateASPActive)
 
-	if err := asp.handleStateUpdate(StateAspInactive); err != nil {
+	if err := asp.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("handleStateUpdate(ASP-INACTIVE): %v", err)
 	}
 

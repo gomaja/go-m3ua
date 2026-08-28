@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 /*
-Command m3ua-client works as M3UA client.
+Command m3ua-asp runs an M3UA ASP that initiates the SCTP association.
 */
 package main
 
@@ -34,44 +34,21 @@ func main() {
 		log.Fatalf("Failed to decode Hex string: %s", err)
 	}
 
-	// create *Config to be used in M3UA connection
-	config := m3ua.NewConfig(
+	// Configure the M3UA association.
+	config := m3ua.NewAssociationConfig(
 		0x11111111,            // OriginatingPointCode
 		0x22222222,            // DestinationPointCode
 		params.ServiceIndSCCP, // ServiceIndicator
 		0,                     // NetworkIndicator
 		0,                     // MessagePriority
-		1,                     // SignalingLinkSelection
+		1,                     // SignallingLinkSelection
 	)
-	config. // set parameters to use
+	config.
 		EnableHeartbeat(*hbInt, 10*time.Second).
-		SetAspIdentifier(1).
+		SetASPIdentifier(1).
 		SetTrafficModeType(params.TrafficModeLoadshare).
 		SetNetworkAppearance(0).
 		SetRoutingContexts(1, 2)
-
-	/* or, you can define config in the following way.
-	config := m3ua.NewClientConfig(
-		&m3ua.HeartbeatInfo{
-			Enabled:  true,
-			Interval: *hbInt,
-			Timer:    time.Duration(10 * time.Second),
-		},
-		0x11111111,                  // OriginatingPointCode
-		0x22222222,                  // DestinationPointCode
-		1,                           // AspIdentifier
-		params.TrafficModeLoadshare, // TrafficModeType
-		0,                           // NetworkAppearance
-		0,                           // CorrelationID
-		[]uint32{1, 2},              // RoutingContexts
-		params.ServiceIndSCCP,       // ServiceIndicator
-		0,                           // NetworkIndicator
-		0,                           // MessagePriority
-		1,                           // SignalingLinkSelection
-	)
-	// set nil on unnecessary parameters.
-	config.CorrelationID = nil
-	*/
 
 	// setup SCTP peer on the specified IPs and Port.
 	raddr, err := sctp.ResolveSCTPAddr("sctp", *addr)
@@ -83,15 +60,19 @@ func main() {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	conn, err := m3ua.Dial(ctx, "m3ua", nil, raddr, config)
+	endpoint, err := m3ua.NewEndpoint(m3ua.RoleASP)
 	if err != nil {
-		log.Fatalf("Failed to dial M3UA: %s", err)
+		log.Fatalf("Failed to create M3UA ASP endpoint: %s", err)
 	}
-	defer func() { _ = conn.Close() }()
+	association, err := endpoint.Dial(ctx, "m3ua", nil, raddr, config)
+	if err != nil {
+		log.Fatalf("Failed to establish M3UA association: %s", err)
+	}
+	defer func() { _ = association.Close() }()
 
 	// send data once in 3 seconds.
 	for {
-		if _, err := conn.Write(d); err != nil {
+		if _, err := association.Write(d); err != nil {
 			log.Fatalf("Failed to write M3UA data: %s", err)
 		}
 		log.Printf("Sent: %x", d)

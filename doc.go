@@ -3,23 +3,24 @@
 // found in the LICENSE file.
 
 /*
-Package m3ua provides easy and painless handling of M3UA protocol in pure Golang.
+Package m3ua implements the M3UA protocol over SCTP.
 
-The API design is kept as similar as possible to other protocols in standard net package.
-To establish M3UA connection as client/server, you can use Dial() and Listen() / Accept()
-without caring about the underlying SCTP association, as go-m3ua handles it together
-with M3UA ASPSM & ASPTM procedures.
+An Endpoint has an explicit RFC 4666 role: ASP, SGP, or IPSP. Dial and
+Listen/Accept describe only which endpoint initiates the SCTP association.
+RFC 4666 Section 1.4.8 recommends that both ASPs and SGPs support either SCTP
+orientation, so protocol behavior never follows from whether Dial or Accept was
+used.
 
 M3UA BEAT/BEAT Ack liveness is application-layer logic from RFC 4666 and is
 configured with HeartbeatInfo. It is separate from SCTP HEARTBEAT chunks and
 SCTP path-management timers, which remain transport/kernel behavior below this
 package.
 
-Servers pass a ListenerConfig to Listen. Its optional SelectConnConfig hook runs
-after SCTP accept and before M3UA parsing so each accepted association can use a
-separate immutable ConnConfig.
+An endpoint accepting SCTP associations passes a ListenerConfig to Listen. Its
+optional SelectAssociationConfig hook runs after SCTP accept and before M3UA
+parsing so each association receives a separate immutable AssociationConfig.
 
-This package relies much on github.com/gomaja/go-sctp, as M3UA requires underlying SCTP connection,
+This package uses github.com/gomaja/go-sctp for the underlying SCTP transport.
 
 Specification: https://www.rfc-editor.org/rfc/rfc4666.html
 
@@ -63,8 +64,8 @@ Two related choices this package does make are documented where they are
 implemented, and a security review will want to know about them: an ASP's SCON
 is recorded apart from the SGP's own destination state, so a peer cannot inject
 SS7 congestion into what other ASPs are told when they audit (see
-Conn.PeerCongestionLevel); and an ASP Active from a peer in ASP-DOWN is refused
-rather than acknowledged, so an association that has not completed ASPSM cannot
-be driven into carrying traffic.
+Association.PeerCongestionLevel); and an ASP Active from a peer in ASP-DOWN is
+refused rather than acknowledged, so an association that has not completed
+ASPSM cannot be driven into carrying traffic.
 */
 package m3ua

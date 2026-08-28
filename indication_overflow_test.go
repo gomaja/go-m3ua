@@ -11,7 +11,7 @@ import (
 )
 
 func TestSignallingStatusOverflowRequiresResynchronization(t *testing.T) {
-	connection, _ := newTestConn(t, StateAspActive, modeClient)
+	connection, _ := newTestConn(t, StateASPActive, RoleASP)
 	connection.statusChan = make(chan *DestinationStatus, 1)
 
 	connection.notifyStatus(&DestinationStatus{PointCode: 1, State: DestinationUnavailable})
@@ -24,11 +24,11 @@ func TestSignallingStatusOverflowRequiresResynchronization(t *testing.T) {
 }
 
 func TestStateChangesOverflowClosesWithAnExplicitCause(t *testing.T) {
-	connection, _ := newTestConn(t, StateAspActive, modeClient)
+	connection, _ := newTestConn(t, StateASPActive, RoleASP)
 	connection.stateEventChan = make(chan State, 1)
 
-	connection.notifyStateChange(StateAspInactive)
-	connection.notifyStateChange(StateAspActive)
+	connection.notifyStateChange(StateASPInactive)
+	connection.notifyStateChange(StateASPActive)
 
 	select {
 	case <-connection.Done():
@@ -41,7 +41,7 @@ func TestStateChangesOverflowClosesWithAnExplicitCause(t *testing.T) {
 }
 
 func TestManagementIndicationsOverflowClosesWithAnExplicitCause(t *testing.T) {
-	connection, _ := newTestConn(t, StateAspActive, modeClient)
+	connection, _ := newTestConn(t, StateASPActive, RoleASP)
 	connection.mgmtChan = make(chan *ManagementIndication, 1)
 
 	connection.notifyManagement(&ManagementIndication{Kind: ManagementNotify})

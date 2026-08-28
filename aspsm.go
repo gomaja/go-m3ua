@@ -9,12 +9,12 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func (c *Conn) initiateASPSM() error {
+func (c *Association) initiateASPSM() error {
 	// RFC 4666 Section 4.3.4.1: "When the ASP sends an ASP Up message, it
 	// starts timer T(ack)", and resends until the Ack arrives. Without that, an
 	// ASP Up lost in transit strands the association: we wait for an Ack that
 	// will never come while the SGP waits for a request it never saw.
-	aspUp := messages.NewAspUp(c.cfg.AspIdentifier.Copy(), nil)
+	aspUp := messages.NewAspUp(c.cfg.ASPIdentifier.Copy(), nil)
 	request := c.startTAck(aspUp, requestAspUp)
 	if _, err := c.WriteSignal(aspUp); err != nil {
 		c.cancelTAckRequest(request)
@@ -43,7 +43,10 @@ func (c *Conn) initiateASPSM() error {
 // the ASP Up message", so an ASP can never legitimately receive one, and ASP
 // Up Ack is a message only an SGP may send. An ASP therefore reports the
 // Error and holds its state instead of acking.
-func (c *Conn) handleAspUp(aspUp *messages.AspUp) error {
+func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
+	if c.role != RoleSGP {
+		return NewUnexpectedMessageError(aspUp)
+	}
 
 	// RFC 4666 Section 4.7: "Upon receiving an ASP Up message while isolated
 	// from the NIF, the SGP should respond with an Error ("Refused -
@@ -56,9 +59,6 @@ func (c *Conn) handleAspUp(aspUp *messages.AspUp) error {
 		return NewInvalidSCTPStreamIDError(c.receivedStreamID())
 	}
 
-	if c.mode != modeServer {
-		return NewUnexpectedMessageError(aspUp)
-	}
 	if aspUp.AspIdentifier != nil {
 		if aspUp.AspIdentifier.Tag != params.AspIdentifier || len(aspUp.AspIdentifier.Data) != 4 {
 			return ErrInvalidParameterValue
@@ -73,7 +73,7 @@ func (c *Conn) handleAspUp(aspUp *messages.AspUp) error {
 	if aspUp.AspIdentifier != nil {
 		if c.as != nil && !c.hasExplicitlyEmptyASPAuthorization() &&
 			!c.as.claimASPIdentifier(c, aspUp.AspIdentifier.AspIdentifier()) {
-			return ErrInvalidAspIdentifier
+			return ErrInvalidASPIdentifier
 		}
 		c.savePeerASPIdentifier(aspUp.AspIdentifier)
 		if c.as != nil {
@@ -83,7 +83,7 @@ func (c *Conn) handleAspUp(aspUp *messages.AspUp) error {
 
 	if _, err := c.WriteSignal(
 		messages.NewAspUpAck(
-			c.cfg.AspIdentifier.Copy(),
+			c.cfg.ASPIdentifier.Copy(),
 			nil,
 		),
 	); err != nil {
@@ -92,7 +92,7 @@ func (c *Conn) handleAspUp(aspUp *messages.AspUp) error {
 
 	// Only ASP-ACTIVE additionally warrants an Error ("Unexpected Message").
 	// The caller keeps the resulting state at ASP-INACTIVE either way.
-	if c.State() == StateAspActive {
+	if c.State() == StateASPActive {
 		return NewUnexpectedMessageError(aspUp)
 	}
 
@@ -112,7 +112,7 @@ func (c *Conn) handleAspUp(aspUp *messages.AspUp) error {
 // That clause is scoped to the ASP. An SGP never sends ASP Up, so it can never
 // legitimately receive an ASP Up Ack in any state: it reports the Error and
 // the dispatcher holds its state.
-func (c *Conn) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
+func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	// Validated first: a message that arrived on a stream it is not allowed to
 	// use is rejected before anything acts on it, and in particular before it
 	// can retire the T(ack) of a request it is not a valid answer to.
@@ -124,7 +124,7 @@ func (c *Conn) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	// one was outstanding decides what follows.
 	solicited := c.stopTAck(requestAspUp)
 
-	if c.mode != modeClient {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(aspUpAck)
 	}
 
@@ -140,7 +140,7 @@ func (c *Conn) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		return nil
 	}
 
-	if c.State() == StateAspActive {
+	if c.State() == StateASPActive {
 		// Section 4.3.4.1: "If the ASP receives an unexpected ASP Up Ack
 		// message, the ASP should consider itself in the ASP-INACTIVE state.
 		// If the ASP was not in the ASP-INACTIVE state, it SHOULD send an Error
@@ -167,12 +167,12 @@ func (c *Conn) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 // Like ASP Up, ASP Down travels only from ASP to SGP and ASP Down Ack is the
 // SGP's response, so an ASP that receives an ASP Down reports the Error and
 // holds its state instead of acking.
-func (c *Conn) handleAspDown(aspDown *messages.AspDown) error {
+func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 	if c.receivedStreamID() != 0 {
 		return NewInvalidSCTPStreamIDError(c.receivedStreamID())
 	}
 
-	if c.mode != modeServer {
+	if c.role != RoleSGP {
 		return NewUnexpectedMessageError(aspDown)
 	}
 
@@ -188,7 +188,7 @@ func (c *Conn) handleAspDown(aspDown *messages.AspDown) error {
 	// selected this ASP, but hold the resulting AS-state Notify messages until
 	// the Ack is on the wire. The dispatcher publishes the association-level
 	// entry action after this returns.
-	c.commitState(StateAspDown)
+	c.commitState(StateASPDown)
 	postAckNotify := func() {}
 	if c.as != nil {
 		postAckNotify = c.as.quiesceASPDown(c)
@@ -204,7 +204,7 @@ func (c *Conn) handleAspDown(aspDown *messages.AspDown) error {
 //
 // Like the other Acks this travels SGP to ASP (RFC 4666 Section 4.3.4.2), so an
 // SGP that receives one reports an Error rather than acting on it.
-func (c *Conn) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
+func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 	// Validated first, as in handleAspUpAck. This one matters most: below, an
 	// unsolicited ASP Down Ack takes the ASP down, so accepting one that
 	// arrived on a data stream would let a peer drop an active link with a
@@ -215,7 +215,7 @@ func (c *Conn) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 
 	solicited := c.stopTAck(requestAspDown)
 
-	if c.mode != modeClient {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(aspDownAck)
 	}
 	if solicited {
@@ -232,14 +232,14 @@ func (c *Conn) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 	// traffic. The caller publishes ASP-DOWN, whose entry action starts the
 	// climb back; resumeTo records how far.
 	switch st := c.State(); st {
-	case StateAspInactive, StateAspActive:
+	case StateASPInactive, StateASPActive:
 		c.setResumeTo(st)
 		return NewUnexpectedMessageError(aspDownAck)
 	}
 	return nil
 }
 
-func (c *Conn) initiateASPDown() (*pendingRequest, error) {
+func (c *Association) initiateASPDown() (*pendingRequest, error) {
 	aspDown := messages.NewAspDown(nil)
 	request := c.startTAck(aspDown, requestAspDown)
 	if _, err := c.WriteSignal(aspDown); err != nil {

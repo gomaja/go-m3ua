@@ -9,6 +9,9 @@ Simple M3UA protocol implementation in the Go programming language.
 
 ## Quickstart
 
+Applications upgrading from v1.0 should read the
+[v1.2 migration guide](./docs/migration-v1.2.md).
+
 ### Installation
 
 Run `go mod tidy` in your project's directory to collect the required packages automatically.
@@ -21,16 +24,18 @@ non-socket tests, but production M3UA associations require OS SCTP support._
 ### Trying Examples
 
 Working examples are available in [examples directory](./examples/).
-Just executing the following commands, you can see the client and server setting up M3UA connection.
+The examples below run an SGP that accepts an SCTP association and an ASP that
+initiates one. RFC 4666 Section 1.4.8 also permits the opposite SCTP
+orientation.
 
 ```shell-session
-# Run Server first
-cd examples/server
-go run m3ua-server.go
+# Run the SGP first.
+cd examples/sgp
+go run m3ua-sgp.go
 
-// Run Client then
-cd examples/client
-go run m3ua-client.go
+# Run the ASP.
+cd examples/asp
+go run m3ua-asp.go
 ```
 
 There is also an example for Point Code format conversion, which works like this;
@@ -47,34 +52,28 @@ $ ./pc-conv -str 1-234-5 -variant 4-3-7
 
 ### For Developers
 
-The API design is kept as similar as possible to other protocols in standard `net` package. To establish M3UA connection as client/server, you can use `Dial()` and `Listen()`/`Accept()` without caring about the underlying SCTP association, as go-m3ua handles it together with M3UA ASPSM & ASPTM procedures.
+Create an `Endpoint` with an explicit RFC 4666 role. `Dial` and
+`Listen`/`Accept` state only which endpoint initiates the SCTP association;
+they do not determine whether M3UA runs as an ASP or SGP.
 
-Here is an example to develop your own M3UA client using go-m3ua.
-
-First, you need to create a `*ConnConfig` used to setup/maintain one M3UA
-association. The historical `*Config` name is kept as an alias.
+The following configuration is role-neutral and is snapshotted for each M3UA
+association:
 
 ```go
-config := m3ua.NewClientConfig(
-    &m3ua.HeartbeatInfo{
-        Enabled:  true,
-        Interval: time.Duration(3 * time.Second),
-        Timer:    time.Duration(10 * time.Second),
-    },
+config := m3ua.NewAssociationConfig(
     0x11111111, // OriginatingPointCode
     0x22222222, // DestinationPointCode
-    1,          // AspIdentifier
-    params.TrafficModeLoadshare, // TrafficModeType
-    0,                     // NetworkAppearance
-    0,                     // CorrelationID
-    []uint32{1, 2},        // RoutingContexts
     params.ServiceIndSCCP, // ServiceIndicator
-    0, // NetworkIndicator
-    0, // MessagePriority
-    1, // SignalingLinkSelection
+    0,                     // NetworkIndicator
+    0,                     // MessagePriority
+    1,                     // SignallingLinkSelection
 )
-// set nil on unnecessary paramters.
-config.CorrelationID = nil
+config.
+    EnableHeartbeat(3*time.Second, 10*time.Second).
+    SetASPIdentifier(1).
+    SetTrafficModeType(params.TrafficModeLoadshare).
+    SetNetworkAppearance(0).
+    SetRoutingContexts(1, 2)
 ```
 
 `HeartbeatInfo` controls RFC 4666 M3UA BEAT/BEAT Ack liveness only. It is
@@ -105,11 +104,10 @@ config.Compatibility = m3ua.CompatibilityPolicy{
 }
 ```
 
-Then, prepare network addresses and context and try to connect with `Dial()`.
+Create an ASP endpoint and initiate the SCTP association:
 
 ```go
-// setup SCTP peer on the specified IPs and Port.
-raddr, err := sctp.ResolveSCTPAddr("sctp", SERVER_IPS)
+remote, err := sctp.ResolveSCTPAddr("sctp", PEER_ADDRESS)
 if err != nil {
     log.Fatal(err)
 }
@@ -118,23 +116,27 @@ ctx := context.Background()
 ctx, cancel := context.WithCancel(ctx)
 defer cancel()
 
-conn, err := m3ua.Dial(ctx, "m3ua", nil, raddr, config)
+endpoint, err := m3ua.NewEndpoint(m3ua.RoleASP)
 if err != nil {
-    log.Fatalf("Failed to dial M3UA: %s", err)
+    log.Fatal(err)
 }
-defer conn.Close()
+association, err := endpoint.Dial(ctx, "m3ua", nil, remote, config)
+if err != nil {
+    log.Fatalf("Failed to establish M3UA association: %s", err)
+}
+defer association.Close()
 ```
 
 Now you can `Read()` / `Write()` data from/to the remote endpoint.
 
 ```go
-if _, err := conn.Write(d); err != nil {
+if _, err := association.Write(d); err != nil {
     log.Fatalf("Failed to write M3UA data: %s", err)
 }
 log.Printf("Successfully sent M3UA data: %x", d)
 
 buf := make([]byte, 1500)
-n, err := conn.Read(buf)
+n, err := association.Read(buf)
 if err != nil {
     log.Fatal(err)
 }
@@ -142,18 +144,22 @@ if err != nil {
 log.Printf("Successfully read M3UA data: %x", buf[:n])
 ```
 
-See [example/server directory](./examples/server) for server example.
+See the [SGP example](./examples/sgp) for accepting SCTP associations.
 
-Server listeners use `*ListenerConfig` so one SCTP listener can select a
-separate immutable `*ConnConfig` per accepted association:
+An endpoint that accepts SCTP associations uses `ListenerConfig` to select a
+separate immutable `AssociationConfig` per association before M3UA parsing:
 
 ```go
-listenerConfig := m3ua.NewListenerConfig(defaultConnConfig)
-listenerConfig.SelectConnConfig = func(info m3ua.AcceptInfo) (*m3ua.ConnConfig, error) {
+listenerConfig := m3ua.NewListenerConfig(defaultAssociationConfig)
+listenerConfig.SelectAssociationConfig = func(info m3ua.AcceptInfo) (*m3ua.AssociationConfig, error) {
     return configForPeer(info.RemoteAddr)
 }
 
-listener, err := m3ua.Listen("m3ua", laddr, listenerConfig)
+endpoint, err := m3ua.NewEndpoint(m3ua.RoleSGP)
+if err != nil {
+    log.Fatal(err)
+}
+listener, err := endpoint.Listen("m3ua", local, listenerConfig)
 ```
 
 ## Supported Features

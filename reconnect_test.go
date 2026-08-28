@@ -17,8 +17,8 @@ import (
 // then Dial again". Nothing exercised that: the suite covers failures *during*
 // the handshake and never re-establishes afterwards.
 //
-// A *Conn cannot be revived — Close closes done and trips a sync.Once, and every
-// goroutine it owns exits on done — so reconnecting means a new Conn from a new
+// An Association cannot be revived — Close closes done and trips a sync.Once, and every
+// goroutine it owns exits on done — so reconnecting means a new Association from a new
 // Dial. These tests pin that contract, and pin that repeating it does not
 // accumulate goroutines, which is what turns a reconnect loop into a leak.
 
@@ -45,7 +45,7 @@ func (p *rawPeer) abort(t *testing.T) {
 	}
 }
 
-// Once traffic resumes, a peer that aborted must take the Conn out of
+// Once traffic resumes, a peer that aborted must take the Association out of
 // ASP-ACTIVE, so an owner polling State() learns its association is gone and
 // can redial.
 //
@@ -65,8 +65,8 @@ func TestPeerAbortIsDetectedOnceTrafficResumes(t *testing.T) {
 	peer := newRawPeer(t, 3050, handshakeOnly)
 	conn := dialRawPeer(t, ctx, peer, 3050, &HeartbeatInfo{Enabled: false})
 
-	if got := conn.State(); got != StateAspActive {
-		t.Fatalf("state before abort = %v, want %v", got, StateAspActive)
+	if got := conn.State(); got != StateASPActive {
+		t.Fatalf("state before abort = %v, want %v", got, StateASPActive)
 	}
 
 	peer.abort(t)
@@ -76,7 +76,7 @@ func TestPeerAbortIsDetectedOnceTrafficResumes(t *testing.T) {
 	// indefinitely onto an association that no longer exists.
 	if !waitFor(func() bool {
 		_, _ = conn.Write([]byte("after-abort"))
-		return conn.State() != StateAspActive
+		return conn.State() != StateASPActive
 	}, 15*time.Second) {
 		t.Fatalf("state is still %v fifteen seconds after the peer aborted, with traffic flowing", conn.State())
 	}
@@ -100,20 +100,20 @@ func TestPeerAbortWithHeartbeatIsDetectedWhileIdle(t *testing.T) {
 		Timer:    500 * time.Millisecond,
 	})
 
-	if got := conn.State(); got != StateAspActive {
-		t.Fatalf("state before abort = %v, want %v", got, StateAspActive)
+	if got := conn.State(); got != StateASPActive {
+		t.Fatalf("state before abort = %v, want %v", got, StateASPActive)
 	}
 
 	peer.abort(t)
 
 	// No writes here: the heartbeat must find it on its own.
-	if !waitFor(func() bool { return conn.State() != StateAspActive }, 15*time.Second) {
+	if !waitFor(func() bool { return conn.State() != StateASPActive }, 15*time.Second) {
 		t.Fatalf("state is still %v fifteen seconds after the peer aborted; T(beat) did not detect it", conn.State())
 	}
 }
 
 // The reconnect contract: after the peer goes away, a fresh Dial re-establishes
-// and the new Conn is fully usable. The old Conn stays dead — it is not revived
+// and the new Association is fully usable. The old Association stays dead — it is not revived
 // by the new association.
 func TestRedialAfterPeerAbortEstablishes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,23 +126,23 @@ func TestRedialAfterPeerAbortEstablishes(t *testing.T) {
 	// Traffic-driven detection, as above.
 	if !waitFor(func() bool {
 		_, _ = first.Write([]byte("after-abort"))
-		return first.State() != StateAspActive
+		return first.State() != StateASPActive
 	}, 15*time.Second) {
-		t.Fatalf("first Conn is still %v after the abort", first.State())
+		t.Fatalf("first Association is still %v after the abort", first.State())
 	}
 
 	// A different local port, because the previous association may still be
 	// lingering on the old one; a reconnecting application dials afresh anyway.
 	second := dialRawPeer(t, ctx, peer, 3053, &HeartbeatInfo{Enabled: false})
 
-	if got := second.State(); got != StateAspActive {
-		t.Errorf("redialled Conn state = %v, want %v", got, StateAspActive)
+	if got := second.State(); got != StateASPActive {
+		t.Errorf("redialled Association state = %v, want %v", got, StateASPActive)
 	}
 	if _, err := second.Write([]byte("after-redial")); err != nil {
-		t.Errorf("Write on the redialled Conn: %v", err)
+		t.Errorf("Write on the redialled Association: %v", err)
 	}
-	if got := first.State(); got == StateAspActive {
-		t.Error("the aborted Conn reports ASP-ACTIVE again; a dead Conn must stay dead")
+	if got := first.State(); got == StateASPActive {
+		t.Error("the aborted Association reports ASP-ACTIVE again; a dead Association must stay dead")
 	}
 }
 
@@ -166,12 +166,12 @@ func TestRepeatedReconnectCyclesDoNotLeakGoroutines(t *testing.T) {
 
 	cycle := func(port int) {
 		conn := dialRawPeer(t, ctx, peer, port, heartbeat)
-		if got := conn.State(); got != StateAspActive {
-			t.Fatalf("port %d: state = %v, want %v", port, got, StateAspActive)
+		if got := conn.State(); got != StateASPActive {
+			t.Fatalf("port %d: state = %v, want %v", port, got, StateASPActive)
 		}
 		peer.abort(t)
-		if !waitFor(func() bool { return conn.State() != StateAspActive }, 15*time.Second) {
-			t.Fatalf("port %d: Conn still %v after abort", port, conn.State())
+		if !waitFor(func() bool { return conn.State() != StateASPActive }, 15*time.Second) {
+			t.Fatalf("port %d: Association still %v after abort", port, conn.State())
 		}
 		_ = conn.Close()
 	}

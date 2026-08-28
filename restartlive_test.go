@@ -75,14 +75,14 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 
 	const port = 3231
 
-	srvCfg := NewServerConfig(&HeartbeatInfo{Enabled: false},
+	srvCfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
 	srvAddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen("m3ua", srvAddr, NewListenerConfig(srvCfg))
+	ln, err := listenSGP("m3ua", srvAddr, NewListenerConfig(srvCfg))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -97,7 +97,7 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 			"without iptables; run the container with --privileged")
 	}
 
-	accepted := make(chan *Conn, 4)
+	accepted := make(chan *Association, 4)
 	go func() {
 		for {
 			c, err := ln.Accept(ctx)
@@ -108,7 +108,7 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 		}
 	}()
 
-	cliCfg := NewClientConfig(&HeartbeatInfo{Enabled: false},
+	cliCfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
 	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -116,11 +116,11 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first, err := Dial(ctx, "m3ua", laddr, srvAddr, cliCfg)
+	first, err := dialASP(ctx, "m3ua", laddr, srvAddr, cliCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sgp *Conn
+	var sgp *Association
 	select {
 	case sgp = <-accepted:
 	case <-time.After(15 * time.Second):
@@ -157,7 +157,7 @@ drainInitialStates:
 	}
 
 	// The ASP comes back on the same five-tuple. This is the restart.
-	second, err := Dial(ctx, "m3ua", laddr, srvAddr, cliCfg)
+	second, err := dialASP(ctx, "m3ua", laddr, srvAddr, cliCfg)
 	if err != nil {
 		t.Fatalf("the ASP could not re-establish: %v", err)
 	}
@@ -188,9 +188,9 @@ drainInitialStates:
 				t.Fatal("the SGP's state indication channel closed during restart recovery")
 			}
 			switch state {
-			case StateAspDown:
+			case StateASPDown:
 				sawDown = true
-			case StateAspActive:
+			case StateASPActive:
 				if sawDown {
 					sawRecovered = true
 				}
@@ -207,7 +207,7 @@ drainInitialStates:
 		}
 	}
 
-	if got := sgp.State(); got != StateAspActive {
-		t.Errorf("SGP state after restart recovery = %v, want %v", got, StateAspActive)
+	if got := sgp.State(); got != StateASPActive {
+		t.Errorf("SGP state after restart recovery = %v, want %v", got, StateASPActive)
 	}
 }

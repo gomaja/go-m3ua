@@ -18,12 +18,12 @@ import (
 //		for st := range conn.SignallingStatus() { ... }
 //	}()
 //
-// That loop never terminated. The channel was created per Conn and never
+// That loop never terminated. The channel was created per Association and never
 // closed, so every association left one goroutine parked on a channel with no
 // remaining sender — for the life of the process. On an SGP whose ASPs come and
 // go, that is an unbounded leak of goroutines and of the Conns they keep
 // reachable.
-func TestSignallingStatusChannelClosesWithTheConn(t *testing.T) {
+func TestSignallingStatusChannelClosesWithTheAssociation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -38,7 +38,7 @@ func TestSignallingStatusChannelClosesWithTheConn(t *testing.T) {
 		close(ranged)
 	}()
 
-	// Let the reader park on the channel before the Conn goes away.
+	// Let the reader park on the channel before the Association goes away.
 	time.Sleep(100 * time.Millisecond)
 	if err := conn.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -159,7 +159,7 @@ func TestQueuedStatusesSurviveClose(t *testing.T) {
 // DestinationState went on answering with whatever the peer had last said,
 // so an MTP3-User that had been told a destination was available kept being
 // told so long after the only route to it had gone.
-func TestClosingAConnReportsItsDestinationsUnavailable(t *testing.T) {
+func TestClosingAnAssociationReportsItsDestinationsUnavailable(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -207,7 +207,7 @@ func TestClosingAConnReportsItsDestinationsUnavailable(t *testing.T) {
 }
 
 // A destination the peer never mentioned is not invented on teardown.
-func TestClosingAConnDoesNotInventDestinations(t *testing.T) {
+func TestClosingAnAssociationDoesNotInventDestinations(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

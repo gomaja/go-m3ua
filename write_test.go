@@ -16,7 +16,7 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// Conn implements net.Conn, so Write carries io.Writer's contract: on success it
+// Association implements net.Conn, so Write carries io.Writer's contract: on success it
 // must return len(b) and nil. It returned neither. The M3UA message wrapping the
 // payload was marshalled, SCTPWrite returned how many bytes it had put on the
 // wire, and that count was then *added to itself*:
@@ -170,7 +170,7 @@ func TestWriteReportsEAGAINWhenTheSendBufferIsFull(t *testing.T) {
 	sent := 0
 	var failure error
 	for i := 0; i < 20000; i++ {
-		if _, err := asps[0].client.WriteToStream(payload, 1); err != nil {
+		if _, err := asps[0].asp.WriteToStream(payload, 1); err != nil {
 			failure = err
 			break
 		}
@@ -188,19 +188,19 @@ func TestWriteReportsEAGAINWhenTheSendBufferIsFull(t *testing.T) {
 	t.Logf("send buffer filled after %d messages of %d bytes", sent, len(payload))
 
 	// Congestion must not be mistaken for a broken association.
-	if got := asps[0].client.State(); got != StateAspActive {
+	if got := asps[0].asp.State(); got != StateASPActive {
 		t.Errorf("state = %v after a full send buffer, want %v: congestion tore the association down",
-			got, StateAspActive)
+			got, StateASPActive)
 	}
 
 	// And it must recover once the far side drains.
 	for i := 0; i < sent; i++ {
-		if _, err := readWithin(t, asps[0].server, 5*time.Second); err != nil {
+		if _, err := readWithin(t, asps[0].sgp, 5*time.Second); err != nil {
 			break
 		}
 	}
 	if !waitFor(func() bool {
-		_, err := asps[0].client.WriteToStream(payload, 1)
+		_, err := asps[0].asp.WriteToStream(payload, 1)
 		return err == nil
 	}, 10*time.Second) {
 		t.Error("Write never recovered after the far side drained")
@@ -229,7 +229,7 @@ func TestWriteDeadlineTurnsAFullBufferIntoBackpressure(t *testing.T) {
 	go func() {
 		n := 0
 		for {
-			if _, err := readWithin(t, asps[0].server, 3*time.Second); err != nil {
+			if _, err := readWithin(t, asps[0].sgp, 3*time.Second); err != nil {
 				break
 			}
 			n++
@@ -239,13 +239,13 @@ func TestWriteDeadlineTurnsAFullBufferIntoBackpressure(t *testing.T) {
 
 	// Far more than the ~330 messages that filled the buffer without a
 	// deadline.
-	if err := asps[0].client.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	if err := asps[0].asp.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		t.Fatalf("SetWriteDeadline: %v", err)
 	}
 	payload := make([]byte, 512)
 	const burst = 3000
 	for i := 0; i < burst; i++ {
-		if _, err := asps[0].client.WriteToStream(payload, 1); err != nil {
+		if _, err := asps[0].asp.WriteToStream(payload, 1); err != nil {
 			t.Fatalf("write %d of %d failed with a deadline in force: %v "+
 				"(a full send buffer should have been waited out, not refused)", i, burst, err)
 		}

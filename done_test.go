@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// An owner of a Conn had two ways to learn the association was gone: poll
+// An owner of an Association had two ways to learn it was gone: poll
 // State() until it read ASP-DOWN, or wait for a Read or Write to start failing.
-// Neither says why, and ErrNotEstablished comes back identically from a Conn
+// Neither says why, and ErrNotEstablished comes back identically from an Association
 // that never came up and one that was torn down by an expired T(beat), a read
 // error, T(ack) giving up, or a deliberate Close. Those want different
 // responses from an application: one is a configuration problem, one is a dead
@@ -23,7 +23,7 @@ import (
 // already know: select on Done(), then ask Err() what happened.
 
 // Done must be open while the association is, and closed once it is not.
-func TestDoneClosesWhenTheConnDoes(t *testing.T) {
+func TestDoneClosesWhenTheAssociationDoes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -62,8 +62,8 @@ func TestErrReportsADeliberateClose(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if got := conn.Err(); !errors.Is(got, ErrConnClosed) {
-		t.Errorf("Err() = %v after Close(), want ErrConnClosed", got)
+	if got := conn.Err(); !errors.Is(got, ErrAssociationClosed) {
+		t.Errorf("Err() = %v after Close(), want ErrAssociationClosed", got)
 	}
 }
 
@@ -126,7 +126,7 @@ func TestErrKeepsTheFirstCause(t *testing.T) {
 	<-conn.Done()
 	first := conn.Err()
 
-	if err := conn.Close(); err != nil && !errors.Is(err, ErrConnClosed) {
+	if err := conn.Close(); err != nil && !errors.Is(err, ErrAssociationClosed) {
 		t.Logf("second Close reported %v", err)
 	}
 	if got := conn.Err(); got != first {
@@ -158,8 +158,8 @@ func TestDoneIsSafeForConcurrentWaiters(t *testing.T) {
 	for i := 0; i < waiters; i++ {
 		select {
 		case err := <-woken:
-			if !errors.Is(err, ErrConnClosed) {
-				t.Errorf("waiter saw Err() = %v, want ErrConnClosed", err)
+			if !errors.Is(err, ErrAssociationClosed) {
+				t.Errorf("waiter saw Err() = %v, want ErrAssociationClosed", err)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("only %d of %d waiters woke", i, waiters)

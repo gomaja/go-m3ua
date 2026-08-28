@@ -29,7 +29,7 @@ func TestUnsupportedClassIsReportedAsAClassError(t *testing.T) {
 		10, 64, 127, // reserved by the IETF
 		128, 200, 255, // reserved for IETF-defined extensions
 	} {
-		conn, _ := newTestConn(t, StateAspActive, modeServer)
+		conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 
 		msg, err := messages.Parse([]byte{0x01, 0x00, class, 0x01, 0x00, 0x00, 0x00, 0x08})
 		if err != nil {
@@ -59,7 +59,7 @@ func TestUnsupportedTypeInAKnownClassStaysATypeError(t *testing.T) {
 		messages.MsgClassASPSM,
 		messages.MsgClassASPTM,
 	} {
-		conn, _ := newTestConn(t, StateAspActive, modeServer)
+		conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 
 		// Type 0x7f is not defined in any of these classes.
 		msg, err := messages.Parse([]byte{0x01, 0x00, class, 0x7f, 0x00, 0x00, 0x00, 0x08})
@@ -85,7 +85,7 @@ func TestUnsupportedTypeInAKnownClassStaysATypeError(t *testing.T) {
 // without saying which or why. It was accepted, and reported a cause of 0 to
 // the MTP3-User as though the peer had sent one.
 func TestDUPUWithoutUserCauseIsRejected(t *testing.T) {
-	conn, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 	err := conn.handleDestinationUserPartUnavailable(
 		messages.NewDestinationUserPartUnavailable(
@@ -104,7 +104,7 @@ func TestDUPUWithoutUserCauseIsRejected(t *testing.T) {
 
 // A DUPU that carries it is still accepted, and the cause reaches the user.
 func TestDUPUWithUserCauseIsAccepted(t *testing.T) {
-	conn, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 	if err := conn.handleDestinationUserPartUnavailable(
 		messages.NewDestinationUserPartUnavailable(
@@ -135,7 +135,7 @@ func TestDUPUWithUserCauseIsAccepted(t *testing.T) {
 // message must not have it put on stream 0, which is where the send template
 // sits.
 func TestWriteSignalDoesNotPutDataOnStreamZero(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.signalWriter = nil // exercise the real accounting path
 	conn.maxMessageStreamID = 0
 
@@ -174,7 +174,7 @@ func TestWriteSignalRejectsDataWithoutUsableProtocolData(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspActive, modeClient)
+			conn, _ := newTestConn(t, StateASPActive, RoleASP)
 			conn.signalWriter = nil
 			conn.maxMessageStreamID = 4
 
@@ -188,9 +188,9 @@ func TestWriteSignalRejectsDataWithoutUsableProtocolData(t *testing.T) {
 func TestWriteSignalRejectsDataOutsideAspActive(t *testing.T) {
 	data := messages.NewData(nil, nil, params.NewProtocolData(
 		1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("x")), nil)
-	for _, state := range []State{StateAspDown, StateAspInactive} {
+	for _, state := range []State{StateASPDown, StateASPInactive} {
 		t.Run(state.String(), func(t *testing.T) {
-			conn, _ := newTestConn(t, state, modeClient)
+			conn, _ := newTestConn(t, state, RoleASP)
 			conn.signalWriter = nil
 			conn.maxMessageStreamID = 4
 			if _, err := conn.WriteSignal(data); !errors.Is(err, ErrNotEstablished) {
@@ -205,7 +205,7 @@ func TestWriteSignalRejectsDataOutsideAspActive(t *testing.T) {
 // every DATA would then go out on a stream the peer never opened, to be
 // discarded by it silently and completely.
 func TestZeroNegotiatedStreamsIsRefusedNotWrapped(t *testing.T) {
-	c := &Conn{maxMessageStreamID: 0}
+	c := &Association{maxMessageStreamID: 0}
 	if got := c.streamFor(0); got != 0 {
 		t.Errorf("streamFor with no streams = %d, want 0", got)
 	}
@@ -235,7 +235,7 @@ func TestDiagnosticInformationCarriesTheReceivedOctets(t *testing.T) {
 		0x61, 0x62, 0x63, // "abc", padding elided
 	}
 
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	if _, err := messages.Parse(raw); err != nil {
 		t.Skipf("this codec rejects the elided-padding form: %v", err)
@@ -297,7 +297,7 @@ func TestMalformedParametersStillDrawTheMandatedError(t *testing.T) {
 				t.Skip("this input parses cleanly; it cannot exercise the malformed path")
 			}
 
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			conn.dispatchRaw(context.Background(), inbound{data: tt.raw})
 
 			var reported error
@@ -321,7 +321,7 @@ func TestMalformedParametersStillDrawTheMandatedError(t *testing.T) {
 // A message too short to hold a header has no class or type to answer for, and
 // must not produce a bogus error.
 func TestUnparseableShortMessageDrawsNothing(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	conn.dispatchRaw(context.Background(), inbound{data: []byte{0x01, 0x00}})
 
 	select {
@@ -380,7 +380,7 @@ func TestParameterFaultInASupportedMessageDrawsAParameterError(t *testing.T) {
 				t.Skip("this input parses cleanly; it cannot exercise the fault path")
 			}
 
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			conn.dispatchRaw(context.Background(), inbound{data: tt.raw})
 
 			var reported error

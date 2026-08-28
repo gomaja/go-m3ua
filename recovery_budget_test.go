@@ -11,7 +11,7 @@ import (
 )
 
 func TestListenerRecoveryMessageBudgetSpansApplicationServers(t *testing.T) {
-	listener, first, second, _ := pendingTwoApplicationServerFixture(t, func(config *Config) {
+	listener, first, second, _ := pendingTwoApplicationServerFixture(t, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 10
 		config.RecoveryQueueBytes = 1 << 20
 		config.RecoveryQueueTotalMessages = 1
@@ -56,7 +56,7 @@ func TestListenerRecoveryByteBudgetAcceptsExactBoundaryOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	totalBytes := len(firstWire) + len(secondWire)
-	listener, _, _, _ := pendingTwoApplicationServerFixture(t, func(config *Config) {
+	listener, _, _, _ := pendingTwoApplicationServerFixture(t, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 10
 		config.RecoveryQueueBytes = 1 << 20
 		config.RecoveryQueueTotalMessages = 10
@@ -79,7 +79,7 @@ func TestListenerRecoveryByteBudgetAcceptsExactBoundaryOnly(t *testing.T) {
 
 func TestListenerRecoveryBudgetCountsActiveInFlightDelivery(t *testing.T) {
 	listener, first, asp, _ := distributionFixtureForContexts(
-		t, params.TrafficModeLoadshare, []uint32{1, 2}, func(config *Config) {
+		t, params.TrafficModeLoadshare, []uint32{1, 2}, func(config *AssociationConfig) {
 			config.RecoveryQueueMessages = 10
 			config.RecoveryQueueBytes = 1 << 20
 			config.RecoveryQueueTotalMessages = 1
@@ -88,9 +88,9 @@ func TestListenerRecoveryBudgetCountsActiveInFlightDelivery(t *testing.T) {
 	)
 	second := listener.as.get(2)
 	asp.noteRoutingContextsActive([]uint32{1, 2})
-	asp.setState(StateAspActive)
-	first.setASPState(asp, StateAspActive, time.Hour)
-	second.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	first.setASPState(asp, StateASPActive, time.Hour)
+	second.setASPState(asp, StateASPActive, time.Hour)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -127,18 +127,18 @@ func TestListenerRecoveryBudgetCountsActiveInFlightDelivery(t *testing.T) {
 	}
 }
 
-func pendingTwoApplicationServerFixture(t *testing.T, configure func(*Config)) (*Listener, *applicationServer, *applicationServer, *Conn) {
+func pendingTwoApplicationServerFixture(t *testing.T, configure func(*AssociationConfig)) (*Listener, *applicationServer, *applicationServer, *Association) {
 	t.Helper()
 	listener, first, asp, _ := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, configure,
 	)
 	second := listener.as.get(2)
 	asp.noteRoutingContextsActive([]uint32{1, 2})
-	asp.setState(StateAspActive)
-	first.setASPState(asp, StateAspActive, time.Hour)
-	second.setASPState(asp, StateAspActive, time.Hour)
-	first.setASPState(asp, StateAspInactive, time.Hour)
-	second.setASPState(asp, StateAspInactive, time.Hour)
+	asp.setState(StateASPActive)
+	first.setASPState(asp, StateASPActive, time.Hour)
+	second.setASPState(asp, StateASPActive, time.Hour)
+	first.setASPState(asp, StateASPInactive, time.Hour)
+	second.setASPState(asp, StateASPInactive, time.Hour)
 	return listener, first, second, asp
 }
 

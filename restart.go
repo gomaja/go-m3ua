@@ -28,15 +28,15 @@ import (
 // makes a shared handler usable: the kernel names the association in the event.
 type restartWatcher struct {
 	mu sync.Mutex
-	// route maps an association ID to the Conn that owns it. Held behind the
-	// mutex because a client sets it after the association exists, and a
+	// route maps an association ID to the Association that owns it. Held behind
+	// the mutex because Dial sets it after the association exists, and a
 	// listener consults it from a reader goroutine.
-	route func(sctp.SCTPAssocID) *Conn
+	route func(sctp.SCTPAssocID) *Association
 }
 
-// setRoute installs the lookup. A client sets it once, after Dial has built the
-// Conn; a Listener sets it before it can accept anything.
-func (w *restartWatcher) setRoute(f func(sctp.SCTPAssocID) *Conn) {
+// setRoute installs the lookup. Dial sets it once after building the
+// Association; a Listener sets it before it can accept anything.
+func (w *restartWatcher) setRoute(f func(sctp.SCTPAssocID) *Association) {
 	w.mu.Lock()
 	w.route = f
 	w.mu.Unlock()
@@ -82,10 +82,11 @@ func (w *restartWatcher) handle(b []byte) error {
 // association's reader; using the dispatch queue therefore blocks that reader
 // from reaching a later message until the restart marker follows every earlier
 // one.
-func (c *Conn) enqueueSCTPRestart() {
-	// A Conn built outside newConn has no live reader or dispatcher, so there is
+func (c *Association) enqueueSCTPRestart() {
+	// An Association built outside newAssociation has no live reader or dispatcher,
+	// so there is
 	// nowhere ordered to deliver the event. Every Dial and Accept path
-	// initialises inboundChan; silently ignore an unusable zero Conn rather than
+	// initialises inboundChan; silently ignore an unusable zero Association rather than
 	// reintroduce an out-of-order direct state transition as a fallback.
 	if c.inboundChan == nil {
 		return
@@ -109,15 +110,15 @@ func (c *Conn) enqueueSCTPRestart() {
 // M3UA message read after the notification is judged against the reset state.
 // The monitor consumes the unbuffered publication before a following ASP Up
 // can publish ASP-INACTIVE, which also serialises the per-AS cleanup ahead of
-// the peer's recovery. On a client, the ASP-DOWN entry action sends ASP Up and
-// starts T(ack).
-func (c *Conn) handleSCTPRestart() {
+// the peer's recovery. For an ASP role, the ASP-DOWN entry action sends ASP Up
+// and starts T(ack).
+func (c *Association) handleSCTPRestart() {
 	// When recovery is already waiting in ASP-DOWN, publishing ASP-DOWN again
 	// is deliberately a state restatement and its entry action will not run.
 	// Remember that case so this new SCTP epoch still gets a new ASP Up after
 	// the old epoch's timer is retired below.
 	c.muState.RLock()
-	restartWhileDown := c.mode == modeClient && c.state == StateAspDown && c.stateEntered
+	restartWhileDown := c.role == RoleASP && c.state == StateASPDown && c.stateEntered
 	c.muState.RUnlock()
 	// The SCTP association remains usable, but its peer state is a new epoch.
 	// Drain any retry already entering the writer and cancel every old T(ack)
@@ -126,7 +127,7 @@ func (c *Conn) handleSCTPRestart() {
 	// Section 4.3.3 requires this only at an ASP; pauseDestinations enforces the
 	// role and leaves an SGP's node-wide destination view untouched.
 	c.pauseDestinations()
-	c.sendState(StateAspDown)
+	c.sendState(StateASPDown)
 	c.notifyManagement(&ManagementIndication{
 		Kind: ManagementSCTPRestart,
 		Description: "the peer restarted the SCTP association; " +
@@ -150,7 +151,7 @@ func (c *Conn) handleSCTPRestart() {
 // A failure here is not fatal. The association works exactly as it did before;
 // only the restart indication is unavailable, and losing an optional Layer
 // Management report is not worth refusing to serve traffic.
-func (c *Conn) subscribeRestart() {
+func (c *Association) subscribeRestart() {
 	if c.sctpConn == nil {
 		return
 	}

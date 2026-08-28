@@ -20,9 +20,9 @@ type State uint8
 
 // M3UA status definitions.
 const (
-	StateAspDown State = iota
-	StateAspInactive
-	StateAspActive
+	StateASPDown State = iota
+	StateASPInactive
+	StateASPActive
 	StateSCTPCDI
 	StateSCTPRI
 
@@ -47,34 +47,34 @@ const (
 
 func (s State) String() string {
 	switch s {
-	case StateAspDown:
-		return "AspDown"
-	case StateAspInactive:
-		return "AspInactive"
-	case StateAspActive:
-		return "AspActive"
+	case StateASPDown:
+		return "ASP-DOWN"
+	case StateASPInactive:
+		return "ASP-INACTIVE"
+	case StateASPActive:
+		return "ASP-ACTIVE"
 	case StateSCTPCDI:
-		return "SCTPCDI"
+		return "SCTP-CDI"
 	case StateSCTPRI:
-		return "SCTPRI"
+		return "SCTP-RI"
 	case stateUnchanged:
 		return "unchanged"
 	default:
-		return "Unknown"
+		return "UNKNOWN"
 	}
 }
 
-// handleStateUpdate applies a published state to the Conn and runs the entry
+// handleStateUpdate applies a published state to the Association and runs the entry
 // action for it, if this is an entry rather than a restatement.
 //
 // Most handlers publish c.State() unchanged to mean "hold". That restatement
-// used to re-run the entry action, and the client's ASP-INACTIVE entry action
+// used to re-run the entry action, and the ASP role's ASP-INACTIVE entry action
 // is "send ASP Active": a peer answering with a Routing Context we did not ask
 // about made the ASP reject the Ack, restate ASP-INACTIVE, and send another ASP
 // Active — a self-sustaining storm, unbounded and at wire speed, from a mere
 // configuration mismatch. Retransmission is T(ack)'s job and is bounded by
 // TAckRetries; the entry action's is to run once per entry.
-func (c *Conn) handleStateUpdate(current State) error {
+func (c *Association) handleStateUpdate(current State) error {
 	return c.handleStateUpdateFrom(current, false)
 }
 
@@ -83,11 +83,11 @@ func (c *Conn) handleStateUpdate(current State) error {
 // newer state while monitor is finishing an older entry action; applying that
 // older publication afterwards would resurrect an ASP the peer already took
 // down.
-func (c *Conn) handlePublishedStateUpdate(current State) error {
+func (c *Association) handlePublishedStateUpdate(current State) error {
 	return c.handleStateUpdateFrom(current, true)
 }
 
-func (c *Conn) handleStateUpdateFrom(current State, published bool) error {
+func (c *Association) handleStateUpdateFrom(current State, published bool) error {
 	// Nothing moved: no transition to apply, no entry action to run, and
 	// nothing for the Application Server to hear about.
 	if current == stateUnchanged {
@@ -135,7 +135,7 @@ func (c *Conn) handleStateUpdateFrom(current State, published bool) error {
 // applyStateUpdate records the transition and runs the entry action for it,
 // with the state lock held throughout so an entry action sees the state it was
 // entered for.
-func (c *Conn) applyStateUpdate(current State) error {
+func (c *Association) applyStateUpdate(current State) error {
 	c.muState.Lock()
 	defer c.muState.Unlock()
 	return c.applyStateUpdateLocked(current)
@@ -143,7 +143,7 @@ func (c *Conn) applyStateUpdate(current State) error {
 
 // applyPublishedStateUpdate atomically rejects a queued publication when a
 // newer dispatcher decision has already replaced it in c.state.
-func (c *Conn) applyPublishedStateUpdate(current State) (bool, error) {
+func (c *Association) applyPublishedStateUpdate(current State) (bool, error) {
 	c.muState.Lock()
 	defer c.muState.Unlock()
 	if c.state != current {
@@ -152,7 +152,7 @@ func (c *Conn) applyPublishedStateUpdate(current State) (bool, error) {
 	return true, c.applyStateUpdateLocked(current)
 }
 
-func (c *Conn) applyStateUpdateLocked(current State) error {
+func (c *Association) applyStateUpdateLocked(current State) error {
 	select {
 	case <-c.done:
 		// closeWith is the final authority once teardown begins. A state update
@@ -170,12 +170,12 @@ func (c *Conn) applyStateUpdateLocked(current State) error {
 	if !c.stateEntered {
 		// Nothing has been applied yet, so appliedState holds only its zero
 		// value and carries no information. state is the honest answer on the
-		// first pass, and is also what a Conn placed directly into a state --
+		// first pass, and is also what an Association placed directly into a state --
 		// by a test, or by Accept before the first publish -- was set to.
 		previous = c.state
 	}
 	// The first update is always an entry. The state starts at its zero value,
-	// which is StateAspDown, so the ASP-DOWN entry action that starts the
+	// which is StateASPDown, so the ASP-DOWN entry action that starts the
 	// handshake would otherwise look like a restatement and never run.
 	entering := current != previous || !c.stateEntered
 	c.stateEntered = true
@@ -190,34 +190,32 @@ func (c *Conn) applyStateUpdateLocked(current State) error {
 		c.notifyStateChange(current)
 	}
 	// Still written here as well as in sendState: applyStateUpdate is reached
-	// directly, without a publish, by callers that place a Conn in a state
+	// directly, without a publish, by callers that place an Association in a state
 	// outright, and it must remain correct for them.
 	c.state = current
 
-	switch c.mode {
-	case modeClient:
-		if err := c.handleStateUpdateAsClient(current, previous, entering); err != nil {
+	switch c.role {
+	case RoleASP:
+		if err := c.handleStateUpdateAsASP(current, previous, entering); err != nil {
 			return err
 		}
 		return nil
-	case modeServer:
-		if err := c.handleStateUpdateAsServer(current, entering); err != nil {
+	case RoleSGP:
+		if err := c.handleStateUpdateAsSGP(current, entering); err != nil {
 			return err
 		}
 		return nil
 	default:
-		// Only client and server modes exist, so this is unreachable today. It
-		// is kept explicit rather than silently falling through to the client
-		// path: IPSP (RFC 4666 Section 1.4.3.4) is the same procedures with
-		// symmetric roles, so adding it means adding a mode here, and a missed
-		// arm would otherwise run an IPSP through the ASP state machine.
-		return fmt.Errorf("%w: mode %d", ErrUnsupportedMode, c.mode)
+		// IPSP (RFC 4666 Section 1.4.3.4) uses symmetric peer procedures and is
+		// enabled only through its explicit exchange-mode API. Falling through
+		// to either the ASP or SGP state machine would be a protocol error.
+		return fmt.Errorf("%w: role %d", ErrUnsupportedRole, c.role)
 	}
 }
 
-func (c *Conn) handleStateUpdateAsClient(current, previous State, entering bool) error {
+func (c *Association) handleStateUpdateAsASP(current, previous State, entering bool) error {
 	switch current {
-	case StateAspDown:
+	case StateASPDown:
 		// A fresh climb: nothing the peer acknowledged before survives the
 		// association going down, which matches Section 4.3.4.1's treatment of
 		// an ASP Up while ASP-ACTIVE, where "all registered Routing Keys are
@@ -228,7 +226,7 @@ func (c *Conn) handleStateUpdateAsClient(current, previous State, entering bool)
 			return nil
 		}
 		return c.initiateASPSM()
-	case StateAspInactive:
+	case StateASPInactive:
 		// RFC 4666 Section 4.3.4.3: the ASP asks to carry traffic "Anytime
 		// after the ASP has received an ASP Up Ack", so ASP Active follows the
 		// climb out of ASP-DOWN. Resending it while already ASP-INACTIVE is
@@ -253,17 +251,17 @@ func (c *Conn) handleStateUpdateAsClient(current, previous State, entering bool)
 			c.clearResumeAfterStrayAck()
 			return c.initiateASPTM()
 		}
-		if !entering || previous != StateAspDown {
+		if !entering || previous != StateASPDown {
 			return nil
 		}
 		// Section 4.3.4.2 has an ASP put down by a stray ASP Down Ack "return
 		// itself to its previous state" — which, if that state was only
 		// ASP-INACTIVE, stops here rather than taking traffic it never had.
-		if c.resumeTo == StateAspInactive {
+		if c.resumeTo == StateASPInactive {
 			return nil
 		}
 		return c.initiateASPTM()
-	case StateAspActive:
+	case StateASPActive:
 		if entering {
 			c.notifyEstablished()
 			c.beatAllow.Broadcast()
@@ -276,9 +274,9 @@ func (c *Conn) handleStateUpdateAsClient(current, previous State, entering bool)
 	}
 }
 
-func (c *Conn) handleStateUpdateAsServer(current State, entering bool) error {
+func (c *Association) handleStateUpdateAsSGP(current State, entering bool) error {
 	switch current {
-	case StateAspDown:
+	case StateASPDown:
 		// The record of which Application Servers this ASP was active in does
 		// not survive the association going down. Section 4.3.1's Figure 3
 		// reaches ASP-DOWN by ASP Down or SCTP CDI, neither of which is per-AS,
@@ -287,7 +285,7 @@ func (c *Conn) handleStateUpdateAsServer(current State, entering bool) error {
 			c.forgetActiveRoutingContexts()
 		}
 		return nil
-	case StateAspInactive:
+	case StateASPInactive:
 		// Likewise: an ASP that has left ASP-ACTIVE altogether is active in no
 		// Application Server, and its next ASP Active decides afresh.
 		if entering {
@@ -295,7 +293,7 @@ func (c *Conn) handleStateUpdateAsServer(current State, entering bool) error {
 		}
 		// XXX - send DAVA to notify peer?
 		return nil
-	case StateAspActive:
+	case StateASPActive:
 		if entering {
 			c.notifyEstablished()
 			c.beatAllow.Broadcast()
@@ -314,7 +312,7 @@ func (c *Conn) handleStateUpdateAsServer(current State, entering bool) error {
 // ASP-ACTIVE (for example after RFC 4666 Section 4.3.4.1 drops it to
 // ASP-INACTIVE on a received ASP Up) would otherwise wedge handleStateUpdate
 // while it holds muState, blocking every State() caller with SCTP still up.
-func (c *Conn) notifyEstablished() {
+func (c *Association) notifyEstablished() {
 	select {
 	case c.established <- struct{}{}:
 	default:
@@ -332,15 +330,15 @@ func (c *Conn) notifyEstablished() {
 // there is nobody to receive. Dropping the surplus token is harmless because
 // T(beat) remains the authority on peer liveness, whereas blocking here would
 // wedge the dispatch goroutine for this message indefinitely.
-func (c *Conn) notifyBeatAck() {
+func (c *Association) notifyBeatAck() {
 	select {
 	case c.beatAckChan <- struct{}{}:
 	default:
 	}
 }
 
-// sendErr safely sends an error on errChan, aborting if the connection is closed.
-func (c *Conn) sendErr(err error) {
+// sendErr safely sends an error on errChan, aborting if the association is closed.
+func (c *Association) sendErr(err error) {
 	select {
 	case c.errChan <- err:
 	case <-c.done:
@@ -348,7 +346,7 @@ func (c *Conn) sendErr(err error) {
 }
 
 // sendState commits a transition and then publishes it for its entry actions,
-// aborting if the connection is closed.
+// aborting if the association is closed.
 //
 // The commit happens here, synchronously, on the goroutine that dispatched the
 // message. That is deliberate and it is what closes a race the split between
@@ -366,7 +364,7 @@ func (c *Conn) sendErr(err error) {
 // follows them keep running off the dispatch path: applyStateUpdate writes to
 // the socket, and Section 4.3.4.5 requires the Notify to follow the related
 // acknowledgement, which it still does.
-func (c *Conn) sendState(s State) {
+func (c *Association) sendState(s State) {
 	if !c.commitState(s) {
 		return
 	}
@@ -380,7 +378,7 @@ func (c *Conn) sendState(s State) {
 // commitState records the dispatcher's decision before it is published for
 // entry actions. stateUnchanged is only a publication token and changes no
 // state.
-func (c *Conn) commitState(s State) bool {
+func (c *Association) commitState(s State) bool {
 	if s == stateUnchanged {
 		return true
 	}
@@ -395,15 +393,15 @@ func (c *Conn) commitState(s State) bool {
 	return true
 }
 
-func (c *Conn) handleSignals(ctx context.Context, m3 messages.M3UA) {
+func (c *Association) handleSignals(ctx context.Context, m3 messages.M3UA) {
 	c.handleReceivedSignals(ctx, m3, nil)
 }
 
 // handleReceivedSignals handles a decoded message together with its original
 // octets. Error responses must own those octets before they cross errChan;
-// looking them up later from Conn can attribute a subsequent message to the
+// looking them up later from Association can attribute a subsequent message to the
 // earlier fault.
-func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw []byte) {
+func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw []byte) {
 	select {
 	case <-ctx.Done():
 		return
@@ -442,18 +440,18 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 		// ("Unexpected Message") accompanies the Ack. Those are SGP procedures
 		// ("The ASP is always the initiator of the ASP Up message"), so an ASP
 		// that receives one reports the Error and holds its state — a stray or
-		// forged ASP Up must not take a client's active data path down. A
+		// forged ASP Up must not take an ASP role's active data path down. A
 		// genuinely unusable message (e.g. wrong SCTP stream) also holds state.
 		if err := c.handleAspUp(msg); err != nil {
 			c.sendErr(err)
 
 			var unexpected *UnexpectedMessageError
-			if !errors.As(err, &unexpected) || c.mode != modeServer {
+			if !errors.As(err, &unexpected) || c.role != RoleSGP {
 				c.sendState(stateUnchanged)
 				return
 			}
 		}
-		c.sendState(StateAspInactive)
+		c.sendState(StateASPInactive)
 	case *messages.AspUpAck:
 		// RFC 4666 Section 4.3.4.1: "If the ASP receives an unexpected ASP Up
 		// Ack message, the ASP should consider itself in the ASP-INACTIVE
@@ -466,18 +464,18 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 			c.sendErr(err)
 
 			var unexpected *UnexpectedMessageError
-			if !errors.As(err, &unexpected) || c.mode != modeClient {
+			if !errors.As(err, &unexpected) || c.role != RoleASP {
 				c.sendState(stateUnchanged)
 				return
 			}
 		}
-		c.sendState(StateAspInactive)
+		c.sendState(StateASPInactive)
 	case *messages.AspDown:
 		if err := c.handleAspDown(msg); err != nil {
 			c.sendErr(err)
 			c.sendState(stateUnchanged)
 		} else {
-			c.sendState(StateAspDown)
+			c.sendState(StateASPDown)
 		}
 	case *messages.AspDownAck:
 		// RFC 4666 Section 4.3.4.2 puts the ASP in ASP-DOWN on an ASP Down Ack
@@ -489,12 +487,12 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 			c.sendErr(err)
 
 			var unexpected *UnexpectedMessageError
-			if !errors.As(err, &unexpected) || c.mode != modeClient {
+			if !errors.As(err, &unexpected) || c.role != RoleASP {
 				c.sendState(stateUnchanged)
 				return
 			}
 		}
-		c.sendState(StateAspDown)
+		c.sendState(StateASPDown)
 	// ASPTM
 	case *messages.AspActive:
 		// RFC 4666 Section 4.3.4.3: the SGP owes an ASP Active Ack even when the
@@ -510,9 +508,9 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 			// An ASP-DOWN peer is refused outright: no Ack was written, and
 			// Figure 3 has no edge from ASP-DOWN to ASP-ACTIVE, so there is
 			// nothing for the peer to act on and no transition to publish.
-			if errors.As(err, &unexpected) && c.mode == modeServer &&
-				c.State() != StateAspDown {
-				c.sendState(StateAspActive)
+			if errors.As(err, &unexpected) && c.role == RoleSGP &&
+				c.State() != StateASPDown {
+				c.sendState(StateASPActive)
 				return
 			}
 
@@ -520,21 +518,21 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 			// subset has already been recorded by the handler and must become
 			// active even though the unserved subset also produces an Error.
 			var routingContextError *RoutingContextError
-			if c.mode == modeServer && errors.As(err, &routingContextError) &&
-				c.stateForActiveRoutingContexts() == StateAspActive {
-				c.sendState(StateAspActive)
+			if c.role == RoleSGP && errors.As(err, &routingContextError) &&
+				c.stateForActiveRoutingContexts() == StateASPActive {
+				c.sendState(StateASPActive)
 				return
 			}
 			c.sendState(stateUnchanged)
 			return
 		}
-		c.sendState(StateAspActive)
+		c.sendState(StateASPActive)
 	case *messages.AspActiveAck:
 		if err := c.handleAspActiveAck(msg); err != nil {
 			c.sendErr(err)
 			c.sendState(stateUnchanged)
 		} else {
-			c.sendState(StateAspActive)
+			c.sendState(StateASPActive)
 		}
 	case *messages.AspInactive:
 		// RFC 4666 Section 4.3.4.4: as with ASP Active, the Ack is owed even when
@@ -544,8 +542,8 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 			c.sendErr(err)
 
 			var unexpected *UnexpectedMessageError
-			if errors.As(err, &unexpected) && c.mode == modeServer &&
-				c.State() != StateAspDown {
+			if errors.As(err, &unexpected) && c.role == RoleSGP &&
+				c.State() != StateASPDown {
 				c.sendState(c.stateForActiveRoutingContexts())
 				return
 			}
@@ -553,7 +551,7 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 			// As for ASP Active, an Error for unserved contexts accompanies the
 			// successful transition of every context named in the Ack.
 			var routingContextError *RoutingContextError
-			if c.mode == modeServer && errors.As(err, &routingContextError) {
+			if c.role == RoleSGP && errors.As(err, &routingContextError) {
 				c.sendState(c.stateForActiveRoutingContexts())
 				return
 			}
@@ -566,9 +564,9 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 			c.sendErr(err)
 			c.sendState(stateUnchanged)
 		} else if c.hasAcknowledgedRoutingContexts() {
-			c.sendState(StateAspActive)
+			c.sendState(StateASPActive)
 		} else {
-			c.sendState(StateAspInactive)
+			c.sendState(StateASPInactive)
 		}
 	case *messages.Heartbeat:
 		if err := c.handleHeartbeat(msg); err != nil {
@@ -603,7 +601,7 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 		// covers everything the association carries, and otherwise stops just
 		// the named contexts. See RFC 4666 Errata ID 2065.
 		if c.overriddenByAlternateAsp(msg) && c.overrideScope(msg) {
-			c.sendState(StateAspInactive)
+			c.sendState(StateASPInactive)
 			return
 		}
 		c.sendState(stateUnchanged)
@@ -680,7 +678,7 @@ func (c *Conn) handleReceivedSignals(ctx context.Context, m3 messages.M3UA, raw 
 // octets sit at fixed offsets in the common header (Section 3.1), so they are
 // readable even when the parameters after them are not — and dropping the whole
 // message meant one malformed TLV silenced both requirements.
-func (c *Conn) dispatchRaw(ctx context.Context, raw inbound) {
+func (c *Association) dispatchRaw(ctx context.Context, raw inbound) {
 	// RFC 4666 Section 7.1 permits only the registered M3UA PPID 3 and the
 	// unspecified PPID 0. Anything else belongs to another upper-layer
 	// protocol and is silently discarded: reflecting M3UA ERR or state across
@@ -764,7 +762,7 @@ func implementedClass(class uint8) bool {
 // That starvation is what made T(beat) useless. heartbeat() reports an expiry
 // through sendErr, so against a peer that stops answering BEATs — the exact
 // condition the timer exists to detect — the report could never be delivered:
-// the connection stayed ASP-ACTIVE and the heartbeat goroutine leaked for the
+// the association stayed ASP-ACTIVE and the heartbeat goroutine leaked for the
 // lifetime of the process. Every other asynchronous sendErr caller (malformed
 // DATA, unsupported messages, write failures) was silently affected the same
 // way, so the mandated Error response was never emitted either.
@@ -802,7 +800,7 @@ func newInboundMessage(data []byte, info *sctp.SndRcvInfo) inbound {
 	return event
 }
 
-func (c *Conn) readLoop(raw chan<- inbound, readErr chan<- error) {
+func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
 	max := c.cfg.ReadBufferSize
 	if max <= 0 {
 		max = DefaultReadBufferSize
@@ -839,7 +837,7 @@ func (c *Conn) readLoop(raw chan<- inbound, readErr chan<- error) {
 	}
 }
 
-func (c *Conn) monitor(ctx context.Context) {
+func (c *Association) monitor(ctx context.Context) {
 
 	c.beatAllow = sync.NewCond(&sync.Mutex{})
 	c.beatAllow.L.Lock()
@@ -870,9 +868,9 @@ func (c *Conn) monitor(ctx context.Context) {
 	// On a capture that is an ASP Up Ack and a Notify, then five ASP Actives two
 	// seconds apart each answered with error code 6.
 	//
-	// Applying it inline also means the client's ASP-DOWN entry action has
+	// Applying it inline also means the ASP role's ASP-DOWN entry action has
 	// written its ASP Up before the reader can deliver the answer to it.
-	if err := c.handleStateUpdate(StateAspDown); err != nil {
+	if err := c.handleStateUpdate(StateASPDown); err != nil {
 		_ = c.closeWith(err)
 		return
 	}
@@ -892,8 +890,7 @@ func (c *Conn) monitor(ctx context.Context) {
 	// Close() to report, and a failure to close a socket the peer has already
 	// stopped talking on has no one left to be reported to. The descriptor is
 	// released either way. Written explicitly so the discard reads as a decision
-	// rather than an oversight, matching the call sites in client.go and
-	// server.go.
+	// rather than an oversight, matching the Dial and Accept call sites.
 	for {
 		select {
 		case <-ctx.Done():
@@ -903,7 +900,7 @@ func (c *Conn) monitor(ctx context.Context) {
 			// Close() was called directly rather than through this loop. Without
 			// this arm the loop still unwinds — closing the socket fails the
 			// pending read, and the reader reports that through readErr — but it
-			// gets there indirectly, by way of an error raised on a connection
+			// gets there indirectly, by way of an error raised on an association
 			// that was closed deliberately. Observing done makes the shutdown
 			// self-sufficient and independent of the reader's timing.
 			return
@@ -935,7 +932,7 @@ func (c *Conn) monitor(ctx context.Context) {
 // stream, so it reaches the library intact; handing each message to its own
 // goroutine handed it straight back to the scheduler, and reordered DATA breaks
 // the transactions above it.
-func (c *Conn) dispatchLoop(ctx context.Context, inboundChan <-chan inbound) {
+func (c *Association) dispatchLoop(ctx context.Context, inboundChan <-chan inbound) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -951,7 +948,7 @@ func (c *Conn) dispatchLoop(ctx context.Context, inboundChan <-chan inbound) {
 	}
 }
 
-func (c *Conn) dispatchInbound(ctx context.Context, event inbound) {
+func (c *Association) dispatchInbound(ctx context.Context, event inbound) {
 	switch event.kind {
 	case inboundMessage:
 		c.dispatchRaw(ctx, event)

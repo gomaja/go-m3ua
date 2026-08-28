@@ -14,7 +14,7 @@ import (
 func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 	listener, firstApplicationServer, first, firstSent := restartFixture(t, 1, 2)
 	secondApplicationServer := listener.as.get(2)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1, 2)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1, 2)
 	restartAttachConn(listener, second)
 	restartActivateASP(firstApplicationServer, first, 1)
 	restartActivateASP(secondApplicationServer, second, 2)
@@ -48,7 +48,7 @@ func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 	if got := len(ssnmMessages(secondSent.snapshot())); got != 0 {
 		t.Fatalf("unconcerned ASP received %d restart DUNAs, want 0", got)
 	}
-	if first.State() != StateAspActive || !first.activeForRoutingContext(1) {
+	if first.State() != StateASPActive || !first.activeForRoutingContext(1) {
 		t.Fatalf("restart changed ASP state/scope to %v, active RC 1 = %v", first.State(), first.activeForRoutingContext(1))
 	}
 	if got := firstApplicationServer.State(); got != ASActive {
@@ -207,7 +207,7 @@ func TestMTP3RestartForcesDAUDUnavailableUntilCompletion(t *testing.T) {
 
 func TestMTP3RestartCompletionUsesCurrentActiveSnapshot(t *testing.T) {
 	listener, applicationServer, first, firstSent := restartFixture(t, 1)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
 	restartAttachConn(listener, second)
 	restartActivateASP(applicationServer, first, 1)
 	destination := restartDestination(1, 0x123456, 0)
@@ -220,8 +220,8 @@ func TestMTP3RestartCompletionUsesCurrentActiveSnapshot(t *testing.T) {
 		t.Fatalf("stage available: %v", err)
 	}
 	first.noteRoutingContextsInactive([]uint32{1})
-	first.setState(StateAspInactive)
-	applicationServer.setASPState(first, StateAspInactive, time.Hour)
+	first.setState(StateASPInactive)
+	applicationServer.setASPState(first, StateASPInactive, time.Hour)
 	restartActivateASP(applicationServer, second, 1)
 	firstSent.reset()
 	secondSent.reset()
@@ -237,7 +237,7 @@ func TestMTP3RestartCompletionUsesCurrentActiveSnapshot(t *testing.T) {
 
 func TestMTP3RestartFanoutContinuesAfterPeerFailure(t *testing.T) {
 	listener, applicationServer, failing, _ := restartFixture(t, 1)
-	healthy, healthySent := addDistributionASP(t, listener, StateAspInactive, 1)
+	healthy, healthySent := addDistributionASP(t, listener, StateASPInactive, 1)
 	restartAttachConn(listener, healthy)
 	restartActivateASP(applicationServer, failing, 1)
 	restartActivateASP(applicationServer, healthy, 1)
@@ -369,8 +369,8 @@ func TestMTP3RestartHandlesAreInvalidatedByListenerClose(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatalf("close Listener: %v", err)
 	}
-	if next, err := listener.BeginMTP3Restart(destination); next != nil || !errors.Is(err, ErrConnClosed) {
-		t.Fatalf("begin after close = (%v, %v), want (nil, ErrConnClosed)", next, err)
+	if next, err := listener.BeginMTP3Restart(destination); next != nil || !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("begin after close = (%v, %v), want (nil, ErrAssociationClosed)", next, err)
 	}
 	if err := restart.Update(destination, DestinationAvailable); !errors.Is(err, ErrStaleMTP3Restart) {
 		t.Fatalf("update after close = %v, want ErrStaleMTP3Restart", err)
@@ -380,8 +380,8 @@ func TestMTP3RestartHandlesAreInvalidatedByListenerClose(t *testing.T) {
 	}
 	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
 		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
-	); !errors.Is(err, ErrConnClosed) {
-		t.Fatalf("report after close = %v, want ErrConnClosed", err)
+	); !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("report after close = %v, want ErrAssociationClosed", err)
 	}
 }
 
@@ -447,12 +447,12 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 	f.Add(uint32(0x123456), uint8(0), uint32(1), uint8(DestinationAvailable), true, true)
 	f.Add(uint32(0xffffff), uint8(24), uint32(2), uint8(255), true, false)
 	f.Fuzz(func(t *testing.T, pointCode uint32, mask uint8, routingContext uint32, rawState uint8, routingContextSet, networkAppearanceSet bool) {
-		listener := &Listener{Config: NewServerConfig(
+		listener := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
 			&HeartbeatInfo{Enabled: false}, 1, 2, 0,
 			params.TrafficModeLoadshare, 7, 0, []uint32{1},
 			params.ServiceIndSCCP, 0, 0, 1,
 		)}
-		listener.Config.CorrelationID = nil
+		listener.AssociationConfig.CorrelationID = nil
 		destination := AffectedDestination{
 			NetworkAppearance:    7,
 			NetworkAppearanceSet: networkAppearanceSet,
@@ -489,29 +489,30 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 	})
 }
 
-func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applicationServer, *Conn, *distributionCapture) {
+func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	t.Helper()
 	listener, applicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, routingContexts,
-		func(config *Config) { config.NetworkAppearance = params.NewNetworkAppearance(7) },
+		func(config *AssociationConfig) { config.NetworkAppearance = params.NewNetworkAppearance(7) },
 	)
 	restartAttachConn(listener, asp)
 	return listener, applicationServer, asp, sent
 }
 
-func restartAttachConn(listener *Listener, connection *Conn) {
+func restartAttachConn(listener *Listener, connection *Association) {
 	connection.listener = listener
-	connection.cfg.NetworkAppearance = listener.Config.NetworkAppearance.Copy()
+	connection.mtp3Restarts = &listener.mtp3Restarts
+	connection.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
 	if listener.destinations == nil {
 		listener.destinations = newDestinations()
 	}
 	connection.destinations = listener.destinations
 }
 
-func restartActivateASP(applicationServer *applicationServer, asp *Conn, routingContext uint32) {
+func restartActivateASP(applicationServer *applicationServer, asp *Association, routingContext uint32) {
 	asp.noteRoutingContextsActive([]uint32{routingContext})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 }
 
 func restartDestination(routingContext, pointCode uint32, mask uint8) AffectedDestination {

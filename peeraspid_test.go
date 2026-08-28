@@ -16,8 +16,8 @@ import (
 
 func TestSGPSavesThePeerASPIdentifier(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	conn, _ := asTestConn(t, registry, StateAspDown, 1)
-	conn.cfg.AspIdentifier = params.NewAspIdentifier(0xaaaa)
+	conn, _ := asTestConn(t, registry, StateASPDown, 1)
+	conn.cfg.ASPIdentifier = params.NewAspIdentifier(0xaaaa)
 
 	if err := conn.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x1234), nil)); err != nil {
 		t.Fatalf("handleAspUp() error = %v", err)
@@ -29,14 +29,14 @@ func TestSGPSavesThePeerASPIdentifier(t *testing.T) {
 
 func TestDuplicatePeerASPIdentifierIsRejected(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspDown, 1)
-	second, secondSent := asTestConn(t, registry, StateAspDown, 1)
+	first, _ := asTestConn(t, registry, StateASPDown, 1)
+	second, secondSent := asTestConn(t, registry, StateASPDown, 1)
 
 	if err := first.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); err != nil {
 		t.Fatalf("first handleAspUp() error = %v", err)
 	}
 	err := second.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil))
-	if !errors.Is(err, ErrInvalidAspIdentifier) {
+	if !errors.Is(err, ErrInvalidASPIdentifier) {
 		t.Fatalf("duplicate handleAspUp() error = %v, want ErrInvalidAspIdentifier", err)
 	}
 	if _, ok := second.PeerASPIdentifier(); ok {
@@ -55,10 +55,10 @@ func TestDuplicatePeerASPIdentifierIsRejected(t *testing.T) {
 
 func TestASPIdentifierNeedOnlyBeUniqueWithinAnAS(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspDown, 1)
-	second, _ := asTestConn(t, registry, StateAspDown, 2)
+	first, _ := asTestConn(t, registry, StateASPDown, 1)
+	second, _ := asTestConn(t, registry, StateASPDown, 2)
 
-	for index, conn := range []*Conn{first, second} {
+	for index, conn := range []*Association{first, second} {
 		if err := conn.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); err != nil {
 			t.Fatalf("connection %d handleAspUp() error = %v", index, err)
 		}
@@ -67,30 +67,30 @@ func TestASPIdentifierNeedOnlyBeUniqueWithinAnAS(t *testing.T) {
 
 func TestDedicatedAssociationsStillRequireUniqueASPIdentifiers(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspDown)
-	second, _ := asTestConn(t, registry, StateAspDown)
+	first, _ := asTestConn(t, registry, StateASPDown)
+	second, _ := asTestConn(t, registry, StateASPDown)
 
 	if err := first.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); err != nil {
 		t.Fatalf("first handleAspUp() error = %v", err)
 	}
-	if err := second.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); !errors.Is(err, ErrInvalidAspIdentifier) {
+	if err := second.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); !errors.Is(err, ErrInvalidASPIdentifier) {
 		t.Fatalf("duplicate dedicated handleAspUp() error = %v, want ErrInvalidAspIdentifier", err)
 	}
 }
 
 func TestConcurrentDuplicateASPIdentifierClaimsHaveOneWinner(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspDown, 1)
-	second, _ := asTestConn(t, registry, StateAspDown, 1)
+	first, _ := asTestConn(t, registry, StateASPDown, 1)
+	second, _ := asTestConn(t, registry, StateASPDown, 1)
 	first.signalWriter = func(message messages.M3UA) (int, error) { return message.MarshalLen(), nil }
 	second.signalWriter = first.signalWriter
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	var wait sync.WaitGroup
-	for _, conn := range []*Conn{first, second} {
+	for _, conn := range []*Association{first, second} {
 		wait.Add(1)
-		go func(conn *Conn) {
+		go func(conn *Association) {
 			defer wait.Done()
 			<-start
 			results <- conn.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(9), nil))
@@ -105,7 +105,7 @@ func TestConcurrentDuplicateASPIdentifierClaimsHaveOneWinner(t *testing.T) {
 		switch {
 		case err == nil:
 			accepted++
-		case errors.Is(err, ErrInvalidAspIdentifier):
+		case errors.Is(err, ErrInvalidASPIdentifier):
 			rejected++
 		default:
 			t.Fatalf("unexpected claim result: %v", err)
@@ -118,7 +118,7 @@ func TestConcurrentDuplicateASPIdentifierClaimsHaveOneWinner(t *testing.T) {
 
 func TestClosedRegistryRejectsNewASPIdentifierClaims(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	conn, _ := asTestConn(t, registry, StateAspDown, 1)
+	conn, _ := asTestConn(t, registry, StateASPDown, 1)
 	registry.close()
 
 	if registry.claimASPIdentifier(conn, 7) {
@@ -133,12 +133,12 @@ func TestClosedRegistryRejectsNewASPIdentifierClaims(t *testing.T) {
 
 func TestOverrideNotifyNamesTheRemoteOverridingASP(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	incumbent, incumbentSent := asTestConn(t, registry, StateAspActive, 1)
+	incumbent, incumbentSent := asTestConn(t, registry, StateASPActive, 1)
 	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 
-	challenger, _ := asTestConn(t, registry, StateAspInactive, 1)
+	challenger, _ := asTestConn(t, registry, StateASPInactive, 1)
 	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
-	challenger.cfg.AspIdentifier = params.NewAspIdentifier(0xaaaa)
+	challenger.cfg.ASPIdentifier = params.NewAspIdentifier(0xaaaa)
 	if err := challenger.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x1234), nil)); err != nil {
 		t.Fatalf("handleAspUp() error = %v", err)
 	}
@@ -162,8 +162,8 @@ func TestOverrideNotifyNamesTheRemoteOverridingASP(t *testing.T) {
 
 func TestActiveASPsAreOrderedBySavedPeerIdentifier(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspActive, 1)
-	second, _ := asTestConn(t, registry, StateAspActive, 1)
+	first, _ := asTestConn(t, registry, StateASPActive, 1)
+	second, _ := asTestConn(t, registry, StateASPActive, 1)
 
 	if err := first.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(20), nil)); err == nil {
 		t.Fatal("ASP Up received while active should also report Unexpected Message")
@@ -179,8 +179,8 @@ func TestActiveASPsAreOrderedBySavedPeerIdentifier(t *testing.T) {
 
 func TestRemovingAnASPNotifiesItsSurvivingPeersOfFailure(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	failed, _ := asTestConn(t, registry, StateAspActive, 1)
-	_, survivorSent := asTestConn(t, registry, StateAspActive, 1)
+	failed, _ := asTestConn(t, registry, StateASPActive, 1)
+	_, survivorSent := asTestConn(t, registry, StateASPActive, 1)
 	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err == nil {
 		t.Fatal("ASP Up received while active should also report Unexpected Message")
 	}
@@ -213,8 +213,8 @@ func TestRemovingAnASPNotifiesItsSurvivingPeersOfFailure(t *testing.T) {
 
 func TestFailureDrivenASStateNotifyNamesTheFailedASP(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	failed, _ := asTestConn(t, registry, StateAspActive, 1)
-	_, survivorSent := asTestConn(t, registry, StateAspInactive, 1)
+	failed, _ := asTestConn(t, registry, StateASPActive, 1)
+	_, survivorSent := asTestConn(t, registry, StateASPInactive, 1)
 	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err == nil {
 		t.Fatal("ASP Up received while active should also report Unexpected Message")
 	}
@@ -236,8 +236,8 @@ func TestFailureDrivenASStateNotifyNamesTheFailedASP(t *testing.T) {
 
 func TestRemovingAnASPDownPeerDoesNotReportASPFailure(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	failed, _ := asTestConn(t, registry, StateAspDown, 1)
-	_, survivorSent := asTestConn(t, registry, StateAspActive, 1)
+	failed, _ := asTestConn(t, registry, StateASPDown, 1)
+	_, survivorSent := asTestConn(t, registry, StateASPActive, 1)
 
 	before := len(notifies(*survivorSent))
 	registry.forget(failed)
@@ -251,13 +251,13 @@ func TestRemovingAnASPDownPeerDoesNotReportASPFailure(t *testing.T) {
 
 func TestForgottenASPIdentifierCanBeReused(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspDown, 1)
+	first, _ := asTestConn(t, registry, StateASPDown, 1)
 	if err := first.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); err != nil {
 		t.Fatal(err)
 	}
 	registry.forget(first)
 
-	replacement, _ := asTestConn(t, registry, StateAspDown, 1)
+	replacement, _ := asTestConn(t, registry, StateASPDown, 1)
 	if err := replacement.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); err != nil {
 		t.Errorf("replacement handleAspUp() error = %v; forgotten identifier should be reusable", err)
 	}
@@ -265,8 +265,8 @@ func TestForgottenASPIdentifierCanBeReused(t *testing.T) {
 
 func TestASStateNotifyDoesNotInventAnASPIdentifier(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	conn, sent := asTestConn(t, registry, StateAspInactive, 1)
-	conn.cfg.AspIdentifier = params.NewAspIdentifier(0xaaaa)
+	conn, sent := asTestConn(t, registry, StateASPInactive, 1)
+	conn.cfg.ASPIdentifier = params.NewAspIdentifier(0xaaaa)
 
 	notifications := notifies(*sent)
 	if len(notifications) == 0 {
