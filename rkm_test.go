@@ -149,9 +149,9 @@ func TestGenericReportsItsActualClass(t *testing.T) {
 // The RKM answer must not depend on role or state: an ASP and an SGP both lack
 // the procedures, and a peer may send REG REQ at any point after ASP Up.
 func TestRKMAnswerIsRoleAndStateIndependent(t *testing.T) {
-	for _, m := range []associationRole{RoleASP, RoleSGP} {
+	for _, role := range []Role{RoleASP, RoleSGP} {
 		for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
-			conn, _ := newTestConn(t, st, m)
+			conn, _ := newTestConn(t, st, role)
 
 			conn.handleSignals(context.Background(),
 				rkmMessage(t, messages.MsgTypeRegistrationRequest))
@@ -160,15 +160,15 @@ func TestRKMAnswerIsRoleAndStateIndependent(t *testing.T) {
 			case err := <-conn.errChan:
 				var unsupportedClass *UnsupportedClassError
 				if !errors.As(err, &unsupportedClass) {
-					t.Errorf("mode %d state %v: reported %T, want *UnsupportedClassError", m, st, err)
+					t.Errorf("role %s state %v: reported %T, want *UnsupportedClassError", role, st, err)
 				}
 			default:
-				t.Errorf("mode %d state %v: no error reported for RKM", m, st)
+				t.Errorf("role %s state %v: no error reported for RKM", role, st)
 			}
 
 			// And it must still publish exactly one state, holding the current one.
 			if got := len(conn.stateChan); got != 1 {
-				t.Errorf("mode %d state %v: published %d states, want 1", m, st, got)
+				t.Errorf("role %s state %v: published %d states, want 1", role, st, got)
 			}
 		}
 	}
@@ -218,16 +218,16 @@ func FuzzDispatchAnyClassAndType(f *testing.F) {
 			return // a bare header this package rejects is not our concern
 		}
 
-		for _, m := range []associationRole{RoleASP, RoleSGP} {
-			conn, _ := newTestConn(t, st, m)
+		for _, role := range []Role{RoleASP, RoleSGP} {
+			conn, _ := newTestConn(t, st, role)
 
 			conn.handleSignals(context.Background(), msg)
 
 			// Exactly one state per message: publishing none silently drops the
 			// transition, publishing two applies a spurious one.
 			if got := len(conn.stateChan); got != 1 {
-				t.Fatalf("class=%d type=%d state=%v mode=%d: published %d states, want 1",
-					class, msgType, st, m, got)
+				t.Fatalf("class=%d type=%d state=%v role=%s: published %d states, want 1",
+					class, msgType, st, role, got)
 			}
 
 			// RKM must always be answered at the class level (Section 4.4.1).

@@ -56,7 +56,7 @@ func (e *Endpoint) Role() Role {
 	return e.role
 }
 
-func (e *Endpoint) associationRole() (associationRole, error) {
+func (e *Endpoint) associationRole() (Role, error) {
 	if e == nil {
 		return 0, ErrUnsupportedRole
 	}

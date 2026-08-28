@@ -191,10 +191,12 @@ func (l *Listener) stageMTP3RestartRange(generation uint64, rangeValue Destinati
 	return nil
 }
 
-// stageAnyMTP3RestartRangeLocked requires procedureMu to be held for reading,
-// keeping the stage-or-publish decision atomic against Complete.
-func (l *Listener) stageAnyMTP3RestartRangeLocked(rangeValue DestinationRange) bool {
-	registry := &l.mtp3Restarts
+// stageAnyMTP3RestartRangeLocked requires registry.procedureMu to be held for
+// reading, keeping the stage-or-publish decision atomic against Complete.
+func stageAnyMTP3RestartRangeLocked(registry *mtp3RestartRegistry, rangeValue DestinationRange) bool {
+	if registry == nil {
+		return false
+	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	for _, epoch := range registry.active {
@@ -389,12 +391,16 @@ func containsRoutingContext(routingContexts []uint32, want uint32) bool {
 }
 
 func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completion, abateCongestion, wait bool) error {
-	if len(ranges) == 0 {
-		return nil
-	}
 	l.muConns.Lock()
 	registry := l.as
 	l.muConns.Unlock()
+	return publishDestinationRanges(registry, ranges, completion, abateCongestion, wait)
+}
+
+func publishDestinationRanges(registry *applicationServers, ranges []DestinationRange, completion, abateCongestion, wait bool) error {
+	if len(ranges) == 0 {
+		return nil
+	}
 	if registry == nil {
 		return nil
 	}

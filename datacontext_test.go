@@ -18,9 +18,9 @@ import (
 // newTestConnWithContexts is newTestConn with the association's Routing
 // Contexts chosen by the test, since what DATA may carry depends on how many
 // have been coordinated.
-func newTestConnWithContexts(t *testing.T, state State, m associationRole, rtCtxs ...uint32) (*Association, *[]messages.M3UA) {
+func newTestConnWithContexts(t *testing.T, state State, role Role, rtCtxs ...uint32) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	conn, sent := newTestConn(t, state, m)
+	conn, sent := newTestConn(t, state, role)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(rtCtxs...)
 	// DATA must not go out on stream 0 (Section 1.4.7 rule 1), so give the
 	// association a data stream to use and record arrivals on it.
@@ -270,7 +270,7 @@ func TestDataWithAnUnconfiguredNetworkAppearanceIsRejected(t *testing.T) {
 func TestDataPreservesNetworkAppearanceAndPresence(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
-		role       associationRole
+		role       Role
 		configured *params.Param
 		peer       *params.Param
 		want       uint32

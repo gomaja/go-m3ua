@@ -54,7 +54,7 @@ type broadcastFlowKey struct {
 }
 
 // DistributeData sends one DATA message to the ASPs serving its Application
-// Application Server. It applies Override, Loadshare, and Broadcast traffic modes, retains
+// Server. It applies Override, Loadshare, and Broadcast traffic modes, retains
 // traffic while the AS is AS-PENDING, and adds the Broadcast synchronization
 // marker RFC 4666 Section 4.3.4.3 requires after an ASP becomes active.
 //

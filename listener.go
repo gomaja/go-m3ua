@@ -20,11 +20,11 @@ import (
 //
 // Listener is a transport-orientation type, not an M3UA protocol role. The
 // Endpoint that created it determines whether accepted associations run ASP,
-// SGP, or (through explicit exchange-mode APIs) IPSP procedures.
+// SGP, or (through explicit Single Exchange model or Double Exchange model
+// APIs) IPSP procedures.
 type Listener struct {
 	sctpListener *sctp.SCTPListener
 	endpoint     *Endpoint
-	role         associationRole
 	*AssociationConfig
 	listenerConfig *ListenerConfig
 	// trafficModes is copied from ListenerConfig when Listen constructs the Listener.
@@ -161,7 +161,7 @@ func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinati
 	return l.as, l.nif, l.destinations
 }
 
-func newListener(endpoint *Endpoint, role associationRole, config *ListenerConfig) *Listener {
+func newListener(endpoint *Endpoint, config *ListenerConfig) *Listener {
 	listenerConfig := NewListenerConfig(nil)
 	if config != nil {
 		listenerConfig = NewListenerConfig(config.DefaultAssociationConfig)
@@ -171,7 +171,6 @@ func newListener(endpoint *Endpoint, role associationRole, config *ListenerConfi
 		AssociationConfig: listenerConfig.DefaultAssociationConfig,
 		listenerConfig:    listenerConfig,
 		endpoint:          endpoint,
-		role:              role,
 	}
 	listener.trafficModes.freeze(newTrafficModePolicy(listener.AssociationConfig))
 	return listener
@@ -331,7 +330,7 @@ func (l *Listener) applyDestinationRange(rangeValue DestinationRange, wait bool)
 	if closed {
 		return ErrAssociationClosed
 	}
-	if l.stageAnyMTP3RestartRangeLocked(prepared) {
+	if stageAnyMTP3RestartRangeLocked(restarts, prepared) {
 		return nil
 	}
 	destinations := l.destinationRegistry()
@@ -491,7 +490,7 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 	if err != nil {
 		return nil, err
 	}
-	l := newListener(e, role, cfg)
+	l := newListener(e, cfg)
 	if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
 		return nil, err
 	}
@@ -566,7 +565,14 @@ func (l *Listener) associationForSCTPID(id sctp.SCTPAssocID) *Association {
 // Cancelling ctx does not interrupt an Accept that is blocked waiting for a peer
 // to connect — only Close does. Once a peer has connected, ctx bounds the
 // handshake, alongside AssociationConfig.EstablishTimeout.
+//
+// A failure after SCTP accept and before M3UA establishment is returned as an
+// AssociationEstablishmentError. An SCTP listener failure is returned directly.
 func (l *Listener) Accept(ctx context.Context) (*Association, error) {
+	role, err := l.endpoint.associationRole()
+	if err != nil {
+		return nil, err
+	}
 
 	// The SCTP association is accepted before the Association is built, so
 	// nothing has to be unwound if the accept itself fails.
@@ -581,16 +587,17 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	// live on the Association: while they lived on AssociationConfig, Accept
 	// rebound the previously accepted Association's socket to the SCTP
 	// association just taken, and that Association served the wrong ASP.
-	associationConfig, err := l.listenerConfig.associationConfigForAccept(newAcceptInfo(sctpAssociation.LocalAddr(), sctpAssociation.RemoteAddr()))
+	acceptInfo := newAcceptInfo(sctpAssociation.LocalAddr(), sctpAssociation.RemoteAddr())
+	associationConfig, err := l.listenerConfig.associationConfigForAccept(acceptInfo)
 	if err != nil {
 		_ = sctpAssociation.Close()
-		return nil, err
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
-	if err := validateAssociationConfigForRole(l.role, associationConfig); err != nil {
+	if err := validateAssociationConfigForRole(role, associationConfig); err != nil {
 		_ = sctpAssociation.Close()
-		return nil, err
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
-	association := newAssociationWithTrafficModePolicy(l.role, associationConfig, newTrafficModePolicy(associationConfig))
+	association := newAssociationWithTrafficModePolicy(role, associationConfig, newTrafficModePolicy(associationConfig))
 	association.sctpConn = sctpAssociation
 	// Set at construction, before any goroutine can observe this Association, so
 	// the field is immutable for its lifetime: Close reads it concurrently
@@ -598,13 +605,13 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	// the Application Server registry and the NIF state, which the dispatcher
 	// reads as soon as monitor() starts.
 	association.listener = l
-	if l.role == RoleSGP {
+	if role == RoleSGP {
 		association.as, association.nif, association.destinations = l.registry()
 		association.mtp3Restarts = &l.mtp3Restarts
 	}
 
 	if err := association.setUpSocket(); err != nil {
-		return nil, err
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
 
 	// The opening ASP-DOWN transition is applied by monitor() itself, before it
@@ -624,20 +631,26 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 			// The listener closed while this association was coming up, so it
 			// would never be shut down by anything else.
 			_ = association.closeWith(ErrFailedToEstablish)
-			return nil, ErrFailedToEstablish
+			return nil, &AssociationEstablishmentError{
+				RemoteAddr: acceptInfo.RemoteAddr,
+				Err:        ErrFailedToEstablish,
+			}
 		}
 		return association, nil
 	case <-association.done:
-		if err := association.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, ErrFailedToEstablish
+		if err := association.Err(); err != nil {
+			return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
+		}
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: ErrFailedToEstablish}
 	case <-ctx.Done():
 		_ = association.closeWith(ctx.Err())
 		return nil, ctx.Err()
 	case <-time.After(establishTimeout):
 		_ = association.closeWith(ErrTimeout)
-		return nil, ErrTimeout
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: ErrTimeout}
 	}
 }
 
@@ -844,7 +857,7 @@ func (l *Listener) SetNIFAvailable(available bool) {
 }
 
 // SetASAvailable declares whether this SGP can still service one Application
-// Application Server, for the partial-failure case of RFC 4666 Section 4.7:
+// Server, for the partial-failure case of RFC 4666 Section 4.7:
 //
 //	If an SGP suffers a partial failure (where an SGP can continue to
 //	service one or more active AS but due to a partial failure it is

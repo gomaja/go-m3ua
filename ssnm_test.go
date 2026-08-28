@@ -33,9 +33,9 @@ func ssnmConn(t *testing.T) (*Association, *[]messages.M3UA) {
 // Those tests exercise destination behavior rather than Routing Context
 // conditionality; multi-flow cases belong in ssnm_scope_test.go and always name
 // their scope explicitly.
-func newSSNMTestConn(t *testing.T, state State, connectionMode associationRole) (*Association, *[]messages.M3UA) {
+func newSSNMTestConn(t *testing.T, state State, role Role) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	conn, sent := newTestConn(t, state, connectionMode)
+	conn, sent := newTestConn(t, state, role)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1)
 	return conn, sent
 }
@@ -656,7 +656,7 @@ func FuzzSSNMHandlers(f *testing.F) {
 // newFuzzConn builds a minimal ASP-ACTIVE Association without the per-test
 // bookkeeping newTestConn does, so a fuzz target can build one per role up
 // front and reuse it. Takes testing.TB so it can be called from F.
-func newFuzzConn(t testing.TB, m associationRole) *Association {
+func newFuzzConn(t testing.TB, role Role) *Association {
 	t.Helper()
 
 	cfg := newASPAssociationConfigForTest(
@@ -668,7 +668,7 @@ func newFuzzConn(t testing.TB, m associationRole) *Association {
 
 	conn := &Association{
 		muState:      new(sync.RWMutex),
-		role:         m,
+		role:         role,
 		state:        StateASPActive,
 		stateChan:    make(chan State, 4),
 		errChan:      make(chan error, 4),

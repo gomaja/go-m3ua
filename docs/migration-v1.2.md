@@ -18,9 +18,10 @@ Use `Endpoint.Dial` when that endpoint initiates SCTP, or
 `Endpoint.Listen` and `Listener.Accept` when it accepts SCTP. Either
 `RoleASP` or `RoleSGP` supports either orientation.
 
-`RoleIPSP` is reserved for the explicit Single Exchange and Double Exchange
-APIs. Calling `Dial` or `Listen` directly on an IPSP endpoint returns
-`ErrUnsupportedRole` rather than guessing an exchange mode.
+`RoleIPSP` is reserved for the explicit Single Exchange model and Double
+Exchange model APIs defined by RFC 4666 Section 4.3.1. Calling `Dial` or
+`Listen` directly on an IPSP endpoint returns `ErrUnsupportedRole` rather than
+guessing either model.
 
 ## Renamed API
 
@@ -35,6 +36,9 @@ APIs. Calling `Dial` or `Listen` directly on an IPSP endpoint returns
 | `DefaultConnConfig` | `DefaultAssociationConfig` |
 | `SelectConnConfig` | `SelectAssociationConfig` |
 | `ErrConnClosed` | `ErrAssociationClosed` |
+| `ErrAspIDRequired` | `ErrASPIdentifierRequired` |
+| `ErrInvalidAspIdentifier` | `ErrInvalidASPIdentifier` |
+| `ErrUnsupportedMode` | `ErrUnsupportedRole` |
 | `StateAspDown` | `StateASPDown` |
 | `StateAspInactive` | `StateASPInactive` |
 | `StateAspActive` | `StateASPActive` |

@@ -80,16 +80,16 @@ func TestSSNMRoutingContextConditionality(t *testing.T) {
 	t.Run("multi-flow association requires it", func(t *testing.T) {
 		for _, role := range []struct {
 			name  string
-			mode  associationRole
+			value Role
 			cases []ssnmScopeCase
 		}{
-			{name: "ASP receives", mode: RoleASP, cases: aspBoundSSNMScopeCases()},
-			{name: "SGP receives", mode: RoleSGP, cases: sgpBoundSSNMScopeCases()},
+			{name: "ASP receives", value: RoleASP, cases: aspBoundSSNMScopeCases()},
+			{name: "SGP receives", value: RoleSGP, cases: sgpBoundSSNMScopeCases()},
 		} {
 			t.Run(role.name, func(t *testing.T) {
 				for _, message := range role.cases {
 					t.Run(message.name, func(t *testing.T) {
-						conn, sent := newTestConnWithContexts(t, StateASPActive, role.mode, 1, 2)
+						conn, sent := newTestConnWithContexts(t, StateASPActive, role.value, 1, 2)
 						err := message.call(conn, nil)
 						if !errors.Is(err, ErrMissingRoutingContext) {
 							t.Fatalf("error = %v, want ErrMissingRoutingContext", err)
@@ -107,16 +107,16 @@ func TestSSNMRoutingContextConditionality(t *testing.T) {
 	t.Run("single-flow association permits omission", func(t *testing.T) {
 		for _, role := range []struct {
 			name  string
-			mode  associationRole
+			value Role
 			cases []ssnmScopeCase
 		}{
-			{name: "ASP receives", mode: RoleASP, cases: aspBoundSSNMScopeCases()},
-			{name: "SGP receives", mode: RoleSGP, cases: sgpBoundSSNMScopeCases()},
+			{name: "ASP receives", value: RoleASP, cases: aspBoundSSNMScopeCases()},
+			{name: "SGP receives", value: RoleSGP, cases: sgpBoundSSNMScopeCases()},
 		} {
 			t.Run(role.name, func(t *testing.T) {
 				for _, message := range role.cases {
 					t.Run(message.name, func(t *testing.T) {
-						conn, _ := newTestConnWithContexts(t, StateASPActive, role.mode, 7)
+						conn, _ := newTestConnWithContexts(t, StateASPActive, role.value, 7)
 						if err := message.call(conn, nil); err != nil {
 							t.Fatalf("single-flow %s without Routing Context: %v", message.name, err)
 						}
@@ -456,16 +456,16 @@ func TestSCONConcernedDestinationDirectionAndStatus(t *testing.T) {
 // Larger uint8 values are well-formed encodings but invalid parameter values.
 func TestSCONRejectsUndefinedCongestionLevels(t *testing.T) {
 	for _, role := range []struct {
-		name string
-		mode associationRole
+		name  string
+		value Role
 	}{
-		{name: "SGP to ASP", mode: RoleASP},
-		{name: "ASP to SGP", mode: RoleSGP},
+		{name: "SGP to ASP", value: RoleASP},
+		{name: "ASP to SGP", value: RoleSGP},
 	} {
 		t.Run(role.name, func(t *testing.T) {
 			for _, level := range []uint8{4, 255} {
 				t.Run(strconv.Itoa(int(level)), func(t *testing.T) {
-					conn, _ := newTestConnWithContexts(t, StateASPActive, role.mode, 1)
+					conn, _ := newTestConnWithContexts(t, StateASPActive, role.value, 1)
 					err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 						nil, nil, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 						nil, params.NewCongestionIndications(level), nil))
@@ -486,15 +486,15 @@ func TestSCONRejectsUndefinedCongestionLevels(t *testing.T) {
 
 	t.Run("all defined levels remain accepted", func(t *testing.T) {
 		for _, role := range []struct {
-			name string
-			mode associationRole
+			name  string
+			value Role
 		}{
-			{name: "SGP to ASP", mode: RoleASP},
-			{name: "ASP to SGP", mode: RoleSGP},
+			{name: "SGP to ASP", value: RoleASP},
+			{name: "ASP to SGP", value: RoleSGP},
 		} {
 			for level := uint8(0); level <= 3; level++ {
 				t.Run(role.name+"/"+string(rune('0'+level)), func(t *testing.T) {
-					conn, _ := newTestConnWithContexts(t, StateASPActive, role.mode, 1)
+					conn, _ := newTestConnWithContexts(t, StateASPActive, role.value, 1)
 					err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 						nil, nil, params.NewAffectedPointCodeWithMask(0, ssnmScopePointCode),
 						nil, params.NewCongestionIndications(level), nil))

@@ -26,7 +26,7 @@ import (
 // Every channel a handler might touch is initialised and done is closed on
 // cleanup, so a test that reaches an unexpected arm fails or unblocks rather
 // than hanging until the package timeout.
-func newTestConn(t *testing.T, state State, m associationRole) (*Association, *[]messages.M3UA) {
+func newTestConn(t *testing.T, state State, role Role) (*Association, *[]messages.M3UA) {
 	t.Helper()
 
 	var sent []messages.M3UA
@@ -54,7 +54,7 @@ func newTestConn(t *testing.T, state State, m associationRole) (*Association, *[
 		// never touch a socket, but StreamID() reads it.
 		sctpInfo:    &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
 		muState:     new(sync.RWMutex),
-		role:        m,
+		role:        role,
 		state:       state,
 		stateChan:   make(chan State, 8),
 		inboundChan: make(chan inbound, 8),
@@ -249,13 +249,13 @@ func TestExactlyOneStatePublishedPerMessage(t *testing.T) {
 				}
 			}
 			for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
-				for _, md := range []associationRole{RoleSGP, RoleASP} {
+				for _, role := range []Role{RoleSGP, RoleASP} {
 					for _, fail := range []bool{false, true} {
-						name := fmt.Sprintf("%s/%v/mode%d/writefail=%t",
-							msg.MessageTypeName(), st, md, fail)
+						name := fmt.Sprintf("%s/%v/role=%s/writefail=%t",
+							msg.MessageTypeName(), st, role, fail)
 
 						t.Run(name, func(t *testing.T) {
-							conn := newProdConn(t, st, md)
+							conn := newProdConn(t, st, role)
 							if fail {
 								conn.signalWriter = writeFails
 							}
@@ -500,10 +500,10 @@ func TestMissingProtocolDataEmitsMissingParameterError(t *testing.T) {
 // fixed at 8 rather than Config.DataQueueSize, so tests can count publishes
 // without running a monitor() reader — do not rely on this fixture to catch a
 // blocking sendState/sendErr or production queue capacity.
-func newProdConn(t *testing.T, state State, m associationRole) *Association {
+func newProdConn(t *testing.T, state State, role Role) *Association {
 	t.Helper()
 
-	conn, _ := newTestConn(t, state, m)
+	conn, _ := newTestConn(t, state, role)
 	conn.beatAckChan = make(chan struct{}, 1)
 	conn.setBeatData([]byte("outstanding"))
 	return conn
@@ -656,13 +656,13 @@ func TestBareHeaderMessagesNeverPanic(t *testing.T) {
 	for _, class := range []uint8{3, 4} { // ASPSM, ASPTM
 		for _, typ := range []uint8{1, 2, 3, 4, 5, 6} {
 			for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
-				for _, md := range []associationRole{RoleSGP, RoleASP} {
+				for _, role := range []Role{RoleSGP, RoleASP} {
 					msg, err := messages.Parse([]byte{1, 0, class, typ, 0, 0, 0, 8})
 					if err != nil {
 						continue // not a defined message type
 					}
 
-					name := fmt.Sprintf("class%d/type%d/%v/mode%d", class, typ, st, md)
+					name := fmt.Sprintf("class%d/type%d/%v/role=%s", class, typ, st, role)
 					t.Run(name, func(t *testing.T) {
 						defer func() {
 							if r := recover(); r != nil {
@@ -670,7 +670,7 @@ func TestBareHeaderMessagesNeverPanic(t *testing.T) {
 							}
 						}()
 
-						conn, _ := newTestConn(t, st, md)
+						conn, _ := newTestConn(t, st, role)
 						conn.setBeatData([]byte("outstanding"))
 						conn.handleSignals(context.Background(), msg)
 					})
@@ -887,12 +887,12 @@ func TestASPHoldsStateOnAspUpAndAspDown(t *testing.T) {
 // ASP-INACTIVE must not block on it, or handleStateUpdate wedges while holding
 // muState and every State() caller blocks with SCTP still up.
 func TestReactivationDoesNotBlockOnEstablished(t *testing.T) {
-	for _, m := range []struct {
+	for _, test := range []struct {
 		name string
-		mode associationRole
+		role Role
 	}{{"SGP", RoleSGP}, {"ASP", RoleASP}} {
-		t.Run(m.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, StateASPActive, m.mode)
+		t.Run(test.name, func(t *testing.T) {
+			conn, _ := newTestConn(t, StateASPActive, test.role)
 
 			// Accept()/Dial() consumed the first signal already.
 			for cycle := 1; cycle <= 4; cycle++ {

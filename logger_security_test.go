@@ -81,11 +81,11 @@ func waitForLog(t *testing.T, writes <-chan string, marker string) string {
 	}
 }
 
-func newLoggingTestConn(state State, endpointMode associationRole) (*Association, *[]messages.M3UA) {
+func newLoggingTestConn(state State, role Role) (*Association, *[]messages.M3UA) {
 	var sent []messages.M3UA
 	connection := &Association{
 		muState:   new(sync.RWMutex),
-		role:      endpointMode,
+		role:      role,
 		state:     state,
 		stateChan: make(chan State, 4),
 		errChan:   make(chan error, 4),

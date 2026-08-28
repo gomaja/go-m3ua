@@ -28,8 +28,6 @@ import (
 // performs the conversion required for the SCTP ancillary data on the wire.
 const M3UAPPID uint32 = 3
 
-type associationRole = Role
-
 // Association is one M3UA association and satisfies net.Conn.
 type Association struct {
 	// sctpConn is the SCTP association this Association owns.
@@ -88,7 +86,7 @@ type Association struct {
 	// muState is to Lock when updating state
 	muState *sync.RWMutex
 	// role is the immutable RFC 4666 endpoint role on this association.
-	role associationRole
+	role Role
 	// state is to see the current state
 	state State
 	// appliedState is the state the entry-action pass last ran for.
@@ -363,11 +361,11 @@ type mandatoryControl struct {
 // AssociationConfig write that
 // broke multi-ASP serving lived in exactly that duplicated code. Both now go
 // through here, and nothing in this function writes to cfg.
-func newAssociation(role associationRole, cfg *AssociationConfig) *Association {
+func newAssociation(role Role, cfg *AssociationConfig) *Association {
 	return newAssociationWithTrafficModePolicy(role, cfg, newTrafficModePolicy(cfg))
 }
 
-func newAssociationWithTrafficModePolicy(role associationRole, cfg *AssociationConfig, trafficModes trafficModePolicy) *Association {
+func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, trafficModes trafficModePolicy) *Association {
 	dataQueueSize := cfg.DataQueueSize
 	if dataQueueSize <= 0 {
 		dataQueueSize = DefaultDataQueueSize

@@ -11,7 +11,34 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
 )
+
+// AssociationEstablishmentError reports a peer-specific failure after an SCTP
+// association was accepted but before its M3UA procedures became established.
+// Listener.Accept returns transport-listener failures directly, so callers can
+// continue after this error without masking a failed listening socket.
+type AssociationEstablishmentError struct {
+	RemoteAddr *sctp.SCTPAddr
+	Err        error
+}
+
+func (e *AssociationEstablishmentError) Error() string {
+	if e == nil || e.Err == nil {
+		return "M3UA association establishment failed"
+	}
+	if e.RemoteAddr == nil {
+		return fmt.Sprintf("M3UA association establishment failed: %v", e.Err)
+	}
+	return fmt.Sprintf("M3UA association establishment with %s failed: %v", e.RemoteAddr, e.Err)
+}
+
+func (e *AssociationEstablishmentError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
 
 // Error definitions.
 var (
@@ -196,7 +223,8 @@ var (
 
 	// ErrUnsupportedRole reports a role for which the requested association
 	// operation has no protocol procedures. IPSP roles require an explicit
-	// exchange mode and are enabled by the IPSP API rather than guessed.
+	// Single Exchange model or Double Exchange model and are enabled by the
+	// IPSP API rather than guessed.
 	ErrUnsupportedRole = errors.New("unsupported M3UA role")
 )
 

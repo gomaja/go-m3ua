@@ -33,7 +33,7 @@ import (
 func TestManagementMessageOffStreamZeroIsRejected(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
-		mode  associationRole
+		role  Role
 		state State
 		send  func(*Association) error
 	}{
@@ -47,7 +47,7 @@ func TestManagementMessageOffStreamZeroIsRejected(t *testing.T) {
 		{"ASP Down Ack", RoleASP, StateASPDown, func(c *Association) error { return c.handleAspDownAck(messages.NewAspDownAck(nil)) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, tt.state, tt.mode)
+			conn, _ := newTestConn(t, tt.state, tt.role)
 
 			// Arrived on stream 3: not permitted for ASPSM.
 			conn.recvStream.Store(3)

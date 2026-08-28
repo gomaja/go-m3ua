@@ -1440,8 +1440,11 @@ func (c *Association) ReportDestinationRangeForNetworkAndRoutingContext(networkA
 }
 
 func (c *Association) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
-	if c != nil && c.role == RoleSGP && c.listener != nil {
-		return c.listener.applyDestinationRange(rangeValue, wait)
+	if c != nil && c.role == RoleSGP {
+		if c.listener != nil {
+			return c.listener.applyDestinationRange(rangeValue, wait)
+		}
+		return c.applyDialedSGPDestinationRange(rangeValue, wait)
 	}
 	if !validDestinationState(rangeValue.State) {
 		return fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
@@ -1451,6 +1454,38 @@ func (c *Association) applyDestinationRange(rangeValue DestinationRange, wait bo
 	}
 	c.destinations.setRanges([]DestinationRange{rangeValue})
 	return nil
+}
+
+func (c *Association) applyDialedSGPDestinationRange(rangeValue DestinationRange, wait bool) error {
+	// RFC 4666 Section 4.5.1 requires an SGP that receives an MTP-PAUSE,
+	// MTP-RESUME, or MTP-STATUS primitive to send the corresponding SSNM to
+	// concerned ASPs. SCTP association initiation does not alter that SGP duty.
+	if !validDestinationState(rangeValue.State) {
+		return fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
+	}
+	if !rangeValue.NetworkAppearanceSet && c.cfg != nil {
+		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(c.cfg.NetworkAppearance)
+	}
+	rangeValue = normalizeDestinationRange(rangeValue)
+	if rangeValue.RoutingContextSet && !containsRoutingContext(c.configuredRoutingContexts(), rangeValue.RoutingContext) {
+		return NewInvalidRoutingContextError(rangeValue.RoutingContext)
+	}
+
+	restarts := c.mtp3Restarts
+	if restarts != nil {
+		restarts.procedureMu.RLock()
+		defer restarts.procedureMu.RUnlock()
+		if stageAnyMTP3RestartRangeLocked(restarts, rangeValue) {
+			return nil
+		}
+	}
+
+	previous, known := c.destinations.lookupRange(
+		destinationRangeKey(rangeValue), rangeValue.PointCode, rangeValue.Mask,
+	)
+	c.destinations.setRanges([]DestinationRange{rangeValue})
+	abateCongestion := known && previous == DestinationCongested && rangeValue.State != DestinationCongested
+	return publishDestinationRanges(c.as, []DestinationRange{rangeValue}, false, abateCongestion, wait)
 }
 
 // PeerCongestionLevel returns the congestion level the peer last reported about

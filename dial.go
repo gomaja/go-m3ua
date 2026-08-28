@@ -158,6 +158,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	if cfg == nil {
 		return nil, ErrNilAssociationConfig
 	}
+	cfg = snapshotAssociationConfig(cfg)
 	if err := validateAssociationConfigForRole(role, cfg); err != nil {
 		return nil, err
 	}

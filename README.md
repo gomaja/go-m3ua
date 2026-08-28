@@ -124,7 +124,7 @@ association, err := endpoint.Dial(ctx, "m3ua", nil, remote, config)
 if err != nil {
     log.Fatalf("Failed to establish M3UA association: %s", err)
 }
-defer association.Close()
+defer func() { _ = association.Close() }()
 ```
 
 Now you can `Read()` / `Write()` data from/to the remote endpoint.
@@ -135,7 +135,7 @@ if _, err := association.Write(d); err != nil {
 }
 log.Printf("Successfully sent M3UA data: %x", d)
 
-buf := make([]byte, 1500)
+buf := make([]byte, m3ua.DefaultReadBufferSize)
 n, err := association.Read(buf)
 if err != nil {
     log.Fatal(err)

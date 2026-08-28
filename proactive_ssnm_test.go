@@ -255,6 +255,113 @@ func TestAcceptedAssociationDestinationUpdateUsesListenerWideBroadcast(t *testin
 	}
 }
 
+func TestDialedSGPDestinationUpdateReportsToItsActiveASP(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+
+	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 4, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("report destination from dialing SGP: %v", err)
+	}
+	reports := ssnmMessages(capture.snapshot())
+	if len(reports) != 1 {
+		t.Fatalf("dialing SGP emitted %d SSNM messages, want one DUNA", len(reports))
+	}
+	if _, ok := reports[0].(*messages.DestinationUnavailable); !ok {
+		t.Fatalf("dialing SGP report = %T, want DUNA", reports[0])
+	}
+	networkAppearance, routingContext, affectedPointCode := ssnmScope(t, reports[0])
+	if networkAppearance == nil || networkAppearance.NetworkAppearance() != 7 {
+		t.Fatalf("DUNA Network Appearance = %v, want 7", networkAppearance)
+	}
+	if got := routingContext.RoutingContexts(); !equalTrafficModeContexts(got, []uint32{1}) {
+		t.Fatalf("DUNA Routing Contexts = %v, want [1]", got)
+	}
+	if got := affectedPointCode.AffectedPointCodes(); len(got) != 1 || got[0] != 0x123456 {
+		t.Fatalf("DUNA Affected Point Codes = %v, want [0x123456]", got)
+	}
+	if got := affectedPointCode.AffectedPointCodeMasks(); len(got) != 1 || got[0] != 4 {
+		t.Fatalf("DUNA Affected Point Code masks = %v, want [4]", got)
+	}
+}
+
+func TestDialedSGPDestinationUpdateRejectsUnconfiguredRoutingContextAtomically(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+
+	err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 2, 0x123456, 4, DestinationUnavailable,
+	)
+	if !errors.Is(err, ErrInvalidRoutingContext) {
+		t.Fatalf("unconfigured Routing Context error = %v, want ErrInvalidRoutingContext", err)
+	}
+	if _, known := association.destinations.lookupRange(
+		destinationKey{
+			networkAppearance:    7,
+			networkAppearanceSet: true,
+			routingContext:       2,
+			routingContextSet:    true,
+		},
+		0x123456,
+		4,
+	); known {
+		t.Fatal("unconfigured Routing Context destination was recorded")
+	}
+	if got := len(ssnmMessages(capture.snapshot())); got != 0 {
+		t.Fatalf("unconfigured Routing Context emitted %d SSNM messages, want 0", got)
+	}
+}
+
+func TestDialedSGPDestinationRecoveryClearsCongestionBeforeDAVA(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+
+	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationCongested,
+	); err != nil {
+		t.Fatalf("report congestion from dialing SGP: %v", err)
+	}
+	capture.reset()
+	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationAvailable,
+	); err != nil {
+		t.Fatalf("report recovery from dialing SGP: %v", err)
+	}
+
+	reports := ssnmMessages(capture.snapshot())
+	if len(reports) != 2 {
+		t.Fatalf("dialing SGP recovery emitted %d messages, want SCON(0), DAVA", len(reports))
+	}
+	scon, ok := reports[0].(*messages.SignallingCongestion)
+	if !ok || scon.CongestionIndications == nil || scon.CongestionIndications.CongestionLevel() != 0 {
+		t.Fatalf("first recovery message = %#v, want SCON with level 0", reports[0])
+	}
+	if _, ok := reports[1].(*messages.DestinationAvailable); !ok {
+		t.Fatalf("second recovery message = %T, want DAVA", reports[1])
+	}
+}
+
+func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routingContexts ...uint32) (*Association, *distributionCapture) {
+	t.Helper()
+	association, _ := newTestConn(t, StateASPActive, RoleSGP)
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+	association.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
+	association.noteRoutingContextsActive(routingContexts)
+	association.as = newApplicationServers(time.Hour, association.cfg)
+	for _, routingContext := range routingContexts {
+		applicationServer := association.as.get(ASKey{
+			NetworkAppearance:    networkAppearance,
+			NetworkAppearanceSet: true,
+			RoutingContext:       routingContext,
+			RoutingContextSet:    true,
+		})
+		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
+		applicationServer.setASPState(association, StateASPActive, time.Hour)
+	}
+	association.mtp3Restarts = &mtp3RestartRegistry{}
+	capture := new(distributionCapture)
+	association.signalWriter = capture.write
+	return association, capture
+}
+
 func TestDestinationSetterMethodCompatibility(t *testing.T) {
 	assertDestinationSetter := func(func(uint32, DestinationState)) {}
 	assertDestinationSetter(new(Listener).SetDestinationState)

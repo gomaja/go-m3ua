@@ -207,8 +207,9 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 		return nil
 	default:
 		// IPSP (RFC 4666 Section 1.4.3.4) uses symmetric peer procedures and is
-		// enabled only through its explicit exchange-mode API. Falling through
-		// to either the ASP or SGP state machine would be a protocol error.
+		// enabled only through an explicit Single Exchange model or Double
+		// Exchange model API. Falling through to either the ASP or SGP state
+		// machine would be a protocol error.
 		return fmt.Errorf("%w: role %d", ErrUnsupportedRole, c.role)
 	}
 }

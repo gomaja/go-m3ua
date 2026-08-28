@@ -362,6 +362,8 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 			sctpConfig.SCTPNoDelayInfo = &noDelay
 		}
 		snapshot.SCTPConfig = &sctpConfig
+	} else {
+		snapshot.SCTPConfig = &SCTPConfig{}
 	}
 	snapshot.ASPIdentifier = config.ASPIdentifier.Copy()
 	snapshot.TrafficModeType = config.TrafficModeType.Copy()

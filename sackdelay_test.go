@@ -83,10 +83,9 @@ func TestSackConfigStoresTheValueForValidationLater(t *testing.T) {
 	}
 }
 
-// The refusal has to happen on the association the AssociationConfig is applied
-// to, not
-// only in the helper: setUpSocket is where the value reaches setsockopt, and it
-// is the last point at which a non-conformant timer can be stopped.
+// The refusal has to happen on the association receiving the AssociationConfig,
+// not only in the helper: setUpSocket is where the value reaches setsockopt, and
+// it is the last point at which a non-conformant timer can be stopped.
 func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

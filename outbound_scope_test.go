@@ -83,13 +83,13 @@ func TestWriteSignalSSNMRejectsInactiveSGPScopeAtomically(t *testing.T) {
 func TestWriteSignalUnscopedSSNMRequiresAnActiveAssociation(t *testing.T) {
 	for _, endpoint := range []struct {
 		name string
-		mode associationRole
+		role Role
 	}{
-		{name: "SGP", mode: RoleSGP},
-		{name: "ASP", mode: RoleASP},
+		{name: "SGP", role: RoleSGP},
+		{name: "ASP", role: RoleASP},
 	} {
 		t.Run(endpoint.name, func(t *testing.T) {
-			asp, _ := newTestConnWithContexts(t, StateASPDown, endpoint.mode)
+			asp, _ := newTestConnWithContexts(t, StateASPDown, endpoint.role)
 			var writes atomic.Int32
 			asp.signalWriter = func(message messages.M3UA) (int, error) {
 				writes.Add(1)

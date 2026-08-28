@@ -24,7 +24,7 @@ func TestNewEndpointRejectsInvalidRole(t *testing.T) {
 	}
 }
 
-func TestIPSPRequiresExplicitExchangeMode(t *testing.T) {
+func TestIPSPDialAndListenRequireAnExplicitExchangeModel(t *testing.T) {
 	endpoint, err := NewEndpoint(RoleIPSP)
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
@@ -35,6 +35,19 @@ func TestIPSPRequiresExplicitExchangeMode(t *testing.T) {
 	}
 	if _, err := endpoint.Listen("m3ua", nil, NewListenerConfig(nil)); !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("Listen error = %v, want ErrUnsupportedRole", err)
+	}
+}
+
+func TestDialNormalizesAZeroAssociationConfigBeforeTransport(t *testing.T) {
+	endpoint, err := NewEndpoint(RoleASP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleASP): %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := endpoint.Dial(ctx, "m3ua", nil, nil, &AssociationConfig{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Dial error = %v, want context.Canceled", err)
 	}
 }
 

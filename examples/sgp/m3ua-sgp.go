@@ -9,8 +9,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
-	"io"
 	"log"
 	"time"
 
@@ -23,12 +23,11 @@ import (
 func serve(association *m3ua.Association) {
 	defer func() { _ = association.Close() }()
 
-	buf := make([]byte, 1500)
+	buf := make([]byte, m3ua.DefaultReadBufferSize)
 	for {
 		n, err := association.Read(buf)
 		if err != nil {
-			// An EOF ends this association; the SGP continues accepting others.
-			if err == io.EOF {
+			if errors.Is(err, m3ua.ErrNotEstablished) {
 				log.Printf("Closed M3UA association with: %s", association.RemoteAddr())
 				return
 			}
@@ -40,13 +39,33 @@ func serve(association *m3ua.Association) {
 	}
 }
 
+func acceptAssociations(ctx context.Context, listener *m3ua.Listener) error {
+	for {
+		association, err := listener.Accept(ctx)
+		if err != nil {
+			var establishmentError *m3ua.AssociationEstablishmentError
+			if errors.As(err, &establishmentError) {
+				log.Printf("Rejected M3UA association: %s", establishmentError)
+				continue
+			}
+			return err
+		}
+		log.Printf("Associated with: %s", association.RemoteAddr())
+		go serve(association)
+	}
+}
+
 func main() {
 	var (
-		addr    = flag.String("addr", "127.0.0.1:2905", "Source IP and Port listen.")
-		hbInt   = flag.Duration("hb-interval", 0, "Interval for M3UA BEAT. Put 0 to disable")
-		hbTimer = flag.Duration("hb-timer", time.Duration(5*time.Second), "Expiration timer for M3UA BEAT. Ignored when hb-interval is 0")
+		addr              = flag.String("addr", "127.0.0.1:2905", "Local SCTP address")
+		hbInt             = flag.Duration("hb-interval", 0, "M3UA T(beat); zero disables M3UA BEAT")
+		hbTimer           = flag.Duration("hb-timer", 5*time.Second, "M3UA BEAT acknowledgement deadline; ignored when hb-interval is zero")
+		acceptConcurrency = flag.Int("accept-concurrency", 4, "Concurrent Listener.Accept workers")
 	)
 	flag.Parse()
+	if *acceptConcurrency <= 0 {
+		log.Fatal("accept-concurrency must be greater than zero")
+	}
 
 	config := m3ua.NewAssociationConfig(
 		0x22222222,            // OriginatingPointCode
@@ -78,16 +97,15 @@ func main() {
 	log.Printf("Waiting for an SCTP association on: %s", listener.Addr())
 
 	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	for {
-		association, err := listener.Accept(ctx)
-		if err != nil {
-			log.Fatalf("Failed to accept M3UA association: %s", err)
-		}
-		log.Printf("Associated with: %s", association.RemoteAddr())
-
-		go serve(association)
+	listenerFailures := make(chan error, *acceptConcurrency)
+	for range *acceptConcurrency {
+		go func() {
+			listenerFailures <- acceptAssociations(ctx, listener)
+		}()
 	}
+	err = <-listenerFailures
+	if closeErr := listener.Close(); closeErr != nil {
+		log.Printf("Failed to close M3UA Listener: %s", closeErr)
+	}
+	log.Fatalf("M3UA Listener failed: %s", err)
 }

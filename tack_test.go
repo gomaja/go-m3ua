@@ -1036,19 +1036,19 @@ func TestScopedActivationAndDeactivationAPIsRejectInvalidUse(t *testing.T) {
 	for _, test := range []struct {
 		name  string
 		call  func(*Association) error
-		mode  associationRole
+		role  Role
 		state State
 		want  error
 	}{
-		{name: "SGP activate", call: func(c *Association) error { return c.ActivateRoutingContexts(1) }, mode: RoleSGP, state: StateASPInactive, want: ErrUnsupportedRole},
-		{name: "SGP deactivate", call: func(c *Association) error { return c.DeactivateRoutingContexts(1) }, mode: RoleSGP, state: StateASPActive, want: ErrUnsupportedRole},
-		{name: "activate while down", call: func(c *Association) error { return c.ActivateRoutingContexts(1) }, mode: RoleASP, state: StateASPDown, want: ErrInvalidState},
-		{name: "deactivate while inactive", call: func(c *Association) error { return c.DeactivateRoutingContexts(1) }, mode: RoleASP, state: StateASPInactive, want: ErrInvalidState},
-		{name: "foreign activate scope", call: func(c *Association) error { return c.ActivateRoutingContexts(99) }, mode: RoleASP, state: StateASPInactive, want: ErrInvalidRoutingContext},
-		{name: "foreign deactivate scope", call: func(c *Association) error { return c.DeactivateRoutingContexts(99) }, mode: RoleASP, state: StateASPActive, want: ErrInvalidRoutingContext},
+		{name: "SGP activate", call: func(c *Association) error { return c.ActivateRoutingContexts(1) }, role: RoleSGP, state: StateASPInactive, want: ErrUnsupportedRole},
+		{name: "SGP deactivate", call: func(c *Association) error { return c.DeactivateRoutingContexts(1) }, role: RoleSGP, state: StateASPActive, want: ErrUnsupportedRole},
+		{name: "activate while down", call: func(c *Association) error { return c.ActivateRoutingContexts(1) }, role: RoleASP, state: StateASPDown, want: ErrInvalidState},
+		{name: "deactivate while inactive", call: func(c *Association) error { return c.DeactivateRoutingContexts(1) }, role: RoleASP, state: StateASPInactive, want: ErrInvalidState},
+		{name: "foreign activate scope", call: func(c *Association) error { return c.ActivateRoutingContexts(99) }, role: RoleASP, state: StateASPInactive, want: ErrInvalidRoutingContext},
+		{name: "foreign deactivate scope", call: func(c *Association) error { return c.DeactivateRoutingContexts(99) }, role: RoleASP, state: StateASPActive, want: ErrInvalidRoutingContext},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, test.state, test.mode)
+			conn, sent := newTestConn(t, test.state, test.role)
 			if err := test.call(conn); !errors.Is(err, test.want) {
 				t.Fatalf("error = %v, want %v", err, test.want)
 			}

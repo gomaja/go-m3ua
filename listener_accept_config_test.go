@@ -110,6 +110,21 @@ func TestConcurrentAcceptsUseSelectedAssociationConfig(t *testing.T) {
 	}
 }
 
+func TestSelectedZeroAssociationConfigIsNormalized(t *testing.T) {
+	listenerConfig := NewListenerConfig(nil)
+	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
+		return &AssociationConfig{}, nil
+	}
+
+	selected, err := listenerConfig.associationConfigForAccept(AcceptInfo{})
+	if err != nil {
+		t.Fatalf("select zero AssociationConfig: %v", err)
+	}
+	if selected.SCTPConfig == nil {
+		t.Fatal("selected zero AssociationConfig retained a nil SCTPConfig")
+	}
+}
+
 func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -157,6 +172,13 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 		if !errors.Is(result.err, want) {
 			t.Fatalf("first Accept error = %v, want selector error %v", result.err, want)
 		}
+		var establishmentError *AssociationEstablishmentError
+		if !errors.As(result.err, &establishmentError) {
+			t.Fatalf("first Accept error = %T, want AssociationEstablishmentError", result.err)
+		}
+		if establishmentError.RemoteAddr == nil {
+			t.Fatal("AssociationEstablishmentError lost the rejected peer address")
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("first Accept did not return the selector error")
 	}
@@ -187,6 +209,29 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("second Accept did not return after selector rejection")
+	}
+}
+
+func TestAcceptReturnsSCTPListenerFailureDirectly(t *testing.T) {
+	listenerConfig := NewListenerConfig(mcSGPConfig())
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), listenerConfig)
+	if err != nil {
+		if isSCTPUnsupported(err) {
+			t.Skipf("skipping socket-backed test: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close Listener: %v", err)
+	}
+
+	_, err = ln.Accept(context.Background())
+	if err == nil {
+		t.Fatal("Accept on a closed Listener returned nil")
+	}
+	var establishmentError *AssociationEstablishmentError
+	if errors.As(err, &establishmentError) {
+		t.Fatalf("SCTP listener failure was wrapped as %T", err)
 	}
 }
 

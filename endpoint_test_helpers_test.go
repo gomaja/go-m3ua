@@ -32,11 +32,7 @@ func newSGPListener(config *ListenerConfig) *Listener {
 	if err != nil {
 		panic(err)
 	}
-	role, err := endpoint.associationRole()
-	if err != nil {
-		panic(err)
-	}
-	return newListener(endpoint, role, config)
+	return newListener(endpoint, config)
 }
 
 func newASPAssociationConfigForTest(heartbeat *HeartbeatInfo, opc, dpc, aspID, trafficMode, networkAppearance, correlationID uint32, routingContexts []uint32, si, ni, priority, sls uint8) *AssociationConfig {
