@@ -57,18 +57,18 @@ func newSGPAssociationConfigForTest(heartbeat *HeartbeatInfo, opc, dpc, aspID, t
 
 func newAssociationConfigForTest(heartbeat *HeartbeatInfo, opc, dpc, aspID, trafficMode, networkAppearance, correlationID uint32, routingContexts []uint32, si, ni, priority, sls uint8) *AssociationConfig {
 	return &AssociationConfig{
-		HeartbeatInfo:          heartbeat,
-		SCTPConfig:             &SCTPConfig{},
-		ASPIdentifier:          params.NewAspIdentifier(aspID),
-		TrafficModeType:        params.NewTrafficModeType(trafficMode),
-		NetworkAppearance:      params.NewNetworkAppearance(networkAppearance),
-		RoutingContexts:        params.NewRoutingContext(routingContexts...),
-		CorrelationID:          params.NewCorrelationID(correlationID),
-		OriginatingPointCode:   opc,
-		DestinationPointCode:   dpc,
-		ServiceIndicator:       si,
-		NetworkIndicator:       ni,
-		MessagePriority:        priority,
+		HeartbeatInfo:           heartbeat,
+		SCTPConfig:              &SCTPConfig{},
+		ASPIdentifier:           params.NewAspIdentifier(aspID),
+		TrafficModeType:         params.NewTrafficModeType(trafficMode),
+		NetworkAppearance:       params.NewNetworkAppearance(networkAppearance),
+		RoutingContexts:         params.NewRoutingContext(routingContexts...),
+		CorrelationID:           params.NewCorrelationID(correlationID),
+		OriginatingPointCode:    opc,
+		DestinationPointCode:    dpc,
+		ServiceIndicator:        si,
+		NetworkIndicator:        ni,
+		MessagePriority:         priority,
 		SignallingLinkSelection: sls,
 	}
 }
