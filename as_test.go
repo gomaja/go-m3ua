@@ -220,12 +220,26 @@ func TestLastActiveASPLeavingSendsASPending(t *testing.T) {
 	conn, sent := asTestConn(t, reg, StateASPInactive, 1)
 	reg.aspStateChanged(conn, StateASPActive)
 	before := len(notifies(*sent))
+	notificationWritten := make(chan struct{})
+	signalWriter := conn.signalWriter
+	conn.signalWriter = func(message messages.M3UA) (int, error) {
+		written, err := signalWriter(message)
+		if _, ok := message.(*messages.Notify); ok {
+			close(notificationWritten)
+		}
+		return written, err
+	}
 
 	reg.aspStateChanged(conn, StateASPInactive)
+	select {
+	case <-notificationWritten:
+	case <-time.After(time.Second):
+		t.Fatal("no Notify was sent when the last active ASP deactivated")
+	}
 
 	got := notifies(*sent)
-	if len(got) <= before {
-		t.Fatal("no Notify was sent when the last active ASP deactivated")
+	if len(got) != before+1 {
+		t.Fatalf("Notify count = %d, want %d after the last active ASP deactivated", len(got), before+1)
 	}
 	typ, info := statusOf(t, got[len(got)-1])
 	if typ != params.AsStateChange {
