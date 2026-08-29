@@ -1414,6 +1414,35 @@ func TestIPSPDoubleExchangeDataRejectsWrongDirectionalScope(t *testing.T) {
 	}
 }
 
+func TestIPSPDoubleExchangeDirectDATAUsesTrafficToPeerNetworkAppearance(t *testing.T) {
+	association, _ := newDoubleExchangeIPSPForTest(t)
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPActive,
+		TrafficToPeer:  StateASPActive,
+	})
+	association.noteRoutingContextsActive([]uint32{22})
+
+	protocolData := params.NewProtocolData(
+		1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("to-peer"),
+	)
+	if _, err := association.WriteSignal(messages.NewData(
+		params.NewNetworkAppearance(20),
+		params.NewRoutingContext(22),
+		protocolData,
+		nil,
+	)); err != nil {
+		t.Fatalf("direct TrafficToPeer DATA: %v", err)
+	}
+	if _, err := association.WriteSignal(messages.NewData(
+		params.NewNetworkAppearance(10),
+		params.NewRoutingContext(22),
+		protocolData,
+		nil,
+	)); !errors.Is(err, ErrInvalidNetworkAppearance) {
+		t.Fatalf("direct DATA with TrafficToLocal Network Appearance error = %v, want ErrInvalidNetworkAppearance", err)
+	}
+}
+
 func TestIPSPDoubleExchangeRestartAndCloseResetBothDirections(t *testing.T) {
 	t.Run("SCTP restart", func(t *testing.T) {
 		association, sent := newDoubleExchangeIPSPForTest(t)
@@ -1507,6 +1536,88 @@ func TestIPSPDoubleExchangeRestartAndCloseResetBothDirections(t *testing.T) {
 			t.Fatalf("state after Close = %+v", got)
 		}
 	})
+}
+
+func TestIPSPDoubleExchangeRestartDrainsOutboundDATABeforeFreshASPSM(t *testing.T) {
+	association, _ := newDoubleExchangeIPSPForTest(t)
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPActive,
+		TrafficToPeer:  StateASPActive,
+	})
+	association.noteRoutingContextsActive([]uint32{22})
+	association.maxMessageStreamID = 4
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+		close(dataStarted)
+		<-releaseData
+		return len(data), nil
+	}
+	freshASPUp := make(chan struct{}, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if _, ok := message.(*messages.AspUp); ok {
+			freshASPUp <- struct{}{}
+		}
+		return message.MarshalLen(), nil
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := association.WriteWithRoutingContext([]byte("old-epoch"), 22)
+		writeDone <- err
+	}()
+	select {
+	case <-dataStarted:
+	case <-time.After(time.Second):
+		t.Fatal("old-epoch DATA did not enter its transport write")
+	}
+
+	restartDone := make(chan struct{})
+	go func() {
+		association.handleSCTPRestart()
+		close(restartDone)
+	}()
+	select {
+	case state := <-association.stateChan:
+		if err := association.handleStateUpdate(state); err != nil {
+			t.Fatalf("apply restart state before DATA drained: %v", err)
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-freshASPUp:
+		close(releaseData)
+		<-writeDone
+		<-restartDone
+		t.Fatal("fresh ASP Up overtook old-epoch DATA")
+	default:
+	}
+
+	close(releaseData)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("old-epoch DATA: %v", err)
+	}
+	select {
+	case <-restartDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SCTP restart did not finish after old-epoch DATA drained")
+	}
+	select {
+	case state := <-association.stateChan:
+		if state != StateASPDown {
+			t.Fatalf("restart state = %v, want ASP-DOWN", state)
+		}
+		if err := association.handleStateUpdate(state); err != nil {
+			t.Fatalf("apply restart state: %v", err)
+		}
+	default:
+	}
+	select {
+	case <-freshASPUp:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fresh ASP Up was not sent after old-epoch DATA drained")
+	}
 }
 
 func newDoubleExchangeAssociationConfigForTest() *AssociationConfig {

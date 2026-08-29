@@ -129,6 +129,15 @@ func (c *Association) handleSCTPRestart() {
 		c.noteNoRoutingContextsAcked()
 		c.forgetActiveRoutingContexts()
 	}
+	if c.role == RoleIPSP {
+		// Close admission for the peer-directed traffic flow before waiting for
+		// DATA already admitted in the old SCTP epoch. RFC 4666 Section 4.3.3
+		// moves the peer IPSP to ASP-DOWN at the restart boundary; publishing
+		// that transition may start the fresh ASP Up procedure, so it cannot
+		// precede the old traffic barrier.
+		c.commitState(StateASPDown)
+		c.quiesceUnscopedTraffic()
+	}
 	// Section 4.3.3 requires this only at an ASP; pauseDestinations enforces the
 	// role and leaves an SGP's node-wide destination view untouched.
 	c.pauseDestinations()

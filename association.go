@@ -1184,7 +1184,12 @@ func (c *Association) lockOutboundDataScope(raw []byte) (func(), error) {
 	if !ok {
 		return nil, errors.New("transfer payload did not decode as DATA")
 	}
-	if err := c.validateOutboundNetworkAppearance(data.NetworkAppearance); err != nil {
+	// In RFC 4666 Section 5.6.2 Double Exchange, this DATA belongs to the
+	// peer-directed traffic flow. Its Network Appearance is independent of the
+	// local-directed flow used by outbound SCON.
+	if err := validateOutboundNetworkAppearanceAgainst(
+		data.NetworkAppearance, c.outboundNetworkAppearance(),
+	); err != nil {
 		return nil, err
 	}
 
@@ -1272,7 +1277,11 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	if !known {
 		return func() {}, nil
 	}
-	if err := c.validateOutboundNetworkAppearance(ssnmNetworkAppearance(decoded)); err != nil {
+	// RFC 4666 Section 5.6.2 defines SCON as flowing opposite DATA between
+	// IPSPs, so Double Exchange validates it against the local-directed flow.
+	if err := validateOutboundNetworkAppearanceAgainst(
+		ssnmNetworkAppearance(decoded), c.localNetworkAppearance(),
+	); err != nil {
 		return nil, err
 	}
 	if err := c.validateOutboundSSNMRoutingContext(routingContext); err != nil {
@@ -1372,16 +1381,12 @@ func ssnmNetworkAppearance(message messages.M3UA) *params.Param {
 	}
 }
 
-func (c *Association) validateOutboundNetworkAppearance(networkAppearance *params.Param) error {
+func validateOutboundNetworkAppearanceAgainst(networkAppearance, configured *params.Param) error {
 	if networkAppearance == nil {
 		return nil
 	}
 	if networkAppearance.Tag != params.NetworkAppearance || len(networkAppearance.Data) != 4 {
 		return ErrInvalidNetworkAppearance
-	}
-	var configured *params.Param
-	if c != nil {
-		configured = c.localNetworkAppearance()
 	}
 	if configured == nil || configured.Tag != params.NetworkAppearance ||
 		len(configured.Data) != 4 ||
