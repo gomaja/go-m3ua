@@ -205,7 +205,7 @@ func (r *aspRoutes) selectTransfer(
 		cachedEligible = r.transferTargetsEligibleLocked(
 			assignment.targets, mtpRoute.id, request.ProtocolData, congestionDecision,
 		)
-		if cachedEligible && !r.transferTargetsUseBroadcast(assignment.targets) {
+		if cachedEligible && r.transferTargetsUseStickyLoadshare(assignment.targets) {
 			r.transferFlowLRU.MoveToFront(element)
 			return append([]aspTransferTarget(nil), assignment.targets...), nil
 		}
@@ -273,17 +273,17 @@ func (r *aspRoutes) selectTransfer(
 	return append([]aspTransferTarget(nil), targets...), nil
 }
 
-func (r *aspRoutes) transferTargetsUseBroadcast(targets []aspTransferTarget) bool {
-	if r.config.signallingGatewaySelection == RouteSelectionBroadcast {
-		return true
+func (r *aspRoutes) transferTargetsUseStickyLoadshare(targets []aspTransferTarget) bool {
+	if r.config.signallingGatewaySelection != RouteSelectionLoadshare {
+		return false
 	}
 	for _, target := range targets {
 		gateway, found := r.signallingGatewayConfig(target.identity.SignallingGateway)
-		if found && gateway.sgpSelection == RouteSelectionBroadcast {
-			return true
+		if !found || gateway.sgpSelection != RouteSelectionLoadshare {
+			return false
 		}
 	}
-	return false
+	return len(targets) > 0
 }
 
 func sameASPTransferTargets(first, second []aspTransferTarget) bool {
@@ -483,7 +483,7 @@ func selectASPTransferGatewaysWithPrevious(
 	hash uint64,
 	previous []aspTransferTarget,
 ) []aspTransferGateway {
-	if mode != RouteSelectionBroadcast {
+	if mode == RouteSelectionLoadshare {
 		for _, target := range previous {
 			for _, candidate := range candidates {
 				if candidate.config.id == target.identity.SignallingGateway {
@@ -515,7 +515,7 @@ func selectASPTransferSGPsWithPrevious(
 	previous []aspTransferTarget,
 	gateway SignallingGatewayID,
 ) []aspTransferSGP {
-	if mode != RouteSelectionBroadcast {
+	if mode == RouteSelectionLoadshare {
 		for _, target := range previous {
 			if target.identity.SignallingGateway != gateway {
 				continue

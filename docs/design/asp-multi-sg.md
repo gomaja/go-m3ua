@@ -96,6 +96,11 @@ Section 3.8.1 defines no M3UA Error code for a receiver's local retention
 budget, so the live Association is closed rather than sending a misleading
 protocol Error.
 
+When the last Association to an SG detaches, that SG's retained
+availability and congestion records are discarded and their capacity is
+reclaimed. Records remain while any Association to the SG exists, so losing one
+redundant Association does not erase state still shared by the remaining SGPs.
+
 ### SG and SGP inventory
 
 ```go

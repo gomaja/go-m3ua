@@ -195,10 +195,70 @@ func (r *aspRoutes) detach(association *Association) {
 		if len(r.associationsBySGP[identity]) == 0 {
 			delete(r.associationsBySGP, identity)
 		}
+		if !r.signallingGatewayAttachedLocked(identity.SignallingGateway) {
+			r.reclaimSignallingGatewayStateLocked(identity.SignallingGateway)
+		}
 	}
 	indications := r.recomputeLocked(nil)
 	r.mu.Unlock()
 	r.publish(indications)
+}
+
+func (r *aspRoutes) signallingGatewayAttachedLocked(signallingGateway SignallingGatewayID) bool {
+	for identity, associations := range r.associationsBySGP {
+		if identity.SignallingGateway == signallingGateway && len(associations) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *aspRoutes) reclaimSignallingGatewayStateLocked(signallingGateway SignallingGatewayID) {
+	for key := range r.availability {
+		if key.signallingGateway == signallingGateway {
+			delete(r.availability, key)
+		}
+	}
+	for key := range r.congestion {
+		if key.signallingGateway == signallingGateway {
+			delete(r.congestion, key)
+		}
+	}
+	r.rebuildRouteStateAccountingLocked()
+	r.rebuildRouteStateIndexLocked()
+}
+
+func (r *aspRoutes) rebuildRouteStateAccountingLocked() {
+	r.stateRecordsPerRoute = make(map[aspRouteStateBudgetKey]int)
+	r.stateRecordCount = 0
+	for key := range r.availability {
+		r.recordRouteStateAccountingLocked(key)
+	}
+	for key := range r.congestion {
+		r.recordRouteStateAccountingLocked(key)
+	}
+}
+
+func (r *aspRoutes) recordRouteStateAccountingLocked(key aspRouteRangeKey) {
+	budgetKey := aspRouteStateBudgetKey{
+		signallingGateway: key.signallingGateway,
+		mtpRoute:          key.mtpRoute,
+	}
+	r.stateRecordsPerRoute[budgetKey]++
+	r.stateRecordCount++
+}
+
+func (r *aspRoutes) rebuildRouteStateIndexLocked() {
+	r.stateIndex = make(map[MTPRouteID]*aspRouteStateIndexNode, len(r.config.mtpRoutes))
+	for _, mtpRoute := range r.config.mtpRoutes {
+		r.stateIndex[mtpRoute.id] = &aspRouteStateIndexNode{}
+	}
+	for key, record := range r.availability {
+		r.indexAvailabilityRecordLocked(key, record)
+	}
+	for key, record := range r.congestion {
+		r.indexCongestionRecordLocked(key, record)
+	}
 }
 
 func (r *aspRoutes) apply(

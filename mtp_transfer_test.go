@@ -184,6 +184,38 @@ func TestMTPTransferPrimaryBackupWithinSignallingGateway(t *testing.T) {
 	if captures["sg-a/sgp-a2"].count() != 1 {
 		t.Fatal("primary/backup did not fail over to the backup SGP")
 	}
+
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	recovered := attachASPRouteAssociation(t, endpoint, identity, 7, 1)
+	recoveredCapture := &mtpTransferCapture{}
+	recovered.dataWriter = recoveredCapture.write
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("recovered primary MTPTransfer: %v", err)
+	}
+	if recoveredCapture.count() != 1 || captures["sg-a/sgp-a2"].count() != 1 {
+		t.Fatalf("primary/backup did not fail back: primary:%d backup:%d",
+			recoveredCapture.count(), captures["sg-a/sgp-a2"].count())
+	}
+}
+
+func TestMTPTransferPrimaryBackupFailsBackAcrossSignallingGateways(t *testing.T) {
+	config := validASPConfig()
+	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	endpoint, associations, captures := newASPTransferFixture(t, config)
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 7, nil)}
+
+	applyASPDUNA(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("backup MTPTransfer: %v", err)
+	}
+	applyASPDAVA(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("recovered primary MTPTransfer: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 || captures["sg-b/sgp-b1"].count() != 1 {
+		t.Fatalf("primary/backup failback counts = primary:%d backup:%d, want 1 each",
+			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+	}
 }
 
 func TestMTPTransferLoadshareKeepsEachFlowStable(t *testing.T) {

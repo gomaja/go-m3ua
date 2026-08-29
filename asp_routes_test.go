@@ -335,6 +335,73 @@ func TestASPRouteStateBudgetIsAtomicUnderConcurrentSSNM(t *testing.T) {
 	}
 }
 
+func TestASPRouteStateReclaimsDetachedSignallingGatewayBudget(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 1
+	config.MaxSSNMStateRecordsPerRoute = 1
+	config.MaxSSNMStateRecords = 1
+	endpoint, first, second := newASPMultiSGFixtureWithConfig(t, config)
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	if err := second.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(9),
+		params.NewRoutingContext(42),
+		params.NewAffectedPointCode(0x123456),
+		nil,
+	)); !errors.Is(err, ErrASPRouteStateLimit) {
+		t.Fatalf("pre-detach second SG error = %v, want ErrASPRouteStateLimit", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first SG Association: %v", err)
+	}
+	applyASPDUNA(t, second, 9, 42, 0x123456, 0)
+
+	endpoint.aspRoutes.mu.RLock()
+	recordCount := endpoint.aspRoutes.stateRecordCount
+	availabilityRecords := len(endpoint.aspRoutes.availability)
+	firstBudget := endpoint.aspRoutes.stateRecordsPerRoute[aspRouteStateBudgetKey{
+		signallingGateway: "sg-a", mtpRoute: "sccp-a",
+	}]
+	secondBudget := endpoint.aspRoutes.stateRecordsPerRoute[aspRouteStateBudgetKey{
+		signallingGateway: "sg-b", mtpRoute: "sccp-a",
+	}]
+	_, firstIndexed, _, _ := endpoint.aspRoutes.indexedRouteStateForRangeLocked(
+		"sg-a", "sccp-a", 0x123456, 0,
+	)
+	endpoint.aspRoutes.mu.RUnlock()
+	if recordCount != 1 || availabilityRecords != 1 || firstBudget != 0 || secondBudget != 1 || firstIndexed {
+		t.Fatalf("post-reclaim state = count:%d availability:%d sg-a:%d sg-b:%d indexed-a:%v",
+			recordCount, availabilityRecords, firstBudget, secondBudget, firstIndexed)
+	}
+}
+
+func TestASPRouteStateRemainsWhileSignallingGatewayHasAssociation(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 1
+	config.MaxSSNMStateRecordsPerRoute = 1
+	config.MaxSSNMStateRecords = 1
+	endpoint, first, secondGateway := newASPMultiSGFixtureWithConfig(t, config)
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	secondAssociation := attachASPRouteAssociation(t, endpoint, identity, 7, 1)
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	if err := first.Close(); err != nil {
+		t.Fatalf("close one SG Association: %v", err)
+	}
+	if err := secondGateway.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(9),
+		params.NewRoutingContext(42),
+		params.NewAffectedPointCode(0x123456),
+		nil,
+	)); !errors.Is(err, ErrASPRouteStateLimit) {
+		t.Fatalf("second SG error while first SG remains attached = %v, want ErrASPRouteStateLimit", err)
+	}
+	if err := secondAssociation.Close(); err != nil {
+		t.Fatalf("close last SG Association: %v", err)
+	}
+	applyASPDUNA(t, secondGateway, 9, 42, 0x123456, 0)
+}
+
 func TestASPRouteAggregationSeparatesMTPRoutes(t *testing.T) {
 	config := validASPConfig()
 	config.MTPRoutes = append(config.MTPRoutes, MTPRouteConfig{
