@@ -192,6 +192,13 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspUpAck)
 	}
+	// RFC 4666 Section 4.3.4.1 permits ASP Up retransmission under T(ack), and
+	// the peer answers every copy. Once this SCTP epoch completed the procedure,
+	// a later Ack is that request's delayed duplicate rather than a new state
+	// transition.
+	if !solicited && c.isRepeatedASPUpAcknowledgement() {
+		return nil
+	}
 	if c.role == RoleIPSP {
 		if c.isIPSPDoubleExchange() {
 			previousLocalState := c.localIPSPStateValue()

@@ -264,6 +264,45 @@ func TestIPSPDoubleExchangeASPUpWhilePeerDirectionActiveResetsOnlyThatDirection(
 	}
 }
 
+func TestIPSPDoubleExchangeAbsorbsDelayedCompletedASPUpAck(t *testing.T) {
+	association, sent := newDoubleExchangeIPSPForTest(t)
+	association.cfg.TAck = time.Hour
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPDown,
+		TrafficToPeer:  StateASPActive,
+	})
+	association.noteRoutingContextsActive([]uint32{22})
+
+	association.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
+	if err := association.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
+		t.Fatalf("first ASP Up Ack: %v", err)
+	}
+	if err := association.handleAspActiveAck(messages.NewAspActiveAck(
+		params.NewTrafficModeType(params.TrafficModeLoadshare),
+		params.NewRoutingContext(11),
+		nil,
+	)); err != nil {
+		t.Fatalf("ASP Active Ack after first ASP Up Ack: %v", err)
+	}
+	if got := association.IPSPState().TrafficToLocal; got != StateASPActive {
+		t.Fatalf("TrafficToLocal after activation = %v, want ASP-ACTIVE", got)
+	}
+	activeRequests := countType(*sent, "ASP Active")
+
+	if err := association.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
+		t.Fatalf("delayed completed ASP Up Ack: %v", err)
+	}
+	if got := association.IPSPState().TrafficToLocal; got != StateASPActive {
+		t.Fatalf("delayed completed ASP Up Ack changed TrafficToLocal to %v", got)
+	}
+	if !association.routingContextAcked(11) {
+		t.Fatal("delayed completed ASP Up Ack cleared the acknowledged Routing Context")
+	}
+	if got := countType(*sent, "ASP Active"); got != activeRequests {
+		t.Fatalf("delayed completed ASP Up Ack started %d additional ASP Active procedures", got-activeRequests)
+	}
+}
+
 func TestIPSPDoubleExchangeASPSMSingleExchangeSimplificationAffectsBothDirections(t *testing.T) {
 	association, _ := newDoubleExchangeIPSPForTest(t)
 	association.cfg.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
@@ -1690,11 +1729,6 @@ func TestIPSPDoubleExchangeRestartDrainsOutboundDATABeforeFreshASPSM(t *testing.
 		t.Fatalf("old-epoch DATA: %v", err)
 	}
 	select {
-	case <-restartDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SCTP restart did not finish after old-epoch DATA drained")
-	}
-	select {
 	case state := <-association.stateChan:
 		if state != StateASPDown {
 			t.Fatalf("restart state = %v, want ASP-DOWN", state)
@@ -1702,7 +1736,13 @@ func TestIPSPDoubleExchangeRestartDrainsOutboundDATABeforeFreshASPSM(t *testing.
 		if err := association.handleStateUpdate(state); err != nil {
 			t.Fatalf("apply restart state: %v", err)
 		}
-	default:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SCTP restart published no ASP-DOWN state after old-epoch DATA drained")
+	}
+	select {
+	case <-restartDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SCTP restart did not finish after ASP-DOWN was consumed")
 	}
 	select {
 	case <-freshASPUp:

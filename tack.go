@@ -68,6 +68,11 @@ type tackRetransmitter struct {
 	// configured RC set lets handlers distinguish that repeated Ack from an
 	// unsolicited state transition without accepting an unrequested scope.
 	acknowledgedASPTM map[requestKind]*acknowledgedASPTMScope
+	// aspUpAcknowledged records completion of the current ASP Up procedure.
+	// ASPSM has no request identifier, so a later Ack for a T(ack)
+	// retransmission is distinguishable from an unsolicited Ack only by this
+	// bounded current-epoch evidence.
+	aspUpAcknowledged bool
 	// awaitingRestartAspUp rejects ASPTM Acks left over from the prior SCTP
 	// epoch until the mandatory fresh ASP-Up procedure completes. Stream 0 has
 	// no request identifier with which an old ASPTM Ack could otherwise be
@@ -151,6 +156,9 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 	c.tack.mu.Lock()
 	if terminationBoundary {
 		c.cancelAllTAckLocked()
+	}
+	if ackFor == requestAspUp {
+		c.tack.aspUpAcknowledged = false
 	}
 	// Association-wide ASPSM procedures have one current epoch and a newer one
 	// supersedes it. ASPTM is per AS: RFC 4666 explicitly permits multiple Active
@@ -464,9 +472,19 @@ func (c *Association) forgetTAck(kind requestKind) bool {
 		}
 	}
 	if found && kind == requestAspUp {
+		c.tack.aspUpAcknowledged = true
 		c.tack.awaitingRestartAspUp = false
 	}
 	return found
+}
+
+func (c *Association) isRepeatedASPUpAcknowledgement() bool {
+	if c.tack == nil {
+		return false
+	}
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	return c.tack.aspUpAcknowledged
 }
 
 // rejectStaleASPTMAck reports an ASPTM Ack that cannot belong to the current
@@ -625,6 +643,7 @@ func (c *Association) resetTAckEpoch() {
 	c.tack.retryMu.Lock()
 	c.tack.mu.Lock()
 	c.tack.awaitingRestartAspUp = c.role == RoleASP || c.role == RoleIPSP
+	c.tack.aspUpAcknowledged = false
 	c.cancelAllTAckLocked()
 	clear(c.tack.acknowledgedASPTM)
 	c.tack.mu.Unlock()
