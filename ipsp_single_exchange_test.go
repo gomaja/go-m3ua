@@ -686,6 +686,27 @@ func TestIPSPSingleExchangeRetainsPeerIdentifierFromASPUpAck(t *testing.T) {
 	}
 }
 
+func TestIPSPSingleExchangeRejectsMalformedASPIdentifierWithoutRetiringTAck(t *testing.T) {
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
+	association.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
+	t.Cleanup(association.stopAllTAck)
+
+	tack := messages.NewAspUpAck(&params.Param{
+		Tag:    params.AspIdentifier,
+		Length: 7,
+		Data:   []byte{0, 0, 73},
+	}, nil)
+	if err := association.handleAspUpAck(tack); !errors.Is(err, ErrInvalidParameterValue) {
+		t.Fatalf("handleAspUpAck() error = %v, want ErrInvalidParameterValue", err)
+	}
+	if got := association.pendingTAck(); got != 1 {
+		t.Fatalf("pending T(ack) after malformed ASP Up Ack = %d, want 1", got)
+	}
+	if _, present := association.PeerASPIdentifier(); present {
+		t.Fatal("malformed ASP Up Ack saved a peer ASP Identifier")
+	}
+}
+
 func TestIPSPSingleExchangeASPTMControlsBothTrafficDirections(t *testing.T) {
 	initiator, initiatorSent := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	receiver, receiverSent := newSingleExchangeIPSPForTest(t, StateASPInactive)

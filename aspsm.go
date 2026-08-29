@@ -125,6 +125,10 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	if c.receivedStreamID() != 0 {
 		return NewInvalidSCTPStreamIDError(c.receivedStreamID())
 	}
+	if c.role == RoleIPSP && aspUpAck.AspIdentifier != nil &&
+		(aspUpAck.AspIdentifier.Tag != params.AspIdentifier || len(aspUpAck.AspIdentifier.Data) != 4) {
+		return ErrInvalidParameterValue
+	}
 
 	// The request this answers is complete: stop resending it (T(ack)). Whether
 	// one was outstanding decides what follows.
@@ -138,9 +142,6 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		// Ack specifically useful for IPSP communication: the answering IPSP
 		// may identify itself independently of the initiator's ASP Up.
 		if aspUpAck.AspIdentifier != nil {
-			if aspUpAck.AspIdentifier.Tag != params.AspIdentifier || len(aspUpAck.AspIdentifier.Data) != 4 {
-				return ErrInvalidParameterValue
-			}
 			c.savePeerASPIdentifier(aspUpAck.AspIdentifier)
 		}
 		return nil
