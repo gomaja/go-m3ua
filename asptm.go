@@ -1066,9 +1066,26 @@ func (c *Association) overrideOtherASPs(activated []uint32) {
 		if as.TrafficMode() != params.TrafficModeOverride {
 			continue
 		}
+		as.overrideMu.Lock()
+		// Activation was recorded before entering this per-AS serialization.
+		// A challenger that waited here may meanwhile have been displaced by the
+		// preceding winner, so reassert this scope and the derived association
+		// state inside the serialized transition before changing the shared AS.
+		if key.RoutingContextSet {
+			c.noteRoutingContextsActive([]uint32{key.RoutingContext})
+		} else {
+			c.noteRoutingContextsActive(nil)
+		}
+		if !c.commitState(c.stateForActiveRoutingContexts()) {
+			as.overrideMu.Unlock()
+			continue
+		}
 		// The Ack has already made the challenger active from the peer's point
 		// of view. Activate it and displace every incumbent under one AS lock so
-		// two simultaneous challengers cannot each remove the other.
+		// two simultaneous challengers cannot each remove the other. Keep the
+		// Override procedure serialized until the displaced associations have
+		// committed the matching local state; otherwise a later winner can be
+		// inactivated by the stale tail of this transition.
 		peers, postBarrierNotify, startDrain := as.activateOverride(c, c.as.recoveryTimer)
 		for _, peer := range peers {
 			// "Any previously active ASP in the AS is now considered to be in
@@ -1101,5 +1118,6 @@ func (c *Association) overrideOtherASPs(activated []uint32) {
 			}
 			notifyAlternateASPActive(peer, key, c.peerASPIdentifierParam())
 		}
+		as.overrideMu.Unlock()
 	}
 }

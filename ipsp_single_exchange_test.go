@@ -382,6 +382,93 @@ func TestIPSPSingleExchangeOverrideDrainsDisplacedDirectTrafficBeforeNotify(t *t
 	}
 }
 
+func TestConcurrentIPSPSingleExchangeOverrideKeepsWinningAssociationActive(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	first, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	second, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	for _, association := range []*Association{first, second} {
+		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		association.as = registry
+		association.noteRoutingContextsActive([]uint32{1})
+	}
+	applicationServer := registry.get(1)
+	applicationServer.setTrafficMode(params.TrafficModeOverride)
+	applicationServer.mu.Lock()
+	applicationServer.asps[first] = StateASPInactive
+	applicationServer.asps[second] = StateASPActive
+	applicationServer.recomputeLocked(time.Hour, nil)
+	applicationServer.mu.Unlock()
+
+	// Hold the first challenger's displaced-peer update after it changes the
+	// shared AS winner. The later challenger can then expose any gap between
+	// that AS mutation and the association-local inactive transition.
+	second.muAckedRCs.Lock()
+	secondUnlocked := false
+	defer func() {
+		if !secondUnlocked {
+			second.muAckedRCs.Unlock()
+		}
+	}()
+	firstDone := make(chan struct{})
+	go func() {
+		first.overrideOtherASPs([]uint32{1})
+		close(firstDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		applicationServer.mu.Lock()
+		firstWon := applicationServer.asps[first] == StateASPActive &&
+			applicationServer.asps[second] == StateASPInactive
+		applicationServer.mu.Unlock()
+		if firstWon {
+			break
+		}
+		if time.Now().After(deadline) {
+			second.muAckedRCs.Unlock()
+			secondUnlocked = true
+			t.Fatal("first Override never became the shared AS winner")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	secondDone := make(chan struct{})
+	go func() {
+		second.overrideOtherASPs([]uint32{1})
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+	case <-time.After(50 * time.Millisecond):
+	}
+	second.muAckedRCs.Unlock()
+	secondUnlocked = true
+
+	for name, done := range map[string]<-chan struct{}{
+		"first Override":  firstDone,
+		"second Override": secondDone,
+	} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s did not finish", name)
+		}
+	}
+
+	if got := applicationServer.activeASPs(); len(got) != 1 || got[0] != second {
+		t.Fatalf("active IPSPs = %v, want only the later challenger", got)
+	}
+	if got := second.State(); got != StateASPActive {
+		t.Fatalf("winning IPSP state = %v, want ASP-ACTIVE", got)
+	}
+	if !second.outboundRoutingContextActive(1) {
+		t.Fatal("winning IPSP cannot send Routing Context 1")
+	}
+	if got := first.State(); got != StateASPInactive {
+		t.Fatalf("displaced IPSP state = %v, want ASP-INACTIVE", got)
+	}
+}
+
 func TestIPSPASPUpAckWaitsForActiveTrafficToQuiesce(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.maxMessageStreamID = 4

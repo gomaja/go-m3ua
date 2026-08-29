@@ -103,6 +103,11 @@ type applicationServer struct {
 	// key is the Network Appearance plus Routing Context scope this AS serves.
 	key ASKey
 
+	// overrideMu serializes an Override winner change through the displaced
+	// associations' local state, traffic barriers, and Notify. mu alone protects
+	// the AS registry, but releasing it before those follow-up steps lets a later
+	// challenger win and then be made inactive by the stale earlier transition.
+	overrideMu sync.Mutex
 	// deliveryMu orders DATA messages within this AS. State changes use mu
 	// independently, so a peer that stops reading cannot hold teardown behind a
 	// blocked socket write; closing that socket is what releases the write.
