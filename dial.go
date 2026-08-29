@@ -194,14 +194,22 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	}()
 
 	// Nothing here writes to cfg: each permitted Dial gets an independent
-	// immutable AssociationConfig snapshot. An SGP registers its Application
-	// Server scope only after cancellation and Endpoint closure have been ruled
-	// out, so an attempt that never starts cannot change Endpoint state.
+	// immutable AssociationConfig snapshot. An SGP or IPSP registers its
+	// Application Server scope only after cancellation and Endpoint closure
+	// have been ruled out, so an attempt that never starts cannot change
+	// Endpoint state.
 	association := newAssociation(role, cfg)
-	if role == RoleSGP {
+	switch role {
+	case RoleSGP:
 		association.as, association.nif, association.destinations, association.mtp3Restarts = e.sgpRegistry()
-		association.as.register(association.configuredASKeys())
+	case RoleIPSP:
+		association.as = e.applicationServerRegistry()
 	}
+	registration := &applicationServerReservation{}
+	if association.as != nil {
+		registration = association.as.reserve(association.configuredASKeys())
+	}
+	defer registration.rollback()
 
 	// The notification handler has to be installed on the socket at dial time;
 	// route it to this Association, and ignore events that arrive before an SCTP
@@ -238,9 +246,14 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 
 	select {
 	case <-association.established:
+		registration.commit()
 		keepOperationContext = true
 		return association, nil
 	case <-association.done:
+		// done closes at the beginning of closeWith. Join the once-only teardown
+		// before rolling back provisional ASKeys, so Endpoint membership has
+		// already been removed when the reservation checks whether a scope is empty.
+		_ = association.closeWith(nil)
 		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
 			return nil, ErrEndpointClosed
 		}

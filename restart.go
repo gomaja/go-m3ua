@@ -118,7 +118,7 @@ func (c *Association) handleSCTPRestart() {
 	// Remember that case so this new SCTP epoch still gets a new ASP Up after
 	// the old epoch's timer is retired below.
 	c.muState.RLock()
-	restartWhileDown := c.role == RoleASP && c.state == StateASPDown && c.stateEntered
+	restartWhileDown := c.initiatesASPSM() && c.state == StateASPDown && c.stateEntered
 	c.muState.RUnlock()
 	// The SCTP association remains usable, but its peer state is a new epoch.
 	// Drain any retry already entering the writer and cancel every old T(ack)
@@ -131,13 +131,24 @@ func (c *Association) handleSCTPRestart() {
 	c.notifyManagement(&ManagementIndication{
 		Kind: ManagementSCTPRestart,
 		Description: "the peer restarted the SCTP association; " +
-			"the ASP moved to ASP-DOWN and recovery state was cleared",
+			"the remote ASP/IPSP state moved to ASP-DOWN and recovery state was cleared",
 	})
 	if restartWhileDown && !c.terminating.Load() {
 		if err := c.initiateASPSM(); err != nil {
 			c.sendErr(err)
 		}
 	}
+}
+
+func (c *Association) initiatesASPSM() bool {
+	if c == nil {
+		return false
+	}
+	if c.role == RoleASP {
+		return true
+	}
+	return c.role == RoleIPSP && c.cfg != nil && c.cfg.IPSP != nil &&
+		c.cfg.IPSP.ExchangeModel == IPSPExchangeSingle && c.cfg.IPSP.InitiateASPSM
 }
 
 // subscribeRestart asks the kernel for SCTP_ASSOC_CHANGE on this association.

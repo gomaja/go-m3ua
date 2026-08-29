@@ -351,21 +351,25 @@ func TestHeartbeatAckedInEveryState(t *testing.T) {
 			conn, sent := newTestConn(t, st, RoleSGP)
 
 			beat := messages.NewHeartbeat(params.NewHeartbeatData([]byte("beat-data")))
+			unknown := params.NewParam(0xfffe, []byte{0x01, 0x02, 0x03, 0x04})
+			beat.Others = []*params.Param{unknown}
 			if err := conn.handleHeartbeat(beat); err != nil {
 				t.Errorf("handleHeartbeat() error = %v, want nil (BEAT Ack is a MUST)", err)
 			}
 
-			// handleHeartbeat reuses the inbound message and only rewrites the
-			// message type, so assert on the wire type rather than the name.
 			if len(*sent) != 1 {
 				t.Fatalf("signals = %v, want exactly one BEAT Ack", typeNames(*sent))
 			}
-			beatAck, ok := (*sent)[0].(*messages.Heartbeat)
+			beatAck, ok := (*sent)[0].(*messages.HeartbeatAck)
 			if !ok {
-				t.Fatalf("sent %T, want *messages.Heartbeat carrying a BEAT Ack", (*sent)[0])
+				t.Fatalf("sent %T, want *messages.HeartbeatAck", (*sent)[0])
 			}
-			if beatAck.Type != messages.MsgTypeHeartbeatAck {
-				t.Errorf("message type = %d, want %d (BEAT Ack)", beatAck.Type, messages.MsgTypeHeartbeatAck)
+			if got := string(beatAck.HeartbeatData.HeartbeatData()); got != "beat-data" {
+				t.Errorf("Heartbeat Data = %q, want %q", got, "beat-data")
+			}
+			if len(beatAck.Others) != 1 || beatAck.Others[0].Tag != unknown.Tag ||
+				string(beatAck.Others[0].Data) != string(unknown.Data) {
+				t.Errorf("other parameters = %v, want an unchanged copy of %v", beatAck.Others, unknown)
 			}
 		})
 	}
@@ -1285,6 +1289,42 @@ func TestNotifyIsRejectedAtAnSGP(t *testing.T) {
 	}
 	if len(conn.mgmtChan) != 0 {
 		t.Error("an ASP-originated NTFY reached Layer Management at the SGP")
+	}
+}
+
+func TestNotifyIsRejectedWhileASPDown(t *testing.T) {
+	for _, role := range []Role{RoleASP, RoleIPSP} {
+		t.Run(role.String(), func(t *testing.T) {
+			association, sent := newTestConn(t, StateASPDown, role)
+			if role == RoleIPSP {
+				association.cfg.IPSP = &IPSPConfig{
+					ExchangeModel: IPSPExchangeSingle,
+					InitiateASPTM: true,
+				}
+			}
+
+			association.handleSignals(context.Background(), messages.NewNotify(
+				params.NewStatus(params.AlternateAspActive), nil, nil, nil))
+
+			var unexpected *UnexpectedMessageError
+			if err := firstErr(association); !errors.As(err, &unexpected) {
+				t.Fatalf("Notify error = %v, want UnexpectedMessageError", err)
+			}
+			select {
+			case state := <-association.stateChan:
+				if state != stateUnchanged {
+					t.Fatalf("published state = %v, want stateUnchanged", state)
+				}
+			default:
+				t.Fatal("Notify published no state update")
+			}
+			if len(association.mgmtChan) != 0 {
+				t.Fatal("ASP-DOWN Notify reached Layer Management")
+			}
+			if len(*sent) != 0 {
+				t.Fatalf("ASP-DOWN Notify sent %v, want no protocol response from this handler", typeNames(*sent))
+			}
+		})
 	}
 }
 

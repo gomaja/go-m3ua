@@ -11,6 +11,11 @@ RFC 4666 Section 1.4.8 recommends that both ASPs and SGPs support either SCTP
 orientation, so protocol behavior never follows from whether Dial or Accept was
 used.
 
+An IPSP Association must select the RFC 4666 Section 4.3 exchange model in
+AssociationConfig.IPSP. Single Exchange is supported. Its ASPSM and ASPTM
+initiation policies are independent from each other and from SCTP association
+initiation, because either IPSP may initiate either exchange.
+
 M3UA BEAT/BEAT Ack liveness is application-layer logic from RFC 4666 and is
 configured with HeartbeatInfo. It is separate from SCTP HEARTBEAT chunks and
 SCTP path-management timers, which remain transport/kernel behavior below this

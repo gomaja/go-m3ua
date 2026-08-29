@@ -260,6 +260,9 @@ var (
 	// Single Exchange model or Double Exchange model and are enabled by the
 	// IPSP API rather than guessed.
 	ErrUnsupportedRole = errors.New("unsupported M3UA role")
+	// ErrUnsupportedIPSPExchangeModel reports an IPSP Association configured
+	// with an exchange model this implementation does not provide.
+	ErrUnsupportedIPSPExchangeModel = errors.New("unsupported IPSP exchange model")
 	// ErrEndpointClosed reports an operation started after Endpoint.Close or
 	// interrupted because the owning Endpoint closed.
 	ErrEndpointClosed = errors.New("M3UA endpoint is closed")

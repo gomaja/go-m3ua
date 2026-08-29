@@ -679,7 +679,7 @@ func copyDestinationStatus(status *DestinationStatus) *DestinationStatus {
 // Scoped to the ASP, as the RFC scopes it. An SGP's recorded states are its own
 // view for answering audits, not something a peer told it.
 func (c *Association) pauseDestinations() {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return
 	}
 
@@ -932,6 +932,13 @@ func (c *Association) ssnmRoutingContextsAllowed(routingContext *params.Param, d
 			}
 			continue
 		}
+		if c.role == RoleIPSP {
+			if c.State() != StateASPActive || !c.activeForRoutingContext(rtCtx) ||
+				c.routingContextOverridden(rtCtx) {
+				return false
+			}
+			continue
+		}
 		// Section 4.5.1 opens this window before the first ASP Active Ack,
 		// while the association is ASP-INACTIVE. On an association already
 		// active for another AS, only RCs in the still-pending ASP Active
@@ -1076,6 +1083,9 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	if c.role == RoleSGP && !c.ssnmAllowed() {
 		return NewUnexpectedMessageError(s)
 	}
+	if c.role == RoleIPSP && !c.ssnmAllowed() {
+		return NewUnexpectedMessageError(s)
+	}
 	allowed, err := c.validateSSNMScope(s, s.RoutingContext, c.role == RoleASP)
 	if err != nil {
 		return err
@@ -1083,7 +1093,7 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	if !allowed {
 		return nil
 	}
-	if c.role == RoleASP && s.ConcernedDestination != nil {
+	if (c.role == RoleASP || c.role == RoleIPSP) && s.ConcernedDestination != nil {
 		return ErrInvalidParameterValue
 	}
 

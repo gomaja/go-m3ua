@@ -53,6 +53,11 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 			if !c.routingContextAcked(rtCtx) || c.routingContextOverridden(rtCtx) {
 				return
 			}
+		case RoleIPSP:
+			if !c.activeForRoutingContext(rtCtx) || c.routingContextOverridden(rtCtx) {
+				c.sendErr(NewUnexpectedMessageError(data))
+				return
+			}
 		}
 	}
 

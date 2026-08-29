@@ -124,13 +124,13 @@ func errorCodeName(code uint32) string {
 // by the dispatcher, which owns state publishing.
 func (c *Association) handleNotify(n *messages.Notify) error {
 	switch c.State() {
-	case StateSCTPCDI, StateSCTPRI:
+	case StateSCTPCDI, StateSCTPRI, StateASPDown:
 		return NewUnexpectedMessageError(n)
 	}
-	// Notify is originated by an SGP and consumed by an ASP. Accepting one in
-	// the reverse direction would let an ASP inject AS state and peer-ASP
-	// identity into the SGP's Layer Management view.
-	if c.role != RoleASP {
+	// In the SG-AS model Notify is originated by an SGP and consumed by an ASP.
+	// RFC 4666 Section 4.3.4.5.1 applies the same procedure between IPSPs and
+	// permits either peer to send it to a remote IPSP that is not ASP-DOWN.
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(n)
 	}
 
@@ -138,6 +138,14 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 	// nothing to report or act on.
 	if n.Status == nil {
 		return ErrMissingStatus
+	}
+	// RFC 4666 Section 3.8.2 gives the conditional ASP Identifier the
+	// Section 3.5.1 format: tag 0x0011, length 8, and a 32-bit value. Reject a
+	// malformed value before Layer Management or the IPSP Override transition
+	// can observe it.
+	if n.AspIdentifier != nil && n.AspIdentifier.Tag == params.AspIdentifier &&
+		len(n.AspIdentifier.Data) != 4 {
+		return ErrInvalidParameterValue
 	}
 
 	// Both Status Type values and their Status Information ranges are closed
@@ -226,14 +234,14 @@ func notifyStatusName(status uint32) string {
 	}
 }
 
-// overriddenByAlternateAsp reports whether a Notify tells this ASP that another
-// ASP has taken over its traffic in an Override mode AS, which RFC 4666 Section
-// 4.3.4.3 requires the receiving ASP to treat as a move to ASP-INACTIVE.
+// overriddenByAlternateAsp reports whether a Notify tells this ASP or IPSP that
+// another ASP/IPSP has taken over its traffic in an Override mode AS, which RFC
+// 4666 Section 4.3.4.3 requires the receiver to treat as ASP-INACTIVE.
 //
-// Scoped to an ASP: an SGP is the sender of this notification, never its
-// subject, so a Notify arriving at an SGP must not move its state.
+// An SGP is the sender of this notification, never its subject. Section
+// 4.3.4.5.1 extends the same Notify procedure between IPSPs.
 func (c *Association) overriddenByAlternateAsp(n *messages.Notify) bool {
-	if c.role != RoleASP || n.Status == nil {
+	if (c.role != RoleASP && c.role != RoleIPSP) || n.Status == nil {
 		return false
 	}
 
@@ -259,25 +267,51 @@ func (c *Association) overriddenByAlternateAsp(n *messages.Notify) bool {
 func (c *Association) overrideScope(n *messages.Notify) bool {
 	named := n.RoutingContext.RoutingContexts()
 	configured := c.configuredRoutingContexts()
-	if len(named) == 0 {
-		return true
+	wholeAssociation := len(named) == 0 || len(configured) == 0
+	if !wholeAssociation {
+		overridden := make(map[uint32]struct{}, len(named))
+		for _, rc := range named {
+			overridden[rc] = struct{}{}
+		}
+		wholeAssociation = true
+		for _, rc := range configured {
+			if _, ok := overridden[rc]; !ok {
+				wholeAssociation = false
+				break
+			}
+		}
 	}
 
-	if len(configured) == 0 {
-		return true
-	}
-
-	overridden := make(map[uint32]struct{}, len(named))
-	for _, rc := range named {
-		overridden[rc] = struct{}{}
-	}
-	for _, rc := range configured {
-		if _, ok := overridden[rc]; !ok {
+	if c.role != RoleIPSP {
+		if !wholeAssociation {
 			// At least one Application Server is untouched, so the association
 			// carries on and only the named contexts stop.
 			c.noteRoutingContextsOverridden(named)
-			return false
 		}
+		return wholeAssociation
 	}
-	return true
+
+	// RFC 4666 Section 4.3.4.5.1 applies the same Notify procedure between
+	// IPSPs. Single Exchange uses one per-AS state for both directions, so the
+	// shared registry must become inactive in the notified scopes as well as the
+	// association's outbound gate. Apply that state before draining traffic so
+	// no new DATA can select the displaced IPSP while admitted writes finish.
+	affected := named
+	if wholeAssociation {
+		c.commitState(StateASPInactive)
+		c.noteRoutingContextsInactive(nil)
+		affected = configured
+	} else {
+		c.noteRoutingContextsOverridden(named)
+	}
+	postTransitionNotify := func() {}
+	if c.as != nil {
+		postTransitionNotify = c.as.quiesceASPFor(c, affected)
+	}
+	c.quiesceUnscopedTraffic()
+	postTransitionNotify()
+
+	// Separate scoped notifications can cumulatively displace every AS even
+	// when no single Notify names the complete configured set.
+	return wholeAssociation || c.stateForActiveRoutingContexts() == StateASPInactive
 }

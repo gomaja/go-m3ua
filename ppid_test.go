@@ -137,8 +137,8 @@ func TestReceiveAcceptsM3UAAndUnspecifiedPPID(t *testing.T) {
 			}
 			if len(*sent) != 1 {
 				t.Errorf("PPID %d produced signals %v, want one Heartbeat Ack", ppid, typeNames(*sent))
-			} else if beat, ok := (*sent)[0].(*messages.Heartbeat); !ok ||
-				beat.Type != messages.MsgTypeHeartbeatAck {
+			} else if beat, ok := (*sent)[0].(*messages.HeartbeatAck); !ok ||
+				beat.MessageType() != messages.MsgTypeHeartbeatAck {
 				t.Errorf("PPID %d produced %T type %d, want Heartbeat Ack type %d",
 					ppid, (*sent)[0], (*sent)[0].MessageType(), messages.MsgTypeHeartbeatAck)
 			}

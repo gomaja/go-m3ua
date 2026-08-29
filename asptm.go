@@ -124,7 +124,7 @@ func (c *Association) beginASPInactive(routingContext *params.Param) (*pendingRe
 // Application Servers. With no arguments it requests every configured Routing
 // Context. The request remains protected by T(ack) until all scoped Acks arrive.
 func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
 	if state := c.State(); state != StateASPInactive && state != StateASPActive {
@@ -141,7 +141,7 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 // Application Servers. With no arguments it requests every configured Routing
 // Context. Local traffic eligibility changes only as the scoped Acks arrive.
 func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
 	if c.State() != StateASPActive {
@@ -275,10 +275,12 @@ func (c *Association) heartbeat(ctx context.Context) {
 // the Ack because the ASP is already ASP-ACTIVE leaves the peer retransmitting
 // on T(ack) forever — the same interop deadlock ASP Up suffered.
 //
-// These are SGP procedures ("from the ASP"), so an ASP that receives an ASP
-// Active reports an Error and holds its state rather than acking.
+// In the SG-AS model this is an SGP procedure, so an ASP that receives ASP
+// Active reports an Error. RFC 4666 Section 4.3.4.3.1 separately requires an
+// IPSP receiving ASP Active to mark the remote IPSP ASP-ACTIVE and return ASP
+// Active Ack.
 func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspActive)
 	}
 
@@ -307,7 +309,7 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 			requested = named
 		}
 	}
-	if !c.nif.servicableASKeys(c.asKeysForRoutingContexts(requested)) {
+	if c.role == RoleSGP && !c.nif.servicableASKeys(c.asKeysForRoutingContexts(requested)) {
 		return ErrManagementBlocking
 	}
 
@@ -400,7 +402,7 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 		//
 		// The ordering is Section 4.3.4.5's: the Notify follows the related Ack.
 		if len(servedContexts) > 0 || contextlessServed {
-			c.overrideOtherASPs(aspActive, servedContexts)
+			c.overrideOtherASPs(servedContexts)
 		}
 	}
 	if rcErr != nil {
@@ -459,12 +461,12 @@ func (c *Association) validateTrafficModeForRoutingContexts(peer *params.Param, 
 
 // handleAspActiveAck validates the ASP Active Ack that answers our ASP Active.
 //
-// The Ack travels SGP to ASP ("At the ASP, the ASP Active Ack message received
-// is not acknowledged" — RFC 4666 Section 4.3.4.3), so an SGP that receives one
-// reports an Error and holds its state: it never sent an ASP Active, so nothing
-// authorises a stray Ack to move it to ASP-ACTIVE.
+// In the SG-AS model the Ack travels SGP to ASP ("At the ASP, the ASP Active
+// Ack message received is not acknowledged" — RFC 4666 Section 4.3.4.3), so an
+// SGP that receives one reports an Error. RFC 4666 Section 4.3.4.3.1 permits an
+// IPSP receiving the Ack to mark the remote IPSP ASP-ACTIVE.
 func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	if c.rejectStaleASPTMAck(requestAspActive) {
@@ -504,8 +506,26 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	// Only what this Ack named is active. A partial Ack used to take the whole
 	// association active, so DATA went out for contexts the SGP had never
 	// agreed to carry.
-	c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
-	c.acknowledgeTAck(requestAspActive, aspAcAck.RoutingContext)
+	if c.role == RoleIPSP {
+		routingContexts := c.configuredRoutingContexts()
+		if aspAcAck.RoutingContext != nil {
+			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
+		}
+		if c.as != nil {
+			if _, err := c.as.agreeTrafficModeForAssociation(
+				c, routingContexts, aspAcAck.TrafficModeType,
+			); err != nil {
+				return err
+			}
+		}
+		acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
+		c.noteRoutingContextsActive(routingContexts)
+		c.overrideOtherASPs(routingContexts)
+		acknowledgement.complete()
+	} else {
+		c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
+		c.acknowledgeTAck(requestAspActive, aspAcAck.RoutingContext)
+	}
 
 	return nil
 }
@@ -741,10 +761,12 @@ func (c *Association) validateRoutingContext(peer *params.Param) error {
 // owed even when the requested state is the current one, so a peer that has
 // lost its state converges instead of retransmitting on T(ack).
 //
-// These are SGP procedures, so an ASP that receives an ASP Inactive reports an
-// Error and holds its state rather than acking.
+// In the SG-AS model this is an SGP procedure, so an ASP that receives ASP
+// Inactive reports an Error. RFC 4666 Section 4.3.4.4.1 separately permits an
+// IPSP receiving ASP Inactive to consider the remote IPSP ASP-INACTIVE and
+// return ASP Inactive Ack.
 func (c *Association) handleAspInactive(aspInactive *messages.AspInactive) error {
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspInactive)
 	}
 
@@ -814,10 +836,11 @@ func (c *Association) handleAspInactive(aspInactive *messages.AspInactive) error
 // handleAspInactiveAck validates the ASP Inactive Ack that answers our ASP
 // Inactive.
 //
-// As with ASP Active Ack this is an SGP-to-ASP message (RFC 4666 Section
-// 4.3.4.4), so an SGP that receives one reports an Error and holds its state.
+// In the SG-AS model this is an SGP-to-ASP message (RFC 4666 Section 4.3.4.4),
+// so an SGP that receives one reports an Error. RFC 4666 Section 4.3.4.4.1
+// permits an IPSP receiving it to consider the remote IPSP ASP-INACTIVE.
 func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	if c.rejectStaleASPTMAck(requestAspInactive) {
@@ -836,6 +859,34 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	}
 	if err := c.validateTAckRoutingContexts(requestAspInactive, aspAcAck.RoutingContext); err != nil {
 		return err
+	}
+	if c.role == RoleIPSP {
+		acknowledgement := c.claimTAckAcknowledgement(requestAspInactive, aspAcAck.RoutingContext)
+		routingContexts := c.configuredRoutingContexts()
+		if aspAcAck.RoutingContext != nil {
+			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
+		}
+		quiescedRoutingContexts := routingContexts
+		if previousState == StateASPActive {
+			c.noteRoutingContextsInactive(routingContexts)
+		} else {
+			// A scoped reordered or unsolicited Ack cannot imply that every
+			// untouched AS was active. From ASP-DOWN or ASP-INACTIVE the baseline
+			// is inactive in every configured AS; preserve it rather than
+			// materializing an association-wide active set and subtracting only
+			// the named contexts.
+			c.noteRoutingContextsInactive(nil)
+			quiescedRoutingContexts = c.configuredRoutingContexts()
+		}
+		c.commitState(c.stateForActiveRoutingContexts())
+		postTransitionNotify := func() {}
+		if c.as != nil {
+			postTransitionNotify = c.as.quiesceASPFor(c, quiescedRoutingContexts)
+		}
+		c.quiesceUnscopedTraffic()
+		postTransitionNotify()
+		acknowledgement.complete()
+		return nil
 	}
 
 	// Traffic has stopped only for the contexts this Ack names. Clearing every
@@ -923,9 +974,13 @@ func (c *Association) hasAcknowledgedRoutingContexts() bool {
 // momentarily ASP-INACTIVE lets the peer's T(beat) expire and tears down an
 // otherwise healthy association.
 func (c *Association) handleHeartbeat(beat *messages.Heartbeat) error {
-	// No need to create new HeartbeatAck, as it's identical to Heartbeat except the MessageType.
-	beat.Type = messages.MsgTypeHeartbeatAck
-	if _, err := c.WriteSignal(beat); err != nil {
+	ack := messages.NewHeartbeatAck(beat.HeartbeatData.Copy())
+	ack.Others = make([]*params.Param, 0, len(beat.Others))
+	for _, parameter := range beat.Others {
+		ack.Others = append(ack.Others, parameter.Copy())
+	}
+	ack.SetLength()
+	if _, err := c.WriteSignal(ack); err != nil {
 		return err
 	}
 	return nil
@@ -1001,7 +1056,7 @@ func (c *Association) stateForActiveRoutingContexts() State {
 // of an ASP Active message at an SGP or IPSP causes direction of traffic to the
 // ASP sending the ASP Active message, in addition to all the other ASPs that
 // are active", so nobody is displaced.
-func (c *Association) overrideOtherASPs(aspActive *messages.AspActive, activated []uint32) {
+func (c *Association) overrideOtherASPs(activated []uint32) {
 	if c.as == nil {
 		return
 	}
@@ -1011,22 +1066,48 @@ func (c *Association) overrideOtherASPs(aspActive *messages.AspActive, activated
 		if as.TrafficMode() != params.TrafficModeOverride {
 			continue
 		}
+		as.overrideMu.Lock()
+		// Activation was recorded before entering this per-AS serialization.
+		// A challenger that waited here may meanwhile have been displaced by the
+		// preceding winner, so reassert this scope and the derived association
+		// state inside the serialized transition before changing the shared AS.
+		if key.RoutingContextSet {
+			c.noteRoutingContextsActive([]uint32{key.RoutingContext})
+		} else {
+			c.noteRoutingContextsActive(nil)
+		}
+		if !c.commitState(c.stateForActiveRoutingContexts()) {
+			as.overrideMu.Unlock()
+			continue
+		}
 		// The Ack has already made the challenger active from the peer's point
 		// of view. Activate it and displace every incumbent under one AS lock so
-		// two simultaneous challengers cannot each remove the other.
+		// two simultaneous challengers cannot each remove the other. Keep the
+		// Override procedure serialized until the displaced associations have
+		// committed the matching local state; otherwise a later winner can be
+		// inactivated by the stale tail of this transition.
 		peers, postBarrierNotify, startDrain := as.activateOverride(c, c.as.recoveryTimer)
 		for _, peer := range peers {
 			// "Any previously active ASP in the AS is now considered to be in
 			// the state ASP-INACTIVE" in this AS, not every AS on the
-			// association. Record the scoped state before Notify so no further
-			// traffic is selected for the displaced ASP after it is told.
+			// association. Record the scoped state before the traffic barriers so
+			// no later DATA is admitted for the displaced scope.
 			if key.RoutingContextSet {
 				peer.noteRoutingContextsInactive([]uint32{key.RoutingContext})
 			} else {
 				peer.noteRoutingContextsInactive(nil)
 			}
+			if peer.stateForActiveRoutingContexts() == StateASPInactive {
+				peer.commitState(StateASPInactive)
+			}
 		}
 		waitForTrafficBarrier(&as.deliveryMu)
+		for _, peer := range peers {
+			// SGP distribution holds deliveryMu, while an IPSP's direct DATA path
+			// and a contextless SGP path hold the association barrier. Both must
+			// finish before the peer is told that another ASP is active.
+			peer.quiesceUnscopedTraffic()
+		}
 		postBarrierNotify()
 		if startDrain {
 			go as.drainRecoveryQueue()
@@ -1037,5 +1118,6 @@ func (c *Association) overrideOtherASPs(aspActive *messages.AspActive, activated
 			}
 			notifyAlternateASPActive(peer, key, c.peerASPIdentifierParam())
 		}
+		as.overrideMu.Unlock()
 	}
 }

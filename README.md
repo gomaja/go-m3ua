@@ -83,6 +83,28 @@ config.
 config.SetASPIdentifier(1) // ASP-only
 ```
 
+An IPSP Association must select an RFC 4666 Section 4.3 exchange model
+explicitly. Single Exchange is supported. The ASPSM and ASPTM initiators are
+independent because RFC 4666 permits either IPSP to initiate either exchange:
+
+```go
+ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleIPSP})
+if err != nil {
+    log.Fatal(err)
+}
+
+config.IPSP = &m3ua.IPSPConfig{
+    ExchangeModel: m3ua.IPSPExchangeSingle,
+    InitiateASPSM: true,
+    InitiateASPTM: false,
+}
+```
+
+`InitiateASPSM` and `InitiateASPTM` do not describe SCTP initiation. The same
+IPSP configuration works with `Dial` or with `Listen`/`Accept`; the remote IPSP
+uses its own Association policy. At least one IPSP must initiate each required
+exchange; both may initiate, and simultaneous exchanges are supported.
+
 `HeartbeatInfo` controls RFC 4666 M3UA BEAT/BEAT Ack liveness only. It is
 separate from SCTP HEARTBEAT path management, which remains transport/kernel
 behavior below go-m3ua.

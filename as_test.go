@@ -45,6 +45,46 @@ func asTestConn(t *testing.T, reg *applicationServers, state State, rtCtxs ...ui
 	return conn, sent
 }
 
+func TestApplicationServerReservationRollsBackAfterLastFailedOwner(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
+	first := registry.reserve([]ASKey{key})
+	second := registry.reserve([]ASKey{key})
+
+	first.rollback()
+	if _, exists := registry.lookup(key); !exists {
+		t.Fatal("first rollback removed an Application Server still reserved by another Dial")
+	}
+	second.rollback()
+	if _, exists := registry.lookup(key); exists {
+		t.Fatal("last failed owner retained its provisional Application Server")
+	}
+}
+
+func TestApplicationServerReservationPreservesExistingAndCommittedScopes(t *testing.T) {
+	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
+
+	t.Run("existing", func(t *testing.T) {
+		registry := newApplicationServers(time.Hour)
+		registry.register([]ASKey{key})
+		reservation := registry.reserve([]ASKey{key})
+		reservation.rollback()
+		if _, exists := registry.lookup(key); !exists {
+			t.Fatal("failed Dial removed an existing Application Server")
+		}
+	})
+
+	t.Run("committed", func(t *testing.T) {
+		registry := newApplicationServers(time.Hour)
+		reservation := registry.reserve([]ASKey{key})
+		reservation.commit()
+		reservation.rollback()
+		if _, exists := registry.lookup(key); !exists {
+			t.Fatal("successful Dial did not retain its Application Server")
+		}
+	})
+}
+
 // TestASStateFollowsItsASPs covers the AS state machine of RFC 4666 Section
 // 4.3.2, which had no implementation at all: there was no AS type, no
 // AS-ACTIVE/INACTIVE/PENDING, and NewNotify was never called outside tests.

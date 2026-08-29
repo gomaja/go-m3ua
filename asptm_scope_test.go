@@ -406,10 +406,6 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 	}
 	applicationServer := registry.get(1)
 	applicationServer.setTrafficMode(params.TrafficModeOverride)
-	active := messages.NewAspActive(
-		params.NewTrafficModeType(params.TrafficModeOverride),
-		params.NewRoutingContext(1), nil,
-	)
 
 	for attempt := 0; attempt < 2_000; attempt++ {
 		first.noteRoutingContextsActive([]uint32{1, 2})
@@ -430,7 +426,7 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 				defer finished.Done()
 				ready.Done()
 				<-start
-				challenger.overrideOtherASPs(active, []uint32{1})
+				challenger.overrideOtherASPs([]uint32{1})
 			}(challenger)
 		}
 		ready.Wait()

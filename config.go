@@ -215,6 +215,33 @@ type SGPConfig struct {
 	BroadcastFlowIdentifierBytes int
 }
 
+// IPSPExchangeModel identifies the peer-to-peer exchange model used by one
+// IPSP Association. RFC 4666 Section 4.3 defines Single Exchange and Double
+// Exchange independently of which IPSP initiates the SCTP association.
+type IPSPExchangeModel uint8
+
+const (
+	// IPSPExchangeSingle is the mandatory Single Exchange model of RFC 4666
+	// Sections 4.3 and 5.6.1. One ASPSM or ASPTM request-and-ack exchange
+	// changes the state maintained by both IPSPs.
+	IPSPExchangeSingle IPSPExchangeModel = iota + 1
+	// IPSPExchangeDouble is the optional Double Exchange model of RFC 4666
+	// Sections 4.3 and 5.6.2. Its independent directional state is implemented
+	// separately from Single Exchange.
+	IPSPExchangeDouble
+)
+
+// IPSPConfig configures RFC 4666 peer-to-peer procedures for one Association.
+//
+// InitiateASPSM and InitiateASPTM select whether this IPSP automatically starts
+// the initial procedure of the named class. Either IPSP may initiate each
+// exchange, and the choices are independent from SCTP association initiation.
+type IPSPConfig struct {
+	ExchangeModel IPSPExchangeModel
+	InitiateASPSM bool
+	InitiateASPTM bool
+}
+
 // EndpointConfig gives one M3UA Endpoint its immutable RFC 4666 role and any
 // role-specific node policy.
 type EndpointConfig struct {
@@ -294,6 +321,10 @@ type AssociationConfig struct {
 	// PeerSGP identifies the remote Signalling Gateway Process for an
 	// Association owned by an ASP Endpoint. It is invalid for an SGP Endpoint.
 	PeerSGP *SGPIdentity
+	// IPSP is required for an Association owned by an IPSP Endpoint and invalid
+	// for ASP and SGP Endpoints. The exchange model is Association policy: one
+	// IPSP may use different models with different peers.
+	IPSP *IPSPConfig
 
 	RoutingContexts         *params.Param
 	CorrelationID           *params.Param
@@ -391,6 +422,10 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 		peerSGP := *config.PeerSGP
 		snapshot.PeerSGP = &peerSGP
 	}
+	if config.IPSP != nil {
+		ipsp := *config.IPSP
+		snapshot.IPSP = &ipsp
+	}
 	if config.TrafficModes != nil {
 		snapshot.TrafficModes = make(map[uint32]uint32, len(config.TrafficModes))
 		for routingContext, trafficMode := range config.TrafficModes {
@@ -406,15 +441,39 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 	}
 	switch role {
 	case RoleASP:
+		if config.IPSP != nil {
+			return fmt.Errorf("%w: IPSP applies only to an IPSP", ErrInvalidRoleConfiguration)
+		}
 		if config.AuthorizeASP != nil {
 			return fmt.Errorf("%w: AuthorizeASP applies only to an SGP", ErrInvalidRoleConfiguration)
 		}
 	case RoleSGP:
+		if config.IPSP != nil {
+			return fmt.Errorf("%w: IPSP applies only to an IPSP", ErrInvalidRoleConfiguration)
+		}
 		if config.ASPIdentifier != nil {
 			return fmt.Errorf("%w: ASPIdentifier applies only to an ASP", ErrInvalidRoleConfiguration)
 		}
 		if config.PeerSGP != nil {
 			return fmt.Errorf("%w: PeerSGP applies only to an ASP", ErrInvalidRoleConfiguration)
+		}
+	case RoleIPSP:
+		if config.IPSP == nil {
+			return fmt.Errorf("%w: IPSP requires an explicit exchange model", ErrInvalidRoleConfiguration)
+		}
+		if config.AuthorizeASP != nil {
+			return fmt.Errorf("%w: AuthorizeASP applies only to an SGP", ErrInvalidRoleConfiguration)
+		}
+		if config.PeerSGP != nil {
+			return fmt.Errorf("%w: PeerSGP applies only to an ASP", ErrInvalidRoleConfiguration)
+		}
+		switch config.IPSP.ExchangeModel {
+		case IPSPExchangeSingle:
+			return nil
+		case IPSPExchangeDouble:
+			return ErrUnsupportedIPSPExchangeModel
+		default:
+			return fmt.Errorf("%w: exchange model %d", ErrUnsupportedIPSPExchangeModel, config.IPSP.ExchangeModel)
 		}
 	default:
 		return ErrUnsupportedRole

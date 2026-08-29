@@ -707,6 +707,30 @@ func TestContextlessConfiguredASInactivatesWithoutRoutingContext(t *testing.T) {
 	}
 }
 
+func TestContextlessASPInactiveQuiescesApplicationServerBeforeAck(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	association, _ := newTestConn(t, StateASPActive, RoleSGP)
+	association.cfg.RoutingContexts = nil
+	association.as = registry
+	applicationServer := registry.get(contextlessASKeyForConfig(association.cfg))
+	applicationServer.setASPState(association, StateASPActive, time.Hour)
+
+	stateAtAck := StateASPDown
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if _, ok := message.(*messages.AspInactiveAck); ok {
+			applicationServer.mu.Lock()
+			stateAtAck = applicationServer.asps[association]
+			applicationServer.mu.Unlock()
+		}
+		return message.MarshalLen(), nil
+	}
+
+	association.handleSignals(context.Background(), messages.NewAspInactive(nil, nil))
+	if stateAtAck != StateASPInactive {
+		t.Fatalf("contextless AS membership at ASP Inactive Ack = %v, want ASP-INACTIVE", stateAtAck)
+	}
+}
+
 func TestExplicitContextCannotCreateItsOwnRoutingKey(t *testing.T) {
 	for _, test := range []struct {
 		name    string

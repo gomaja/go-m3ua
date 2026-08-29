@@ -255,12 +255,9 @@ func TestFullDataQueueStillAnswersSignalling(t *testing.T) {
 	if err := conn.handleHeartbeat(messages.NewHeartbeat(params.NewHeartbeatData([]byte("alive?")))); err != nil {
 		t.Fatalf("handleHeartbeat with a full DATA queue: %v", err)
 	}
-	// handleHeartbeat answers by flipping the received BEAT's type rather than
-	// building a new message, so the Ack is a *messages.Heartbeat carrying
-	// MsgTypeHeartbeatAck.
 	found := false
 	for _, m := range *sent {
-		if h, ok := m.(*messages.Heartbeat); ok && h.Type == messages.MsgTypeHeartbeatAck {
+		if _, ok := m.(*messages.HeartbeatAck); ok {
 			found = true
 		}
 	}

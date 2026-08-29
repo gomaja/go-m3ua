@@ -211,12 +211,49 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 			return err
 		}
 		return nil
+	case RoleIPSP:
+		return c.handleStateUpdateAsIPSPSingleExchange(current, previous, entering)
 	default:
-		// IPSP (RFC 4666 Section 1.4.3.4) uses symmetric peer procedures and is
-		// enabled only through an explicit Single Exchange model or Double
-		// Exchange model API. Falling through to either the ASP or SGP state
-		// machine would be a protocol error.
 		return fmt.Errorf("%w: role %d", ErrUnsupportedRole, c.role)
+	}
+}
+
+func (c *Association) handleStateUpdateAsIPSPSingleExchange(current, previous State, entering bool) error {
+	if c.cfg == nil || c.cfg.IPSP == nil || c.cfg.IPSP.ExchangeModel != IPSPExchangeSingle {
+		return ErrUnsupportedIPSPExchangeModel
+	}
+
+	switch current {
+	case StateASPDown:
+		if entering {
+			c.forgetActiveRoutingContexts()
+		}
+		if !entering || c.terminating.Load() || !c.cfg.IPSP.InitiateASPSM {
+			return nil
+		}
+		// RFC 4666 Sections 4.3 and 4.3.4.1.2: either IPSP may initiate the
+		// single ASPSM exchange, independently of SCTP association initiation.
+		return c.initiateASPSM()
+	case StateASPInactive:
+		if entering {
+			c.forgetActiveRoutingContexts()
+		}
+		if !entering || previous != StateASPDown || !c.cfg.IPSP.InitiateASPTM {
+			return nil
+		}
+		// RFC 4666 Sections 4.3 and 4.3.4.3.1 permit either IPSP to initiate
+		// the ASPTM exchange. This choice is deliberately separate from ASPSM.
+		return c.initiateASPTM()
+	case StateASPActive:
+		if entering {
+			c.notifyEstablished()
+			c.allowHeartbeat()
+		}
+		return nil
+	case StateSCTPCDI, StateSCTPRI:
+		return ErrSCTPNotAlive
+	default:
+		return ErrInvalidState
 	}
 }
 
@@ -456,13 +493,11 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		c.sendState(stateUnchanged)
 	// ASPSM
 	case *messages.AspUp:
-		// RFC 4666 Section 4.3.4.1: at an SGP, ASP Up always drives the remote
-		// ASP to ASP-INACTIVE, including from ASP-ACTIVE, where an Error
-		// ("Unexpected Message") accompanies the Ack. Those are SGP procedures
-		// ("The ASP is always the initiator of the ASP Up message"), so an ASP
-		// that receives one reports the Error and holds its state — a stray or
-		// forged ASP Up must not take an ASP role's active data path down. A
-		// genuinely unusable message (e.g. wrong SCTP stream) also holds state.
+		// RFC 4666 Section 4.3.4.1 drives the remote ASP at an SGP to
+		// ASP-INACTIVE. Section 4.3.4.1.2 permits the corresponding transition
+		// for a remote IPSP. An ASP that receives ASP Up reports the Error and
+		// holds its state. A genuinely unusable message, such as one received on
+		// the wrong SCTP stream, also holds state.
 		if err := c.handleAspUp(msg); err != nil {
 			c.sendErr(err)
 
@@ -476,11 +511,9 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 	case *messages.AspUpAck:
 		// RFC 4666 Section 4.3.4.1: "If the ASP receives an unexpected ASP Up
 		// Ack message, the ASP should consider itself in the ASP-INACTIVE
-		// state." That clause is scoped to the ASP. An SGP is never the
-		// initiator of ASP Up, so it cannot legitimately receive an ASP Up Ack
-		// and nothing authorises it to change state on one: it reports the
-		// Error and holds, rather than letting a stray message take an active
-		// association's data path down.
+		// state." That clause is scoped to the ASP. Section 4.3.4.1.2 permits
+		// the same remote-IPSP transition. An SGP cannot legitimately receive
+		// ASP Up Ack and holds its state after reporting the Error.
 		if err := c.handleAspUpAck(msg); err != nil {
 			c.sendErr(err)
 
@@ -529,7 +562,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			// An ASP-DOWN peer is refused outright: no Ack was written, and
 			// Figure 3 has no edge from ASP-DOWN to ASP-ACTIVE, so there is
 			// nothing for the peer to act on and no transition to publish.
-			if errors.As(err, &unexpected) && c.role == RoleSGP &&
+			if errors.As(err, &unexpected) && (c.role == RoleSGP || c.role == RoleIPSP) &&
 				c.State() != StateASPDown {
 				c.sendState(StateASPActive)
 				return
@@ -539,7 +572,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			// subset has already been recorded by the handler and must become
 			// active even though the unserved subset also produces an Error.
 			var routingContextError *RoutingContextError
-			if c.role == RoleSGP && errors.As(err, &routingContextError) &&
+			if (c.role == RoleSGP || c.role == RoleIPSP) && errors.As(err, &routingContextError) &&
 				c.stateForActiveRoutingContexts() == StateASPActive {
 				c.sendState(StateASPActive)
 				return
@@ -563,7 +596,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			c.sendErr(err)
 
 			var unexpected *UnexpectedMessageError
-			if errors.As(err, &unexpected) && c.role == RoleSGP &&
+			if errors.As(err, &unexpected) && (c.role == RoleSGP || c.role == RoleIPSP) &&
 				c.State() != StateASPDown {
 				c.sendState(c.stateForActiveRoutingContexts())
 				return
@@ -572,7 +605,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			// As for ASP Active, an Error for unserved contexts accompanies the
 			// successful transition of every context named in the Ack.
 			var routingContextError *RoutingContextError
-			if c.role == RoleSGP && errors.As(err, &routingContextError) {
+			if (c.role == RoleSGP || c.role == RoleIPSP) && errors.As(err, &routingContextError) {
 				c.sendState(c.stateForActiveRoutingContexts())
 				return
 			}
@@ -584,6 +617,8 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		if err := c.handleAspInactiveAck(msg); err != nil {
 			c.sendErr(err)
 			c.sendState(stateUnchanged)
+		} else if c.role == RoleIPSP {
+			c.sendState(c.stateForActiveRoutingContexts())
 		} else if c.hasAcknowledgedRoutingContexts() {
 			c.sendState(StateASPActive)
 		} else {
