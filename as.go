@@ -1276,7 +1276,6 @@ func (as *applicationServer) deliverStateNotifications() {
 		if !closed {
 			notifyASState(event.targets, event.state, event.key, event.aspIdentifier)
 		}
-		close(event.done)
 
 		as.mu.Lock()
 		if len(as.notifications) > 0 && as.notifications[0] == event {
@@ -1284,6 +1283,7 @@ func (as *applicationServer) deliverStateNotifications() {
 			as.notifications = as.notifications[1:]
 		}
 		as.mu.Unlock()
+		close(event.done)
 	}
 }
 

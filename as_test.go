@@ -196,6 +196,58 @@ func TestNotifyIsSentOnASStateChange(t *testing.T) {
 	}
 }
 
+func TestASStateNotificationReleaseWaitsForHeadRetirement(t *testing.T) {
+	applicationServer := &applicationServer{
+		key: ASKey{RoutingContext: 1, RoutingContextSet: true},
+	}
+	association, _ := newTestConn(t, StateASPInactive, RoleSGP)
+	writeStarted := make(chan struct{})
+	allowWrite := make(chan struct{})
+	writeFinished := make(chan struct{})
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		close(writeStarted)
+		<-allowWrite
+		close(writeFinished)
+		return message.MarshalLen(), nil
+	}
+
+	applicationServer.mu.Lock()
+	release := applicationServer.enqueueStateNotificationLocked(
+		ASInactive, []*Association{association}, nil,
+	)
+	event := applicationServer.notifications[0]
+	applicationServer.mu.Unlock()
+
+	releaseReturned := make(chan struct{})
+	go func() {
+		release()
+		close(releaseReturned)
+	}()
+	<-writeStarted
+
+	applicationServer.mu.Lock()
+	close(allowWrite)
+	<-writeFinished
+	select {
+	case <-event.done:
+		applicationServer.mu.Unlock()
+		t.Fatal("notification release completed before the head event was retired")
+	case <-time.After(100 * time.Millisecond):
+	}
+	applicationServer.mu.Unlock()
+
+	select {
+	case <-releaseReturned:
+	case <-time.After(time.Second):
+		t.Fatal("notification release did not complete after the head event was retired")
+	}
+	applicationServer.mu.Lock()
+	defer applicationServer.mu.Unlock()
+	if len(applicationServer.notifications) != 0 {
+		t.Fatalf("notification queue retained %d completed events, want 0", len(applicationServer.notifications))
+	}
+}
+
 // An ASP in ASP-DOWN is excluded, exactly as the sentence says.
 func TestNotifyIsNotSentToAnAspDownPeer(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
