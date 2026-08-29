@@ -72,15 +72,8 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 			c.as.restrictASP(c)
 		}
 	}
-	if aspUp.AspIdentifier != nil {
-		if c.role == RoleSGP && c.as != nil && !c.hasExplicitlyEmptyASPAuthorization() &&
-			!c.as.claimASPIdentifier(c, aspUp.AspIdentifier.AspIdentifier()) {
-			return ErrInvalidASPIdentifier
-		}
-		c.savePeerASPIdentifier(aspUp.AspIdentifier)
-		if c.as != nil {
-			c.as.refreshASPOrdering(c)
-		}
+	if err := c.claimPeerASPIdentifier(aspUp.AspIdentifier); err != nil {
+		return err
 	}
 
 	previousState := c.State()
@@ -146,6 +139,11 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		(aspUpAck.AspIdentifier.Tag != params.AspIdentifier || len(aspUpAck.AspIdentifier.Data) != 4) {
 		return ErrInvalidParameterValue
 	}
+	if c.role == RoleIPSP {
+		if err := c.claimPeerASPIdentifier(aspUpAck.AspIdentifier); err != nil {
+			return err
+		}
+	}
 
 	// The request this answers is complete: stop resending it (T(ack)). Whether
 	// one was outstanding decides what follows.
@@ -158,10 +156,6 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		// RFC 4666 Section 3.5.2 makes the optional ASP Identifier in ASP Up
 		// Ack specifically useful for IPSP communication: the answering IPSP
 		// may identify itself independently of the initiator's ASP Up.
-		if aspUpAck.AspIdentifier != nil {
-			c.savePeerASPIdentifier(aspUpAck.AspIdentifier)
-		}
-
 		// RFC 4666 Section 4.3.4.1.2 permits the receiving IPSP to consider
 		// its peer ASP-INACTIVE when the ASP Up Ack arrives. In Single Exchange
 		// a simultaneous procedure can already have made this association active,
@@ -205,6 +199,21 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		return NewUnexpectedMessageError(aspUpAck)
 	}
 
+	return nil
+}
+
+func (c *Association) claimPeerASPIdentifier(identifier *params.Param) error {
+	if identifier == nil {
+		return nil
+	}
+	if c.as != nil && (c.role == RoleIPSP || !c.hasExplicitlyEmptyASPAuthorization()) &&
+		!c.as.claimASPIdentifier(c, identifier.AspIdentifier()) {
+		return ErrInvalidASPIdentifier
+	}
+	c.savePeerASPIdentifier(identifier)
+	if c.as != nil {
+		c.as.refreshASPOrdering(c)
+	}
 	return nil
 }
 

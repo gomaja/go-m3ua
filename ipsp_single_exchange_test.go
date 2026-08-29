@@ -1324,6 +1324,55 @@ func TestIPSPSingleExchangeRetainsPeerIdentifierFromASPUpAck(t *testing.T) {
 	}
 }
 
+func TestIPSPSingleExchangeRejectsDuplicatePeerIdentifiersInCommonAS(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		accept func(*Association) error
+		reject func(*Association) error
+	}{
+		{
+			name: "ASP Up",
+			accept: func(association *Association) error {
+				return association.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(73), nil))
+			},
+			reject: func(association *Association) error {
+				return association.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(73), nil))
+			},
+		},
+		{
+			name: "ASP Up Ack",
+			accept: func(association *Association) error {
+				return association.handleAspUpAck(messages.NewAspUpAck(params.NewAspIdentifier(73), nil))
+			},
+			reject: func(association *Association) error {
+				association.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
+				return association.handleAspUpAck(messages.NewAspUpAck(params.NewAspIdentifier(73), nil))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := newApplicationServers(time.Hour)
+			t.Cleanup(registry.close)
+			first, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
+			second, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
+			first.as, second.as = registry, registry
+
+			if err := test.accept(first); err != nil {
+				t.Fatalf("first %s: %v", test.name, err)
+			}
+			if err := test.reject(second); !errors.Is(err, ErrInvalidASPIdentifier) {
+				t.Fatalf("second %s error = %v, want ErrInvalidASPIdentifier", test.name, err)
+			}
+			if _, present := second.PeerASPIdentifier(); present {
+				t.Fatal("duplicate peer ASP Identifier was retained")
+			}
+			if test.name == "ASP Up Ack" && second.pendingTAck() != 1 {
+				t.Fatalf("duplicate ASP Up Ack left %d pending T(ack) requests, want 1", second.pendingTAck())
+			}
+		})
+	}
+}
+
 func TestIPSPSingleExchangeRejectsMalformedASPIdentifierWithoutRetiringTAck(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
 	association.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
