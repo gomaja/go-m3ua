@@ -419,10 +419,12 @@ The stable flow key contains the MTP Route plus OPC, DPC, SI, NI, and SLS.
 Message Priority is evaluated separately by congestion policy and does not
 split a sequenced traffic flow. A bounded sticky-flow cache retains the
 selected Association set while every selected Association remains eligible.
-Loadshare keeps a healthy flow on its SG and SGP when candidate inventory
-changes. Primary/backup reevaluates configured order, so a recovered
-higher-priority route takes the flow back. Broadcast recomputes the complete
-eligible set. Within a selected SGP, an eligible previously selected
+Loadshare keeps a healthy flow on its SG and SGP only while that SG remains in
+the best current availability and congestion class. A recovered strictly
+better route takes the flow; equal-ranked candidate changes preserve the
+existing assignment. Primary/backup reevaluates configured order, so a
+recovered higher-priority route takes the flow back. Broadcast recomputes the
+complete eligible set. Within a selected SGP, an eligible previously selected
 Association is retained in every mode. When the assignment becomes ineligible,
 the same deterministic hash and configuration order choose its replacement.
 

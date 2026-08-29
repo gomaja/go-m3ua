@@ -225,9 +225,7 @@ func integrationPeers() []integrationPeer {
 }
 
 func integrationASPConfig() *ASPConfig {
-	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
-	return config
+	return validASPConfig()
 }
 
 func integrationAssociationConfig(role Role, peer integrationPeer) *AssociationConfig {
@@ -267,6 +265,16 @@ func exerciseASPMultiSGTransfer(
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-a DUNA")
 	}
+	if err := sgpAssociations["sg-b"].ReportDestinationStateForNetworkAndRoutingContext(
+		9, 42, pointCode, DestinationRestricted,
+	); err != nil {
+		t.Fatalf("report DRST from sg-b: %v", err)
+	}
+	if !waitFor(func() bool {
+		return aspAssociations["sg-b"].DestinationStateForNetworkAndRoutingContext(9, 42, pointCode) == DestinationRestricted
+	}, 5*time.Second) {
+		t.Fatal("ASP did not apply sg-b DRST")
+	}
 
 	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 5, []byte("through-sg-b"))}
 	if _, err := aspEndpoint.MTPTransfer(request); err != nil {
@@ -284,12 +292,9 @@ func exerciseASPMultiSGTransfer(
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-a DAVA")
 	}
-	if err := aspAssociations["sg-b"].Close(); err != nil {
-		t.Fatalf("close sg-b Association: %v", err)
-	}
-	request = MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 6, []byte("through-sg-a"))}
+	request = MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 5, []byte("through-sg-a"))}
 	if _, err := aspEndpoint.MTPTransfer(request); err != nil {
-		t.Fatalf("MTPTransfer through sg-a: %v", err)
+		t.Fatalf("same-flow MTPTransfer through recovered sg-a: %v", err)
 	}
 	requireIntegrationData(t, sgpAssociations["sg-a"], request.ProtocolData)
 }

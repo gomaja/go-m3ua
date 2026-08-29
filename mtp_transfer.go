@@ -83,8 +83,10 @@ type aspTransferTarget struct {
 }
 
 type aspTransferAssignment struct {
-	key     aspTransferFlowKey
-	targets []aspTransferTarget
+	key                aspTransferFlowKey
+	targets            []aspTransferTarget
+	routeGeneration    uint64
+	congestionDecision aspCongestionDecision
 }
 
 type aspTransferSGP struct {
@@ -205,7 +207,10 @@ func (r *aspRoutes) selectTransfer(
 		cachedEligible = r.transferTargetsEligibleLocked(
 			assignment.targets, mtpRoute.id, request.ProtocolData, congestionDecision,
 		)
-		if cachedEligible && r.transferTargetsUseStickyLoadshare(assignment.targets) {
+		if cachedEligible &&
+			assignment.routeGeneration == r.transferRouteGeneration[mtpRoute.id] &&
+			assignment.congestionDecision == congestionDecision &&
+			r.transferTargetsUseStickyLoadshare(assignment.targets) {
 			r.transferFlowLRU.MoveToFront(element)
 			return append([]aspTransferTarget(nil), assignment.targets...), nil
 		}
@@ -264,12 +269,14 @@ func (r *aspRoutes) selectTransfer(
 	if cachedElement != nil {
 		assignment := cachedElement.Value.(*aspTransferAssignment)
 		if cachedEligible && sameASPTransferTargets(assignment.targets, targets) {
+			assignment.routeGeneration = r.transferRouteGeneration[mtpRoute.id]
+			assignment.congestionDecision = congestionDecision
 			r.transferFlowLRU.MoveToFront(cachedElement)
 			return append([]aspTransferTarget(nil), assignment.targets...), nil
 		}
 		r.removeTransferFlowLocked(cachedElement)
 	}
-	r.rememberTransferFlowLocked(flowKey, targets)
+	r.rememberTransferFlowLocked(flowKey, targets, congestionDecision)
 	return append([]aspTransferTarget(nil), targets...), nil
 }
 
@@ -626,16 +633,41 @@ func (r *aspRoutes) signallingGatewayConfig(id SignallingGatewayID) (aspSignalli
 	return aspSignallingGatewayConfig{}, false
 }
 
-func (r *aspRoutes) rememberTransferFlowLocked(key aspTransferFlowKey, targets []aspTransferTarget) {
+func (r *aspRoutes) rememberTransferFlowLocked(
+	key aspTransferFlowKey,
+	targets []aspTransferTarget,
+	congestionDecision aspCongestionDecision,
+) {
 	if r.config.transferFlowCacheEntries <= 0 {
 		return
 	}
-	assignment := &aspTransferAssignment{key: key, targets: append([]aspTransferTarget(nil), targets...)}
+	assignment := &aspTransferAssignment{
+		key:                key,
+		targets:            append([]aspTransferTarget(nil), targets...),
+		routeGeneration:    r.transferRouteGeneration[key.mtpRoute],
+		congestionDecision: congestionDecision,
+	}
 	element := r.transferFlowLRU.PushFront(assignment)
 	r.transferFlows[key] = element
 	for r.transferFlowLRU.Len() > r.config.transferFlowCacheEntries {
 		r.removeTransferFlowLocked(r.transferFlowLRU.Back())
 	}
+}
+
+func (r *aspRoutes) advanceTransferRouteGenerationLocked(mtpRoute MTPRouteID) {
+	r.transferRouteGeneration[mtpRoute]++
+	if r.transferRouteGeneration[mtpRoute] != 0 {
+		return
+	}
+	for element := r.transferFlowLRU.Front(); element != nil; {
+		next := element.Next()
+		assignment := element.Value.(*aspTransferAssignment)
+		if assignment.key.mtpRoute == mtpRoute {
+			r.removeTransferFlowLocked(element)
+		}
+		element = next
+	}
+	r.transferRouteGeneration[mtpRoute] = 1
 }
 
 func (r *aspRoutes) removeTransferFlowLocked(element *list.Element) {

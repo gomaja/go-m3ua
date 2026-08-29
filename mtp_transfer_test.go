@@ -522,6 +522,103 @@ func TestMTPTransferSGPBroadcastKeepsHealthyLoadsharedSignallingGateway(t *testi
 	}
 }
 
+func TestMTPTransferLoadsharePromotesRecoveredBetterRoute(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		setup   func(*testing.T, map[string]*Association)
+		recover func(*testing.T, map[string]*Association)
+	}{
+		{
+			name: "available over restricted",
+			setup: func(t *testing.T, associations map[string]*Association) {
+				applyASPDUNA(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0)
+				applyASPDRST(t, associations["sg-b/sgp-b1"], 9, 42, 0x123456, 0)
+			},
+			recover: func(t *testing.T, associations map[string]*Association) {
+				applyASPDAVA(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0)
+			},
+		},
+		{
+			name: "less congested",
+			setup: func(t *testing.T, associations map[string]*Association) {
+				applyASPSCON(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0,
+					params.NewCongestionIndications(3))
+				applyASPSCON(t, associations["sg-b/sgp-b1"], 9, 42, 0x123456, 0,
+					params.NewCongestionIndications(2))
+			},
+			recover: func(t *testing.T, associations map[string]*Association) {
+				applyASPSCON(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0,
+					params.NewCongestionIndications(1))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := validASPConfig()
+			config.SignallingGatewaySelection = RouteSelectionLoadshare
+			for index := range config.SignallingGateways {
+				config.SignallingGateways[index].SGPSelection = RouteSelectionLoadshare
+			}
+			endpoint, associations, captures := newASPTransferFixture(t, config)
+			test.setup(t, associations)
+			request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 19, nil)}
+			if _, err := endpoint.MTPTransfer(request); err != nil {
+				t.Fatalf("initial inferior-route MTPTransfer: %v", err)
+			}
+			if captures["sg-b/sgp-b1"].count() != 1 || captures["sg-a/sgp-a1"].count() != 0 {
+				t.Fatalf("initial counts = sg-a:%d sg-b:%d, want 0/1",
+					captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+			}
+
+			test.recover(t, associations)
+			if _, err := endpoint.MTPTransfer(request); err != nil {
+				t.Fatalf("recovered better-route MTPTransfer: %v", err)
+			}
+			if captures["sg-a/sgp-a1"].count() != 1 || captures["sg-b/sgp-b1"].count() != 1 {
+				t.Fatalf("post-recovery counts = sg-a:%d sg-b:%d, want 1/1",
+					captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+			}
+		})
+	}
+}
+
+func TestMTPTransferLoadshareReevaluatesMessagePriorityCongestionPolicy(t *testing.T) {
+	config := validASPConfig()
+	config.SignallingGatewaySelection = RouteSelectionLoadshare
+	for index := range config.SignallingGateways {
+		config.SignallingGateways[index].SGPSelection = RouteSelectionLoadshare
+	}
+	config.CongestionPolicy = func(messagePriority, congestionLevel uint8, levelSet bool) bool {
+		if !levelSet {
+			return false
+		}
+		return messagePriority != 0 || congestionLevel == 2
+	}
+	endpoint, associations, captures := newASPTransferFixture(t, config)
+	applyASPSCON(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0,
+		params.NewCongestionIndications(1))
+	applyASPSCON(t, associations["sg-b/sgp-b1"], 9, 42, 0x123456, 0,
+		params.NewCongestionIndications(2))
+
+	protocolData := transferProtocolData(0x123456, 20, nil)
+	if _, err := endpoint.MTPTransfer(MTPTransferRequest{ProtocolData: protocolData}); err != nil {
+		t.Fatalf("priority-zero MTPTransfer: %v", err)
+	}
+	if captures["sg-b/sgp-b1"].count() != 1 || captures["sg-a/sgp-a1"].count() != 0 {
+		t.Fatalf("priority-zero counts = sg-a:%d sg-b:%d, want 0/1",
+			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+	}
+
+	protocolData = transferProtocolData(0x123456, 20, nil)
+	protocolData.MessagePriority = 1
+	if _, err := endpoint.MTPTransfer(MTPTransferRequest{ProtocolData: protocolData}); err != nil {
+		t.Fatalf("priority-one MTPTransfer: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 || captures["sg-b/sgp-b1"].count() != 1 {
+		t.Fatalf("priority-one counts = sg-a:%d sg-b:%d, want 1/1",
+			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+	}
+}
+
 func TestMTPTransferReturnsNoRouteWhenEverySGPIsIneligible(t *testing.T) {
 	endpoint, associations, _ := newASPTransferFixture(t, validASPConfig())
 	associations["sg-a/sgp-a1"].noteRoutingContextsUnacked(params.NewRoutingContext(1))
@@ -818,6 +915,29 @@ func TestMTPTransferFlowCacheIsBounded(t *testing.T) {
 	endpoint.aspRoutes.mu.RUnlock()
 	if entries != 2 || lruEntries != 2 {
 		t.Fatalf("flow cache sizes = map:%d LRU:%d, want 2", entries, lruEntries)
+	}
+}
+
+func TestTransferRouteGenerationWrapEvictsRouteAssignments(t *testing.T) {
+	routes, err := newASPRoutes(validASPConfig())
+	if err != nil {
+		t.Fatalf("newASPRoutes: %v", err)
+	}
+	const mtpRoute = MTPRouteID("sccp-a")
+	key := aspTransferFlowKey{mtpRoute: mtpRoute}
+	routes.transferRouteGeneration[mtpRoute] = ^uint64(0)
+	routes.rememberTransferFlowLocked(key, []aspTransferTarget{{}}, aspCongestionDecision{})
+	if len(routes.transferFlows) != 1 {
+		t.Fatalf("flow cache entries before wrap = %d, want 1", len(routes.transferFlows))
+	}
+
+	routes.advanceTransferRouteGenerationLocked(mtpRoute)
+	if routes.transferRouteGeneration[mtpRoute] != 1 {
+		t.Fatalf("route generation after wrap = %d, want 1", routes.transferRouteGeneration[mtpRoute])
+	}
+	if len(routes.transferFlows) != 0 || routes.transferFlowLRU.Len() != 0 {
+		t.Fatalf("flow cache after wrap = map:%d LRU:%d, want 0/0",
+			len(routes.transferFlows), routes.transferFlowLRU.Len())
 	}
 }
 

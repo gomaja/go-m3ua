@@ -112,6 +112,7 @@ type aspRoutes struct {
 	stateRecordCount                 int
 	derived                          map[aspDerivedRangeKey]aspDestinationStatus
 	sequence                         uint64
+	transferRouteGeneration          map[MTPRouteID]uint64
 	transferFlows                    map[aspTransferFlowKey]*list.Element
 	transferFlowLRU                  *list.List
 	// transferSequences serializes concurrent MTP-TRANSFER requests sharing
@@ -148,6 +149,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		stateRecordsPerRoute:             make(map[aspRouteStateBudgetKey]int),
 		stateRecordsPerSignallingGateway: make(map[SignallingGatewayID]int),
 		derived:                          make(map[aspDerivedRangeKey]aspDestinationStatus),
+		transferRouteGeneration:          make(map[MTPRouteID]uint64, len(snapshot.mtpRoutes)),
 		transferFlows:                    make(map[aspTransferFlowKey]*list.Element),
 		transferFlowLRU:                  list.New(),
 		transferSequences:                make(map[aspTransferFlowKey]*aspTransferFlowLock),
@@ -720,6 +722,7 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 				continue
 			}
 		}
+		r.advanceTransferRouteGenerationLocked(mtpRoute.id)
 		updated := r.recomputeMTPRouteLocked(mtpRoute)
 		routeIndications := r.derivedStatusIndicationsLocked(mtpRoute, updated)
 		indications = append(indications, routeIndications...)
