@@ -29,7 +29,8 @@ interpretation.
 | --- | --- | --- |
 | M3UA | [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html) | Proposed Standard. It obsoletes RFC 3332 and has no `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc4666.json). The [Datatracker record](https://datatracker.ietf.org/doc/rfc4666/) and [incoming relationship API](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4666&limit=100&format=json) agree. |
 | SIGTRAN security | [RFC 3788](https://www.rfc-editor.org/rfc/rfc3788.html) | Proposed Standard with no formal update or replacement. RFC 4666 [Section 6](https://www.rfc-editor.org/rfc/rfc4666.html#section-6) requires implementations to follow its normative guidance. Its concrete protocol references require the modernization described below. |
-| SCTP | [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html) | Current Proposed Standard SCTP base specification. It obsoletes RFCs 4460, 4960, 6096, 7053, and 8540 and has no later update or replacement in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc9260.json). |
+| SCTP | [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html) | Current Proposed Standard SCTP base specification. It obsoletes RFCs 4460, 4960, 6096, 7053, and 8540 and has no later formal `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc9260.json). |
+| SCTP zero-checksum extension | [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) | Current optional extension for negotiated zero-checksum operation when an alternate error-detection method provides at least equivalent integrity. It does not formally update RFC 9260: the RFC Editor records and the Datatracker incoming-relationship API list no `Updates` relationship. |
 | SCTP authenticated chunks | [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) | Current optional SCTP-AUTH extension. It protects selected SCTP chunks but does not provide M3UA payload confidentiality and is not a substitute for RFC 3788 transport or network protection. |
 | TLS over SCTP | [RFC 3436](https://www.rfc-editor.org/rfc/rfc3436.html) | Current TLS-over-SCTP mapping, updated by [RFC 8996](https://www.rfc-editor.org/rfc/rfc8996.html) to prohibit TLS 1.0 and TLS 1.1. TLS support is optional under RFC 3788 [Section 7](https://www.rfc-editor.org/rfc/rfc3788.html#section-7). |
 | DTLS over SCTP | [RFC 6083](https://www.rfc-editor.org/rfc/rfc6083.html) | Current DTLS-over-SCTP mapping, also updated by RFC 8996. It is not referenced by RFC 3788 and does not silently replace the RFC 3788 TLS procedure. |
@@ -40,7 +41,8 @@ The Datatracker document records, including its
 [RFC 3788](https://datatracker.ietf.org/doc/rfc3788/) records, agree with the
 RFC Editor on the publication status of every document above. Its
 incoming-relationship API agrees that RFC 4666, RFC 3788, and RFC 9260 have no
-later update or replacement and that RFC 8996 updates RFC 3436 and RFC 6083.
+later formal update or replacement and that RFC 8996 updates RFC 3436 and RFC
+6083. RFC 9653 extends SCTP without declaring an `Updates: 9260` relationship.
 The same API does not return every update relationship shown by some supporting
 RFC Editor records, including the RFC 6040 and RFC 7619 updates to RFC 4301.
 This is recorded as a database discrepancy; the modernization table uses the
@@ -103,6 +105,13 @@ implementation. go-sctp and go-m3ua remain responsible for setting socket
 policy correctly, preserving SCTP notifications and errors, and not
 contradicting those procedures. This boundary creates no go-sctp API gap for
 the RFC 9260 errata listed above.
+
+RFC 9653 [Section 7.1](https://www.rfc-editor.org/rfc/rfc9653.html#section-7.1)
+defaults alternate error detection and zero-checksum acceptance to disabled.
+go-m3ua v1.2.0 does not negotiate SCTP-over-DTLS or enable another alternate
+error-detection method, so ordinary kernel CRC32c behavior remains in force.
+The optional RFC 9653 socket control is therefore not required for this
+release's RFC 4666 or RFC 9260 conformance claim.
 
 Related extension registries contain no Verified erratum that changes this
 release. RFC 4895 [Errata 995](https://www.rfc-editor.org/errata/eid995) is Held
