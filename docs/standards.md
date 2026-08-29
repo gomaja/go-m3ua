@@ -44,7 +44,10 @@ incoming-relationship API agrees that RFC 4666, RFC 3788, and RFC 9260 have no
 later formal update or replacement and that RFC 8996 updates RFC 3436 and RFC
 6083. RFC 9653 extends SCTP without declaring an `Updates: 9260` relationship.
 The same API does not return every update relationship shown by some supporting
-RFC Editor records, including the RFC 6040 and RFC 7619 updates to RFC 4301.
+RFC Editor records, including the RFC 6040 and RFC 7619 updates in the
+[RFC 4301 RFC Editor record](https://www.rfc-editor.org/rfc/rfc4301.json), which
+are absent from the matching
+[Datatracker incoming-relationship API result](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4301&limit=100&format=json).
 This is recorded as a database discrepancy; the modernization table uses the
 RFC Editor's published relationships rather than treating an absent
 Datatracker API result as evidence that no relationship exists.
