@@ -247,10 +247,14 @@ type Association struct {
 	// whose selector returns distinct scopes cannot grow the shared registry
 	// without bound.
 	asReservation *applicationServerReservation
-	// unscopedDeliveryMu covers DATA and SSNM on a dedicated association where
-	// no Routing Context was coordinated, so ASP Down can still drain traffic
-	// and network-management writes before Ack.
+	// unscopedDeliveryMu covers peer-directed DATA on an IPSP and DATA/SSNM on
+	// a dedicated association where no Routing Context was coordinated.
 	unscopedDeliveryMu sync.Mutex
+	// localIPSPSSNMDeliveryMu is the independent Double Exchange barrier for
+	// local-directed SCON. RFC 4666 Section 5.6.2 gives DATA and SCON opposite
+	// traffic directions, so withdrawing one direction must not wait for the
+	// other while still draining messages already admitted in its own direction.
+	localIPSPSSNMDeliveryMu sync.Mutex
 	// authorizedRCs is the immutable per-peer subset of the listener's Routing
 	// Context inventory resolved when ASP Up is received. Before resolution, an
 	// SGP retains the all-configured policy; an ASP uses its own
@@ -1263,6 +1267,13 @@ func (c *Association) quiesceUnscopedTraffic() {
 	waitForTrafficBarrier(&c.unscopedDeliveryMu)
 }
 
+func (c *Association) quiesceLocalIPSPSSNMTraffic() {
+	if c == nil || !c.isIPSPDoubleExchange() {
+		return
+	}
+	waitForTrafficBarrier(&c.localIPSPSSNMDeliveryMu)
+}
+
 func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	decoded, err := messages.Parse(raw)
 	if err != nil {
@@ -1346,20 +1357,20 @@ func (c *Association) validateOutboundSSNMRoutingContext(routingContext *params.
 }
 
 func (c *Association) lockResolvedOutboundIPSPSSNMScope(routingContext *params.Param) (func(), error) {
-	c.unscopedDeliveryMu.Lock()
+	c.localIPSPSSNMDeliveryMu.Lock()
 	if c.localIPSPStateValue() != StateASPActive {
-		c.unscopedDeliveryMu.Unlock()
+		c.localIPSPSSNMDeliveryMu.Unlock()
 		return nil, ErrNotEstablished
 	}
 	if routingContext != nil {
 		for _, rtCtx := range routingContext.RoutingContexts() {
 			if !c.routingContextAcked(rtCtx) || c.routingContextOverridden(rtCtx) {
-				c.unscopedDeliveryMu.Unlock()
+				c.localIPSPSSNMDeliveryMu.Unlock()
 				return nil, ErrRoutingContextNotActive
 			}
 		}
 	}
-	return c.unscopedDeliveryMu.Unlock, nil
+	return c.localIPSPSSNMDeliveryMu.Unlock, nil
 }
 
 func ssnmNetworkAppearance(message messages.M3UA) *params.Param {

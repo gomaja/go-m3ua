@@ -298,13 +298,16 @@ func (c *Association) overrideScope(n *messages.Notify) bool {
 		if wholeAssociation {
 			c.noteNoRoutingContextsAcked()
 			c.commitLocalIPSPState(StateASPInactive)
+			c.quiesceLocalIPSPSSNMTraffic()
 			return true
 		}
 		c.noteRoutingContextsOverridden(named)
 		if c.stateForAcknowledgedRoutingContexts() == StateASPInactive {
 			c.commitLocalIPSPState(StateASPInactive)
+			c.quiesceLocalIPSPSSNMTraffic()
 			return true
 		}
+		c.quiesceLocalIPSPSSNMTraffic()
 		return false
 	}
 

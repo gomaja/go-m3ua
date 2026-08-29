@@ -921,6 +921,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 				c.noteNoRoutingContextsAcked()
 			}
 			c.commitLocalIPSPState(c.stateForAcknowledgedRoutingContexts())
+			c.quiesceLocalIPSPSSNMTraffic()
 			acknowledgement.complete()
 			return nil
 		}

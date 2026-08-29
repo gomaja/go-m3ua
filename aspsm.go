@@ -118,6 +118,15 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 }
 
 func (c *Association) handleAspUpDoubleExchange(previousState State, aspUp *messages.AspUp) error {
+	startLocalASPTM := false
+	if c.usesSingleASPSMExchange() {
+		previousLocalState := c.localIPSPStateValue()
+		c.noteNoRoutingContextsAcked()
+		c.commitLocalIPSPState(StateASPInactive)
+		c.quiesceLocalIPSPSSNMTraffic()
+		startLocalASPTM = previousLocalState == StateASPDown &&
+			c.cfg.IPSP.InitiateASPTM && !c.terminating.Load()
+	}
 	c.commitState(StateASPInactive)
 	c.noteRoutingContextsInactive(nil)
 	postAckNotify := func() {}
@@ -135,9 +144,8 @@ func (c *Association) handleAspUpDoubleExchange(previousState State, aspUp *mess
 	}
 	if c.usesSingleASPSMExchange() {
 		c.completeRestartASPSM()
-		c.noteNoRoutingContextsAcked()
-		if err := c.enterLocalIPSPState(StateASPInactive); err != nil {
-			return err
+		if startLocalASPTM {
+			return c.initiateASPTM()
 		}
 	}
 	if previousState == StateASPActive {
@@ -186,6 +194,7 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	}
 	if c.role == RoleIPSP {
 		if c.isIPSPDoubleExchange() {
+			previousLocalState := c.localIPSPStateValue()
 			if c.usesSingleASPSMExchange() {
 				c.commitState(StateASPInactive)
 				c.noteRoutingContextsInactive(nil)
@@ -197,7 +206,12 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 				postTransitionNotify()
 			}
 			c.noteNoRoutingContextsAcked()
-			return c.enterLocalIPSPState(StateASPInactive)
+			c.commitLocalIPSPState(StateASPInactive)
+			c.quiesceLocalIPSPSSNMTraffic()
+			if previousLocalState == StateASPDown && c.cfg.IPSP.InitiateASPTM && !c.terminating.Load() {
+				return c.initiateASPTM()
+			}
+			return nil
 		}
 		// RFC 4666 Section 3.5.2 makes the optional ASP Identifier in ASP Up
 		// Ack specifically useful for IPSP communication: the answering IPSP
@@ -314,14 +328,17 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 
 func (c *Association) handleAspDownDoubleExchange() error {
 	c.commitState(StateASPDown)
+	if c.usesSingleASPSMExchange() {
+		c.commitLocalIPSPState(StateASPDown)
+		c.noteNoRoutingContextsAcked()
+	}
 	postAckNotify := func() {}
 	if c.as != nil {
 		postAckNotify = c.as.quiesceASPDown(c)
 	}
 	c.quiesceUnscopedTraffic()
 	if c.usesSingleASPSMExchange() {
-		c.commitLocalIPSPState(StateASPDown)
-		c.noteNoRoutingContextsAcked()
+		c.quiesceLocalIPSPSSNMTraffic()
 	}
 	ackErr := c.writeMandatoryControls([]messages.M3UA{
 		messages.NewAspDownAck(nil),
@@ -352,6 +369,7 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 			acknowledgement := c.claimTAckAcknowledgement(requestAspDown, nil)
 			c.commitLocalIPSPState(StateASPDown)
 			c.noteNoRoutingContextsAcked()
+			c.quiesceLocalIPSPSSNMTraffic()
 			if c.usesSingleASPSMExchange() {
 				c.commitState(StateASPDown)
 				postTransitionNotify := func() {}

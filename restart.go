@@ -136,6 +136,7 @@ func (c *Association) handleSCTPRestart() {
 		// that transition may start the fresh ASP Up procedure, so it cannot
 		// precede the old traffic barrier.
 		c.commitState(StateASPDown)
+		c.quiesceLocalIPSPSSNMTraffic()
 		c.quiesceUnscopedTraffic()
 	}
 	// Section 4.3.3 requires this only at an ASP; pauseDestinations enforces the

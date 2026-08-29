@@ -657,6 +657,97 @@ func TestIPSPDoubleExchangeLocalInactiveAckDoesNotWaitForTrafficToPeerDATA(t *te
 	}
 }
 
+func TestIPSPDoubleExchangeLocalWithdrawalDrainsAdmittedSCON(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		begin    func(*Association) error
+		complete func(*Association) error
+	}{
+		{
+			name: "ASP Inactive Ack",
+			begin: func(association *Association) error {
+				return association.DeactivateRoutingContexts(11)
+			},
+			complete: func(association *Association) error {
+				return association.handleAspInactiveAck(
+					messages.NewAspInactiveAck(params.NewRoutingContext(11), nil),
+				)
+			},
+		},
+		{
+			name: "ASP Down Ack",
+			begin: func(association *Association) error {
+				_, err := association.initiateASPDown()
+				return err
+			},
+			complete: func(association *Association) error {
+				return association.handleAspDownAck(messages.NewAspDownAck(nil))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			association, _ := newDoubleExchangeIPSPForTest(t)
+			association.setIPSPState(IPSPState{
+				TrafficToLocal: StateASPActive,
+				TrafficToPeer:  StateASPActive,
+			})
+			association.noteRoutingContextsAcked(params.NewRoutingContext(11))
+			association.noteRoutingContextsActive([]uint32{22})
+			if err := test.begin(association); err != nil {
+				t.Fatalf("begin local withdrawal: %v", err)
+			}
+
+			sconStarted := make(chan struct{})
+			releaseSCON := make(chan struct{})
+			association.signalWriter = func(message messages.M3UA) (int, error) {
+				if _, ok := message.(*messages.SignallingCongestion); ok {
+					close(sconStarted)
+					<-releaseSCON
+				}
+				return message.MarshalLen(), nil
+			}
+			sconDone := make(chan error, 1)
+			go func() {
+				_, err := association.WriteSignal(messages.NewSignallingCongestion(
+					params.NewNetworkAppearance(10),
+					params.NewRoutingContext(11),
+					params.NewAffectedPointCode(0x111111),
+					nil, nil, nil,
+				))
+				sconDone <- err
+			}()
+			select {
+			case <-sconStarted:
+			case <-time.After(time.Second):
+				t.Fatal("TrafficToLocal SCON did not enter its transport write")
+			}
+
+			withdrawalDone := make(chan error, 1)
+			go func() { withdrawalDone <- test.complete(association) }()
+			select {
+			case err := <-withdrawalDone:
+				close(releaseSCON)
+				<-sconDone
+				t.Fatalf("local withdrawal completed before admitted SCON drained: %v", err)
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			close(releaseSCON)
+			if err := <-sconDone; err != nil {
+				t.Fatalf("TrafficToLocal SCON: %v", err)
+			}
+			select {
+			case err := <-withdrawalDone:
+				if err != nil {
+					t.Fatalf("complete local withdrawal: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("local withdrawal did not finish after admitted SCON drained")
+			}
+		})
+	}
+}
+
 func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testing.T) {
 	for _, test := range []struct {
 		name          string
