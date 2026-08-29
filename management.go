@@ -123,7 +123,11 @@ func errorCodeName(code uint32) string {
 // inter-ASP communication with the Overriding ASP." That transition is applied
 // by the dispatcher, which owns state publishing.
 func (c *Association) handleNotify(n *messages.Notify) error {
-	switch c.State() {
+	state := c.State()
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPStateValue()
+	}
+	switch state {
 	case StateSCTPCDI, StateSCTPRI, StateASPDown:
 		return NewUnexpectedMessageError(n)
 	}
@@ -172,10 +176,10 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 	// Validate before publishing M-NOTIFY or letting the dispatcher act on an
 	// Alternate ASP Active status. An unknown context must be reported with the
 	// peer's offending values, and rejection must not change any AS state.
-	if err := c.validateRoutingContext(n.RoutingContext); err != nil {
+	if err := c.validateLocalRoutingContext(n.RoutingContext); err != nil {
 		return err
 	}
-	configured := c.configuredRoutingContexts()
+	configured := c.configuredLocalRoutingContexts()
 	if n.RoutingContext == nil && len(configured) == 0 && c.hasExplicitlyEmptyASPAuthorization() {
 		// Section 3.8.1 assigns this exact case its own Error: no RC was
 		// present and configuration cannot identify any referenced AS.
@@ -266,7 +270,7 @@ func (c *Association) overriddenByAlternateAsp(n *messages.Notify) bool {
 // for what that does and does not implement.
 func (c *Association) overrideScope(n *messages.Notify) bool {
 	named := n.RoutingContext.RoutingContexts()
-	configured := c.configuredRoutingContexts()
+	configured := c.configuredLocalRoutingContexts()
 	wholeAssociation := len(named) == 0 || len(configured) == 0
 	if !wholeAssociation {
 		overridden := make(map[uint32]struct{}, len(named))
@@ -289,6 +293,22 @@ func (c *Association) overrideScope(n *messages.Notify) bool {
 			c.noteRoutingContextsOverridden(named)
 		}
 		return wholeAssociation
+	}
+	if c.isIPSPDoubleExchange() {
+		if wholeAssociation {
+			c.noteNoRoutingContextsAcked()
+			c.commitLocalIPSPState(StateASPInactive)
+			c.quiesceLocalIPSPSSNMTraffic()
+			return true
+		}
+		c.noteRoutingContextsOverridden(named)
+		if c.stateForAcknowledgedRoutingContexts() == StateASPInactive {
+			c.commitLocalIPSPState(StateASPInactive)
+			c.quiesceLocalIPSPSSNMTraffic()
+			return true
+		}
+		c.quiesceLocalIPSPSSNMTraffic()
+		return false
 	}
 
 	// RFC 4666 Section 4.3.4.5.1 applies the same Notify procedure between

@@ -486,8 +486,8 @@ func appearanceOf(param *params.Param) (uint32, bool) {
 
 func (c *Association) destinationKey(networkAppearance *params.Param, pointCode uint32) destinationKey {
 	appearance, set := appearanceOf(networkAppearance)
-	if !set && c.cfg != nil {
-		appearance, set = appearanceOf(c.cfg.NetworkAppearance)
+	if !set {
+		appearance, set = appearanceOf(c.outboundNetworkAppearance())
 	}
 	return destinationKey{
 		networkAppearance:    appearance,
@@ -934,7 +934,7 @@ func (c *Association) ssnmRoutingContextsAllowed(routingContext *params.Param, d
 		}
 		if c.role == RoleIPSP {
 			if c.State() != StateASPActive || !c.activeForRoutingContext(rtCtx) ||
-				c.routingContextOverridden(rtCtx) {
+				c.peerRoutingContextOverridden(rtCtx) {
 				return false
 			}
 			continue

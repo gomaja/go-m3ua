@@ -124,6 +124,21 @@ func (c *Association) handleSCTPRestart() {
 	// Drain any retry already entering the writer and cancel every old T(ack)
 	// before ASP-DOWN can start the mandatory fresh ASP-Up procedure.
 	c.resetTAckEpoch()
+	if c.isIPSPDoubleExchange() {
+		c.commitLocalIPSPState(StateASPDown)
+		c.noteNoRoutingContextsAcked()
+		c.forgetActiveRoutingContexts()
+	}
+	if c.role == RoleIPSP {
+		// Close admission for the peer-directed traffic flow before waiting for
+		// DATA already admitted in the old SCTP epoch. RFC 4666 Section 4.3.3
+		// moves the peer IPSP to ASP-DOWN at the restart boundary; publishing
+		// that transition may start the fresh ASP Up procedure, so it cannot
+		// precede the old traffic barrier.
+		c.commitState(StateASPDown)
+		c.quiesceLocalIPSPSSNMTraffic()
+		c.quiesceUnscopedTraffic()
+	}
 	// Section 4.3.3 requires this only at an ASP; pauseDestinations enforces the
 	// role and leaves an SGP's node-wide destination view untouched.
 	c.pauseDestinations()
@@ -148,7 +163,7 @@ func (c *Association) initiatesASPSM() bool {
 		return true
 	}
 	return c.role == RoleIPSP && c.cfg != nil && c.cfg.IPSP != nil &&
-		c.cfg.IPSP.ExchangeModel == IPSPExchangeSingle && c.cfg.IPSP.InitiateASPSM
+		c.cfg.IPSP.InitiateASPSM
 }
 
 // subscribeRestart asks the kernel for SCTP_ASSOC_CHANGE on this association.

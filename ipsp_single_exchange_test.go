@@ -30,10 +30,10 @@ func TestIPSPAssociationRequiresAnExplicitExchangeModel(t *testing.T) {
 			ipsp: &IPSPConfig{ExchangeModel: IPSPExchangeSingle},
 		},
 		{
-			name:    "IPSP Double Exchange not implemented by this change",
+			name:    "IPSP Double Exchange requires directional policy",
 			role:    RoleIPSP,
 			ipsp:    &IPSPConfig{ExchangeModel: IPSPExchangeDouble},
-			wantErr: ErrUnsupportedIPSPExchangeModel,
+			wantErr: ErrInvalidRoleConfiguration,
 		},
 		{
 			name:    "IPSP unknown exchange model",

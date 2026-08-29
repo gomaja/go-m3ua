@@ -12,8 +12,8 @@ import (
 )
 
 func (c *Association) handleData(ctx context.Context, data *messages.Data) {
-	if c.State() != StateASPActive {
-		c.sendErr(NewUnexpectedMessageError(data))
+	if !c.inboundDataActive() {
+		c.sendErrForMessage(data, NewUnexpectedMessageError(data))
 		return
 	}
 
@@ -23,17 +23,17 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 	// direction unchecked meant a peer that broke the rule was rewarded with
 	// delivery.
 	if c.receivedStreamID() == 0 {
-		c.sendErr(NewInvalidSCTPStreamIDError(0))
+		c.sendErrForMessage(data, NewInvalidSCTPStreamIDError(0))
 		return
 	}
 
-	if err := c.validateNetworkAppearance(data.NetworkAppearance); err != nil {
-		c.sendErr(err)
+	if err := c.validateDataNetworkAppearance(data.NetworkAppearance); err != nil {
+		c.sendErrForMessage(data, err)
 		return
 	}
 
 	if err := c.validateDataRoutingContext(data.RoutingContext); err != nil {
-		c.sendErr(err)
+		c.sendErrForMessage(data, err)
 		return
 	}
 
@@ -46,7 +46,7 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 		switch c.role {
 		case RoleSGP:
 			if !c.activeForRoutingContext(rtCtx) {
-				c.sendErr(NewUnexpectedMessageError(data))
+				c.sendErrForMessage(data, NewUnexpectedMessageError(data))
 				return
 			}
 		case RoleASP:
@@ -54,8 +54,12 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 				return
 			}
 		case RoleIPSP:
-			if !c.activeForRoutingContext(rtCtx) || c.routingContextOverridden(rtCtx) {
-				c.sendErr(NewUnexpectedMessageError(data))
+			active := c.activeForRoutingContext(rtCtx)
+			if c.isIPSPDoubleExchange() {
+				active = c.routingContextAcked(rtCtx)
+			}
+			if !active || c.routingContextOverridden(rtCtx) {
+				c.sendErrForMessage(data, NewUnexpectedMessageError(data))
 				return
 			}
 		}
@@ -66,13 +70,13 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 	// and the package installs no recover(), so dereferencing the absent
 	// parameter would terminate the process and every association it serves.
 	if data.ProtocolData == nil {
-		c.sendErr(ErrMissingProtocolData)
+		c.sendErrForMessage(data, ErrMissingProtocolData)
 		return
 	}
 
 	pd, err := data.ProtocolData.ProtocolData()
 	if err != nil {
-		c.sendErr(ErrFailedToPeelOff)
+		c.sendErrForMessage(data, ErrFailedToPeelOff)
 		return
 	}
 
@@ -131,6 +135,9 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 // unknowable.
 func (c *Association) validateDataRoutingContext(peer *params.Param) error {
 	configured := c.configuredRoutingContexts()
+	if c.isIPSPDoubleExchange() {
+		configured = c.configuredLocalRoutingContexts()
+	}
 	if peer == nil {
 		if len(configured) > 1 {
 			return ErrMissingRoutingContext
@@ -138,7 +145,7 @@ func (c *Association) validateDataRoutingContext(peer *params.Param) error {
 		return nil
 	}
 
-	if err := c.validateRoutingContext(peer); err != nil {
+	if err := validateRoutingContextAgainst(peer, configured); err != nil {
 		return err
 	}
 	routingContexts := peer.RoutingContexts()
@@ -155,7 +162,11 @@ func (c *Association) receivedDataRoutingContext(peer *params.Param) (uint32, bo
 	if peer != nil {
 		return peer.RoutingContexts()[0], true
 	}
-	if configured := c.configuredRoutingContexts(); len(configured) == 1 {
+	configured := c.configuredRoutingContexts()
+	if c.isIPSPDoubleExchange() {
+		configured = c.configuredLocalRoutingContexts()
+	}
+	if len(configured) == 1 {
 		return configured[0], true
 	}
 	return 0, false
@@ -166,6 +177,24 @@ func (c *Association) receivedDataRoutingContext(peer *params.Param) (uint32, bo
 // Absence is valid: Network Appearance is Optional, and a dedicated association
 // can identify its SS7 network without carrying it in every message.
 func (c *Association) validateNetworkAppearance(peer *params.Param) error {
+	var configured *params.Param
+	if c != nil && c.cfg != nil {
+		configured = c.cfg.NetworkAppearance
+		if c.isIPSPDoubleExchange() && c.cfg.IPSP.TrafficToPeer != nil {
+			configured = c.cfg.IPSP.TrafficToPeer.NetworkAppearance
+		}
+	}
+	return c.validateNetworkAppearanceAgainst(peer, configured)
+}
+
+func (c *Association) validateDataNetworkAppearance(peer *params.Param) error {
+	if !c.isIPSPDoubleExchange() {
+		return c.validateNetworkAppearance(peer)
+	}
+	return c.validateNetworkAppearanceAgainst(peer, c.localNetworkAppearance())
+}
+
+func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.Param) error {
 	if peer == nil {
 		return nil
 	}
@@ -179,14 +208,10 @@ func (c *Association) validateNetworkAppearance(peer *params.Param) error {
 	// The Invalid Network Appearance Error is explicitly originated by an SGP
 	// when an ASP sends an invalid value. An ASP receiving an SGP's value keeps
 	// it for the MTP3-User rather than reflecting Error code 21 back.
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return nil
 	}
 
-	var configured *params.Param
-	if c.cfg != nil {
-		configured = c.cfg.NetworkAppearance
-	}
 	if configured == nil || configured.Tag != params.NetworkAppearance ||
 		len(configured.Data) != 4 ||
 		configured.NetworkAppearance() != peer.NetworkAppearance() {

@@ -92,6 +92,10 @@ type Association struct {
 	aspTransferMu sync.RWMutex
 	// state is to see the current state
 	state State
+	// localIPSPState is the local IPSP's state for traffic directed to this
+	// IPSP in the RFC 4666 Double Exchange model. state retains the remote
+	// IPSP's state for traffic directed to the peer.
+	localIPSPState State
 	// appliedState is the state the entry-action pass last ran for.
 	//
 	// It exists because state is now committed by sendState, on the dispatch
@@ -142,7 +146,9 @@ type Association struct {
 	// construction. Keeping the public AssociationConfig pointer is necessary for the
 	// remaining settings, but ASPTM runs concurrently with caller code and must
 	// never read a mutable Param or map from it.
-	trafficModes trafficModeSnapshot
+	trafficModes          trafficModeSnapshot
+	localIPSPTrafficModes trafficModeSnapshot
+	peerIPSPTrafficModes  trafficModeSnapshot
 	// peerASPIdentifier is the identifier an ASP supplied in ASP Up. It is
 	// distinct from cfg.ASPIdentifier, which is this endpoint's own optional
 	// identifier and is shared by every association a Listener accepts.
@@ -200,10 +206,10 @@ type Association struct {
 	// the compatibility fallback for an association placed directly into
 	// ASP-ACTIVE while the latter follows an ASP Inactive Ack covering every AS.
 	ackedRCsScoped bool
-	// overriddenRCs are the Routing Contexts an alternate ASP has taken over,
-	// so this ASP may no longer send traffic for them while the association
-	// carries on serving the rest. Guarded by muAckedRCs, which already covers
-	// "what may I send for".
+	// overriddenRCs are the Routing Contexts an alternate ASP has taken over.
+	// For IPSP Double Exchange they belong only to TrafficToLocal, alongside
+	// ackedRCs; the independent TrafficToPeer inventory remains in activeRCs.
+	// Guarded by muAckedRCs, which covers both inventories.
 	overriddenRCs map[uint32]struct{}
 
 	// activeRCs are the Routing Contexts this peer has activated, at an SGP.
@@ -241,10 +247,14 @@ type Association struct {
 	// whose selector returns distinct scopes cannot grow the shared registry
 	// without bound.
 	asReservation *applicationServerReservation
-	// unscopedDeliveryMu covers DATA and SSNM on a dedicated association where
-	// no Routing Context was coordinated, so ASP Down can still drain traffic
-	// and network-management writes before Ack.
+	// unscopedDeliveryMu covers peer-directed DATA on an IPSP and DATA/SSNM on
+	// a dedicated association where no Routing Context was coordinated.
 	unscopedDeliveryMu sync.Mutex
+	// localIPSPSSNMDeliveryMu is the independent Double Exchange barrier for
+	// local-directed SCON. RFC 4666 Section 5.6.2 gives DATA and SCON opposite
+	// traffic directions, so withdrawing one direction must not wait for the
+	// other while still draining messages already admitted in its own direction.
+	localIPSPSSNMDeliveryMu sync.Mutex
 	// authorizedRCs is the immutable per-peer subset of the listener's Routing
 	// Context inventory resolved when ASP Up is received. Before resolution, an
 	// SGP retains the all-configured policy; an ASP uses its own
@@ -413,6 +423,7 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		resumeTo: StateASPActive,
 	}
 	c.trafficModes.freeze(trafficModes)
+	c.freezeTrafficModePolicies()
 
 	// A nil HeartbeatInfo means the caller never asked for M3UA BEATs —
 	// NewAssociationConfig leaves it nil — so it resolves to disabled rather
@@ -476,7 +487,100 @@ func (c *Association) trafficModePolicy() trafficModePolicy {
 	if c == nil {
 		return trafficModePolicy{}
 	}
+	if c.isIPSPDoubleExchange() {
+		return c.peerIPSPTrafficModes.get(nil)
+	}
 	return c.trafficModes.get(c.cfg)
+}
+
+func (c *Association) localTrafficModePolicy() trafficModePolicy {
+	if c == nil {
+		return trafficModePolicy{}
+	}
+	if c.isIPSPDoubleExchange() {
+		return c.localIPSPTrafficModes.get(nil)
+	}
+	return c.trafficModes.get(c.cfg)
+}
+
+func (c *Association) freezeTrafficModePolicies() {
+	if c == nil || c.cfg == nil || c.cfg.IPSP == nil || c.cfg.IPSP.ExchangeModel != IPSPExchangeDouble {
+		return
+	}
+	c.localIPSPTrafficModes.freeze(newIPSPTrafficModePolicy(c.cfg.IPSP.TrafficToLocal))
+	c.peerIPSPTrafficModes.freeze(newIPSPTrafficModePolicy(c.cfg.IPSP.TrafficToPeer))
+}
+
+func (c *Association) isIPSPDoubleExchange() bool {
+	return c != nil && c.role == RoleIPSP && c.cfg != nil && c.cfg.IPSP != nil &&
+		c.cfg.IPSP.ExchangeModel == IPSPExchangeDouble
+}
+
+func (c *Association) usesSingleASPSMExchange() bool {
+	return c.isIPSPDoubleExchange() && c.cfg.IPSP.ASPSMExchange == IPSPASPSMExchangeSingle
+}
+
+func (c *Association) hasLocalIPSPTrafficDirection() bool {
+	return c.isIPSPDoubleExchange() && c.cfg.IPSP.TrafficToLocal != nil
+}
+
+func (c *Association) hasPeerIPSPTrafficDirection() bool {
+	return c.isIPSPDoubleExchange() && c.cfg.IPSP.TrafficToPeer != nil
+}
+
+// IPSPState returns the two independent traffic-direction states of an IPSP
+// Double Exchange Association. For Single Exchange both fields contain State().
+func (c *Association) IPSPState() IPSPState {
+	if c == nil {
+		return IPSPState{}
+	}
+	c.muState.RLock()
+	defer c.muState.RUnlock()
+	if !c.isIPSPDoubleExchange() {
+		return IPSPState{TrafficToLocal: c.state, TrafficToPeer: c.state}
+	}
+	return IPSPState{TrafficToLocal: c.localIPSPState, TrafficToPeer: c.state}
+}
+
+func (c *Association) localIPSPStateValue() State {
+	c.muState.RLock()
+	defer c.muState.RUnlock()
+	return c.localIPSPState
+}
+
+func (c *Association) commitLocalIPSPState(state State) bool {
+	unlockTransfer := c.lockASPTransferMutation()
+	c.muState.Lock()
+	select {
+	case <-c.done:
+		c.muState.Unlock()
+		unlockTransfer()
+		return false
+	default:
+	}
+	changed := c.localIPSPState != state
+	c.localIPSPState = state
+	c.muState.Unlock()
+	unlockTransfer()
+	if changed {
+		c.notifyASPRouteStateChanged()
+	}
+	if state == StateASPActive {
+		c.notifyEstablished()
+		c.allowHeartbeat()
+	}
+	return true
+}
+
+func (c *Association) enterLocalIPSPState(state State) error {
+	previous := c.localIPSPStateValue()
+	if !c.commitLocalIPSPState(state) {
+		return nil
+	}
+	if state == StateASPInactive && previous == StateASPDown && c.cfg.IPSP.InitiateASPTM && !c.terminating.Load() {
+		return c.initiateASPTM()
+	}
+	return nil
 }
 
 // setUpSocket applies the configured SCTP options to the SCTP association this
@@ -636,7 +740,7 @@ func (c *Association) ReadPD() (pd *params.ProtocolDataPayload, err error) {
 // the same queue, so a caller that does not care about that scope can keep using
 // either.
 func (c *Association) ReadData() (*DataMessage, error) {
-	if c.State() != StateASPActive {
+	if !c.inboundDataActive() {
 		return nil, ErrNotEstablished
 	}
 
@@ -745,7 +849,7 @@ func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, 
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.cfg.NetworkAppearance.Copy(), rc, params.NewProtocolData(
+		c.outboundNetworkAppearance().Copy(), rc, params.NewProtocolData(
 			c.cfg.OriginatingPointCode, c.cfg.DestinationPointCode,
 			c.cfg.ServiceIndicator, c.cfg.NetworkIndicator,
 			c.cfg.MessagePriority, c.cfg.SignallingLinkSelection, b,
@@ -869,9 +973,9 @@ func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDat
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.cfg.NetworkAppearance.Copy(), // cannot be changed on an active association
-		rc,                             // the one context identifying this traffic flow
-		protocolData,                   // custom mtp3 protocol data OPC, DPC, SI, NI, MP, and SLS, flexible on active connections
+		c.outboundNetworkAppearance().Copy(),
+		rc,           // the one context identifying this traffic flow
+		protocolData, // custom mtp3 protocol data OPC, DPC, SI, NI, MP, and SLS, flexible on active connections
 		c.cfg.CorrelationID.Copy(),
 	).MarshalBinary()
 	if err != nil {
@@ -893,6 +997,39 @@ func (c *Association) writeSCTPData(data []byte, info *sctp.SndRcvInfo) (int, er
 		return c.dataWriter(data, info)
 	}
 	return c.sctpConn.SCTPWrite(data, info)
+}
+
+func (c *Association) inboundDataActive() bool {
+	if c.isIPSPDoubleExchange() {
+		return c.localIPSPStateValue() == StateASPActive
+	}
+	return c.State() == StateASPActive
+}
+
+func (c *Association) outboundNetworkAppearance() *params.Param {
+	if c == nil || c.cfg == nil {
+		return nil
+	}
+	if c.isIPSPDoubleExchange() {
+		if c.cfg.IPSP.TrafficToPeer == nil {
+			return nil
+		}
+		return c.cfg.IPSP.TrafficToPeer.NetworkAppearance
+	}
+	return c.cfg.NetworkAppearance
+}
+
+func (c *Association) localNetworkAppearance() *params.Param {
+	if c == nil || c.cfg == nil {
+		return nil
+	}
+	if c.isIPSPDoubleExchange() {
+		if c.cfg.IPSP.TrafficToLocal == nil {
+			return nil
+		}
+		return c.cfg.IPSP.TrafficToLocal.NetworkAppearance
+	}
+	return c.cfg.NetworkAppearance
 }
 
 // WriteSignal writes an M3UA message on the SCTP association.
@@ -1051,7 +1188,12 @@ func (c *Association) lockOutboundDataScope(raw []byte) (func(), error) {
 	if !ok {
 		return nil, errors.New("transfer payload did not decode as DATA")
 	}
-	if err := c.validateOutboundNetworkAppearance(data.NetworkAppearance); err != nil {
+	// In RFC 4666 Section 5.6.2 Double Exchange, this DATA belongs to the
+	// peer-directed traffic flow. Its Network Appearance is independent of the
+	// local-directed flow used by outbound SCON.
+	if err := validateOutboundNetworkAppearanceAgainst(
+		data.NetworkAppearance, c.outboundNetworkAppearance(),
+	); err != nil {
 		return nil, err
 	}
 
@@ -1125,6 +1267,13 @@ func (c *Association) quiesceUnscopedTraffic() {
 	waitForTrafficBarrier(&c.unscopedDeliveryMu)
 }
 
+func (c *Association) quiesceLocalIPSPSSNMTraffic() {
+	if c == nil || !c.isIPSPDoubleExchange() {
+		return
+	}
+	waitForTrafficBarrier(&c.localIPSPSSNMDeliveryMu)
+}
+
 func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	decoded, err := messages.Parse(raw)
 	if err != nil {
@@ -1139,10 +1288,14 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	if !known {
 		return func() {}, nil
 	}
-	if err := c.validateOutboundNetworkAppearance(ssnmNetworkAppearance(decoded)); err != nil {
+	// RFC 4666 Section 5.6.2 defines SCON as flowing opposite DATA between
+	// IPSPs, so Double Exchange validates it against the local-directed flow.
+	if err := validateOutboundNetworkAppearanceAgainst(
+		ssnmNetworkAppearance(decoded), c.localNetworkAppearance(),
+	); err != nil {
 		return nil, err
 	}
-	if err := c.validateSSNMRoutingContext(routingContext); err != nil {
+	if err := c.validateOutboundSSNMRoutingContext(routingContext); err != nil {
 		return nil, err
 	}
 
@@ -1150,10 +1303,14 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	if routingContext != nil {
 		routingContexts = routingContext.RoutingContexts()
 	} else {
-		routingContexts = c.configuredRoutingContexts()
+		routingContexts = c.configuredLocalRoutingContexts()
 	}
 	if len(routingContexts) == 0 {
-		if c.State() != StateASPActive {
+		state := c.State()
+		if c.isIPSPDoubleExchange() {
+			state = c.localIPSPStateValue()
+		}
+		if state != StateASPActive {
 			return nil, ErrNotEstablished
 		}
 		if c.role == RoleSGP && c.cfg != nil && c.cfg.RoutingContexts != nil &&
@@ -1164,9 +1321,15 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 			return c.lockResolvedOutboundDataScope(nil)
 		}
 		if c.role == RoleIPSP {
+			if c.isIPSPDoubleExchange() {
+				return c.lockResolvedOutboundIPSPSSNMScope(nil)
+			}
 			return c.lockResolvedOutboundDataScope(nil)
 		}
 		return func() {}, nil
+	}
+	if c.isIPSPDoubleExchange() {
+		return c.lockResolvedOutboundIPSPSSNMScope(params.NewRoutingContext(routingContexts...))
 	}
 	for _, rtCtx := range routingContexts {
 		if _, err := c.routingContextFor(rtCtx); err != nil {
@@ -1177,6 +1340,37 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 		return c.lockResolvedOutboundDataScope(params.NewRoutingContext(routingContexts...))
 	}
 	return c.lockSGPApplicationServers(routingContexts)
+}
+
+func (c *Association) validateOutboundSSNMRoutingContext(routingContext *params.Param) error {
+	configured := c.configuredRoutingContexts()
+	if c.isIPSPDoubleExchange() {
+		configured = c.configuredLocalRoutingContexts()
+	}
+	if err := validateRoutingContextAgainst(routingContext, configured); err != nil {
+		return err
+	}
+	if routingContext == nil && len(configured) > 1 {
+		return ErrMissingRoutingContext
+	}
+	return nil
+}
+
+func (c *Association) lockResolvedOutboundIPSPSSNMScope(routingContext *params.Param) (func(), error) {
+	c.localIPSPSSNMDeliveryMu.Lock()
+	if c.localIPSPStateValue() != StateASPActive {
+		c.localIPSPSSNMDeliveryMu.Unlock()
+		return nil, ErrNotEstablished
+	}
+	if routingContext != nil {
+		for _, rtCtx := range routingContext.RoutingContexts() {
+			if !c.routingContextAcked(rtCtx) || c.routingContextOverridden(rtCtx) {
+				c.localIPSPSSNMDeliveryMu.Unlock()
+				return nil, ErrRoutingContextNotActive
+			}
+		}
+	}
+	return c.localIPSPSSNMDeliveryMu.Unlock, nil
 }
 
 func ssnmNetworkAppearance(message messages.M3UA) *params.Param {
@@ -1198,16 +1392,12 @@ func ssnmNetworkAppearance(message messages.M3UA) *params.Param {
 	}
 }
 
-func (c *Association) validateOutboundNetworkAppearance(networkAppearance *params.Param) error {
+func validateOutboundNetworkAppearanceAgainst(networkAppearance, configured *params.Param) error {
 	if networkAppearance == nil {
 		return nil
 	}
 	if networkAppearance.Tag != params.NetworkAppearance || len(networkAppearance.Data) != 4 {
 		return ErrInvalidNetworkAppearance
-	}
-	var configured *params.Param
-	if c != nil && c.cfg != nil {
-		configured = c.cfg.NetworkAppearance
 	}
 	if configured == nil || configured.Tag != params.NetworkAppearance ||
 		len(configured.Data) != 4 ||
@@ -1279,6 +1469,19 @@ func (c *Association) enqueueNotify(notification *messages.Notify) {
 		return
 	}
 	_ = c.writeMandatoryControls([]messages.M3UA{notification}, true, false)
+}
+
+func (c *Association) enqueueNotifyToAvailablePeer(notification *messages.Notify) {
+	if c == nil || notification == nil {
+		return
+	}
+	c.muState.RLock()
+	if c.state == StateASPDown {
+		c.muState.RUnlock()
+		return
+	}
+	c.enqueueNotify(notification)
+	c.muState.RUnlock()
 }
 
 func (c *Association) writeNotifications() {
@@ -1407,9 +1610,19 @@ func (c *Association) closeWith(cause error) error {
 		c.muState.Lock()
 		previousState := c.state
 		c.state = StateASPDown
+		c.localIPSPState = StateASPDown
 		c.appliedState = StateASPDown
 		c.muState.Unlock()
 		unlockTransfer()
+		if c.isIPSPDoubleExchange() {
+			c.muAckedRCs.Lock()
+			c.ackedRCs = nil
+			c.ackedRCsScoped = true
+			c.activeRCs = nil
+			c.activeRCsScoped = true
+			c.overriddenRCs = nil
+			c.muAckedRCs.Unlock()
+		}
 		c.notifyASPRouteStateChanged()
 		if previousState != StateASPDown {
 			c.notifyStateChange(StateASPDown)
@@ -1518,7 +1731,9 @@ func (c *Association) SetWriteDeadline(t time.Time) error {
 	return c.sctpConn.SetWriteDeadline(t)
 }
 
-// State returns the current RFC 4666 ASP/IPSP state of the Association.
+// State returns the current RFC 4666 ASP/IPSP state of the Association. For
+// IPSP Double Exchange it is the remote IPSP state governing TrafficToPeer;
+// IPSPState returns both independent directions.
 func (c *Association) State() State {
 	c.muState.RLock()
 	defer c.muState.RUnlock()
@@ -1559,14 +1774,42 @@ func (c *Association) configuredRoutingContexts() []uint32 {
 		}
 		c.muAuthorizedRCs.RUnlock()
 	}
+	if c.isIPSPDoubleExchange() {
+		return routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToPeer)
+	}
 	if c.cfg == nil || c.cfg.RoutingContexts == nil {
 		return nil
 	}
 	return append([]uint32(nil), c.cfg.RoutingContexts.RoutingContexts()...)
 }
 
+func (c *Association) configuredLocalRoutingContexts() []uint32 {
+	if c == nil {
+		return nil
+	}
+	if c.isIPSPDoubleExchange() {
+		return routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal)
+	}
+	return c.configuredRoutingContexts()
+}
+
+func routingContextsFromIPSPTrafficConfig(config *IPSPTrafficConfig) []uint32 {
+	if config == nil || config.RoutingContexts == nil {
+		return nil
+	}
+	return append([]uint32(nil), config.RoutingContexts.RoutingContexts()...)
+}
+
 func (c *Association) configuredRoutingContextParam() *params.Param {
 	configured := c.configuredRoutingContexts()
+	if len(configured) == 0 {
+		return nil
+	}
+	return params.NewRoutingContext(configured...)
+}
+
+func (c *Association) configuredLocalRoutingContextParam() *params.Param {
+	configured := c.configuredLocalRoutingContexts()
 	if len(configured) == 0 {
 		return nil
 	}
@@ -1580,6 +1823,9 @@ func (c *Association) configuredASKeys() []ASKey {
 	if c.hasExplicitlyEmptyASPAuthorization() {
 		return nil
 	}
+	if c.isIPSPDoubleExchange() && !c.hasPeerIPSPTrafficDirection() {
+		return nil
+	}
 	return c.asKeysForRoutingContexts(c.configuredRoutingContexts())
 }
 
@@ -1587,13 +1833,19 @@ func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey
 	if c == nil {
 		return nil
 	}
+	appearance, appearanceSet := appearanceOf(c.applicationServerNetworkAppearance())
 	if len(routingContexts) == 0 {
-		return []ASKey{contextlessASKeyForConfig(c.cfg)}
+		return []ASKey{{NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet}}
 	}
 	keys := make([]ASKey, 0, len(routingContexts))
 	seen := make(map[ASKey]struct{}, len(routingContexts))
 	for _, routingContext := range routingContexts {
-		key := asKeyForConfigRoutingContext(c.cfg, routingContext)
+		key := ASKey{
+			NetworkAppearance:    appearance,
+			NetworkAppearanceSet: appearanceSet,
+			RoutingContext:       routingContext,
+			RoutingContextSet:    true,
+		}
 		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
@@ -1601,6 +1853,19 @@ func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+func (c *Association) applicationServerNetworkAppearance() *params.Param {
+	if c == nil || c.cfg == nil {
+		return nil
+	}
+	if c.isIPSPDoubleExchange() {
+		if c.cfg.IPSP.TrafficToPeer == nil {
+			return nil
+		}
+		return c.cfg.IPSP.TrafficToPeer.NetworkAppearance
+	}
+	return c.cfg.NetworkAppearance
 }
 
 func (c *Association) resolveASPAuthorization(identifier *params.Param) error {
@@ -1907,6 +2172,9 @@ func (c *Association) routingContextFor(rtCtx uint32) (*params.Param, error) {
 }
 
 func (c *Association) outboundRoutingContextActive(rtCtx uint32) bool {
+	if c.role == RoleIPSP && c.isIPSPDoubleExchange() {
+		return c.activeForRoutingContext(rtCtx)
+	}
 	if c.role == RoleSGP || c.role == RoleIPSP {
 		return c.activeForRoutingContext(rtCtx) && !c.routingContextOverridden(rtCtx)
 	}
@@ -1977,7 +2245,7 @@ func (c *Association) clearResumeAfterStrayAck() {
 // acknowledged. An Ack with no Routing Context parameter acknowledges whatever
 // the association carries, so every configured context is marked.
 func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
-	rcs := c.configuredRoutingContexts()
+	rcs := c.configuredLocalRoutingContexts()
 	if acked != nil {
 		if named := acked.RoutingContexts(); len(named) > 0 {
 			rcs = named
@@ -2058,7 +2326,7 @@ func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
-	if c.role == RoleIPSP {
+	if c.role == RoleIPSP && !c.isIPSPDoubleExchange() {
 		// Single Exchange uses the same per-AS state in both directions. An
 		// Alternate ASP Active Notify therefore makes each named context inactive,
 		// not merely unsendable. Materialize an association-wide active set before
@@ -2104,7 +2372,9 @@ func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 
 	if len(rcs) == 0 {
 		c.activeRCs, c.activeRCsScoped = nil, false
-		c.overriddenRCs = nil
+		if !c.isIPSPDoubleExchange() {
+			c.overriddenRCs = nil
+		}
 		return
 	}
 	if c.activeRCs == nil {
@@ -2113,7 +2383,9 @@ func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 	c.activeRCsScoped = true
 	for _, rc := range rcs {
 		c.activeRCs[rc] = struct{}{}
-		delete(c.overriddenRCs, rc)
+		if !c.isIPSPDoubleExchange() {
+			delete(c.overriddenRCs, rc)
+		}
 	}
 }
 
@@ -2180,6 +2452,13 @@ func (c *Association) routingContextOverridden(rc uint32) bool {
 	return ok
 }
 
+func (c *Association) peerRoutingContextOverridden(rc uint32) bool {
+	if c.isIPSPDoubleExchange() {
+		return false
+	}
+	return c.routingContextOverridden(rc)
+}
+
 // Shutdown ends the association the orderly way, then closes it.
 //
 // RFC 4666 Section 4.9 offers a node two ways to stop communicating:
@@ -2229,8 +2508,15 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	}
 
 	state := c.State()
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPStateValue()
+	}
 	if state == StateASPActive {
-		request, err := c.beginASPInactive(c.cfg.RoutingContexts)
+		routingContext := c.cfg.RoutingContexts
+		if c.isIPSPDoubleExchange() {
+			routingContext = c.configuredLocalRoutingContextParam()
+		}
+		request, err := c.beginASPInactive(routingContext)
 		if err == nil {
 			err = c.waitTAck(ctx, request)
 		}
@@ -2261,7 +2547,9 @@ func (c *Association) finishTermination(cause error) error {
 }
 
 // StateChanges reports every ASP state transition this association makes, in
-// order, and is closed when the association ends.
+// order, and is closed when the association ends. For IPSP Double Exchange it
+// reports the remote IPSP transitions governing TrafficToPeer; query IPSPState
+// when both independent directions matter.
 //
 // RFC 4666 Section 1.6.3 gives Layer Management an indication for each of these
 // transitions -- M-ASP_UP, M-ASP_DOWN, M-ASP_ACTIVE and M-ASP_INACTIVE, in

@@ -84,8 +84,9 @@ config.SetASPIdentifier(1) // ASP-only
 ```
 
 An IPSP Association must select an RFC 4666 Section 4.3 exchange model
-explicitly. Single Exchange is supported. The ASPSM and ASPTM initiators are
-independent because RFC 4666 permits either IPSP to initiate either exchange:
+explicitly. Single Exchange and Double Exchange are supported. The ASPSM and
+ASPTM initiators are independent because RFC 4666 permits either IPSP to
+initiate either exchange:
 
 ```go
 ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleIPSP})
@@ -99,6 +100,46 @@ config.IPSP = &m3ua.IPSPConfig{
     InitiateASPTM: false,
 }
 ```
+
+Double Exchange gives each direction of data traffic its own Routing Key,
+Network Appearance, Traffic Mode, and ASP/IPSP state as required by RFC 4666
+Sections 4.3 and 5.6.2:
+
+```go
+config.IPSP = &m3ua.IPSPConfig{
+    ExchangeModel: m3ua.IPSPExchangeDouble,
+    ASPSMExchange: m3ua.IPSPASPSMExchangeDouble,
+    InitiateASPSM: true,
+    InitiateASPTM: true,
+    TrafficToLocal: &m3ua.IPSPTrafficConfig{
+        TrafficModeType: params.NewTrafficModeType(params.TrafficModeLoadshare),
+        NetworkAppearance: params.NewNetworkAppearance(10),
+        RoutingContexts: params.NewRoutingContext(11),
+    },
+    TrafficToPeer: &m3ua.IPSPTrafficConfig{
+        TrafficModeType: params.NewTrafficModeType(params.TrafficModeLoadshare),
+        NetworkAppearance: params.NewNetworkAppearance(20),
+        RoutingContexts: params.NewRoutingContext(22),
+    },
+}
+```
+
+With the normal `IPSPASPSMExchangeDouble` procedure, `InitiateASPSM` requires
+`TrafficToLocal`, because that ASP Up establishes the direction in which the
+peer sends DATA to the local IPSP. The agreed
+`IPSPASPSMExchangeSingle` simplification may establish both directions with
+one ASP Up exchange. `InitiateASPTM` always requires `TrafficToLocal`.
+
+`TrafficToLocal` is the traffic the peer sends to this IPSP after this IPSP's
+ASP Up/ASP Active procedures succeed. `TrafficToPeer` is the traffic this IPSP
+sends after the peer's ASP Up/ASP Active procedures succeed. A non-nil traffic
+direction with no `RoutingContexts` represents a configured contextless AS; a
+nil direction is disabled. `Association.IPSPState()` reports both directions.
+
+`IPSPASPSMExchangeDouble` is the normal independent ASPSM exchange.
+`IPSPASPSMExchangeSingle` enables only the agreed ASPSM simplification described
+by RFC 4666 Section 4.3; ASPTM and DATA remain independently directional.
+See the [Double Exchange design](./docs/design/ipsp-double-exchange.md).
 
 `InitiateASPSM` and `InitiateASPTM` do not describe SCTP initiation. The same
 IPSP configuration works with `Dial` or with `Listen`/`Accept`; the remote IPSP

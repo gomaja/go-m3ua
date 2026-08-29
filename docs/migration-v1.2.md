@@ -44,12 +44,52 @@ associationConfig.IPSP = &m3ua.IPSPConfig{
 }
 ```
 
-Single Exchange is implemented. Double Exchange is rejected with
-`ErrUnsupportedIPSPExchangeModel` until its independent directional state is
-implemented. `InitiateASPSM` and `InitiateASPTM` are independent because RFC
-4666 permits either IPSP to initiate either exchange. Neither setting selects
-which IPSP initiates SCTP; use `Dial` or `Listen`/`Accept` for that separate
-RFC 4666 Section 1.4.8 choice.
+Single Exchange and Double Exchange are implemented. `InitiateASPSM` and
+`InitiateASPTM` are independent because RFC 4666 permits either IPSP to
+initiate either exchange. Neither setting selects which IPSP initiates SCTP;
+use `Dial` or `Listen`/`Accept` for that separate RFC 4666 Section 1.4.8
+choice.
+
+Double Exchange must move traffic policy out of the Association-wide fields and
+into the two RFC 4666 data directions:
+
+```go
+associationConfig.IPSP = &m3ua.IPSPConfig{
+    ExchangeModel: m3ua.IPSPExchangeDouble,
+    ASPSMExchange: m3ua.IPSPASPSMExchangeDouble,
+    InitiateASPSM: true,
+    InitiateASPTM: true,
+    TrafficToLocal: &m3ua.IPSPTrafficConfig{
+        TrafficModeType: params.NewTrafficModeType(params.TrafficModeLoadshare),
+        NetworkAppearance: params.NewNetworkAppearance(10),
+        RoutingContexts: params.NewRoutingContext(11),
+    },
+    TrafficToPeer: &m3ua.IPSPTrafficConfig{
+        TrafficModeType: params.NewTrafficModeType(params.TrafficModeLoadshare),
+        NetworkAppearance: params.NewNetworkAppearance(20),
+        RoutingContexts: params.NewRoutingContext(22),
+    },
+}
+```
+
+For Double Exchange, Association-wide `TrafficModeType`, `TrafficModes`,
+`NetworkAppearance`, and `RoutingContexts` are rejected as ambiguous.
+`TrafficToLocal` configures DATA received from the peer and the local
+ASP Up/ASP Active procedure. `TrafficToPeer` configures DATA sent to the peer
+and the peer ASP Up/ASP Active procedure. A non-nil direction with nil
+`RoutingContexts` is a configured contextless AS; a nil direction is disabled.
+
+`ASPSMExchange` is mandatory for Double Exchange. Use
+`IPSPASPSMExchangeDouble` for the normal independent ASPSM procedures, or
+`IPSPASPSMExchangeSingle` only when both IPSPs have agreed to the RFC 4666
+Section 4.3 ASPSM simplification. The simplification does not merge ASPTM or
+DATA state. With normal Double Exchange, `InitiateASPSM` requires
+`TrafficToLocal`; with the agreed ASPSM simplification it may establish both
+directions. `InitiateASPTM` always requires `TrafficToLocal`.
+
+`Association.State()` and `Association.StateChanges()` retain the remote IPSP
+state that governs `TrafficToPeer`. Use `Association.IPSPState()` whenever a
+Double Exchange application needs both independent directions.
 
 A `RoleSGP` endpoint owns one shared Application Server registry, NIF state,
 destination state, MTP3 restart coordinator, and recovery budget. Any number of

@@ -448,6 +448,20 @@ func (e *UnexpectedMessageError) Error() string {
 	return fmt.Sprintf("unexpected message. class: %s, type: %s", e.Msg.MessageClassName(), e.Msg.MessageTypeName())
 }
 
+// receivedMessageError retains the decoded message whose processing failed so
+// an Error response can name that message's traffic scope. RFC 4666 Section
+// 3.8.1 says a Routing Context included in Error identifies the context to
+// which the error applies; an association may carry different IPSP Double
+// Exchange contexts in each direction, so substituting configuration can name
+// the opposite traffic flow.
+type receivedMessageError struct {
+	Message messages.M3UA
+	Err     error
+}
+
+func (e *receivedMessageError) Error() string { return e.Err.Error() }
+func (e *receivedMessageError) Unwrap() error { return e.Err }
+
 // InvalidSCTPStreamIDError reports an SCTP stream outside the range a message
 // may use, whether selected locally or received from the peer.
 type InvalidSCTPStreamIDError struct {
@@ -538,6 +552,13 @@ func (e *RoutingContextError) Is(target error) bool {
 
 func (c *Association) handleErrors(e error) error {
 	var res messages.M3UA
+	errorRoutingContext := c.configuredRoutingContextParam()
+	errorNetworkAppearance := c.cfg.NetworkAppearance.Copy()
+	var receivedError *receivedMessageError
+	if errors.As(e, &receivedError) {
+		errorRoutingContext = routingContextOf(receivedError.Message).Copy()
+		errorNetworkAppearance = networkAppearanceOf(receivedError.Message).Copy()
+	}
 	var InvalidVersionError *InvalidVersionError
 	if errors.As(e, &InvalidVersionError) {
 		// The Error's own common header carries Version 1, which is how the
@@ -585,16 +606,16 @@ func (c *Association) handleErrors(e error) error {
 	if errors.Is(e, ErrManagementBlocking) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrRefusedManagementBlocking),
-			c.configuredRoutingContextParam(),
-			c.cfg.NetworkAppearance.Copy(),
+			errorRoutingContext,
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
 	if errors.Is(e, ErrInvalidParameterValue) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrInvalidParameterValue),
-			c.configuredRoutingContextParam(),
-			c.cfg.NetworkAppearance.Copy(),
+			errorRoutingContext,
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
@@ -618,10 +639,10 @@ func (c *Association) handleErrors(e error) error {
 			// nothing to do with the fault. Nil when the offending message
 			// carried none, since the rule is conditional on it having had them.
 			routingContextOf(UnexpectedMessageError.Msg).Copy(),
-			c.cfg.NetworkAppearance.Copy(),
+			networkAppearanceOf(UnexpectedMessageError.Msg).Copy(),
 			// Mask 0: this is one point code, this node's, not a range.
 			params.NewAffectedPointCodeWithMask(0, c.cfg.OriginatingPointCode),
-			nil,
+			params.NewDiagnosticInformation(first40(nil, UnexpectedMessageError.Msg)),
 		)
 	}
 	var InvalidSCTPStreamIDError *InvalidSCTPStreamIDError
@@ -649,8 +670,8 @@ func (c *Association) handleErrors(e error) error {
 	if errors.Is(e, ErrUnsupportedTrafficMode) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrUnsupportedTrafficModeType),
-			c.configuredRoutingContextParam(),
-			c.cfg.NetworkAppearance.Copy(),
+			errorRoutingContext,
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
@@ -677,7 +698,7 @@ func (c *Association) handleErrors(e error) error {
 		res = messages.NewError(
 			params.NewErrorCode(routingContextError.Code),
 			routingContext,
-			c.cfg.NetworkAppearance.Copy(),
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
@@ -694,8 +715,8 @@ func (c *Association) handleErrors(e error) error {
 	if errors.Is(e, ErrMissingUserCause) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrMissingParameter),
-			c.configuredRoutingContextParam(),
-			c.cfg.NetworkAppearance.Copy(),
+			errorRoutingContext,
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
@@ -704,8 +725,8 @@ func (c *Association) handleErrors(e error) error {
 	if errors.Is(e, ErrMissingAffectedPointCode) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrMissingParameter),
-			c.configuredRoutingContextParam(),
-			c.cfg.NetworkAppearance.Copy(),
+			errorRoutingContext,
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
@@ -714,8 +735,8 @@ func (c *Association) handleErrors(e error) error {
 	if errors.Is(e, ErrMissingProtocolData) {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrMissingParameter),
-			c.configuredRoutingContextParam(),
-			c.cfg.NetworkAppearance.Copy(),
+			errorRoutingContext,
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
@@ -723,7 +744,7 @@ func (c *Association) handleErrors(e error) error {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrMissingParameter),
 			nil,
-			c.cfg.NetworkAppearance.Copy(),
+			errorNetworkAppearance,
 			nil, nil,
 		)
 	}
@@ -748,8 +769,8 @@ func (c *Association) handleErrors(e error) error {
 	// mean anything to the peer.
 	if errors.Is(e, ErrDataQueueFull) {
 		if _, err := c.WriteSignal(messages.NewSignallingCongestion(
-			c.cfg.NetworkAppearance.Copy(),
-			c.configuredRoutingContextParam(),
+			c.localNetworkAppearance().Copy(),
+			c.configuredLocalRoutingContextParam(),
 			params.NewAffectedPointCodeWithMask(0, c.cfg.OriginatingPointCode),
 			nil, nil, nil,
 		)); err != nil {
@@ -852,6 +873,31 @@ func routingContextOf(m messages.M3UA) *params.Param {
 		return v.RoutingContext
 	default:
 		// ASP Up, ASP Down, Heartbeat and their Acks carry no Routing Context.
+		return nil
+	}
+}
+
+// networkAppearanceOf returns the Network Appearance parameter a message
+// carried. Only DATA, SSNM, and Error messages define it.
+func networkAppearanceOf(m messages.M3UA) *params.Param {
+	switch v := m.(type) {
+	case *messages.Data:
+		return v.NetworkAppearance
+	case *messages.DestinationUnavailable:
+		return v.NetworkAppearance
+	case *messages.DestinationAvailable:
+		return v.NetworkAppearance
+	case *messages.DestinationStateAudit:
+		return v.NetworkAppearance
+	case *messages.SignallingCongestion:
+		return v.NetworkAppearance
+	case *messages.DestinationUserPartUnavailable:
+		return v.NetworkAppearance
+	case *messages.DestinationRestricted:
+		return v.NetworkAppearance
+	case *messages.Error:
+		return v.NetworkAppearance
+	default:
 		return nil
 	}
 }

@@ -427,18 +427,18 @@ func (r *applicationServers) getOrCreateLocked(key ASKey) (*applicationServer, b
 	if r.as == nil {
 		r.as = make(map[ASKey]*applicationServer)
 	}
-	server, exists := r.as[key]
+	asEntry, exists := r.as[key]
 	if exists {
-		return server, false
+		return asEntry, false
 	}
-	server = &applicationServer{
+	asEntry = &applicationServer{
 		key:                key,
 		asps:               make(map[*Association]State),
 		broadcastFlowLimit: r.distribution.broadcastFlowCacheEntries,
 		recoveryBudget:     r.recoveryBudget,
 	}
-	r.as[key] = server
-	return server, true
+	r.as[key] = asEntry
+	return asEntry, true
 }
 
 func (r *applicationServers) registrationForLocked(key ASKey, applicationServer *applicationServer, removable bool) *applicationServerRegistration {
@@ -1508,7 +1508,7 @@ func notifyASState(targets []*Association, state ASState, key ASKey, aspIdentifi
 	for _, c := range targets {
 		// Best effort: a peer that cannot be told is a problem for that
 		// association, not for the Application Server or its other members.
-		c.enqueueNotify(messages.NewNotify(
+		c.enqueueNotifyToAvailablePeer(messages.NewNotify(
 			params.NewStatus(info),
 			aspIdentifier.Copy(),
 			routingContextParamForASKey(key),
@@ -1519,7 +1519,7 @@ func notifyASState(targets []*Association, state ASState, key ASKey, aspIdentifi
 
 func notifyASPFailure(targets []*Association, key ASKey, failedIdentifier *params.Param) {
 	for _, target := range targets {
-		target.enqueueNotify(messages.NewNotify(
+		target.enqueueNotifyToAvailablePeer(messages.NewNotify(
 			params.NewStatus(params.AspFailure),
 			failedIdentifier.Copy(),
 			routingContextParamForASKey(key),

@@ -221,6 +221,22 @@ func TestHandleAspUpAckFromInactiveIsAccepted(t *testing.T) {
 	}
 }
 
+func TestCompletedASPUpAckRetransmissionIsAbsorbed(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
+	conn.cfg.TAck = time.Hour
+	conn.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
+
+	if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
+		t.Fatalf("first ASP Up Ack: %v", err)
+	}
+	if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
+		t.Fatalf("delayed completed ASP Up Ack: %v", err)
+	}
+	if got := conn.State(); got != StateASPActive {
+		t.Fatalf("delayed completed ASP Up Ack changed state to %v", got)
+	}
+}
+
 // Every handled message must publish exactly one state. monitor() consumes
 // stateChan to drive handleStateUpdate, which is what applies a transition and
 // signals establishment: publishing none silently drops the transition the

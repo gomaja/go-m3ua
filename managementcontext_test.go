@@ -223,6 +223,38 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 		}
 	})
 
+	t.Run("the last usable context determines association state", func(t *testing.T) {
+		for _, test := range []struct {
+			name      string
+			solicited bool
+		}{
+			{name: "solicited ASP Inactive Ack", solicited: true},
+			{name: "unsolicited ASP Inactive Ack"},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+				asp.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
+				asp.noteRoutingContextsOverridden([]uint32{1})
+				if test.solicited {
+					asp.startTAck(
+						messages.NewAspInactive(params.NewRoutingContext(2), nil),
+						requestAspInactive,
+					)
+				}
+
+				asp.handleSignals(context.Background(),
+					messages.NewAspInactiveAck(params.NewRoutingContext(2), nil))
+
+				if got := asp.State(); got != StateASPInactive {
+					t.Fatalf("state with only overridden RC 1 remaining = %v, want ASP-INACTIVE", got)
+				}
+				if got := asp.resumeAfterStrayAck(); got != !test.solicited {
+					t.Fatalf("resume after stray Ack = %t, want %t", got, !test.solicited)
+				}
+			})
+		}
+	})
+
 	t.Run("an override covering every context stands the association down", func(t *testing.T) {
 		asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 		notify := messages.NewNotify(params.NewStatus(params.AlternateAspActive),

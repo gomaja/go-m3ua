@@ -138,6 +138,16 @@ func TestUnexpectedMessageErrorQuotesThePeersRoutingContexts(t *testing.T) {
 		t.Errorf("Error named Routing Contexts %v, want [2] — the ones the "+
 			"unexpected message carried, not this node's configuration", got)
 	}
+	wire, err := offending.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal offending ASP Active: %v", err)
+	}
+	if e.DiagnosticInformation == nil {
+		t.Fatal("the Error carried no Diagnostic Information")
+	}
+	if got, want := e.DiagnosticInformation.DiagnosticInformation(), first40(wire, nil); !bytes.Equal(got, want) {
+		t.Errorf("Diagnostic Information = %x, want first offending octets %x", got, want)
+	}
 }
 
 // When the unexpected message carried no Routing Context, none is invented: the
