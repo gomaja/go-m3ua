@@ -866,11 +866,22 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 		if aspAcAck.RoutingContext != nil {
 			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
 		}
-		c.noteRoutingContextsInactive(routingContexts)
+		quiescedRoutingContexts := routingContexts
+		if previousState == StateASPActive {
+			c.noteRoutingContextsInactive(routingContexts)
+		} else {
+			// A scoped reordered or unsolicited Ack cannot imply that every
+			// untouched AS was active. From ASP-DOWN or ASP-INACTIVE the baseline
+			// is inactive in every configured AS; preserve it rather than
+			// materializing an association-wide active set and subtracting only
+			// the named contexts.
+			c.noteRoutingContextsInactive(nil)
+			quiescedRoutingContexts = c.configuredRoutingContexts()
+		}
 		c.commitState(c.stateForActiveRoutingContexts())
 		postTransitionNotify := func() {}
 		if c.as != nil {
-			postTransitionNotify = c.as.quiesceASPFor(c, routingContexts)
+			postTransitionNotify = c.as.quiesceASPFor(c, quiescedRoutingContexts)
 		}
 		c.quiesceUnscopedTraffic()
 		postTransitionNotify()

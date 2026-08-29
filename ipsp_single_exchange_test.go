@@ -576,6 +576,28 @@ func TestIPSPSingleExchangeReorderedAcknowledgementsChangePeerState(t *testing.T
 	}
 }
 
+func TestIPSPSingleExchangeScopedInactiveAckDoesNotActivateUntouchedContexts(t *testing.T) {
+	for _, initialState := range []State{StateASPDown, StateASPInactive} {
+		t.Run(initialState.String(), func(t *testing.T) {
+			association, _ := newSingleExchangeIPSPForTest(t, initialState)
+			association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+
+			association.handleSignals(context.Background(), messages.NewAspInactiveAck(
+				params.NewRoutingContext(1), nil,
+			))
+
+			if got := association.State(); got != StateASPInactive {
+				t.Fatalf("state after scoped ASP Inactive Ack = %v, want ASP-INACTIVE", got)
+			}
+			for _, routingContext := range []uint32{1, 2} {
+				if association.activeForRoutingContext(routingContext) {
+					t.Errorf("Routing Context %d became active from %s", routingContext, initialState)
+				}
+			}
+		})
+	}
+}
+
 func TestIPSPSingleExchangeDuplicateASPActiveIsAcknowledged(t *testing.T) {
 	association, sent := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.noteRoutingContextsActive([]uint32{1})
