@@ -435,6 +435,34 @@ func (c *Association) Role() Role {
 	return c.role
 }
 
+// ApplicationServerState returns the state of the unambiguous Application
+// Server identified by routingContext. RFC 4666 Section 4.3.2 requires an SGP
+// to maintain AS state; a Routing Context shared by multiple Network
+// Appearances is ambiguous and therefore reports AS-DOWN rather than guessing.
+func (c *Association) ApplicationServerState(routingContext uint32) ASState {
+	if c == nil || c.as == nil {
+		return ASDown
+	}
+	_, applicationServer, ok, ambiguous := c.as.lookupRoutingContext(routingContext)
+	if !ok || ambiguous {
+		return ASDown
+	}
+	return applicationServer.State()
+}
+
+// ApplicationServerStateForAS returns the RFC 4666 Section 4.3.2 state for an
+// exact ASKey, including its Network Appearance and contextless-AS identity.
+func (c *Association) ApplicationServerStateForAS(key ASKey) ASState {
+	if c == nil || c.as == nil {
+		return ASDown
+	}
+	applicationServer, ok := c.as.lookup(key)
+	if !ok {
+		return ASDown
+	}
+	return applicationServer.State()
+}
+
 func (c *Association) trafficModePolicy() trafficModePolicy {
 	if c == nil {
 		return trafficModePolicy{}

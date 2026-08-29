@@ -7,6 +7,7 @@ package m3ua
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -67,6 +68,42 @@ func TestAnASPIsActiveOnlyInTheApplicationServersItActivatedFor(t *testing.T) {
 	}
 	if st := l.ApplicationServerState(2); st == ASActive {
 		t.Errorf("AS 2 state = %v with no ASP active in it", st)
+	}
+}
+
+func TestSGPAssociationExposesApplicationServerState(t *testing.T) {
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
+	association.as = newApplicationServers(time.Hour, association.cfg)
+	key := routingContextASKey(1)
+	association.as.get(key).setASPState(association, StateASPActive, time.Hour)
+
+	if got := association.ApplicationServerState(1); got != ASActive {
+		t.Fatalf("Routing Context 1 AS state = %v, want %v", got, ASActive)
+	}
+	if got := association.ApplicationServerStateForAS(key); got != ASActive {
+		t.Fatalf("ASKey %v state = %v, want %v", key, got, ASActive)
+	}
+	if got := association.ApplicationServerState(2); got != ASDown {
+		t.Fatalf("untracked Routing Context 2 AS state = %v, want %v", got, ASDown)
+	}
+}
+
+func TestSGPAssociationRoutingContextStateRejectsAmbiguousNetworkAppearances(t *testing.T) {
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
+	association.as = newApplicationServers(time.Hour, association.cfg)
+	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	association.as.get(key10).setASPState(association, StateASPActive, time.Hour)
+	association.as.get(key20)
+
+	if got := association.ApplicationServerState(1); got != ASDown {
+		t.Fatalf("ambiguous Routing Context 1 AS state = %v, want %v", got, ASDown)
+	}
+	if got := association.ApplicationServerStateForAS(key10); got != ASActive {
+		t.Fatalf("ASKey %v state = %v, want %v", key10, got, ASActive)
+	}
+	if got := association.ApplicationServerStateForAS(key20); got != ASDown {
+		t.Fatalf("ASKey %v state = %v, want %v", key20, got, ASDown)
 	}
 }
 
