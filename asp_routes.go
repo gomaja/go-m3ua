@@ -186,8 +186,8 @@ func (r *aspRoutes) attach(association *Association) bool {
 	}
 	r.associationsBySGP[identity][association] = struct{}{}
 	indications := r.recomputeLocked(nil)
-	r.mu.Unlock()
 	r.publish(indications)
+	r.mu.Unlock()
 	return true
 }
 
@@ -210,8 +210,8 @@ func (r *aspRoutes) detach(association *Association) {
 		}
 	}
 	indications := r.recomputeLocked(nil)
-	r.mu.Unlock()
 	r.publish(indications)
+	r.mu.Unlock()
 }
 
 func (r *aspRoutes) signallingGatewayAttachedLocked(signallingGateway SignallingGatewayID) bool {
@@ -389,8 +389,8 @@ func (r *aspRoutes) apply(
 		}
 	}
 	indications := r.recomputeLocked(affectedMTPRoutes)
-	r.mu.Unlock()
 	r.publish(indications)
+	r.mu.Unlock()
 	return nil
 }
 
@@ -452,8 +452,8 @@ func (r *aspRoutes) associationStateChanged(association *Association) {
 		return
 	}
 	indications := r.recomputeLocked(nil)
-	r.mu.Unlock()
 	r.publish(indications)
+	r.mu.Unlock()
 }
 
 func (r *aspRoutes) renumberLocked() {
@@ -978,8 +978,13 @@ func newMTPDestinationStatus(destination MTPDestination, status aspDestinationSt
 }
 
 func (r *aspRoutes) publish(indications []*MTPIndication) {
+	if r == nil || len(indications) == 0 {
+		return
+	}
+	r.indicationMu.Lock()
+	defer r.indicationMu.Unlock()
 	for _, indication := range indications {
-		r.publishOne(indication)
+		r.publishOneLocked(indication)
 	}
 }
 
@@ -989,7 +994,11 @@ func (r *aspRoutes) publishOne(indication *MTPIndication) {
 	}
 	r.indicationMu.Lock()
 	defer r.indicationMu.Unlock()
-	if r.indicationsClosed {
+	r.publishOneLocked(indication)
+}
+
+func (r *aspRoutes) publishOneLocked(indication *MTPIndication) {
+	if indication == nil || r.indicationsClosed {
 		return
 	}
 	if r.resyncPending {

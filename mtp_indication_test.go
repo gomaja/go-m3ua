@@ -5,9 +5,12 @@
 package m3ua
 
 import (
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
@@ -380,6 +383,106 @@ func TestEndpointMTPIndicationDropsDeltasWhileResyncIsPending(t *testing.T) {
 	default:
 		t.Fatal("indication stream did not resume after the resynchronization marker was consumed")
 	}
+}
+
+func TestASPRoutesPublishesEachMutationBatchAtomically(t *testing.T) {
+	routes := &aspRoutes{}
+	const firstBatchSize = 100_000
+	firstIndication := &MTPIndication{Kind: MTPPauseIndication}
+	firstBatch := make([]*MTPIndication, firstBatchSize)
+	for index := range firstBatch {
+		firstBatch[index] = firstIndication
+	}
+	laterBatch := []*MTPIndication{{ResyncRequired: true}}
+	routes.indications = make(chan *MTPIndication, len(firstBatch)+len(laterBatch))
+
+	routes.indicationMu.Lock()
+	firstStarted := make(chan struct{})
+	laterStarted := make(chan struct{})
+	var publishers sync.WaitGroup
+	publishers.Add(2)
+	go func() {
+		defer publishers.Done()
+		close(firstStarted)
+		routes.publish(firstBatch)
+	}()
+	<-firstStarted
+	for range 100 {
+		runtime.Gosched()
+	}
+	go func() {
+		defer publishers.Done()
+		close(laterStarted)
+		routes.publish(laterBatch)
+	}()
+	<-laterStarted
+	for range 100 {
+		runtime.Gosched()
+	}
+	routes.indicationMu.Unlock()
+	publishers.Wait()
+
+	if len(routes.indications) != firstBatchSize+1 {
+		t.Fatalf("published %d indications, want %d", len(routes.indications), firstBatchSize+1)
+	}
+	for index := range firstBatchSize {
+		if got := <-routes.indications; got != firstIndication {
+			t.Fatalf("indication %d = %#v, want an item from the earlier mutation batch", index, got)
+		}
+	}
+	if got := <-routes.indications; got != laterBatch[0] {
+		t.Fatalf("last indication = %#v, want later mutation %#v", got, laterBatch[0])
+	}
+}
+
+func TestASPRoutesKeepsMutationOrderedThroughIndicationPublication(t *testing.T) {
+	endpoint, association, alternate := newASPMultiSGFixture(t)
+	if err := alternate.Close(); err != nil {
+		t.Fatalf("close alternate SG Association: %v", err)
+	}
+	routes := endpoint.aspRoutes
+	drainMTPIndications(routes.indications)
+
+	routes.indicationMu.Lock()
+	routes.mu.Lock()
+	started := make(chan struct{})
+	completed := make(chan error, 1)
+	go func() {
+		close(started)
+		completed <- association.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+			params.NewNetworkAppearance(7),
+			params.NewRoutingContext(1),
+			params.NewAffectedPointCode(0x123456),
+			nil,
+		))
+	}()
+	<-started
+	for range 100 {
+		runtime.Gosched()
+	}
+	routes.mu.Unlock()
+
+	stateVisibleBeforePublication := false
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if routes.mu.TryLock() {
+			stateVisibleBeforePublication = len(routes.availability) != 0
+			routes.mu.Unlock()
+			if stateVisibleBeforePublication {
+				break
+			}
+		}
+		runtime.Gosched()
+	}
+	routes.indicationMu.Unlock()
+	if err := <-completed; err != nil {
+		t.Fatalf("handleDestinationUnavailable: %v", err)
+	}
+	if stateVisibleBeforePublication {
+		t.Fatal("route mutation became visible before its indication batch was published")
+	}
+	requireMTPIndication(t, routes.indications, MTPPauseIndication, "sccp-a", 0x123456, 0,
+		DestinationUnavailable, false, 0, false)
 }
 
 func drainMTPIndications(indications <-chan *MTPIndication) {
