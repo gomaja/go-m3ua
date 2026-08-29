@@ -302,32 +302,48 @@ func TestASPRouteStateRejectsPerRouteRecordOverflowAtomically(t *testing.T) {
 	}
 }
 
-func TestASPRouteStateRejectsEndpointRecordOverflowAtomically(t *testing.T) {
+func TestASPRouteStatePartitionsEndpointBudgetAcrossSignallingGateways(t *testing.T) {
 	config := validASPConfig()
 	config.MaxAffectedPointCodesPerSSNM = 8
 	config.MaxSSNMStateRecordsPerRoute = 8
-	config.MaxSSNMStateRecords = 1
+	config.MaxSSNMStateRecordsPerSignallingGateway = 1
+	config.MaxSSNMStateRecords = 2
 	endpoint, first, second := newASPMultiSGFixtureWithConfig(t, config)
 
 	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
-	err := second.handleDestinationUnavailable(messages.NewDestinationUnavailable(
-		params.NewNetworkAppearance(9),
-		params.NewRoutingContext(42),
-		params.NewAffectedPointCode(0x123456),
+	applyASPDUNA(t, second, 9, 42, 0x123456, 0)
+	err := first.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		params.NewAffectedPointCode(0x123457),
 		nil,
 	))
 	if !errors.Is(err, ErrASPRouteStateLimit) {
-		t.Fatalf("Endpoint overflow error = %v, want ErrASPRouteStateLimit", err)
+		t.Fatalf("first SG overflow error = %v, want ErrASPRouteStateLimit", err)
+	}
+	if err := second.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(9),
+		params.NewRoutingContext(42),
+		params.NewAffectedPointCode(0x123457),
+		nil,
+	)); !errors.Is(err, ErrASPRouteStateLimit) {
+		t.Fatalf("second SG overflow error = %v, want ErrASPRouteStateLimit", err)
 	}
 	endpoint.aspRoutes.mu.RLock()
 	recordCount := endpoint.aspRoutes.stateRecordCount
+	firstRecords := endpoint.aspRoutes.stateRecordsPerSignallingGateway["sg-a"]
+	secondRecords := endpoint.aspRoutes.stateRecordsPerSignallingGateway["sg-b"]
 	availabilityRecords := len(endpoint.aspRoutes.availability)
 	endpoint.aspRoutes.mu.RUnlock()
-	if recordCount != 1 || availabilityRecords != 1 {
-		t.Fatalf("Endpoint overflow left count %d and %d availability records, want 1 and 1", recordCount, availabilityRecords)
+	if recordCount != 2 || firstRecords != 1 || secondRecords != 1 || availabilityRecords != 2 {
+		t.Fatalf("partitioned budgets = total:%d sg-a:%d sg-b:%d availability:%d, want 2/1/1/2",
+			recordCount, firstRecords, secondRecords, availabilityRecords)
 	}
-	if state := second.DestinationStateForNetworkAndRoutingContext(9, 42, 0x123456); state != DestinationAvailable {
-		t.Fatalf("Endpoint overflow changed Association destination state to %v", state)
+	if state := first.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123457); state != DestinationAvailable {
+		t.Fatalf("first SG overflow changed Association destination state to %v", state)
+	}
+	if state := second.DestinationStateForNetworkAndRoutingContext(9, 42, 0x123457); state != DestinationAvailable {
+		t.Fatalf("second SG overflow changed Association destination state to %v", state)
 	}
 }
 
@@ -335,7 +351,8 @@ func TestASPRouteStateOverwriteDoesNotConsumeRecordBudget(t *testing.T) {
 	config := validASPConfig()
 	config.MaxAffectedPointCodesPerSSNM = 8
 	config.MaxSSNMStateRecordsPerRoute = 1
-	config.MaxSSNMStateRecords = 1
+	config.MaxSSNMStateRecordsPerSignallingGateway = 1
+	config.MaxSSNMStateRecords = 2
 	endpoint, first, _ := newASPMultiSGFixtureWithConfig(t, config)
 
 	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
@@ -397,7 +414,8 @@ func TestASPRouteStateBudgetIsAtomicUnderConcurrentSSNM(t *testing.T) {
 	config := validASPConfig()
 	config.MaxAffectedPointCodesPerSSNM = 1
 	config.MaxSSNMStateRecordsPerRoute = 8
-	config.MaxSSNMStateRecords = 8
+	config.MaxSSNMStateRecordsPerSignallingGateway = 8
+	config.MaxSSNMStateRecords = 16
 	endpoint, first, _ := newASPMultiSGFixtureWithConfig(t, config)
 	const attempts = 32
 	results := make(chan error, attempts)
@@ -440,22 +458,19 @@ func TestASPRouteStateReclaimsDetachedSignallingGatewayBudget(t *testing.T) {
 	config := validASPConfig()
 	config.MaxAffectedPointCodesPerSSNM = 1
 	config.MaxSSNMStateRecordsPerRoute = 1
-	config.MaxSSNMStateRecords = 1
+	config.MaxSSNMStateRecordsPerSignallingGateway = 1
+	config.MaxSSNMStateRecords = 2
 	endpoint, first, second := newASPMultiSGFixtureWithConfig(t, config)
 
 	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
-	if err := second.handleDestinationUnavailable(messages.NewDestinationUnavailable(
-		params.NewNetworkAppearance(9),
-		params.NewRoutingContext(42),
-		params.NewAffectedPointCode(0x123456),
-		nil,
-	)); !errors.Is(err, ErrASPRouteStateLimit) {
-		t.Fatalf("pre-detach second SG error = %v, want ErrASPRouteStateLimit", err)
-	}
+	applyASPDUNA(t, second, 9, 42, 0x123456, 0)
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first SG Association: %v", err)
 	}
-	applyASPDUNA(t, second, 9, 42, 0x123456, 0)
+	replacement := attachASPRouteAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+	applyASPDUNA(t, replacement, 7, 1, 0x123457, 0)
 
 	endpoint.aspRoutes.mu.RLock()
 	recordCount := endpoint.aspRoutes.stateRecordCount
@@ -466,13 +481,17 @@ func TestASPRouteStateReclaimsDetachedSignallingGatewayBudget(t *testing.T) {
 	secondBudget := endpoint.aspRoutes.stateRecordsPerRoute[aspRouteStateBudgetKey{
 		signallingGateway: "sg-b", mtpRoute: "sccp-a",
 	}]
-	_, firstIndexed, _, _ := endpoint.aspRoutes.indexedRouteStateForRangeLocked(
+	_, oldFirstIndexed, _, _ := endpoint.aspRoutes.indexedRouteStateForRangeLocked(
 		"sg-a", "sccp-a", 0x123456, 0,
 	)
+	_, replacementIndexed, _, _ := endpoint.aspRoutes.indexedRouteStateForRangeLocked(
+		"sg-a", "sccp-a", 0x123457, 0,
+	)
 	endpoint.aspRoutes.mu.RUnlock()
-	if recordCount != 1 || availabilityRecords != 1 || firstBudget != 0 || secondBudget != 1 || firstIndexed {
-		t.Fatalf("post-reclaim state = count:%d availability:%d sg-a:%d sg-b:%d indexed-a:%v",
-			recordCount, availabilityRecords, firstBudget, secondBudget, firstIndexed)
+	if recordCount != 2 || availabilityRecords != 2 || firstBudget != 1 || secondBudget != 1 ||
+		oldFirstIndexed || !replacementIndexed {
+		t.Fatalf("post-reclaim state = count:%d availability:%d sg-a:%d sg-b:%d old-a:%v replacement-a:%v",
+			recordCount, availabilityRecords, firstBudget, secondBudget, oldFirstIndexed, replacementIndexed)
 	}
 }
 
@@ -480,7 +499,8 @@ func TestASPRouteStateRemainsWhileSignallingGatewayHasAssociation(t *testing.T) 
 	config := validASPConfig()
 	config.MaxAffectedPointCodesPerSSNM = 1
 	config.MaxSSNMStateRecordsPerRoute = 1
-	config.MaxSSNMStateRecords = 1
+	config.MaxSSNMStateRecordsPerSignallingGateway = 1
+	config.MaxSSNMStateRecords = 2
 	endpoint, first, secondGateway := newASPMultiSGFixtureWithConfig(t, config)
 	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
 	secondAssociation := attachASPRouteAssociation(t, endpoint, identity, 7, 1)
@@ -489,18 +509,18 @@ func TestASPRouteStateRemainsWhileSignallingGatewayHasAssociation(t *testing.T) 
 	if err := first.Close(); err != nil {
 		t.Fatalf("close one SG Association: %v", err)
 	}
-	if err := secondGateway.handleDestinationUnavailable(messages.NewDestinationUnavailable(
-		params.NewNetworkAppearance(9),
-		params.NewRoutingContext(42),
-		params.NewAffectedPointCode(0x123456),
+	if err := secondAssociation.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		params.NewAffectedPointCode(0x123457),
 		nil,
 	)); !errors.Is(err, ErrASPRouteStateLimit) {
-		t.Fatalf("second SG error while first SG remains attached = %v, want ErrASPRouteStateLimit", err)
+		t.Fatalf("same SG error while another Association remains attached = %v, want ErrASPRouteStateLimit", err)
 	}
+	applyASPDUNA(t, secondGateway, 9, 42, 0x123456, 0)
 	if err := secondAssociation.Close(); err != nil {
 		t.Fatalf("close last SG Association: %v", err)
 	}
-	applyASPDUNA(t, secondGateway, 9, 42, 0x123456, 0)
 }
 
 func TestASPRouteAggregationSeparatesMTPRoutes(t *testing.T) {

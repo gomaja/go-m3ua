@@ -121,6 +121,10 @@ type ASPConfig struct {
 	// records for one route between the ASP and an SG. Availability and
 	// congestion records are independent and each consumes one record.
 	MaxSSNMStateRecordsPerRoute int
+	// MaxSSNMStateRecordsPerSignallingGateway reserves a separate retained-state
+	// budget for every provisioned SG. Zero partitions MaxSSNMStateRecords
+	// equally across the configured SGs.
+	MaxSSNMStateRecordsPerSignallingGateway int
 	// MaxSSNMStateRecords bounds those retained route records across the ASP
 	// Endpoint.
 	MaxSSNMStateRecords int
@@ -151,17 +155,18 @@ type aspSignallingGatewayConfig struct {
 }
 
 type aspRoutingConfig struct {
-	signallingGatewaySelection   RouteSelectionMode
-	mtpRoutes                    []aspMTPRoute
-	mtpRouteByID                 map[MTPRouteID]int
-	signallingGateways           []aspSignallingGatewayConfig
-	sgpByIdentity                map[SGPIdentity]aspSGPConfig
-	congestionPolicy             ASPCongestionPolicy
-	transferFlowCacheEntries     int
-	mtpIndicationQueueSize       int
-	maxAffectedPointCodesPerSSNM int
-	maxSSNMStateRecordsPerRoute  int
-	maxSSNMStateRecords          int
+	signallingGatewaySelection              RouteSelectionMode
+	mtpRoutes                               []aspMTPRoute
+	mtpRouteByID                            map[MTPRouteID]int
+	signallingGateways                      []aspSignallingGatewayConfig
+	sgpByIdentity                           map[SGPIdentity]aspSGPConfig
+	congestionPolicy                        ASPCongestionPolicy
+	transferFlowCacheEntries                int
+	mtpIndicationQueueSize                  int
+	maxAffectedPointCodesPerSSNM            int
+	maxSSNMStateRecordsPerRoute             int
+	maxSSNMStateRecordsPerSignallingGateway int
+	maxSSNMStateRecords                     int
 }
 
 func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
@@ -189,22 +194,26 @@ func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
 	if config.MaxSSNMStateRecordsPerRoute < 0 {
 		return aspRoutingConfig{}, invalidASPConfig("negative SSNM state records per route %d", config.MaxSSNMStateRecordsPerRoute)
 	}
+	if config.MaxSSNMStateRecordsPerSignallingGateway < 0 {
+		return aspRoutingConfig{}, invalidASPConfig("negative SSNM state records per Signalling Gateway %d", config.MaxSSNMStateRecordsPerSignallingGateway)
+	}
 	if config.MaxSSNMStateRecords < 0 {
 		return aspRoutingConfig{}, invalidASPConfig("negative SSNM state records %d", config.MaxSSNMStateRecords)
 	}
 
 	snapshot := aspRoutingConfig{
-		signallingGatewaySelection:   config.SignallingGatewaySelection,
-		mtpRoutes:                    make([]aspMTPRoute, 0, len(config.MTPRoutes)),
-		mtpRouteByID:                 make(map[MTPRouteID]int, len(config.MTPRoutes)),
-		signallingGateways:           make([]aspSignallingGatewayConfig, 0, len(config.SignallingGateways)),
-		sgpByIdentity:                make(map[SGPIdentity]aspSGPConfig),
-		congestionPolicy:             config.CongestionPolicy,
-		transferFlowCacheEntries:     config.TransferFlowCacheEntries,
-		mtpIndicationQueueSize:       config.MTPIndicationQueueSize,
-		maxAffectedPointCodesPerSSNM: config.MaxAffectedPointCodesPerSSNM,
-		maxSSNMStateRecordsPerRoute:  config.MaxSSNMStateRecordsPerRoute,
-		maxSSNMStateRecords:          config.MaxSSNMStateRecords,
+		signallingGatewaySelection:              config.SignallingGatewaySelection,
+		mtpRoutes:                               make([]aspMTPRoute, 0, len(config.MTPRoutes)),
+		mtpRouteByID:                            make(map[MTPRouteID]int, len(config.MTPRoutes)),
+		signallingGateways:                      make([]aspSignallingGatewayConfig, 0, len(config.SignallingGateways)),
+		sgpByIdentity:                           make(map[SGPIdentity]aspSGPConfig),
+		congestionPolicy:                        config.CongestionPolicy,
+		transferFlowCacheEntries:                config.TransferFlowCacheEntries,
+		mtpIndicationQueueSize:                  config.MTPIndicationQueueSize,
+		maxAffectedPointCodesPerSSNM:            config.MaxAffectedPointCodesPerSSNM,
+		maxSSNMStateRecordsPerRoute:             config.MaxSSNMStateRecordsPerRoute,
+		maxSSNMStateRecordsPerSignallingGateway: config.MaxSSNMStateRecordsPerSignallingGateway,
+		maxSSNMStateRecords:                     config.MaxSSNMStateRecords,
 	}
 	if snapshot.transferFlowCacheEntries == 0 {
 		snapshot.transferFlowCacheEntries = DefaultTransferFlowCacheEntries
@@ -220,6 +229,22 @@ func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
 	}
 	if snapshot.maxSSNMStateRecords == 0 {
 		snapshot.maxSSNMStateRecords = DefaultMaxSSNMStateRecords
+	}
+	if snapshot.maxSSNMStateRecords < len(config.SignallingGateways) {
+		return aspRoutingConfig{}, invalidASPConfig(
+			"SSNM state record limit %d cannot reserve one record for each of %d Signalling Gateways",
+			snapshot.maxSSNMStateRecords, len(config.SignallingGateways))
+	}
+	if snapshot.maxSSNMStateRecordsPerSignallingGateway == 0 {
+		snapshot.maxSSNMStateRecordsPerSignallingGateway =
+			snapshot.maxSSNMStateRecords / len(config.SignallingGateways)
+	}
+	if snapshot.maxSSNMStateRecordsPerSignallingGateway >
+		snapshot.maxSSNMStateRecords/len(config.SignallingGateways) {
+		return aspRoutingConfig{}, invalidASPConfig(
+			"%d SSNM state records per Signalling Gateway cannot fit %d reservations in Endpoint limit %d",
+			snapshot.maxSSNMStateRecordsPerSignallingGateway,
+			len(config.SignallingGateways), snapshot.maxSSNMStateRecords)
 	}
 
 	for _, mtpRoute := range config.MTPRoutes {
@@ -298,6 +323,16 @@ func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
 				}
 				if _, exists := routeKeys[route.MTPRoute]; exists {
 					return aspRoutingConfig{}, invalidASPConfig("SGP %q in Signalling Gateway %q has duplicate mapping for MTP Route %q", sgp.ID, signallingGateway.ID, route.MTPRoute)
+				}
+				if !route.AS.NetworkAppearanceSet && route.AS.NetworkAppearance != 0 {
+					return aspRoutingConfig{}, invalidASPConfig(
+						"SGP %q in Signalling Gateway %q has Network Appearance %d without presence",
+						sgp.ID, signallingGateway.ID, route.AS.NetworkAppearance)
+				}
+				if !route.AS.RoutingContextSet && route.AS.RoutingContext != 0 {
+					return aspRoutingConfig{}, invalidASPConfig(
+						"SGP %q in Signalling Gateway %q has Routing Context %d without presence",
+						sgp.ID, signallingGateway.ID, route.AS.RoutingContext)
 				}
 				routeKeys[route.MTPRoute] = struct{}{}
 				mappedMTPRoutes[route.MTPRoute] = struct{}{}

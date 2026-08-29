@@ -75,6 +75,7 @@ type ASPConfig struct {
     MTPIndicationQueueSize       int
     MaxAffectedPointCodesPerSSNM int
     MaxSSNMStateRecordsPerRoute  int
+    MaxSSNMStateRecordsPerSignallingGateway int
     MaxSSNMStateRecords          int
 }
 ```
@@ -85,11 +86,15 @@ maps those routes to the peer-specific Network Appearance and Routing
 Context values used by each SGP. The configuration is deeply copied by
 `NewEndpoint`.
 
-The three SSNM limits bound peer-controlled work and retained route state. A
+The four SSNM limits bound peer-controlled work and retained route state. A
 route record belongs to one SG and MTP Route; availability and congestion are
 independent records. Zero selects defaults of 1,024 Affected Point Codes per
-message, 2,048 records per route, and 16,384 records per ASP Endpoint. A
-message that would exceed a limit is rejected atomically with
+message, 2,048 records per route, and 16,384 records per ASP Endpoint. A zero
+per-SG limit divides the Endpoint limit equally into reserved SG partitions;
+an explicit per-SG limit must reserve that capacity for every provisioned SG
+within the Endpoint limit. One SG therefore cannot consume another SG's
+retained-state capacity. A message that would exceed a limit is rejected
+atomically with
 `ErrASPRouteStateLimit`: neither the Endpoint route registry nor the
 Association's diagnostic destination view is partially changed. RFC 4666
 Section 3.8.1 defines no M3UA Error code for a receiver's local retention
@@ -202,7 +207,10 @@ Configuration validation rejects:
 - an SGP route that references an unknown MTP Route;
 - duplicate MTP Routes or duplicate SGP route mappings;
 - an MTP Route that has no SGP mapping;
+- an `ASKey` carrying a Network Appearance or Routing Context value while its
+  corresponding presence field is false;
 - negative flow-cache or indication-queue sizes;
+- SSNM per-SG reservations that do not fit the Endpoint limit;
 - invalid point-code masks or point-code values.
 
 Overlapping MTP Routes are permitted because an application may name one

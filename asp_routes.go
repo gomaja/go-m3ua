@@ -106,13 +106,14 @@ type aspRoutes struct {
 	congestion                map[aspRouteRangeKey]aspCongestionRecord
 	// stateIndex mirrors the bounded records above in point-code prefix form,
 	// avoiding a full record scan for every derived leaf on each SSNM update.
-	stateIndex           map[MTPRouteID]*aspRouteStateIndexNode
-	stateRecordsPerRoute map[aspRouteStateBudgetKey]int
-	stateRecordCount     int
-	derived              map[aspDerivedRangeKey]aspDestinationStatus
-	sequence             uint64
-	transferFlows        map[aspTransferFlowKey]*list.Element
-	transferFlowLRU      *list.List
+	stateIndex                       map[MTPRouteID]*aspRouteStateIndexNode
+	stateRecordsPerRoute             map[aspRouteStateBudgetKey]int
+	stateRecordsPerSignallingGateway map[SignallingGatewayID]int
+	stateRecordCount                 int
+	derived                          map[aspDerivedRangeKey]aspDestinationStatus
+	sequence                         uint64
+	transferFlows                    map[aspTransferFlowKey]*list.Element
+	transferFlowLRU                  *list.List
 	// transferSequences serializes concurrent MTP-TRANSFER requests sharing
 	// one RFC 4666 Section 3.3.1 traffic flow. In broadcast mode this ensures
 	// every selected SGP observes the same order, as Appendix A.2.2 requires
@@ -136,20 +137,21 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		queueSize = DefaultMTPIndicationQueueSize
 	}
 	routes := &aspRoutes{
-		config:                    snapshot,
-		associations:              make(map[*Association]SGPIdentity),
-		associationsBySGP:         make(map[SGPIdentity]map[*Association]struct{}),
-		associationEligibleRoutes: make(map[*Association]map[MTPRouteID]struct{}),
-		associationOrder:          make(map[*Association]uint64),
-		availability:              make(map[aspRouteRangeKey]aspAvailabilityRecord),
-		congestion:                make(map[aspRouteRangeKey]aspCongestionRecord),
-		stateIndex:                make(map[MTPRouteID]*aspRouteStateIndexNode, len(snapshot.mtpRoutes)),
-		stateRecordsPerRoute:      make(map[aspRouteStateBudgetKey]int),
-		derived:                   make(map[aspDerivedRangeKey]aspDestinationStatus),
-		transferFlows:             make(map[aspTransferFlowKey]*list.Element),
-		transferFlowLRU:           list.New(),
-		transferSequences:         make(map[aspTransferFlowKey]*aspTransferFlowLock),
-		indications:               make(chan *MTPIndication, queueSize),
+		config:                           snapshot,
+		associations:                     make(map[*Association]SGPIdentity),
+		associationsBySGP:                make(map[SGPIdentity]map[*Association]struct{}),
+		associationEligibleRoutes:        make(map[*Association]map[MTPRouteID]struct{}),
+		associationOrder:                 make(map[*Association]uint64),
+		availability:                     make(map[aspRouteRangeKey]aspAvailabilityRecord),
+		congestion:                       make(map[aspRouteRangeKey]aspCongestionRecord),
+		stateIndex:                       make(map[MTPRouteID]*aspRouteStateIndexNode, len(snapshot.mtpRoutes)),
+		stateRecordsPerRoute:             make(map[aspRouteStateBudgetKey]int),
+		stateRecordsPerSignallingGateway: make(map[SignallingGatewayID]int),
+		derived:                          make(map[aspDerivedRangeKey]aspDestinationStatus),
+		transferFlows:                    make(map[aspTransferFlowKey]*list.Element),
+		transferFlowLRU:                  list.New(),
+		transferSequences:                make(map[aspTransferFlowKey]*aspTransferFlowLock),
+		indications:                      make(chan *MTPIndication, queueSize),
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {
 		routes.stateIndex[mtpRoute.id] = &aspRouteStateIndexNode{}
@@ -295,6 +297,7 @@ func (r *aspRoutes) reclaimSignallingGatewayStateLocked(signallingGateway Signal
 
 func (r *aspRoutes) rebuildRouteStateAccountingLocked() {
 	r.stateRecordsPerRoute = make(map[aspRouteStateBudgetKey]int)
+	r.stateRecordsPerSignallingGateway = make(map[SignallingGatewayID]int)
 	r.stateRecordCount = 0
 	for key := range r.availability {
 		r.recordRouteStateAccountingLocked(key)
@@ -310,6 +313,7 @@ func (r *aspRoutes) recordRouteStateAccountingLocked(key aspRouteRangeKey) {
 		mtpRoute:          key.mtpRoute,
 	}
 	r.stateRecordsPerRoute[budgetKey]++
+	r.stateRecordsPerSignallingGateway[key.signallingGateway]++
 	r.stateRecordCount++
 }
 
@@ -353,6 +357,7 @@ func (r *aspRoutes) apply(
 	pendingKeys := make([]aspRouteRangeKey, 0, len(statuses))
 	pendingSet := make(map[aspRouteRangeKey]struct{}, len(statuses))
 	newRecordsPerRoute := make(map[aspRouteStateBudgetKey]int)
+	newRecordsPerSignallingGateway := make(map[SignallingGatewayID]int)
 	newRecordCount := 0
 	affectedMTPRoutes := make(map[MTPRouteID]struct{})
 
@@ -396,12 +401,22 @@ func (r *aspRoutes) apply(
 						budgetKey.mtpRoute,
 						r.config.maxSSNMStateRecordsPerRoute)
 				}
+				if r.stateRecordsPerSignallingGateway[budgetKey.signallingGateway]+
+					newRecordsPerSignallingGateway[budgetKey.signallingGateway]+1 >
+					r.config.maxSSNMStateRecordsPerSignallingGateway {
+					r.mu.Unlock()
+					return fmt.Errorf("%w: SG %q would exceed the %d-record limit",
+						ErrASPRouteStateLimit,
+						budgetKey.signallingGateway,
+						r.config.maxSSNMStateRecordsPerSignallingGateway)
+				}
 				if r.stateRecordCount+newRecordCount+1 > r.config.maxSSNMStateRecords {
 					r.mu.Unlock()
 					return fmt.Errorf("%w: Endpoint would exceed the %d-record limit",
 						ErrASPRouteStateLimit, r.config.maxSSNMStateRecords)
 				}
 				newRecordsPerRoute[budgetKey]++
+				newRecordsPerSignallingGateway[budgetKey.signallingGateway]++
 				newRecordCount++
 			}
 			pendingKeys = append(pendingKeys, key)
@@ -440,6 +455,7 @@ func (r *aspRoutes) apply(
 				mtpRoute:          key.mtpRoute,
 			}
 			r.stateRecordsPerRoute[budgetKey]++
+			r.stateRecordsPerSignallingGateway[budgetKey.signallingGateway]++
 			r.stateRecordCount++
 		}
 	}

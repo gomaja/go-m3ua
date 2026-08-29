@@ -34,10 +34,12 @@ func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 	}
 	if snapshot.maxAffectedPointCodesPerSSNM != DefaultMaxAffectedPointCodesPerSSNM ||
 		snapshot.maxSSNMStateRecordsPerRoute != DefaultMaxSSNMStateRecordsPerRoute ||
+		snapshot.maxSSNMStateRecordsPerSignallingGateway != DefaultMaxSSNMStateRecords/2 ||
 		snapshot.maxSSNMStateRecords != DefaultMaxSSNMStateRecords {
-		t.Fatalf("SSNM budgets = APC:%d route:%d Endpoint:%d",
+		t.Fatalf("SSNM budgets = APC:%d route:%d SG:%d Endpoint:%d",
 			snapshot.maxAffectedPointCodesPerSSNM,
 			snapshot.maxSSNMStateRecordsPerRoute,
+			snapshot.maxSSNMStateRecordsPerSignallingGateway,
 			snapshot.maxSSNMStateRecords)
 	}
 	if got := snapshot.mtpRoutes[0].id; got != "sccp-a" {
@@ -202,6 +204,18 @@ func TestASPConfigValidation(t *testing.T) {
 			},
 		},
 		{
+			name: "SGP route has absent Network Appearance with a value",
+			mutate: func(config *ASPConfig) {
+				config.SignallingGateways[0].SGPs[0].Routes[0].AS.NetworkAppearanceSet = false
+			},
+		},
+		{
+			name: "SGP route has absent Routing Context with a value",
+			mutate: func(config *ASPConfig) {
+				config.SignallingGateways[0].SGPs[0].Routes[0].AS.RoutingContextSet = false
+			},
+		},
+		{
 			name: "MTP Route without any SGP mapping",
 			mutate: func(config *ASPConfig) {
 				config.MTPRoutes = append(config.MTPRoutes, MTPRouteConfig{
@@ -236,9 +250,28 @@ func TestASPConfigValidation(t *testing.T) {
 			},
 		},
 		{
+			name: "negative SSNM state records per Signalling Gateway",
+			mutate: func(config *ASPConfig) {
+				config.MaxSSNMStateRecordsPerSignallingGateway = -1
+			},
+		},
+		{
 			name: "negative SSNM state records",
 			mutate: func(config *ASPConfig) {
 				config.MaxSSNMStateRecords = -1
+			},
+		},
+		{
+			name: "SSNM Endpoint budget cannot reserve every Signalling Gateway",
+			mutate: func(config *ASPConfig) {
+				config.MaxSSNMStateRecords = 1
+			},
+		},
+		{
+			name: "SSNM Signalling Gateway reservations exceed Endpoint budget",
+			mutate: func(config *ASPConfig) {
+				config.MaxSSNMStateRecords = 2
+				config.MaxSSNMStateRecordsPerSignallingGateway = 2
 			},
 		},
 	}
