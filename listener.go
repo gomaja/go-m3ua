@@ -183,7 +183,7 @@ func (l *Listener) promoteAcceptedAssociation(association *Association) bool {
 		registration.rollback()
 		return false
 	}
-	registration.commit()
+	association.asReservation = registration
 	if l.conns == nil {
 		l.conns = make(map[*Association]struct{})
 	}
@@ -712,8 +712,13 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 
 	select {
 	case <-association.established:
+		association.asReservation.commit()
 		return association, nil
 	case <-association.done:
+		// done closes at the beginning of closeWith. Join the once-only teardown
+		// before returning, so Endpoint membership and provisional AS scopes have
+		// both been released.
+		_ = association.closeWith(nil)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

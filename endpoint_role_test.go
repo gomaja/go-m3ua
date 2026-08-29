@@ -1245,6 +1245,44 @@ func TestRejectedIPSPPromotionDoesNotRetainApplicationServer(t *testing.T) {
 	}
 }
 
+func TestFailedAcceptedAssociationsDoNotRetainApplicationServers(t *testing.T) {
+	for _, role := range []Role{RoleSGP, RoleIPSP} {
+		t.Run(role.String(), func(t *testing.T) {
+			endpoint, err := NewEndpoint(EndpointConfig{Role: role})
+			if err != nil {
+				t.Fatalf("NewEndpoint(%s): %v", role, err)
+			}
+			t.Cleanup(func() { _ = endpoint.Close() })
+			listener := newListener(endpoint, NewListenerConfig(nil))
+
+			for routingContext := uint32(1); routingContext <= 3; routingContext++ {
+				association, _ := newTestConn(t, StateASPDown, role)
+				association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+				association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
+				if role == RoleIPSP {
+					association.cfg.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+				}
+				association.listener = listener
+
+				if !listener.promoteAcceptedAssociation(association) {
+					t.Fatal("promoteAcceptedAssociation() = false")
+				}
+				if err := association.closeWith(ErrFailedToEstablish); err != nil {
+					t.Fatalf("closeWith(): %v", err)
+				}
+
+				key := ASKey{
+					NetworkAppearance: 7, NetworkAppearanceSet: true,
+					RoutingContext: routingContext, RoutingContextSet: true,
+				}
+				if _, registered := endpoint.as.lookup(key); registered {
+					t.Fatalf("failed accepted %s association retained Application Server %+v", role, key)
+				}
+			}
+		})
+	}
+}
+
 func TestAssociationConfigRejectsRoleSpecificSettings(t *testing.T) {
 	tests := []struct {
 		name   string

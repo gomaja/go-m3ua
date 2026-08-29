@@ -235,6 +235,12 @@ type Association struct {
 	// every ASP serving a Routing Context, so an Association reports its own ASP state
 	// changes into it rather than deciding anything itself.
 	as *applicationServers
+	// asReservation keeps an accepted SGP or IPSP association's configured AS
+	// scopes provisional until M3UA establishment succeeds. A failed handshake
+	// rolls them back after Endpoint membership has been removed, so a listener
+	// whose selector returns distinct scopes cannot grow the shared registry
+	// without bound.
+	asReservation *applicationServerReservation
 	// unscopedDeliveryMu covers DATA and SSNM on a dedicated association where
 	// no Routing Context was coordinated, so ASP Down can still drain traffic
 	// and network-management writes before Ack.
@@ -1427,6 +1433,9 @@ func (c *Association) closeWith(cause error) error {
 		}
 		if c.endpoint != nil {
 			c.endpoint.forgetAssociation(c)
+		}
+		if c.asReservation != nil {
+			c.asReservation.rollback()
 		}
 	})
 	return err
