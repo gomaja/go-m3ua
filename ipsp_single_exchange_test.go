@@ -3,6 +3,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -731,6 +732,108 @@ func TestIPSPSingleExchangeInactiveAckWaitsForAdmittedData(t *testing.T) {
 	case <-ackWritten:
 	default:
 		t.Fatal("ASP Inactive Ack was not written after DATA drained")
+	}
+}
+
+func TestIPSPSingleExchangeInactiveAckDefersCompletionUntilAdmittedDataDrains(t *testing.T) {
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	association.cfg.RoutingContexts = nil
+	association.cfg.TAck = 20 * time.Millisecond
+	association.noteRoutingContextsActive(nil)
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	var inactiveWrites atomic.Int32
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		switch message.(type) {
+		case *messages.Data:
+			close(dataStarted)
+			<-releaseData
+		case *messages.AspInactive:
+			inactiveWrites.Add(1)
+		}
+		return message.MarshalLen(), nil
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseData:
+		default:
+			close(releaseData)
+		}
+	})
+
+	data := messages.NewData(nil, nil, params.NewProtocolData(
+		1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte{0x01},
+	), nil)
+	dataDone := make(chan error, 1)
+	go func() {
+		_, err := association.WriteSignal(data)
+		dataDone <- err
+	}()
+	select {
+	case <-dataStarted:
+	case err := <-dataDone:
+		t.Fatalf("outbound DATA returned before entering the traffic path: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("outbound DATA did not enter the IPSP traffic path")
+	}
+
+	request, err := association.beginASPInactive(nil)
+	if err != nil {
+		t.Fatalf("beginASPInactive(): %v", err)
+	}
+	if got := inactiveWrites.Load(); got != 1 {
+		t.Fatalf("initial ASP Inactive writes = %d, want 1", got)
+	}
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- association.waitTAck(context.Background(), request) }()
+	handleDone := make(chan struct{})
+	go func() {
+		association.handleSignals(context.Background(), messages.NewAspInactiveAck(nil, nil))
+		close(handleDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for association.State() != StateASPInactive && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := association.State(); got != StateASPInactive {
+		t.Fatalf("state while applying ASP Inactive Ack = %v, want ASP-INACTIVE", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := inactiveWrites.Load(); got != 1 {
+		t.Fatalf("ASP Inactive retransmitted %d times after its Ack was claimed", got-1)
+	}
+	select {
+	case err := <-waitDone:
+		t.Fatalf("T(ack) waiter completed before admitted DATA drained: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	select {
+	case <-handleDone:
+		t.Fatal("ASP Inactive Ack handler returned before admitted DATA drained")
+	default:
+	}
+	if _, err := association.WriteSignal(data); !errors.Is(err, ErrNotEstablished) {
+		t.Fatalf("DATA admitted after ASP Inactive Ack committed ASP-INACTIVE: %v", err)
+	}
+
+	close(releaseData)
+	if err := <-dataDone; err != nil {
+		t.Fatalf("in-flight DATA: %v", err)
+	}
+	select {
+	case <-handleDone:
+	case <-time.After(time.Second):
+		t.Fatal("ASP Inactive Ack handler did not finish after DATA drained")
+	}
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("T(ack) waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("T(ack) waiter did not complete after DATA drained")
 	}
 }
 

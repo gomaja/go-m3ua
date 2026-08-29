@@ -851,12 +851,20 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 		return err
 	}
 	if c.role == RoleIPSP {
-		var routingContexts []uint32
+		acknowledgement := c.claimTAckAcknowledgement(requestAspInactive, aspAcAck.RoutingContext)
+		routingContexts := c.configuredRoutingContexts()
 		if aspAcAck.RoutingContext != nil {
 			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
 		}
 		c.noteRoutingContextsInactive(routingContexts)
-		c.acknowledgeTAck(requestAspInactive, aspAcAck.RoutingContext)
+		c.commitState(c.stateForActiveRoutingContexts())
+		postTransitionNotify := func() {}
+		if c.as != nil {
+			postTransitionNotify = c.as.quiesceASPFor(c, routingContexts)
+		}
+		c.quiesceUnscopedTraffic()
+		postTransitionNotify()
+		acknowledgement.complete()
 		return nil
 	}
 

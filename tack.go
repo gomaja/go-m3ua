@@ -34,7 +34,8 @@ type pendingRequest struct {
 	routingContextOmitted bool
 	stop                  chan struct{}
 	result                chan error
-	once                  sync.Once
+	stopOnce              sync.Once
+	resultOnce            sync.Once
 }
 
 // tackRetransmitter resends unacknowledged ASPSM/ASPTM requests until their Ack
@@ -165,11 +166,15 @@ func (p *pendingRequest) acknowledge() {
 	p.finish(nil)
 }
 
+func (p *pendingRequest) stopRetries() {
+	p.stopOnce.Do(func() { close(p.stop) })
+}
+
 func (p *pendingRequest) finish(err error) {
-	p.once.Do(func() {
+	p.resultOnce.Do(func() {
+		p.stopRetries()
 		p.result <- err
 		close(p.result)
-		close(p.stop)
 	})
 }
 
@@ -293,18 +298,39 @@ func (c *Association) validateTAckRoutingContexts(kind requestKind, acknowledged
 // different RC subsets, so the retransmitter remains armed until all explicit
 // contexts have been acknowledged.
 func (c *Association) acknowledgeTAck(kind requestKind, acknowledged *params.Param) bool {
+	acknowledgement := c.claimTAckAcknowledgement(kind, acknowledged)
+	acknowledgement.complete()
+	return acknowledgement.solicited
+}
+
+type pendingTAckAcknowledgement struct {
+	solicited bool
+	completed []*pendingRequest
+}
+
+func (acknowledgement pendingTAckAcknowledgement) complete() {
+	for _, request := range acknowledgement.completed {
+		request.acknowledge()
+	}
+}
+
+// claimTAckAcknowledgement applies an Ack to the retransmission inventory and
+// immediately stops every request it completes, but deliberately leaves its
+// waiter blocked. A state handler can then close traffic gates and drain writes
+// admitted before the Ack before calling complete.
+func (c *Association) claimTAckAcknowledgement(kind requestKind, acknowledged *params.Param) pendingTAckAcknowledgement {
 	if c.tack == nil {
-		return false
+		return pendingTAckAcknowledgement{}
 	}
 
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
 	requests := c.pendingRequestEntriesLocked(kind)
 	if len(requests) == 0 {
-		return false
+		return pendingTAckAcknowledgement{}
 	}
 
-	solicited := false
+	result := pendingTAckAcknowledgement{}
 	for _, entry := range requests {
 		req := entry.request
 		matched := false
@@ -327,14 +353,15 @@ func (c *Association) acknowledgeTAck(kind requestKind, acknowledged *params.Par
 		if !matched {
 			continue
 		}
-		solicited = true
+		result.solicited = true
 		if len(req.remaining) > 0 {
 			continue
 		}
-		req.acknowledge()
+		req.stopRetries()
 		delete(c.tack.pending, entry.message)
+		result.completed = append(result.completed, req)
 	}
-	return solicited
+	return result
 }
 
 // pendingTAckRoutingContexts returns the explicit RCs still awaiting an Ack.
