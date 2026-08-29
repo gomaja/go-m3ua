@@ -12,6 +12,7 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
 )
 
 func TestNewEndpointRejectsInvalidRole(t *testing.T) {
@@ -21,6 +22,140 @@ func TestNewEndpointRejectsInvalidRole(t *testing.T) {
 	}
 	if !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("NewEndpoint error = %v, want ErrUnsupportedRole", err)
+	}
+}
+
+func TestASPListenerDoesNotRunSGPAvailabilityProcedures(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(*Listener) error
+	}{
+		{
+			name: "NIF isolation",
+			call: func(listener *Listener) error {
+				return listener.SetNIFAvailable(false)
+			},
+		},
+		{
+			name: "Application Server isolation",
+			call: func(listener *Listener) error {
+				return listener.SetASAvailableForAS(ASKey{RoutingContext: 1, RoutingContextSet: true}, false)
+			},
+		},
+		{
+			name: "legacy Routing Context Application Server isolation",
+			call: func(listener *Listener) error {
+				return listener.SetASAvailable(1, false)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint, err := NewEndpoint(RoleASP)
+			if err != nil {
+				t.Fatalf("NewEndpoint(RoleASP): %v", err)
+			}
+			listener := newListener(endpoint, NewListenerConfig(NewAssociationConfig(0, 0, 0, 0, 0, 0)))
+			association, sent := newTestConn(t, StateASPActive, RoleASP)
+			association.cfg.RoutingContexts = params.NewRoutingContext(1)
+			association.noteRoutingContextsActive([]uint32{1})
+			if !listener.track(association) {
+				t.Fatal("failed to track test Association")
+			}
+
+			if err := test.call(listener); !errors.Is(err, ErrUnsupportedRole) {
+				t.Fatalf("availability control error = %v, want ErrUnsupportedRole", err)
+			}
+
+			if got := association.State(); got != StateASPActive {
+				t.Fatalf("ASP Association state = %v, want ASP-ACTIVE", got)
+			}
+			if got := len(*sent); got != 0 {
+				t.Fatalf("ASP Listener emitted %d SGP control messages, want 0", got)
+			}
+			if listener.as != nil || listener.nif != nil {
+				t.Fatal("ASP Listener initialized SGP shared state")
+			}
+		})
+	}
+}
+
+func TestSGPEndpointStateOwnerReservationIsExclusive(t *testing.T) {
+	endpoint, err := NewEndpoint(RoleSGP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	firstRelease, err := endpoint.reserveSGPStateOwner()
+	if err != nil {
+		t.Fatalf("reserve first SGP state owner: %v", err)
+	}
+	if _, err := endpoint.reserveSGPStateOwner(); !errors.Is(err, ErrEndpointStateInUse) {
+		t.Fatalf("reserve second SGP state owner error = %v, want ErrEndpointStateInUse", err)
+	}
+	firstRelease()
+	secondRelease, err := endpoint.reserveSGPStateOwner()
+	if err != nil {
+		t.Fatalf("reserve SGP state owner after release: %v", err)
+	}
+	secondRelease()
+}
+
+func TestSGPEndpointDialOwnsStateUntilAssociationCloses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	aspEndpoint, err := NewEndpoint(RoleASP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleASP): %v", err)
+	}
+	aspConfig := mcASPConfig(0xABCD0001)
+	aspConfig.RoutingContexts = params.NewRoutingContext(1)
+	address := mcAddr(0, "127.0.0.1")
+	listener, err := aspEndpoint.Listen("m3ua", address, NewListenerConfig(aspConfig))
+	if err != nil {
+		skipIfSCTPUnsupported(t, err)
+		t.Fatalf("ASP Listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	type acceptResult struct {
+		association *Association
+		err         error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		association, acceptErr := listener.Accept(ctx)
+		accepted <- acceptResult{association: association, err: acceptErr}
+	}()
+
+	sgpEndpoint, err := NewEndpoint(RoleSGP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	sgpConfig := mcSGPConfig()
+	sgpConfig.RoutingContexts = params.NewRoutingContext(1)
+	dialed, err := sgpEndpoint.Dial(ctx, "m3ua", nil, listener.Addr().(*sctp.SCTPAddr), sgpConfig)
+	if err != nil {
+		t.Fatalf("SGP Dial: %v", err)
+	}
+
+	result := <-accepted
+	if result.err != nil {
+		t.Fatalf("ASP Accept: %v", result.err)
+	}
+	defer func() { _ = result.association.Close() }()
+
+	cancelled, cancelDial := context.WithCancel(context.Background())
+	cancelDial()
+	if _, err := sgpEndpoint.Dial(cancelled, "m3ua", nil, nil, sgpConfig); !errors.Is(err, ErrEndpointStateInUse) {
+		t.Fatalf("second SGP Dial error = %v, want ErrEndpointStateInUse", err)
+	}
+	if err := dialed.Close(); err != nil {
+		t.Fatalf("close first dialed SGP Association: %v", err)
+	}
+	if _, err := sgpEndpoint.Dial(cancelled, "m3ua", nil, nil, sgpConfig); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SGP Dial after Association close error = %v, want context.Canceled", err)
 	}
 }
 

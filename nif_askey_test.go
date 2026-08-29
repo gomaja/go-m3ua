@@ -48,7 +48,9 @@ func TestSetASAvailableIgnoresAmbiguousLegacyRoutingContext(t *testing.T) {
 	registry.get(key10).setASPState(first, StateASPActive, time.Hour)
 	registry.get(key20).setASPState(second, StateASPActive, time.Hour)
 
-	listener.SetASAvailable(1, false)
+	if err := listener.SetASAvailable(1, false); err != nil {
+		t.Fatalf("SetASAvailable: %v", err)
+	}
 
 	if !nif.servicableASKeys([]ASKey{key10}) {
 		t.Fatalf("ambiguous legacy availability isolated %v", key10)
@@ -77,7 +79,9 @@ func TestSetASAvailableIgnoresLegacyRoutingContextWhenRegistryAndTrackedDisagree
 		t.Fatal("track refused an association")
 	}
 
-	listener.SetASAvailable(1, false)
+	if err := listener.SetASAvailable(1, false); err != nil {
+		t.Fatalf("SetASAvailable: %v", err)
+	}
 
 	if !nif.servicableASKeys([]ASKey{registryKey}) {
 		t.Fatalf("disagreeing legacy availability isolated registry key %v", registryKey)

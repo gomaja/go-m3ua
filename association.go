@@ -133,6 +133,10 @@ type Association struct {
 	// once, inside closeOnce, so the first cause is the one kept: a later Close
 	// must not overwrite the reason the association actually died.
 	closeErr atomic.Value
+	// releaseEndpointStateOwner releases the exclusive SGP state reservation
+	// held by a dialed Association. Accepted associations leave it nil because
+	// their Listener owns the reservation.
+	releaseEndpointStateOwner func()
 	// cfg is a configuration required to communicate between M3UA endpoints
 	cfg *AssociationConfig
 	// trafficModes is the immutable Traffic Mode policy copied from cfg at
@@ -1363,6 +1367,9 @@ func (c *Association) closeWith(cause error) error {
 		if c.listener != nil {
 			c.listener.forget(c)
 		}
+		if c.releaseEndpointStateOwner != nil {
+			c.releaseEndpointStateOwner()
+		}
 	})
 	return err
 }
@@ -1441,10 +1448,9 @@ func (c *Association) State() State {
 	return c.state
 }
 
-// StreamID returns the SCTP stream of the most recently received message.
-//
-// This is the outbound template, not the stream any received message arrived
-// on; see Association.recvStream for that.
+// StreamID returns the outbound SCTP stream template. Association writes copy
+// this template before selecting a message-specific stream; received stream
+// identifiers are validated internally and are not exposed by this method.
 func (c *Association) StreamID() uint16 {
 	return c.sctpInfo.Stream
 }

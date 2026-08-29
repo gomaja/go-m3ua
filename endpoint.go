@@ -4,6 +4,8 @@
 
 package m3ua
 
+import "sync"
+
 // Role identifies the M3UA protocol role of an Endpoint.
 //
 // RFC 4666 Section 1.4.8 deliberately separates this role from which peer
@@ -36,6 +38,9 @@ func (r Role) String() string {
 // association initiation.
 type Endpoint struct {
 	role Role
+
+	mu            sync.Mutex
+	sgpStateInUse bool
 }
 
 // NewEndpoint creates an M3UA endpoint with an immutable protocol role.
@@ -54,6 +59,31 @@ func (e *Endpoint) Role() Role {
 		return 0
 	}
 	return e.role
+}
+
+// reserveSGPStateOwner prevents one SGP Endpoint from silently splitting its
+// AS, NIF, destination, and restart state across independent owners. The
+// reservation is released when the owning Listener or Association closes.
+func (e *Endpoint) reserveSGPStateOwner() (func(), error) {
+	if e == nil || e.role != RoleSGP {
+		return nil, ErrUnsupportedRole
+	}
+	e.mu.Lock()
+	if e.sgpStateInUse {
+		e.mu.Unlock()
+		return nil, ErrEndpointStateInUse
+	}
+	e.sgpStateInUse = true
+	e.mu.Unlock()
+
+	var releaseOnce sync.Once
+	return func() {
+		releaseOnce.Do(func() {
+			e.mu.Lock()
+			e.sgpStateInUse = false
+			e.mu.Unlock()
+		})
+	}, nil
 }
 
 func (e *Endpoint) associationRole() (Role, error) {

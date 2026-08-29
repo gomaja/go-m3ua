@@ -42,6 +42,9 @@ type Listener struct {
 	// indications. One per Listener, because the dependency gives every
 	// accepted association the listener's handler; it routes by association ID.
 	restarts *restartWatcher
+	// releaseEndpointStateOwner releases the SGP Endpoint reservation after the
+	// listening socket and every accepted Association have closed.
+	releaseEndpointStateOwner func()
 
 	// nif records isolation from the nodal interworking function, which
 	// RFC 4666 Section 4.7 makes the SGP answer differently.
@@ -181,6 +184,15 @@ func (l *Listener) trafficModePolicy() trafficModePolicy {
 		return trafficModePolicy{}
 	}
 	return l.trafficModes.get(l.AssociationConfig)
+}
+
+// Role returns the immutable M3UA protocol role of associations accepted by
+// this Listener.
+func (l *Listener) Role() Role {
+	if l == nil || l.endpoint == nil {
+		return 0
+	}
+	return l.endpoint.Role()
 }
 
 // SetDestinationState records a destination's availability at this SG, for every
@@ -483,7 +495,9 @@ func (l *Listener) forget(c *Association) {
 }
 
 // Listen returns an SCTP listener whose accepted associations run this
-// Endpoint's M3UA role.
+// Endpoint's M3UA role. One RoleSGP Endpoint currently permits one Listener or
+// one dialed Association as its shared protocol-state owner; another returns
+// ErrEndpointStateInUse. A RoleSGP Listener itself may accept multiple ASPs.
 func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerConfig) (*Listener, error) {
 	var err error
 	role, err := e.associationRole()
@@ -499,6 +513,13 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 	if !ok {
 		return nil, fmt.Errorf("invalid network: %s", network)
 	}
+	var releaseEndpointStateOwner func()
+	if role == RoleSGP {
+		releaseEndpointStateOwner, err = e.reserveSGPStateOwner()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Through SocketConfig rather than ListenSCTP so a notification handler can
 	// be installed. The dependency fixes a listener's handler at construction
@@ -510,8 +531,12 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 
 	l.sctpListener, err = scfg.Listen(n, laddr)
 	if err != nil {
+		if releaseEndpointStateOwner != nil {
+			releaseEndpointStateOwner()
+		}
 		return nil, fmt.Errorf("failed to listen SCTP: %w", err)
 	}
+	l.releaseEndpointStateOwner = releaseEndpointStateOwner
 	return l, nil
 }
 
@@ -698,6 +723,9 @@ func (l *Listener) Close() error {
 			firstErr = err
 		}
 	}
+	if l.releaseEndpointStateOwner != nil {
+		l.releaseEndpointStateOwner()
+	}
 
 	return firstErr
 }
@@ -828,8 +856,12 @@ func aspsForTraffic(as *applicationServer, sls uint8) []*Association {
 // The NIF is above this library — it is where MTP3 meets M3UA, and this package
 // has no MTP3 side — so only the application knows when it has gone. Declaring
 // it here is what lets the library produce the behaviour the section describes;
-// without it, error code 0x0d could never be sent at all.
-func (l *Listener) SetNIFAvailable(available bool) {
+// without it, error code 0x0d could never be sent at all. It returns
+// ErrUnsupportedRole for a Listener whose Endpoint is not an SGP.
+func (l *Listener) SetNIFAvailable(available bool) error {
+	if l.Role() != RoleSGP {
+		return ErrUnsupportedRole
+	}
 	_, nif, _ := l.registry()
 
 	l.muConns.Lock()
@@ -841,7 +873,7 @@ func (l *Listener) SetNIFAvailable(available bool) {
 
 	nif.setIsolated(!available)
 	if available {
-		return
+		return nil
 	}
 
 	// "the SGP should send ASP Down Ack to all its connected ASPs".
@@ -854,6 +886,7 @@ func (l *Listener) SetNIFAvailable(available bool) {
 		}(c)
 	}
 	isolated.Wait()
+	return nil
 }
 
 // SetASAvailable declares whether this SGP can still service one Application
@@ -866,33 +899,40 @@ func (l *Listener) SetNIFAvailable(available bool) {
 //	Upon receiving an ASP Active message for an affected AS while still
 //	partially isolated from the NIF, the SGP should respond with an
 //	Error ("Refused - Management Blocking").
-func (l *Listener) SetASAvailable(rtCtx uint32, available bool) {
+//
+// It returns ErrUnsupportedRole for a Listener whose Endpoint is not an SGP.
+func (l *Listener) SetASAvailable(rtCtx uint32, available bool) error {
+	if l.Role() != RoleSGP {
+		return ErrUnsupportedRole
+	}
 	registry, _, _ := l.registry()
 	registryKey, _, registryOK, registryAmbiguous := registry.lookupRoutingContext(rtCtx)
 	if registryAmbiguous {
-		return
+		return nil
 	}
 	trackedKey, trackedOK, trackedAmbiguous := l.singleTrackedASKeyForRoutingContext(rtCtx)
 	if trackedAmbiguous {
-		return
+		return nil
 	}
 	if registryOK && trackedOK && registryKey != trackedKey {
-		return
+		return nil
 	}
 	if registryOK {
-		l.SetASAvailableForAS(registryKey, available)
-		return
+		return l.SetASAvailableForAS(registryKey, available)
 	}
 	if trackedOK {
-		l.SetASAvailableForAS(trackedKey, available)
-		return
+		return l.SetASAvailableForAS(trackedKey, available)
 	}
-	l.SetASAvailableForAS(registry.routingContextASKey(rtCtx), available)
+	return l.SetASAvailableForAS(registry.routingContextASKey(rtCtx), available)
 }
 
 // SetASAvailableForAS declares whether this SGP can still service one exact
-// Application Server.
-func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
+// Application Server. It returns ErrUnsupportedRole for a Listener whose
+// Endpoint is not an SGP.
+func (l *Listener) SetASAvailableForAS(key ASKey, available bool) error {
+	if l.Role() != RoleSGP {
+		return ErrUnsupportedRole
+	}
 	as, nif, _ := l.registry()
 
 	l.muConns.Lock()
@@ -904,7 +944,7 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
 
 	nif.setASAvailableForAS(key, available)
 	if available {
-		return
+		return nil
 	}
 
 	// "the SGP should send ASP Inactive Ack to all its connected ASPs for the
@@ -924,6 +964,7 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
 		}
 	}
 	isolated.Wait()
+	return nil
 }
 
 func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, bool, bool) {

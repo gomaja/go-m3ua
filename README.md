@@ -56,8 +56,9 @@ Create an `Endpoint` with an explicit RFC 4666 role. `Dial` and
 `Listen`/`Accept` state only which endpoint initiates the SCTP association;
 they do not determine whether M3UA runs as an ASP or SGP.
 
-The following configuration is role-neutral and is snapshotted for each M3UA
-association:
+The base `AssociationConfig` is role-neutral and is snapshotted for each M3UA
+association. Role-specific setters must then match the Endpoint; this ASP
+example sets an ASP Identifier:
 
 ```go
 config := m3ua.NewAssociationConfig(
@@ -70,10 +71,10 @@ config := m3ua.NewAssociationConfig(
 )
 config.
     EnableHeartbeat(3*time.Second, 10*time.Second).
-    SetASPIdentifier(1).
     SetTrafficModeType(params.TrafficModeLoadshare).
     SetNetworkAppearance(0).
     SetRoutingContexts(1, 2)
+config.SetASPIdentifier(1) // ASP-only
 ```
 
 `HeartbeatInfo` controls RFC 4666 M3UA BEAT/BEAT Ack liveness only. It is

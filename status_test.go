@@ -21,7 +21,7 @@ import (
 // That loop never terminated. The channel was created per Association and never
 // closed, so every association left one goroutine parked on a channel with no
 // remaining sender — for the life of the process. On an SGP whose ASPs come and
-// go, that is an unbounded leak of goroutines and of the Conns they keep
+// go, that is an unbounded leak of goroutines and of the Associations they keep
 // reachable.
 func TestSignallingStatusChannelClosesWithTheAssociation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

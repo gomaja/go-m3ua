@@ -1043,10 +1043,11 @@ func distributionFixtureConfigured(t *testing.T, trafficMode uint32, configure f
 
 func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingContexts []uint32, configure func(*AssociationConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	t.Helper()
-	listener := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false}, 1, 2, 0, trafficMode, 0, 0,
 		routingContexts, params.ServiceIndSCCP, 0, 0, 1,
-	)}
+	)
+	listener := newSGPListener(NewListenerConfig(config))
 	listener.AssociationConfig.CorrelationID = nil
 	if configure != nil {
 		configure(listener.AssociationConfig)

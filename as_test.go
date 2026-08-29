@@ -221,11 +221,12 @@ func TestLastActiveASPLeavingSendsASPending(t *testing.T) {
 	reg.aspStateChanged(conn, StateASPActive)
 	before := len(notifies(*sent))
 	notificationWritten := make(chan struct{})
+	var notificationWrittenOnce sync.Once
 	signalWriter := conn.signalWriter
 	conn.signalWriter = func(message messages.M3UA) (int, error) {
 		written, err := signalWriter(message)
 		if _, ok := message.(*messages.Notify); ok {
-			close(notificationWritten)
+			notificationWrittenOnce.Do(func() { close(notificationWritten) })
 		}
 		return written, err
 	}

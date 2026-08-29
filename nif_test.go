@@ -115,11 +115,12 @@ func TestAspActiveForAServicableASIsUnaffected(t *testing.T) {
 // TestSetNIFAvailableTellsEveryASP covers the other half of the first
 // guideline: "the SGP should send ASP Down Ack to all its connected ASPs".
 func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
-	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x111111, 0x222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, 3, 2, 1, 0,
-	)}
+	)
+	l := newSGPListener(NewListenerConfig(config))
 
 	var sentPerConn []*[]messages.M3UA
 	for i := 0; i < 2; i++ {
@@ -131,7 +132,9 @@ func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
 		sentPerConn = append(sentPerConn, sent)
 	}
 
-	l.SetNIFAvailable(false)
+	if err := l.SetNIFAvailable(false); err != nil {
+		t.Fatalf("SetNIFAvailable: %v", err)
+	}
 
 	for i, sent := range sentPerConn {
 		found := false
@@ -149,11 +152,12 @@ func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
 
 // The partial case tells only the ASPs serving the affected Application Server.
 func TestSetASAvailableTellsOnlyTheAffectedASPs(t *testing.T) {
-	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x111111, 0x222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, 3, 2, 1, 0,
-	)}
+	)
+	l := newSGPListener(NewListenerConfig(config))
 
 	affected, affectedSent := newTestConn(t, StateASPActive, RoleSGP)
 	affected.cfg.RoutingContexts = params.NewRoutingContext(1)
@@ -163,7 +167,9 @@ func TestSetASAvailableTellsOnlyTheAffectedASPs(t *testing.T) {
 	other.cfg.RoutingContexts = params.NewRoutingContext(2)
 	l.track(other)
 
-	l.SetASAvailable(1, false)
+	if err := l.SetASAvailable(1, false); err != nil {
+		t.Fatalf("SetASAvailable: %v", err)
+	}
 
 	found := false
 	for _, name := range typeNames(*affectedSent) {

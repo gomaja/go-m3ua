@@ -23,6 +23,11 @@ Exchange model APIs defined by RFC 4666 Section 4.3.1. Calling `Dial` or
 `Listen` directly on an IPSP endpoint returns `ErrUnsupportedRole` rather than
 guessing either model.
 
+A `RoleSGP` endpoint currently admits one shared protocol-state owner: one
+`Listener`, which can serve multiple accepted ASP associations, or one dialed
+`Association`. A second owner returns `ErrEndpointStateInUse` instead of
+creating an independent AS registry for the same SGP.
+
 ## Renamed API
 
 | Before v1.2 | v1.2 |
@@ -60,6 +65,8 @@ one role are validated before association processing:
 - `ASPIdentifier` is local ASP policy and is rejected on an SGP endpoint.
 - `AuthorizeASP`, recovery queues, and Broadcast distribution policy are SGP
   policy and are rejected on an ASP endpoint.
+- `Listener.SetNIFAvailable`, `SetASAvailable`, and `SetASAvailableForAS` now
+  return an error and reject a non-SGP Listener with `ErrUnsupportedRole`.
 - A nil `AssociationConfig` passed to `Endpoint.Dial` returns
   `ErrNilAssociationConfig`.
 

@@ -150,6 +150,11 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 //
 // The M3UA handshake that follows has its own budget,
 // AssociationConfig.EstablishTimeout, and observes ctx as well.
+//
+// A RoleSGP Endpoint currently permits one owner of its shared protocol state:
+// either one Listener, which may accept multiple ASP associations, or one
+// dialed Association. A second owner returns ErrEndpointStateInUse rather than
+// silently creating an inconsistent AS registry.
 func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, cfg *AssociationConfig) (*Association, error) {
 	role, err := e.associationRole()
 	if err != nil {
@@ -166,11 +171,24 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	if !ok {
 		return nil, fmt.Errorf("invalid network: %s", network)
 	}
+	var releaseEndpointStateOwner func()
+	if role == RoleSGP {
+		releaseEndpointStateOwner, err = e.reserveSGPStateOwner()
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if releaseEndpointStateOwner != nil {
+				releaseEndpointStateOwner()
+			}
+		}()
+	}
 
-	// Nothing here writes to cfg: a caller that reuses one AssociationConfig
-	// across several Dials gets independent Associations.
+	// Nothing here writes to cfg: each permitted Dial gets an independent
+	// immutable AssociationConfig snapshot.
 	association := newAssociation(role, cfg)
 	if role == RoleSGP {
+		association.releaseEndpointStateOwner = releaseEndpointStateOwner
 		association.as = newApplicationServersWithTrafficModePolicy(
 			cfg.RecoveryTimer, cfg, association.trafficModePolicy(),
 		)
@@ -218,6 +236,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 
 	select {
 	case <-association.established:
+		releaseEndpointStateOwner = nil
 		return association, nil
 	case <-association.done:
 		if err := association.Err(); err != nil {

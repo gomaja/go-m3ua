@@ -63,8 +63,9 @@ func TestPartialNIFIsolationWaitsForScopedDirectDataBeforeAspInactiveAck(t *test
 	}
 
 	isolationDone := make(chan struct{})
+	isolationErrors := make(chan error, 1)
 	go func() {
-		listener.SetASAvailable(1, false)
+		isolationErrors <- listener.SetASAvailable(1, false)
 		close(isolationDone)
 	}()
 	select {
@@ -77,6 +78,9 @@ func TestPartialNIFIsolationWaitsForScopedDirectDataBeforeAspInactiveAck(t *test
 	released = true
 	if err := <-writeDone; err != nil {
 		t.Fatalf("direct DATA: %v", err)
+	}
+	if err := <-isolationErrors; err != nil {
+		t.Fatalf("SetASAvailable: %v", err)
 	}
 	select {
 	case <-acknowledged:
@@ -100,10 +104,8 @@ func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.
 	asp, _ := newTestConn(t, StateASPActive, RoleSGP)
 	asp.maxMessageStreamID = 4
 	asp.cfg.RoutingContexts = nil
-	listener := &Listener{
-		AssociationConfig: asp.cfg,
-		conns:             map[*Association]struct{}{asp: {}},
-	}
+	listener := newSGPListener(NewListenerConfig(asp.cfg))
+	listener.conns = map[*Association]struct{}{asp: {}}
 	asp.listener = listener
 
 	writeStarted := make(chan struct{})
@@ -142,8 +144,9 @@ func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.
 	}
 
 	isolationDone := make(chan struct{})
+	isolationErrors := make(chan error, 1)
 	go func() {
-		listener.SetNIFAvailable(false)
+		isolationErrors <- listener.SetNIFAvailable(false)
 		close(isolationDone)
 	}()
 	select {
@@ -156,6 +159,9 @@ func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.
 	released = true
 	if err := <-writeDone; err != nil {
 		t.Fatalf("direct DATA: %v", err)
+	}
+	if err := <-isolationErrors; err != nil {
+		t.Fatalf("SetNIFAvailable: %v", err)
 	}
 	select {
 	case <-acknowledged:
