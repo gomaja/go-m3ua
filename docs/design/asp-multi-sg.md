@@ -311,9 +311,11 @@ SG's more-specific DAVA.
 Retained availability and congestion records are indexed in a persistent
 24-bit point-code prefix tree. Route recomputation traverses that index and the
 bounded prefix depth instead of rescanning every retained record for every
-derived leaf. Repeated updates to existing prefixes replace indexed records in
-place, so overwrite-only SSNM traffic cannot restore the former quadratic
-Endpoint-lock work or grow the index.
+derived leaf. MTP-TRANSFER route-state lookup walks the same bounded prefix
+path rather than scanning records belonging to unrelated SGs and MTP Routes.
+Repeated updates to existing prefixes replace indexed records in place, so
+overwrite-only SSNM traffic cannot restore the former quadratic Endpoint-lock
+work or grow the index.
 
 ## MTP3-User Indications
 

@@ -334,6 +334,30 @@ func TestMTPTransferReturnsNoRouteWhenEverySignallingGatewayIsUnavailable(t *tes
 	}
 }
 
+func TestMTPTransferIndexedRouteLookupUsesLatestCoveringUpdate(t *testing.T) {
+	endpoint, first, second := newASPMultiSGFixture(t)
+	if err := second.Close(); err != nil {
+		t.Fatalf("close alternate SG Association: %v", err)
+	}
+	capture := &mtpTransferCapture{}
+	first.dataWriter = capture.write
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 4, nil)}
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	applyASPDAVA(t, first, 7, 1, 0x120000, 16)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer after newer covering DAVA: %v", err)
+	}
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	if _, err := endpoint.MTPTransfer(request); !errors.Is(err, ErrNoMTPRoute) {
+		t.Fatalf("MTPTransfer after newer exact DUNA error = %v, want ErrNoMTPRoute", err)
+	}
+	if capture.count() != 1 {
+		t.Fatalf("transmitted DATA count = %d, want 1", capture.count())
+	}
+}
+
 func TestMTPTransferBroadcastsAcrossSGPsWithinSignallingGateway(t *testing.T) {
 	config := oneSignallingGatewayTwoSGPConfig(RouteSelectionBroadcast)
 	endpoint, _, captures := newASPTransferFixture(t, config)

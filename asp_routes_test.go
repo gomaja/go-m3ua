@@ -572,6 +572,27 @@ func FuzzASPRouteIntersection(f *testing.F) {
 }
 
 func BenchmarkASPRouteSparseOverwriteRecompute(b *testing.B) {
+	routes, _ := benchmarkASPRoutesWithSparseRecords(b)
+	b.ResetTimer()
+	for range b.N {
+		routes.mu.Lock()
+		_ = routes.recomputeLocked(map[MTPRouteID]struct{}{"sccp-a": {}})
+		routes.mu.Unlock()
+	}
+}
+
+func BenchmarkASPRouteIndexedTransferLookup(b *testing.B) {
+	routes, gateway := benchmarkASPRoutesWithSparseRecords(b)
+	b.ResetTimer()
+	for range b.N {
+		routes.mu.Lock()
+		_, _ = routes.signallingGatewayStatusLocked(gateway, "sccp-a", 0x123456, 0)
+		routes.mu.Unlock()
+	}
+}
+
+func benchmarkASPRoutesWithSparseRecords(b *testing.B) (*aspRoutes, aspSignallingGatewayConfig) {
+	b.Helper()
 	config := validASPConfig()
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
 	if err != nil {
@@ -609,12 +630,7 @@ func BenchmarkASPRouteSparseOverwriteRecompute(b *testing.B) {
 		routes.indexAvailabilityRecordLocked(key, record)
 	}
 	routes.mu.Unlock()
-	b.ResetTimer()
-	for range b.N {
-		routes.mu.Lock()
-		_ = routes.recomputeLocked(map[MTPRouteID]struct{}{"sccp-a": {}})
-		routes.mu.Unlock()
-	}
+	return routes, routes.config.signallingGateways[0]
 }
 
 func countASPRouteStateIndexNodes(node *aspRouteStateIndexNode) int {

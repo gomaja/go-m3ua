@@ -851,13 +851,16 @@ func (r *aspRoutes) signallingGatewayStatusLocked(
 	}
 
 	status := aspDestinationStatus{availability: DestinationAvailable}
-	if record, exists := r.latestAvailabilityLocked(gateway.id, mtpRoute, pointCode, mask); exists {
-		status.availability = record.availability
+	availability, availabilitySet, congestion, congestionSet := r.indexedRouteStateForRangeLocked(
+		gateway.id, mtpRoute, pointCode, mask,
+	)
+	if availabilitySet {
+		status.availability = availability.availability
 	}
-	if record, exists := r.latestCongestionLocked(gateway.id, mtpRoute, pointCode, mask); exists {
-		status.congested = record.congested
-		status.congestionLevel = record.level
-		status.congestionLevelSet = record.levelSet
+	if congestionSet {
+		status.congested = congestion.congested
+		status.congestionLevel = congestion.level
+		status.congestionLevelSet = congestion.levelSet
 	}
 	return status, true
 }
@@ -891,46 +894,42 @@ func (r *aspRoutes) signallingGatewayRouteCapabilityLocked(
 	return configured, capable
 }
 
-func (r *aspRoutes) latestAvailabilityLocked(
+func (r *aspRoutes) indexedRouteStateForRangeLocked(
 	signallingGateway SignallingGatewayID,
-	mtpRoute MTPRouteID,
+	mtpRouteID MTPRouteID,
 	pointCode uint32,
 	mask uint8,
-) (aspAvailabilityRecord, bool) {
-	var latest aspAvailabilityRecord
-	found := false
-	for key, record := range r.availability {
-		if key.signallingGateway != signallingGateway || key.mtpRoute != mtpRoute ||
-			!aspRangeCovers(key.pointCode, key.mask, pointCode, mask) {
-			continue
-		}
-		if !found || record.sequence > latest.sequence {
-			latest = record
-			found = true
-		}
+) (aspAvailabilityRecord, bool, aspCongestionRecord, bool) {
+	mtpRoute, exists := r.mtpRoute(mtpRouteID)
+	if !exists || !aspMTPRouteCoversRange(mtpRoute, pointCode, mask) {
+		return aspAvailabilityRecord{}, false, aspCongestionRecord{}, false
 	}
-	return latest, found
-}
-
-func (r *aspRoutes) latestCongestionLocked(
-	signallingGateway SignallingGatewayID,
-	mtpRoute MTPRouteID,
-	pointCode uint32,
-	mask uint8,
-) (aspCongestionRecord, bool) {
-	var latest aspCongestionRecord
-	found := false
-	for key, record := range r.congestion {
-		if key.signallingGateway != signallingGateway || key.mtpRoute != mtpRoute ||
-			!aspRangeCovers(key.pointCode, key.mask, pointCode, mask) {
-			continue
+	node := r.stateIndex[mtpRouteID]
+	var availability aspAvailabilityRecord
+	availabilitySet := false
+	var congestion aspCongestionRecord
+	congestionSet := false
+	for currentMask := mtpRoute.mask; ; currentMask-- {
+		if node == nil {
+			break
 		}
-		if !found || record.sequence > latest.sequence {
-			latest = record
-			found = true
+		if record, found := node.availability[signallingGateway]; found &&
+			(!availabilitySet || record.sequence > availability.sequence) {
+			availability = record
+			availabilitySet = true
 		}
+		if record, found := node.congestion[signallingGateway]; found &&
+			(!congestionSet || record.sequence > congestion.sequence) {
+			congestion = record
+			congestionSet = true
+		}
+		if currentMask == mask {
+			break
+		}
+		branch := int(pointCode >> (currentMask - 1) & 1)
+		node = node.children[branch]
 	}
-	return latest, found
+	return availability, availabilitySet, congestion, congestionSet
 }
 
 func aspRouteASMatchesStatus(association *Association, key ASKey, status *DestinationStatus) bool {
