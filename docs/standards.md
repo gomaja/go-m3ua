@@ -159,7 +159,7 @@ not an invented standards relationship.
 | RFC 3332, M3UA | [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html) | M3UA protocol behavior uses RFC 4666 exclusively. |
 | RFC 2401, IPsec architecture | [RFC 4301](https://www.rfc-editor.org/rfc/rfc4301.html), as updated by RFCs 6040 and 7619 | Network policy and security-association design belong to deployment configuration. |
 | RFC 2406, ESP | [RFC 4303](https://www.rfc-editor.org/rfc/rfc4303.html) | Deployments requiring RFC 3788 confidentiality and integrity use current ESP, not RFC 2406. |
-| RFCs 2407 and 2409, IPsec DOI and IKEv1 | [RFC 7296](https://www.rfc-editor.org/rfc/rfc7296.html) and its updates | IKEv1 Main/Aggressive Mode requirements in RFC 3788 cannot be presented as a modern secure profile. Deployments use current IKEv2 policy and algorithms. |
+| RFCs 2407 and 2409, IPsec DOI and IKEv1 | [RFC 7296](https://www.rfc-editor.org/rfc/rfc7296.html) and its updates | Literal RFC 3788 Section 5 conformance still requires the obsolete IKEv1 Main Mode, Aggressive Mode, and Quick Mode capabilities because no RFC formally updates that requirement. The project-recommended secure deployment profile uses current IKEv2 policy and algorithms instead; it is deliberately non-equivalent and cannot by itself establish literal RFC 3788 conformance. |
 | RFC 2246, TLS 1.0 | [RFC 9846](https://www.rfc-editor.org/rfc/rfc9846.html) | RFC 9846 is the current TLS 1.3 specification. RFC 3436 is updated by RFC 8996, which prohibits TLS 1.0 and TLS 1.1. The obsolete mandatory cipher suite text in RFC 3788 is not a modern deployment baseline. |
 | RFC 3280, certificate profile | [RFC 5280](https://www.rfc-editor.org/rfc/rfc5280.html) and its updates | Certificate validation and trust policy belong to the security layer chosen by the deployment. |
 | RFC 2560, OCSP | [RFC 6960](https://www.rfc-editor.org/rfc/rfc6960.html) and its updates | Revocation checking belongs to the deployment security layer. |
@@ -185,6 +185,10 @@ The deployment is responsible for:
   [Section 7](https://www.rfc-editor.org/rfc/rfc3788.html#section-7), supplied
   by the host or another deployment layer even when policy does not enable
   IPsec on every Association;
+- the legacy IKEv1, IPsec DOI, and Quick Mode capabilities required by RFC 3788
+  [Section 5](https://www.rfc-editor.org/rfc/rfc3788.html#section-5) if the
+  operator makes a literal RFC 3788 conformance claim, or an explicit
+  non-equivalent modernization decision to use current IKEv2 instead;
 - optional TLS, DTLS, private-network, or additional protection selected by
   deployment policy, none of which removes the mandatory IPsec-support
   requirement;
@@ -197,8 +201,11 @@ The deployment is responsible for:
 - operational monitoring, audit retention, incident response, and regulatory
   requirements.
 
-Using go-m3ua alone does not make a node compliant with RFC 3788. A conformance
-claim requires the application and deployment to supply the required security
-mechanism and policy. The library must not embed keys, create implicit trust,
-downgrade protection, or claim that SCTP checksum, cookie, multihoming, or
-heartbeat behavior provides confidentiality or peer authentication.
+Using go-m3ua alone does not make a node compliant with RFC 3788. A literal
+conformance claim requires the application and deployment to supply every
+legacy capability that current RFC 3788 still mandates. A deployment that
+instead follows the project-recommended current IKEv2 profile must describe it
+as a secure modernization, not as literal RFC 3788 conformance. The library
+must not embed keys, create implicit trust, downgrade protection, or claim that
+SCTP checksum, cookie, multihoming, or heartbeat behavior provides
+confidentiality or peer authentication.
