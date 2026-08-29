@@ -2,6 +2,7 @@ package m3ua
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,6 +236,62 @@ func TestSGPAssociationAvailabilityRequiresEstablishedOpenAssociation(t *testing
 	for name, call := range calls {
 		if err := call(); !errors.Is(err, ErrAssociationClosed) {
 			t.Errorf("closed %s availability error = %v, want ErrAssociationClosed", name, err)
+		}
+	}
+}
+
+func TestClosedSGPListenerRejectsAvailabilityControls(t *testing.T) {
+	listener := newSGPListener(NewListenerConfig(mcSGPConfig()))
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close SGP Listener: %v", err)
+	}
+	calls := map[string]func() error{
+		"NIF": func() error { return listener.SetNIFAvailable(false) },
+		"AS":  func() error { return listener.SetASAvailable(1, false) },
+		"ASKey": func() error {
+			return listener.SetASAvailableForAS(routingContextASKey(1), false)
+		},
+	}
+	for name, call := range calls {
+		if err := call(); !errors.Is(err, ErrAssociationClosed) {
+			t.Errorf("closed %s availability error = %v, want ErrAssociationClosed", name, err)
+		}
+	}
+	if listener.as != nil || listener.nif != nil || listener.destinations != nil {
+		t.Fatal("closed availability control initialized stale Listener state")
+	}
+}
+
+func TestSGPListenerAvailabilityControlsRaceClose(t *testing.T) {
+	for iteration := 0; iteration < 100; iteration++ {
+		listener := newSGPListener(NewListenerConfig(mcSGPConfig()))
+		start := make(chan struct{})
+		results := make(chan error, 4)
+		var calls sync.WaitGroup
+		for _, call := range []func() error{
+			func() error { return listener.SetNIFAvailable(false) },
+			func() error { return listener.SetASAvailable(1, false) },
+			func() error { return listener.SetASAvailableForAS(routingContextASKey(1), false) },
+			listener.Close,
+		} {
+			calls.Add(1)
+			go func(call func() error) {
+				defer calls.Done()
+				<-start
+				results <- call()
+			}(call)
+		}
+		close(start)
+		calls.Wait()
+		close(results)
+
+		for err := range results {
+			if err != nil && !errors.Is(err, ErrAssociationClosed) {
+				t.Fatalf("iteration %d availability/close error = %v", iteration, err)
+			}
+		}
+		if err := listener.SetNIFAvailable(true); !errors.Is(err, ErrAssociationClosed) {
+			t.Fatalf("iteration %d post-close availability error = %v, want ErrAssociationClosed", iteration, err)
 		}
 	}
 }

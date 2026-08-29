@@ -957,16 +957,19 @@ func (l *Listener) SetNIFAvailable(available bool) error {
 	if l.Role() != RoleSGP {
 		return ErrUnsupportedRole
 	}
-	_, nif, _ := l.registry()
-
 	l.muConns.Lock()
+	if l.closed {
+		l.muConns.Unlock()
+		return ErrAssociationClosed
+	}
+	_, nif, _ := l.registryLocked()
 	conns := make([]*Association, 0, len(l.conns))
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
+	nif.setIsolated(!available)
 	l.muConns.Unlock()
 
-	nif.setIsolated(!available)
 	if available {
 		return nil
 	}
@@ -997,10 +1000,10 @@ func (l *Listener) SetNIFAvailable(available bool) error {
 //
 // It returns ErrUnsupportedRole for a Listener whose Endpoint is not an SGP.
 func (l *Listener) SetASAvailable(rtCtx uint32, available bool) error {
-	if l.Role() != RoleSGP {
-		return ErrUnsupportedRole
+	registry, err := l.openAvailabilityRegistry()
+	if err != nil {
+		return err
 	}
-	registry, _, _ := l.registry()
 	registryKey, _, registryOK, registryAmbiguous := registry.lookupRoutingContext(rtCtx)
 	if registryAmbiguous {
 		return nil
@@ -1028,16 +1031,19 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) error {
 	if l.Role() != RoleSGP {
 		return ErrUnsupportedRole
 	}
-	as, nif, _ := l.registry()
-
 	l.muConns.Lock()
+	if l.closed {
+		l.muConns.Unlock()
+		return ErrAssociationClosed
+	}
+	as, nif, _ := l.registryLocked()
 	conns := make([]*Association, 0, len(l.conns))
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
+	nif.setASAvailableForAS(key, available)
 	l.muConns.Unlock()
 
-	nif.setASAvailableForAS(key, available)
 	if available {
 		return nil
 	}
@@ -1060,6 +1066,19 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) error {
 	}
 	isolated.Wait()
 	return nil
+}
+
+func (l *Listener) openAvailabilityRegistry() (*applicationServers, error) {
+	if l.Role() != RoleSGP {
+		return nil, ErrUnsupportedRole
+	}
+	l.muConns.Lock()
+	defer l.muConns.Unlock()
+	if l.closed {
+		return nil, ErrAssociationClosed
+	}
+	registry, _, _ := l.registryLocked()
+	return registry, nil
 }
 
 // SetNIFAvailable declares whether this dialing SGP Association can reach the
