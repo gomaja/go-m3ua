@@ -150,11 +150,6 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 //
 // The M3UA handshake that follows has its own budget,
 // AssociationConfig.EstablishTimeout, and observes ctx as well.
-//
-// A RoleSGP Endpoint currently permits one owner of its shared protocol state:
-// either one Listener, which may accept multiple ASP associations, or one
-// dialed Association. A second owner returns ErrEndpointStateInUse rather than
-// silently creating an inconsistent AS registry.
 func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, cfg *AssociationConfig) (*Association, error) {
 	role, err := e.associationRole()
 	if err != nil {
@@ -171,32 +166,6 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	if !ok {
 		return nil, fmt.Errorf("invalid network: %s", network)
 	}
-	var releaseEndpointStateOwner func()
-	if role == RoleSGP {
-		releaseEndpointStateOwner, err = e.reserveSGPStateOwner()
-		if err != nil {
-			return nil, err
-		}
-		defer func() {
-			if releaseEndpointStateOwner != nil {
-				releaseEndpointStateOwner()
-			}
-		}()
-	}
-
-	// Nothing here writes to cfg: each permitted Dial gets an independent
-	// immutable AssociationConfig snapshot.
-	association := newAssociation(role, cfg)
-	if role == RoleSGP {
-		association.releaseEndpointStateOwner = releaseEndpointStateOwner
-		association.as = newApplicationServersWithTrafficModePolicy(
-			cfg.RecoveryTimer, cfg, association.trafficModePolicy(),
-		)
-		association.nif = &nifAvailability{}
-		association.destinations = newDestinations()
-		association.mtp3Restarts = &mtp3RestartRegistry{}
-	}
-
 	initTimeout := cfg.InitTimeout
 	if initTimeout <= 0 {
 		initTimeout = DefaultInitTimeout
@@ -208,26 +177,56 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 		return nil, ctx.Err()
 	default:
 	}
+	if !e.beginOperation() {
+		return nil, ErrEndpointClosed
+	}
+	defer e.endOperation()
+	operationCtx, cancelOperation, stopOperation := e.operationContext(ctx)
+	keepOperationContext := false
+	defer func() {
+		stopOperation()
+		if !keepOperationContext {
+			cancelOperation(nil)
+		}
+	}()
 
-	// Created before the association, because the handler has to be installed
-	// on the socket at dial time; the route to this Association is set immediately
-	// after, and the handler ignores events that arrive before it exists.
+	// Nothing here writes to cfg: each permitted Dial gets an independent
+	// immutable AssociationConfig snapshot. An SGP registers its Application
+	// Server scope only after cancellation and Endpoint closure have been ruled
+	// out, so an attempt that never starts cannot change Endpoint state.
+	association := newAssociation(role, cfg)
+	if role == RoleSGP {
+		association.as, association.nif, association.destinations, association.mtp3Restarts = e.sgpRegistry()
+		association.as.register(association.configuredASKeys())
+	}
+
+	// The notification handler has to be installed on the socket at dial time;
+	// route it to this Association, and ignore events that arrive before an SCTP
+	// association identifier exists.
 	restarts := &restartWatcher{}
 	restarts.setRoute(func(sctp.SCTPAssocID) *Association { return association })
 
-	sctpConn, err := dialAssociation(ctx, n, laddr, raddr, initTimeout, restarts)
+	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, restarts)
 	if err != nil {
+		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
+			return nil, ErrEndpointClosed
+		}
 		return nil, err
 	}
 	association.sctpConn = sctpConn
+	if !e.trackAssociation(association) {
+		_ = sctpConn.Close()
+		return nil, ErrEndpointClosed
+	}
 
 	if err := association.setUpSocket(); err != nil {
+		_ = association.closeWith(err)
 		return nil, err
 	}
 
 	// The opening ASP-DOWN transition is applied inside monitor(), ahead of
 	// dispatching, instead of racing the reader from here.
-	go association.monitor(ctx)
+	go association.monitor(operationCtx)
 
 	establishTimeout := cfg.EstablishTimeout
 	if establishTimeout <= 0 {
@@ -236,16 +235,20 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 
 	select {
 	case <-association.established:
-		releaseEndpointStateOwner = nil
+		keepOperationContext = true
 		return association, nil
 	case <-association.done:
+		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
+			return nil, ErrEndpointClosed
+		}
 		if err := association.Err(); err != nil {
 			return nil, err
 		}
 		return nil, ErrFailedToEstablish
-	case <-ctx.Done():
-		_ = association.closeWith(ctx.Err())
-		return nil, ctx.Err()
+	case <-operationCtx.Done():
+		cause := context.Cause(operationCtx)
+		_ = association.closeWith(cause)
+		return nil, cause
 	case <-time.After(establishTimeout):
 		_ = association.closeWith(ErrTimeout)
 		return nil, ErrTimeout

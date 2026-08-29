@@ -323,7 +323,7 @@ func TestDistributeDataResolvesAndValidatesRoutingContext(t *testing.T) {
 	})
 
 	t.Run("omitted with one registered AS and no Config parameter", func(t *testing.T) {
-		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 			config.RoutingContexts = nil
 		})
 		applicationServer.setASPState(asp, StateASPActive, time.Hour)
@@ -428,7 +428,7 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 	})
 
 	t.Run("unknown Network Appearance without configured default", func(t *testing.T) {
-		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 			config.NetworkAppearance = nil
 			config.RoutingContexts = nil
 		})
@@ -447,7 +447,7 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 }
 
 func TestBroadcastFlowIdentifierAcceptsExactConfiguredLimit(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *distributionFixtureConfig) {
 		config.BroadcastFlowIdentifierBytes = 4
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			return "1234", nil
@@ -567,7 +567,9 @@ func TestBroadcastRecipientsReceiveIsolatedDataCopies(t *testing.T) {
 
 func TestDistributionPolicyDoesNotRaceConcurrentConfigMutation(t *testing.T) {
 	var classifierCalls atomic.Int32
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
+	var mutablePolicy *SGPConfig
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *distributionFixtureConfig) {
+		mutablePolicy = config.SGPConfig
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			classifierCalls.Add(1)
 			return "snapshotted", nil
@@ -593,11 +595,11 @@ func TestDistributionPolicyDoesNotRaceConcurrentConfigMutation(t *testing.T) {
 			configuredNetworkAppearance.Data[3] = byte(2 + iteration%200)
 			listener.AssociationConfig.RoutingContexts = params.NewRoutingContext(uint32(2 + iteration%200))
 			listener.AssociationConfig.NetworkAppearance = params.NewNetworkAppearance(uint32(2 + iteration%200))
-			listener.AssociationConfig.RecoveryQueueMessages = iteration + 1
-			listener.AssociationConfig.RecoveryQueueBytes = iteration + 1
-			listener.AssociationConfig.BroadcastFlowCacheEntries = iteration + 1
-			listener.AssociationConfig.BroadcastFlowIdentifierBytes = iteration + 1
-			listener.AssociationConfig.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
+			mutablePolicy.RecoveryQueueMessages = iteration + 1
+			mutablePolicy.RecoveryQueueBytes = iteration + 1
+			mutablePolicy.BroadcastFlowCacheEntries = iteration + 1
+			mutablePolicy.BroadcastFlowIdentifierBytes = iteration + 1
+			mutablePolicy.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 				return "live Config callback must not run", errors.New("live Config callback ran")
 			}
 		}
@@ -638,12 +640,13 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 		if len(value) > int(^uint16(0)) {
 			t.Skip()
 		}
-		config := newSGPAssociationConfigForTest(
-			&HeartbeatInfo{Enabled: false}, 1, 2, 0, params.TrafficModeLoadshare, 0, 0,
-			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
-		)
-		registry := newApplicationServers(time.Hour, config)
-		registry.get(1)
+		registry := newApplicationServers(time.Hour)
+		registry.get(ASKey{
+			NetworkAppearance:    0,
+			RoutingContext:       1,
+			NetworkAppearanceSet: true,
+			RoutingContextSet:    true,
+		})
 		data := distributionData(1, 1, "payload")
 		data.CorrelationID = params.NewCorrelationID(1)
 
@@ -670,7 +673,7 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 			data.CorrelationID = parameter
 		}
 
-		owned, _, _, _, err := prepareDistributionData(registry, registry.distribution, data)
+		owned, _, _, _, err := prepareDistributionData(registry, data)
 		if !correctTag {
 			if !errors.Is(err, params.ErrInvalidType) {
 				t.Fatalf("slot %d wrong-tag error = %v, want params.ErrInvalidType", slot, err)

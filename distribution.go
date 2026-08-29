@@ -30,8 +30,6 @@ type distributionPolicy struct {
 	byteLimit                    int
 	broadcastFlowCacheEntries    int
 	broadcastFlowIdentifierBytes int
-	routingContexts              []uint32
-	networkAppearance            *params.Param
 	broadcastFlowIdentifier      BroadcastFlowIdentifier
 }
 
@@ -83,10 +81,11 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 }
 
 // DistributeData sends one DATA message through the Application Server
-// registry owned by an SGP Association. This is the distribution entry point
-// for an SGP that initiated its SCTP association, as permitted by RFC 4666
-// Section 1.4.8. Accepted SGP associations use the same Listener-owned registry,
-// so either entry point applies the same AS state and traffic-mode decisions.
+// registry owned by the Association's SGP Endpoint. This is the distribution
+// entry point for an SGP that initiated its SCTP association, as permitted by
+// RFC 4666 Section 1.4.8. Accepted and SCTP-initiating SGP Associations use the
+// same Endpoint-owned registry, so either entry point applies the same AS state
+// and traffic-mode decisions.
 func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, error) {
 	if c == nil {
 		return TrafficDistribution{}, errors.New("cannot distribute DATA through a nil Association")
@@ -107,7 +106,7 @@ func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, 
 
 func distributeData(registry *applicationServers, data *messages.Data) (TrafficDistribution, error) {
 	policy := registry.distribution
-	owned, protocolData, encodedSize, key, err := prepareDistributionData(registry, policy, data)
+	owned, protocolData, encodedSize, key, err := prepareDistributionData(registry, data)
 	if err != nil {
 		return TrafficDistribution{}, err
 	}
@@ -126,7 +125,7 @@ func distributeData(registry *applicationServers, data *messages.Data) (TrafficD
 	return applicationServer.distribute(owned, protocolData, flow, encodedSize, policy.messageLimit, policy.byteLimit)
 }
 
-func prepareDistributionData(registry *applicationServers, policy distributionPolicy, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, ASKey, error) {
+func prepareDistributionData(registry *applicationServers, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, ASKey, error) {
 	if data == nil {
 		return nil, nil, 0, ASKey{}, errors.New("cannot distribute nil DATA")
 	}
@@ -154,11 +153,8 @@ func prepareDistributionData(registry *applicationServers, policy distributionPo
 	if err := validateDistributionNetworkAppearanceShape(owned.NetworkAppearance); err != nil {
 		return nil, nil, 0, ASKey{}, err
 	}
-	key, err := resolveDistributionRoutingContext(registry, policy, owned)
+	key, err := resolveDistributionRoutingContext(registry, owned)
 	if err != nil {
-		return nil, nil, 0, ASKey{}, err
-	}
-	if err := validateDistributionNetworkAppearance(registry, policy, key, owned.NetworkAppearance); err != nil {
 		return nil, nil, 0, ASKey{}, err
 	}
 
@@ -180,25 +176,9 @@ func prepareDistributionData(registry *applicationServers, policy distributionPo
 	return validated, validatedProtocolData, len(raw), key, nil
 }
 
-func resolveDistributionRoutingContext(registry *applicationServers, policy distributionPolicy, data *messages.Data) (ASKey, error) {
-	configured := policy.routingContexts
-
+func resolveDistributionRoutingContext(registry *applicationServers, data *messages.Data) (ASKey, error) {
 	if data.RoutingContext == nil {
-		switch len(configured) {
-		case 0:
-			if key, _, ok := registry.sole(); ok {
-				if key.RoutingContextSet {
-					data.RoutingContext = params.NewRoutingContext(key.RoutingContext)
-				}
-				return key, nil
-			}
-			return ASKey{}, ErrNoActiveASP
-		case 1:
-			data.RoutingContext = params.NewRoutingContext(configured[0])
-			return resolveExplicitDistributionRoutingContext(registry, policy, data.NetworkAppearance, configured[0])
-		default:
-			return ASKey{}, ErrMissingRoutingContext
-		}
+		return resolveOmittedDistributionRoutingContext(registry, data)
 	}
 	if data.RoutingContext.Tag != params.RoutingContext {
 		return ASKey{}, fmt.Errorf("invalid DATA Routing Context: %w", params.ErrInvalidType)
@@ -208,63 +188,80 @@ func resolveDistributionRoutingContext(registry *applicationServers, policy dist
 	}
 	routingContexts := data.RoutingContext.RoutingContexts()
 	rtCtx := routingContexts[0]
-	return resolveExplicitDistributionRoutingContext(registry, policy, data.NetworkAppearance, rtCtx)
+	return resolveExplicitDistributionRoutingContext(registry, data.NetworkAppearance, rtCtx)
 }
 
-func resolveExplicitDistributionRoutingContext(registry *applicationServers, policy distributionPolicy, networkAppearance *params.Param, rtCtx uint32) (ASKey, error) {
+func resolveOmittedDistributionRoutingContext(registry *applicationServers, data *messages.Data) (ASKey, error) {
+	keys := registry.keys()
+	if data.NetworkAppearance != nil {
+		networkAppearance := data.NetworkAppearance.NetworkAppearance()
+		keys = filterASKeysForNetworkAppearance(keys, networkAppearance)
+		if len(keys) == 0 {
+			return ASKey{}, NewInvalidNetworkAppearanceError(networkAppearance)
+		}
+	}
+	if len(keys) == 1 {
+		key := keys[0]
+		if key.RoutingContextSet {
+			data.RoutingContext = params.NewRoutingContext(key.RoutingContext)
+		}
+		return key, nil
+	}
+	if len(keys) == 0 {
+		return ASKey{}, ErrNoActiveASP
+	}
+	if distributionRoutingContextAmbiguous(keys) {
+		return ASKey{}, ErrMissingRoutingContext
+	}
+	return ASKey{}, ErrInvalidNetworkAppearance
+}
+
+func resolveExplicitDistributionRoutingContext(registry *applicationServers, networkAppearance *params.Param, rtCtx uint32) (ASKey, error) {
 	if networkAppearance == nil {
 		matches := registry.asKeysForRoutingContext(rtCtx)
 		switch len(matches) {
 		case 0:
+			return ASKey{}, NewInvalidRoutingContextError(rtCtx)
 		case 1:
 			return matches[0], nil
 		default:
-			key := asKeyFromDistributionScope(policy, nil, rtCtx)
-			if _, ok := registry.lookup(key); ok || distributionScopeConfigured(policy, key) {
-				return key, nil
-			}
 			return ASKey{}, ErrInvalidNetworkAppearance
 		}
-
-		key := asKeyFromDistributionScope(policy, nil, rtCtx)
-		if distributionScopeConfigured(policy, key) {
-			return key, nil
-		}
-		return ASKey{}, NewInvalidRoutingContextError(rtCtx)
 	}
 
-	key := asKeyFromDistributionScope(policy, networkAppearance, rtCtx)
-	if _, ok := registry.lookup(key); ok || distributionScopeConfigured(policy, key) {
+	key := routingContextASKey(rtCtx)
+	key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(networkAppearance)
+	if _, ok := registry.lookup(key); ok {
 		return key, nil
 	}
-	if distributionRoutingContextKnown(registry, policy, rtCtx) {
-		return key, nil
+	if len(registry.asKeysForRoutingContext(rtCtx)) > 0 {
+		return ASKey{}, NewInvalidNetworkAppearanceError(key.NetworkAppearance)
 	}
 	return ASKey{}, NewInvalidRoutingContextError(rtCtx)
 }
 
-func distributionRoutingContextKnown(registry *applicationServers, policy distributionPolicy, rtCtx uint32) bool {
-	if distributionRoutingContextConfigured(policy, rtCtx) {
-		return true
-	}
-	return len(registry.asKeysForRoutingContext(rtCtx)) > 0
-}
-
-func distributionRoutingContextConfigured(policy distributionPolicy, rtCtx uint32) bool {
-	for _, configured := range policy.routingContexts {
-		if configured == rtCtx {
-			return true
+func filterASKeysForNetworkAppearance(keys []ASKey, networkAppearance uint32) []ASKey {
+	filtered := make([]ASKey, 0, len(keys))
+	for _, key := range keys {
+		if key.NetworkAppearanceSet && key.NetworkAppearance == networkAppearance {
+			filtered = append(filtered, key)
 		}
 	}
-	return false
+	return filtered
 }
 
-func distributionScopeConfigured(policy distributionPolicy, key ASKey) bool {
-	if !key.RoutingContextSet || !distributionRoutingContextConfigured(policy, key.RoutingContext) {
-		return false
+func distributionRoutingContextAmbiguous(keys []ASKey) bool {
+	contexts := make(map[struct {
+		value uint32
+		set   bool
+	}]struct{}, len(keys))
+	for _, key := range keys {
+		contexts[struct {
+			value uint32
+			set   bool
+		}{value: key.RoutingContext, set: key.RoutingContextSet}] = struct{}{}
 	}
-	appearance, set := appearanceOf(policy.networkAppearance)
-	return key.NetworkAppearanceSet == set && (!set || key.NetworkAppearance == appearance)
+	return len(contexts) > 1
 }
 
 func validateDistributionNetworkAppearanceShape(networkAppearance *params.Param) error {
@@ -280,31 +277,7 @@ func validateDistributionNetworkAppearanceShape(networkAppearance *params.Param)
 	return nil
 }
 
-func validateDistributionNetworkAppearance(registry *applicationServers, policy distributionPolicy, key ASKey, networkAppearance *params.Param) error {
-	if networkAppearance == nil {
-		return nil
-	}
-	if _, ok := registry.lookup(key); ok || distributionScopeConfigured(policy, key) {
-		return nil
-	}
-	appearance, set := appearanceOf(policy.networkAppearance)
-	if !set || appearance != networkAppearance.NetworkAppearance() {
-		return NewInvalidNetworkAppearanceError(networkAppearance.NetworkAppearance())
-	}
-	return nil
-}
-
-func asKeyFromDistributionScope(policy distributionPolicy, networkAppearance *params.Param, routingContext uint32) ASKey {
-	key := routingContextASKey(routingContext)
-	if networkAppearance != nil {
-		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(networkAppearance)
-		return key
-	}
-	key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(policy.networkAppearance)
-	return key
-}
-
-func newDistributionPolicy(config *AssociationConfig) distributionPolicy {
+func newSGPDistributionPolicy(config *SGPConfig) distributionPolicy {
 	policy := distributionPolicy{
 		messageLimit:                 DefaultRecoveryQueueMessages,
 		byteLimit:                    DefaultRecoveryQueueBytes,
@@ -326,10 +299,6 @@ func newDistributionPolicy(config *AssociationConfig) distributionPolicy {
 	if config.BroadcastFlowIdentifierBytes > 0 {
 		policy.broadcastFlowIdentifierBytes = config.BroadcastFlowIdentifierBytes
 	}
-	if config.RoutingContexts != nil {
-		policy.routingContexts = append([]uint32(nil), config.RoutingContexts.RoutingContexts()...)
-	}
-	policy.networkAppearance = config.NetworkAppearance.Copy()
 	policy.broadcastFlowIdentifier = config.BroadcastFlowIdentifier
 	return policy
 }

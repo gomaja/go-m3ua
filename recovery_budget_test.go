@@ -11,7 +11,7 @@ import (
 )
 
 func TestListenerRecoveryMessageBudgetSpansApplicationServers(t *testing.T) {
-	listener, first, second, _ := pendingTwoApplicationServerFixture(t, func(config *AssociationConfig) {
+	listener, first, second, _ := pendingTwoApplicationServerFixture(t, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 10
 		config.RecoveryQueueBytes = 1 << 20
 		config.RecoveryQueueTotalMessages = 1
@@ -38,8 +38,14 @@ func TestListenerRecoveryMessageBudgetSpansApplicationServers(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatalf("Listener.Close: %v", err)
 	}
+	if messages, _ := recoveryBudgetUsage(listener.as.recoveryBudget); messages != 1 {
+		t.Fatalf("aggregate retained messages after Listener.Close = %d, want 1", messages)
+	}
+	if err := listener.endpoint.Close(); err != nil {
+		t.Fatalf("Endpoint.Close: %v", err)
+	}
 	if messages, bytes := recoveryBudgetUsage(listener.as.recoveryBudget); messages != 0 || bytes != 0 {
-		t.Fatalf("aggregate budget after close = %d messages, %d bytes; want zero", messages, bytes)
+		t.Fatalf("aggregate budget after Endpoint.Close = %d messages, %d bytes; want zero", messages, bytes)
 	}
 	_ = second
 }
@@ -56,7 +62,7 @@ func TestListenerRecoveryByteBudgetAcceptsExactBoundaryOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	totalBytes := len(firstWire) + len(secondWire)
-	listener, _, _, _ := pendingTwoApplicationServerFixture(t, func(config *AssociationConfig) {
+	listener, _, _, _ := pendingTwoApplicationServerFixture(t, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 10
 		config.RecoveryQueueBytes = 1 << 20
 		config.RecoveryQueueTotalMessages = 10
@@ -79,14 +85,14 @@ func TestListenerRecoveryByteBudgetAcceptsExactBoundaryOnly(t *testing.T) {
 
 func TestListenerRecoveryBudgetCountsActiveInFlightDelivery(t *testing.T) {
 	listener, first, asp, _ := distributionFixtureForContexts(
-		t, params.TrafficModeLoadshare, []uint32{1, 2}, func(config *AssociationConfig) {
+		t, params.TrafficModeLoadshare, []uint32{1, 2}, func(config *distributionFixtureConfig) {
 			config.RecoveryQueueMessages = 10
 			config.RecoveryQueueBytes = 1 << 20
 			config.RecoveryQueueTotalMessages = 1
 			config.RecoveryQueueTotalBytes = 1 << 20
 		},
 	)
-	second := listener.as.get(2)
+	second := listener.as.get(associationConfigASKey(listener.AssociationConfig, 2))
 	asp.noteRoutingContextsActive([]uint32{1, 2})
 	asp.setState(StateASPActive)
 	first.setASPState(asp, StateASPActive, time.Hour)
@@ -127,12 +133,12 @@ func TestListenerRecoveryBudgetCountsActiveInFlightDelivery(t *testing.T) {
 	}
 }
 
-func pendingTwoApplicationServerFixture(t *testing.T, configure func(*AssociationConfig)) (*Listener, *applicationServer, *applicationServer, *Association) {
+func pendingTwoApplicationServerFixture(t *testing.T, configure func(*distributionFixtureConfig)) (*Listener, *applicationServer, *applicationServer, *Association) {
 	t.Helper()
 	listener, first, asp, _ := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, configure,
 	)
-	second := listener.as.get(2)
+	second := listener.as.get(associationConfigASKey(listener.AssociationConfig, 2))
 	asp.noteRoutingContextsActive([]uint32{1, 2})
 	asp.setState(StateASPActive)
 	first.setASPState(asp, StateASPActive, time.Hour)

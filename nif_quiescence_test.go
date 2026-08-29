@@ -20,8 +20,10 @@ import (
 // write escape after that Ack.
 func TestPartialNIFIsolationWaitsForScopedDirectDataBeforeAspInactiveAck(t *testing.T) {
 	listener, applicationServer, asp, _ := distributionFixture(t, params.TrafficModeLoadshare)
-	listener.conns = map[*Association]struct{}{asp: {}}
 	asp.listener = listener
+	if !listener.promoteAcceptedAssociation(asp) {
+		t.Fatal("failed to attach Association")
+	}
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
@@ -105,8 +107,10 @@ func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.
 	asp.maxMessageStreamID = 4
 	asp.cfg.RoutingContexts = nil
 	listener := newSGPListener(NewListenerConfig(asp.cfg))
-	listener.conns = map[*Association]struct{}{asp: {}}
 	asp.listener = listener
+	if !listener.promoteAcceptedAssociation(asp) {
+		t.Fatal("failed to attach Association")
+	}
 
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})

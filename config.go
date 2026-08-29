@@ -156,10 +156,10 @@ const DefaultRecoveryQueueMessages = 1024
 const DefaultRecoveryQueueBytes = 4 << 20
 
 // DefaultRecoveryQueueTotalMessages bounds recovery DATA retained across all
-// Application Servers owned by one Listener.
+// Application Servers owned by one SGP Endpoint.
 const DefaultRecoveryQueueTotalMessages = 4096
 
-// DefaultRecoveryQueueTotalBytes is the listener-wide encoded DATA budget.
+// DefaultRecoveryQueueTotalBytes is the SGP Endpoint-wide encoded DATA budget.
 const DefaultRecoveryQueueTotalBytes = 16 << 20
 
 // DefaultBroadcastFlowCacheEntries bounds synchronization markers retained for
@@ -185,6 +185,50 @@ const DefaultTAckRetries = 5
 // sequenced flows share that label. The callback receives an owned copy and
 // must return a stable identifier for equivalent flows.
 type BroadcastFlowIdentifier func(*params.ProtocolDataPayload) (string, error)
+
+// SGPConfig configures protocol state shared by every Association owned by one
+// Signalling Gateway Process Endpoint.
+//
+// RFC 4666 Sections 4.3.2, 4.3.4.3, and 4.6 define recovery, distribution,
+// and restart procedures in terms of an SGP and its Application Servers, not
+// in terms of one SCTP association or the peer that initiated it.
+type SGPConfig struct {
+	// RecoveryTimer is T(r), the AS-PENDING recovery timer of RFC 4666
+	// Section 4.3.2. Zero selects DefaultRecoveryTimer.
+	RecoveryTimer time.Duration
+	// RecoveryQueueMessages and RecoveryQueueBytes bound DATA retained for one
+	// AS while T(r) runs. Values less than or equal to zero select defaults.
+	RecoveryQueueMessages int
+	RecoveryQueueBytes    int
+	// RecoveryQueueTotalMessages and RecoveryQueueTotalBytes bound retained DATA
+	// across every AS owned by the SGP Endpoint.
+	RecoveryQueueTotalMessages int
+	RecoveryQueueTotalBytes    int
+	// BroadcastFlowIdentifier refines the default routing-label flow key used
+	// for RFC 4666 Section 4.3.4.3 Broadcast synchronization Correlation IDs.
+	BroadcastFlowIdentifier BroadcastFlowIdentifier
+	// BroadcastFlowCacheEntries bounds remembered flows per AS. Values less than
+	// or equal to zero select DefaultBroadcastFlowCacheEntries.
+	BroadcastFlowCacheEntries int
+	// BroadcastFlowIdentifierBytes bounds an application-defined flow
+	// identifier. Values less than or equal to zero select the default.
+	BroadcastFlowIdentifierBytes int
+}
+
+// EndpointConfig gives one M3UA Endpoint its immutable RFC 4666 role and any
+// role-specific node policy.
+type EndpointConfig struct {
+	Role Role
+	SGP  *SGPConfig
+}
+
+func snapshotSGPConfig(config *SGPConfig) *SGPConfig {
+	if config == nil {
+		return &SGPConfig{}
+	}
+	snapshot := *config
+	return &snapshot
+}
 
 // ASPIdentity identifies an ASP at the point its ASP Up is received. The ASP
 // Identifier is optional in RFC 4666, so ASPIdentifierSet distinguishes an
@@ -233,9 +277,9 @@ type AssociationConfig struct {
 	// when an Association or Listener is constructed; later mutations do not
 	// alter established protocol policy.
 	TrafficModeType *params.Param
-	// AuthorizeASP optionally narrows the listener-wide Routing Context inventory
-	// to the immutable set this peer may serve. Without it, accepted ASPs retain
-	// the legacy policy of being configured for every Routing Context.
+	// AuthorizeASP optionally narrows this accepted Association's configured
+	// Routing Context inventory to the immutable set its peer ASP may serve.
+	// Without it, the peer ASP may serve every configured Routing Context.
 	AuthorizeASP ASPAuthorizer
 	// TrafficModes optionally configures Traffic Mode per Routing Context. It
 	// takes precedence over TrafficModeType and permits one association to serve
@@ -243,37 +287,6 @@ type AssociationConfig struct {
 	// The map is copied when an Association or Listener is constructed.
 	TrafficModes      map[uint32]uint32
 	NetworkAppearance *params.Param
-	// RecoveryTimer is T(r), the AS-PENDING recovery timer of RFC 4666
-	// Section 4.3.2: "A recovery timer T(r) SHOULD be started, and all incoming
-	// signalling messages SHOULD be queued by the SGP.  If an ASP becomes
-	// ASP-ACTIVE before T(r) expires, the AS is moved to the AS-ACTIVE state".
-	//
-	// Zero selects DefaultRecoveryTimer. This applies only to an SGP role,
-	// where the AS state machine is maintained.
-	RecoveryTimer time.Duration
-	// RecoveryQueueMessages and RecoveryQueueBytes bound the DATA retained for
-	// an AS while T(r) runs. Values less than or equal to zero select the
-	// corresponding defaults. Both limits apply; reaching either refuses the
-	// new message without disturbing traffic already queued.
-	RecoveryQueueMessages int
-	RecoveryQueueBytes    int
-	// RecoveryQueueTotalMessages and RecoveryQueueTotalBytes cap the aggregate
-	// queued plus in-flight recovery traffic across every AS on the Listener.
-	// Values less than or equal to zero select the corresponding defaults.
-	RecoveryQueueTotalMessages int
-	RecoveryQueueTotalBytes    int
-	// BroadcastFlowIdentifier optionally refines the default routing-label flow
-	// key used for RFC 4666 Broadcast synchronization Correlation IDs. It is
-	// snapshotted when the Listener first accepts an association.
-	BroadcastFlowIdentifier BroadcastFlowIdentifier
-	// BroadcastFlowCacheEntries bounds remembered flows per AS. Values less than
-	// or equal to zero select DefaultBroadcastFlowCacheEntries. On overflow the
-	// cache is cleared, which safely produces extra synchronization markers.
-	BroadcastFlowCacheEntries int
-	// BroadcastFlowIdentifierBytes bounds the identifier returned by
-	// BroadcastFlowIdentifier. Values less than or equal to zero select the
-	// default. Oversized identifiers are rejected rather than truncated.
-	BroadcastFlowIdentifierBytes int
 	// Compatibility configures explicit receive-side tolerance for known peer
 	// protocol violations. The zero value keeps RFC-strict behaviour.
 	Compatibility CompatibilityPolicy
@@ -387,16 +400,6 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 	case RoleASP:
 		if config.AuthorizeASP != nil {
 			return fmt.Errorf("%w: AuthorizeASP applies only to an SGP", ErrInvalidRoleConfiguration)
-		}
-		if config.RecoveryTimer != 0 ||
-			config.RecoveryQueueMessages != 0 ||
-			config.RecoveryQueueBytes != 0 ||
-			config.RecoveryQueueTotalMessages != 0 ||
-			config.RecoveryQueueTotalBytes != 0 ||
-			config.BroadcastFlowIdentifier != nil ||
-			config.BroadcastFlowCacheEntries != 0 ||
-			config.BroadcastFlowIdentifierBytes != 0 {
-			return fmt.Errorf("%w: AS recovery and distribution policy applies only to an SGP", ErrInvalidRoleConfiguration)
 		}
 	case RoleSGP:
 		if config.ASPIdentifier != nil {

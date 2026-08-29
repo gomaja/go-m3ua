@@ -98,7 +98,7 @@ func TestAssociationFreezesTrafficModePolicyForActiveAckValidation(t *testing.T)
 	}
 }
 
-func TestApplicationServerRegistryFreezesTrafficModePolicyAtConstruction(t *testing.T) {
+func TestAssociationTrafficModePolicyIsFrozenBeforeRegistryAgreement(t *testing.T) {
 	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,
@@ -115,13 +115,16 @@ func TestApplicationServerRegistryFreezesTrafficModePolicyAtConstruction(t *test
 	)
 	configuredModes := map[uint32]uint32{1: params.TrafficModeOverride}
 	config.TrafficModes = configuredModes
-	registry := newApplicationServers(time.Hour, config)
+	policy := newTrafficModePolicy(config)
+	registry := newApplicationServers(time.Hour)
 
 	configuredModes[1] = params.TrafficModeBroadcast
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
 	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeBroadcast}
 
-	agreed, err := registry.agreeTrafficMode([]uint32{1}, nil)
+	agreed, err := registry.agreeTrafficModeForKeys(
+		[]ASKey{associationConfigASKey(config, 1)}, policy, nil,
+	)
 	if err != nil {
 		t.Fatalf("agreeTrafficMode rejected the construction-time policy: %v", err)
 	}
@@ -130,7 +133,7 @@ func TestApplicationServerRegistryFreezesTrafficModePolicyAtConstruction(t *test
 	}
 }
 
-func TestListenerTrafficModePolicyIsInheritedByRegistryAndAcceptedAssociations(t *testing.T) {
+func TestListenerTrafficModePolicyIsInheritedByAcceptedAssociations(t *testing.T) {
 	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,
@@ -154,17 +157,17 @@ func TestListenerTrafficModePolicyIsInheritedByRegistryAndAcceptedAssociations(t
 	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeBroadcast}
 
 	registry, _, _ := listener.registry()
-	agreed, err := registry.agreeTrafficMode([]uint32{1}, nil)
+	accepted := newAssociationWithTrafficModePolicy(
+		RoleSGP, listener.AssociationConfig, newTrafficModePolicy(listener.AssociationConfig),
+	)
+	accepted.as = registry
+	agreed, err := registry.agreeTrafficModeForAssociation(accepted, []uint32{1}, nil)
 	if err != nil {
-		t.Fatalf("listener registry agreement: %v", err)
+		t.Fatalf("accepted Association traffic-mode agreement: %v", err)
 	}
 	if agreed == nil || agreed.TrafficModeType() != params.TrafficModeOverride {
-		t.Fatalf("listener registry mode = %v, want construction-time Override", agreed)
+		t.Fatalf("accepted Association registry mode = %v, want construction-time Override", agreed)
 	}
-
-	accepted := newAssociationWithTrafficModePolicy(
-		RoleSGP, listener.AssociationConfig, listener.trafficModePolicy(),
-	)
 	requests, err := accepted.aspActiveRequests(params.NewRoutingContext(1))
 	if err != nil {
 		t.Fatalf("accepted Association ASP Active request: %v", err)
@@ -180,7 +183,7 @@ func TestPerRoutingContextTrafficModePrecedesConfiguredDefault(t *testing.T) {
 	connection.cfg.TrafficModes = map[uint32]uint32{
 		1: params.TrafficModeOverride,
 	}
-	registry := newApplicationServers(time.Hour, connection.cfg)
+	registry := newApplicationServers(time.Hour)
 	connection.as = registry
 	registry.aspStateChanged(connection, StateASPInactive)
 
@@ -205,7 +208,7 @@ func TestPerRoutingContextTrafficModePrecedesConfiguredDefault(t *testing.T) {
 			t.Fatalf("RC %d Ack mode = %v, want %d",
 				request.routingContext, ack.TrafficModeType, request.mode)
 		}
-		if got := registry.get(request.routingContext).TrafficMode(); got != request.mode {
+		if got := registry.get(associationConfigASKey(connection.cfg, request.routingContext)).TrafficMode(); got != request.mode {
 			t.Fatalf("RC %d agreed mode = %d, want %d",
 				request.routingContext, got, request.mode)
 		}
@@ -217,16 +220,17 @@ func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 	connection.cfg.TrafficModes = map[uint32]uint32{
 		1: params.TrafficModeOverride,
 	}
-	registry := newApplicationServers(time.Hour, connection.cfg)
-	_, agreementErr := registry.agreeTrafficMode(
-		[]uint32{1, 2}, params.NewTrafficModeType(params.TrafficModeOverride),
+	registry := newApplicationServers(time.Hour)
+	_, agreementErr := registry.agreeTrafficModeForKeys(
+		connection.asKeysForRoutingContexts([]uint32{1, 2}), connection.trafficModePolicy(),
+		params.NewTrafficModeType(params.TrafficModeOverride),
 	)
 	if !errors.Is(agreementErr, ErrUnsupportedTrafficMode) {
 		t.Fatalf("direct mixed-scope agreement error = %v, want %v",
 			agreementErr, ErrUnsupportedTrafficMode)
 	}
 	for _, routingContext := range []uint32{1, 2} {
-		if got := registry.get(routingContext).TrafficMode(); got != 0 {
+		if got := registry.get(associationConfigASKey(connection.cfg, routingContext)).TrafficMode(); got != 0 {
 			t.Fatalf("direct rejected agreement committed mode %d for RC %d",
 				got, routingContext)
 		}
@@ -249,7 +253,7 @@ func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 		}
 	}
 	for _, routingContext := range []uint32{1, 2} {
-		if got := registry.get(routingContext).TrafficMode(); got != 0 {
+		if got := registry.get(associationConfigASKey(connection.cfg, routingContext)).TrafficMode(); got != 0 {
 			t.Fatalf("rejected agreement committed mode %d for RC %d", got, routingContext)
 		}
 	}
@@ -272,7 +276,7 @@ func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
 	)
 	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeOverride}
 	connection := newAssociation(RoleASP, config)
-	registry := newApplicationServers(time.Hour, config)
+	registry := newApplicationServers(time.Hour)
 	ack := messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeOverride),
 		params.NewRoutingContext(1),
@@ -312,8 +316,9 @@ func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
 				readErrors <- err
 				return
 			}
-			if _, err := registry.agreeTrafficMode(
-				[]uint32{1}, params.NewTrafficModeType(params.TrafficModeOverride),
+			if _, err := registry.agreeTrafficModeForKeys(
+				connection.asKeysForRoutingContexts([]uint32{1}), connection.trafficModePolicy(),
+				params.NewTrafficModeType(params.TrafficModeOverride),
 			); err != nil {
 				readErrors <- err
 				return

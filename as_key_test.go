@@ -10,7 +10,7 @@ import (
 )
 
 func TestApplicationServersKeyIncludesNetworkAppearance(t *testing.T) {
-	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
@@ -36,7 +36,7 @@ func TestApplicationServersKeyIncludesNetworkAppearance(t *testing.T) {
 }
 
 func TestApplicationServersSupportContextlessASKeysPerNetworkAppearance(t *testing.T) {
-	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
@@ -62,7 +62,7 @@ func TestApplicationServersSupportContextlessASKeysPerNetworkAppearance(t *testi
 }
 
 func TestContextlessASRejectsIncompatibleTrafficModeForSameASKey(t *testing.T) {
-	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
@@ -83,7 +83,7 @@ func TestContextlessASRejectsIncompatibleTrafficModeForSameASKey(t *testing.T) {
 }
 
 func TestContextlessASAllowsDifferentNetworkAppearanceTrafficModes(t *testing.T) {
-	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
@@ -122,14 +122,14 @@ func TestNormalizeASKeyRejectsOutOfRangeIntRoutingContext(t *testing.T) {
 	if _, ok := legacyRoutingContextScope(outOfRange); ok {
 		t.Fatal("legacy Routing Context scope accepted an int above uint32")
 	}
-	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+	registry := newApplicationServers(DefaultRecoveryTimer)
 	if _, ok := registry.normalizeASKey(outOfRange); ok {
 		t.Fatal("registry AS key normalization accepted an int above uint32")
 	}
 }
 
 func TestContextlessOverrideDisplacesOnlySameASKey(t *testing.T) {
-	registry := newApplicationServers(DefaultRecoveryTimer, nil)
+	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)

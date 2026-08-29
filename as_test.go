@@ -623,10 +623,10 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 func TestASPsForTrafficAppliesTheTrafficMode(t *testing.T) {
 	setup := func(t *testing.T, mode uint32, n int) (*Listener, []*Association) {
 		t.Helper()
-		l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
+		l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(
 			&HeartbeatInfo{Enabled: false},
 			0x111111, 0x222222, 1, mode, 0, 0, []uint32{1}, 3, 2, 1, 0,
-		)}
+		)))
 		l.as = newApplicationServers(time.Hour)
 		l.as.get(1).setTrafficMode(mode)
 

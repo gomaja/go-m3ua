@@ -12,7 +12,7 @@ import (
 )
 
 func dialASP(ctx context.Context, network string, local, remote *sctp.SCTPAddr, config *AssociationConfig) (*Association, error) {
-	endpoint, err := NewEndpoint(RoleASP)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
 	if err != nil {
 		return nil, err
 	}
@@ -20,7 +20,7 @@ func dialASP(ctx context.Context, network string, local, remote *sctp.SCTPAddr, 
 }
 
 func listenSGP(network string, local *sctp.SCTPAddr, config *ListenerConfig) (*Listener, error) {
-	endpoint, err := NewEndpoint(RoleSGP)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {
 		return nil, err
 	}
@@ -28,11 +28,19 @@ func listenSGP(network string, local *sctp.SCTPAddr, config *ListenerConfig) (*L
 }
 
 func newSGPListener(config *ListenerConfig) *Listener {
-	endpoint, err := NewEndpoint(RoleSGP)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {
 		panic(err)
 	}
 	return newListener(endpoint, config)
+}
+
+func associationConfigASKey(config *AssociationConfig, routingContext uint32) ASKey {
+	key := routingContextASKey(routingContext)
+	if config != nil {
+		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
+	}
+	return key
 }
 
 func newASPAssociationConfigForTest(heartbeat *HeartbeatInfo, opc, dpc, aspID, trafficMode, networkAppearance, correlationID uint32, routingContexts []uint32, si, ni, priority, sls uint8) *AssociationConfig {

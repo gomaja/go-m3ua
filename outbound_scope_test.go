@@ -15,7 +15,7 @@ func TestWriteSignalDataEnforcesSGPPerApplicationServerState(t *testing.T) {
 	listener, firstApplicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 	)
-	secondApplicationServer := listener.as.get(2)
+	secondApplicationServer := listener.as.get(associationConfigASKey(listener.AssociationConfig, 2))
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
 	firstApplicationServer.setASPState(asp, StateASPActive, time.Hour)
@@ -59,7 +59,7 @@ func TestWriteSignalSSNMRejectsInactiveSGPScopeAtomically(t *testing.T) {
 	listener, firstApplicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 	)
-	secondApplicationServer := listener.as.get(2)
+	secondApplicationServer := listener.as.get(associationConfigASKey(listener.AssociationConfig, 2))
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
 	firstApplicationServer.setASPState(asp, StateASPActive, time.Hour)
@@ -309,7 +309,7 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 
 func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
-	asp.as = newApplicationServers(time.Hour, asp.cfg)
+	asp.as = newApplicationServers(time.Hour)
 	asp.maxMessageStreamID = 4
 	asp.recvStream.Store(0)
 	writeStarted := make(chan struct{})
@@ -363,7 +363,7 @@ func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 
 func TestASPDownAckWaitsForUnscopedSSNM(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
-	asp.as = newApplicationServers(time.Hour, asp.cfg)
+	asp.as = newApplicationServers(time.Hour)
 	asp.recvStream.Store(0)
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})

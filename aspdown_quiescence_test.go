@@ -96,13 +96,13 @@ func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
 	)
 	listener := newSGPListener(NewListenerConfig(config))
 	listener.AssociationConfig.CorrelationID = nil
-	listener.as = newApplicationServers(time.Hour, listener.AssociationConfig)
+	listener.as = newApplicationServers(time.Hour)
 
 	asp, _ := addDistributionASP(t, listener, StateASPActive, 1, 2)
 	observer, _ := addDistributionASP(t, listener, StateASPInactive, 1, 2)
 	servers := map[uint32]*applicationServer{
-		1: listener.as.get(1),
-		2: listener.as.get(2),
+		1: listener.as.get(associationConfigASKey(listener.AssociationConfig, 1)),
+		2: listener.as.get(associationConfigASKey(listener.AssociationConfig, 2)),
 	}
 	for _, applicationServer := range servers {
 		applicationServer.setTrafficMode(params.TrafficModeLoadshare)

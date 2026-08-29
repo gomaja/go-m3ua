@@ -118,7 +118,7 @@ func TestBroadcastActivationDropsThePreviousFlowEpoch(t *testing.T) {
 }
 
 func TestBroadcastFlowCacheIsBoundedAndEvictionRetags(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *distributionFixtureConfig) {
 		config.BroadcastFlowCacheEntries = 2
 	})
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
@@ -146,7 +146,7 @@ func TestBroadcastFlowCacheIsBoundedAndEvictionRetags(t *testing.T) {
 }
 
 func TestBroadcastFlowIdentifierLengthIsBounded(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *distributionFixtureConfig) {
 		config.BroadcastFlowIdentifierBytes = 4
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			return "12345", nil
@@ -210,7 +210,7 @@ func TestBroadcastPartialWriteKeepsSynchronizationPending(t *testing.T) {
 }
 
 func TestBroadcastFlowIdentifierRefinesRoutingLabelAndOwnsInput(t *testing.T) {
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *distributionFixtureConfig) {
 		config.BroadcastFlowIdentifier = func(protocolData *params.ProtocolDataPayload) (string, error) {
 			identifier := fmt.Sprintf("circuit-%d", protocolData.Data[0])
 			protocolData.Data[0] = 0xff
@@ -242,7 +242,7 @@ func TestBroadcastFlowIdentifierRefinesRoutingLabelAndOwnsInput(t *testing.T) {
 
 func TestBroadcastFlowIdentifierOnlyRunsForBroadcast(t *testing.T) {
 	want := errors.New("classifier should not run")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			return "", want
 		}
@@ -277,7 +277,7 @@ func TestBroadcastFlowIdentifierFailuresDoNotDeliver(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
+			listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *distributionFixtureConfig) {
 				config.BroadcastFlowIdentifier = test.classifier
 			})
 			applicationServer.setASPState(asp, StateASPActive, time.Hour)
@@ -293,10 +293,12 @@ func TestBroadcastFlowIdentifierFailuresDoNotDeliver(t *testing.T) {
 }
 
 func TestRecoveryQueuePolicyIsSnapshotted(t *testing.T) {
-	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	var policy *SGPConfig
+	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 1
+		policy = config.SGPConfig
 	})
-	listener.AssociationConfig.RecoveryQueueMessages = 100
+	policy.RecoveryQueueMessages = 100
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	if _, err := listener.DistributeData(distributionData(1, 1, "first")); err != nil {
@@ -380,7 +382,7 @@ func TestASPAssociationCannotRunSGPDistribution(t *testing.T) {
 }
 
 func TestASPListenerCannotRunSGPDistribution(t *testing.T) {
-	endpoint, err := NewEndpoint(RoleASP)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -396,21 +398,19 @@ func TestASPListenerCannotRunSGPDistribution(t *testing.T) {
 	}
 }
 
-func TestDialingSGPAssociationCloseReleasesRecoveryState(t *testing.T) {
-	_, applicationServer, association, _ := distributionFixture(t, params.TrafficModeLoadshare)
+func TestClosingSGPAssociationRetainsRecoveryStateUntilEndpointCloses(t *testing.T) {
+	listener, applicationServer, association, _ := distributionFixture(t, params.TrafficModeLoadshare)
 	applicationServer.setASPState(association, StateASPActive, time.Hour)
 	applicationServer.setASPState(association, StateASPInactive, time.Hour)
 	if _, err := association.DistributeData(distributionData(1, 1, "retained")); err != nil {
 		t.Fatalf("queue DATA: %v", err)
 	}
-	released := false
-	association.releaseEndpointStateOwner = func() { released = true }
+	if !listener.endpoint.trackAssociation(association) {
+		t.Fatal("failed to attach Association to Endpoint")
+	}
 
 	if err := association.Close(); err != nil {
-		t.Fatalf("close dialing SGP Association: %v", err)
-	}
-	if !released {
-		t.Fatal("dialing SGP Association did not release Endpoint state ownership")
+		t.Fatalf("close SGP Association: %v", err)
 	}
 	if _, err := association.DistributeData(distributionData(1, 1, "after close")); !errors.Is(err, ErrAssociationClosed) {
 		t.Fatalf("distribution after Association.Close error = %v, want ErrAssociationClosed", err)
@@ -418,12 +418,22 @@ func TestDialingSGPAssociationCloseReleasesRecoveryState(t *testing.T) {
 
 	applicationServer.mu.Lock()
 	closed := applicationServer.closed
+	applicationServer.mu.Unlock()
+	if closed {
+		t.Fatal("closing one Association closed Endpoint recovery state")
+	}
+
+	if err := listener.endpoint.Close(); err != nil {
+		t.Fatalf("Endpoint.Close: %v", err)
+	}
+	applicationServer.mu.Lock()
+	closed = applicationServer.closed
 	queued := len(applicationServer.recoveryQueue)
 	queuedBytes := applicationServer.recoveryQueueBytes
 	recovery := applicationServer.recovery
 	applicationServer.mu.Unlock()
 	if !closed || queued != 0 || queuedBytes != 0 || recovery != nil {
-		t.Fatalf("closed dialing SGP AS state = closed:%v queued:%d bytes:%d recovery:%v",
+		t.Fatalf("closed Endpoint AS state = closed:%v queued:%d bytes:%d recovery:%v",
 			closed, queued, queuedBytes, recovery)
 	}
 }
@@ -516,7 +526,7 @@ func TestRecoveryDrainIsAsyncAndQueuesNewTrafficBehindBacklog(t *testing.T) {
 
 func TestBlockedActiveDeliveryUsesTheBoundedFIFO(t *testing.T) {
 	message := distributionData(1, 2, "same size")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = 2 * message.MarshalLen()
 	})
@@ -599,7 +609,7 @@ func TestBlockedActiveDeliveryUsesTheBoundedFIFO(t *testing.T) {
 
 func TestRecoveryQueueBoundsIncludeBlockedInFlightData(t *testing.T) {
 	message := distributionData(1, 2, "same size")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = 2 * message.MarshalLen()
 	})
@@ -782,7 +792,7 @@ func TestRecoveryExpiryDiscardsQueuedTraffic(t *testing.T) {
 func TestRecoveryQueueIsBoundedAndOwnsMessages(t *testing.T) {
 	first := distributionData(1, 1, "owned")
 	second := distributionData(1, 1, "second")
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = first.MarshalLen() + second.MarshalLen()
 	})
@@ -811,9 +821,9 @@ func TestRecoveryQueueIsBoundedAndOwnsMessages(t *testing.T) {
 	}
 }
 
-func TestListenerCloseStopsDistributionAndReleasesRecoveryState(t *testing.T) {
+func TestListenerCloseStopsItsDistributionWithoutReleasingEndpointRecoveryState(t *testing.T) {
 	var classifierCalls atomic.Int32
-	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *AssociationConfig) {
+	listener, applicationServer, asp, _ := distributionFixtureConfigured(t, params.TrafficModeBroadcast, func(config *distributionFixtureConfig) {
 		config.BroadcastFlowIdentifier = func(*params.ProtocolDataPayload) (string, error) {
 			classifierCalls.Add(1)
 			return "flow", nil
@@ -843,8 +853,22 @@ func TestListenerCloseStopsDistributionAndReleasesRecoveryState(t *testing.T) {
 	recovery := applicationServer.recovery
 	retry := applicationServer.drainRetry
 	applicationServer.mu.Unlock()
+	if closed || queued != 1 || queuedBytes == 0 || recovery == nil || retry != nil {
+		t.Fatalf("Listener.Close changed Endpoint AS state: closed=%t messages=%d bytes=%d recovery=%v retry=%v",
+			closed, queued, queuedBytes, recovery, retry)
+	}
+	if err := listener.endpoint.Close(); err != nil {
+		t.Fatalf("Endpoint.Close: %v", err)
+	}
+	applicationServer.mu.Lock()
+	closed = applicationServer.closed
+	queued = len(applicationServer.recoveryQueue)
+	queuedBytes = applicationServer.recoveryQueueBytes
+	recovery = applicationServer.recovery
+	retry = applicationServer.drainRetry
+	applicationServer.mu.Unlock()
 	if !closed || queued != 0 || queuedBytes != 0 || recovery != nil || retry != nil {
-		t.Fatalf("closed AS retained state: closed=%t messages=%d bytes=%d recovery=%v retry=%v",
+		t.Fatalf("Endpoint.Close retained AS state: closed=%t messages=%d bytes=%d recovery=%v retry=%v",
 			closed, queued, queuedBytes, recovery, retry)
 	}
 }
@@ -929,7 +953,7 @@ func TestASPInactiveAckWaitsUntilScopedTrafficIsHalted(t *testing.T) {
 		err    error
 	}
 	listener, applicationServer, asp, sent := distributionFixtureForContexts(t, params.TrafficModeLoadshare, []uint32{1, 2}, nil)
-	secondApplicationServer := listener.as.get(2)
+	secondApplicationServer := listener.as.get(associationConfigASKey(listener.AssociationConfig, 2))
 	secondApplicationServer.setTrafficMode(params.TrafficModeLoadshare)
 	asp.noteRoutingContextsActive([]uint32{1, 2})
 	asp.setState(StateASPActive)
@@ -1123,23 +1147,33 @@ func distributionFixture(t *testing.T, trafficMode uint32) (*Listener, *applicat
 	return distributionFixtureConfigured(t, trafficMode, nil)
 }
 
-func distributionFixtureConfigured(t *testing.T, trafficMode uint32, configure func(*AssociationConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
+func distributionFixtureConfigured(t *testing.T, trafficMode uint32, configure func(*distributionFixtureConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	return distributionFixtureForContexts(t, trafficMode, []uint32{1}, configure)
 }
 
-func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingContexts []uint32, configure func(*AssociationConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
+type distributionFixtureConfig struct {
+	*AssociationConfig
+	*SGPConfig
+}
+
+func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingContexts []uint32, configure func(*distributionFixtureConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	t.Helper()
 	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false}, 1, 2, 0, trafficMode, 0, 0,
 		routingContexts, params.ServiceIndSCCP, 0, 0, 1,
 	)
-	listener := newSGPListener(NewListenerConfig(config))
-	listener.AssociationConfig.CorrelationID = nil
+	config.CorrelationID = nil
+	sgpConfig := &SGPConfig{RecoveryTimer: time.Hour}
 	if configure != nil {
-		configure(listener.AssociationConfig)
+		configure(&distributionFixtureConfig{AssociationConfig: config, SGPConfig: sgpConfig})
 	}
-	listener.as = newApplicationServers(time.Hour, listener.AssociationConfig)
-	applicationServer := listener.as.get(1)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, SGP: sgpConfig})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	listener := newListener(endpoint, NewListenerConfig(config))
+	listener.as, listener.nif, listener.destinations = listener.registry()
+	applicationServer := listener.as.get(associationConfigASKey(listener.AssociationConfig, routingContexts[0]))
 	applicationServer.setTrafficMode(trafficMode)
 	asp, sent := addDistributionASP(t, listener, StateASPInactive, routingContexts...)
 	return listener, applicationServer, asp, sent
@@ -1152,6 +1186,7 @@ func addDistributionASP(t *testing.T, listener *Listener, state State, routingCo
 	asp.cfg.CorrelationID = nil
 	asp.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
 	asp.as = listener.as
+	asp.as.register(asp.configuredASKeys())
 	capture := new(distributionCapture)
 	asp.signalWriter = capture.write
 	return asp, capture

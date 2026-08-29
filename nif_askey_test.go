@@ -45,7 +45,7 @@ func TestSetASAvailableIgnoresAmbiguousLegacyRoutingContext(t *testing.T) {
 	second.listener = listener
 	second.noteRoutingContextsActive([]uint32{1})
 	second.setState(StateASPActive)
-	if !listener.track(first) || !listener.track(second) {
+	if !listener.promoteAcceptedAssociation(first) || !listener.promoteAcceptedAssociation(second) {
 		t.Fatal("track refused an association")
 	}
 	registry.get(key10).setASPState(first, StateASPActive, time.Hour)
@@ -78,7 +78,7 @@ func TestSetASAvailableIgnoresLegacyRoutingContextWhenRegistryAndTrackedDisagree
 	conn.listener = listener
 	conn.noteRoutingContextsActive([]uint32{1})
 	conn.setState(StateASPActive)
-	if !listener.track(conn) {
+	if !listener.promoteAcceptedAssociation(conn) {
 		t.Fatal("track refused an association")
 	}
 
@@ -97,9 +97,9 @@ func TestSetASAvailableIgnoresLegacyRoutingContextWhenRegistryAndTrackedDisagree
 func TestDialingSGPAssociationControlsNIFAvailability(t *testing.T) {
 	association, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	association.nif = &nifAvailability{}
-	association.as = newApplicationServers(time.Hour, association.cfg)
+	association.as = newApplicationServers(time.Hour)
 	association.noteRoutingContextsActive([]uint32{1})
-	association.as.get(1).setASPState(association, StateASPActive, time.Hour)
+	association.as.get(associationConfigASKey(association.cfg, 1)).setASPState(association, StateASPActive, time.Hour)
 
 	if err := association.SetNIFAvailable(false); err != nil {
 		t.Fatalf("SetNIFAvailable(false): %v", err)
@@ -128,10 +128,32 @@ func TestDialingSGPAssociationControlsNIFAvailability(t *testing.T) {
 	}
 }
 
+func TestSGPEndpointNIFIsolationQuiescesEveryAssociation(t *testing.T) {
+	endpoint, listeners, associations, sent := endpointAvailabilityFixture(t)
+	defer func() { _ = endpoint.Close() }()
+
+	if err := listeners[0].SetNIFAvailable(false); err != nil {
+		t.Fatalf("SetNIFAvailable(false): %v", err)
+	}
+
+	for index, association := range associations {
+		if got := association.State(); got != StateASPDown {
+			t.Errorf("Association %d state = %v, want ASP-DOWN", index, got)
+		}
+		written := sent[index].snapshot()
+		if got := countMessageType(written, "ASP Down Ack"); got != 1 {
+			t.Errorf("Association %d ASP Down Ack count = %d, want 1 (sent %v)", index, got, typeNames(written))
+		}
+	}
+	if active := endpoint.as.get(routingContextASKey(1)).activeASPs(); len(active) != 0 {
+		t.Fatalf("isolated Endpoint retained %d active ASPs", len(active))
+	}
+}
+
 func TestDialingSGPAssociationControlsASAvailability(t *testing.T) {
 	association, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	association.nif = &nifAvailability{}
-	association.as = newApplicationServers(time.Hour, association.cfg)
+	association.as = newApplicationServers(time.Hour)
 	association.noteRoutingContextsActive([]uint32{1})
 	key := routingContextASKey(1)
 	association.as.get(key).setASPState(association, StateASPActive, time.Hour)
@@ -163,6 +185,88 @@ func TestDialingSGPAssociationControlsASAvailability(t *testing.T) {
 	}
 }
 
+func TestSGPEndpointASIsolationQuiescesEveryAffectedAssociation(t *testing.T) {
+	endpoint, _, associations, sent := endpointAvailabilityFixture(t)
+	defer func() { _ = endpoint.Close() }()
+	key := routingContextASKey(1)
+
+	if err := associations[2].SetASAvailableForAS(key, false); err != nil {
+		t.Fatalf("SetASAvailableForAS(false): %v", err)
+	}
+
+	for index, association := range associations {
+		if association.activeForRoutingContext(1) {
+			t.Errorf("Association %d remained active for isolated Routing Context", index)
+		}
+		written := sent[index].snapshot()
+		if got := countMessageType(written, "ASP Inactive Ack"); got != 1 {
+			t.Errorf("Association %d ASP Inactive Ack count = %d, want 1 (sent %v)", index, got, typeNames(written))
+		}
+	}
+	if active := endpoint.as.get(key).activeASPs(); len(active) != 0 {
+		t.Fatalf("isolated Application Server retained %d active ASPs", len(active))
+	}
+}
+
+func endpointAvailabilityFixture(t *testing.T) (*Endpoint, []*Listener, []*Association, []*distributionCapture) {
+	t.Helper()
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	listeners := []*Listener{
+		newListener(endpoint, NewListenerConfig(mcSGPConfig())),
+		newListener(endpoint, NewListenerConfig(mcSGPConfig())),
+	}
+	for _, listener := range listeners {
+		if !endpoint.trackListener(listener) {
+			t.Fatal("failed to attach Listener")
+		}
+	}
+
+	associations := make([]*Association, 0, 3)
+	sent := make([]*distributionCapture, 0, 3)
+	key := routingContextASKey(1)
+	for _, listener := range listeners {
+		association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
+		written := new(distributionCapture)
+		association.signalWriter = written.write
+		association.listener = listener
+		if !listener.promoteAcceptedAssociation(association) {
+			t.Fatal("failed to attach accepted Association")
+		}
+		association.noteRoutingContextsActive([]uint32{1})
+		endpoint.as.get(key).setASPState(association, StateASPActive, time.Hour)
+		associations = append(associations, association)
+		sent = append(sent, written)
+	}
+
+	initiating, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
+	written := new(distributionCapture)
+	initiating.signalWriter = written.write
+	initiating.as, initiating.nif, initiating.destinations, initiating.mtp3Restarts = endpoint.sgpRegistry()
+	initiating.as.register(initiating.configuredASKeys())
+	if !endpoint.trackAssociation(initiating) {
+		t.Fatal("failed to attach SCTP-initiating Association")
+	}
+	initiating.noteRoutingContextsActive([]uint32{1})
+	endpoint.as.get(key).setASPState(initiating, StateASPActive, time.Hour)
+	associations = append(associations, initiating)
+	sent = append(sent, written)
+
+	return endpoint, listeners, associations, sent
+}
+
+func countMessageType(written []messages.M3UA, name string) int {
+	count := 0
+	for _, message := range written {
+		if message.MessageTypeName() == name {
+			count++
+		}
+	}
+	return count
+}
+
 func TestASPAssociationRejectsSGPAvailabilityControls(t *testing.T) {
 	association, _ := newTestConn(t, StateASPActive, RoleASP)
 	for name, call := range map[string]func() error{
@@ -182,7 +286,7 @@ func TestAcceptedSGPAssociationDelegatesAvailabilityToListener(t *testing.T) {
 	listener, applicationServer, association, sent := restartFixture(t, 1)
 	association.as, association.nif, association.destinations = listener.registry()
 	restartActivateASP(applicationServer, association, 1)
-	if !listener.track(association) {
+	if !listener.promoteAcceptedAssociation(association) {
 		t.Fatal("failed to track accepted SGP Association")
 	}
 	sent.reset()
@@ -198,7 +302,7 @@ func TestAcceptedSGPAssociationDelegatesAvailabilityToListener(t *testing.T) {
 	}
 	_, nif, _ := listener.registry()
 	if nif.servicableASKeys([]ASKey{key}) {
-		t.Fatal("accepted SGP Association did not update Listener-wide AS availability")
+		t.Fatal("accepted SGP Association did not update Endpoint-wide AS availability")
 	}
 	if association.activeForRoutingContext(1) {
 		t.Fatal("accepted SGP Association retained active traffic scope after AS isolation")
@@ -242,6 +346,11 @@ func TestSGPAssociationAvailabilityRequiresEstablishedOpenAssociation(t *testing
 
 func TestClosedSGPListenerRejectsAvailabilityControls(t *testing.T) {
 	listener := newSGPListener(NewListenerConfig(mcSGPConfig()))
+	endpoint := listener.endpoint
+	applicationServers := listener.as
+	nif := listener.nif
+	destinations := listener.destinations
+	defer func() { _ = endpoint.Close() }()
 	if err := listener.Close(); err != nil {
 		t.Fatalf("close SGP Listener: %v", err)
 	}
@@ -257,8 +366,17 @@ func TestClosedSGPListenerRejectsAvailabilityControls(t *testing.T) {
 			t.Errorf("closed %s availability error = %v, want ErrAssociationClosed", name, err)
 		}
 	}
-	if listener.as != nil || listener.nif != nil || listener.destinations != nil {
-		t.Fatal("closed availability control initialized stale Listener state")
+	if listener.as != applicationServers || listener.nif != nif || listener.destinations != destinations {
+		t.Fatal("closed availability control replaced Endpoint-owned state")
+	}
+	if nif.isolatedEntirely() || !nif.servicableASKeys([]ASKey{routingContextASKey(1)}) {
+		t.Fatal("closed availability control mutated Endpoint NIF availability")
+	}
+	if len(applicationServers.keys()) != 0 {
+		t.Fatal("closed availability control registered an Application Server")
+	}
+	if len(destinations.rangesForScope(destinationKey{})) != 0 {
+		t.Fatal("closed availability control mutated Endpoint destination state")
 	}
 }
 

@@ -60,7 +60,7 @@ func main() {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	endpoint, err := m3ua.NewEndpoint(m3ua.RoleASP)
+	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP})
 	if err != nil {
 		log.Fatalf("Failed to create M3UA ASP endpoint: %s", err)
 	}

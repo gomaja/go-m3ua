@@ -1475,16 +1475,11 @@ func (c *Association) applyDialedSGPDestinationRange(rangeValue DestinationRange
 	// RFC 4666 Section 4.5.1 requires an SGP that receives an MTP-PAUSE,
 	// MTP-RESUME, or MTP-STATUS primitive to send the corresponding SSNM to
 	// concerned ASPs. SCTP association initiation does not alter that SGP duty.
-	if !validDestinationState(rangeValue.State) {
-		return fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
+	prepared, err := c.prepareLocalDestinationRange(rangeValue)
+	if err != nil {
+		return err
 	}
-	if !rangeValue.NetworkAppearanceSet && c.cfg != nil {
-		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(c.cfg.NetworkAppearance)
-	}
-	rangeValue = normalizeDestinationRange(rangeValue)
-	if rangeValue.RoutingContextSet && !containsRoutingContext(c.configuredRoutingContexts(), rangeValue.RoutingContext) {
-		return NewInvalidRoutingContextError(rangeValue.RoutingContext)
-	}
+	rangeValue = prepared
 
 	restarts := c.mtp3Restarts
 	if restarts != nil {
