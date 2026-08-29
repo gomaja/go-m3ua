@@ -1006,6 +1006,21 @@ func TestIPSPDoubleExchangeAlternateASPNotifyDoesNotOverrideTheOppositeDirection
 		t.Fatal("TrafficToLocal DATA for the overridden Routing Context was not rejected")
 	}
 
+	if err := association.DeactivateRoutingContexts(12); err != nil {
+		t.Fatalf("deactivate final usable TrafficToLocal Routing Context: %v", err)
+	}
+	if err := association.handleAspInactiveAck(
+		messages.NewAspInactiveAck(params.NewRoutingContext(12), nil),
+	); err != nil {
+		t.Fatalf("ack final usable TrafficToLocal deactivation: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPInactive,
+		TrafficToPeer:  StateASPActive,
+	}) {
+		t.Fatalf("directional state with only an overridden local Routing Context = %+v", got)
+	}
+
 	if err := association.ActivateRoutingContexts(11); err != nil {
 		t.Fatalf("reactivate overridden TrafficToLocal Routing Context: %v", err)
 	}

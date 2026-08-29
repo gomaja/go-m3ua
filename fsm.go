@@ -677,7 +677,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			c.sendState(stateUnchanged)
 		} else if c.role == RoleIPSP {
 			c.sendState(c.stateForActiveRoutingContexts())
-		} else if c.hasAcknowledgedRoutingContexts() {
+		} else if c.stateForAcknowledgedRoutingContexts() == StateASPActive {
 			c.sendState(StateASPActive)
 		} else {
 			c.sendState(StateASPInactive)

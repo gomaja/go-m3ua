@@ -920,11 +920,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 			} else {
 				c.noteNoRoutingContextsAcked()
 			}
-			state := StateASPInactive
-			if c.hasAcknowledgedRoutingContexts() {
-				state = StateASPActive
-			}
-			c.commitLocalIPSPState(state)
+			c.commitLocalIPSPState(c.stateForAcknowledgedRoutingContexts())
 			acknowledgement.complete()
 			return nil
 		}
@@ -974,7 +970,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	// sibling RC remains active, the association never enters ASP-INACTIVE, so
 	// restart only the displaced scope here. Otherwise the ASP-INACTIVE entry
 	// action initiates the return after that required intermediate state.
-	if c.hasAcknowledgedRoutingContexts() {
+	if c.stateForAcknowledgedRoutingContexts() == StateASPActive {
 		return c.initiateASPActive(aspAcAck.RoutingContext)
 	}
 	c.armResumeAfterStrayAck()
@@ -1022,20 +1018,15 @@ func (c *Association) noteNoRoutingContextsAcked() {
 	c.notifyASPRouteStateChanged()
 }
 
-// hasAcknowledgedRoutingContexts reports whether at least one Application
-// Application Server remains active at an ASP after a scoped ASP Inactive Ack.
-func (c *Association) hasAcknowledgedRoutingContexts() bool {
-	c.muAckedRCs.RLock()
-	defer c.muAckedRCs.RUnlock()
-	return !c.ackedRCsScoped || len(c.ackedRCs) > 0
-}
-
 func (c *Association) stateForAcknowledgedRoutingContexts() State {
-	localState := c.localIPSPStateValue()
+	current := c.State()
+	if c.isIPSPDoubleExchange() {
+		current = c.localIPSPStateValue()
+	}
 	c.muAckedRCs.RLock()
 	defer c.muAckedRCs.RUnlock()
 	if !c.ackedRCsScoped {
-		return localState
+		return current
 	}
 	for routingContext := range c.ackedRCs {
 		if _, overridden := c.overriddenRCs[routingContext]; !overridden {
