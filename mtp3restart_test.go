@@ -3,6 +3,7 @@ package m3ua
 import (
 	"errors"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -226,6 +227,47 @@ func TestDialingSGPRestartHandlesAreInvalidatedByAssociationClose(t *testing.T) 
 	}
 	if err := restart.Complete(); !errors.Is(err, ErrStaleMTP3Restart) {
 		t.Fatalf("complete after Association.Close = %v, want ErrStaleMTP3Restart", err)
+	}
+}
+
+func TestDialingSGPRestartIsInvalidatedBeforeAssociationCleanup(t *testing.T) {
+	_, applicationServer, association, _ := restartFixture(t, 1)
+	association.listener = nil
+	association.mtp3Restarts = &mtp3RestartRegistry{}
+	association.destinations = newDestinations()
+	association.releaseEndpointStateOwner = func() {}
+	restartActivateASP(applicationServer, association, 1)
+	destination := restartDestination(1, 0x123456, 0)
+
+	restart, err := association.BeginMTP3Restart(destination)
+	if err != nil {
+		t.Fatalf("begin dialing SGP MTP3 restart: %v", err)
+	}
+	if err := restart.Update(destination, DestinationAvailable); err != nil {
+		t.Fatalf("stage available destination: %v", err)
+	}
+	restart.target.publish = func([]DestinationRange, bool, bool, bool) error { return nil }
+
+	association.muState.Lock()
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- association.Close()
+	}()
+	<-association.Done()
+	for range 100 {
+		runtime.Gosched()
+	}
+
+	completeErr := restart.Complete()
+	association.muState.Unlock()
+	if err := <-closeResult; err != nil {
+		t.Fatalf("close dialing SGP Association: %v", err)
+	}
+	if !errors.Is(completeErr, ErrStaleMTP3Restart) {
+		t.Fatalf("complete after Association.Done = %v, want ErrStaleMTP3Restart", completeErr)
+	}
+	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, destination.PointCode); got != DestinationUnavailable {
+		t.Fatalf("destination state after close race = %v, want unavailable", got)
 	}
 }
 

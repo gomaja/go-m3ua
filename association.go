@@ -1333,6 +1333,9 @@ func (c *Association) closeWith(cause error) error {
 			c.closeErr.Store(cause)
 		}
 		close(c.done)
+		if c.releaseEndpointStateOwner != nil {
+			invalidateMTP3RestartRegistry(c.mtp3Restarts)
+		}
 		// Retransmitters select on done, but cancel them explicitly so a
 		// pending request cannot be resent onto a socket that is closing.
 		c.stopAllTAck()
@@ -1368,7 +1371,6 @@ func (c *Association) closeWith(cause error) error {
 			c.listener.forget(c)
 		}
 		if c.releaseEndpointStateOwner != nil {
-			invalidateMTP3RestartRegistry(c.mtp3Restarts)
 			c.as.close()
 			c.releaseEndpointStateOwner()
 		}
