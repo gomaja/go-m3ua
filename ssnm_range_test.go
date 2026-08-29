@@ -302,11 +302,12 @@ func TestDestinationRangeSnapshotsPreserveScopeAndUpdateOrder(t *testing.T) {
 }
 
 func TestListenerDestinationRangesProvideAllRCBaselineAndScopedOverride(t *testing.T) {
-	listener := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x222222, 0x111111, 1, params.TrafficModeLoadshare, 7, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)}
+	)
+	listener := newSGPListener(NewListenerConfig(config))
 	listener.SetDestinationRangeForNetwork(7, 0x1234aa, 8, DestinationUnavailable)
 	listener.SetDestinationStateForNetworkAndRoutingContext(7, 2, 0x123456, DestinationAvailable)
 

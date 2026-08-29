@@ -168,9 +168,10 @@ func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
 	// through the embedded *Config and dereferences nil without one. The setter
 	// under test needs no Config at all, which is the point — it is usable
 	// before anything has been accepted.
-	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)}
+		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
+	l := newSGPListener(NewListenerConfig(config))
 
 	if _, known := l.DestinationState(0x111111); known {
 		t.Error("an unset destination reported as known")

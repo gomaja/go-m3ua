@@ -350,6 +350,27 @@ func TestASPAssociationRejectsSGPDestinationReports(t *testing.T) {
 	}
 }
 
+func TestASPListenerRejectsSGPDestinationProcedures(t *testing.T) {
+	endpoint, err := NewEndpoint(RoleASP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleASP): %v", err)
+	}
+	config := mcASPConfig(1)
+	config.NetworkAppearance = params.NewNetworkAppearance(7)
+	listener := newListener(endpoint, NewListenerConfig(config))
+	const pointCode = uint32(0x123456)
+
+	if err := listener.ReportDestinationStateForNetworkAndRoutingContext(
+		7, 1, pointCode, DestinationRestricted,
+	); !errors.Is(err, ErrUnsupportedRole) {
+		t.Fatalf("ASP Listener destination report error = %v, want ErrUnsupportedRole", err)
+	}
+	listener.SetDestinationStateForNetworkAndRoutingContext(7, 1, pointCode, DestinationRestricted)
+	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 1, pointCode); known {
+		t.Fatalf("ASP Listener destination state = (%v, %v) after unsupported update, want unknown", state, known)
+	}
+}
+
 func TestDialNormalizesAZeroAssociationConfigBeforeTransport(t *testing.T) {
 	endpoint, err := NewEndpoint(RoleASP)
 	if err != nil {

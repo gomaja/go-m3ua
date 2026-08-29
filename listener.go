@@ -400,6 +400,12 @@ func (l *Listener) ReportDestinationRangeForNetworkAndRoutingContext(networkAppe
 }
 
 func (l *Listener) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
+	if l == nil || l.Role() != RoleSGP {
+		if wait {
+			return ErrUnsupportedRole
+		}
+		return nil
+	}
 	prepared, err := l.prepareLocalDestinationRange(rangeValue)
 	if err != nil {
 		return err
