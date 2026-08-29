@@ -327,6 +327,29 @@ func TestIPSPAssociationRejectsSGPDestinationProcedures(t *testing.T) {
 	}
 }
 
+func TestASPAssociationRejectsSGPDestinationReports(t *testing.T) {
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+	const (
+		networkAppearance = uint32(7)
+		routingContext    = uint32(1)
+		pointCode         = uint32(0x123456)
+	)
+	association.SetDestinationStateForNetworkAndRoutingContext(
+		networkAppearance, routingContext, pointCode, DestinationRestricted,
+	)
+
+	if err := association.ReportDestinationStateForNetworkAndRoutingContext(
+		networkAppearance, routingContext, pointCode, DestinationUnavailable,
+	); !errors.Is(err, ErrUnsupportedRole) {
+		t.Fatalf("ASP destination report error = %v, want ErrUnsupportedRole", err)
+	}
+	if got := association.DestinationStateForNetworkAndRoutingContext(
+		networkAppearance, routingContext, pointCode,
+	); got != DestinationRestricted {
+		t.Fatalf("ASP destination state = %v after rejected report, want restricted", got)
+	}
+}
+
 func TestDialNormalizesAZeroAssociationConfigBeforeTransport(t *testing.T) {
 	endpoint, err := NewEndpoint(RoleASP)
 	if err != nil {

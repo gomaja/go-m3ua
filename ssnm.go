@@ -1440,15 +1440,27 @@ func (c *Association) ReportDestinationRangeForNetworkAndRoutingContext(networkA
 }
 
 func (c *Association) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
-	if c != nil && c.role == RoleIPSP {
-		return ErrUnsupportedRole
-	}
-	if c != nil && c.role == RoleSGP {
+	if c != nil {
+		if c.role == RoleIPSP || wait && c.role != RoleSGP {
+			return ErrUnsupportedRole
+		}
+		if c.role != RoleSGP {
+			return applyLocalDestinationRange(c, rangeValue)
+		}
+		select {
+		case <-c.done:
+			return ErrAssociationClosed
+		default:
+		}
 		if c.listener != nil {
 			return c.listener.applyDestinationRange(rangeValue, wait)
 		}
 		return c.applyDialedSGPDestinationRange(rangeValue, wait)
 	}
+	return applyLocalDestinationRange(c, rangeValue)
+}
+
+func applyLocalDestinationRange(c *Association, rangeValue DestinationRange) error {
 	if !validDestinationState(rangeValue.State) {
 		return fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
 	}

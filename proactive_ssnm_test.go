@@ -285,6 +285,27 @@ func TestDialedSGPDestinationUpdateReportsToItsActiveASP(t *testing.T) {
 	}
 }
 
+func TestClosedDialedSGPRejectsDestinationReports(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+	if err := association.Close(); err != nil {
+		t.Fatalf("close dialing SGP Association: %v", err)
+	}
+	capture.reset()
+
+	err := association.ReportDestinationStateForNetworkAndRoutingContext(
+		7, 1, 0x123456, DestinationUnavailable,
+	)
+	if !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("closed dialing SGP destination report error = %v, want ErrAssociationClosed", err)
+	}
+	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); got != DestinationAvailable {
+		t.Fatalf("closed dialing SGP destination state = %v after rejected report, want available", got)
+	}
+	if got := len(ssnmMessages(capture.snapshot())); got != 0 {
+		t.Fatalf("closed dialing SGP emitted %d destination reports, want 0", got)
+	}
+}
+
 func TestDialedSGPDestinationUpdateRejectsUnconfiguredRoutingContextAtomically(t *testing.T) {
 	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
 
