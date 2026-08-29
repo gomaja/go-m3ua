@@ -410,10 +410,13 @@ Selection order is:
 The stable flow key contains the MTP Route plus OPC, DPC, SI, NI, and SLS.
 Message Priority is evaluated separately by congestion policy and does not
 split a sequenced traffic flow. A bounded sticky-flow cache retains the
-selected Association set while every selected Association remains eligible. A
-change in candidate inventory does not move a healthy flow. When the assignment
-becomes ineligible, the same deterministic hash and configuration order choose
-its replacement.
+selected Association set while every selected Association remains eligible.
+Loadshare keeps a healthy flow on its SG and SGP when candidate inventory
+changes. Primary/backup reevaluates configured order, so a recovered
+higher-priority route takes the flow back. Broadcast recomputes the complete
+eligible set. Within a selected SGP, an eligible previously selected
+Association is retained in every mode. When the assignment becomes ineligible,
+the same deterministic hash and configuration order choose its replacement.
 
 Broadcast attempts every selected Association in deterministic order. A
 partial failure is returned as a typed error containing the successful and

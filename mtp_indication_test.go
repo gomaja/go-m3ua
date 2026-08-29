@@ -254,6 +254,12 @@ func TestClosingLastASPAssociationReportsEveryCoalescedPause(t *testing.T) {
 		t.Fatalf("missing MTP-PAUSE indications for %v", expected)
 	}
 	requireNoMTPIndication(t, indications)
+	statuses := endpoint.MTPDestinationStatuses()
+	if len(statuses) != 1 || statuses[0].Destination != (MTPDestination{
+		MTPRoute: "sccp-a", PointCode: 0x120000, Mask: 16,
+	}) || statuses[0].Availability != DestinationUnavailable {
+		t.Fatalf("post-detach MTP destination statuses = %#v, want configured unavailable baseline", statuses)
+	}
 }
 
 func TestEndpointMTPIndicationsFollowCommittedAssociationState(t *testing.T) {

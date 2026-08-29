@@ -212,6 +212,20 @@ func (r *aspRoutes) detach(association *Association) {
 			delete(r.associationsBySGP, identity)
 		}
 		if !r.signallingGatewayAttachedLocked(identity.SignallingGateway) {
+			if affectedMTPRoutes == nil {
+				affectedMTPRoutes = make(map[MTPRouteID]struct{})
+			}
+			for _, gateway := range r.config.signallingGateways {
+				if gateway.id != identity.SignallingGateway {
+					continue
+				}
+				for _, sgp := range gateway.sgps {
+					for _, route := range sgp.routes {
+						affectedMTPRoutes[route.mtpRoute] = struct{}{}
+					}
+				}
+				break
+			}
 			r.reclaimSignallingGatewayStateLocked(identity.SignallingGateway)
 		}
 	}
