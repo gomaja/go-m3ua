@@ -181,8 +181,13 @@ go-m3ua is an M3UA protocol library. It is responsible for:
 
 The deployment is responsible for:
 
-- IPsec, TLS, DTLS, private-network, or equivalent protection selected by its
-  security policy;
+- IPsec ESP and IKE support required of a SIGTRAN node by RFC 3788
+  [Section 7](https://www.rfc-editor.org/rfc/rfc3788.html#section-7), supplied
+  by the host or another deployment layer even when policy does not enable
+  IPsec on every Association;
+- optional TLS, DTLS, private-network, or additional protection selected by
+  deployment policy, none of which removes the mandatory IPsec-support
+  requirement;
 - mutual peer authentication, keys, certificates, trust anchors, revocation,
   algorithm policy, rekeying, and secret storage;
 - firewalling, routing, anti-spoofing, rate limits outside the process, and
