@@ -87,6 +87,9 @@ type Association struct {
 	muState *sync.RWMutex
 	// role is the immutable RFC 4666 endpoint role on this association.
 	role Role
+	// aspTransferMu keeps a selected ASP MTP-TRANSFER write ordered before a
+	// concurrent loss of the Association or its active Application Server scope.
+	aspTransferMu sync.RWMutex
 	// state is to see the current state
 	state State
 	// appliedState is the state the entry-action pass last ran for.
@@ -332,7 +335,8 @@ type Association struct {
 	signalWriter func(m3 messages.M3UA) (int, error)
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
-	dataWriter func([]byte, *sctp.SndRcvInfo) (int, error)
+	dataWriter      func([]byte, *sctp.SndRcvInfo) (int, error)
+	transportCloser func() error
 	// notificationQueue keeps peer-controlled socket backpressure out of the AS
 	// state machine and proactive SSNM paths. A full queue closes the association
 	// rather than silently dropping mandatory ordered control traffic.
@@ -1082,7 +1086,7 @@ func (c *Association) lockResolvedOutboundDataScope(routingContext *params.Param
 		}
 		return c.unscopedDeliveryMu.Unlock, nil
 	}
-	release, err := c.lockServerApplicationServers(routingContext.RoutingContexts())
+	release, err := c.lockSGPApplicationServers(routingContext.RoutingContexts())
 	if err != nil {
 		if c.State() != StateASPActive {
 			return nil, ErrNotEstablished
@@ -1139,7 +1143,7 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 			return nil, err
 		}
 	}
-	return c.lockServerApplicationServers(routingContexts)
+	return c.lockSGPApplicationServers(routingContexts)
 }
 
 func ssnmNetworkAppearance(message messages.M3UA) *params.Param {
@@ -1199,7 +1203,7 @@ func ssnmRoutingContext(message messages.M3UA) (*params.Param, bool) {
 	}
 }
 
-func (c *Association) lockServerApplicationServers(routingContexts []uint32) (func(), error) {
+func (c *Association) lockSGPApplicationServers(routingContexts []uint32) (func(), error) {
 	if c.role != RoleSGP || c.as == nil || len(routingContexts) == 0 {
 		return func() {}, nil
 	}
@@ -1365,11 +1369,15 @@ func (c *Association) closeWith(cause error) error {
 		// Retransmitters select on done, but cancel them explicitly so a
 		// pending request cannot be resent onto a socket that is closing.
 		c.stopAllTAck()
+		err = c.closeTransport()
+		unlockTransfer := c.lockASPTransferMutation()
 		c.muState.Lock()
 		previousState := c.state
 		c.state = StateASPDown
 		c.appliedState = StateASPDown
 		c.muState.Unlock()
+		unlockTransfer()
+		c.notifyASPRouteStateChanged()
 		if previousState != StateASPDown {
 			c.notifyStateChange(StateASPDown)
 		}
@@ -1387,12 +1395,6 @@ func (c *Association) closeWith(cause error) error {
 		})
 		// Ends any range over ManagementIndications().
 		c.closeManagement()
-		// Close the association before AS departure can notify siblings. Any
-		// control write already blocked on this socket is released first, and a
-		// nil socket is valid in the state-machine test harness.
-		if c.sctpConn != nil {
-			err = c.sctpConn.Close()
-		}
 		if c.listener != nil {
 			c.listener.forget(c)
 		}
@@ -1401,6 +1403,16 @@ func (c *Association) closeWith(cause error) error {
 		}
 	})
 	return err
+}
+
+func (c *Association) closeTransport() error {
+	if c.transportCloser != nil {
+		return c.transportCloser()
+	}
+	if c.sctpConn != nil {
+		return c.sctpConn.Close()
+	}
+	return nil
 }
 
 // LocalAddr returns the local network address.
@@ -1897,12 +1909,15 @@ func (c *Association) dataRoutingContext() (*params.Param, error) {
 // setState replaces the Association's state without going through the dispatcher.
 // It exists for tests that need to place an Association in a given state directly.
 func (c *Association) setState(s State) {
+	unlockTransfer := c.lockASPTransferMutation()
 	c.muState.Lock()
 	c.state = s
 	// Kept in step so a later transition measures itself against the state the
 	// Association was actually placed in, not against a stale applied value.
 	c.appliedState = s
 	c.muState.Unlock()
+	unlockTransfer()
+	c.notifyASPRouteStateChanged()
 }
 
 // resumeAfterStrayAck reports whether a return to ASP-ACTIVE is owed because a
@@ -1933,15 +1948,27 @@ func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 		}
 	}
 
+	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
-	defer c.muAckedRCs.Unlock()
+	changed := !c.ackedRCsScoped
 	if c.ackedRCs == nil {
 		c.ackedRCs = make(map[uint32]struct{})
 	}
 	c.ackedRCsScoped = true
 	for _, rc := range rcs {
+		if _, exists := c.ackedRCs[rc]; !exists {
+			changed = true
+		}
+		if _, exists := c.overriddenRCs[rc]; exists {
+			changed = true
+		}
 		c.ackedRCs[rc] = struct{}{}
 		delete(c.overriddenRCs, rc)
+	}
+	c.muAckedRCs.Unlock()
+	unlockTransfer()
+	if changed {
+		c.notifyASPRouteStateChanged()
 	}
 }
 
@@ -1962,6 +1989,13 @@ func (c *Association) routingContextAcked(rc uint32) bool {
 // starts from nothing. An override recorded against the old activation goes with
 // it: the next ASP Active decides afresh which contexts this ASP may carry.
 func (c *Association) forgetAckedRoutingContexts() {
+	unlockTransfer := c.lockASPTransferMutation()
+	c.forgetAckedRoutingContextsWithoutTransferBarrier()
+	unlockTransfer()
+	c.notifyASPRouteStateChanged()
+}
+
+func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 	c.muAckedRCs.Lock()
 	c.ackedRCs = nil
 	c.ackedRCsScoped = false
@@ -1986,14 +2020,24 @@ func (c *Association) forgetAckedRoutingContexts() {
 // of the contexts are not sendable, and the per-context truth is what
 // routingContextFor enforces on each write.
 func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
+	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
-	defer c.muAckedRCs.Unlock()
 	if c.overriddenRCs == nil {
 		c.overriddenRCs = make(map[uint32]struct{})
 	}
 	for _, rc := range rcs {
 		c.overriddenRCs[rc] = struct{}{}
 	}
+	c.muAckedRCs.Unlock()
+	unlockTransfer()
+	c.notifyASPRouteStateChanged()
+}
+
+func (c *Association) notifyASPRouteStateChanged() {
+	if c == nil || c.role != RoleASP || c.endpoint == nil || c.endpoint.aspRoutes == nil {
+		return
+	}
+	c.endpoint.aspRoutes.associationStateChanged(c)
 }
 
 // noteRoutingContextsActive records, at an SGP, which Application Servers this

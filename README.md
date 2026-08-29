@@ -3,7 +3,7 @@
 Simple M3UA protocol implementation in the Go programming language.
 
 [![CI status](https://github.com/gomaja/go-m3ua/actions/workflows/go.yml/badge.svg)](https://github.com/gomaja/go-m3ua/actions/workflows/go.yml)
-[![golangci-lint](https://github.com/gomaja/go-m3ua/actions/workflows/golangci-lint.yml/badge.svg)](https://github.com/gomaja/go-m3ua/actions/workflows/golangci-lint.yml)
+[![Security status](https://github.com/gomaja/go-m3ua/actions/workflows/security.yml/badge.svg)](https://github.com/gomaja/go-m3ua/actions/workflows/security.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/gomaja/go-m3ua.svg)](https://pkg.go.dev/github.com/gomaja/go-m3ua)
 [![GitHub](https://img.shields.io/github/license/mashape/apistatus.svg)](https://github.com/gomaja/go-m3ua/blob/main/LICENSE)
 
@@ -68,8 +68,8 @@ example sets an ASP Identifier:
 
 ```go
 config := m3ua.NewAssociationConfig(
-    0x11111111, // OriginatingPointCode
-    0x22222222, // DestinationPointCode
+    0x111111, // OriginatingPointCode
+    0x222222, // DestinationPointCode
     params.ServiceIndSCCP, // ServiceIndicator
     0,                     // NetworkIndicator
     0,                     // MessagePriority
@@ -78,8 +78,8 @@ config := m3ua.NewAssociationConfig(
 config.
     EnableHeartbeat(3*time.Second, 10*time.Second).
     SetTrafficModeType(params.TrafficModeLoadshare).
-    SetNetworkAppearance(0).
-    SetRoutingContexts(1, 2)
+    SetNetworkAppearance(7).
+    SetRoutingContexts(1)
 config.SetASPIdentifier(1) // ASP-only
 ```
 
@@ -111,9 +111,44 @@ config.Compatibility = m3ua.CompatibilityPolicy{
 }
 ```
 
-Create an ASP endpoint and initiate the SCTP association:
+Create an ASP Endpoint with its local MTP Route and provisioned SG/SGP route. The
+Routing Context and Network Appearance are peer-specific `ASKey` values; they
+are not global route identifiers:
 
 ```go
+peer := m3ua.SGPIdentity{
+    SignallingGateway: "sg-a",
+    SignallingGatewayProcess: "sgp-a1",
+}
+asKey := m3ua.ASKey{
+    NetworkAppearance: 7, NetworkAppearanceSet: true,
+    RoutingContext: 1, RoutingContextSet: true,
+}
+endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Role: m3ua.RoleASP,
+    ASP: &m3ua.ASPConfig{
+        SignallingGatewaySelection: m3ua.RouteSelectionPrimaryBackup,
+        MTPRoutes: []m3ua.MTPRouteConfig{{
+            ID: "sccp",
+            DestinationPointCode: 0x220000,
+            Mask: 16,
+            ServiceIndicators: []uint8{params.ServiceIndSCCP},
+        }},
+        SignallingGateways: []m3ua.SignallingGatewayConfig{{
+            ID: peer.SignallingGateway,
+            SGPSelection: m3ua.RouteSelectionPrimaryBackup,
+            SGPs: []m3ua.SignallingGatewayProcessConfig{{
+                ID: peer.SignallingGatewayProcess,
+                Routes: []m3ua.SGPRoute{{MTPRoute: "sccp", AS: asKey}},
+            }},
+        }},
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+config.PeerSGP = &peer
 remote, err := sctp.ResolveSCTPAddr("sctp", PEER_ADDRESS)
 if err != nil {
     log.Fatal(err)
@@ -123,10 +158,6 @@ ctx := context.Background()
 ctx, cancel := context.WithCancel(ctx)
 defer cancel()
 
-endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP})
-if err != nil {
-    log.Fatal(err)
-}
 association, err := endpoint.Dial(ctx, "m3ua", nil, remote, config)
 if err != nil {
     log.Fatalf("Failed to establish M3UA association: %s", err)
@@ -134,13 +165,41 @@ if err != nil {
 defer func() { _ = association.Close() }()
 ```
 
-Now you can `Read()` / `Write()` data from/to the remote endpoint.
+For an ASP with provisioned routes, submit the RFC 4666 MTP-TRANSFER request to
+the Endpoint. It resolves the MTP Route, aggregates route state across SGs,
+selects the SGP and Association, applies that peer's `ASKey`, and derives the
+SCTP stream from the Protocol Data SLS:
 
 ```go
-if _, err := association.Write(d); err != nil {
-    log.Fatalf("Failed to write M3UA data: %s", err)
+result, err := endpoint.MTPTransfer(m3ua.MTPTransferRequest{
+    MTPRoute: "sccp",
+    ProtocolData: params.NewProtocolDataPayload(
+        opc, dpc, params.ServiceIndSCCP, ni, priority, sls, d,
+    ),
+})
+if err != nil {
+    log.Fatalf("MTP-TRANSFER failed: %s", err)
 }
-log.Printf("Successfully sent M3UA data: %x", d)
+log.Printf("sent through %d Association(s)", result.TransmittedAssociations)
+```
+
+Consume Endpoint-wide derived MTP-PAUSE, MTP-RESUME, and MTP-STATUS
+indications. An individual Association ending does not close this channel:
+
+```go
+for indication := range endpoint.MTPIndications() {
+    if indication.ResyncRequired {
+        statuses := endpoint.MTPDestinationStatuses()
+        _ = statuses // Replace the application's route snapshot atomically.
+        continue
+    }
+    log.Printf("%s: %#v", indication.Kind, indication.Destination)
+}
+```
+
+Association-level reads remain the DATA receive API:
+
+```go
 
 buf := make([]byte, m3ua.DefaultReadBufferSize)
 n, err := association.Read(buf)
@@ -230,7 +289,9 @@ listener, err := endpoint.Listen("m3ua", local, listenerConfig)
 
 This project targets RFC 4666 with current IANA SIGTRAN/SCTP assignments and SCTP behavior from RFC 9260 where it affects the M3UA transport. See [docs/compliance.md](docs/compliance.md) for the current audit notes.
 
-The module is still pre-v1. Some exported APIs may change before v1.0.0.
+The v1.2 API intentionally uses RFC entity and primitive names. See the
+[v1.2 migration guide](docs/migration-v1.2.md) for the breaking role,
+configuration, and ASP routing changes.
 
 ## LICENSE
 

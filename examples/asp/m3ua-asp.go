@@ -12,71 +12,139 @@ import (
 	"encoding/hex"
 	"flag"
 	"log"
+	"math"
 	"time"
 
-	"github.com/gomaja/go-m3ua/messages/params"
-
 	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-sctp"
 )
 
 func main() {
 	var (
-		addr  = flag.String("addr", "127.0.0.1:2905", "Remote IP and Port to connect to.")
-		data  = flag.String("data", "deadbeef", "Payload to send on M3UA in hex stream format.")
-		hbInt = flag.Duration("hb-interval", 0, "Interval for M3UA BEAT. Put 0 to disable")
+		addr    = flag.String("addr", "127.0.0.1:2905", "Remote SGP SCTP address.")
+		data    = flag.String("data", "deadbeef", "MTP3-User payload in hexadecimal.")
+		hbInt   = flag.Duration("hb-interval", 0, "M3UA T(beat) interval; zero disables M3UA BEAT.")
+		network = flag.Uint64("network-appearance", 0, "Peer Network Appearance.")
+		rtCtx   = flag.Uint64("routing-context", 1, "Peer Routing Context.")
+		gateway = flag.String("signalling-gateway", "sg-a", "Peer Signalling Gateway identity.")
+		process = flag.String("signalling-gateway-process", "sgp-a1", "Peer SGP identity.")
 	)
 	flag.Parse()
+	if *network > math.MaxUint32 {
+		log.Fatalf("Network Appearance %d exceeds 32 bits", *network)
+	}
+	if *rtCtx > math.MaxUint32 {
+		log.Fatalf("Routing Context %d exceeds 32 bits", *rtCtx)
+	}
+	networkAppearance := uint32(*network)
+	routingContext := uint32(*rtCtx)
 
-	// setup data to send
-	d, err := hex.DecodeString(*data)
+	payload, err := hex.DecodeString(*data)
 	if err != nil {
-		log.Fatalf("Failed to decode Hex string: %s", err)
+		log.Fatalf("Failed to decode hexadecimal payload: %s", err)
 	}
 
-	// Configure the M3UA association.
-	config := m3ua.NewAssociationConfig(
-		0x11111111,            // OriginatingPointCode
-		0x22222222,            // DestinationPointCode
-		params.ServiceIndSCCP, // ServiceIndicator
-		0,                     // NetworkIndicator
-		0,                     // MessagePriority
-		1,                     // SignallingLinkSelection
+	peer := m3ua.SGPIdentity{
+		SignallingGateway:        m3ua.SignallingGatewayID(*gateway),
+		SignallingGatewayProcess: m3ua.SignallingGatewayProcessID(*process),
+	}
+	asKey := m3ua.ASKey{
+		NetworkAppearance:    networkAppearance,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+	}
+
+	associationConfig := m3ua.NewAssociationConfig(
+		0x111111,
+		0x222222,
+		params.ServiceIndSCCP,
+		0,
+		0,
+		1,
 	)
-	config.
+	associationConfig.
 		EnableHeartbeat(*hbInt, 10*time.Second).
 		SetASPIdentifier(1).
 		SetTrafficModeType(params.TrafficModeLoadshare).
-		SetNetworkAppearance(0).
-		SetRoutingContexts(1, 2)
+		SetNetworkAppearance(networkAppearance).
+		SetRoutingContexts(routingContext)
+	associationConfig.PeerSGP = &peer
 
-	// setup SCTP peer on the specified IPs and Port.
-	raddr, err := sctp.ResolveSCTPAddr("sctp", *addr)
+	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+		Role: m3ua.RoleASP,
+		ASP: &m3ua.ASPConfig{
+			SignallingGatewaySelection: m3ua.RouteSelectionPrimaryBackup,
+			MTPRoutes: []m3ua.MTPRouteConfig{
+				{
+					ID:                    "sccp",
+					DestinationPointCode:  0x222222,
+					ServiceIndicators:     []uint8{params.ServiceIndSCCP},
+					OriginatingPointCodes: []uint32{0x111111},
+				},
+			},
+			SignallingGateways: []m3ua.SignallingGatewayConfig{
+				{
+					ID:           peer.SignallingGateway,
+					SGPSelection: m3ua.RouteSelectionPrimaryBackup,
+					SGPs: []m3ua.SignallingGatewayProcessConfig{
+						{
+							ID: peer.SignallingGatewayProcess,
+							Routes: []m3ua.SGPRoute{
+								{MTPRoute: "sccp", AS: asKey},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
 	if err != nil {
-		log.Fatalf("Failed to resolve SCTP address: %s", err)
+		log.Fatalf("Failed to create M3UA ASP Endpoint: %s", err)
 	}
+	defer func() { _ = endpoint.Close() }()
 
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
+	remote, err := sctp.ResolveSCTPAddr("sctp", *addr)
+	if err != nil {
+		log.Fatalf("Failed to resolve SGP SCTP address: %s", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP})
+	association, err := endpoint.Dial(ctx, "m3ua", nil, remote, associationConfig)
 	if err != nil {
-		log.Fatalf("Failed to create M3UA ASP endpoint: %s", err)
-	}
-	association, err := endpoint.Dial(ctx, "m3ua", nil, raddr, config)
-	if err != nil {
-		log.Fatalf("Failed to establish M3UA association: %s", err)
+		log.Fatalf("Failed to establish M3UA Association: %s", err)
 	}
 	defer func() { _ = association.Close() }()
 
-	// send data once in 3 seconds.
-	for {
-		if _, err := association.Write(d); err != nil {
-			log.Fatalf("Failed to write M3UA data: %s", err)
+	go func() {
+		for indication := range endpoint.MTPIndications() {
+			if indication.ResyncRequired {
+				log.Printf("MTP indication queue requires destination-state resynchronization")
+				continue
+			}
+			log.Printf("%s: MTP Route %q, destination %#x/%d, availability %s",
+				indication.Kind,
+				indication.Destination.Destination.MTPRoute,
+				indication.Destination.Destination.PointCode,
+				indication.Destination.Destination.Mask,
+				indication.Destination.Availability,
+			)
 		}
-		log.Printf("Sent: %x", d)
+	}()
 
+	for {
+		result, err := endpoint.MTPTransfer(m3ua.MTPTransferRequest{
+			MTPRoute: "sccp",
+			ProtocolData: params.NewProtocolDataPayload(
+				0x111111, 0x222222, params.ServiceIndSCCP, 0, 0, 1, payload,
+			),
+		})
+		if err != nil {
+			log.Fatalf("MTP-TRANSFER failed: %s", err)
+		}
+		log.Printf("MTP-TRANSFER sent %d user octets through %d Association(s)",
+			result.UserDataOctets, result.TransmittedAssociations)
 		time.Sleep(3 * time.Second)
 	}
 }

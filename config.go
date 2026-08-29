@@ -219,6 +219,7 @@ type SGPConfig struct {
 // role-specific node policy.
 type EndpointConfig struct {
 	Role Role
+	ASP  *ASPConfig
 	SGP  *SGPConfig
 }
 
@@ -290,6 +291,9 @@ type AssociationConfig struct {
 	// Compatibility configures explicit receive-side tolerance for known peer
 	// protocol violations. The zero value keeps RFC-strict behaviour.
 	Compatibility CompatibilityPolicy
+	// PeerSGP identifies the remote Signalling Gateway Process for an
+	// Association owned by an ASP Endpoint. It is invalid for an SGP Endpoint.
+	PeerSGP *SGPIdentity
 
 	RoutingContexts         *params.Param
 	CorrelationID           *params.Param
@@ -383,6 +387,10 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
 	snapshot.RoutingContexts = config.RoutingContexts.Copy()
 	snapshot.CorrelationID = config.CorrelationID.Copy()
+	if config.PeerSGP != nil {
+		peerSGP := *config.PeerSGP
+		snapshot.PeerSGP = &peerSGP
+	}
 	if config.TrafficModes != nil {
 		snapshot.TrafficModes = make(map[uint32]uint32, len(config.TrafficModes))
 		for routingContext, trafficMode := range config.TrafficModes {
@@ -404,6 +412,9 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 	case RoleSGP:
 		if config.ASPIdentifier != nil {
 			return fmt.Errorf("%w: ASPIdentifier applies only to an ASP", ErrInvalidRoleConfiguration)
+		}
+		if config.PeerSGP != nil {
+			return fmt.Errorf("%w: PeerSGP applies only to an ASP", ErrInvalidRoleConfiguration)
 		}
 	default:
 		return ErrUnsupportedRole

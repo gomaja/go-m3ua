@@ -1,17 +1,54 @@
 # go-m3ua compliance and ecosystem audit
 
-Audit date: 2026-08-01.
+Audit date: 2026-08-29.
 
 ## Specification baseline
 
 - Base protocol: RFC 4666, which obsoletes RFC 3332.
-- RFC Editor errata for RFC 4666 on 2026-08-01:
+- RFC Editor errata for RFC 4666 on 2026-08-29:
   - Errata ID 2065 is Held for Document Update, Technical: Notify Routing Context is treated as Conditional for scoped Alternate ASP Active behavior.
   - Errata ID 4475 is Held for Document Update, Editorial: Service Indicator padding is interpreted as 32-bit alignment.
   - Errata ID 2518 is Rejected, Technical: RKM parameter tag values remain the RFC 4666 assignments.
 - IANA SIGTRAN adaptation registry: M3UA message classes/types and parameters remain RFC 4666 assignments.
 - IANA SCTP PPID registry: M3UA is Payload Protocol Identifier 3.
 - SCTP baseline: RFC 9260 is applied where current SCTP behavior affects this library, including the 500 ms maximum for SACK.Delay.
+
+The RFC Editor and Datatracker were cross-checked on the audit date. RFC 4666
+remains an IETF Proposed Standard, has no `Updated by` or `Obsoleted by`
+relationship, and the concluded SIGTRAN working group lists no active M3UA
+Internet-Draft. Errata 2065 and 4475 remain Held for Document Update, and
+Errata 2518 remains Rejected; no Verified erratum changes the implemented
+behavior.
+
+## ASP multi-SG routing
+
+The ASP Endpoint implements the route function described by RFC 4666 Sections
+1.3.2.5, 1.4.2.5, 4.5.2.2, and 5.5.1.1.1:
+
+- MTP Routes are local routing-table identities; each SGP route maps one to
+  the peer-specific Network Appearance and Routing Context in an `ASKey`.
+- SSNM state is retained per originating SG and aggregated before MTP-PAUSE,
+  MTP-RESUME, or MTP-STATUS is delivered to the MTP3-User.
+- Peer-controlled SSNM work and retained route state have configurable
+  per-message, per-route, and Endpoint-wide bounds; an over-limit message is
+  rejected atomically without inventing an RFC 4666 protocol Error code.
+- A persistent point-code prefix index keeps derived-route recomputation
+  bounded by retained prefixes and the 24-bit path depth, including when a peer
+  repeatedly overwrites existing records without consuming new-record budget.
+  MTP-TRANSFER route-state lookup uses that same bounded path rather than
+  scanning Endpoint-wide records.
+- Availability, restriction, and congestion are independent selection inputs.
+- Primary/backup, loadshare, and broadcast selection are supported between SGs
+  and between SGPs of one SG, following Appendix A.2.2.
+- Stable bounded flow assignments minimize missequencing; DATA uses the
+  Protocol Data SLS to select a nonzero negotiated SCTP stream as required by
+  Section 1.4.7.
+- Association state and active Routing Context scope are revalidated at the
+  write barrier. One Association loss does not remove a route still served by
+  a sibling Association or SG.
+- Both RFC 4666 Section 1.4.8 SCTP initiation orientations are covered by
+  Linux SCTP integration tests. Protocol role never depends on which peer
+  initiated SCTP.
 
 ## RKM scope
 
@@ -45,9 +82,12 @@ Application/plugin hits from GitHub code search were not treated as competing li
 
 ## Current validation commands
 
+- `go build ./...`
 - `go test ./... -count=1`
 - `go test ./... -count=1 -race`
-- `golangci-lint run --timeout=5m`
+- `go vet ./...`
+- `staticcheck ./...`
+- `golangci-lint run ./...`
 - `go run github.com/rhysd/actionlint/cmd/actionlint@latest`
 
 CI runs the test matrix on Go 1.23, 1.24, and 1.25, plus a Go 1.25 race job and pinned golangci-lint v2.

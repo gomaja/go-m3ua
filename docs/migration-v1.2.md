@@ -51,6 +51,57 @@ SGP state learned from the SS7 side is Endpoint-wide regardless of which peer
 initiated SCTP. Existing Listener and Association management methods therefore
 act on the same SGP Endpoint state. These procedures reject the ASP role.
 
+## ASP routes across SGs and SGPs
+
+An ASP that reaches a destination through more than one SG now provisions its
+local MTP Routes and peer SGP inventory in `EndpointConfig.ASP`. Each
+`AssociationConfig.PeerSGP` identifies the remote SGP for that Association.
+The Endpoint rejects a missing or unknown SGP identity and rejects an
+Association whose Network Appearance or Routing Context is not a provisioned
+route of that SGP.
+
+```go
+asp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Role: m3ua.RoleASP,
+    ASP: &m3ua.ASPConfig{
+        SignallingGatewaySelection: m3ua.RouteSelectionPrimaryBackup,
+        MTPRoutes: []m3ua.MTPRouteConfig{{
+            ID: "sccp",
+            DestinationPointCode: 0x220000,
+            Mask: 16,
+            ServiceIndicators: []uint8{params.ServiceIndSCCP},
+        }},
+        SignallingGateways: []m3ua.SignallingGatewayConfig{
+            // Provision SGs, their SGPs, and each peer-specific ASKey here.
+        },
+    },
+})
+```
+
+Use `Endpoint.MTPTransfer` rather than selecting an Association in application
+code. RFC 4666 Section 5.5.1.1.1 makes SGP, Association, and stream selection
+part of the ASP M3UA function. Primary/backup, loadshare, and broadcast are
+available independently between SGs and between the SGPs of one SG.
+
+Use `Endpoint.MTPIndications`, `Endpoint.MTPDestinationStatus`, and
+`Endpoint.MTPDestinationStatuses` for the derived MTP3-User view. The plural
+snapshot is the authoritative resynchronization source after an indication
+queue overflow. Association-level `SignallingStatus` remains useful for
+peer-route diagnostics, but a DUNA from one SG is not an MTP-PAUSE while
+another SG route remains available.
+
+`ASPConfig.MaxAffectedPointCodesPerSSNM`,
+`ASPConfig.MaxSSNMStateRecordsPerRoute`, and
+`ASPConfig.MaxSSNMStateRecords` bound SSNM processing and retained route state.
+Zero uses the library defaults. A deployment may set explicit positive limits
+from its provisioned route inventory; exceeding one returns
+`ErrASPRouteStateLimit` and closes the affected Association without partially
+applying the message.
+
+The same APIs apply whether the ASP or SGP initiated SCTP. `Dial`, `Listen`,
+and `Accept` describe SCTP establishment only; `RoleASP` and `RoleSGP` select
+the RFC procedures.
+
 ## Renamed API
 
 | Before v1.2 | v1.2 |
@@ -95,6 +146,8 @@ one role are validated before association processing:
   return an error and reject a non-SGP Listener with `ErrUnsupportedRole`.
 - A nil `AssociationConfig` passed to `Endpoint.Dial` returns
   `ErrNilAssociationConfig`.
+- An ASP Endpoint with routing policy requires `AssociationConfig.PeerSGP` and
+  validates the Association's `ASKey` scope before SCTP setup or M3UA parsing.
 
 The configuration selected by `ListenerConfig.SelectAssociationConfig` is
 validated after SCTP accept and before socket setup, monitoring, or M3UA

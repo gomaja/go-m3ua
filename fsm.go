@@ -136,19 +136,26 @@ func (c *Association) handleStateUpdateFrom(current State, published bool) error
 // entered for.
 func (c *Association) applyStateUpdate(current State) error {
 	c.muState.Lock()
-	defer c.muState.Unlock()
-	return c.applyStateUpdateLocked(current)
+	stateChanged := c.state != current
+	err := c.applyStateUpdateLocked(current)
+	c.muState.Unlock()
+	if stateChanged {
+		c.notifyASPRouteStateChanged()
+	}
+	return err
 }
 
 // applyPublishedStateUpdate atomically rejects a queued publication when a
 // newer dispatcher decision has already replaced it in c.state.
 func (c *Association) applyPublishedStateUpdate(current State) (bool, error) {
 	c.muState.Lock()
-	defer c.muState.Unlock()
 	if c.state != current {
+		c.muState.Unlock()
 		return false, nil
 	}
-	return true, c.applyStateUpdateLocked(current)
+	err := c.applyStateUpdateLocked(current)
+	c.muState.Unlock()
+	return true, err
 }
 
 func (c *Association) applyStateUpdateLocked(current State) error {
@@ -220,7 +227,7 @@ func (c *Association) handleStateUpdateAsASP(current, previous State, entering b
 		// association going down, which matches Section 4.3.4.1's treatment of
 		// an ASP Up while ASP-ACTIVE, where "all registered Routing Keys are
 		// considered deregistered".
-		c.forgetAckedRoutingContexts()
+		c.forgetAckedRoutingContextsWithoutTransferBarrier()
 		// RFC 4666 Section 4.3.4.1: the ASP is always the initiator of ASP Up.
 		if !entering || c.terminating.Load() {
 			return nil
@@ -388,14 +395,22 @@ func (c *Association) commitState(s State) bool {
 	if s == stateUnchanged {
 		return true
 	}
+	unlockTransfer := c.lockASPTransferMutation()
 	c.muState.Lock()
-	defer c.muState.Unlock()
 	select {
 	case <-c.done:
+		c.muState.Unlock()
+		unlockTransfer()
 		return false
 	default:
 	}
+	stateChanged := c.state != s
 	c.state = s
+	c.muState.Unlock()
+	unlockTransfer()
+	if stateChanged {
+		c.notifyASPRouteStateChanged()
+	}
 	return true
 }
 

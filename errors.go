@@ -153,6 +153,40 @@ var (
 	// no RFC 4666 meaning for the selected endpoint role.
 	ErrInvalidRoleConfiguration = errors.New("invalid M3UA role configuration")
 
+	// ErrInvalidASPConfig reports an invalid ASP-wide MTP Route, Signalling
+	// Gateway, Signalling Gateway Process, or route inventory.
+	ErrInvalidASPConfig = errors.New("invalid ASP routing configuration")
+
+	// ErrInvalidMTPTransfer reports an invalid MTP-TRANSFER request primitive.
+	ErrInvalidMTPTransfer = errors.New("invalid MTP-TRANSFER request")
+	// ErrUnknownMTPRoute reports an explicit MTP Route not provisioned at
+	// the ASP Endpoint.
+	ErrUnknownMTPRoute = errors.New("unknown MTP Route")
+	// ErrNoMatchingMTPRoute reports a routing label outside every provisioned
+	// ASP MTP Route.
+	ErrNoMatchingMTPRoute = errors.New("no MTP Route matches the MTP routing label")
+	// ErrAmbiguousMTPRoute reports several equally specific MTP Routes for an
+	// MTP routing label whose request omitted an explicit MTP Route.
+	ErrAmbiguousMTPRoute = errors.New("MTP routing label matches several MTP Routes")
+	// ErrMTPTransferOutsideRoute reports that an explicit MTP Route does
+	// not match the request's MTP routing label.
+	ErrMTPTransferOutsideRoute = errors.New("MTP routing label is outside the selected MTP Route")
+	// ErrNoMTPRoute reports that no active, reachable, policy-permitted SGP
+	// Association can carry an MTP-TRANSFER request.
+	ErrNoMTPRoute = errors.New("no eligible MTP route")
+	// ErrMissingSGPIdentity reports an ASP Association without the provisioned
+	// remote SGP identity required for Endpoint route selection.
+	ErrMissingSGPIdentity = errors.New("ASP Association has no SGP identity")
+	// ErrUnknownSGP reports an ASP Association naming an SGP not provisioned at
+	// its Endpoint.
+	ErrUnknownSGP = errors.New("ASP Association names an unknown SGP")
+	// ErrSGPRouteScopeMismatch reports Network Appearance or Routing Context
+	// configuration that is not a provisioned route of the named SGP.
+	ErrSGPRouteScopeMismatch = errors.New("ASP Association scope is not provisioned for its SGP")
+	// ErrASPRouteStateLimit reports that a peer SSNM message would exceed the
+	// configured ASP route-state work or retention budget.
+	ErrASPRouteStateLimit = errors.New("ASP SSNM route-state limit exceeded")
+
 	// ErrMissingUserCause is used when a DUPU arrives without the User/Cause
 	// parameter, which RFC 4666 Section 3.4.5 lists as Mandatory.
 	ErrMissingUserCause = errors.New("DUPU message without User/Cause parameter")

@@ -716,7 +716,14 @@ func (c *Association) closeStatus() {
 // applySSNM records a destination state change and reports it to the user.
 // Affected Point Code is Mandatory in every SSNM message (RFC 4666 Sections
 // 3.4.1 to 3.4.6) and may carry several point codes, each of which is updated.
-func (c *Association) applySSNM(networkAppearance, routingContext, apc *params.Param, state DestinationState, mutate func(*DestinationStatus)) error {
+func (c *Association) applySSNM(
+	networkAppearance,
+	routingContext,
+	apc *params.Param,
+	state DestinationState,
+	update *aspRouteUpdate,
+	mutate func(*DestinationStatus),
+) error {
 	if apc == nil {
 		return ErrMissingAffectedPointCode
 	}
@@ -756,6 +763,11 @@ func (c *Association) applySSNM(networkAppearance, routingContext, apc *params.P
 		statuses = append(statuses, status)
 	}
 
+	if update != nil && c.endpoint != nil && c.endpoint.aspRoutes != nil {
+		if err := c.endpoint.aspRoutes.apply(c, statuses, *update); err != nil {
+			return err
+		}
+	}
 	if routingContextSet {
 		c.destinations.setScopedRanges(routingContexts, updates)
 	} else {
@@ -963,7 +975,14 @@ func (c *Association) handleDestinationUnavailable(d *messages.DestinationUnavai
 		return nil
 	}
 
-	return c.applySSNM(d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationUnavailable, nil)
+	return c.applySSNM(
+		d.NetworkAppearance,
+		d.RoutingContext,
+		d.AffectedPointCode,
+		DestinationUnavailable,
+		&aspRouteUpdate{kind: aspRouteAvailabilityUpdate, availability: DestinationUnavailable},
+		nil,
+	)
 }
 
 // handleDestinationAvailable processes a DAVA.
@@ -993,7 +1012,14 @@ func (c *Association) handleDestinationAvailable(d *messages.DestinationAvailabl
 		return nil
 	}
 
-	return c.applySSNM(d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationAvailable, nil)
+	return c.applySSNM(
+		d.NetworkAppearance,
+		d.RoutingContext,
+		d.AffectedPointCode,
+		DestinationAvailable,
+		&aspRouteUpdate{kind: aspRouteAvailabilityUpdate, availability: DestinationAvailable},
+		nil,
+	)
 }
 
 // handleDestinationRestricted processes a DRST.
@@ -1020,7 +1046,14 @@ func (c *Association) handleDestinationRestricted(d *messages.DestinationRestric
 		return nil
 	}
 
-	return c.applySSNM(d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationRestricted, nil)
+	return c.applySSNM(
+		d.NetworkAppearance,
+		d.RoutingContext,
+		d.AffectedPointCode,
+		DestinationRestricted,
+		&aspRouteUpdate{kind: aspRouteAvailabilityUpdate, availability: DestinationRestricted},
+		nil,
+	)
 }
 
 // handleSignallingCongestion processes a SCON.
@@ -1098,7 +1131,12 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	if !congested {
 		state = DestinationAvailable
 	}
-	return c.applySSNM(s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, state, func(st *DestinationStatus) {
+	return c.applySSNM(s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, state, &aspRouteUpdate{
+		kind:               aspRouteCongestionUpdate,
+		congested:          congested,
+		congestionLevel:    level,
+		congestionLevelSet: s.CongestionIndications != nil,
+	}, func(st *DestinationStatus) {
 		st.CongestionLevel = level
 	})
 }
@@ -1156,7 +1194,7 @@ func (c *Association) handleDestinationUserPartUnavailable(d *messages.Destinati
 		}
 	}
 
-	return c.applySSNM(d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationAvailable, func(st *DestinationStatus) {
+	return c.applySSNM(d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationAvailable, nil, func(st *DestinationStatus) {
 		st.UserPartUnavailable = true
 		st.UserCause = d.UserCause.UserCause()
 	})
