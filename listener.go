@@ -559,8 +559,13 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 		return nil, err
 	}
 	l := newListener(e, cfg)
-	if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
-		return nil, err
+	// A selector-only Listener has no meaningful default association policy.
+	// Its selected snapshot is validated in Accept, before any socket setup or
+	// M3UA parsing. Validate the default here only when it can actually be used.
+	if l.listenerConfig.SelectAssociationConfig == nil {
+		if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
+			return nil, err
+		}
 	}
 
 	n, ok := netMap[network]

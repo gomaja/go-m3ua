@@ -127,6 +127,34 @@ func TestListenerConfigSelectorOnlyUsesDefaultAssociationConfigFallback(t *testi
 	}
 }
 
+func TestIPSPListenerSelectorOnlyDefersAssociationConfigValidation(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	selected := NewAssociationConfig(1, 2, 3, 0, 0, 1)
+	selected.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	listenerConfig := &ListenerConfig{
+		SelectAssociationConfig: func(AcceptInfo) (*AssociationConfig, error) {
+			return selected, nil
+		},
+	}
+	localAddr, err := sctp.ResolveSCTPAddr("sctp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ResolveSCTPAddr(): %v", err)
+	}
+
+	listener, listenErr := endpoint.Listen("m3ua4", localAddr, listenerConfig)
+	if listener != nil {
+		t.Cleanup(func() { _ = listener.Close() })
+	}
+	if errors.Is(listenErr, ErrInvalidRoleConfiguration) {
+		t.Fatalf("selector-only IPSP Listener validated its unused default config: %v", listenErr)
+	}
+}
+
 func TestListenerConfigSelectorIsFrozenWhenListenerIsBuilt(t *testing.T) {
 	first := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},

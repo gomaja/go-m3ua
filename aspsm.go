@@ -266,14 +266,26 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 		return NewInvalidSCTPStreamIDError(c.receivedStreamID())
 	}
 
-	solicited := c.stopTAck(requestAspDown)
-
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspDownAck)
 	}
 	if c.role == RoleIPSP {
+		// Claim the acknowledgement first to stop retransmissions, but do not
+		// release a Shutdown or other T(ack) waiter until the peer is ASP-DOWN
+		// and all traffic admitted under its earlier state has drained.
+		acknowledgement := c.claimTAckAcknowledgement(requestAspDown, nil)
+		c.commitState(StateASPDown)
+		postTransitionNotify := func() {}
+		if c.as != nil {
+			postTransitionNotify = c.as.quiesceASPDown(c)
+		}
+		c.quiesceUnscopedTraffic()
+		postTransitionNotify()
+		acknowledgement.complete()
 		return nil
 	}
+
+	solicited := c.stopTAck(requestAspDown)
 	if solicited {
 		return nil
 	}

@@ -686,6 +686,92 @@ func TestIPSPSingleExchangeShutdownUsesASPTMThenASPSM(t *testing.T) {
 	}
 }
 
+func TestIPSPSingleExchangeASPDownAckDrainsActiveTrafficBeforeCompletion(t *testing.T) {
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	association.maxMessageStreamID = 4
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+	association.noteRoutingContextsActive([]uint32{1})
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if _, ok := message.(*messages.Data); ok {
+			close(dataStarted)
+			<-releaseData
+		}
+		return message.MarshalLen(), nil
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseData:
+		default:
+			close(releaseData)
+		}
+	})
+
+	data := distributionData(1, 1, "in flight")
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := association.WriteSignal(data)
+		writeDone <- err
+	}()
+	select {
+	case <-dataStarted:
+	case err := <-writeDone:
+		t.Fatalf("outbound DATA returned before entering the traffic path: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("outbound DATA did not enter the IPSP traffic path")
+	}
+
+	request := association.startTAck(messages.NewAspDown(nil), requestAspDown)
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- association.waitTAck(context.Background(), request) }()
+	handleDone := make(chan struct{})
+	go func() {
+		association.handleSignals(context.Background(), messages.NewAspDownAck(nil))
+		close(handleDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for association.State() != StateASPDown && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := association.State(); got != StateASPDown {
+		t.Fatalf("state while applying ASP Down Ack = %v, want ASP-DOWN", got)
+	}
+	select {
+	case err := <-waitDone:
+		t.Fatalf("T(ack) completed before admitted DATA drained: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	select {
+	case <-handleDone:
+		t.Fatal("ASP Down Ack handler returned before admitted DATA drained")
+	default:
+	}
+	if _, err := association.WriteSignal(data); !errors.Is(err, ErrNotEstablished) {
+		t.Fatalf("DATA admitted after ASP Down Ack committed ASP-DOWN: %v", err)
+	}
+
+	close(releaseData)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("in-flight DATA: %v", err)
+	}
+	select {
+	case <-handleDone:
+	case <-time.After(time.Second):
+		t.Fatal("ASP Down Ack handler did not finish after DATA drained")
+	}
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("T(ack) waiter: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("T(ack) waiter did not complete after DATA drained")
+	}
+}
+
 func TestIPSPSingleExchangeInactiveAckPublishesPeerInactive(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.noteRoutingContextsActive([]uint32{1})
