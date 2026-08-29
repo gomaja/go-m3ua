@@ -228,6 +228,46 @@ func TestMTPTransferBroadcastAndPartialFailure(t *testing.T) {
 	}
 }
 
+func TestMTPTransferBroadcastIncludesEveryPermittedSignallingGateway(t *testing.T) {
+	tests := []struct {
+		name   string
+		update func(*testing.T, *Association)
+	}{
+		{
+			name: "restricted",
+			update: func(t *testing.T, association *Association) {
+				applyASPDRST(t, association, 9, 42, 0x123456, 0)
+			},
+		},
+		{
+			name: "congested",
+			update: func(t *testing.T, association *Association) {
+				applyASPSCON(t, association, 9, 42, 0x123456, 0, params.NewCongestionIndications(2))
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := validASPConfig()
+			config.SignallingGatewaySelection = RouteSelectionBroadcast
+			endpoint, associations, captures := newASPTransferFixture(t, config)
+			test.update(t, associations["sg-b/sgp-b1"])
+
+			result, err := endpoint.MTPTransfer(MTPTransferRequest{
+				ProtocolData: transferProtocolData(0x123456, 4, nil),
+			})
+			if err != nil {
+				t.Fatalf("MTPTransfer: %v", err)
+			}
+			if result.TransmittedAssociations != 2 || captures["sg-a/sgp-a1"].count() != 1 ||
+				captures["sg-b/sgp-b1"].count() != 1 {
+				t.Fatalf("broadcast result = %#v, counts = sg-a:%d sg-b:%d, want 1 each", result,
+					captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+			}
+		})
+	}
+}
+
 func TestMTPTransferBroadcastAddsRecoveredSignallingGateway(t *testing.T) {
 	config := validASPConfig()
 	config.SignallingGatewaySelection = RouteSelectionBroadcast

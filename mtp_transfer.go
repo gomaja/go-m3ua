@@ -184,7 +184,9 @@ func (r *aspRoutes) selectTransfer(request MTPTransferRequest) ([]aspTransferTar
 		}
 		return nil, ErrNoMTPRoute
 	}
-	gatewayCandidates = bestASPTransferGateways(gatewayCandidates)
+	if r.config.signallingGatewaySelection != RouteSelectionBroadcast {
+		gatewayCandidates = bestASPTransferGateways(gatewayCandidates)
+	}
 	selectedGateways := selectASPTransferGatewaysWithPrevious(
 		gatewayCandidates,
 		r.config.signallingGatewaySelection,
