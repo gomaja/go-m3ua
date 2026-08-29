@@ -335,7 +335,8 @@ type Association struct {
 	signalWriter func(m3 messages.M3UA) (int, error)
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
-	dataWriter func([]byte, *sctp.SndRcvInfo) (int, error)
+	dataWriter      func([]byte, *sctp.SndRcvInfo) (int, error)
+	transportCloser func() error
 	// notificationQueue keeps peer-controlled socket backpressure out of the AS
 	// state machine and proactive SSNM paths. A full queue closes the association
 	// rather than silently dropping mandatory ordered control traffic.
@@ -1368,6 +1369,7 @@ func (c *Association) closeWith(cause error) error {
 		// Retransmitters select on done, but cancel them explicitly so a
 		// pending request cannot be resent onto a socket that is closing.
 		c.stopAllTAck()
+		err = c.closeTransport()
 		unlockTransfer := c.lockASPTransferMutation()
 		c.muState.Lock()
 		previousState := c.state
@@ -1393,12 +1395,6 @@ func (c *Association) closeWith(cause error) error {
 		})
 		// Ends any range over ManagementIndications().
 		c.closeManagement()
-		// Close the association before AS departure can notify siblings. Any
-		// control write already blocked on this socket is released first, and a
-		// nil socket is valid in the state-machine test harness.
-		if c.sctpConn != nil {
-			err = c.sctpConn.Close()
-		}
 		if c.listener != nil {
 			c.listener.forget(c)
 		}
@@ -1407,6 +1403,16 @@ func (c *Association) closeWith(cause error) error {
 		}
 	})
 	return err
+}
+
+func (c *Association) closeTransport() error {
+	if c.transportCloser != nil {
+		return c.transportCloser()
+	}
+	if c.sctpConn != nil {
+		return c.sctpConn.Close()
+	}
+	return nil
 }
 
 // LocalAddr returns the local network address.

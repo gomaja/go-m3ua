@@ -29,6 +29,9 @@ The ASP Endpoint implements the route function described by RFC 4666 Sections
   the peer-specific Network Appearance and Routing Context in an `ASKey`.
 - SSNM state is retained per originating SG and aggregated before MTP-PAUSE,
   MTP-RESUME, or MTP-STATUS is delivered to the MTP3-User.
+- Peer-controlled SSNM work and retained route state have configurable
+  per-message, per-route, and Endpoint-wide bounds; an over-limit message is
+  rejected atomically without inventing an RFC 4666 protocol Error code.
 - Availability, restriction, and congestion are independent selection inputs.
 - Primary/backup, loadshare, and broadcast selection are supported between SGs
   and between SGPs of one SG, following Appendix A.2.2.

@@ -228,6 +228,89 @@ func TestMTPTransferBroadcastAndPartialFailure(t *testing.T) {
 	}
 }
 
+func TestMTPTransferBroadcastAddsRecoveredSignallingGateway(t *testing.T) {
+	config := validASPConfig()
+	config.SignallingGatewaySelection = RouteSelectionBroadcast
+	endpoint, associations, captures := newASPTransferFixture(t, config)
+	const pointCode = uint32(0x123456)
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 4, nil)}
+
+	applyASPDUNA(t, associations["sg-b/sgp-b1"], 9, 42, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer with unavailable SG: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 || captures["sg-b/sgp-b1"].count() != 0 {
+		t.Fatal("broadcast selected the unavailable SG")
+	}
+
+	applyASPDAVA(t, associations["sg-b/sgp-b1"], 9, 42, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer after SG recovery: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 2 || captures["sg-b/sgp-b1"].count() != 1 {
+		t.Fatalf("broadcast after recovery counts = sg-a:%d sg-b:%d, want 2 and 1",
+			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+	}
+}
+
+func TestMTPTransferBroadcastAddsRecoveredSignallingGatewayProcess(t *testing.T) {
+	config := oneSignallingGatewayTwoSGPConfig(RouteSelectionBroadcast)
+	endpoint, associations, captures := newASPTransferFixture(t, config)
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 4, nil)}
+
+	if err := associations["sg-a/sgp-a2"].Close(); err != nil {
+		t.Fatalf("close second SGP Association: %v", err)
+	}
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer with unavailable SGP: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 || captures["sg-a/sgp-a2"].count() != 0 {
+		t.Fatal("broadcast selected the unavailable SGP")
+	}
+
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a2"}
+	recovered := attachASPRouteAssociation(t, endpoint, identity, 7, 1)
+	recoveredCapture := &mtpTransferCapture{}
+	recovered.dataWriter = recoveredCapture.write
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer after SGP recovery: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 2 || recoveredCapture.count() != 1 {
+		t.Fatalf("broadcast after SGP recovery counts = sgp-a1:%d sgp-a2:%d, want 2 and 1",
+			captures["sg-a/sgp-a1"].count(), recoveredCapture.count())
+	}
+}
+
+func TestMTPTransferSGPBroadcastKeepsHealthyLoadsharedSignallingGateway(t *testing.T) {
+	config := validASPConfig()
+	for gatewayIndex := range config.SignallingGateways {
+		config.SignallingGateways[gatewayIndex].SGPSelection = RouteSelectionBroadcast
+	}
+	endpoint, associations, captures := newASPTransferFixture(t, config)
+	const pointCode = uint32(0x123456)
+	var request MTPTransferRequest
+	for sls := uint8(0); ; sls++ {
+		request = MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, sls, nil)}
+		flowKey := newASPTransferFlowKey("sccp-a", request.ProtocolData)
+		if hashASPTransferFlow(flowKey, "signalling-gateway")%2 == 1 {
+			break
+		}
+	}
+
+	applyASPDUNA(t, associations["sg-b/sgp-b1"], 9, 42, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer with unavailable loadshare SG: %v", err)
+	}
+	applyASPDAVA(t, associations["sg-b/sgp-b1"], 9, 42, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer after alternate loadshare SG recovery: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 2 || captures["sg-b/sgp-b1"].count() != 0 {
+		t.Fatalf("healthy loadshare assignment moved after recovery: sg-a:%d sg-b:%d",
+			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+	}
+}
+
 func TestMTPTransferReturnsNoRouteWhenEverySGPIsIneligible(t *testing.T) {
 	endpoint, associations, _ := newASPTransferFixture(t, validASPConfig())
 	associations["sg-a/sgp-a1"].noteRoutingContextsUnacked(params.NewRoutingContext(1))
@@ -557,6 +640,58 @@ func TestMTPTransferOrdersScopeLossAfterInFlightWrite(t *testing.T) {
 	}
 	if captures["sg-b/sgp-b1"].count() != 1 {
 		t.Fatal("transfer after scope loss did not use the alternate SGP")
+	}
+}
+
+func TestAssociationCloseClosesTransportBeforeWaitingForMTPTransfer(t *testing.T) {
+	config := validASPConfig()
+	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	endpoint, associations, _ := newASPTransferFixture(t, config)
+	primary := associations["sg-a/sgp-a1"]
+	writeStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	transportClosed := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
+	primary.dataWriter = func(_ []byte, _ *sctp.SndRcvInfo) (int, error) {
+		close(writeStarted)
+		<-releaseWrite
+		return 0, ErrAssociationClosed
+	}
+	primary.transportCloser = func() error {
+		close(transportClosed)
+		release()
+		return nil
+	}
+
+	transferDone := make(chan error, 1)
+	go func() {
+		_, err := endpoint.MTPTransfer(MTPTransferRequest{
+			ProtocolData: transferProtocolData(0x123456, 1, nil),
+		})
+		transferDone <- err
+	}()
+	select {
+	case <-writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("MTPTransfer did not reach the selected Association")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- primary.Close() }()
+	select {
+	case <-transportClosed:
+	case <-time.After(100 * time.Millisecond):
+		release()
+		<-transferDone
+		<-closeDone
+		t.Fatal("Association.Close waited for MTPTransfer before closing the transport")
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Association.Close: %v", err)
+	}
+	if err := <-transferDone; err == nil {
+		t.Fatal("MTPTransfer succeeded after the Association transport closed")
 	}
 }
 

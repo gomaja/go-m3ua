@@ -159,40 +159,54 @@ func (r *aspRoutes) selectTransfer(request MTPTransferRequest) ([]aspTransferTar
 		return nil, err
 	}
 	flowKey := newASPTransferFlowKey(mtpRoute.id, request.ProtocolData)
+	var previousTargets []aspTransferTarget
+	var cachedElement *list.Element
+	cachedEligible := false
 	if element := r.transferFlows[flowKey]; element != nil {
 		assignment := element.Value.(*aspTransferAssignment)
-		if r.transferTargetsEligibleLocked(
+		cachedEligible = r.transferTargetsEligibleLocked(
 			assignment.targets, mtpRoute.id, request.ProtocolData, congestionDecision,
-		) {
+		)
+		if cachedEligible && !r.transferTargetsUseBroadcast(assignment.targets) {
 			r.transferFlowLRU.MoveToFront(element)
 			return append([]aspTransferTarget(nil), assignment.targets...), nil
 		}
-		r.removeTransferFlowLocked(element)
+		previousTargets = append(previousTargets, assignment.targets...)
+		cachedElement = element
 	}
 
 	gatewayCandidates := r.transferGatewayCandidatesLocked(
 		mtpRoute.id, request.ProtocolData, congestionDecision,
 	)
 	if len(gatewayCandidates) == 0 {
+		if cachedElement != nil {
+			r.removeTransferFlowLocked(cachedElement)
+		}
 		return nil, ErrNoMTPRoute
 	}
 	gatewayCandidates = bestASPTransferGateways(gatewayCandidates)
-	selectedGateways := selectASPTransferGateways(
+	selectedGateways := selectASPTransferGatewaysWithPrevious(
 		gatewayCandidates,
 		r.config.signallingGatewaySelection,
 		hashASPTransferFlow(flowKey, "signalling-gateway"),
+		previousTargets,
 	)
 	targets := make([]aspTransferTarget, 0)
 	for _, gateway := range selectedGateways {
-		selectedSGPs := selectASPTransferSGPs(
+		selectedSGPs := selectASPTransferSGPsWithPrevious(
 			gateway.sgps,
 			gateway.config.sgpSelection,
 			hashASPTransferFlow(flowKey, string(gateway.config.id)),
+			previousTargets,
+			gateway.config.id,
 		)
 		for _, sgp := range selectedSGPs {
 			associationHash := hashASPTransferFlow(flowKey,
 				string(sgp.identity.SignallingGateway)+"/"+string(sgp.identity.SignallingGatewayProcess))
 			association := sgp.associations[int(associationHash%uint64(len(sgp.associations)))]
+			if previous := previousASPTransferAssociation(previousTargets, sgp); previous != nil {
+				association = previous
+			}
 			targets = append(targets, aspTransferTarget{
 				identity:    sgp.identity,
 				association: association,
@@ -202,10 +216,63 @@ func (r *aspRoutes) selectTransfer(request MTPTransferRequest) ([]aspTransferTar
 		}
 	}
 	if len(targets) == 0 {
+		if cachedElement != nil {
+			r.removeTransferFlowLocked(cachedElement)
+		}
 		return nil, ErrNoMTPRoute
+	}
+	if cachedElement != nil {
+		assignment := cachedElement.Value.(*aspTransferAssignment)
+		if cachedEligible && sameASPTransferTargets(assignment.targets, targets) {
+			r.transferFlowLRU.MoveToFront(cachedElement)
+			return append([]aspTransferTarget(nil), assignment.targets...), nil
+		}
+		r.removeTransferFlowLocked(cachedElement)
 	}
 	r.rememberTransferFlowLocked(flowKey, targets)
 	return append([]aspTransferTarget(nil), targets...), nil
+}
+
+func (r *aspRoutes) transferTargetsUseBroadcast(targets []aspTransferTarget) bool {
+	if r.config.signallingGatewaySelection == RouteSelectionBroadcast {
+		return true
+	}
+	for _, target := range targets {
+		gateway, found := r.signallingGatewayConfig(target.identity.SignallingGateway)
+		if found && gateway.sgpSelection == RouteSelectionBroadcast {
+			return true
+		}
+	}
+	return false
+}
+
+func sameASPTransferTargets(first, second []aspTransferTarget) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func previousASPTransferAssociation(
+	targets []aspTransferTarget,
+	sgp aspTransferSGP,
+) *Association {
+	for _, target := range targets {
+		if target.identity != sgp.identity {
+			continue
+		}
+		for _, association := range sgp.associations {
+			if association == target.association {
+				return association
+			}
+		}
+	}
+	return nil
 }
 
 func (r *aspRoutes) resolveTransferMTPRouteLocked(
@@ -370,6 +437,24 @@ func selectASPTransferGateways(
 	}
 }
 
+func selectASPTransferGatewaysWithPrevious(
+	candidates []aspTransferGateway,
+	mode RouteSelectionMode,
+	hash uint64,
+	previous []aspTransferTarget,
+) []aspTransferGateway {
+	if mode != RouteSelectionBroadcast {
+		for _, target := range previous {
+			for _, candidate := range candidates {
+				if candidate.config.id == target.identity.SignallingGateway {
+					return []aspTransferGateway{candidate}
+				}
+			}
+		}
+	}
+	return selectASPTransferGateways(candidates, mode, hash)
+}
+
 func selectASPTransferSGPs(candidates []aspTransferSGP, mode RouteSelectionMode, hash uint64) []aspTransferSGP {
 	switch mode {
 	case RouteSelectionPrimaryBackup:
@@ -381,6 +466,28 @@ func selectASPTransferSGPs(candidates []aspTransferSGP, mode RouteSelectionMode,
 	default:
 		return nil
 	}
+}
+
+func selectASPTransferSGPsWithPrevious(
+	candidates []aspTransferSGP,
+	mode RouteSelectionMode,
+	hash uint64,
+	previous []aspTransferTarget,
+	gateway SignallingGatewayID,
+) []aspTransferSGP {
+	if mode != RouteSelectionBroadcast {
+		for _, target := range previous {
+			if target.identity.SignallingGateway != gateway {
+				continue
+			}
+			for _, candidate := range candidates {
+				if candidate.identity == target.identity {
+					return []aspTransferSGP{candidate}
+				}
+			}
+		}
+	}
+	return selectASPTransferSGPs(candidates, mode, hash)
 }
 
 func newASPTransferFlowKey(mtpRoute MTPRouteID, protocolData *params.ProtocolDataPayload) aspTransferFlowKey {

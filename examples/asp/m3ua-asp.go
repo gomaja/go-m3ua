@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"log"
+	"math"
 	"time"
 
 	"github.com/gomaja/go-m3ua"
@@ -24,12 +25,20 @@ func main() {
 		addr    = flag.String("addr", "127.0.0.1:2905", "Remote SGP SCTP address.")
 		data    = flag.String("data", "deadbeef", "MTP3-User payload in hexadecimal.")
 		hbInt   = flag.Duration("hb-interval", 0, "M3UA T(beat) interval; zero disables M3UA BEAT.")
-		network = flag.Uint("network-appearance", 0, "Peer Network Appearance.")
-		rtCtx   = flag.Uint("routing-context", 1, "Peer Routing Context.")
-		gateway = flag.String("signalling-gateway", "sg-a", "Local Signalling Gateway identity.")
-		process = flag.String("signalling-gateway-process", "sgp-a1", "Local SGP identity.")
+		network = flag.Uint64("network-appearance", 0, "Peer Network Appearance.")
+		rtCtx   = flag.Uint64("routing-context", 1, "Peer Routing Context.")
+		gateway = flag.String("signalling-gateway", "sg-a", "Peer Signalling Gateway identity.")
+		process = flag.String("signalling-gateway-process", "sgp-a1", "Peer SGP identity.")
 	)
 	flag.Parse()
+	if *network > math.MaxUint32 {
+		log.Fatalf("Network Appearance %d exceeds 32 bits", *network)
+	}
+	if *rtCtx > math.MaxUint32 {
+		log.Fatalf("Routing Context %d exceeds 32 bits", *rtCtx)
+	}
+	networkAppearance := uint32(*network)
+	routingContext := uint32(*rtCtx)
 
 	payload, err := hex.DecodeString(*data)
 	if err != nil {
@@ -41,9 +50,9 @@ func main() {
 		SignallingGatewayProcess: m3ua.SignallingGatewayProcessID(*process),
 	}
 	asKey := m3ua.ASKey{
-		NetworkAppearance:    uint32(*network),
+		NetworkAppearance:    networkAppearance,
 		NetworkAppearanceSet: true,
-		RoutingContext:       uint32(*rtCtx),
+		RoutingContext:       routingContext,
 		RoutingContextSet:    true,
 	}
 
@@ -59,8 +68,8 @@ func main() {
 		EnableHeartbeat(*hbInt, 10*time.Second).
 		SetASPIdentifier(1).
 		SetTrafficModeType(params.TrafficModeLoadshare).
-		SetNetworkAppearance(uint32(*network)).
-		SetRoutingContexts(uint32(*rtCtx))
+		SetNetworkAppearance(networkAppearance).
+		SetRoutingContexts(routingContext)
 	associationConfig.PeerSGP = &peer
 
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{

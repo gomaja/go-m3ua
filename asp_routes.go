@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"container/list"
+	"fmt"
 	"sort"
 	"sync"
 )
@@ -15,6 +16,11 @@ type aspRouteRangeKey struct {
 	mtpRoute          MTPRouteID
 	pointCode         uint32
 	mask              uint8
+}
+
+type aspRouteStateBudgetKey struct {
+	signallingGateway SignallingGatewayID
+	mtpRoute          MTPRouteID
 }
 
 type aspAvailabilityRecord struct {
@@ -71,6 +77,8 @@ type aspRoutes struct {
 	nextAssociationOrder uint64
 	availability         map[aspRouteRangeKey]aspAvailabilityRecord
 	congestion           map[aspRouteRangeKey]aspCongestionRecord
+	stateRecordsPerRoute map[aspRouteStateBudgetKey]int
+	stateRecordCount     int
 	derived              map[aspDerivedRangeKey]aspDestinationStatus
 	sequence             uint64
 	transferFlows        map[aspTransferFlowKey]*list.Element
@@ -92,16 +100,17 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		queueSize = DefaultMTPIndicationQueueSize
 	}
 	routes := &aspRoutes{
-		config:            snapshot,
-		associations:      make(map[*Association]SGPIdentity),
-		associationsBySGP: make(map[SGPIdentity]map[*Association]struct{}),
-		associationOrder:  make(map[*Association]uint64),
-		availability:      make(map[aspRouteRangeKey]aspAvailabilityRecord),
-		congestion:        make(map[aspRouteRangeKey]aspCongestionRecord),
-		derived:           make(map[aspDerivedRangeKey]aspDestinationStatus),
-		transferFlows:     make(map[aspTransferFlowKey]*list.Element),
-		transferFlowLRU:   list.New(),
-		indications:       make(chan *MTPIndication, queueSize),
+		config:               snapshot,
+		associations:         make(map[*Association]SGPIdentity),
+		associationsBySGP:    make(map[SGPIdentity]map[*Association]struct{}),
+		associationOrder:     make(map[*Association]uint64),
+		availability:         make(map[aspRouteRangeKey]aspAvailabilityRecord),
+		congestion:           make(map[aspRouteRangeKey]aspCongestionRecord),
+		stateRecordsPerRoute: make(map[aspRouteStateBudgetKey]int),
+		derived:              make(map[aspDerivedRangeKey]aspDestinationStatus),
+		transferFlows:        make(map[aspTransferFlowKey]*list.Element),
+		transferFlowLRU:      list.New(),
+		indications:          make(chan *MTPIndication, queueSize),
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {
 		routes.derived[aspDerivedRangeKey{
@@ -164,21 +173,34 @@ func (r *aspRoutes) detach(association *Association) {
 	r.publish(indications)
 }
 
-func (r *aspRoutes) apply(association *Association, statuses []*DestinationStatus, update aspRouteUpdate) {
+func (r *aspRoutes) apply(
+	association *Association,
+	statuses []*DestinationStatus,
+	update aspRouteUpdate,
+) error {
 	if r == nil || association == nil || len(statuses) == 0 {
-		return
+		return nil
 	}
 	r.mu.Lock()
 	identity, exists := r.associations[association]
 	if !exists {
 		r.mu.Unlock()
-		return
+		return nil
 	}
 	sgp, exists := r.config.sgpByIdentity[identity]
 	if !exists {
 		r.mu.Unlock()
-		return
+		return nil
 	}
+	if len(statuses) > r.config.maxAffectedPointCodesPerSSNM {
+		r.mu.Unlock()
+		return fmt.Errorf("%w: SSNM carries %d Affected Point Codes, limit %d",
+			ErrASPRouteStateLimit, len(statuses), r.config.maxAffectedPointCodesPerSSNM)
+	}
+	pendingKeys := make([]aspRouteRangeKey, 0, len(statuses))
+	pendingSet := make(map[aspRouteRangeKey]struct{}, len(statuses))
+	newRecordsPerRoute := make(map[aspRouteStateBudgetKey]int)
+	newRecordCount := 0
 	affectedMTPRoutes := make(map[MTPRouteID]struct{})
 
 	for _, status := range statuses {
@@ -203,31 +225,84 @@ func (r *aspRoutes) apply(association *Association, statuses []*DestinationStatu
 				pointCode:         pointCode,
 				mask:              mask,
 			}
+			if _, duplicate := pendingSet[key]; duplicate {
+				continue
+			}
+			pendingSet[key] = struct{}{}
+			if !r.hasRouteStateRecordLocked(key, update.kind) {
+				budgetKey := aspRouteStateBudgetKey{
+					signallingGateway: key.signallingGateway,
+					mtpRoute:          key.mtpRoute,
+				}
+				if r.stateRecordsPerRoute[budgetKey]+newRecordsPerRoute[budgetKey]+1 >
+					r.config.maxSSNMStateRecordsPerRoute {
+					r.mu.Unlock()
+					return fmt.Errorf("%w: SG %q MTP Route %q would exceed the %d-record limit",
+						ErrASPRouteStateLimit,
+						budgetKey.signallingGateway,
+						budgetKey.mtpRoute,
+						r.config.maxSSNMStateRecordsPerRoute)
+				}
+				if r.stateRecordCount+newRecordCount+1 > r.config.maxSSNMStateRecords {
+					r.mu.Unlock()
+					return fmt.Errorf("%w: Endpoint would exceed the %d-record limit",
+						ErrASPRouteStateLimit, r.config.maxSSNMStateRecords)
+				}
+				newRecordsPerRoute[budgetKey]++
+				newRecordCount++
+			}
+			pendingKeys = append(pendingKeys, key)
 			affectedMTPRoutes[route.mtpRoute] = struct{}{}
+		}
+	}
+
+	for _, key := range pendingKeys {
+		newRecord := !r.hasRouteStateRecordLocked(key, update.kind)
+		r.sequence++
+		if r.sequence == 0 {
+			r.renumberLocked()
 			r.sequence++
-			if r.sequence == 0 {
-				r.renumberLocked()
-				r.sequence++
+		}
+		switch update.kind {
+		case aspRouteAvailabilityUpdate:
+			r.availability[key] = aspAvailabilityRecord{
+				availability: update.availability,
+				sequence:     r.sequence,
 			}
-			switch update.kind {
-			case aspRouteAvailabilityUpdate:
-				r.availability[key] = aspAvailabilityRecord{
-					availability: update.availability,
-					sequence:     r.sequence,
-				}
-			case aspRouteCongestionUpdate:
-				r.congestion[key] = aspCongestionRecord{
-					congested: update.congested,
-					level:     update.congestionLevel,
-					levelSet:  update.congestionLevelSet,
-					sequence:  r.sequence,
-				}
+		case aspRouteCongestionUpdate:
+			r.congestion[key] = aspCongestionRecord{
+				congested: update.congested,
+				level:     update.congestionLevel,
+				levelSet:  update.congestionLevelSet,
+				sequence:  r.sequence,
 			}
+		}
+		if newRecord {
+			budgetKey := aspRouteStateBudgetKey{
+				signallingGateway: key.signallingGateway,
+				mtpRoute:          key.mtpRoute,
+			}
+			r.stateRecordsPerRoute[budgetKey]++
+			r.stateRecordCount++
 		}
 	}
 	indications := r.recomputeLocked(affectedMTPRoutes)
 	r.mu.Unlock()
 	r.publish(indications)
+	return nil
+}
+
+func (r *aspRoutes) hasRouteStateRecordLocked(key aspRouteRangeKey, kind aspRouteUpdateKind) bool {
+	switch kind {
+	case aspRouteAvailabilityUpdate:
+		_, exists := r.availability[key]
+		return exists
+	case aspRouteCongestionUpdate:
+		_, exists := r.congestion[key]
+		return exists
+	default:
+		return false
+	}
 }
 
 func (r *aspRoutes) associationStateChanged(association *Association) {

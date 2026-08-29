@@ -90,6 +90,14 @@ queue overflow. Association-level `SignallingStatus` remains useful for
 peer-route diagnostics, but a DUNA from one SG is not an MTP-PAUSE while
 another SG route remains available.
 
+`ASPConfig.MaxAffectedPointCodesPerSSNM`,
+`ASPConfig.MaxSSNMStateRecordsPerRoute`, and
+`ASPConfig.MaxSSNMStateRecords` bound SSNM processing and retained route state.
+Zero uses the library defaults. A deployment may set explicit positive limits
+from its provisioned route inventory; exceeding one returns
+`ErrASPRouteStateLimit` and closes the affected Association without partially
+applying the message.
+
 The same APIs apply whether the ASP or SGP initiated SCTP. `Dial`, `Listen`,
 and `Accept` describe SCTP establishment only; `RoleASP` and `RoleSGP` select
 the RFC procedures.

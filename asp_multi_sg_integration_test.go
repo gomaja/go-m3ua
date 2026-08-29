@@ -321,5 +321,14 @@ func expectedConcurrentMTPTransferError(err error) bool {
 		return true
 	}
 	var transferErr *MTPTransferError
-	return errors.As(err, &transferErr)
+	if !errors.As(err, &transferErr) || len(transferErr.Failures) == 0 {
+		return false
+	}
+	for _, failure := range transferErr.Failures {
+		if !errors.Is(failure.Err, ErrRoutingContextNotActive) &&
+			!errors.Is(failure.Err, ErrNotEstablished) {
+			return false
+		}
+	}
+	return true
 }

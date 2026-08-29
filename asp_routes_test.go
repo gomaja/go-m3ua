@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages"
@@ -137,6 +138,174 @@ func TestASPRouteAggregationDoesNotApplyDifferentNetworkAppearance(t *testing.T)
 	}
 }
 
+func TestASPRouteStateRejectsOversizedSSNMAtomically(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 1
+	endpoint, first, _ := newASPMultiSGFixtureWithConfig(t, config)
+	err := first.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		params.NewAffectedPointCode(0x123456, 0x123457),
+		nil,
+	))
+	if !errors.Is(err, ErrASPRouteStateLimit) {
+		t.Fatalf("oversized SSNM error = %v, want ErrASPRouteStateLimit", err)
+	}
+	endpoint.aspRoutes.mu.RLock()
+	availabilityRecords := len(endpoint.aspRoutes.availability)
+	endpoint.aspRoutes.mu.RUnlock()
+	if availabilityRecords != 0 {
+		t.Fatalf("oversized SSNM stored %d availability records", availabilityRecords)
+	}
+	if state := first.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); state != DestinationAvailable {
+		t.Fatalf("oversized SSNM changed Association destination state to %v", state)
+	}
+}
+
+func TestASPRouteStateRejectsPerRouteRecordOverflowAtomically(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 8
+	config.MaxSSNMStateRecordsPerRoute = 1
+	config.MaxSSNMStateRecords = 8
+	endpoint, first, _ := newASPMultiSGFixtureWithConfig(t, config)
+	err := first.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		params.NewAffectedPointCode(0x123456, 0x123457),
+		nil,
+	))
+	if !errors.Is(err, ErrASPRouteStateLimit) {
+		t.Fatalf("per-route overflow error = %v, want ErrASPRouteStateLimit", err)
+	}
+	endpoint.aspRoutes.mu.RLock()
+	availabilityRecords := len(endpoint.aspRoutes.availability)
+	endpoint.aspRoutes.mu.RUnlock()
+	if availabilityRecords != 0 {
+		t.Fatalf("per-route overflow partially stored %d availability records", availabilityRecords)
+	}
+}
+
+func TestASPRouteStateRejectsEndpointRecordOverflowAtomically(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 8
+	config.MaxSSNMStateRecordsPerRoute = 8
+	config.MaxSSNMStateRecords = 1
+	endpoint, first, second := newASPMultiSGFixtureWithConfig(t, config)
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	err := second.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(9),
+		params.NewRoutingContext(42),
+		params.NewAffectedPointCode(0x123456),
+		nil,
+	))
+	if !errors.Is(err, ErrASPRouteStateLimit) {
+		t.Fatalf("Endpoint overflow error = %v, want ErrASPRouteStateLimit", err)
+	}
+	endpoint.aspRoutes.mu.RLock()
+	recordCount := endpoint.aspRoutes.stateRecordCount
+	availabilityRecords := len(endpoint.aspRoutes.availability)
+	endpoint.aspRoutes.mu.RUnlock()
+	if recordCount != 1 || availabilityRecords != 1 {
+		t.Fatalf("Endpoint overflow left count %d and %d availability records, want 1 and 1", recordCount, availabilityRecords)
+	}
+	if state := second.DestinationStateForNetworkAndRoutingContext(9, 42, 0x123456); state != DestinationAvailable {
+		t.Fatalf("Endpoint overflow changed Association destination state to %v", state)
+	}
+}
+
+func TestASPRouteStateOverwriteDoesNotConsumeRecordBudget(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 8
+	config.MaxSSNMStateRecordsPerRoute = 1
+	config.MaxSSNMStateRecords = 1
+	endpoint, first, _ := newASPMultiSGFixtureWithConfig(t, config)
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	applyASPDAVA(t, first, 7, 1, 0x123456, 0)
+	endpoint.aspRoutes.mu.RLock()
+	recordCount := endpoint.aspRoutes.stateRecordCount
+	availabilityRecords := len(endpoint.aspRoutes.availability)
+	endpoint.aspRoutes.mu.RUnlock()
+	if recordCount != 1 || availabilityRecords != 1 {
+		t.Fatalf("overwrite left count %d and %d availability records, want 1 and 1", recordCount, availabilityRecords)
+	}
+}
+
+func TestASPRouteStateCountsAvailabilityAndCongestionSeparately(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 8
+	config.MaxSSNMStateRecordsPerRoute = 1
+	config.MaxSSNMStateRecords = 8
+	endpoint, first, _ := newASPMultiSGFixtureWithConfig(t, config)
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	err := first.handleSignallingCongestion(messages.NewSignallingCongestion(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		params.NewAffectedPointCode(0x123456),
+		nil,
+		params.NewCongestionIndications(2),
+		nil,
+	))
+	if !errors.Is(err, ErrASPRouteStateLimit) {
+		t.Fatalf("congestion overflow error = %v, want ErrASPRouteStateLimit", err)
+	}
+	endpoint.aspRoutes.mu.RLock()
+	recordCount := endpoint.aspRoutes.stateRecordCount
+	congestionRecords := len(endpoint.aspRoutes.congestion)
+	endpoint.aspRoutes.mu.RUnlock()
+	if recordCount != 1 || congestionRecords != 0 {
+		t.Fatalf("congestion overflow left count %d and %d congestion records, want 1 and 0", recordCount, congestionRecords)
+	}
+	if state := first.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); state != DestinationUnavailable {
+		t.Fatalf("congestion overflow changed Association destination state to %v", state)
+	}
+}
+
+func TestASPRouteStateBudgetIsAtomicUnderConcurrentSSNM(t *testing.T) {
+	config := validASPConfig()
+	config.MaxAffectedPointCodesPerSSNM = 1
+	config.MaxSSNMStateRecordsPerRoute = 8
+	config.MaxSSNMStateRecords = 8
+	endpoint, first, _ := newASPMultiSGFixtureWithConfig(t, config)
+	const attempts = 32
+	results := make(chan error, attempts)
+	for offset := uint32(0); offset < attempts; offset++ {
+		go func(pointCode uint32) {
+			results <- first.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+				params.NewNetworkAppearance(7),
+				params.NewRoutingContext(1),
+				params.NewAffectedPointCode(pointCode),
+				nil,
+			))
+		}(0x120000 + offset)
+	}
+	succeeded := 0
+	rejected := 0
+	for range attempts {
+		err := <-results
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrASPRouteStateLimit):
+			rejected++
+		default:
+			t.Fatalf("concurrent SSNM error = %v", err)
+		}
+	}
+	if succeeded != 8 || rejected != attempts-8 {
+		t.Fatalf("concurrent SSNM results = %d succeeded, %d rejected", succeeded, rejected)
+	}
+	endpoint.aspRoutes.mu.RLock()
+	recordCount := endpoint.aspRoutes.stateRecordCount
+	availabilityRecords := len(endpoint.aspRoutes.availability)
+	endpoint.aspRoutes.mu.RUnlock()
+	if recordCount != 8 || availabilityRecords != 8 {
+		t.Fatalf("concurrent SSNM retained count %d and %d records, want 8 and 8", recordCount, availabilityRecords)
+	}
+}
+
 func TestASPRouteAggregationSeparatesMTPRoutes(t *testing.T) {
 	config := validASPConfig()
 	config.MTPRoutes = append(config.MTPRoutes, MTPRouteConfig{
@@ -180,6 +349,7 @@ func TestASPRouteRenumberPreservesUpdateOrder(t *testing.T) {
 		mask:              0,
 	}
 	routes.mu.Lock()
+	defer routes.mu.Unlock()
 	routes.availability[older] = aspAvailabilityRecord{sequence: 100}
 	routes.availability[newer] = aspAvailabilityRecord{sequence: 200}
 	routes.congestion[older] = aspCongestionRecord{sequence: 300}
@@ -191,7 +361,6 @@ func TestASPRouteRenumberPreservesUpdateOrder(t *testing.T) {
 	if routes.congestion[older].sequence >= routes.congestion[newer].sequence {
 		t.Fatal("congestion update order changed during sequence renumbering")
 	}
-	routes.mu.Unlock()
 }
 
 func newASPMultiSGFixture(t *testing.T) (*Endpoint, *Association, *Association) {

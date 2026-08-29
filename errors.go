@@ -183,6 +183,9 @@ var (
 	// ErrSGPRouteScopeMismatch reports Network Appearance or Routing Context
 	// configuration that is not a provisioned route of the named SGP.
 	ErrSGPRouteScopeMismatch = errors.New("ASP Association scope is not provisioned for its SGP")
+	// ErrASPRouteStateLimit reports that a peer SSNM message would exceed the
+	// configured ASP route-state work or retention budget.
+	ErrASPRouteStateLimit = errors.New("ASP SSNM route-state limit exceeded")
 
 	// ErrMissingUserCause is used when a DUPU arrives without the User/Cause
 	// parameter, which RFC 4666 Section 3.4.5 lists as Mandatory.

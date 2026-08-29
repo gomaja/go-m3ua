@@ -13,6 +13,15 @@ const (
 	// DefaultMTPIndicationQueueSize bounds derived MTP3-User indications retained
 	// while the application is not reading them.
 	DefaultMTPIndicationQueueSize = 256
+	// DefaultMaxAffectedPointCodesPerSSNM bounds work caused by one peer SSNM
+	// message before any route state is changed.
+	DefaultMaxAffectedPointCodesPerSSNM = 1024
+	// DefaultMaxSSNMStateRecordsPerRoute bounds retained state for one SG and
+	// MTP Route.
+	DefaultMaxSSNMStateRecordsPerRoute = 2048
+	// DefaultMaxSSNMStateRecords bounds retained SSNM route state at one ASP
+	// Endpoint.
+	DefaultMaxSSNMStateRecords = 16384
 )
 
 // SignallingGatewayID is the local identity of an RFC 4666 Signalling Gateway.
@@ -96,7 +105,8 @@ type SignallingGatewayConfig struct {
 }
 
 // ASPConfig configures route state and MTP-TRANSFER selection shared by every
-// Association owned by one ASP Endpoint.
+// Association owned by one ASP Endpoint. Zero-valued size and record limits use
+// their corresponding Default constants.
 type ASPConfig struct {
 	SignallingGatewaySelection RouteSelectionMode
 	MTPRoutes                  []MTPRouteConfig
@@ -104,6 +114,16 @@ type ASPConfig struct {
 	CongestionPolicy           ASPCongestionPolicy
 	TransferFlowCacheEntries   int
 	MTPIndicationQueueSize     int
+	// MaxAffectedPointCodesPerSSNM bounds the number of Affected Point Code
+	// values accepted from one SSNM message before route matching.
+	MaxAffectedPointCodesPerSSNM int
+	// MaxSSNMStateRecordsPerRoute bounds retained availability and congestion
+	// records for one route between the ASP and an SG. Availability and
+	// congestion records are independent and each consumes one record.
+	MaxSSNMStateRecordsPerRoute int
+	// MaxSSNMStateRecords bounds those retained route records across the ASP
+	// Endpoint.
+	MaxSSNMStateRecords int
 }
 
 type aspMTPRoute struct {
@@ -131,14 +151,17 @@ type aspSignallingGatewayConfig struct {
 }
 
 type aspRoutingConfig struct {
-	signallingGatewaySelection RouteSelectionMode
-	mtpRoutes                  []aspMTPRoute
-	mtpRouteByID               map[MTPRouteID]int
-	signallingGateways         []aspSignallingGatewayConfig
-	sgpByIdentity              map[SGPIdentity]aspSGPConfig
-	congestionPolicy           ASPCongestionPolicy
-	transferFlowCacheEntries   int
-	mtpIndicationQueueSize     int
+	signallingGatewaySelection   RouteSelectionMode
+	mtpRoutes                    []aspMTPRoute
+	mtpRouteByID                 map[MTPRouteID]int
+	signallingGateways           []aspSignallingGatewayConfig
+	sgpByIdentity                map[SGPIdentity]aspSGPConfig
+	congestionPolicy             ASPCongestionPolicy
+	transferFlowCacheEntries     int
+	mtpIndicationQueueSize       int
+	maxAffectedPointCodesPerSSNM int
+	maxSSNMStateRecordsPerRoute  int
+	maxSSNMStateRecords          int
 }
 
 func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
@@ -160,22 +183,43 @@ func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
 	if config.MTPIndicationQueueSize < 0 {
 		return aspRoutingConfig{}, invalidASPConfig("negative MTP indication queue size %d", config.MTPIndicationQueueSize)
 	}
+	if config.MaxAffectedPointCodesPerSSNM < 0 {
+		return aspRoutingConfig{}, invalidASPConfig("negative Affected Point Codes per SSNM %d", config.MaxAffectedPointCodesPerSSNM)
+	}
+	if config.MaxSSNMStateRecordsPerRoute < 0 {
+		return aspRoutingConfig{}, invalidASPConfig("negative SSNM state records per route %d", config.MaxSSNMStateRecordsPerRoute)
+	}
+	if config.MaxSSNMStateRecords < 0 {
+		return aspRoutingConfig{}, invalidASPConfig("negative SSNM state records %d", config.MaxSSNMStateRecords)
+	}
 
 	snapshot := aspRoutingConfig{
-		signallingGatewaySelection: config.SignallingGatewaySelection,
-		mtpRoutes:                  make([]aspMTPRoute, 0, len(config.MTPRoutes)),
-		mtpRouteByID:               make(map[MTPRouteID]int, len(config.MTPRoutes)),
-		signallingGateways:         make([]aspSignallingGatewayConfig, 0, len(config.SignallingGateways)),
-		sgpByIdentity:              make(map[SGPIdentity]aspSGPConfig),
-		congestionPolicy:           config.CongestionPolicy,
-		transferFlowCacheEntries:   config.TransferFlowCacheEntries,
-		mtpIndicationQueueSize:     config.MTPIndicationQueueSize,
+		signallingGatewaySelection:   config.SignallingGatewaySelection,
+		mtpRoutes:                    make([]aspMTPRoute, 0, len(config.MTPRoutes)),
+		mtpRouteByID:                 make(map[MTPRouteID]int, len(config.MTPRoutes)),
+		signallingGateways:           make([]aspSignallingGatewayConfig, 0, len(config.SignallingGateways)),
+		sgpByIdentity:                make(map[SGPIdentity]aspSGPConfig),
+		congestionPolicy:             config.CongestionPolicy,
+		transferFlowCacheEntries:     config.TransferFlowCacheEntries,
+		mtpIndicationQueueSize:       config.MTPIndicationQueueSize,
+		maxAffectedPointCodesPerSSNM: config.MaxAffectedPointCodesPerSSNM,
+		maxSSNMStateRecordsPerRoute:  config.MaxSSNMStateRecordsPerRoute,
+		maxSSNMStateRecords:          config.MaxSSNMStateRecords,
 	}
 	if snapshot.transferFlowCacheEntries == 0 {
 		snapshot.transferFlowCacheEntries = DefaultTransferFlowCacheEntries
 	}
 	if snapshot.mtpIndicationQueueSize == 0 {
 		snapshot.mtpIndicationQueueSize = DefaultMTPIndicationQueueSize
+	}
+	if snapshot.maxAffectedPointCodesPerSSNM == 0 {
+		snapshot.maxAffectedPointCodesPerSSNM = DefaultMaxAffectedPointCodesPerSSNM
+	}
+	if snapshot.maxSSNMStateRecordsPerRoute == 0 {
+		snapshot.maxSSNMStateRecordsPerRoute = DefaultMaxSSNMStateRecordsPerRoute
+	}
+	if snapshot.maxSSNMStateRecords == 0 {
+		snapshot.maxSSNMStateRecords = DefaultMaxSSNMStateRecords
 	}
 
 	for _, mtpRoute := range config.MTPRoutes {

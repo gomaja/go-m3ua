@@ -67,12 +67,15 @@ association initiation.
 
 ```go
 type ASPConfig struct {
-    SignallingGatewaySelection RouteSelectionMode
-    MTPRoutes                  []MTPRouteConfig
-    SignallingGateways         []SignallingGatewayConfig
-    CongestionPolicy           ASPCongestionPolicy
-    TransferFlowCacheEntries   int
-    MTPIndicationQueueSize     int
+    SignallingGatewaySelection   RouteSelectionMode
+    MTPRoutes                    []MTPRouteConfig
+    SignallingGateways           []SignallingGatewayConfig
+    CongestionPolicy             ASPCongestionPolicy
+    TransferFlowCacheEntries     int
+    MTPIndicationQueueSize       int
+    MaxAffectedPointCodesPerSSNM int
+    MaxSSNMStateRecordsPerRoute  int
+    MaxSSNMStateRecords          int
 }
 ```
 
@@ -81,6 +84,17 @@ type ASPConfig struct {
 maps those routes to the peer-specific Network Appearance and Routing
 Context values used by each SGP. The configuration is deeply copied by
 `NewEndpoint`.
+
+The three SSNM limits bound peer-controlled work and retained route state. A
+route record belongs to one SG and MTP Route; availability and congestion are
+independent records. Zero selects defaults of 1,024 Affected Point Codes per
+message, 2,048 records per route, and 16,384 records per ASP Endpoint. A
+message that would exceed a limit is rejected atomically with
+`ErrASPRouteStateLimit`: neither the Endpoint route registry nor the
+Association's diagnostic destination view is partially changed. RFC 4666
+Section 3.8.1 defines no M3UA Error code for a receiver's local retention
+budget, so the live Association is closed rather than sending a misleading
+protocol Error.
 
 ### SG and SGP inventory
 
@@ -239,6 +253,7 @@ A `RoleASP` Endpoint owns one `aspRoutes` registry containing:
 - the immutable MTP Route, SG, SGP, route, and selection policy snapshot;
 - all attached Associations grouped by `SGPIdentity`;
 - route availability, restriction, and congestion state per SG and MTP Route;
+- bounded SSNM availability and congestion records per route and Endpoint;
 - per-SG capability and restart-related SSNM state derived from its
   Associations;
 - the derived MTP destination state;
@@ -394,6 +409,8 @@ that the peer received no DATA.
   locks; callbacks occur after Association state commits to avoid lock cycles.
 - MTP-TRANSFER selection takes a snapshot, releases the registry lock, and then
   writes, so peer-controlled socket backpressure cannot block SSNM or close.
+- Association close releases the SCTP transport before waiting for an in-flight
+  MTP-TRANSFER write barrier, so a blocked write cannot deadlock shutdown.
 - Association removal invalidates affected sticky assignments and derives
   indications before the Association's route-level status channel closes.
 - Endpoint close stops new transfers, closes Associations, publishes final
@@ -408,11 +425,13 @@ The implementation is test-first and includes:
 - configuration and deep-snapshot tests;
 - SG/SGP grouping and duplicate validation tests;
 - availability, restriction, congestion, and range-partition aggregation tests;
+- atomic per-message, per-route, and Endpoint-wide SSNM budget tests;
 - no-change suppression and bounded-indication overflow tests;
 - primary/backup, loadshare, and broadcast tests at both SG and SGP levels;
 - active Routing Context, Network Appearance, and route-key filtering tests;
 - stable Association and SCTP stream tests per traffic flow;
-- Association loss, SGP loss, SG loss, SSNM recovery, and failover tests;
+- Association loss, SGP loss, SG loss, SSNM recovery, broadcast recovery, and
+  failover tests;
 - partial broadcast failure tests;
 - concurrent SSNM, transfer, Association close, and Endpoint close tests under
   the race detector;

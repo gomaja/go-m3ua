@@ -763,13 +763,15 @@ func (c *Association) applySSNM(
 		statuses = append(statuses, status)
 	}
 
+	if update != nil && c.endpoint != nil && c.endpoint.aspRoutes != nil {
+		if err := c.endpoint.aspRoutes.apply(c, statuses, *update); err != nil {
+			return err
+		}
+	}
 	if routingContextSet {
 		c.destinations.setScopedRanges(routingContexts, updates)
 	} else {
 		c.destinations.setRanges(updates)
-	}
-	if update != nil && c.endpoint != nil && c.endpoint.aspRoutes != nil {
-		c.endpoint.aspRoutes.apply(c, statuses, *update)
 	}
 	for _, status := range statuses {
 		c.notifyStatus(status)

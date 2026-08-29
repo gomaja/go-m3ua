@@ -32,6 +32,14 @@ func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 	if snapshot.signallingGatewaySelection != RouteSelectionLoadshare {
 		t.Fatalf("SignallingGatewaySelection = %v, want loadshare", snapshot.signallingGatewaySelection)
 	}
+	if snapshot.maxAffectedPointCodesPerSSNM != DefaultMaxAffectedPointCodesPerSSNM ||
+		snapshot.maxSSNMStateRecordsPerRoute != DefaultMaxSSNMStateRecordsPerRoute ||
+		snapshot.maxSSNMStateRecords != DefaultMaxSSNMStateRecords {
+		t.Fatalf("SSNM budgets = APC:%d route:%d Endpoint:%d",
+			snapshot.maxAffectedPointCodesPerSSNM,
+			snapshot.maxSSNMStateRecordsPerRoute,
+			snapshot.maxSSNMStateRecords)
+	}
 	if got := snapshot.mtpRoutes[0].id; got != "sccp-a" {
 		t.Fatalf("MTP Route ID = %q, want sccp-a", got)
 	}
@@ -213,6 +221,24 @@ func TestASPConfigValidation(t *testing.T) {
 			name: "negative MTP indication queue size",
 			mutate: func(config *ASPConfig) {
 				config.MTPIndicationQueueSize = -1
+			},
+		},
+		{
+			name: "negative Affected Point Codes per SSNM",
+			mutate: func(config *ASPConfig) {
+				config.MaxAffectedPointCodesPerSSNM = -1
+			},
+		},
+		{
+			name: "negative SSNM state records per route",
+			mutate: func(config *ASPConfig) {
+				config.MaxSSNMStateRecordsPerRoute = -1
+			},
+		},
+		{
+			name: "negative SSNM state records",
+			mutate: func(config *ASPConfig) {
+				config.MaxSSNMStateRecords = -1
 			},
 		},
 	}
