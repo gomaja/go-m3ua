@@ -124,6 +124,11 @@ func (c *Association) handleSCTPRestart() {
 	// Drain any retry already entering the writer and cancel every old T(ack)
 	// before ASP-DOWN can start the mandatory fresh ASP-Up procedure.
 	c.resetTAckEpoch()
+	if c.isIPSPDoubleExchange() {
+		c.commitLocalIPSPState(StateASPDown)
+		c.noteNoRoutingContextsAcked()
+		c.forgetActiveRoutingContexts()
+	}
 	// Section 4.3.3 requires this only at an ASP; pauseDestinations enforces the
 	// role and leaves an SGP's node-wide destination view untouched.
 	c.pauseDestinations()
@@ -148,7 +153,7 @@ func (c *Association) initiatesASPSM() bool {
 		return true
 	}
 	return c.role == RoleIPSP && c.cfg != nil && c.cfg.IPSP != nil &&
-		c.cfg.IPSP.ExchangeModel == IPSPExchangeSingle && c.cfg.IPSP.InitiateASPSM
+		c.cfg.IPSP.InitiateASPSM
 }
 
 // subscribeRestart asks the kernel for SCTP_ASSOC_CHANGE on this association.

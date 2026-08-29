@@ -35,6 +35,24 @@ func newTrafficModePolicy(config *AssociationConfig) trafficModePolicy {
 	return policy
 }
 
+func newIPSPTrafficModePolicy(config *IPSPTrafficConfig) trafficModePolicy {
+	policy := trafficModePolicy{}
+	if config == nil {
+		return policy
+	}
+	if config.TrafficModeType != nil {
+		policy.defaultMode = config.TrafficModeType.TrafficModeType()
+		policy.defaultModeSet = true
+	}
+	if len(config.TrafficModes) != 0 {
+		policy.modes = make(map[uint32]uint32, len(config.TrafficModes))
+		for routingContext, mode := range config.TrafficModes {
+			policy.modes[routingContext] = mode
+		}
+	}
+	return policy
+}
+
 func (p trafficModePolicy) configured(routingContext uint32) (uint32, bool) {
 	if mode, ok := p.modes[routingContext]; ok {
 		return mode, true

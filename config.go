@@ -231,6 +231,29 @@ const (
 	IPSPExchangeDouble
 )
 
+// IPSPASPSMExchangeModel identifies the ASPSM procedure agreed for an IPSP
+// Double Exchange Association. RFC 4666 Section 4.3 defines the normal double
+// exchange and permits a single exchange as an agreed simplification.
+type IPSPASPSMExchangeModel uint8
+
+const (
+	// IPSPASPSMExchangeDouble keeps the two IPSP ASPSM directions independent.
+	IPSPASPSMExchangeDouble IPSPASPSMExchangeModel = iota + 1
+	// IPSPASPSMExchangeSingle lets one ASP Up or ASP Down exchange affect the
+	// whole IPSP communication, as permitted by RFC 4666 Sections 4.3 and 5.6.2.
+	IPSPASPSMExchangeSingle
+)
+
+// IPSPTrafficConfig configures one direction of IPSP Double Exchange traffic.
+// RoutingContexts identify the Routing Keys for that direction, while Network
+// Appearance and Traffic Mode apply only to those traffic flows.
+type IPSPTrafficConfig struct {
+	TrafficModeType   *params.Param
+	TrafficModes      map[uint32]uint32
+	NetworkAppearance *params.Param
+	RoutingContexts   *params.Param
+}
+
 // IPSPConfig configures RFC 4666 peer-to-peer procedures for one Association.
 //
 // InitiateASPSM and InitiateASPTM select whether this IPSP automatically starts
@@ -238,8 +261,20 @@ const (
 // exchange, and the choices are independent from SCTP association initiation.
 type IPSPConfig struct {
 	ExchangeModel IPSPExchangeModel
+	// ASPSMExchange is the ASPSM agreement for Double Exchange. It is not
+	// used by Single Exchange.
+	ASPSMExchange IPSPASPSMExchangeModel
+	// InitiateASPSM starts this IPSP's ASP Up procedure independently of SCTP
+	// association initiation. Normal Double Exchange requires TrafficToLocal;
+	// the agreed single-ASPSM simplification may establish both directions.
 	InitiateASPSM bool
+	// InitiateASPTM starts this IPSP's ASP Active procedure after its local
+	// ASPSM direction becomes ASP-INACTIVE.
 	InitiateASPTM bool
+	// TrafficToLocal configures DATA the peer sends to this IPSP.
+	TrafficToLocal *IPSPTrafficConfig
+	// TrafficToPeer configures DATA this IPSP sends to the peer.
+	TrafficToPeer *IPSPTrafficConfig
 }
 
 // EndpointConfig gives one M3UA Endpoint its immutable RFC 4666 role and any
@@ -424,6 +459,8 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 	}
 	if config.IPSP != nil {
 		ipsp := *config.IPSP
+		ipsp.TrafficToLocal = snapshotIPSPTrafficConfig(config.IPSP.TrafficToLocal)
+		ipsp.TrafficToPeer = snapshotIPSPTrafficConfig(config.IPSP.TrafficToPeer)
 		snapshot.IPSP = &ipsp
 	}
 	if config.TrafficModes != nil {
@@ -469,9 +506,36 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 		}
 		switch config.IPSP.ExchangeModel {
 		case IPSPExchangeSingle:
+			if config.IPSP.ASPSMExchange != 0 || config.IPSP.TrafficToLocal != nil || config.IPSP.TrafficToPeer != nil {
+				return fmt.Errorf("%w: IPSP Single Exchange uses the Association traffic configuration", ErrInvalidRoleConfiguration)
+			}
 			return nil
 		case IPSPExchangeDouble:
-			return ErrUnsupportedIPSPExchangeModel
+			if config.IPSP.ASPSMExchange != IPSPASPSMExchangeDouble &&
+				config.IPSP.ASPSMExchange != IPSPASPSMExchangeSingle {
+				return fmt.Errorf("%w: IPSP Double Exchange requires an explicit ASPSM exchange agreement", ErrInvalidRoleConfiguration)
+			}
+			if config.IPSP.TrafficToLocal == nil && config.IPSP.TrafficToPeer == nil {
+				return fmt.Errorf("%w: IPSP Double Exchange requires at least one traffic direction", ErrInvalidRoleConfiguration)
+			}
+			if config.IPSP.ASPSMExchange == IPSPASPSMExchangeDouble &&
+				config.IPSP.InitiateASPSM && config.IPSP.TrafficToLocal == nil {
+				return fmt.Errorf("%w: normal Double Exchange ASPSM initiation requires TrafficToLocal", ErrInvalidRoleConfiguration)
+			}
+			if config.IPSP.InitiateASPTM && config.IPSP.TrafficToLocal == nil {
+				return fmt.Errorf("%w: InitiateASPTM requires TrafficToLocal", ErrInvalidRoleConfiguration)
+			}
+			if config.RoutingContexts != nil || config.NetworkAppearance != nil ||
+				config.TrafficModeType != nil || len(config.TrafficModes) != 0 {
+				return fmt.Errorf("%w: IPSP Double Exchange traffic policy must be directional", ErrInvalidRoleConfiguration)
+			}
+			if err := validateIPSPTrafficConfig("TrafficToLocal", config.IPSP.TrafficToLocal); err != nil {
+				return err
+			}
+			if err := validateIPSPTrafficConfig("TrafficToPeer", config.IPSP.TrafficToPeer); err != nil {
+				return err
+			}
+			return nil
 		default:
 			return fmt.Errorf("%w: exchange model %d", ErrUnsupportedIPSPExchangeModel, config.IPSP.ExchangeModel)
 		}
@@ -479,6 +543,74 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 		return ErrUnsupportedRole
 	}
 	return nil
+}
+
+func validateIPSPTrafficConfig(name string, config *IPSPTrafficConfig) error {
+	if config == nil {
+		return nil
+	}
+	if err := validateIPSPTrafficParam(name, "TrafficModeType", config.TrafficModeType, params.TrafficModeType); err != nil {
+		return err
+	}
+	if err := validateIPSPTrafficParam(name, "NetworkAppearance", config.NetworkAppearance, params.NetworkAppearance); err != nil {
+		return err
+	}
+	if err := validateIPSPTrafficParam(name, "RoutingContexts", config.RoutingContexts, params.RoutingContext); err != nil {
+		return err
+	}
+
+	configuredRoutingContexts := make(map[uint32]struct{})
+	if config.RoutingContexts != nil {
+		for _, routingContext := range config.RoutingContexts.RoutingContexts() {
+			if _, duplicate := configuredRoutingContexts[routingContext]; duplicate {
+				return fmt.Errorf("%w: %s contains duplicate Routing Context %d",
+					ErrInvalidRoleConfiguration, name, routingContext)
+			}
+			configuredRoutingContexts[routingContext] = struct{}{}
+		}
+	}
+	for routingContext, trafficMode := range config.TrafficModes {
+		if !validTrafficMode(trafficMode) {
+			return fmt.Errorf("%w: %s has undefined Traffic Mode %d for Routing Context %d",
+				ErrInvalidRoleConfiguration, name, trafficMode, routingContext)
+		}
+		if _, configured := configuredRoutingContexts[routingContext]; !configured {
+			return fmt.Errorf("%w: %s has a Traffic Mode for unconfigured Routing Context %d",
+				ErrInvalidRoleConfiguration, name, routingContext)
+		}
+	}
+	return nil
+}
+
+func validateIPSPTrafficParam(direction, name string, parameter *params.Param, wantTag uint16) error {
+	if parameter == nil {
+		return nil
+	}
+	if parameter.Tag != wantTag {
+		return fmt.Errorf("%w: %s %s has parameter tag %#04x, want %#04x",
+			ErrInvalidRoleConfiguration, direction, name, parameter.Tag, wantTag)
+	}
+	if _, err := parameter.Copy().MarshalBinary(); err != nil {
+		return fmt.Errorf("%w: %s %s: %v", ErrInvalidRoleConfiguration, direction, name, err)
+	}
+	return nil
+}
+
+func snapshotIPSPTrafficConfig(config *IPSPTrafficConfig) *IPSPTrafficConfig {
+	if config == nil {
+		return nil
+	}
+	snapshot := *config
+	snapshot.TrafficModeType = config.TrafficModeType.Copy()
+	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
+	snapshot.RoutingContexts = config.RoutingContexts.Copy()
+	if config.TrafficModes != nil {
+		snapshot.TrafficModes = make(map[uint32]uint32, len(config.TrafficModes))
+		for routingContext, trafficMode := range config.TrafficModes {
+			snapshot.TrafficModes[routingContext] = trafficMode
+		}
+	}
+	return &snapshot
 }
 
 func newAcceptInfo(local, remote net.Addr) AcceptInfo {

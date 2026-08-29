@@ -77,6 +77,9 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 	}
 
 	previousState := c.State()
+	if c.isIPSPDoubleExchange() {
+		return c.handleAspUpDoubleExchange(previousState, aspUp)
+	}
 
 	// RFC 4666 Section 4.3.4.1 makes a received ASP Up establish the remote
 	// ASP/IPSP as ASP-INACTIVE. If it was ASP-ACTIVE, the same section removes
@@ -91,12 +94,12 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 	}
 	c.quiesceUnscopedTraffic()
 
-	_, ackErr := c.WriteSignal(
+	ackErr := c.writeMandatoryControls([]messages.M3UA{
 		messages.NewAspUpAck(
 			c.cfg.ASPIdentifier.Copy(),
 			nil,
 		),
-	)
+	}, false, true)
 	postAckNotify()
 	if ackErr != nil {
 		return ackErr
@@ -111,6 +114,35 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 		return NewUnexpectedMessageError(aspUp)
 	}
 
+	return nil
+}
+
+func (c *Association) handleAspUpDoubleExchange(previousState State, aspUp *messages.AspUp) error {
+	c.commitState(StateASPInactive)
+	c.noteRoutingContextsInactive(nil)
+	postAckNotify := func() {}
+	if c.as != nil {
+		postAckNotify = c.as.quiesceASPFor(c, c.configuredRoutingContexts())
+	}
+	c.quiesceUnscopedTraffic()
+
+	ackErr := c.writeMandatoryControls([]messages.M3UA{
+		messages.NewAspUpAck(c.cfg.ASPIdentifier.Copy(), nil),
+	}, false, true)
+	postAckNotify()
+	if ackErr != nil {
+		return ackErr
+	}
+	if c.usesSingleASPSMExchange() {
+		c.completeRestartASPSM()
+		c.noteNoRoutingContextsAcked()
+		if err := c.enterLocalIPSPState(StateASPInactive); err != nil {
+			return err
+		}
+	}
+	if previousState == StateASPActive {
+		return NewUnexpectedMessageError(aspUp)
+	}
 	return nil
 }
 
@@ -153,6 +185,20 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		return NewUnexpectedMessageError(aspUpAck)
 	}
 	if c.role == RoleIPSP {
+		if c.isIPSPDoubleExchange() {
+			if c.usesSingleASPSMExchange() {
+				c.commitState(StateASPInactive)
+				c.noteRoutingContextsInactive(nil)
+				postTransitionNotify := func() {}
+				if c.as != nil {
+					postTransitionNotify = c.as.quiesceASPFor(c, c.configuredRoutingContexts())
+				}
+				c.quiesceUnscopedTraffic()
+				postTransitionNotify()
+			}
+			c.noteNoRoutingContextsAcked()
+			return c.enterLocalIPSPState(StateASPInactive)
+		}
 		// RFC 4666 Section 3.5.2 makes the optional ASP Identifier in ASP Up
 		// Ack specifically useful for IPSP communication: the answering IPSP
 		// may identify itself independently of the initiator's ASP Up.
@@ -236,6 +282,9 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 	if c.role != RoleSGP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspDown)
 	}
+	if c.isIPSPDoubleExchange() {
+		return c.handleAspDownDoubleExchange()
+	}
 
 	// ASP Down carries only an optional INFO String (RFC 4666 Section 3.5.3),
 	// so there is nothing further to validate: any parameter combination is
@@ -256,7 +305,27 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 	}
 	c.quiesceUnscopedTraffic()
 
-	_, ackErr := c.WriteSignal(messages.NewAspDownAck(nil))
+	ackErr := c.writeMandatoryControls([]messages.M3UA{
+		messages.NewAspDownAck(nil),
+	}, false, true)
+	postAckNotify()
+	return ackErr
+}
+
+func (c *Association) handleAspDownDoubleExchange() error {
+	c.commitState(StateASPDown)
+	postAckNotify := func() {}
+	if c.as != nil {
+		postAckNotify = c.as.quiesceASPDown(c)
+	}
+	c.quiesceUnscopedTraffic()
+	if c.usesSingleASPSMExchange() {
+		c.commitLocalIPSPState(StateASPDown)
+		c.noteNoRoutingContextsAcked()
+	}
+	ackErr := c.writeMandatoryControls([]messages.M3UA{
+		messages.NewAspDownAck(nil),
+	}, false, true)
 	postAckNotify()
 	return ackErr
 }
@@ -279,6 +348,21 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 		return NewUnexpectedMessageError(aspDownAck)
 	}
 	if c.role == RoleIPSP {
+		if c.isIPSPDoubleExchange() {
+			acknowledgement := c.claimTAckAcknowledgement(requestAspDown, nil)
+			c.commitLocalIPSPState(StateASPDown)
+			c.noteNoRoutingContextsAcked()
+			if c.usesSingleASPSMExchange() {
+				c.commitState(StateASPDown)
+				if c.as != nil {
+					postTransitionNotify := c.as.quiesceASPDown(c)
+					postTransitionNotify()
+				}
+				c.quiesceUnscopedTraffic()
+			}
+			acknowledgement.complete()
+			return nil
+		}
 		// Claim the acknowledgement first to stop retransmissions, but do not
 		// release a Shutdown or other T(ack) waiter until the peer is ASP-DOWN
 		// and all traffic admitted under its earlier state has drained.

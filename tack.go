@@ -60,6 +60,14 @@ type tackRetransmitter struct {
 	// then send the new epoch's first request without an old retry overtaking it.
 	retryMu sync.Mutex
 	pending map[messages.M3UA]*pendingRequest
+	// acknowledgedASPTM retains the ASPTM scopes acknowledged during the current
+	// SCTP association epoch. RFC 4666 Sections 4.3.4.3 and 4.3.4.4 permit
+	// T(ack) retransmission and require the peer to answer each repeated request.
+	// Because ASPTM has no request identifier, an Ack for a retransmission can
+	// arrive after its first Ack completed the procedure. Retaining the bounded
+	// configured RC set lets handlers distinguish that repeated Ack from an
+	// unsolicited state transition without accepting an unrequested scope.
+	acknowledgedASPTM map[requestKind]*acknowledgedASPTMScope
 	// awaitingRestartAspUp rejects ASPTM Acks left over from the prior SCTP
 	// epoch until the mandatory fresh ASP-Up procedure completes. Stream 0 has
 	// no request identifier with which an old ASPTM Ack could otherwise be
@@ -67,8 +75,16 @@ type tackRetransmitter struct {
 	awaitingRestartAspUp bool
 }
 
+type acknowledgedASPTMScope struct {
+	routingContextOmitted bool
+	routingContexts       map[uint32]struct{}
+}
+
 func newTAckRetransmitter() *tackRetransmitter {
-	return &tackRetransmitter{pending: make(map[messages.M3UA]*pendingRequest)}
+	return &tackRetransmitter{
+		pending:           make(map[messages.M3UA]*pendingRequest),
+		acknowledgedASPTM: make(map[requestKind]*acknowledgedASPTMScope),
+	}
 }
 
 // tackInterval reports the configured T(ack), or the RFC default.
@@ -361,7 +377,28 @@ func (c *Association) claimTAckAcknowledgement(kind requestKind, acknowledged *p
 		delete(c.tack.pending, entry.message)
 		result.completed = append(result.completed, req)
 	}
+	if result.solicited {
+		c.recordASPTMAcknowledgementLocked(kind, acknowledged)
+	}
 	return result
+}
+
+func (c *Association) recordASPTMAcknowledgementLocked(kind requestKind, acknowledged *params.Param) {
+	if kind != requestAspActive && kind != requestAspInactive {
+		return
+	}
+	scope := c.tack.acknowledgedASPTM[kind]
+	if scope == nil {
+		scope = &acknowledgedASPTMScope{routingContexts: make(map[uint32]struct{})}
+		c.tack.acknowledgedASPTM[kind] = scope
+	}
+	if acknowledged == nil {
+		scope.routingContextOmitted = true
+		return
+	}
+	for _, routingContext := range acknowledged.RoutingContexts() {
+		scope.routingContexts[routingContext] = struct{}{}
+	}
 }
 
 // pendingTAckRoutingContexts returns the explicit RCs still awaiting an Ack.
@@ -454,6 +491,57 @@ func (c *Association) rejectStaleASPTMAck(kind requestKind) bool {
 	return len(c.pendingRequestsLocked(kind)) == 0
 }
 
+// isRepeatedASPTMAcknowledgement reports an Ack whose entire scope was already
+// acknowledged during this SCTP association epoch and does not match a current
+// request of the same kind.
+//
+// RFC 4666 Sections 4.3.4.3 and 4.3.4.4 permit the local IPSP to retransmit ASP
+// Active or ASP Inactive until an Ack arrives. The peer answers every copy, so
+// a later Ack must neither reverse a subsequent procedure nor provoke an Error
+// for a request this association did send. A current request wins because the
+// protocol provides no request identifier that could distinguish its Ack from
+// an older retransmission's Ack.
+func (c *Association) isRepeatedASPTMAcknowledgement(kind requestKind, acknowledged *params.Param) bool {
+	if c.tack == nil {
+		return false
+	}
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	for _, request := range c.pendingRequestsLocked(kind) {
+		if acknowledged == nil {
+			if request.routingContextOmitted || request.routingContexts == nil {
+				return false
+			}
+			continue
+		}
+		if request.routingContexts == nil {
+			return false
+		}
+		for _, routingContext := range acknowledged.RoutingContexts() {
+			if _, pending := request.routingContexts[routingContext]; pending {
+				return false
+			}
+		}
+	}
+	scope := c.tack.acknowledgedASPTM[kind]
+	if scope == nil {
+		return false
+	}
+	if acknowledged == nil {
+		return scope.routingContextOmitted
+	}
+	routingContexts := acknowledged.RoutingContexts()
+	if len(routingContexts) == 0 {
+		return false
+	}
+	for _, routingContext := range routingContexts {
+		if _, acknowledgedBefore := scope.routingContexts[routingContext]; !acknowledgedBefore {
+			return false
+		}
+	}
+	return true
+}
+
 // forgetTAckRequest removes req only if it is still the current request of its
 // kind. A superseded retransmitter can finish an in-flight write after its
 // replacement was armed; it must not retire or report expiry for that newer
@@ -538,6 +626,7 @@ func (c *Association) resetTAckEpoch() {
 	c.tack.mu.Lock()
 	c.tack.awaitingRestartAspUp = c.role == RoleASP || c.role == RoleIPSP
 	c.cancelAllTAckLocked()
+	clear(c.tack.acknowledgedASPTM)
 	c.tack.mu.Unlock()
 	c.tack.retryMu.Unlock()
 }

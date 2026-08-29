@@ -14,6 +14,9 @@ import (
 )
 
 func (c *Association) initiateASPTM() error {
+	if c.isIPSPDoubleExchange() {
+		return c.initiateASPActive(c.configuredLocalRoutingContextParam())
+	}
 	return c.initiateASPActive(c.configuredRoutingContextParam())
 }
 
@@ -45,13 +48,13 @@ type aspActiveRequest struct {
 }
 
 func (c *Association) aspActiveRequests(routingContext *params.Param) ([]aspActiveRequest, error) {
-	trafficModes := c.trafficModePolicy()
+	trafficModes := c.localTrafficModePolicy()
 	var routingContexts []uint32
 	omitted := routingContext == nil
 	if routingContext != nil {
 		routingContexts = routingContext.RoutingContexts()
 	} else {
-		routingContexts = c.configuredRoutingContexts()
+		routingContexts = c.configuredLocalRoutingContexts()
 	}
 
 	if len(routingContexts) == 0 {
@@ -127,7 +130,14 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
-	if state := c.State(); state != StateASPInactive && state != StateASPActive {
+	if c.isIPSPDoubleExchange() && !c.hasLocalIPSPTrafficDirection() {
+		return ErrNoConfiguredAS
+	}
+	state := c.State()
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPStateValue()
+	}
+	if state != StateASPInactive && state != StateASPActive {
 		return ErrInvalidState
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
@@ -144,7 +154,14 @@ func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
-	if c.State() != StateASPActive {
+	if c.isIPSPDoubleExchange() && !c.hasLocalIPSPTrafficDirection() {
+		return ErrNoConfiguredAS
+	}
+	state := c.State()
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPStateValue()
+	}
+	if state != StateASPActive {
 		return ErrInvalidState
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
@@ -156,10 +173,13 @@ func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error
 
 func (c *Association) outboundRoutingContexts(routingContexts []uint32) (*params.Param, error) {
 	if len(routingContexts) == 0 {
+		if c.isIPSPDoubleExchange() {
+			return c.configuredLocalRoutingContextParam(), nil
+		}
 		return c.configuredRoutingContextParam(), nil
 	}
 	routingContext := params.NewRoutingContext(routingContexts...)
-	if err := c.validateRoutingContext(routingContext); err != nil {
+	if err := c.validateLocalRoutingContext(routingContext); err != nil {
 		return nil, err
 	}
 	return routingContext, nil
@@ -372,9 +392,9 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 		}
 	}
 
-	if _, err := c.WriteSignal(
+	if err := c.writeMandatoryControls([]messages.M3UA{
 		messages.NewAspActiveAck(acknowledgedMode, acknowledged, nil),
-	); err != nil {
+	}, false, true); err != nil {
 		return err
 	}
 
@@ -469,6 +489,12 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
+	if c.isRepeatedASPTMAcknowledgement(requestAspActive, aspAcAck.RoutingContext) {
+		if err := c.validateAspActiveAckTrafficMode(aspAcAck); err != nil {
+			return err
+		}
+		return c.validateLocalRoutingContext(aspAcAck.RoutingContext)
+	}
 	if c.rejectStaleASPTMAck(requestAspActive) {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
@@ -480,7 +506,11 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	// sends a second Ack while this ASP is already ASP-ACTIVE. Requiring
 	// ASP-INACTIVE threw that second Ack away, leaving the context it granted
 	// unusable.
-	switch c.State() {
+	state := c.State()
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPStateValue()
+	}
+	switch state {
 	case StateASPInactive, StateASPActive:
 	default:
 		return NewUnexpectedMessageError(aspAcAck)
@@ -496,7 +526,7 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	// The Ack must concern the Routing Contexts we asked about. An Ack for
 	// somebody else's RC would otherwise take our data path active on the
 	// strength of a message that was never about us.
-	if err := c.validateRoutingContext(aspAcAck.RoutingContext); err != nil {
+	if err := c.validateLocalRoutingContext(aspAcAck.RoutingContext); err != nil {
 		return err
 	}
 	if err := c.validateTAckRoutingContexts(requestAspActive, aspAcAck.RoutingContext); err != nil {
@@ -507,6 +537,12 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	// association active, so DATA went out for contexts the SGP had never
 	// agreed to carry.
 	if c.role == RoleIPSP {
+		if c.isIPSPDoubleExchange() {
+			acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
+			c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
+			acknowledgement.complete()
+			return c.enterLocalIPSPState(StateASPActive)
+		}
 		routingContexts := c.configuredRoutingContexts()
 		if aspAcAck.RoutingContext != nil {
 			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
@@ -569,9 +605,9 @@ func (c *Association) validateAspActiveAckTrafficMode(ack *messages.AspActiveAck
 	}
 
 	if len(acknowledgedContexts) == 0 {
-		acknowledgedContexts = c.configuredRoutingContexts()
+		acknowledgedContexts = c.configuredLocalRoutingContexts()
 	}
-	trafficModes := c.trafficModePolicy()
+	trafficModes := c.localTrafficModePolicy()
 	for _, rtCtx := range acknowledgedContexts {
 		configuredMode, configured := trafficModes.configured(rtCtx)
 		if configured && configuredMode != acknowledgedMode {
@@ -616,6 +652,12 @@ func (c *Association) validateAspActiveAckTrafficMode(ack *messages.AspActiveAck
 type unservedError func(rcs ...uint32) *RoutingContextError
 
 func (c *Association) answerRoutingContexts(requested *params.Param, unservedAs, noKeysAs unservedError) (*params.Param, error) {
+	if c.isIPSPDoubleExchange() && !c.hasPeerIPSPTrafficDirection() {
+		if requested != nil && len(requested.RoutingContexts()) > 0 {
+			return nil, unservedAs(requested.RoutingContexts()...)
+		}
+		return nil, noKeysAs()
+	}
 	ours := make(map[uint32]struct{})
 	for _, rc := range c.configuredRoutingContexts() {
 		ours[rc] = struct{}{}
@@ -701,6 +743,14 @@ func validateRoutingContextShape(peer *params.Param) error {
 // is answering for the single configured context, which is not an error. When
 // present, every context named must be one of ours.
 func (c *Association) validateRoutingContext(peer *params.Param) error {
+	return validateRoutingContextAgainst(peer, c.configuredRoutingContexts())
+}
+
+func (c *Association) validateLocalRoutingContext(peer *params.Param) error {
+	return validateRoutingContextAgainst(peer, c.configuredLocalRoutingContexts())
+}
+
+func validateRoutingContextAgainst(peer *params.Param, configured []uint32) error {
 	// A parameter that is present and decodes to nothing is not the same as one
 	// that was omitted. Section 3.8.1: "The 'Invalid Routing Context' error is
 	// sent if a message is received with an invalid or unconfigured routing
@@ -721,12 +771,8 @@ func (c *Association) validateRoutingContext(peer *params.Param) error {
 	}
 	theirs := peer.RoutingContexts()
 
-	if c.cfg == nil || c.cfg.RoutingContexts == nil {
-		return NewInvalidRoutingContextError(theirs...)
-	}
-
 	ours := make(map[uint32]struct{})
-	for _, rc := range c.configuredRoutingContexts() {
+	for _, rc := range configured {
 		ours[rc] = struct{}{}
 	}
 	// An empty local set means no Routing Key exists, not that every peer value
@@ -843,10 +889,16 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
+	if c.isRepeatedASPTMAcknowledgement(requestAspInactive, aspAcAck.RoutingContext) {
+		return c.validateLocalRoutingContext(aspAcAck.RoutingContext)
+	}
 	if c.rejectStaleASPTMAck(requestAspInactive) {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	previousState := c.State()
+	if c.isIPSPDoubleExchange() {
+		previousState = c.localIPSPStateValue()
+	}
 	if previousState != StateASPDown && previousState != StateASPInactive && previousState != StateASPActive {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
@@ -854,13 +906,28 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	// ASP Inactive Ack carries no Traffic Mode Type (Section 3.7.4), so only
 	// the Routing Context is checked: the Ack must concern contexts we asked
 	// to deactivate.
-	if err := c.validateRoutingContext(aspAcAck.RoutingContext); err != nil {
+	if err := c.validateLocalRoutingContext(aspAcAck.RoutingContext); err != nil {
 		return err
 	}
 	if err := c.validateTAckRoutingContexts(requestAspInactive, aspAcAck.RoutingContext); err != nil {
 		return err
 	}
 	if c.role == RoleIPSP {
+		if c.isIPSPDoubleExchange() {
+			acknowledgement := c.claimTAckAcknowledgement(requestAspInactive, aspAcAck.RoutingContext)
+			if previousState == StateASPActive {
+				c.noteRoutingContextsUnacked(aspAcAck.RoutingContext)
+			} else {
+				c.noteNoRoutingContextsAcked()
+			}
+			state := StateASPInactive
+			if c.hasAcknowledgedRoutingContexts() {
+				state = StateASPActive
+			}
+			c.commitLocalIPSPState(state)
+			acknowledgement.complete()
+			return nil
+		}
 		acknowledgement := c.claimTAckAcknowledgement(requestAspInactive, aspAcAck.RoutingContext)
 		routingContexts := c.configuredRoutingContexts()
 		if aspAcAck.RoutingContext != nil {
@@ -919,7 +986,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 // from the set an ASP Active Ack granted. An omitted parameter covers every
 // configured AS; a named parameter affects only that subset.
 func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
-	rcs := c.configuredRoutingContexts()
+	rcs := c.configuredLocalRoutingContexts()
 	if inactive != nil {
 		rcs = inactive.RoutingContexts()
 	}
@@ -932,7 +999,7 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 		// "active everywhere". Materialise that set before subtracting a scoped
 		// deactivation so the unaffected contexts remain active.
 		c.ackedRCs = make(map[uint32]struct{})
-		for _, rc := range c.configuredRoutingContexts() {
+		for _, rc := range c.configuredLocalRoutingContexts() {
 			c.ackedRCs[rc] = struct{}{}
 		}
 	}
@@ -961,6 +1028,21 @@ func (c *Association) hasAcknowledgedRoutingContexts() bool {
 	c.muAckedRCs.RLock()
 	defer c.muAckedRCs.RUnlock()
 	return !c.ackedRCsScoped || len(c.ackedRCs) > 0
+}
+
+func (c *Association) stateForAcknowledgedRoutingContexts() State {
+	localState := c.localIPSPStateValue()
+	c.muAckedRCs.RLock()
+	defer c.muAckedRCs.RUnlock()
+	if !c.ackedRCsScoped {
+		return localState
+	}
+	for routingContext := range c.ackedRCs {
+		if _, overridden := c.overriddenRCs[routingContext]; !overridden {
+			return StateASPActive
+		}
+	}
+	return StateASPInactive
 }
 
 // handleHeartbeat answers an incoming BEAT.
