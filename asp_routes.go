@@ -97,12 +97,13 @@ type aspRoutes struct {
 
 	config aspRoutingConfig
 
-	associations         map[*Association]SGPIdentity
-	associationsBySGP    map[SGPIdentity]map[*Association]struct{}
-	associationOrder     map[*Association]uint64
-	nextAssociationOrder uint64
-	availability         map[aspRouteRangeKey]aspAvailabilityRecord
-	congestion           map[aspRouteRangeKey]aspCongestionRecord
+	associations              map[*Association]SGPIdentity
+	associationsBySGP         map[SGPIdentity]map[*Association]struct{}
+	associationEligibleRoutes map[*Association]map[MTPRouteID]struct{}
+	associationOrder          map[*Association]uint64
+	nextAssociationOrder      uint64
+	availability              map[aspRouteRangeKey]aspAvailabilityRecord
+	congestion                map[aspRouteRangeKey]aspCongestionRecord
 	// stateIndex mirrors the bounded records above in point-code prefix form,
 	// avoiding a full record scan for every derived leaf on each SSNM update.
 	stateIndex           map[MTPRouteID]*aspRouteStateIndexNode
@@ -135,19 +136,20 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		queueSize = DefaultMTPIndicationQueueSize
 	}
 	routes := &aspRoutes{
-		config:               snapshot,
-		associations:         make(map[*Association]SGPIdentity),
-		associationsBySGP:    make(map[SGPIdentity]map[*Association]struct{}),
-		associationOrder:     make(map[*Association]uint64),
-		availability:         make(map[aspRouteRangeKey]aspAvailabilityRecord),
-		congestion:           make(map[aspRouteRangeKey]aspCongestionRecord),
-		stateIndex:           make(map[MTPRouteID]*aspRouteStateIndexNode, len(snapshot.mtpRoutes)),
-		stateRecordsPerRoute: make(map[aspRouteStateBudgetKey]int),
-		derived:              make(map[aspDerivedRangeKey]aspDestinationStatus),
-		transferFlows:        make(map[aspTransferFlowKey]*list.Element),
-		transferFlowLRU:      list.New(),
-		transferSequences:    make(map[aspTransferFlowKey]*aspTransferFlowLock),
-		indications:          make(chan *MTPIndication, queueSize),
+		config:                    snapshot,
+		associations:              make(map[*Association]SGPIdentity),
+		associationsBySGP:         make(map[SGPIdentity]map[*Association]struct{}),
+		associationEligibleRoutes: make(map[*Association]map[MTPRouteID]struct{}),
+		associationOrder:          make(map[*Association]uint64),
+		availability:              make(map[aspRouteRangeKey]aspAvailabilityRecord),
+		congestion:                make(map[aspRouteRangeKey]aspCongestionRecord),
+		stateIndex:                make(map[MTPRouteID]*aspRouteStateIndexNode, len(snapshot.mtpRoutes)),
+		stateRecordsPerRoute:      make(map[aspRouteStateBudgetKey]int),
+		derived:                   make(map[aspDerivedRangeKey]aspDestinationStatus),
+		transferFlows:             make(map[aspTransferFlowKey]*list.Element),
+		transferFlowLRU:           list.New(),
+		transferSequences:         make(map[aspTransferFlowKey]*aspTransferFlowLock),
+		indications:               make(chan *MTPIndication, queueSize),
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {
 		routes.stateIndex[mtpRoute.id] = &aspRouteStateIndexNode{}
@@ -185,7 +187,9 @@ func (r *aspRoutes) attach(association *Association) bool {
 		r.associationsBySGP[identity] = make(map[*Association]struct{})
 	}
 	r.associationsBySGP[identity][association] = struct{}{}
-	indications := r.recomputeLocked(nil)
+	eligibleRoutes := r.eligibleAssociationRoutesLocked(association, identity)
+	r.associationEligibleRoutes[association] = eligibleRoutes
+	indications := r.recomputeLocked(eligibleRoutes)
 	r.publish(indications)
 	r.mu.Unlock()
 	return true
@@ -197,8 +201,10 @@ func (r *aspRoutes) detach(association *Association) {
 	}
 	r.mu.Lock()
 	identity, exists := r.associations[association]
+	affectedMTPRoutes := r.associationEligibleRoutes[association]
 	if exists {
 		delete(r.associations, association)
+		delete(r.associationEligibleRoutes, association)
 		delete(r.associationOrder, association)
 		r.invalidateAssociationTransferFlowsLocked(association)
 		delete(r.associationsBySGP[identity], association)
@@ -209,9 +215,44 @@ func (r *aspRoutes) detach(association *Association) {
 			r.reclaimSignallingGatewayStateLocked(identity.SignallingGateway)
 		}
 	}
-	indications := r.recomputeLocked(nil)
+	indications := r.recomputeLocked(affectedMTPRoutes)
 	r.publish(indications)
 	r.mu.Unlock()
+}
+
+func (r *aspRoutes) eligibleAssociationRoutesLocked(
+	association *Association,
+	identity SGPIdentity,
+) map[MTPRouteID]struct{} {
+	eligible := make(map[MTPRouteID]struct{})
+	sgp, exists := r.config.sgpByIdentity[identity]
+	if !exists {
+		return eligible
+	}
+	for _, route := range sgp.routes {
+		if aspAssociationEligibleForAS(association, route.as) {
+			eligible[route.mtpRoute] = struct{}{}
+		}
+	}
+	return eligible
+}
+
+func changedASPAssociationRoutes(
+	previous map[MTPRouteID]struct{},
+	current map[MTPRouteID]struct{},
+) map[MTPRouteID]struct{} {
+	changed := make(map[MTPRouteID]struct{})
+	for mtpRoute := range previous {
+		if _, exists := current[mtpRoute]; !exists {
+			changed[mtpRoute] = struct{}{}
+		}
+	}
+	for mtpRoute := range current {
+		if _, exists := previous[mtpRoute]; !exists {
+			changed[mtpRoute] = struct{}{}
+		}
+	}
+	return changed
 }
 
 func (r *aspRoutes) signallingGatewayAttachedLocked(signallingGateway SignallingGatewayID) bool {
@@ -442,18 +483,27 @@ func (r *aspRoutes) stateIndexNodeForRangeLocked(key aspRouteRangeKey) *aspRoute
 	return aspRouteStateNodeForRange(root, mtpRoute.mask, key.pointCode, key.mask)
 }
 
-func (r *aspRoutes) associationStateChanged(association *Association) {
+func (r *aspRoutes) associationStateChanged(association *Association) bool {
 	if r == nil || association == nil {
-		return
+		return false
 	}
 	r.mu.Lock()
-	if _, exists := r.associations[association]; !exists {
+	identity, exists := r.associations[association]
+	if !exists {
 		r.mu.Unlock()
-		return
+		return false
 	}
-	indications := r.recomputeLocked(nil)
+	current := r.eligibleAssociationRoutesLocked(association, identity)
+	affectedMTPRoutes := changedASPAssociationRoutes(r.associationEligibleRoutes[association], current)
+	if len(affectedMTPRoutes) == 0 {
+		r.mu.Unlock()
+		return false
+	}
+	r.associationEligibleRoutes[association] = current
+	indications := r.recomputeLocked(affectedMTPRoutes)
 	r.publish(indications)
 	r.mu.Unlock()
+	return true
 }
 
 func (r *aspRoutes) renumberLocked() {

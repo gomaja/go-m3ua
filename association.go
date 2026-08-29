@@ -1950,17 +1950,26 @@ func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
+	changed := !c.ackedRCsScoped
 	if c.ackedRCs == nil {
 		c.ackedRCs = make(map[uint32]struct{})
 	}
 	c.ackedRCsScoped = true
 	for _, rc := range rcs {
+		if _, exists := c.ackedRCs[rc]; !exists {
+			changed = true
+		}
+		if _, exists := c.overriddenRCs[rc]; exists {
+			changed = true
+		}
 		c.ackedRCs[rc] = struct{}{}
 		delete(c.overriddenRCs, rc)
 	}
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
-	c.notifyASPRouteStateChanged()
+	if changed {
+		c.notifyASPRouteStateChanged()
+	}
 }
 
 // routingContextAcked reports whether the peer has acknowledged this context,

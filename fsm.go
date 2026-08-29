@@ -136,9 +136,12 @@ func (c *Association) handleStateUpdateFrom(current State, published bool) error
 // entered for.
 func (c *Association) applyStateUpdate(current State) error {
 	c.muState.Lock()
+	stateChanged := c.state != current
 	err := c.applyStateUpdateLocked(current)
 	c.muState.Unlock()
-	c.notifyASPRouteStateChanged()
+	if stateChanged {
+		c.notifyASPRouteStateChanged()
+	}
 	return err
 }
 
@@ -152,7 +155,6 @@ func (c *Association) applyPublishedStateUpdate(current State) (bool, error) {
 	}
 	err := c.applyStateUpdateLocked(current)
 	c.muState.Unlock()
-	c.notifyASPRouteStateChanged()
 	return true, err
 }
 
@@ -402,10 +404,13 @@ func (c *Association) commitState(s State) bool {
 		return false
 	default:
 	}
+	stateChanged := c.state != s
 	c.state = s
 	c.muState.Unlock()
 	unlockTransfer()
-	c.notifyASPRouteStateChanged()
+	if stateChanged {
+		c.notifyASPRouteStateChanged()
+	}
 	return true
 }
 

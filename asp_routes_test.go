@@ -28,6 +28,41 @@ func TestASPRouteAggregationKeepsDestinationAvailableThroughSecondSG(t *testing.
 	requireASPRouteStatus(t, endpoint, "sccp-a", pointCode, DestinationAvailable, false, 0, false)
 }
 
+func TestASPRouteStateChangeSkipsUnchangedAssociationCapabilities(t *testing.T) {
+	endpoint, association, _ := newASPMultiSGFixture(t)
+	if endpoint.aspRoutes.associationStateChanged(association) {
+		t.Fatal("unchanged Association capability triggered an MTP Route recomputation")
+	}
+
+	association.muAckedRCs.Lock()
+	delete(association.ackedRCs, 1)
+	association.muAckedRCs.Unlock()
+	if !endpoint.aspRoutes.associationStateChanged(association) {
+		t.Fatal("changed Routing Context capability did not trigger an MTP Route recomputation")
+	}
+	if endpoint.aspRoutes.associationStateChanged(association) {
+		t.Fatal("recorded Association capability triggered a second recomputation")
+	}
+}
+
+func TestChangedASPAssociationRoutesReturnsOnlyCapabilityDeltas(t *testing.T) {
+	previous := map[MTPRouteID]struct{}{"sccp-a": {}, "isup-a": {}}
+	current := map[MTPRouteID]struct{}{"isup-a": {}, "tcap-b": {}}
+	changed := changedASPAssociationRoutes(previous, current)
+	if len(changed) != 2 {
+		t.Fatalf("changed MTP Routes = %#v, want exactly sccp-a and tcap-b", changed)
+	}
+	if _, exists := changed["sccp-a"]; !exists {
+		t.Fatal("changed MTP Routes omitted removed capability sccp-a")
+	}
+	if _, exists := changed["tcap-b"]; !exists {
+		t.Fatal("changed MTP Routes omitted added capability tcap-b")
+	}
+	if _, exists := changed["isup-a"]; exists {
+		t.Fatal("changed MTP Routes included unchanged capability isup-a")
+	}
+}
+
 func TestASPRouteAggregationPrefersAvailableOverRestricted(t *testing.T) {
 	endpoint, first, second := newASPMultiSGFixture(t)
 	const pointCode = uint32(0x123456)
