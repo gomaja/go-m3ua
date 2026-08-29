@@ -873,8 +873,8 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 		rcs = inactive.RoutingContexts()
 	}
 
+	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
-	defer c.muAckedRCs.Unlock()
 
 	if !c.ackedRCsScoped {
 		// An Association placed directly into ASP-ACTIVE has the compatibility meaning
@@ -889,13 +889,19 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 	for _, rc := range rcs {
 		delete(c.ackedRCs, rc)
 	}
+	c.muAckedRCs.Unlock()
+	unlockTransfer()
+	c.notifyASPRouteStateChanged()
 }
 
 func (c *Association) noteNoRoutingContextsAcked() {
+	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
 	c.ackedRCs = make(map[uint32]struct{})
 	c.ackedRCsScoped = true
 	c.muAckedRCs.Unlock()
+	unlockTransfer()
+	c.notifyASPRouteStateChanged()
 }
 
 // hasAcknowledgedRoutingContexts reports whether at least one Application

@@ -52,6 +52,7 @@ type Endpoint struct {
 	cancel       context.CancelCauseFunc
 	operations   sync.WaitGroup
 	as           *applicationServers
+	aspRoutes    *aspRoutes
 	nif          *nifAvailability
 	destinations *destinations
 	mtp3Restarts *mtp3RestartRegistry
@@ -62,8 +63,19 @@ type Endpoint struct {
 func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 	switch config.Role {
 	case RoleASP, RoleSGP, RoleIPSP:
+		if config.Role != RoleASP && config.ASP != nil {
+			return nil, ErrInvalidRoleConfiguration
+		}
 		if config.Role != RoleSGP && config.SGP != nil {
 			return nil, ErrInvalidRoleConfiguration
+		}
+		var routes *aspRoutes
+		if config.Role == RoleASP {
+			var err error
+			routes, err = newASPRoutes(config.ASP)
+			if err != nil {
+				return nil, err
+			}
 		}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		endpoint := &Endpoint{
@@ -74,6 +86,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 			ctx:          ctx,
 			cancel:       cancel,
 			mtp3Restarts: &mtp3RestartRegistry{},
+			aspRoutes:    routes,
 		}
 		if config.Role == RoleSGP {
 			endpoint.as = newApplicationServersForSGP(snapshotSGPConfig(config.SGP))
@@ -153,6 +166,9 @@ func (e *Endpoint) trackAssociation(association *Association) bool {
 	if e.closed {
 		return false
 	}
+	if e.aspRoutes != nil && !e.aspRoutes.attach(association) {
+		return false
+	}
 	association.endpoint = e
 	e.associations[association] = struct{}{}
 	return true
@@ -165,7 +181,11 @@ func (e *Endpoint) forgetAssociation(association *Association) {
 	e.mu.Lock()
 	delete(e.associations, association)
 	applicationServers := e.as
+	aspRoutes := e.aspRoutes
 	e.mu.Unlock()
+	if aspRoutes != nil {
+		aspRoutes.detach(association)
+	}
 	if applicationServers != nil {
 		applicationServers.forget(association)
 	}
@@ -324,6 +344,9 @@ func (e *Endpoint) Close() error {
 		}
 	}
 	e.operations.Wait()
+	if e.aspRoutes != nil {
+		e.aspRoutes.closeIndications()
+	}
 	e.mu.Lock()
 	e.closeErr = firstErr
 	close(e.done)
@@ -358,4 +381,14 @@ func (e *Endpoint) associationRole() (Role, error) {
 	default:
 		return 0, ErrUnsupportedRole
 	}
+}
+
+func (e *Endpoint) validateAssociationConfig(config *AssociationConfig) error {
+	if e == nil {
+		return ErrUnsupportedRole
+	}
+	if e.role == RoleASP && e.aspRoutes != nil {
+		return e.aspRoutes.validateAssociationConfig(config)
+	}
+	return nil
 }

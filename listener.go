@@ -661,6 +661,11 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 		_ = sctpAssociation.Close()
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
+	if err := l.endpoint.validateAssociationConfig(associationConfig); err != nil {
+		l.rejectPendingSCTP(sctpAssociation)
+		_ = sctpAssociation.Close()
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
+	}
 	association := newAssociationWithTrafficModePolicy(role, associationConfig, newTrafficModePolicy(associationConfig))
 	association.sctpConn = sctpAssociation
 	// Set at construction, before any goroutine can observe this Association, so

@@ -162,6 +162,9 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	if err := validateAssociationConfigForRole(role, cfg); err != nil {
 		return nil, err
 	}
+	if err := e.validateAssociationConfig(cfg); err != nil {
+		return nil, err
+	}
 	n, ok := netMap[network]
 	if !ok {
 		return nil, fmt.Errorf("invalid network: %s", network)
