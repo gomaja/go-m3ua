@@ -63,6 +63,17 @@ type aspDerivedRangeKey struct {
 	mask      uint8
 }
 
+type aspRouteStateIndexNode struct {
+	children     [2]*aspRouteStateIndexNode
+	availability map[SignallingGatewayID]aspAvailabilityRecord
+	congestion   map[SignallingGatewayID]aspCongestionRecord
+}
+
+type aspGatewayRouteSnapshot struct {
+	id      SignallingGatewayID
+	capable bool
+}
+
 // aspRoutes owns ASP-wide route state. RFC 4666 Section 4.5.2.2 scopes SSNM
 // updates to the originating SG, while Section 1.3.2.5 requires the ASP to
 // derive one destination state from all such routes.
@@ -77,6 +88,9 @@ type aspRoutes struct {
 	nextAssociationOrder uint64
 	availability         map[aspRouteRangeKey]aspAvailabilityRecord
 	congestion           map[aspRouteRangeKey]aspCongestionRecord
+	// stateIndex mirrors the bounded records above in point-code prefix form,
+	// avoiding a full record scan for every derived leaf on each SSNM update.
+	stateIndex           map[MTPRouteID]*aspRouteStateIndexNode
 	stateRecordsPerRoute map[aspRouteStateBudgetKey]int
 	stateRecordCount     int
 	derived              map[aspDerivedRangeKey]aspDestinationStatus
@@ -106,6 +120,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		associationOrder:     make(map[*Association]uint64),
 		availability:         make(map[aspRouteRangeKey]aspAvailabilityRecord),
 		congestion:           make(map[aspRouteRangeKey]aspCongestionRecord),
+		stateIndex:           make(map[MTPRouteID]*aspRouteStateIndexNode, len(snapshot.mtpRoutes)),
 		stateRecordsPerRoute: make(map[aspRouteStateBudgetKey]int),
 		derived:              make(map[aspDerivedRangeKey]aspDestinationStatus),
 		transferFlows:        make(map[aspTransferFlowKey]*list.Element),
@@ -113,6 +128,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		indications:          make(chan *MTPIndication, queueSize),
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {
+		routes.stateIndex[mtpRoute.id] = &aspRouteStateIndexNode{}
 		routes.derived[aspDerivedRangeKey{
 			mtpRoute:  mtpRoute.id,
 			pointCode: mtpRoute.destinationPointCode,
@@ -265,17 +281,21 @@ func (r *aspRoutes) apply(
 		}
 		switch update.kind {
 		case aspRouteAvailabilityUpdate:
-			r.availability[key] = aspAvailabilityRecord{
+			record := aspAvailabilityRecord{
 				availability: update.availability,
 				sequence:     r.sequence,
 			}
+			r.availability[key] = record
+			r.indexAvailabilityRecordLocked(key, record)
 		case aspRouteCongestionUpdate:
-			r.congestion[key] = aspCongestionRecord{
+			record := aspCongestionRecord{
 				congested: update.congested,
 				level:     update.congestionLevel,
 				levelSet:  update.congestionLevelSet,
 				sequence:  r.sequence,
 			}
+			r.congestion[key] = record
+			r.indexCongestionRecordLocked(key, record)
 		}
 		if newRecord {
 			budgetKey := aspRouteStateBudgetKey{
@@ -303,6 +323,41 @@ func (r *aspRoutes) hasRouteStateRecordLocked(key aspRouteRangeKey, kind aspRout
 	default:
 		return false
 	}
+}
+
+func (r *aspRoutes) indexAvailabilityRecordLocked(key aspRouteRangeKey, record aspAvailabilityRecord) {
+	node := r.stateIndexNodeForRangeLocked(key)
+	if node == nil {
+		return
+	}
+	if node.availability == nil {
+		node.availability = make(map[SignallingGatewayID]aspAvailabilityRecord)
+	}
+	node.availability[key.signallingGateway] = record
+}
+
+func (r *aspRoutes) indexCongestionRecordLocked(key aspRouteRangeKey, record aspCongestionRecord) {
+	node := r.stateIndexNodeForRangeLocked(key)
+	if node == nil {
+		return
+	}
+	if node.congestion == nil {
+		node.congestion = make(map[SignallingGatewayID]aspCongestionRecord)
+	}
+	node.congestion[key.signallingGateway] = record
+}
+
+func (r *aspRoutes) stateIndexNodeForRangeLocked(key aspRouteRangeKey) *aspRouteStateIndexNode {
+	mtpRoute, exists := r.mtpRoute(key.mtpRoute)
+	if !exists {
+		return nil
+	}
+	root := r.stateIndex[key.mtpRoute]
+	if root == nil {
+		root = &aspRouteStateIndexNode{}
+		r.stateIndex[key.mtpRoute] = root
+	}
+	return aspRouteStateNodeForRange(root, mtpRoute.mask, key.pointCode, key.mask)
 }
 
 func (r *aspRoutes) associationStateChanged(association *Association) {
@@ -338,6 +393,7 @@ func (r *aspRoutes) renumberLocked() {
 		sequence++
 		record.sequence = sequence
 		r.availability[key] = record
+		r.indexAvailabilityRecordLocked(key, record)
 	}
 	congestionKeys := make([]aspRouteRangeKey, 0, len(r.congestion))
 	for key := range r.congestion {
@@ -356,6 +412,7 @@ func (r *aspRoutes) renumberLocked() {
 		sequence++
 		record.sequence = sequence
 		r.congestion[key] = record
+		r.indexCongestionRecordLocked(key, record)
 	}
 	r.sequence = sequence
 }
@@ -449,27 +506,6 @@ func (r *aspRoutes) destinationStatus(mtpRouteID MTPRouteID, pointCode uint32, m
 	return result, found
 }
 
-func (r *aspRoutes) destinationStatusLocked(mtpRouteID MTPRouteID, pointCode uint32, mask uint8) (aspDestinationStatus, bool) {
-	bestSet := false
-	best := aspDestinationStatus{availability: DestinationUnavailable}
-	for _, gateway := range r.config.signallingGateways {
-		status, configured := r.signallingGatewayStatusLocked(gateway, mtpRouteID, pointCode, mask)
-		if !configured {
-			continue
-		}
-		if !bestSet || aspAvailabilityRank(status.availability) < aspAvailabilityRank(best.availability) {
-			best = status
-			bestSet = true
-			continue
-		}
-		if status.availability != best.availability {
-			continue
-		}
-		best = leastCongestedASPStatus(best, status)
-	}
-	return best, bestSet
-}
-
 func (r *aspRoutes) mtpDestinationStatus(destination MTPDestination) (MTPDestinationStatus, bool) {
 	if destination.PointCode > 0xffffff || destination.Mask > 24 ||
 		destination.PointCode&lowPointCodeBits(destination.Mask) != 0 {
@@ -522,22 +558,8 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 				continue
 			}
 		}
-		leaves := r.derivedLeavesLocked(mtpRoute)
-		updated := make(map[aspDerivedRangeKey]aspDestinationStatus, len(leaves))
-		for _, leaf := range leaves {
-			current, configured := r.destinationStatusLocked(mtpRoute.id, leaf.pointCode, leaf.mask)
-			if !configured {
-				continue
-			}
-			previous, previousSet := r.previousDerivedStatusLocked(leaf)
-			if !previousSet {
-				previous = aspDestinationStatus{availability: DestinationUnavailable}
-			}
-			updated[leaf] = current
-			if indication := newMTPIndication(leaf, previous, current); indication != nil {
-				indications = append(indications, indication)
-			}
-		}
+		updated, routeIndications := r.recomputeMTPRouteLocked(mtpRoute)
+		indications = append(indications, routeIndications...)
 		for key := range r.derived {
 			if key.mtpRoute == mtpRoute.id {
 				delete(r.derived, key)
@@ -550,66 +572,176 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 	return indications
 }
 
-func (r *aspRoutes) derivedLeavesLocked(mtpRoute aspMTPRoute) []aspDerivedRangeKey {
-	boundaries := make([]aspDerivedRangeKey, 0, len(r.availability)+len(r.congestion))
-	for key := range r.availability {
-		if key.mtpRoute == mtpRoute.id {
-			boundaries = append(boundaries, aspDerivedRangeKey{
-				mtpRoute:  key.mtpRoute,
-				pointCode: key.pointCode,
-				mask:      key.mask,
-			})
-		}
+func (r *aspRoutes) recomputeMTPRouteLocked(
+	mtpRoute aspMTPRoute,
+) (map[aspDerivedRangeKey]aspDestinationStatus, []*MTPIndication) {
+	gateways := r.gatewayRouteSnapshotsLocked(mtpRoute.id)
+	updated := make(map[aspDerivedRangeKey]aspDestinationStatus)
+	if len(gateways) == 0 {
+		return updated, nil
 	}
-	for key := range r.congestion {
-		if key.mtpRoute == mtpRoute.id {
-			boundaries = append(boundaries, aspDerivedRangeKey{
-				mtpRoute:  key.mtpRoute,
-				pointCode: key.pointCode,
-				mask:      key.mask,
-			})
-		}
+	root := r.stateIndex[mtpRoute.id]
+	if root == nil {
+		root = &aspRouteStateIndexNode{}
 	}
-	root := aspDerivedRangeKey{
-		mtpRoute:  mtpRoute.id,
-		pointCode: mtpRoute.destinationPointCode,
-		mask:      mtpRoute.mask,
-	}
-	leaves := make([]aspDerivedRangeKey, 0, len(boundaries)+1)
-	appendASPDerivedLeaves(root, boundaries, &leaves)
-	return leaves
+
+	var indications []*MTPIndication
+	r.appendIndexedDerivedLeavesLocked(
+		mtpRoute,
+		root,
+		mtpRoute.destinationPointCode,
+		mtpRoute.mask,
+		gateways,
+		make([]*aspRouteStateIndexNode, 0, int(mtpRoute.mask)+1),
+		updated,
+		&indications,
+	)
+	return updated, indications
 }
 
-func appendASPDerivedLeaves(
-	rangeKey aspDerivedRangeKey,
-	boundaries []aspDerivedRangeKey,
-	leaves *[]aspDerivedRangeKey,
-) {
-	split := false
-	for _, boundary := range boundaries {
-		if boundary.mask < rangeKey.mask &&
-			aspRangeCovers(rangeKey.pointCode, rangeKey.mask, boundary.pointCode, boundary.mask) {
-			split = true
-			break
+func (r *aspRoutes) gatewayRouteSnapshotsLocked(
+	mtpRoute MTPRouteID,
+) []aspGatewayRouteSnapshot {
+	snapshots := make([]aspGatewayRouteSnapshot, 0, len(r.config.signallingGateways))
+	for _, gateway := range r.config.signallingGateways {
+		configured, capable := r.signallingGatewayRouteCapabilityLocked(gateway, mtpRoute)
+		if !configured {
+			continue
 		}
+		snapshots = append(snapshots, aspGatewayRouteSnapshot{id: gateway.id, capable: capable})
 	}
-	if !split || rangeKey.mask == 0 {
-		*leaves = append(*leaves, rangeKey)
+	return snapshots
+}
+
+func aspRouteStateNodeForRange(
+	root *aspRouteStateIndexNode,
+	rootMask uint8,
+	pointCode uint32,
+	mask uint8,
+) *aspRouteStateIndexNode {
+	node := root
+	for currentMask := rootMask; currentMask > mask; currentMask-- {
+		branch := int(pointCode >> (currentMask - 1) & 1)
+		if node.children[branch] == nil {
+			node.children[branch] = &aspRouteStateIndexNode{}
+		}
+		node = node.children[branch]
+	}
+	return node
+}
+
+func (r *aspRoutes) appendIndexedDerivedLeavesLocked(
+	mtpRoute aspMTPRoute,
+	node *aspRouteStateIndexNode,
+	pointCode uint32,
+	mask uint8,
+	gateways []aspGatewayRouteSnapshot,
+	path []*aspRouteStateIndexNode,
+	updated map[aspDerivedRangeKey]aspDestinationStatus,
+	indications *[]*MTPIndication,
+) {
+	path = append(path, node)
+
+	if mask == 0 || node.children[0] == nil && node.children[1] == nil {
+		r.appendIndexedDerivedLeafLocked(mtpRoute, pointCode, mask, gateways, path, updated, indications)
 		return
 	}
-	childMask := rangeKey.mask - 1
-	left := rangeKey
-	left.mask = childMask
-	right := left
-	right.pointCode |= uint32(1) << childMask
-	appendASPDerivedLeaves(left, boundaries, leaves)
-	appendASPDerivedLeaves(right, boundaries, leaves)
+	childMask := mask - 1
+	for branch := 0; branch < 2; branch++ {
+		childPointCode := pointCode | uint32(branch)<<childMask
+		child := node.children[branch]
+		if child == nil {
+			r.appendIndexedDerivedLeafLocked(
+				mtpRoute, childPointCode, childMask, gateways, path, updated, indications,
+			)
+			continue
+		}
+		r.appendIndexedDerivedLeavesLocked(
+			mtpRoute, child, childPointCode, childMask, gateways, path, updated, indications,
+		)
+	}
 }
 
-func (r *aspRoutes) previousDerivedStatusLocked(key aspDerivedRangeKey) (aspDestinationStatus, bool) {
-	for previousKey, status := range r.derived {
-		if previousKey.mtpRoute == key.mtpRoute &&
-			aspRangeCovers(previousKey.pointCode, previousKey.mask, key.pointCode, key.mask) {
+func (r *aspRoutes) appendIndexedDerivedLeafLocked(
+	mtpRoute aspMTPRoute,
+	pointCode uint32,
+	mask uint8,
+	gateways []aspGatewayRouteSnapshot,
+	path []*aspRouteStateIndexNode,
+	updated map[aspDerivedRangeKey]aspDestinationStatus,
+	indications *[]*MTPIndication,
+) {
+	current := aspDestinationStatusFromGatewayPath(gateways, path)
+	key := aspDerivedRangeKey{mtpRoute: mtpRoute.id, pointCode: pointCode, mask: mask}
+	previous, previousSet := r.previousDerivedStatusForRangeLocked(mtpRoute, pointCode, mask)
+	if !previousSet {
+		previous = aspDestinationStatus{availability: DestinationUnavailable}
+	}
+	updated[key] = current
+	if indication := newMTPIndication(key, previous, current); indication != nil {
+		*indications = append(*indications, indication)
+	}
+}
+
+func aspDestinationStatusFromGatewayPath(
+	gateways []aspGatewayRouteSnapshot,
+	path []*aspRouteStateIndexNode,
+) aspDestinationStatus {
+	bestSet := false
+	best := aspDestinationStatus{availability: DestinationUnavailable}
+	for _, gateway := range gateways {
+		status := aspDestinationStatus{availability: DestinationUnavailable}
+		if gateway.capable {
+			status.availability = DestinationAvailable
+			var availability aspAvailabilityRecord
+			availabilitySet := false
+			var congestion aspCongestionRecord
+			congestionSet := false
+			for _, node := range path {
+				if record, exists := node.availability[gateway.id]; exists &&
+					(!availabilitySet || record.sequence > availability.sequence) {
+					availability = record
+					availabilitySet = true
+				}
+				if record, exists := node.congestion[gateway.id]; exists &&
+					(!congestionSet || record.sequence > congestion.sequence) {
+					congestion = record
+					congestionSet = true
+				}
+			}
+			if availabilitySet {
+				status.availability = availability.availability
+			}
+			if congestionSet {
+				status.congested = congestion.congested
+				status.congestionLevel = congestion.level
+				status.congestionLevelSet = congestion.levelSet
+			}
+		}
+		if !bestSet || aspAvailabilityRank(status.availability) < aspAvailabilityRank(best.availability) {
+			best = status
+			bestSet = true
+			continue
+		}
+		if status.availability == best.availability {
+			best = leastCongestedASPStatus(best, status)
+		}
+	}
+	return best
+}
+
+func (r *aspRoutes) previousDerivedStatusForRangeLocked(
+	mtpRoute aspMTPRoute,
+	pointCode uint32,
+	mask uint8,
+) (aspDestinationStatus, bool) {
+	for candidateMask := int(mtpRoute.mask); candidateMask >= int(mask); candidateMask-- {
+		key := aspDerivedRangeKey{
+			mtpRoute:  mtpRoute.id,
+			pointCode: destinationRangePrefix(pointCode, uint8(candidateMask)),
+			mask:      uint8(candidateMask),
+		}
+		if status, exists := r.derived[key]; exists {
 			return status, true
 		}
 	}
@@ -710,6 +842,30 @@ func (r *aspRoutes) signallingGatewayStatusLocked(
 	pointCode uint32,
 	mask uint8,
 ) (aspDestinationStatus, bool) {
+	configured, capable := r.signallingGatewayRouteCapabilityLocked(gateway, mtpRoute)
+	if !configured {
+		return aspDestinationStatus{}, false
+	}
+	if !capable {
+		return aspDestinationStatus{availability: DestinationUnavailable}, true
+	}
+
+	status := aspDestinationStatus{availability: DestinationAvailable}
+	if record, exists := r.latestAvailabilityLocked(gateway.id, mtpRoute, pointCode, mask); exists {
+		status.availability = record.availability
+	}
+	if record, exists := r.latestCongestionLocked(gateway.id, mtpRoute, pointCode, mask); exists {
+		status.congested = record.congested
+		status.congestionLevel = record.level
+		status.congestionLevelSet = record.levelSet
+	}
+	return status, true
+}
+
+func (r *aspRoutes) signallingGatewayRouteCapabilityLocked(
+	gateway aspSignallingGatewayConfig,
+	mtpRoute MTPRouteID,
+) (bool, bool) {
 	configured := false
 	capable := false
 	for _, sgp := range gateway.sgps {
@@ -732,23 +888,7 @@ func (r *aspRoutes) signallingGatewayStatusLocked(
 			break
 		}
 	}
-	if !configured {
-		return aspDestinationStatus{}, false
-	}
-	if !capable {
-		return aspDestinationStatus{availability: DestinationUnavailable}, true
-	}
-
-	status := aspDestinationStatus{availability: DestinationAvailable}
-	if record, exists := r.latestAvailabilityLocked(gateway.id, mtpRoute, pointCode, mask); exists {
-		status.availability = record.availability
-	}
-	if record, exists := r.latestCongestionLocked(gateway.id, mtpRoute, pointCode, mask); exists {
-		status.congested = record.congested
-		status.congestionLevel = record.level
-		status.congestionLevelSet = record.levelSet
-	}
-	return status, true
+	return configured, capable
 }
 
 func (r *aspRoutes) latestAvailabilityLocked(

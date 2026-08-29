@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages"
@@ -81,6 +82,21 @@ func TestASPRouteAggregationClipsBroadSSNMToMTPRoute(t *testing.T) {
 	if _, known := endpoint.aspRoutes.destinationStatus("sccp-a", 0x220000, 0); known {
 		t.Fatal("route registry invented a destination outside the MTP Route")
 	}
+}
+
+func TestASPRouteAggregationUsesLatestCoveringUpdate(t *testing.T) {
+	endpoint, first, second := newASPMultiSGFixture(t)
+	if err := second.Close(); err != nil {
+		t.Fatalf("close alternate SG Association: %v", err)
+	}
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	applyASPDAVA(t, first, 7, 1, 0x120000, 16)
+	requireASPRouteStatus(t, endpoint, "sccp-a", 0x123456, DestinationAvailable, false, 0, false)
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	requireASPRouteStatus(t, endpoint, "sccp-a", 0x123456, DestinationUnavailable, false, 0, false)
+	requireASPRouteStatus(t, endpoint, "sccp-a", 0x123457, DestinationAvailable, false, 0, false)
 }
 
 func TestASPRouteAggregationInfersOmittedSingleAssociationScope(t *testing.T) {
@@ -230,6 +246,19 @@ func TestASPRouteStateOverwriteDoesNotConsumeRecordBudget(t *testing.T) {
 	if recordCount != 1 || availabilityRecords != 1 {
 		t.Fatalf("overwrite left count %d and %d availability records, want 1 and 1", recordCount, availabilityRecords)
 	}
+	endpoint.aspRoutes.mu.RLock()
+	indexNodes := countASPRouteStateIndexNodes(endpoint.aspRoutes.stateIndex["sccp-a"])
+	endpoint.aspRoutes.mu.RUnlock()
+	for range 64 {
+		applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+		applyASPDAVA(t, first, 7, 1, 0x123456, 0)
+	}
+	endpoint.aspRoutes.mu.RLock()
+	updatedIndexNodes := countASPRouteStateIndexNodes(endpoint.aspRoutes.stateIndex["sccp-a"])
+	endpoint.aspRoutes.mu.RUnlock()
+	if updatedIndexNodes != indexNodes {
+		t.Fatalf("overwrite grew route-state index from %d to %d nodes", indexNodes, updatedIndexNodes)
+	}
 }
 
 func TestASPRouteStateCountsAvailabilityAndCongestionSeparately(t *testing.T) {
@@ -360,6 +389,14 @@ func TestASPRouteRenumberPreservesUpdateOrder(t *testing.T) {
 	}
 	if routes.congestion[older].sequence >= routes.congestion[newer].sequence {
 		t.Fatal("congestion update order changed during sequence renumbering")
+	}
+	olderNode := routes.stateIndexNodeForRangeLocked(older)
+	newerNode := routes.stateIndexNodeForRangeLocked(newer)
+	if olderNode.availability["sg-a"].sequence != routes.availability[older].sequence ||
+		newerNode.availability["sg-a"].sequence != routes.availability[newer].sequence ||
+		olderNode.congestion["sg-a"].sequence != routes.congestion[older].sequence ||
+		newerNode.congestion["sg-a"].sequence != routes.congestion[newer].sequence {
+		t.Fatal("route-state index sequence changed independently from retained records")
 	}
 }
 
@@ -532,6 +569,59 @@ func FuzzASPRouteIntersection(f *testing.F) {
 			t.Fatalf("intersection %#x-%#x, want %#x-%#x", intersectionLow, intersectionHigh, wantLow, wantHigh)
 		}
 	})
+}
+
+func BenchmarkASPRouteSparseOverwriteRecompute(b *testing.B) {
+	config := validASPConfig()
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		b.Fatalf("NewEndpoint: %v", err)
+	}
+	associationConfig := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	associationConfig.NetworkAppearance = params.NewNetworkAppearance(7)
+	associationConfig.RoutingContexts = params.NewRoutingContext(1)
+	associationConfig.PeerSGP = &SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}
+	association := &Association{
+		cfg:     associationConfig,
+		muState: new(sync.RWMutex),
+		role:    RoleASP,
+		state:   StateASPActive,
+		done:    make(chan struct{}),
+	}
+	if !endpoint.aspRoutes.attach(association) {
+		b.Fatal("attach benchmark Association")
+	}
+	routes := endpoint.aspRoutes
+	routes.mu.Lock()
+	for offset := uint32(0); offset < DefaultMaxSSNMStateRecordsPerRoute; offset++ {
+		routes.sequence++
+		key := aspRouteRangeKey{
+			signallingGateway: "sg-a",
+			mtpRoute:          "sccp-a",
+			pointCode:         0x120000 + offset,
+			mask:              0,
+		}
+		record := aspAvailabilityRecord{availability: DestinationUnavailable, sequence: routes.sequence}
+		routes.availability[key] = record
+		routes.indexAvailabilityRecordLocked(key, record)
+	}
+	routes.mu.Unlock()
+	b.ResetTimer()
+	for range b.N {
+		routes.mu.Lock()
+		_ = routes.recomputeLocked(map[MTPRouteID]struct{}{"sccp-a": {}})
+		routes.mu.Unlock()
+	}
+}
+
+func countASPRouteStateIndexNodes(node *aspRouteStateIndexNode) int {
+	if node == nil {
+		return 0
+	}
+	return 1 + countASPRouteStateIndexNodes(node.children[0]) + countASPRouteStateIndexNodes(node.children[1])
 }
 
 func aspTestRange(pointCode uint32, mask uint8) (uint32, uint32) {

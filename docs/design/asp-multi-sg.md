@@ -308,6 +308,13 @@ affected prefix into canonical non-overlapping prefixes before comparing old
 and new aggregate state. This prevents one SG's broad DUNA from hiding another
 SG's more-specific DAVA.
 
+Retained availability and congestion records are indexed in a persistent
+24-bit point-code prefix tree. Route recomputation traverses that index and the
+bounded prefix depth instead of rescanning every retained record for every
+derived leaf. Repeated updates to existing prefixes replace indexed records in
+place, so overwrite-only SSNM traffic cannot restore the former quadratic
+Endpoint-lock work or grow the index.
+
 ## MTP3-User Indications
 
 ```go
@@ -425,7 +432,8 @@ The implementation is test-first and includes:
 - configuration and deep-snapshot tests;
 - SG/SGP grouping and duplicate validation tests;
 - availability, restriction, congestion, and range-partition aggregation tests;
-- atomic per-message, per-route, and Endpoint-wide SSNM budget tests;
+- atomic per-message, per-route, and Endpoint-wide SSNM budget tests, including
+  concurrent and repeated-overwrite cases;
 - no-change suppression and bounded-indication overflow tests;
 - primary/backup, loadshare, and broadcast tests at both SG and SGP levels;
 - active Routing Context, Network Appearance, and route-key filtering tests;

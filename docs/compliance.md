@@ -32,6 +32,9 @@ The ASP Endpoint implements the route function described by RFC 4666 Sections
 - Peer-controlled SSNM work and retained route state have configurable
   per-message, per-route, and Endpoint-wide bounds; an over-limit message is
   rejected atomically without inventing an RFC 4666 protocol Error code.
+- A persistent point-code prefix index keeps derived-route recomputation
+  bounded by retained prefixes and the 24-bit path depth, including when a peer
+  repeatedly overwrites existing records without consuming new-record budget.
 - Availability, restriction, and congestion are independent selection inputs.
 - Primary/backup, loadshare, and broadcast selection are supported between SGs
   and between SGPs of one SG, following Appendix A.2.2.
