@@ -268,6 +268,145 @@ func TestMTPTransferBroadcastIncludesEveryPermittedSignallingGateway(t *testing.
 	}
 }
 
+func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testing.T) {
+	config := validASPConfig()
+	config.SignallingGatewaySelection = RouteSelectionBroadcast
+	endpoint, associations, _ := newASPTransferFixture(t, config)
+	firstWriteStarted := make(chan struct{})
+	releaseFirstWrite := make(chan struct{})
+	secondWriteStarted := make(chan struct{})
+	var secondWriteOnce sync.Once
+	var orderMu sync.Mutex
+	orders := make(map[string][]string)
+	for identity, association := range associations {
+		identity := identity
+		association.dataWriter = func(raw []byte, _ *sctp.SndRcvInfo) (int, error) {
+			payload, err := capturedMTPTransferPayload(raw)
+			if err != nil {
+				return 0, err
+			}
+			orderMu.Lock()
+			orders[identity] = append(orders[identity], payload)
+			orderMu.Unlock()
+			if identity == "sg-a/sgp-a1" && payload == "first" {
+				close(firstWriteStarted)
+				<-releaseFirstWrite
+			}
+			if payload == "second" {
+				secondWriteOnce.Do(func() { close(secondWriteStarted) })
+			}
+			return len(raw), nil
+		}
+	}
+
+	transfer := func(payload string, priority uint8) error {
+		protocolData := transferProtocolData(0x123456, 4, []byte(payload))
+		protocolData.MessagePriority = priority
+		_, err := endpoint.MTPTransfer(MTPTransferRequest{
+			ProtocolData: protocolData,
+		})
+		return err
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- transfer("first", 0) }()
+	select {
+	case <-firstWriteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first MTPTransfer did not reach the first Signalling Gateway")
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- transfer("second", 1) }()
+	interleaved := false
+	select {
+	case <-secondWriteStarted:
+		interleaved = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseFirstWrite)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first MTPTransfer: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second MTPTransfer: %v", err)
+	}
+	if interleaved {
+		t.Fatal("second same-flow MTPTransfer started before the first broadcast completed")
+	}
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	for _, identity := range []string{"sg-a/sgp-a1", "sg-b/sgp-b1"} {
+		order := orders[identity]
+		if len(order) != 2 || order[0] != "first" || order[1] != "second" {
+			t.Errorf("%s DATA order = %v, want [first second]", identity, order)
+		}
+	}
+	endpoint.aspRoutes.transferSequenceMu.Lock()
+	activeSequences := len(endpoint.aspRoutes.transferSequences)
+	endpoint.aspRoutes.transferSequenceMu.Unlock()
+	if activeSequences != 0 {
+		t.Errorf("retained transfer sequence gates = %d, want 0", activeSequences)
+	}
+}
+
+func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
+	config := validASPConfig()
+	config.SignallingGatewaySelection = RouteSelectionBroadcast
+	endpoint, associations, _ := newASPTransferFixture(t, config)
+	firstWriteStarted := make(chan struct{})
+	releaseFirstWrite := make(chan struct{})
+	secondWriteStarted := make(chan struct{})
+	firstAssociation := associations["sg-a/sgp-a1"]
+	firstAssociation.dataWriter = func(raw []byte, _ *sctp.SndRcvInfo) (int, error) {
+		payload, err := capturedMTPTransferPayload(raw)
+		if err != nil {
+			return 0, err
+		}
+		switch payload {
+		case "first":
+			close(firstWriteStarted)
+			<-releaseFirstWrite
+		case "second":
+			close(secondWriteStarted)
+		}
+		return len(raw), nil
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := endpoint.MTPTransfer(MTPTransferRequest{
+			ProtocolData: transferProtocolData(0x123456, 4, []byte("first")),
+		})
+		firstDone <- err
+	}()
+	select {
+	case <-firstWriteStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first MTPTransfer did not reach the first Signalling Gateway")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := endpoint.MTPTransfer(MTPTransferRequest{
+			ProtocolData: transferProtocolData(0x123456, 5, []byte("second")),
+		})
+		secondDone <- err
+	}()
+	select {
+	case <-secondWriteStarted:
+	case <-time.After(time.Second):
+		close(releaseFirstWrite)
+		<-firstDone
+		<-secondDone
+		t.Fatal("independent MTP traffic flow waited for a blocked flow")
+	}
+	close(releaseFirstWrite)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first MTPTransfer: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second MTPTransfer: %v", err)
+	}
+}
+
 func TestMTPTransferBroadcastAddsRecoveredSignallingGateway(t *testing.T) {
 	config := validASPConfig()
 	config.SignallingGatewaySelection = RouteSelectionBroadcast
@@ -845,4 +984,20 @@ func transferProtocolData(pointCode uint32, sls uint8, data []byte) *params.Prot
 	return params.NewProtocolDataPayload(
 		0x111111, pointCode, params.ServiceIndSCCP, 0, 0, sls, data,
 	)
+}
+
+func capturedMTPTransferPayload(raw []byte) (string, error) {
+	parsed, err := messages.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	data, ok := parsed.(*messages.Data)
+	if !ok {
+		return "", errors.New("captured message is not DATA")
+	}
+	protocolData, err := data.ProtocolData.ProtocolData()
+	if err != nil {
+		return "", err
+	}
+	return string(protocolData.Data), nil
 }

@@ -72,7 +72,6 @@ type aspTransferFlowKey struct {
 	dpc      uint32
 	si       uint8
 	ni       uint8
-	mp       uint8
 	sls      uint8
 }
 
@@ -120,7 +119,17 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 	}
 	defer e.endOperation()
 
-	targets, err := e.aspRoutes.selectTransfer(request)
+	congestionDecision := evaluateASPCongestionPolicy(
+		e.aspRoutes.config.congestionPolicy,
+		request.ProtocolData.MessagePriority,
+	)
+	unlockSequence, err := e.aspRoutes.lockTransferSequence(request)
+	if err != nil {
+		return MTPTransferResult{}, err
+	}
+	defer unlockSequence()
+
+	targets, err := e.aspRoutes.selectTransfer(request, congestionDecision)
 	if err != nil {
 		return MTPTransferResult{}, err
 	}
@@ -146,11 +155,40 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 	return result, nil
 }
 
-func (r *aspRoutes) selectTransfer(request MTPTransferRequest) ([]aspTransferTarget, error) {
-	congestionDecision := evaluateASPCongestionPolicy(
-		r.config.congestionPolicy,
-		request.ProtocolData.MessagePriority,
-	)
+func (r *aspRoutes) lockTransferSequence(request MTPTransferRequest) (func(), error) {
+	r.mu.RLock()
+	mtpRoute, err := r.resolveTransferMTPRouteLocked(request.MTPRoute, request.ProtocolData)
+	r.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	flowKey := newASPTransferFlowKey(mtpRoute.id, request.ProtocolData)
+
+	r.transferSequenceMu.Lock()
+	flowLock := r.transferSequences[flowKey]
+	if flowLock == nil {
+		flowLock = &aspTransferFlowLock{}
+		r.transferSequences[flowKey] = flowLock
+	}
+	flowLock.references++
+	r.transferSequenceMu.Unlock()
+
+	flowLock.mu.Lock()
+	return func() {
+		flowLock.mu.Unlock()
+		r.transferSequenceMu.Lock()
+		flowLock.references--
+		if flowLock.references == 0 {
+			delete(r.transferSequences, flowKey)
+		}
+		r.transferSequenceMu.Unlock()
+	}, nil
+}
+
+func (r *aspRoutes) selectTransfer(
+	request MTPTransferRequest,
+	congestionDecision aspCongestionDecision,
+) ([]aspTransferTarget, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -499,7 +537,6 @@ func newASPTransferFlowKey(mtpRoute MTPRouteID, protocolData *params.ProtocolDat
 		dpc:      protocolData.DestinationPointCode,
 		si:       protocolData.ServiceIndicator,
 		ni:       protocolData.NetworkIndicator,
-		mp:       protocolData.MessagePriority,
 		sls:      protocolData.SignallingLinkSelection,
 	}
 }
@@ -509,13 +546,12 @@ func hashASPTransferFlow(key aspTransferFlowKey, salt string) uint64 {
 	_, _ = hash.Write([]byte(key.mtpRoute))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(salt))
-	var encoded [12]byte
+	var encoded [11]byte
 	binary.BigEndian.PutUint32(encoded[0:4], key.opc)
 	binary.BigEndian.PutUint32(encoded[4:8], key.dpc)
 	encoded[8] = key.si
 	encoded[9] = key.ni
-	encoded[10] = key.mp
-	encoded[11] = key.sls
+	encoded[10] = key.sls
 	_, _ = hash.Write(encoded[:])
 	return hash.Sum64()
 }

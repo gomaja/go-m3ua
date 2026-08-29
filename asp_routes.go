@@ -74,6 +74,11 @@ type aspGatewayRouteSnapshot struct {
 	capable bool
 }
 
+type aspTransferFlowLock struct {
+	mu         sync.Mutex
+	references int
+}
+
 // aspRoutes owns ASP-wide route state. RFC 4666 Section 4.5.2.2 scopes SSNM
 // updates to the originating SG, while Section 1.3.2.5 requires the ASP to
 // derive one destination state from all such routes.
@@ -97,6 +102,12 @@ type aspRoutes struct {
 	sequence             uint64
 	transferFlows        map[aspTransferFlowKey]*list.Element
 	transferFlowLRU      *list.List
+	// transferSequences serializes concurrent MTP-TRANSFER requests sharing
+	// one RFC 4666 Section 3.3.1 traffic flow. In broadcast mode this ensures
+	// every selected SGP observes the same order, as Appendix A.2.2 requires
+	// when minimizing missequencing.
+	transferSequenceMu sync.Mutex
+	transferSequences  map[aspTransferFlowKey]*aspTransferFlowLock
 
 	indicationMu      sync.Mutex
 	indications       chan *MTPIndication
@@ -125,6 +136,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		derived:              make(map[aspDerivedRangeKey]aspDestinationStatus),
 		transferFlows:        make(map[aspTransferFlowKey]*list.Element),
 		transferFlowLRU:      list.New(),
+		transferSequences:    make(map[aspTransferFlowKey]*aspTransferFlowLock),
 		indications:          make(chan *MTPIndication, queueSize),
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {

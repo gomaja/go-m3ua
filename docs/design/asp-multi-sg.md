@@ -399,18 +399,24 @@ Selection order is:
 9. Use that SGP route's `ASKey` and choose the SCTP stream from the Protocol
    Data SLS.
 
-The stable flow key contains the MTP Route plus OPC, DPC, SI, NI, SLS, and
-Message Priority. A bounded sticky-flow
-cache retains the selected Association set while every selected Association
-remains eligible. A change in candidate inventory does not move a healthy flow.
-When the assignment becomes ineligible, the same deterministic hash and
-configuration order choose its replacement.
+The stable flow key contains the MTP Route plus OPC, DPC, SI, NI, and SLS.
+Message Priority is evaluated separately by congestion policy and does not
+split a sequenced traffic flow. A bounded sticky-flow cache retains the
+selected Association set while every selected Association remains eligible. A
+change in candidate inventory does not move a healthy flow. When the assignment
+becomes ineligible, the same deterministic hash and configuration order choose
+its replacement.
 
 Broadcast attempts every selected Association in deterministic order. A
 partial failure is returned as a typed error containing the successful and
 failed SGP identities; it is never reported as complete success. Non-broadcast
 write failure is not retried blindly because an SCTP write error may not prove
 that the peer received no DATA.
+
+Concurrent MTP-TRANSFER requests for the same traffic flow are serialized
+across the complete selected Association set. This gives every broadcast SGP
+the same DATA order while independent flows remain concurrent. Sequence gates
+exist only while calls for that flow are active and are then removed.
 
 ## Concurrency and Lifecycle
 
