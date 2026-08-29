@@ -19,7 +19,7 @@ Use `Endpoint.Dial` when that endpoint initiates SCTP, or
 `RoleASP` or `RoleSGP` supports either orientation.
 
 `RoleIPSP` is reserved for the explicit Single Exchange model and Double
-Exchange model APIs defined by RFC 4666 Section 4.3.1. Calling `Dial` or
+Exchange model APIs defined by RFC 4666 Section 4.3. Calling `Dial` or
 `Listen` directly on an IPSP endpoint returns `ErrUnsupportedRole` rather than
 guessing either model.
 
@@ -33,6 +33,12 @@ Use `Listener.DistributeData` for an SGP that accepts SCTP associations and
 Both paths apply the same Application Server state, recovery queue, and Traffic
 Mode rules. Calling `Association.DistributeData` on an ASP returns
 `ErrUnsupportedRole`.
+
+For SGP state learned from the SS7 side, the same orientation rule applies:
+use the Listener methods for an SGP that accepts SCTP associations, or
+`Association.SetNIFAvailable`, `Association.SetASAvailableForAS`, destination
+reporting, and `Association.BeginMTP3Restart` for an SGP that initiates its SCTP
+association. These Association procedures reject the ASP role.
 
 ## Renamed API
 

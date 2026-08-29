@@ -18,7 +18,7 @@ var (
 	// atomically declared when the restart began.
 	ErrMTP3RestartScope = errors.New("destination is outside the MTP3 restart scope")
 	// ErrStaleMTP3Restart reports a handle whose restart has already completed
-	// or no longer belongs to this Listener generation.
+	// or no longer belongs to its owning SGP state generation.
 	ErrStaleMTP3Restart = errors.New("stale MTP3 restart handle")
 	// ErrEmptyMTP3Restart reports a restart declaration with no affected scope.
 	ErrEmptyMTP3Restart = errors.New("MTP3 restart has no affected destinations")
@@ -35,13 +35,21 @@ type AffectedDestination struct {
 	Mask                 uint8
 }
 
-// MTP3Restart is an opaque generation handle for one Listener restart
-// procedure. Its methods are safe to call concurrently.
+// MTP3Restart is an opaque generation handle for one SGP restart procedure.
+// Its methods are safe to call concurrently.
 type MTP3Restart struct {
-	listener   *Listener
+	target     mtp3RestartTarget
 	generation uint64
 	mu         sync.Mutex
 	completed  bool
+}
+
+type mtp3RestartTarget struct {
+	registry     *mtp3RestartRegistry
+	closed       func() bool
+	prepare      func(DestinationRange) (DestinationRange, error)
+	destinations func() *destinations
+	publish      func([]DestinationRange, bool, bool, bool) error
 }
 
 type mtp3RestartRegistry struct {
@@ -56,6 +64,17 @@ type mtp3RestartEpoch struct {
 	updates  []DestinationRange
 }
 
+func invalidateMTP3RestartRegistry(registry *mtp3RestartRegistry) {
+	if registry == nil {
+		return
+	}
+	registry.procedureMu.Lock()
+	registry.mu.Lock()
+	registry.active = nil
+	registry.mu.Unlock()
+	registry.procedureMu.Unlock()
+}
+
 // BeginMTP3Restart starts the MTP3 restart procedure in RFC 4666 Section 4.6.
 // Validation and isolation-state publication are atomic. A non-nil handle is
 // returned even when one or more ASP writes fail, so the procedure can still
@@ -64,13 +83,39 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 	if l == nil {
 		return nil, errors.New("nil Listener")
 	}
+	if l.Role() != RoleSGP {
+		return nil, ErrUnsupportedRole
+	}
+	return beginMTP3Restart(l.mtp3RestartTarget(), affected...)
+}
+
+// BeginMTP3Restart starts the MTP3 restart procedure in RFC 4666 Section 4.6
+// for an SGP Association. A dialing SGP owns the restart state directly; an
+// accepted SGP Association uses its Listener's shared restart state.
+func (c *Association) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Restart, error) {
+	if c == nil || c.Role() != RoleSGP {
+		return nil, ErrUnsupportedRole
+	}
+	select {
+	case <-c.done:
+		return nil, ErrAssociationClosed
+	default:
+	}
+	return beginMTP3Restart(c.mtp3RestartTarget(), affected...)
+}
+
+func beginMTP3Restart(target mtp3RestartTarget, affected ...AffectedDestination) (*MTP3Restart, error) {
 	if len(affected) == 0 {
 		return nil, ErrEmptyMTP3Restart
+	}
+	if target.registry == nil || target.closed == nil || target.prepare == nil ||
+		target.destinations == nil || target.publish == nil {
+		return nil, ErrNotEstablished
 	}
 
 	ranges := make([]DestinationRange, len(affected))
 	for index, destination := range affected {
-		rangeValue, err := l.prepareLocalDestinationRange(DestinationRange{
+		rangeValue, err := target.prepare(DestinationRange{
 			NetworkAppearance:    destination.NetworkAppearance,
 			NetworkAppearanceSet: destination.NetworkAppearanceSet,
 			RoutingContext:       destination.RoutingContext,
@@ -90,13 +135,10 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 		ranges[index] = rangeValue
 	}
 
-	registry := &l.mtp3Restarts
+	registry := target.registry
 	registry.procedureMu.Lock()
 	defer registry.procedureMu.Unlock()
-	l.muConns.Lock()
-	closed := l.closed
-	l.muConns.Unlock()
-	if closed {
+	if target.closed() {
 		return nil, ErrAssociationClosed
 	}
 
@@ -124,16 +166,16 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 	}
 	registry.mu.Unlock()
 
-	destinations := l.destinationRegistry()
+	destinations := target.destinations()
 	destinations.setRanges(ranges)
-	handle := &MTP3Restart{listener: l, generation: generation}
-	return handle, l.publishDestinationRanges(ranges, false, false, true)
+	handle := &MTP3Restart{target: target, generation: generation}
+	return handle, target.publish(ranges, false, false, true)
 }
 
 // Update stages a destination's final state. No recovery SSNM is emitted until
 // Complete, and DAUD continues to report DUNA for the affected scope meanwhile.
 func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationState) error {
-	if r == nil || r.listener == nil {
+	if r == nil || r.target.registry == nil {
 		return ErrStaleMTP3Restart
 	}
 	r.mu.Lock()
@@ -141,7 +183,7 @@ func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationS
 	if r.completed {
 		return ErrStaleMTP3Restart
 	}
-	rangeValue, err := r.listener.prepareLocalDestinationRange(DestinationRange{
+	rangeValue, err := r.target.prepare(DestinationRange{
 		NetworkAppearance:    destination.NetworkAppearance,
 		NetworkAppearanceSet: destination.NetworkAppearanceSet,
 		RoutingContext:       destination.RoutingContext,
@@ -153,13 +195,13 @@ func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationS
 	if err != nil {
 		return err
 	}
-	return r.listener.stageMTP3RestartRange(r.generation, rangeValue)
+	return stageMTP3RestartRange(r.target.registry, r.generation, rangeValue)
 }
 
 // Complete atomically publishes all staged final states, then sends recovery
 // SSNM to the currently active and concerned ASPs. Calling it again is a no-op.
 func (r *MTP3Restart) Complete() error {
-	if r == nil || r.listener == nil {
+	if r == nil || r.target.registry == nil {
 		return ErrStaleMTP3Restart
 	}
 	r.mu.Lock()
@@ -167,15 +209,14 @@ func (r *MTP3Restart) Complete() error {
 	if r.completed {
 		return nil
 	}
-	err := r.listener.completeMTP3Restart(r.generation)
+	err := completeMTP3Restart(r.target, r.generation)
 	if !errors.Is(err, ErrStaleMTP3Restart) {
 		r.completed = true
 	}
 	return err
 }
 
-func (l *Listener) stageMTP3RestartRange(generation uint64, rangeValue DestinationRange) error {
-	registry := &l.mtp3Restarts
+func stageMTP3RestartRange(registry *mtp3RestartRegistry, generation uint64, rangeValue DestinationRange) error {
 	registry.procedureMu.RLock()
 	defer registry.procedureMu.RUnlock()
 	registry.mu.Lock()
@@ -221,8 +262,8 @@ func appendRestartUpdate(updates []DestinationRange, rangeValue DestinationRange
 	return append(updates, rangeValue)
 }
 
-func (l *Listener) completeMTP3Restart(generation uint64) error {
-	registry := &l.mtp3Restarts
+func completeMTP3Restart(target mtp3RestartTarget, generation uint64) error {
+	registry := target.registry
 	registry.procedureMu.Lock()
 	defer registry.procedureMu.Unlock()
 	registry.mu.Lock()
@@ -235,8 +276,46 @@ func (l *Listener) completeMTP3Restart(generation uint64) error {
 	delete(registry.active, generation)
 	registry.mu.Unlock()
 
-	l.destinationRegistry().setRanges(updates)
-	return l.publishDestinationRanges(updates, true, false, true)
+	target.destinations().setRanges(updates)
+	return target.publish(updates, true, false, true)
+}
+
+func (l *Listener) mtp3RestartTarget() mtp3RestartTarget {
+	return mtp3RestartTarget{
+		registry: &l.mtp3Restarts,
+		closed: func() bool {
+			l.muConns.Lock()
+			defer l.muConns.Unlock()
+			return l.closed
+		},
+		prepare:      l.prepareLocalDestinationRange,
+		destinations: l.destinationRegistry,
+		publish:      l.publishDestinationRanges,
+	}
+}
+
+func (c *Association) mtp3RestartTarget() mtp3RestartTarget {
+	if c.listener != nil {
+		return c.listener.mtp3RestartTarget()
+	}
+	return mtp3RestartTarget{
+		registry: c.mtp3Restarts,
+		closed: func() bool {
+			select {
+			case <-c.done:
+				return true
+			default:
+				return false
+			}
+		},
+		prepare: c.prepareLocalDestinationRange,
+		destinations: func() *destinations {
+			return c.destinations
+		},
+		publish: func(ranges []DestinationRange, completion, abateCongestion, wait bool) error {
+			return publishDestinationRanges(c.as, ranges, completion, abateCongestion, wait)
+		},
+	}
 }
 
 func (l *Listener) destinationRegistry() *destinations {
@@ -249,28 +328,36 @@ func (l *Listener) destinationRegistry() *destinations {
 }
 
 func (l *Listener) prepareLocalDestinationRange(rangeValue DestinationRange) (DestinationRange, error) {
+	l.muConns.Lock()
+	registry := l.as
+	l.muConns.Unlock()
+	return prepareLocalDestinationRange(l.AssociationConfig, registry, rangeValue)
+}
+
+func (c *Association) prepareLocalDestinationRange(rangeValue DestinationRange) (DestinationRange, error) {
+	return prepareLocalDestinationRange(c.cfg, c.as, rangeValue)
+}
+
+func prepareLocalDestinationRange(config *AssociationConfig, registry *applicationServers, rangeValue DestinationRange) (DestinationRange, error) {
 	if !validDestinationState(rangeValue.State) {
 		return DestinationRange{}, fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
 	}
-	if !rangeValue.NetworkAppearanceSet && l.AssociationConfig != nil {
-		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(l.AssociationConfig.NetworkAppearance)
+	if !rangeValue.NetworkAppearanceSet && config != nil {
+		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
 	}
 	rangeValue = normalizeDestinationRange(rangeValue)
 	if !rangeValue.RoutingContextSet {
 		return rangeValue, nil
 	}
-	if !l.hasLocalRoutingContext(rangeValue.RoutingContext) {
+	if !hasLocalRoutingContext(config, registry, rangeValue.RoutingContext) {
 		return DestinationRange{}, NewInvalidRoutingContextError(rangeValue.RoutingContext)
 	}
 	return rangeValue, nil
 }
 
-func (l *Listener) hasLocalRoutingContext(routingContext uint32) bool {
-	if l == nil {
-		return false
-	}
-	if l.AssociationConfig != nil && l.AssociationConfig.RoutingContexts != nil {
-		configured := l.AssociationConfig.RoutingContexts.RoutingContexts()
+func hasLocalRoutingContext(config *AssociationConfig, registry *applicationServers, routingContext uint32) bool {
+	if config != nil && config.RoutingContexts != nil {
+		configured := config.RoutingContexts.RoutingContexts()
 		if len(configured) > 0 {
 			for _, candidate := range configured {
 				if candidate == routingContext {
@@ -279,9 +366,6 @@ func (l *Listener) hasLocalRoutingContext(routingContext uint32) bool {
 			}
 		}
 	}
-	l.muConns.Lock()
-	registry := l.as
-	l.muConns.Unlock()
 	if registry == nil {
 		return false
 	}

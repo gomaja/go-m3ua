@@ -304,6 +304,29 @@ func TestIPSPDialAndListenRequireAnExplicitExchangeModel(t *testing.T) {
 	}
 }
 
+func TestIPSPAssociationRejectsSGPDestinationProcedures(t *testing.T) {
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleIPSP, 1)
+	const (
+		networkAppearance = uint32(7)
+		routingContext    = uint32(1)
+		pointCode         = uint32(0x123456)
+	)
+
+	if err := association.ReportDestinationStateForNetworkAndRoutingContext(
+		networkAppearance, routingContext, pointCode, DestinationRestricted,
+	); !errors.Is(err, ErrUnsupportedRole) {
+		t.Fatalf("IPSP destination report error = %v, want ErrUnsupportedRole", err)
+	}
+	association.SetDestinationStateForNetworkAndRoutingContext(
+		networkAppearance, routingContext, pointCode, DestinationRestricted,
+	)
+	if got := association.DestinationStateForNetworkAndRoutingContext(
+		networkAppearance, routingContext, pointCode,
+	); got != DestinationAvailable {
+		t.Fatalf("IPSP destination state = %v after unsupported update, want available", got)
+	}
+}
+
 func TestDialNormalizesAZeroAssociationConfigBeforeTransport(t *testing.T) {
 	endpoint, err := NewEndpoint(RoleASP)
 	if err != nil {
@@ -471,15 +494,69 @@ func TestEndpointRoleIsIndependentOfSCTPOrientation(t *testing.T) {
 				); err != nil {
 					t.Fatalf("ASP write DAUD: %v", err)
 				}
-				select {
-				case status := <-acceptedAssociation.SignallingStatus():
-					if status.PointCode != pointCode || status.State != DestinationAvailable {
-						t.Fatalf("DAUD response = %+v, want point code %#x available", status, pointCode)
-					}
-				case <-ctx.Done():
-					t.Fatalf("DAUD response did not arrive: %v", ctx.Err())
+				waitForEndpointDestinationStatus(
+					t, ctx, acceptedAssociation, pointCode, DestinationAvailable, "DAUD response",
+				)
+
+				restartPointCode := uint32(0x2345)
+				restartDestination := AffectedDestination{
+					NetworkAppearance:    0,
+					NetworkAppearanceSet: true,
+					RoutingContext:       1,
+					RoutingContextSet:    true,
+					PointCode:            restartPointCode,
+				}
+				restart, err := dialed.BeginMTP3Restart(restartDestination)
+				if err != nil {
+					t.Fatalf("dialing SGP begin MTP3 restart: %v", err)
+				}
+				waitForEndpointDestinationStatus(
+					t, ctx, acceptedAssociation, restartPointCode, DestinationUnavailable,
+					"restart isolation status",
+				)
+				if err := restart.Update(restartDestination, DestinationAvailable); err != nil {
+					t.Fatalf("dialing SGP stage MTP3 restart recovery: %v", err)
+				}
+				if err := restart.Complete(); err != nil {
+					t.Fatalf("dialing SGP complete MTP3 restart: %v", err)
+				}
+				waitForEndpointDestinationStatus(
+					t, ctx, acceptedAssociation, restartPointCode, DestinationAvailable,
+					"restart recovery status",
+				)
+
+				if err := dialed.SetASAvailable(1, false); err != nil {
+					t.Fatalf("dialing SGP isolate Application Server: %v", err)
+				}
+				if dialed.activeForRoutingContext(1) {
+					t.Fatal("dialing SGP retained active traffic scope after AS isolation")
 				}
 			}
 		})
+	}
+}
+
+func waitForEndpointDestinationStatus(
+	t *testing.T,
+	ctx context.Context,
+	association *Association,
+	pointCode uint32,
+	state DestinationState,
+	description string,
+) {
+	t.Helper()
+	for {
+		select {
+		case status, ok := <-association.SignallingStatus():
+			if !ok {
+				t.Fatalf("Association closed before %s arrived", description)
+			}
+			if status != nil && status.PointCode == pointCode && status.State == state {
+				return
+			}
+		case <-ctx.Done():
+			t.Fatalf("%s for point code %#x and state %v did not arrive: %v",
+				description, pointCode, state, ctx.Err())
+		}
 	}
 }

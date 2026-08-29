@@ -1056,6 +1056,108 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) error {
 	return nil
 }
 
+// SetNIFAvailable declares whether this dialing SGP Association can reach the
+// SS7 network through its nodal interworking function. On an accepted SGP
+// Association it applies the Listener-wide NIF state. RFC 4666 Section 4.7
+// defines the resulting ASP Down Ack and management-blocking procedures.
+func (c *Association) SetNIFAvailable(available bool) error {
+	if err := c.validateSGPAvailabilityControl(); err != nil {
+		return err
+	}
+	if c.listener != nil {
+		return c.listener.SetNIFAvailable(available)
+	}
+	c.nif.setIsolated(!available)
+	if !available {
+		isolateNIFConnection(c)
+	}
+	return nil
+}
+
+// SetASAvailable declares whether this dialing SGP Association can service one
+// unambiguous Routing Context. On an accepted SGP Association it applies the
+// Listener-wide Application Server state.
+func (c *Association) SetASAvailable(rtCtx uint32, available bool) error {
+	if err := c.validateSGPAvailabilityControl(); err != nil {
+		return err
+	}
+	if c.listener != nil {
+		return c.listener.SetASAvailable(rtCtx, available)
+	}
+	registryKey, _, registryOK, registryAmbiguous := c.as.lookupRoutingContext(rtCtx)
+	if registryAmbiguous {
+		return nil
+	}
+	configuredKey, configuredOK, configuredAmbiguous := c.singleConfiguredASKeyForRoutingContext(rtCtx)
+	if configuredAmbiguous {
+		return nil
+	}
+	if registryOK && configuredOK && registryKey != configuredKey {
+		return nil
+	}
+	if registryOK {
+		return c.SetASAvailableForAS(registryKey, available)
+	}
+	if configuredOK {
+		return c.SetASAvailableForAS(configuredKey, available)
+	}
+	return c.SetASAvailableForAS(c.as.routingContextASKey(rtCtx), available)
+}
+
+// SetASAvailableForAS declares whether this dialing SGP Association can
+// service one exact Application Server. On an accepted SGP Association it
+// applies the Listener-wide Application Server state.
+func (c *Association) SetASAvailableForAS(key ASKey, available bool) error {
+	if err := c.validateSGPAvailabilityControl(); err != nil {
+		return err
+	}
+	if c.listener != nil {
+		return c.listener.SetASAvailableForAS(key, available)
+	}
+	c.nif.setASAvailableForAS(key, available)
+	if available {
+		return nil
+	}
+	for _, configuredKey := range c.configuredASKeys() {
+		if configuredKey == key {
+			isolateApplicationServerConnection(c, c.as, key)
+			break
+		}
+	}
+	return nil
+}
+
+func (c *Association) validateSGPAvailabilityControl() error {
+	if c == nil || c.Role() != RoleSGP {
+		return ErrUnsupportedRole
+	}
+	select {
+	case <-c.done:
+		return ErrAssociationClosed
+	default:
+	}
+	if c.nif == nil || c.as == nil {
+		return ErrNotEstablished
+	}
+	return nil
+}
+
+func (c *Association) singleConfiguredASKeyForRoutingContext(rtCtx uint32) (ASKey, bool, bool) {
+	var found ASKey
+	foundSet := false
+	for _, key := range c.configuredASKeys() {
+		if !key.RoutingContextSet || key.RoutingContext != rtCtx {
+			continue
+		}
+		if foundSet && key != found {
+			return ASKey{}, false, true
+		}
+		found = key
+		foundSet = true
+	}
+	return found, foundSet, false
+}
+
 func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, bool, bool) {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()

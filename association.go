@@ -1368,6 +1368,7 @@ func (c *Association) closeWith(cause error) error {
 			c.listener.forget(c)
 		}
 		if c.releaseEndpointStateOwner != nil {
+			invalidateMTP3RestartRegistry(c.mtp3Restarts)
 			c.as.close()
 			c.releaseEndpointStateOwner()
 		}

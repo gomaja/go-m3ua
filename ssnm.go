@@ -1440,6 +1440,9 @@ func (c *Association) ReportDestinationRangeForNetworkAndRoutingContext(networkA
 }
 
 func (c *Association) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
+	if c != nil && c.role == RoleIPSP {
+		return ErrUnsupportedRole
+	}
 	if c != nil && c.role == RoleSGP {
 		if c.listener != nil {
 			return c.listener.applyDestinationRange(rangeValue, wait)
