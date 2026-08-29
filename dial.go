@@ -205,9 +205,11 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	case RoleIPSP:
 		association.as = e.applicationServerRegistry()
 	}
+	registration := &applicationServerReservation{}
 	if association.as != nil {
-		association.as.register(association.configuredASKeys())
+		registration = association.as.reserve(association.configuredASKeys())
 	}
+	defer registration.rollback()
 
 	// The notification handler has to be installed on the socket at dial time;
 	// route it to this Association, and ignore events that arrive before an SCTP
@@ -244,9 +246,14 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 
 	select {
 	case <-association.established:
+		registration.commit()
 		keepOperationContext = true
 		return association, nil
 	case <-association.done:
+		// done closes at the beginning of closeWith. Join the once-only teardown
+		// before rolling back provisional ASKeys, so Endpoint membership has
+		// already been removed when the reservation checks whether a scope is empty.
+		_ = association.closeWith(nil)
 		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
 			return nil, ErrEndpointClosed
 		}

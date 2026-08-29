@@ -245,9 +245,10 @@ type asStateNotification struct {
 // applicationServers is the registry an SGP or IPSP Endpoint keeps, one entry
 // per Application Server traffic scope it serves.
 type applicationServers struct {
-	mu     sync.Mutex
-	as     map[ASKey]*applicationServer
-	closed bool
+	mu            sync.Mutex
+	as            map[ASKey]*applicationServer
+	registrations map[ASKey]*applicationServerRegistration
+	closed        bool
 	// aspIdentifiers is the identifier each association supplied in ASP Up.
 	// Uniqueness is required only among ASPs that support a common AS.
 	aspIdentifiers map[*Association]uint32
@@ -259,6 +260,24 @@ type applicationServers struct {
 	// recoveryBudget bounds retained DATA across the entire SGP Endpoint, in
 	// addition to each AS's own distributionPolicy limits.
 	recoveryBudget *recoveryBudget
+}
+
+type applicationServerRegistration struct {
+	applicationServer *applicationServer
+	provisional       int
+	persistent        bool
+	removable         bool
+}
+
+type applicationServerReservationEntry struct {
+	key               ASKey
+	applicationServer *applicationServer
+}
+
+type applicationServerReservation struct {
+	registry *applicationServers
+	entries  []applicationServerReservationEntry
+	once     sync.Once
 }
 
 type activeSSNMTarget struct {
@@ -280,6 +299,7 @@ func newApplicationServersForSGP(config *SGPConfig) *applicationServers {
 	}
 	return &applicationServers{
 		as:             make(map[ASKey]*applicationServer),
+		registrations:  make(map[ASKey]*applicationServerRegistration),
 		aspIdentifiers: make(map[*Association]uint32),
 		recoveryTimer:  recovery,
 		distribution:   newSGPDistributionPolicy(config),
@@ -355,23 +375,164 @@ func (r *applicationServers) get(scope any) *applicationServer {
 			return as
 		}
 	}
-	as, ok := r.as[key]
-	if !ok {
-		as = &applicationServer{
-			key:                key,
-			asps:               make(map[*Association]State),
-			broadcastFlowLimit: r.distribution.broadcastFlowCacheEntries,
-			recoveryBudget:     r.recoveryBudget,
-		}
-		r.as[key] = as
-	}
+	as, _ := r.getOrCreateLocked(key)
 	return as
 }
 
 func (r *applicationServers) register(keys []ASKey) {
-	for _, key := range keys {
-		r.get(key)
+	if r == nil {
+		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return
+	}
+	for _, key := range uniqueASKeys(keys) {
+		applicationServer, _ := r.getOrCreateLocked(key)
+		registration := r.registrationForLocked(key, applicationServer, false)
+		registration.persistent = true
+		registration.removable = false
+	}
+}
+
+func (r *applicationServers) reserve(keys []ASKey) *applicationServerReservation {
+	reservation := &applicationServerReservation{registry: r}
+	if r == nil {
+		return reservation
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return reservation
+	}
+	for _, key := range uniqueASKeys(keys) {
+		applicationServer, created := r.getOrCreateLocked(key)
+		registration := r.registrationForLocked(key, applicationServer, created)
+		registration.provisional++
+		reservation.entries = append(reservation.entries, applicationServerReservationEntry{
+			key:               key,
+			applicationServer: applicationServer,
+		})
+	}
+	return reservation
+}
+
+func (r *applicationServers) getOrCreateLocked(key ASKey) (*applicationServer, bool) {
+	if r.as == nil {
+		r.as = make(map[ASKey]*applicationServer)
+	}
+	server, exists := r.as[key]
+	if exists {
+		return server, false
+	}
+	server = &applicationServer{
+		key:                key,
+		asps:               make(map[*Association]State),
+		broadcastFlowLimit: r.distribution.broadcastFlowCacheEntries,
+		recoveryBudget:     r.recoveryBudget,
+	}
+	r.as[key] = server
+	return server, true
+}
+
+func (r *applicationServers) registrationForLocked(key ASKey, applicationServer *applicationServer, removable bool) *applicationServerRegistration {
+	if r.registrations == nil {
+		r.registrations = make(map[ASKey]*applicationServerRegistration)
+	}
+	registration := r.registrations[key]
+	if registration == nil || registration.applicationServer != applicationServer {
+		registration = &applicationServerRegistration{
+			applicationServer: applicationServer,
+			removable:         removable,
+		}
+		r.registrations[key] = registration
+	}
+	return registration
+}
+
+func uniqueASKeys(keys []ASKey) []ASKey {
+	unique := make([]ASKey, 0, len(keys))
+	seen := make(map[ASKey]struct{}, len(keys))
+	for _, key := range keys {
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, key)
+	}
+	return unique
+}
+
+func (reservation *applicationServerReservation) commit() {
+	if reservation == nil {
+		return
+	}
+	reservation.once.Do(func() {
+		registry := reservation.registry
+		if registry == nil {
+			return
+		}
+		registry.mu.Lock()
+		defer registry.mu.Unlock()
+		if registry.closed {
+			return
+		}
+		for _, entry := range reservation.entries {
+			registration := registry.registrations[entry.key]
+			if registration == nil || registration.applicationServer != entry.applicationServer {
+				continue
+			}
+			if registration.provisional > 0 {
+				registration.provisional--
+			}
+			registration.persistent = true
+			registration.removable = false
+		}
+	})
+}
+
+func (reservation *applicationServerReservation) rollback() {
+	if reservation == nil {
+		return
+	}
+	reservation.once.Do(func() {
+		registry := reservation.registry
+		if registry == nil {
+			return
+		}
+		var removed []*applicationServer
+		registry.mu.Lock()
+		if !registry.closed {
+			for _, entry := range reservation.entries {
+				registration := registry.registrations[entry.key]
+				if registration == nil || registration.applicationServer != entry.applicationServer {
+					continue
+				}
+				if registration.provisional > 0 {
+					registration.provisional--
+				}
+				if registration.provisional > 0 || registration.persistent {
+					continue
+				}
+				delete(registry.registrations, entry.key)
+				if !registration.removable || registry.as[entry.key] != entry.applicationServer {
+					continue
+				}
+				entry.applicationServer.mu.Lock()
+				empty := len(entry.applicationServer.asps) == 0
+				entry.applicationServer.mu.Unlock()
+				if empty {
+					delete(registry.as, entry.key)
+					removed = append(removed, entry.applicationServer)
+				}
+			}
+		}
+		registry.mu.Unlock()
+		for _, applicationServer := range removed {
+			applicationServer.close()
+		}
+	})
 }
 
 func closedApplicationServer(key ASKey) *applicationServer {
@@ -594,6 +755,7 @@ func (r *applicationServers) close() {
 		all = append(all, applicationServer)
 	}
 	r.aspIdentifiers = nil
+	r.registrations = nil
 	r.mu.Unlock()
 
 	for _, applicationServer := range all {

@@ -175,12 +175,15 @@ func (l *Listener) promoteAcceptedAssociation(association *Association) bool {
 	case RoleIPSP:
 		association.as = l.as
 	}
+	registration := &applicationServerReservation{}
 	if association.as != nil {
-		association.as.register(association.configuredASKeys())
+		registration = association.as.reserve(association.configuredASKeys())
 	}
 	if l.endpoint == nil || !l.endpoint.trackAssociation(association) {
+		registration.rollback()
 		return false
 	}
+	registration.commit()
 	if l.conns == nil {
 		l.conns = make(map[*Association]struct{})
 	}

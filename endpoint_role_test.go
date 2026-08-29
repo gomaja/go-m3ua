@@ -1162,6 +1162,89 @@ func TestCancelledSGPDialDoesNotRegisterApplicationServer(t *testing.T) {
 	}
 }
 
+func TestFailedDialDoesNotRetainApplicationServer(t *testing.T) {
+	tests := []struct {
+		name   string
+		role   Role
+		config func() *AssociationConfig
+	}{
+		{
+			name: "SGP",
+			role: RoleSGP,
+			config: func() *AssociationConfig {
+				return scopedSGPConfig(7, 1)
+			},
+		},
+		{
+			name: "IPSP",
+			role: RoleIPSP,
+			config: func() *AssociationConfig {
+				return integrationIPSPConfig(1, 2, false, false)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint, err := NewEndpoint(EndpointConfig{Role: test.role})
+			if err != nil {
+				t.Fatalf("NewEndpoint(%s): %v", test.role, err)
+			}
+			t.Cleanup(func() { _ = endpoint.Close() })
+
+			config := test.config()
+			config.InitTimeout = 100 * time.Millisecond
+			remote, err := sctp.ResolveSCTPAddr("sctp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("ResolveSCTPAddr(): %v", err)
+			}
+			association, dialErr := endpoint.Dial(context.Background(), "m3ua4", nil, remote, config)
+			if association != nil {
+				_ = association.Close()
+			}
+			if dialErr == nil {
+				t.Fatal("Dial to remote SCTP port zero unexpectedly succeeded")
+			}
+
+			key := ASKey{
+				NetworkAppearance: 7, NetworkAppearanceSet: true,
+				RoutingContext: 1, RoutingContextSet: true,
+			}
+			if _, registered := endpoint.as.lookup(key); registered {
+				t.Fatalf("failed %s Dial retained its Application Server", test.role)
+			}
+		})
+	}
+}
+
+func TestRejectedIPSPPromotionDoesNotRetainApplicationServer(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	listener := newListener(endpoint, NewListenerConfig(nil))
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+
+	endpoint.mu.Lock()
+	endpoint.closed = true
+	endpoint.mu.Unlock()
+	if listener.promoteAcceptedAssociation(association) {
+		t.Fatal("promoteAcceptedAssociation() accepted a closed Endpoint")
+	}
+	endpoint.mu.Lock()
+	endpoint.closed = false
+	endpoint.mu.Unlock()
+
+	key := ASKey{
+		NetworkAppearance: 7, NetworkAppearanceSet: true,
+		RoutingContext: 1, RoutingContextSet: true,
+	}
+	if _, registered := endpoint.as.lookup(key); registered {
+		t.Fatal("rejected IPSP association retained its Application Server")
+	}
+}
+
 func TestAssociationConfigRejectsRoleSpecificSettings(t *testing.T) {
 	tests := []struct {
 		name   string
