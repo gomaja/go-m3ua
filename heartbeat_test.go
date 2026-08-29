@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -118,5 +119,57 @@ func TestHeartbeatTimerDefaultsToTwiceTheInterval(t *testing.T) {
 				t.Error("BEATs are enabled with no interval; heartbeat() would spin")
 			}
 		})
+	}
+}
+
+// RFC 4666 Sections 3 and 3.5.6 permit extension parameters on BEAT and require
+// the corresponding BEAT Ack to return every received parameter unchanged.
+func TestHeartbeatAckPreservesExtensionParametersFromWire(t *testing.T) {
+	heartbeat := messages.NewHeartbeat(params.NewHeartbeatData([]byte("heartbeat-data")))
+	heartbeat.Others = []*params.Param{params.NewAspIdentifier(0x11223344)}
+	wire, err := heartbeat.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal BEAT: %v", err)
+	}
+	parsed, err := messages.Parse(wire)
+	if err != nil {
+		t.Fatalf("parse BEAT: %v", err)
+	}
+	parsedHeartbeat, ok := parsed.(*messages.Heartbeat)
+	if !ok {
+		t.Fatalf("parsed message = %T, want *messages.Heartbeat", parsed)
+	}
+
+	association, sent := newTestConn(t, StateASPActive, RoleIPSP)
+	if err := association.handleHeartbeat(parsedHeartbeat); err != nil {
+		t.Fatalf("handleHeartbeat(): %v", err)
+	}
+	if len(*sent) != 1 {
+		t.Fatalf("responses = %d, want 1 BEAT Ack", len(*sent))
+	}
+	ack, ok := (*sent)[0].(*messages.HeartbeatAck)
+	if !ok {
+		t.Fatalf("response = %T, want *messages.HeartbeatAck", (*sent)[0])
+	}
+	ackWire, err := ack.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal BEAT Ack: %v", err)
+	}
+	parsedAckMessage, err := messages.Parse(ackWire)
+	if err != nil {
+		t.Fatalf("parse BEAT Ack: %v", err)
+	}
+	parsedAck, ok := parsedAckMessage.(*messages.HeartbeatAck)
+	if !ok {
+		t.Fatalf("parsed response = %T, want *messages.HeartbeatAck", parsedAckMessage)
+	}
+	if len(parsedAck.Others) != 1 {
+		t.Fatalf("BEAT Ack extension parameters = %d, want 1", len(parsedAck.Others))
+	}
+	got := parsedAck.Others[0]
+	want := parsedHeartbeat.Others[0]
+	if got.Tag != want.Tag || !bytes.Equal(got.Data, want.Data) {
+		t.Fatalf("BEAT Ack extension parameter = {tag: %#x, data: %x}, want {tag: %#x, data: %x}",
+			got.Tag, got.Data, want.Tag, want.Data)
 	}
 }
