@@ -287,7 +287,11 @@ listener, err := endpoint.Listen("m3ua", local, listenerConfig)
 
 ## Compliance
 
-This project targets RFC 4666 with current IANA SIGTRAN/SCTP assignments and SCTP behavior from RFC 9260 where it affects the M3UA transport. See [docs/compliance.md](docs/compliance.md) for the current audit notes.
+This project targets RFC 4666 with current IANA SIGTRAN/SCTP assignments and
+SCTP behavior from RFC 9260 where it affects the M3UA transport. See the
+[standards and security contract](docs/standards.md), the
+[RFC 4666 conformance matrix](docs/rfc4666-conformance.md), and the
+[ecosystem audit](docs/compliance.md).
 
 The v1.2 API intentionally uses RFC entity and primitive names. See the
 [v1.2 migration guide](docs/migration-v1.2.md) for the breaking role,

@@ -4,21 +4,16 @@ Audit date: 2026-08-29.
 
 ## Specification baseline
 
-- Base protocol: RFC 4666, which obsoletes RFC 3332.
-- RFC Editor errata for RFC 4666 on 2026-08-29:
-  - Errata ID 2065 is Held for Document Update, Technical: Notify Routing Context is treated as Conditional for scoped Alternate ASP Active behavior.
-  - Errata ID 4475 is Held for Document Update, Editorial: Service Indicator padding is interpreted as 32-bit alignment.
-  - Errata ID 2518 is Rejected, Technical: RKM parameter tag values remain the RFC 4666 assignments.
-- IANA SIGTRAN adaptation registry: M3UA message classes/types and parameters remain RFC 4666 assignments.
-- IANA SCTP PPID registry: M3UA is Payload Protocol Identifier 3.
-- SCTP baseline: RFC 9260 is applied where current SCTP behavior affects this library, including the 500 ms maximum for SACK.Delay.
+The authoritative publication, errata, IANA, active-draft, SCTP, and security
+baseline is maintained in [standards.md](standards.md). The section-by-section
+implementation status and remaining v1.2.0 issues are maintained in the
+[RFC 4666 conformance matrix](rfc4666-conformance.md).
 
-The RFC Editor and Datatracker were cross-checked on the audit date. RFC 4666
-remains an IETF Proposed Standard, has no `Updated by` or `Obsoleted by`
-relationship, and the concluded SIGTRAN working group lists no active M3UA
-Internet-Draft. Errata 2065 and 4475 remain Held for Document Update, and
-Errata 2518 remains Rejected; no Verified erratum changes the implemented
-behavior.
+RFC 4666 remains the current M3UA Proposed Standard and RFC 9260 remains the
+current SCTP base specification. The standards contract also records the
+obsolete security protocol references embedded in current RFC 3788 and keeps
+library conformance separate from deployment-provided peer authentication,
+integrity, confidentiality, and replay protection.
 
 ## ASP multi-SG routing
 
