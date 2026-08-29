@@ -49,17 +49,21 @@ model or show examples without creating a separate implementation requirement.
 
 ## Message formats
 
+These rows assess wire codecs and message-specific validation in RFC 4666
+Section 3. Procedure and public-operation gaps are assessed separately under
+Section 4 below.
+
 | RFC 4666 area | Strength | Status | Evidence and remaining work |
 | --- | --- | --- | --- |
 | [2 Conventions](https://www.rfc-editor.org/rfc/rfc4666.html#section-2) | Mandatory | Implemented | RFC 2119 requirements and network byte order are applied. |
 | [3.1 Common header](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.1) | Mandatory | Implemented | Version, reserved octet, class/type, length, truncation, extension, and unsupported class/type behavior have strict and fuzz coverage. |
 | [3.2 Variable-length parameters](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.2) | Mandatory | Implemented | TLV length, padding, cardinality, ordering, duplicate handling, unknown extension preservation, and bounded parsing are covered. Held Errata 4475 is handled only as documented in the standards contract. |
 | [3.3 DATA](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.3) | Mandatory | Implemented | Parameter order, scope, Network Appearance, Routing Context, Correlation Id, Protocol Data, stream, and SLS behavior are covered. |
-| [3.4 SSNM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.4) | Mandatory | Implemented | DUNA, DAVA, DAUD, SCON, DUPU, and DRST codecs and receive procedures are implemented. Typed operation completion is tracked by #19. |
-| [3.5 ASPSM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.5) | Mandatory | Partial | ASP/SGP ASPUP, ASPUP_ACK, ASPDOWN, ASPDOWN_ACK, BEAT, and BEAT_ACK are implemented. IPSP behavior belongs to #15 and #16. |
-| [3.6 RKM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.6) | Optional | Partial | RKM parameter codecs exist, but the four complete message codecs and procedures are tracked by #17. Until then RKM receives Error `Unsupported Message Class` as permitted by Section 4.4.1. |
-| [3.7 ASPTM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.7) | Mandatory | Partial | ASP/SGP ASPAC, ASPAC_ACK, ASPIA, and ASPIA_ACK are implemented per ASKey. IPSP directional state belongs to #15 and #16. |
-| [3.8 MGMT](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.8) | Mandatory | Partial | Error and Notify codecs, diagnostic octets, error mapping, Notify scope, and unknown-message behavior are implemented. Keyed management operations remain in #19. Held Errata 2065 is a documented project interpretation. |
+| [3.4 SSNM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.4) | Mandatory | Implemented | DUNA, DAVA, DAUD, SCON, DUPU, and DRST codecs, parameters, ordering, cardinality, and validation are implemented. SSNM operation APIs are assessed under Sections 4.2 and 4.5. |
+| [3.5 ASPSM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.5) | Mandatory | Implemented | ASPUP, ASPUP_ACK, ASPDOWN, ASPDOWN_ACK, BEAT, and BEAT_ACK codecs and message-specific validation are implemented. Role procedures are assessed under Section 4.3. |
+| [3.6 RKM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.6) | Optional | Partial | RKM parameter codecs exist, but the four complete message codecs are tracked by #17. The corresponding procedures are assessed under Section 4.4; until they land, RKM receives Error `Unsupported Message Class` as permitted by Section 4.4.1. |
+| [3.7 ASPTM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.7) | Mandatory | Implemented | ASPAC, ASPAC_ACK, ASPIA, and ASPIA_ACK codecs, parameters, ordering, cardinality, and validation are implemented. Role procedures are assessed under Section 4.3. |
+| [3.8 MGMT](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.8) | Mandatory | Implemented | Error and Notify codecs, diagnostic octets, parameter scope, cardinality, and unknown-extension handling are implemented. Held Errata 2065 is a documented project interpretation. |
 
 ## Procedures
 
