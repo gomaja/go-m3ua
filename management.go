@@ -139,6 +139,14 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 	if n.Status == nil {
 		return ErrMissingStatus
 	}
+	// RFC 4666 Section 3.8.2 gives the conditional ASP Identifier the
+	// Section 3.5.1 format: tag 0x0011, length 8, and a 32-bit value. Reject a
+	// malformed value before Layer Management or the IPSP Override transition
+	// can observe it.
+	if n.AspIdentifier != nil && n.AspIdentifier.Tag == params.AspIdentifier &&
+		len(n.AspIdentifier.Data) != 4 {
+		return ErrInvalidParameterValue
+	}
 
 	// Both Status Type values and their Status Information ranges are closed
 	// tables in Section 3.8.2. Reserved values are not state: surfacing one as

@@ -3,6 +3,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -859,6 +860,36 @@ func TestIPSPSingleExchangeAcceptsNotify(t *testing.T) {
 		}
 	default:
 		t.Fatal("Notify produced no management indication")
+	}
+}
+
+func TestIPSPSingleExchangeRejectsMalformedNotifyASPIdentifierBeforeStateChange(t *testing.T) {
+	for _, valueLength := range []int{0, 1, 3, 5, 8} {
+		t.Run(fmt.Sprintf("%d value octets", valueLength), func(t *testing.T) {
+			association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+			association.cfg.RoutingContexts = params.NewRoutingContext(1)
+			association.noteRoutingContextsActive([]uint32{1})
+			notify := messages.NewNotify(
+				params.NewStatus(params.AlternateAspActive), nil,
+				params.NewRoutingContext(1), nil,
+			)
+			notify.AspIdentifier = params.NewParam(int(params.AspIdentifier), make([]byte, valueLength))
+
+			association.handleSignals(context.Background(), notify)
+
+			if err := firstErr(association); !errors.Is(err, ErrInvalidParameterValue) {
+				t.Fatalf("Notify error = %v, want ErrInvalidParameterValue", err)
+			}
+			if got := association.State(); got != StateASPActive {
+				t.Fatalf("state = %v, want ASP-ACTIVE", got)
+			}
+			if !association.outboundRoutingContextActive(1) {
+				t.Fatal("malformed Notify disabled Routing Context 1")
+			}
+			if len(association.mgmtChan) != 0 {
+				t.Fatal("malformed Notify reached Layer Management")
+			}
+		})
 	}
 }
 
