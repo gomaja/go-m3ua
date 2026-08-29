@@ -90,8 +90,8 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 }
 
 // BeginMTP3Restart starts the MTP3 restart procedure in RFC 4666 Section 4.6
-// for an SGP Association. A dialing SGP owns the restart state directly; an
-// accepted SGP Association uses its Listener's shared restart state.
+// for an SGP Association. Accepted and SCTP-initiating Associations use the
+// restart state owned by their SGP Endpoint.
 func (c *Association) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Restart, error) {
 	if c == nil || c.Role() != RoleSGP {
 		return nil, ErrUnsupportedRole
@@ -281,8 +281,9 @@ func completeMTP3Restart(target mtp3RestartTarget, generation uint64) error {
 }
 
 func (l *Listener) mtp3RestartTarget() mtp3RestartTarget {
+	l.registry()
 	return mtp3RestartTarget{
-		registry: &l.mtp3Restarts,
+		registry: l.mtp3Restarts,
 		closed: func() bool {
 			l.muConns.Lock()
 			defer l.muConns.Unlock()

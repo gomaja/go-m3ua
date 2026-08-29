@@ -366,7 +366,7 @@ func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routi
 	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
 	association.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
 	association.noteRoutingContextsActive(routingContexts)
-	association.as = newApplicationServers(time.Hour, association.cfg)
+	association.as = newApplicationServers(time.Hour)
 	for _, routingContext := range routingContexts {
 		applicationServer := association.as.get(ASKey{
 			NetworkAppearance:    networkAppearance,

@@ -56,6 +56,12 @@ Create an `Endpoint` with an explicit RFC 4666 role. `Dial` and
 `Listen`/`Accept` state only which endpoint initiates the SCTP association;
 they do not determine whether M3UA runs as an ASP or SGP.
 
+RFC 4666 Section 1.2 names the M3UA protocol entities `ASP`, `SGP`, `IPSP`,
+`AS`, and `Association`. Section 1.4.8 uses client/server only for which peer
+initiates the SCTP association. Accordingly, this API never uses Client or
+Server as an M3UA role: `RoleASP`, `RoleSGP`, and `RoleIPSP` select protocol
+procedures, while `Dial`, `Listen`, and `Accept` describe SCTP establishment.
+
 The base `AssociationConfig` is role-neutral and is snapshotted for each M3UA
 association. Role-specific setters must then match the Endpoint; this ASP
 example sets an ASP Identifier:
@@ -117,7 +123,7 @@ ctx := context.Background()
 ctx, cancel := context.WithCancel(ctx)
 defer cancel()
 
-endpoint, err := m3ua.NewEndpoint(m3ua.RoleASP)
+endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP})
 if err != nil {
     log.Fatal(err)
 }
@@ -156,7 +162,7 @@ listenerConfig.SelectAssociationConfig = func(info m3ua.AcceptInfo) (*m3ua.Assoc
     return configForPeer(info.RemoteAddr)
 }
 
-endpoint, err := m3ua.NewEndpoint(m3ua.RoleSGP)
+endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
 if err != nil {
     log.Fatal(err)
 }

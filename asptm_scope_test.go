@@ -619,16 +619,15 @@ func TestSetASUnavailableLeavesOtherContextsActive(t *testing.T) {
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)
 	listener := newSGPListener(NewListenerConfig(config))
-	registry, nif, _ := listener.registry()
+	registry, _, _ := listener.registry()
 
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
-	asp.as = registry
-	asp.nif = nif
-	asp.noteRoutingContextsActive(nil)
-	registry.aspStateChanged(asp, StateASPActive)
-	if !listener.track(asp) {
+	asp.listener = listener
+	if !listener.promoteAcceptedAssociation(asp) {
 		t.Fatal("listener refused test ASP")
 	}
+	asp.noteRoutingContextsActive(nil)
+	registry.aspStateChanged(asp, StateASPActive)
 
 	if err := listener.SetASAvailable(1, false); err != nil {
 		t.Fatalf("SetASAvailable: %v", err)

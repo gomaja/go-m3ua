@@ -163,7 +163,7 @@ type applicationServer struct {
 	// nextCorrelationID allocates identifiers unique within this AS until the
 	// 32-bit wire field necessarily wraps.
 	nextCorrelationID uint32
-	// recoveryBudget is shared by every AS owned by the Listener.
+	// recoveryBudget is shared by every AS owned by the SGP Endpoint.
 	recoveryBudget *recoveryBudget
 }
 
@@ -175,7 +175,7 @@ type recoveryBudget struct {
 	bytes        int
 }
 
-func newRecoveryBudget(config *AssociationConfig) *recoveryBudget {
+func newSGPRecoveryBudget(config *SGPConfig) *recoveryBudget {
 	budget := &recoveryBudget{
 		messageLimit: DefaultRecoveryQueueTotalMessages,
 		byteLimit:    DefaultRecoveryQueueTotalBytes,
@@ -242,7 +242,7 @@ type asStateNotification struct {
 	waitOnRelease bool
 }
 
-// applicationServers is the registry a Listener keeps, one entry per
+// applicationServers is the registry an SGP Endpoint keeps, one entry per
 // Application Server traffic scope it serves.
 type applicationServers struct {
 	mu     sync.Mutex
@@ -253,17 +253,10 @@ type applicationServers struct {
 	aspIdentifiers map[*Association]uint32
 	// recoveryTimer is T(r); zero means DefaultRecoveryTimer.
 	recoveryTimer time.Duration
-	// defaultNetworkAppearance is used only by legacy Routing Context-only
-	// accessors. Exact ASKey callers do not consult it.
-	defaultNetworkAppearance *params.Param
 	// distribution is immutable after construction, so DistributeData never
-	// races an application mutating its AssociationConfig after the Listener starts.
+	// races an application mutating its SGPConfig after the Endpoint starts.
 	distribution distributionPolicy
-	// trafficModes is the listener-wide traffic-handling policy captured with
-	// the registry. ASP Active messages are processed concurrently, so agreement
-	// must not consult caller-owned AssociationConfig maps or Params after construction.
-	trafficModes trafficModePolicy
-	// recoveryBudget bounds retained DATA across the entire Listener, in
+	// recoveryBudget bounds retained DATA across the entire SGP Endpoint, in
 	// addition to each AS's own distributionPolicy limits.
 	recoveryBudget *recoveryBudget
 }
@@ -273,38 +266,24 @@ type activeSSNMTarget struct {
 	routingContexts []uint32
 }
 
-func newApplicationServers(recovery time.Duration, configs ...*AssociationConfig) *applicationServers {
-	var config *AssociationConfig
-	if len(configs) > 0 {
-		config = configs[0]
-	}
-	return newApplicationServersWithTrafficModePolicy(
-		recovery, config, newTrafficModePolicy(config),
-	)
+func newApplicationServers(recovery time.Duration) *applicationServers {
+	return newApplicationServersForSGP(&SGPConfig{RecoveryTimer: recovery})
 }
 
-func newApplicationServersWithTrafficModePolicy(
-	recovery time.Duration,
-	config *AssociationConfig,
-	trafficModes trafficModePolicy,
-) *applicationServers {
+func newApplicationServersForSGP(config *SGPConfig) *applicationServers {
+	if config == nil {
+		config = &SGPConfig{}
+	}
+	recovery := config.RecoveryTimer
 	if recovery <= 0 {
 		recovery = DefaultRecoveryTimer
 	}
-	budget := newRecoveryBudget(config)
 	return &applicationServers{
 		as:             make(map[ASKey]*applicationServer),
 		aspIdentifiers: make(map[*Association]uint32),
 		recoveryTimer:  recovery,
-		defaultNetworkAppearance: func() *params.Param {
-			if config == nil {
-				return nil
-			}
-			return config.NetworkAppearance.Copy()
-		}(),
-		distribution:   newDistributionPolicy(config),
-		trafficModes:   trafficModes,
-		recoveryBudget: budget,
+		distribution:   newSGPDistributionPolicy(config),
+		recoveryBudget: newSGPRecoveryBudget(config),
 	}
 }
 
@@ -389,6 +368,12 @@ func (r *applicationServers) get(scope any) *applicationServer {
 	return as
 }
 
+func (r *applicationServers) register(keys []ASKey) {
+	for _, key := range keys {
+		r.get(key)
+	}
+}
+
 func closedApplicationServer(key ASKey) *applicationServer {
 	return &applicationServer{key: key, asps: make(map[*Association]State), state: ASDown, closed: true}
 }
@@ -453,11 +438,7 @@ func (r *applicationServers) normalizeASKey(scope any) (ASKey, bool) {
 }
 
 func (r *applicationServers) routingContextASKey(routingContext uint32) ASKey {
-	key := routingContextASKey(routingContext)
-	if r != nil {
-		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(r.defaultNetworkAppearance)
-	}
-	return key
+	return routingContextASKey(routingContext)
 }
 
 func (r *applicationServers) lookupRoutingContext(rtCtx uint32) (ASKey, *applicationServer, bool, bool) {
@@ -502,6 +483,23 @@ func (r *applicationServers) asKeysForRoutingContext(rtCtx uint32) []ASKey {
 		if key.RoutingContextSet && key.RoutingContext == rtCtx {
 			keys = append(keys, key)
 		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
+	return keys
+}
+
+func (r *applicationServers) keys() []ASKey {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	keys := make([]ASKey, 0, len(r.as))
+	for key := range r.as {
+		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
 	return keys
@@ -579,29 +577,8 @@ func asKeyMatchesDestinationScope(key ASKey, scope destinationKey) bool {
 	return true
 }
 
-// sole returns the only registered AS, when omission of Routing Context is
-// unambiguous even without an AssociationConfig value.
-func (r *applicationServers) sole() (ASKey, *applicationServer, bool) {
-	if r == nil {
-		return ASKey{}, nil, false
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return ASKey{}, nil, false
-	}
-	if len(r.as) != 1 {
-		return ASKey{}, nil, false
-	}
-	for key, as := range r.as {
-		return key, as, true
-	}
-	return ASKey{}, nil, false
-}
-
-// close ends every AS-owned timer and releases all retained traffic. The
-// Listener or a dialing SGP Association owns the registry, so none of this
-// state may outlive its owner.
+// close ends every AS-owned timer and releases all retained traffic. The SGP
+// Endpoint owns the registry, so none of this state may outlive the Endpoint.
 func (r *applicationServers) close() {
 	if r == nil {
 		return
@@ -645,7 +622,7 @@ func (r *applicationServers) forget(c *Association) {
 	}
 }
 
-// restrictASP removes an accepted association from every listener-wide AS its
+// restrictASP removes an accepted Association from every Endpoint-wide AS its
 // immutable ASP Up authorization did not grant. Leaving DOWN placeholders in
 // those ASes would still leak their state Notify messages to another tenant.
 func (r *applicationServers) restrictASP(c *Association) {
@@ -751,23 +728,6 @@ func (r *applicationServers) aspStateChangedFrom(c *Association, st State, publi
 			r.get(key).setASPState(c, state, recovery)
 		}
 	}
-}
-
-// agreeTrafficMode validates and records the mode for every acknowledged AS
-// before ASP Active Ack is sent. All AS locks are held in Routing Context order,
-// so simultaneous first activations with conflicting modes cannot both win.
-func (r *applicationServers) agreeTrafficMode(rtCtxs []uint32, requested *params.Param) (*params.Param, error) {
-	keys := make([]ASKey, 0, len(rtCtxs))
-	seen := make(map[ASKey]struct{}, len(rtCtxs))
-	for _, rtCtx := range rtCtxs {
-		key := r.routingContextASKey(rtCtx)
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		seen[key] = struct{}{}
-		keys = append(keys, key)
-	}
-	return r.agreeTrafficModeForKeys(keys, r.trafficModes, requested)
 }
 
 func (r *applicationServers) agreeTrafficModeForAssociation(c *Association, rtCtxs []uint32, requested *params.Param) (*params.Param, error) {

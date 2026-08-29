@@ -10,8 +10,20 @@ and accepting SCTP associations; `Dial` therefore no longer implies ASP and
 Create one endpoint with the required RFC role:
 
 ```go
-asp, err := m3ua.NewEndpoint(m3ua.RoleASP)
-sgp, err := m3ua.NewEndpoint(m3ua.RoleSGP)
+asp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP})
+sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+```
+
+Configure SGP-wide recovery and distribution policy on the Endpoint rather
+than on any one Association:
+
+```go
+sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Role: m3ua.RoleSGP,
+    SGP: &m3ua.SGPConfig{
+        RecoveryTimer: 2 * time.Second,
+    },
+})
 ```
 
 Use `Endpoint.Dial` when that endpoint initiates SCTP, or
@@ -23,22 +35,21 @@ Exchange model APIs defined by RFC 4666 Section 4.3. Calling `Dial` or
 `Listen` directly on an IPSP endpoint returns `ErrUnsupportedRole` rather than
 guessing either model.
 
-A `RoleSGP` endpoint currently admits one shared protocol-state owner: one
-`Listener`, which can serve multiple accepted ASP associations, or one dialed
-`Association`. A second owner returns `ErrEndpointStateInUse` instead of
-creating an independent AS registry for the same SGP.
+A `RoleSGP` endpoint owns one shared Application Server registry, NIF state,
+destination state, MTP3 restart coordinator, and recovery budget. Any number of
+its `Listener` values and SCTP-initiating or accepted `Association` values use
+that same SGP state. Closing one Listener or Association leaves its Endpoint and
+sibling associations running; closing the Endpoint closes all of them.
 
-Use `Listener.DistributeData` for an SGP that accepts SCTP associations and
-`Association.DistributeData` for an SGP that initiates its SCTP association.
+Use `Listener.DistributeData` from a Listener owned by the SGP Endpoint, or
+`Association.DistributeData` from an SGP Association that initiated SCTP.
 Both paths apply the same Application Server state, recovery queue, and Traffic
 Mode rules. Calling `Association.DistributeData` on an ASP returns
 `ErrUnsupportedRole`.
 
-For SGP state learned from the SS7 side, the same orientation rule applies:
-use the Listener methods for an SGP that accepts SCTP associations, or
-`Association.SetNIFAvailable`, `Association.SetASAvailableForAS`, destination
-reporting, and `Association.BeginMTP3Restart` for an SGP that initiates its SCTP
-association. These Association procedures reject the ASP role.
+SGP state learned from the SS7 side is Endpoint-wide regardless of which peer
+initiated SCTP. Existing Listener and Association management methods therefore
+act on the same SGP Endpoint state. These procedures reject the ASP role.
 
 ## Renamed API
 
@@ -64,6 +75,7 @@ association. These Association procedures reject the ASP role.
 | `SetSackConfig`, `SetSctpSackConfig` | `SetSCTPSACK` |
 | `SetNoDelayConfig`, `SetSctpNoDelayConfig` | `SetSCTPNoDelay` |
 | `SignalingLinkSelection` | `SignallingLinkSelection` |
+| `AssociationConfig.Recovery*`, `AssociationConfig.BroadcastFlow*` | `EndpointConfig.SGP` |
 
 No compatibility aliases remain. This makes role and association ownership
 visible at every call site and prevents transport orientation from selecting
@@ -75,8 +87,10 @@ M3UA procedures accidentally.
 one role are validated before association processing:
 
 - `ASPIdentifier` is local ASP policy and is rejected on an SGP endpoint.
-- `AuthorizeASP`, recovery queues, and Broadcast distribution policy are SGP
-  policy and are rejected on an ASP endpoint.
+- `AuthorizeASP` is SGP Association policy and is rejected on an ASP endpoint.
+- Recovery queues and Broadcast distribution policy belong to `SGPConfig`;
+  supplying `EndpointConfig.SGP` for an ASP or IPSP returns
+  `ErrInvalidRoleConfiguration`.
 - `Listener.SetNIFAvailable`, `SetASAvailable`, and `SetASAvailableForAS` now
   return an error and reject a non-SGP Listener with `ErrUnsupportedRole`.
 - A nil `AssociationConfig` passed to `Endpoint.Dial` returns

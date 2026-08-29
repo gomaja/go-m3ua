@@ -133,10 +133,6 @@ type Association struct {
 	// once, inside closeOnce, so the first cause is the one kept: a later Close
 	// must not overwrite the reason the association actually died.
 	closeErr atomic.Value
-	// releaseEndpointStateOwner releases the exclusive SGP state reservation
-	// held by a dialed Association. Accepted associations leave it nil because
-	// their Listener owns the reservation.
-	releaseEndpointStateOwner func()
 	// cfg is a configuration required to communicate between M3UA endpoints
 	cfg *AssociationConfig
 	// trafficModes is the immutable Traffic Mode policy copied from cfg at
@@ -229,8 +225,8 @@ type Association struct {
 	// an ASP role.
 	nif *nifAvailability
 
-	// as is the Application Server registry this association belongs to. It is
-	// nil for an ASP role.
+	// as is the Application Server registry this Association belongs to. It is
+	// nil for an ASP and shared by all Associations owned by an SGP Endpoint.
 	//
 	// The AS state machine of RFC 4666 Section 4.3.2 lives on the SGP and spans
 	// every ASP serving a Routing Context, so an Association reports its own ASP state
@@ -283,6 +279,9 @@ type Association struct {
 	// can deregister it from the Listener that owns the listening socket.
 	// Protocol behavior must not branch on this transport-lifecycle link.
 	listener *Listener
+	// endpoint owns node-wide state and the complete Listener/Association
+	// lifecycle independently of SCTP association initiation.
+	endpoint *Endpoint
 	// readDeadline bounds Read, ReadPD and ReadData, as Unix nanoseconds with
 	// zero meaning none. See SetReadDeadline for why it is not pushed down to
 	// the SCTP socket.
@@ -1363,9 +1362,6 @@ func (c *Association) closeWith(cause error) error {
 			c.closeErr.Store(cause)
 		}
 		close(c.done)
-		if c.releaseEndpointStateOwner != nil {
-			invalidateMTP3RestartRegistry(c.mtp3Restarts)
-		}
 		// Retransmitters select on done, but cancel them explicitly so a
 		// pending request cannot be resent onto a socket that is closing.
 		c.stopAllTAck()
@@ -1400,9 +1396,8 @@ func (c *Association) closeWith(cause error) error {
 		if c.listener != nil {
 			c.listener.forget(c)
 		}
-		if c.releaseEndpointStateOwner != nil {
-			c.as.close()
-			c.releaseEndpointStateOwner()
+		if c.endpoint != nil {
+			c.endpoint.forgetAssociation(c)
 		}
 	})
 	return err

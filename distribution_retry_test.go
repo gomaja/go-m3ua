@@ -20,7 +20,7 @@ func TestActiveFIFOTransientFailureRetriesAndRetainsGlobalBudget(t *testing.T) {
 	firstData := distributionData(1, 1, "first")
 	secondData := distributionData(1, 1, "second")
 	totalBytes := firstData.MarshalLen() + secondData.MarshalLen()
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = totalBytes
 		config.RecoveryQueueTotalMessages = 2
@@ -135,7 +135,7 @@ func TestActiveFIFOFailureEnteringPendingIsRetainedBeforeRecoveryExpiry(t *testi
 	firstData := distributionData(1, 1, "first")
 	secondData := distributionData(1, 1, "second")
 	totalBytes := firstData.MarshalLen() + secondData.MarshalLen()
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = totalBytes
 		config.RecoveryQueueTotalMessages = 2
@@ -254,7 +254,7 @@ func TestActiveFIFOFailureAfterRecoveryExpiryIsDiscardedAndReleasesGlobalBudget(
 	firstData := distributionData(1, 1, "first")
 	secondData := distributionData(1, 1, "second")
 	totalBytes := firstData.MarshalLen() + secondData.MarshalLen()
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = totalBytes
 		config.RecoveryQueueTotalMessages = 2

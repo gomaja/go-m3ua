@@ -143,8 +143,8 @@ func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 	okConn := conn
 	defer func() { _ = okConn.Close() }()
 	select {
-	case serverConn := <-accepted:
-		defer func() { _ = serverConn.Close() }()
+	case acceptedAssociation := <-accepted:
+		defer func() { _ = acceptedAssociation.Close() }()
 	case <-time.After(5 * time.Second):
 		t.Fatal("SGP never accepted the permitted SACK delay association")
 	}

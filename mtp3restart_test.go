@@ -3,7 +3,6 @@ package m3ua
 import (
 	"errors"
 	"reflect"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +13,7 @@ import (
 
 func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 	listener, firstApplicationServer, first, firstSent := restartFixture(t, 1, 2)
-	secondApplicationServer := listener.as.get(2)
+	secondApplicationServer := listener.as.get(associationConfigASKey(listener.AssociationConfig, 2))
 	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1, 2)
 	restartAttachConn(listener, second)
 	restartActivateASP(firstApplicationServer, first, 1)
@@ -195,7 +194,7 @@ func TestASPAssociationRejectsMTP3RestartProcedure(t *testing.T) {
 }
 
 func TestASPListenerRejectsMTP3RestartProcedure(t *testing.T) {
-	endpoint, err := NewEndpoint(RoleASP)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -206,68 +205,132 @@ func TestASPListenerRejectsMTP3RestartProcedure(t *testing.T) {
 	}
 }
 
-func TestDialingSGPRestartHandlesAreInvalidatedByAssociationClose(t *testing.T) {
-	_, applicationServer, association, _ := restartFixture(t, 1)
+func TestSGPRestartHandlesRemainValidUntilEndpointClose(t *testing.T) {
+	listener, applicationServer, association, _ := restartFixture(t, 1)
 	association.listener = nil
-	association.mtp3Restarts = &mtp3RestartRegistry{}
-	association.destinations = newDestinations()
-	association.releaseEndpointStateOwner = func() {}
+	association.mtp3Restarts = listener.endpoint.mtp3Restarts
+	association.destinations = listener.endpoint.destinations
+	if !listener.endpoint.trackAssociation(association) {
+		t.Fatal("failed to attach Association to Endpoint")
+	}
 	restartActivateASP(applicationServer, association, 1)
 	destination := restartDestination(1, 0x123456, 0)
 
 	restart, err := association.BeginMTP3Restart(destination)
 	if err != nil {
-		t.Fatalf("begin dialing SGP MTP3 restart: %v", err)
+		t.Fatalf("begin SGP MTP3 restart: %v", err)
 	}
 	if err := association.Close(); err != nil {
-		t.Fatalf("close dialing SGP Association: %v", err)
+		t.Fatalf("close SGP Association: %v", err)
 	}
-	if err := restart.Update(destination, DestinationAvailable); !errors.Is(err, ErrStaleMTP3Restart) {
-		t.Fatalf("update after Association.Close = %v, want ErrStaleMTP3Restart", err)
+	if err := restart.Update(destination, DestinationAvailable); err != nil {
+		t.Fatalf("update after Association.Close: %v", err)
+	}
+	if err := listener.endpoint.Close(); err != nil {
+		t.Fatalf("Endpoint.Close: %v", err)
 	}
 	if err := restart.Complete(); !errors.Is(err, ErrStaleMTP3Restart) {
-		t.Fatalf("complete after Association.Close = %v, want ErrStaleMTP3Restart", err)
+		t.Fatalf("complete after Endpoint.Close = %v, want ErrStaleMTP3Restart", err)
 	}
 }
 
-func TestDialingSGPRestartIsInvalidatedBeforeAssociationCleanup(t *testing.T) {
-	_, applicationServer, association, _ := restartFixture(t, 1)
+func TestEndpointCloseSerializesWithRestartCompletion(t *testing.T) {
+	listener, applicationServer, association, _ := restartFixture(t, 1)
 	association.listener = nil
-	association.mtp3Restarts = &mtp3RestartRegistry{}
-	association.destinations = newDestinations()
-	association.releaseEndpointStateOwner = func() {}
+	association.mtp3Restarts = listener.endpoint.mtp3Restarts
+	association.destinations = listener.endpoint.destinations
+	if !listener.endpoint.trackAssociation(association) {
+		t.Fatal("failed to attach Association to Endpoint")
+	}
 	restartActivateASP(applicationServer, association, 1)
 	destination := restartDestination(1, 0x123456, 0)
 
 	restart, err := association.BeginMTP3Restart(destination)
 	if err != nil {
-		t.Fatalf("begin dialing SGP MTP3 restart: %v", err)
+		t.Fatalf("begin SGP MTP3 restart: %v", err)
 	}
 	if err := restart.Update(destination, DestinationAvailable); err != nil {
 		t.Fatalf("stage available destination: %v", err)
 	}
 	restart.target.publish = func([]DestinationRange, bool, bool, bool) error { return nil }
 
-	association.muState.Lock()
 	closeResult := make(chan error, 1)
+	completeResult := make(chan error, 1)
+	start := make(chan struct{})
 	go func() {
-		closeResult <- association.Close()
+		<-start
+		closeResult <- listener.endpoint.Close()
 	}()
-	<-association.Done()
-	for range 100 {
-		runtime.Gosched()
+	go func() {
+		<-start
+		completeResult <- restart.Complete()
+	}()
+	close(start)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("Endpoint.Close: %v", err)
+	}
+	completeErr := <-completeResult
+	if completeErr != nil && !errors.Is(completeErr, ErrStaleMTP3Restart) {
+		t.Fatalf("concurrent restart completion error = %v, want nil or ErrStaleMTP3Restart", completeErr)
+	}
+	listener.endpoint.mtp3Restarts.mu.Lock()
+	active := len(listener.endpoint.mtp3Restarts.active)
+	listener.endpoint.mtp3Restarts.mu.Unlock()
+	if active != 0 {
+		t.Fatalf("active MTP3 restarts after Endpoint.Close = %d, want 0", active)
+	}
+}
+
+func TestEndpointInvalidatesRestartStateBeforeClosingAssociations(t *testing.T) {
+	listener, applicationServer, association, _ := restartFixture(t, 1)
+	if !listener.endpoint.trackListener(listener) {
+		t.Fatal("failed to attach Listener to Endpoint")
+	}
+	if !listener.endpoint.trackAssociation(association) {
+		t.Fatal("failed to attach Association to Endpoint")
+	}
+	restartActivateASP(applicationServer, association, 1)
+	destination := restartDestination(1, 0x123456, 0)
+	restart, err := association.BeginMTP3Restart(destination)
+	if err != nil {
+		t.Fatalf("begin SGP MTP3 restart: %v", err)
 	}
 
-	completeErr := restart.Complete()
-	association.muState.Unlock()
-	if err := <-closeResult; err != nil {
-		t.Fatalf("close dialing SGP Association: %v", err)
+	listener.endpoint.mtp3Restarts.procedureMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			listener.endpoint.mtp3Restarts.procedureMu.Unlock()
+		}
+	}()
+	closed := make(chan error, 1)
+	go func() { closed <- listener.endpoint.Close() }()
+	if !waitFor(func() bool {
+		listener.endpoint.mu.Lock()
+		defer listener.endpoint.mu.Unlock()
+		return listener.endpoint.closed
+	}, time.Second) {
+		t.Fatal("Endpoint.Close did not start")
 	}
-	if !errors.Is(completeErr, ErrStaleMTP3Restart) {
-		t.Fatalf("complete after Association.Done = %v, want ErrStaleMTP3Restart", completeErr)
+
+	select {
+	case <-association.Done():
+		t.Fatal("Endpoint closed an Association before invalidating MTP3 restart state")
+	case <-time.After(50 * time.Millisecond):
 	}
-	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, destination.PointCode); got != DestinationUnavailable {
-		t.Fatalf("destination state after close race = %v, want unavailable", got)
+
+	listener.endpoint.mtp3Restarts.procedureMu.Unlock()
+	locked = false
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Endpoint.Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Endpoint.Close did not complete after restart state invalidated")
+	}
+	if err := restart.Complete(); !errors.Is(err, ErrStaleMTP3Restart) {
+		t.Fatalf("restart completion after Endpoint.Close = %v, want ErrStaleMTP3Restart", err)
 	}
 }
 
@@ -518,7 +581,7 @@ func TestMTP3RestartPreAckWriteFailureWithholdsAck(t *testing.T) {
 	}
 }
 
-func TestMTP3RestartHandlesAreInvalidatedByListenerClose(t *testing.T) {
+func TestMTP3RestartHandlesRemainValidAfterListenerClose(t *testing.T) {
 	listener, _, _, _ := restartFixture(t, 1)
 	destination := restartDestination(1, 0x123456, 0)
 	restart, err := listener.BeginMTP3Restart(destination)
@@ -531,16 +594,19 @@ func TestMTP3RestartHandlesAreInvalidatedByListenerClose(t *testing.T) {
 	if next, err := listener.BeginMTP3Restart(destination); next != nil || !errors.Is(err, ErrAssociationClosed) {
 		t.Fatalf("begin after close = (%v, %v), want (nil, ErrAssociationClosed)", next, err)
 	}
-	if err := restart.Update(destination, DestinationAvailable); !errors.Is(err, ErrStaleMTP3Restart) {
-		t.Fatalf("update after close = %v, want ErrStaleMTP3Restart", err)
+	if err := restart.Update(destination, DestinationAvailable); err != nil {
+		t.Fatalf("update after Listener.Close: %v", err)
 	}
-	if err := restart.Complete(); !errors.Is(err, ErrStaleMTP3Restart) {
-		t.Fatalf("complete after close = %v, want ErrStaleMTP3Restart", err)
+	if err := restart.Complete(); err != nil {
+		t.Fatalf("complete after Listener.Close: %v", err)
 	}
 	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
 		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
 	); !errors.Is(err, ErrAssociationClosed) {
 		t.Fatalf("report after close = %v, want ErrAssociationClosed", err)
+	}
+	if err := listener.endpoint.Close(); err != nil {
+		t.Fatalf("Endpoint.Close: %v", err)
 	}
 }
 
@@ -653,7 +719,7 @@ func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applic
 	t.Helper()
 	listener, applicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, routingContexts,
-		func(config *AssociationConfig) { config.NetworkAppearance = params.NewNetworkAppearance(7) },
+		func(config *distributionFixtureConfig) { config.NetworkAppearance = params.NewNetworkAppearance(7) },
 	)
 	restartAttachConn(listener, asp)
 	return listener, applicationServer, asp, sent
@@ -661,7 +727,7 @@ func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applic
 
 func restartAttachConn(listener *Listener, connection *Association) {
 	connection.listener = listener
-	connection.mtp3Restarts = &listener.mtp3Restarts
+	connection.mtp3Restarts = listener.mtp3Restarts
 	connection.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
 	if listener.destinations == nil {
 		listener.destinations = newDestinations()

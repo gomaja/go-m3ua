@@ -86,7 +86,7 @@ func main() {
 		log.Fatalf("Failed to resolve SCTP address: %s", err)
 	}
 
-	endpoint, err := m3ua.NewEndpoint(m3ua.RoleSGP)
+	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
 	if err != nil {
 		log.Fatalf("Failed to create M3UA SGP endpoint: %s", err)
 	}

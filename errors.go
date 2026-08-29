@@ -226,11 +226,9 @@ var (
 	// Single Exchange model or Double Exchange model and are enabled by the
 	// IPSP API rather than guessed.
 	ErrUnsupportedRole = errors.New("unsupported M3UA role")
-	// ErrEndpointStateInUse reports an attempt to give one SGP Endpoint a
-	// second independent owner of AS, NIF, destination, and restart state.
-	// A Listener may still serve multiple accepted ASP associations because
-	// those associations share its state.
-	ErrEndpointStateInUse = errors.New("M3UA endpoint protocol state is already in use")
+	// ErrEndpointClosed reports an operation started after Endpoint.Close or
+	// interrupted because the owning Endpoint closed.
+	ErrEndpointClosed = errors.New("M3UA endpoint is closed")
 )
 
 // InvalidVersionError is used if a message with an unsupported version is received.

@@ -126,7 +126,8 @@ func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		c, sent := newTestConn(t, StateASPActive, RoleSGP)
 		c.cfg.RoutingContexts = params.NewRoutingContext(1)
-		if !l.track(c) {
+		c.listener = l
+		if !l.promoteAcceptedAssociation(c) {
 			t.Fatal("track refused an association")
 		}
 		sentPerConn = append(sentPerConn, sent)
@@ -161,11 +162,17 @@ func TestSetASAvailableTellsOnlyTheAffectedASPs(t *testing.T) {
 
 	affected, affectedSent := newTestConn(t, StateASPActive, RoleSGP)
 	affected.cfg.RoutingContexts = params.NewRoutingContext(1)
-	l.track(affected)
+	affected.listener = l
+	if !l.promoteAcceptedAssociation(affected) {
+		t.Fatal("track refused the affected Association")
+	}
 
 	other, otherSent := newTestConn(t, StateASPActive, RoleSGP)
 	other.cfg.RoutingContexts = params.NewRoutingContext(2)
-	l.track(other)
+	other.listener = l
+	if !l.promoteAcceptedAssociation(other) {
+		t.Fatal("track refused the unaffected Association")
+	}
 
 	if err := l.SetASAvailable(1, false); err != nil {
 		t.Fatalf("SetASAvailable: %v", err)
