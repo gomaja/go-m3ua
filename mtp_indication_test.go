@@ -190,6 +190,69 @@ func TestClosingOneASPAssociationDoesNotPauseReachableDestination(t *testing.T) 
 	}
 }
 
+func TestClosingPartitionedSignallingGatewayDoesNotEmitSpuriousResume(t *testing.T) {
+	endpoint, first, _ := newASPMultiSGFixture(t)
+	indications := endpoint.MTPIndications()
+	drainMTPIndications(indications)
+
+	applyASPDUNA(t, first, 7, 1, 0x123456, 0)
+	requireNoMTPIndication(t, indications)
+	if err := first.Close(); err != nil {
+		t.Fatalf("close partitioned SG Association: %v", err)
+	}
+	requireNoMTPIndication(t, indications)
+}
+
+func TestClosingLastASPAssociationReportsEveryCoalescedPause(t *testing.T) {
+	config := validASPConfig()
+	config.SignallingGateways = config.SignallingGateways[:1]
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	association := attachASPRouteAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+	indications := endpoint.MTPIndications()
+	drainMTPIndications(indications)
+
+	applyASPDUNA(t, association, 7, 1, 0x123456, 0)
+	drainMTPIndications(indications)
+	expected := make(map[MTPDestination]struct{})
+	for _, status := range endpoint.MTPDestinationStatuses() {
+		if status.Availability != DestinationUnavailable {
+			expected[status.Destination] = struct{}{}
+		}
+	}
+	if len(expected) == 0 {
+		t.Fatal("pre-close route snapshot has no available ranges")
+	}
+
+	if err := association.Close(); err != nil {
+		t.Fatalf("close last Association: %v", err)
+	}
+	for range len(expected) {
+		select {
+		case indication := <-indications:
+			if indication == nil || indication.ResyncRequired || indication.Kind != MTPPauseIndication ||
+				indication.Destination.Availability != DestinationUnavailable {
+				t.Fatalf("coalesced transition indication = %#v, want MTP-PAUSE", indication)
+			}
+			if _, exists := expected[indication.Destination.Destination]; !exists {
+				t.Fatalf("unexpected coalesced MTP-PAUSE destination %#v", indication.Destination.Destination)
+			}
+			delete(expected, indication.Destination.Destination)
+		default:
+			t.Fatalf("missing MTP-PAUSE indications for %v", expected)
+		}
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing MTP-PAUSE indications for %v", expected)
+	}
+	requireNoMTPIndication(t, indications)
+}
+
 func TestEndpointMTPIndicationsFollowCommittedAssociationState(t *testing.T) {
 	endpoint, first, second := newASPMultiSGFixture(t)
 	indications := endpoint.MTPIndications()

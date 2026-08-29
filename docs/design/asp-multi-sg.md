@@ -359,6 +359,9 @@ subsequent absolute destination statuses.
 Only derived changes produce indications. A DUNA received through one SG emits
 no pause while another SG still provides an available route. Closing one
 Association emits no pause while its SG or another SG remains capable.
+When a route-state rebuild changes prefix boundaries, deltas are compared over
+the union of the old and new canonical partitions so coalescing cannot suppress
+a child transition or invent a parent transition.
 
 The channel closes only after `Endpoint.Close` has removed every Association
 and completed route shutdown. `MTPDestinationStatuses` returns the canonical,

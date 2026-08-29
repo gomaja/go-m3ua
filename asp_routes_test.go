@@ -84,6 +84,72 @@ func TestASPRouteAggregationClipsBroadSSNMToMTPRoute(t *testing.T) {
 	}
 }
 
+func TestASPDerivedStatusIndicationsComparePartitionUnion(t *testing.T) {
+	routes, err := newASPRoutes(validASPConfig())
+	if err != nil {
+		t.Fatalf("newASPRoutes: %v", err)
+	}
+	mtpRoute, exists := routes.mtpRoute("sccp-a")
+	if !exists {
+		t.Fatal("missing sccp-a MTP Route")
+	}
+	available := aspDestinationStatus{availability: DestinationAvailable}
+	unavailable := aspDestinationStatus{availability: DestinationUnavailable}
+	left := aspDerivedRangeKey{mtpRoute: "sccp-a", pointCode: 0x120000, mask: 15}
+	right := aspDerivedRangeKey{mtpRoute: "sccp-a", pointCode: 0x128000, mask: 15}
+	root := aspDerivedRangeKey{mtpRoute: "sccp-a", pointCode: 0x120000, mask: 16}
+
+	tests := []struct {
+		name     string
+		previous map[aspDerivedRangeKey]aspDestinationStatus
+		current  map[aspDerivedRangeKey]aspDestinationStatus
+		wantKind MTPIndicationKind
+		wantKey  aspDerivedRangeKey
+		want     int
+	}{
+		{
+			name:     "coalescing preserves child pause",
+			previous: map[aspDerivedRangeKey]aspDestinationStatus{left: available, right: unavailable},
+			current:  map[aspDerivedRangeKey]aspDestinationStatus{root: unavailable},
+			wantKind: MTPPauseIndication,
+			wantKey:  left,
+			want:     1,
+		},
+		{
+			name:     "splitting preserves child resume",
+			previous: map[aspDerivedRangeKey]aspDestinationStatus{root: unavailable},
+			current:  map[aspDerivedRangeKey]aspDestinationStatus{left: available, right: unavailable},
+			wantKind: MTPResumeIndication,
+			wantKey:  left,
+			want:     1,
+		},
+		{
+			name:     "uniform coalescing has no delta",
+			previous: map[aspDerivedRangeKey]aspDestinationStatus{left: available, right: available},
+			current:  map[aspDerivedRangeKey]aspDestinationStatus{root: available},
+			want:     0,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			routes.derived = test.previous
+			indications := routes.derivedStatusIndicationsLocked(mtpRoute, test.current)
+			if len(indications) != test.want {
+				t.Fatalf("indications = %#v, want %d", indications, test.want)
+			}
+			if test.want == 0 {
+				return
+			}
+			indication := indications[0]
+			if indication.Kind != test.wantKind || indication.Destination.Destination != (MTPDestination{
+				MTPRoute: test.wantKey.mtpRoute, PointCode: test.wantKey.pointCode, Mask: test.wantKey.mask,
+			}) {
+				t.Fatalf("indication = %#v, want kind %v range %#v", indication, test.wantKind, test.wantKey)
+			}
+		})
+	}
+}
+
 func TestASPRouteAggregationUsesLatestCoveringUpdate(t *testing.T) {
 	endpoint, first, second := newASPMultiSGFixture(t)
 	if err := second.Close(); err != nil {

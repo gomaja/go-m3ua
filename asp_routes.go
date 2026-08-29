@@ -63,6 +63,16 @@ type aspDerivedRangeKey struct {
 	mask      uint8
 }
 
+type aspDerivedStatusNode struct {
+	children  [2]int
+	status    aspDestinationStatus
+	statusSet bool
+}
+
+type aspDerivedStatusTree struct {
+	nodes []aspDerivedStatusNode
+}
+
 type aspRouteStateIndexNode struct {
 	children     [2]*aspRouteStateIndexNode
 	availability map[SignallingGatewayID]aspAvailabilityRecord
@@ -630,7 +640,8 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 				continue
 			}
 		}
-		updated, routeIndications := r.recomputeMTPRouteLocked(mtpRoute)
+		updated := r.recomputeMTPRouteLocked(mtpRoute)
+		routeIndications := r.derivedStatusIndicationsLocked(mtpRoute, updated)
 		indications = append(indications, routeIndications...)
 		for key := range r.derived {
 			if key.mtpRoute == mtpRoute.id {
@@ -646,18 +657,17 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 
 func (r *aspRoutes) recomputeMTPRouteLocked(
 	mtpRoute aspMTPRoute,
-) (map[aspDerivedRangeKey]aspDestinationStatus, []*MTPIndication) {
+) map[aspDerivedRangeKey]aspDestinationStatus {
 	gateways := r.gatewayRouteSnapshotsLocked(mtpRoute.id)
 	updated := make(map[aspDerivedRangeKey]aspDestinationStatus)
 	if len(gateways) == 0 {
-		return updated, nil
+		return updated
 	}
 	root := r.stateIndex[mtpRoute.id]
 	if root == nil {
 		root = &aspRouteStateIndexNode{}
 	}
 
-	var indications []*MTPIndication
 	r.appendIndexedDerivedLeavesLocked(
 		mtpRoute,
 		root,
@@ -666,9 +676,8 @@ func (r *aspRoutes) recomputeMTPRouteLocked(
 		gateways,
 		make([]*aspRouteStateIndexNode, 0, int(mtpRoute.mask)+1),
 		updated,
-		&indications,
 	)
-	return updated, indications
+	return updated
 }
 
 func (r *aspRoutes) gatewayRouteSnapshotsLocked(
@@ -710,12 +719,11 @@ func (r *aspRoutes) appendIndexedDerivedLeavesLocked(
 	gateways []aspGatewayRouteSnapshot,
 	path []*aspRouteStateIndexNode,
 	updated map[aspDerivedRangeKey]aspDestinationStatus,
-	indications *[]*MTPIndication,
 ) {
 	path = append(path, node)
 
 	if mask == 0 || node.children[0] == nil && node.children[1] == nil {
-		r.appendIndexedDerivedLeafLocked(mtpRoute, pointCode, mask, gateways, path, updated, indications)
+		r.appendIndexedDerivedLeafLocked(mtpRoute, pointCode, mask, gateways, path, updated)
 		return
 	}
 	childMask := mask - 1
@@ -724,12 +732,12 @@ func (r *aspRoutes) appendIndexedDerivedLeavesLocked(
 		child := node.children[branch]
 		if child == nil {
 			r.appendIndexedDerivedLeafLocked(
-				mtpRoute, childPointCode, childMask, gateways, path, updated, indications,
+				mtpRoute, childPointCode, childMask, gateways, path, updated,
 			)
 			continue
 		}
 		r.appendIndexedDerivedLeavesLocked(
-			mtpRoute, child, childPointCode, childMask, gateways, path, updated, indications,
+			mtpRoute, child, childPointCode, childMask, gateways, path, updated,
 		)
 	}
 }
@@ -741,18 +749,10 @@ func (r *aspRoutes) appendIndexedDerivedLeafLocked(
 	gateways []aspGatewayRouteSnapshot,
 	path []*aspRouteStateIndexNode,
 	updated map[aspDerivedRangeKey]aspDestinationStatus,
-	indications *[]*MTPIndication,
 ) {
 	current := aspDestinationStatusFromGatewayPath(gateways, path)
 	key := aspDerivedRangeKey{mtpRoute: mtpRoute.id, pointCode: pointCode, mask: mask}
-	previous, previousSet := r.previousDerivedStatusForRangeLocked(mtpRoute, pointCode, mask)
-	if !previousSet {
-		previous = aspDestinationStatus{availability: DestinationUnavailable}
-	}
 	updated[key] = current
-	if indication := newMTPIndication(key, previous, current); indication != nil {
-		*indications = append(*indications, indication)
-	}
 }
 
 func aspDestinationStatusFromGatewayPath(
@@ -802,22 +802,144 @@ func aspDestinationStatusFromGatewayPath(
 	return best
 }
 
-func (r *aspRoutes) previousDerivedStatusForRangeLocked(
+func (r *aspRoutes) derivedStatusIndicationsLocked(
 	mtpRoute aspMTPRoute,
-	pointCode uint32,
-	mask uint8,
-) (aspDestinationStatus, bool) {
-	for candidateMask := int(mtpRoute.mask); candidateMask >= int(mask); candidateMask-- {
-		key := aspDerivedRangeKey{
-			mtpRoute:  mtpRoute.id,
-			pointCode: destinationRangePrefix(pointCode, uint8(candidateMask)),
-			mask:      uint8(candidateMask),
-		}
-		if status, exists := r.derived[key]; exists {
-			return status, true
+	updated map[aspDerivedRangeKey]aspDestinationStatus,
+) []*MTPIndication {
+	previousTree := derivedStatusTree(mtpRoute, r.derived)
+	currentTree := derivedStatusTree(mtpRoute, updated)
+	indications := make([]*MTPIndication, 0)
+	appendDerivedStatusIndications(
+		mtpRoute.id,
+		mtpRoute.destinationPointCode,
+		mtpRoute.mask,
+		&previousTree,
+		1,
+		&currentTree,
+		1,
+		aspDestinationStatus{},
+		false,
+		aspDestinationStatus{},
+		false,
+		&indications,
+	)
+	return indications
+}
+
+func derivedStatusTree(
+	mtpRoute aspMTPRoute,
+	statuses map[aspDerivedRangeKey]aspDestinationStatus,
+) aspDerivedStatusTree {
+	entryCount := 0
+	for key := range statuses {
+		if key.mtpRoute == mtpRoute.id && aspMTPRouteCoversRange(mtpRoute, key.pointCode, key.mask) {
+			entryCount++
 		}
 	}
-	return aspDestinationStatus{}, false
+	tree := aspDerivedStatusTree{
+		nodes: make([]aspDerivedStatusNode, 1, 1+entryCount*2),
+	}
+	for key, status := range statuses {
+		if key.mtpRoute != mtpRoute.id || !aspMTPRouteCoversRange(mtpRoute, key.pointCode, key.mask) {
+			continue
+		}
+		node := tree.nodeForRange(mtpRoute.mask, key.pointCode, key.mask)
+		tree.nodes[node-1].status = status
+		tree.nodes[node-1].statusSet = true
+	}
+	return tree
+}
+
+func (tree *aspDerivedStatusTree) nodeForRange(
+	rootMask uint8,
+	pointCode uint32,
+	mask uint8,
+) int {
+	node := 1
+	for currentMask := rootMask; currentMask > mask; currentMask-- {
+		branch := int(pointCode >> (currentMask - 1) & 1)
+		child := tree.nodes[node-1].children[branch]
+		if child == 0 {
+			tree.nodes = append(tree.nodes, aspDerivedStatusNode{})
+			child = len(tree.nodes)
+			tree.nodes[node-1].children[branch] = child
+		}
+		node = child
+	}
+	return node
+}
+
+func appendDerivedStatusIndications(
+	mtpRoute MTPRouteID,
+	pointCode uint32,
+	mask uint8,
+	previousTree *aspDerivedStatusTree,
+	previousNode int,
+	currentTree *aspDerivedStatusTree,
+	currentNode int,
+	previous aspDestinationStatus,
+	previousSet bool,
+	current aspDestinationStatus,
+	currentSet bool,
+	indications *[]*MTPIndication,
+) {
+	if previousNode != 0 && previousTree.nodes[previousNode-1].statusSet {
+		previous = previousTree.nodes[previousNode-1].status
+		previousSet = true
+	}
+	if currentNode != 0 && currentTree.nodes[currentNode-1].statusSet {
+		current = currentTree.nodes[currentNode-1].status
+		currentSet = true
+	}
+	previousHasChildren := previousTree.nodeHasChildren(previousNode)
+	currentHasChildren := currentTree.nodeHasChildren(currentNode)
+	if mask == 0 || !previousHasChildren && !currentHasChildren {
+		if !previousSet {
+			previous = aspDestinationStatus{availability: DestinationUnavailable}
+		}
+		if !currentSet {
+			current = aspDestinationStatus{availability: DestinationUnavailable}
+		}
+		key := aspDerivedRangeKey{mtpRoute: mtpRoute, pointCode: pointCode, mask: mask}
+		if indication := newMTPIndication(key, previous, current); indication != nil {
+			*indications = append(*indications, indication)
+		}
+		return
+	}
+
+	childMask := mask - 1
+	for branch := 0; branch < 2; branch++ {
+		previousChild := 0
+		if previousNode != 0 {
+			previousChild = previousTree.nodes[previousNode-1].children[branch]
+		}
+		currentChild := 0
+		if currentNode != 0 {
+			currentChild = currentTree.nodes[currentNode-1].children[branch]
+		}
+		appendDerivedStatusIndications(
+			mtpRoute,
+			pointCode|uint32(branch)<<childMask,
+			childMask,
+			previousTree,
+			previousChild,
+			currentTree,
+			currentChild,
+			previous,
+			previousSet,
+			current,
+			currentSet,
+			indications,
+		)
+	}
+}
+
+func (tree *aspDerivedStatusTree) nodeHasChildren(node int) bool {
+	if node == 0 {
+		return false
+	}
+	children := tree.nodes[node-1].children
+	return children[0] != 0 || children[1] != 0
 }
 
 func newMTPIndication(
