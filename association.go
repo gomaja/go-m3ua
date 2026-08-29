@@ -2058,6 +2058,23 @@ func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
+	if c.role == RoleIPSP {
+		// Single Exchange uses the same per-AS state in both directions. An
+		// Alternate ASP Active Notify therefore makes each named context inactive,
+		// not merely unsendable. Materialize an association-wide active set before
+		// subtracting a partial override so later acknowledgements cannot count the
+		// overridden context as the last active AS.
+		if !c.activeRCsScoped {
+			c.activeRCs = make(map[uint32]struct{})
+			for _, rc := range c.configuredRoutingContexts() {
+				c.activeRCs[rc] = struct{}{}
+			}
+			c.activeRCsScoped = true
+		}
+		for _, rc := range rcs {
+			delete(c.activeRCs, rc)
+		}
+	}
 	if c.overriddenRCs == nil {
 		c.overriddenRCs = make(map[uint32]struct{})
 	}

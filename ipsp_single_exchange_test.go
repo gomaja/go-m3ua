@@ -460,6 +460,90 @@ func TestIPSPASPUpAckWaitsForActiveTrafficToQuiesce(t *testing.T) {
 	}
 }
 
+func TestIPSPSingleExchangeReceivedASPUpAckQuiescesActiveTraffic(t *testing.T) {
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	association.maxMessageStreamID = 4
+	association.recvStream.Store(0)
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+	association.noteRoutingContextsActive([]uint32{1})
+	registry := newApplicationServers(time.Hour)
+	t.Cleanup(registry.close)
+	association.as = registry
+	applicationServer := registry.get(associationConfigASKey(association.cfg, 1))
+	applicationServer.setASPState(association, StateASPActive, time.Hour)
+	association.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
+	t.Cleanup(association.stopAllTAck)
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if _, ok := message.(*messages.Data); ok {
+			close(dataStarted)
+			<-releaseData
+		}
+		return message.MarshalLen(), nil
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseData:
+		default:
+			close(releaseData)
+		}
+	})
+
+	data := distributionData(1, 1, "in flight")
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := association.WriteSignal(data)
+		writeDone <- err
+	}()
+	select {
+	case <-dataStarted:
+	case err := <-writeDone:
+		t.Fatalf("outbound DATA returned before entering the traffic path: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("outbound DATA did not enter the IPSP traffic path")
+	}
+
+	handleDone := make(chan struct{})
+	go func() {
+		association.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
+		close(handleDone)
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for association.State() != StateASPInactive && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := association.State(); got != StateASPInactive {
+		t.Fatalf("state while applying ASP Up Ack = %v, want ASP-INACTIVE", got)
+	}
+	if active := applicationServer.activeASPs(); len(active) != 0 {
+		t.Fatalf("Application Server retained %d active IPSPs while applying ASP Up Ack", len(active))
+	}
+	if association.activeForRoutingContext(1) {
+		t.Fatal("Routing Context 1 remained active while applying ASP Up Ack")
+	}
+	select {
+	case <-handleDone:
+		t.Fatal("ASP Up Ack handler returned before admitted DATA drained")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if _, err := association.WriteSignal(data); !errors.Is(err, ErrNotEstablished) {
+		t.Fatalf("DATA admitted after ASP Up Ack committed ASP-INACTIVE: %v", err)
+	}
+
+	close(releaseData)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("in-flight DATA: %v", err)
+	}
+	select {
+	case <-handleDone:
+	case <-time.After(time.Second):
+		t.Fatal("ASP Up Ack handler did not finish after DATA drained")
+	}
+}
+
 func TestIPSPSingleExchangeReorderedAcknowledgementsChangePeerState(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -975,6 +1059,35 @@ func TestIPSPSingleExchangeInactiveAckDefersCompletionUntilAdmittedDataDrains(t 
 		}
 	case <-time.After(time.Second):
 		t.Fatal("T(ack) waiter did not complete after DATA drained")
+	}
+}
+
+func TestIPSPSingleExchangeInactiveAckExcludesOverriddenContextsFromState(t *testing.T) {
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+	association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	association.noteRoutingContextsActive([]uint32{1, 2})
+	association.handleSignals(context.Background(), messages.NewNotify(
+		params.NewStatus(params.AlternateAspActive), nil,
+		params.NewRoutingContext(1), nil,
+	))
+	if !association.routingContextOverridden(1) {
+		t.Fatal("Alternate ASP Active Notify did not override Routing Context 1")
+	}
+	association.startTAck(messages.NewAspInactive(params.NewRoutingContext(2), nil), requestAspInactive)
+	t.Cleanup(association.stopAllTAck)
+
+	association.handleSignals(context.Background(), messages.NewAspInactiveAck(
+		params.NewRoutingContext(2), nil,
+	))
+
+	if got := association.State(); got != StateASPInactive {
+		t.Fatalf("state after the last non-overridden context became inactive = %v, want ASP-INACTIVE", got)
+	}
+	for _, routingContext := range []uint32{1, 2} {
+		if association.outboundRoutingContextActive(routingContext) {
+			t.Errorf("Routing Context %d remained active", routingContext)
+		}
 	}
 }
 

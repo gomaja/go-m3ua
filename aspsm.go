@@ -161,6 +161,22 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		if aspUpAck.AspIdentifier != nil {
 			c.savePeerASPIdentifier(aspUpAck.AspIdentifier)
 		}
+
+		// RFC 4666 Section 4.3.4.1.2 permits the receiving IPSP to consider
+		// its peer ASP-INACTIVE when the ASP Up Ack arrives. In Single Exchange
+		// a simultaneous procedure can already have made this association active,
+		// so commit the inactive state and drain traffic here, before returning
+		// to the dispatcher. Otherwise a concurrent DATA write can be admitted
+		// after the peer has sent the acknowledgement that ended the ASPSM
+		// procedure.
+		c.commitState(StateASPInactive)
+		c.noteRoutingContextsInactive(nil)
+		postTransitionNotify := func() {}
+		if c.as != nil {
+			postTransitionNotify = c.as.quiesceASPFor(c, c.configuredRoutingContexts())
+		}
+		c.quiesceUnscopedTraffic()
+		postTransitionNotify()
 		return nil
 	}
 
