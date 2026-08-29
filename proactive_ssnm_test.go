@@ -26,17 +26,17 @@ func TestListenerDestinationUpdatesNotifyOnlyConcernedActiveASPs(t *testing.T) {
 			listener, _, first, firstSent := distributionFixtureForContexts(
 				t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 			)
-			second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1, 2)
+			second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1, 2)
 			first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 			second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 			firstApplicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 			secondApplicationServer := proactiveSSNMApplicationServer(listener, 7, 2)
 			first.noteRoutingContextsActive([]uint32{1})
-			first.setState(StateAspActive)
+			first.setState(StateASPActive)
 			second.noteRoutingContextsActive([]uint32{2})
-			second.setState(StateAspActive)
-			firstApplicationServer.setASPState(first, StateAspActive, time.Hour)
-			secondApplicationServer.setASPState(second, StateAspActive, time.Hour)
+			second.setState(StateASPActive)
+			firstApplicationServer.setASPState(first, StateASPActive, time.Hour)
+			secondApplicationServer.setASPState(second, StateASPActive, time.Hour)
 			firstSent.reset()
 			secondSent.reset()
 
@@ -80,9 +80,9 @@ func TestAllContextDestinationUpdateDeduplicatesAnASPAndNamesItsActiveScopes(t *
 	firstApplicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	secondApplicationServer := proactiveSSNMApplicationServer(listener, 7, 2)
 	asp.noteRoutingContextsActive([]uint32{1, 2})
-	asp.setState(StateAspActive)
-	firstApplicationServer.setASPState(asp, StateAspActive, time.Hour)
-	secondApplicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	firstApplicationServer.setASPState(asp, StateASPActive, time.Hour)
+	secondApplicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	if err := listener.ReportDestinationRangeForNetwork(7, 0x123456, 4, DestinationUnavailable); err != nil {
@@ -104,20 +104,20 @@ func TestAllContextDestinationUpdateScopesTargetsByNetworkAppearance(t *testing.
 	)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 	first.noteRoutingContextsActive([]uint32{1})
-	first.setState(StateAspActive)
+	first.setState(StateASPActive)
 	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	applicationServer10 := listener.as.get(key10)
 	applicationServer10.setTrafficMode(params.TrafficModeLoadshare)
-	applicationServer10.setASPState(first, StateAspActive, time.Hour)
+	applicationServer10.setASPState(first, StateASPActive, time.Hour)
 
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
 	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
 	second.noteRoutingContextsActive([]uint32{1})
-	second.setState(StateAspActive)
+	second.setState(StateASPActive)
 	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	applicationServer20 := listener.as.get(key20)
 	applicationServer20.setTrafficMode(params.TrafficModeLoadshare)
-	applicationServer20.setASPState(second, StateAspActive, time.Hour)
+	applicationServer20.setASPState(second, StateASPActive, time.Hour)
 	firstSent.reset()
 	secondSent.reset()
 
@@ -138,14 +138,14 @@ func TestDestinationUpdateScopesSameASPRoutingContextByNetworkAppearance(t *test
 	)
 	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
+	asp.setState(StateASPActive)
 	for _, key := range []ASKey{
 		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
 		{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
 	} {
 		applicationServer := listener.as.get(key)
 		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	}
 	sent.reset()
 
@@ -169,16 +169,16 @@ func TestDestinationUpdateContinuesAfterOneASPWriteFails(t *testing.T) {
 	listener, _, first, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	first.noteRoutingContextsActive([]uint32{1})
-	first.setState(StateAspActive)
+	first.setState(StateASPActive)
 	second.noteRoutingContextsActive([]uint32{1})
-	second.setState(StateAspActive)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	second.setState(StateASPActive)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 
 	writeFailure := errors.New("injected SSNM write failure")
 	first.signalWriter = func(messages.M3UA) (int, error) { return 0, writeFailure }
@@ -202,8 +202,8 @@ func TestDestinationUpdateRejectsUnknownStateAtomically(t *testing.T) {
 		t, params.TrafficModeLoadshare,
 	)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
@@ -220,20 +220,20 @@ func TestDestinationUpdateRejectsUnknownStateAtomically(t *testing.T) {
 	}
 }
 
-func TestAcceptedConnDestinationUpdateUsesListenerWideBroadcast(t *testing.T) {
+func TestAcceptedAssociationDestinationUpdateUsesListenerWideBroadcast(t *testing.T) {
 	listener, _, first, firstSent := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
 	first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	first.noteRoutingContextsActive([]uint32{1})
-	first.setState(StateAspActive)
+	first.setState(StateASPActive)
 	second.noteRoutingContextsActive([]uint32{1})
-	second.setState(StateAspActive)
-	applicationServer.setASPState(first, StateAspActive, time.Hour)
-	applicationServer.setASPState(second, StateAspActive, time.Hour)
+	second.setState(StateASPActive)
+	applicationServer.setASPState(first, StateASPActive, time.Hour)
+	applicationServer.setASPState(second, StateASPActive, time.Hour)
 	listener.destinations = newDestinations()
 	first.destinations = listener.destinations
 	second.destinations = listener.destinations
@@ -245,7 +245,7 @@ func TestAcceptedConnDestinationUpdateUsesListenerWideBroadcast(t *testing.T) {
 	if err := first.ReportDestinationStateForNetworkAndRoutingContext(
 		7, 1, 0x123456, DestinationUnavailable,
 	); err != nil {
-		t.Fatalf("set destination state through accepted Conn: %v", err)
+		t.Fatalf("set destination state through accepted Association: %v", err)
 	}
 	if got := len(ssnmMessages(firstSent.snapshot())); got != 1 {
 		t.Fatalf("calling ASP received %d SSNM messages, want 1", got)
@@ -255,26 +255,154 @@ func TestAcceptedConnDestinationUpdateUsesListenerWideBroadcast(t *testing.T) {
 	}
 }
 
+func TestDialedSGPDestinationUpdateReportsToItsActiveASP(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+
+	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 4, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("report destination from dialing SGP: %v", err)
+	}
+	reports := ssnmMessages(capture.snapshot())
+	if len(reports) != 1 {
+		t.Fatalf("dialing SGP emitted %d SSNM messages, want one DUNA", len(reports))
+	}
+	if _, ok := reports[0].(*messages.DestinationUnavailable); !ok {
+		t.Fatalf("dialing SGP report = %T, want DUNA", reports[0])
+	}
+	networkAppearance, routingContext, affectedPointCode := ssnmScope(t, reports[0])
+	if networkAppearance == nil || networkAppearance.NetworkAppearance() != 7 {
+		t.Fatalf("DUNA Network Appearance = %v, want 7", networkAppearance)
+	}
+	if got := routingContext.RoutingContexts(); !equalTrafficModeContexts(got, []uint32{1}) {
+		t.Fatalf("DUNA Routing Contexts = %v, want [1]", got)
+	}
+	if got := affectedPointCode.AffectedPointCodes(); len(got) != 1 || got[0] != 0x123456 {
+		t.Fatalf("DUNA Affected Point Codes = %v, want [0x123456]", got)
+	}
+	if got := affectedPointCode.AffectedPointCodeMasks(); len(got) != 1 || got[0] != 4 {
+		t.Fatalf("DUNA Affected Point Code masks = %v, want [4]", got)
+	}
+}
+
+func TestClosedDialedSGPRejectsDestinationReports(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+	if err := association.Close(); err != nil {
+		t.Fatalf("close dialing SGP Association: %v", err)
+	}
+	capture.reset()
+
+	err := association.ReportDestinationStateForNetworkAndRoutingContext(
+		7, 1, 0x123456, DestinationUnavailable,
+	)
+	if !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("closed dialing SGP destination report error = %v, want ErrAssociationClosed", err)
+	}
+	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); got != DestinationAvailable {
+		t.Fatalf("closed dialing SGP destination state = %v after rejected report, want available", got)
+	}
+	if got := len(ssnmMessages(capture.snapshot())); got != 0 {
+		t.Fatalf("closed dialing SGP emitted %d destination reports, want 0", got)
+	}
+}
+
+func TestDialedSGPDestinationUpdateRejectsUnconfiguredRoutingContextAtomically(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+
+	err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 2, 0x123456, 4, DestinationUnavailable,
+	)
+	if !errors.Is(err, ErrInvalidRoutingContext) {
+		t.Fatalf("unconfigured Routing Context error = %v, want ErrInvalidRoutingContext", err)
+	}
+	if _, known := association.destinations.lookupRange(
+		destinationKey{
+			networkAppearance:    7,
+			networkAppearanceSet: true,
+			routingContext:       2,
+			routingContextSet:    true,
+		},
+		0x123456,
+		4,
+	); known {
+		t.Fatal("unconfigured Routing Context destination was recorded")
+	}
+	if got := len(ssnmMessages(capture.snapshot())); got != 0 {
+		t.Fatalf("unconfigured Routing Context emitted %d SSNM messages, want 0", got)
+	}
+}
+
+func TestDialedSGPDestinationRecoveryClearsCongestionBeforeDAVA(t *testing.T) {
+	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+
+	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationCongested,
+	); err != nil {
+		t.Fatalf("report congestion from dialing SGP: %v", err)
+	}
+	capture.reset()
+	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, 0x123456, 0, DestinationAvailable,
+	); err != nil {
+		t.Fatalf("report recovery from dialing SGP: %v", err)
+	}
+
+	reports := ssnmMessages(capture.snapshot())
+	if len(reports) != 2 {
+		t.Fatalf("dialing SGP recovery emitted %d messages, want SCON(0), DAVA", len(reports))
+	}
+	scon, ok := reports[0].(*messages.SignallingCongestion)
+	if !ok || scon.CongestionIndications == nil || scon.CongestionIndications.CongestionLevel() != 0 {
+		t.Fatalf("first recovery message = %#v, want SCON with level 0", reports[0])
+	}
+	if _, ok := reports[1].(*messages.DestinationAvailable); !ok {
+		t.Fatalf("second recovery message = %T, want DAVA", reports[1])
+	}
+}
+
+func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routingContexts ...uint32) (*Association, *distributionCapture) {
+	t.Helper()
+	association, _ := newTestConn(t, StateASPActive, RoleSGP)
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+	association.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
+	association.noteRoutingContextsActive(routingContexts)
+	association.as = newApplicationServers(time.Hour, association.cfg)
+	for _, routingContext := range routingContexts {
+		applicationServer := association.as.get(ASKey{
+			NetworkAppearance:    networkAppearance,
+			NetworkAppearanceSet: true,
+			RoutingContext:       routingContext,
+			RoutingContextSet:    true,
+		})
+		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
+		applicationServer.setASPState(association, StateASPActive, time.Hour)
+	}
+	association.mtp3Restarts = &mtp3RestartRegistry{}
+	capture := new(distributionCapture)
+	association.signalWriter = capture.write
+	return association, capture
+}
+
 func TestDestinationSetterMethodCompatibility(t *testing.T) {
 	assertDestinationSetter := func(func(uint32, DestinationState)) {}
 	assertDestinationSetter(new(Listener).SetDestinationState)
-	assertDestinationSetter(new(Conn).SetDestinationState)
+	assertDestinationSetter(new(Association).SetDestinationState)
 }
 
 func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
 	listener, _, blocked, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
-	healthy, healthySent := addDistributionASP(t, listener, StateAspInactive, 1)
+	healthy, healthySent := addDistributionASP(t, listener, StateASPInactive, 1)
 	blocked.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	healthy.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	blocked.noteRoutingContextsActive([]uint32{1})
-	blocked.setState(StateAspActive)
+	blocked.setState(StateASPActive)
 	healthy.noteRoutingContextsActive([]uint32{1})
-	healthy.setState(StateAspActive)
-	applicationServer.setASPState(blocked, StateAspActive, time.Hour)
-	applicationServer.setASPState(healthy, StateAspActive, time.Hour)
+	healthy.setState(StateASPActive)
+	applicationServer.setASPState(blocked, StateASPActive, time.Hour)
+	applicationServer.setASPState(healthy, StateASPActive, time.Hour)
 
 	writeEntered := make(chan struct{})
 	writeRelease := make(chan struct{})
@@ -321,8 +449,8 @@ func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
 	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
@@ -364,8 +492,8 @@ func TestProactiveSSNMQueueOverflowClosesAssociation(t *testing.T) {
 	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	asp.notificationQueue = make(chan mandatoryControl, 1)
 	asp.notificationOnce.Do(func() {})
 
@@ -388,8 +516,8 @@ func TestDestinationReportValidatesScopeBeforeConcurrentCommit(t *testing.T) {
 	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	var waitGroup sync.WaitGroup
@@ -441,8 +569,8 @@ func TestQueuedProactiveSSNMPrecedesAspInactiveAck(t *testing.T) {
 	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	asp.notificationQueue = make(chan mandatoryControl, defaultNotificationQueueSize)
 
 	writeEntered := make(chan struct{})

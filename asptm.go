@@ -13,11 +13,11 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func (c *Conn) initiateASPTM() error {
+func (c *Association) initiateASPTM() error {
 	return c.initiateASPActive(c.configuredRoutingContextParam())
 }
 
-func (c *Conn) initiateASPActive(routingContext *params.Param) error {
+func (c *Association) initiateASPActive(routingContext *params.Param) error {
 	requests, err := c.aspActiveRequests(routingContext)
 	if err != nil {
 		return err
@@ -44,7 +44,7 @@ type aspActiveRequest struct {
 	routingContext *params.Param
 }
 
-func (c *Conn) aspActiveRequests(routingContext *params.Param) ([]aspActiveRequest, error) {
+func (c *Association) aspActiveRequests(routingContext *params.Param) ([]aspActiveRequest, error) {
 	trafficModes := c.trafficModePolicy()
 	var routingContexts []uint32
 	omitted := routingContext == nil
@@ -105,12 +105,12 @@ func (c *Conn) aspActiveRequests(routingContext *params.Param) ([]aspActiveReque
 	return requests, nil
 }
 
-func (c *Conn) initiateASPInactive(routingContext *params.Param) error {
+func (c *Association) initiateASPInactive(routingContext *params.Param) error {
 	_, err := c.beginASPInactive(routingContext)
 	return err
 }
 
-func (c *Conn) beginASPInactive(routingContext *params.Param) (*pendingRequest, error) {
+func (c *Association) beginASPInactive(routingContext *params.Param) (*pendingRequest, error) {
 	aspInactive := messages.NewAspInactive(routingContext.Copy(), nil)
 	request := c.startTAck(aspInactive, requestAspInactive)
 	if _, err := c.WriteSignal(aspInactive); err != nil {
@@ -123,11 +123,11 @@ func (c *Conn) beginASPInactive(routingContext *params.Param) (*pendingRequest, 
 // ActivateRoutingContexts starts the ASP Active procedure for the named
 // Application Servers. With no arguments it requests every configured Routing
 // Context. The request remains protected by T(ack) until all scoped Acks arrive.
-func (c *Conn) ActivateRoutingContexts(routingContexts ...uint32) error {
-	if c.mode != modeClient {
-		return ErrUnsupportedMode
+func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
+	if c.role != RoleASP {
+		return ErrUnsupportedRole
 	}
-	if state := c.State(); state != StateAspInactive && state != StateAspActive {
+	if state := c.State(); state != StateASPInactive && state != StateASPActive {
 		return ErrInvalidState
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
@@ -140,11 +140,11 @@ func (c *Conn) ActivateRoutingContexts(routingContexts ...uint32) error {
 // DeactivateRoutingContexts starts the ASP Inactive procedure for the named
 // Application Servers. With no arguments it requests every configured Routing
 // Context. Local traffic eligibility changes only as the scoped Acks arrive.
-func (c *Conn) DeactivateRoutingContexts(routingContexts ...uint32) error {
-	if c.mode != modeClient {
-		return ErrUnsupportedMode
+func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error {
+	if c.role != RoleASP {
+		return ErrUnsupportedRole
 	}
-	if c.State() != StateAspActive {
+	if c.State() != StateASPActive {
 		return ErrInvalidState
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
@@ -154,7 +154,7 @@ func (c *Conn) DeactivateRoutingContexts(routingContexts ...uint32) error {
 	return c.initiateASPInactive(routingContext)
 }
 
-func (c *Conn) outboundRoutingContexts(routingContexts []uint32) (*params.Param, error) {
+func (c *Association) outboundRoutingContexts(routingContexts []uint32) (*params.Param, error) {
 	if len(routingContexts) == 0 {
 		return c.configuredRoutingContextParam(), nil
 	}
@@ -168,7 +168,7 @@ func (c *Conn) outboundRoutingContexts(routingContexts []uint32) (*params.Param,
 // setBeatData registers the Heartbeat Data whose echo the next BEAT Ack must
 // carry. heartbeat() and the dispatch goroutine run concurrently, so all
 // access goes through muBeat.
-func (c *Conn) setBeatData(data []byte) {
+func (c *Association) setBeatData(data []byte) {
 	c.muBeat.Lock()
 	c.beatData = data
 	c.muBeat.Unlock()
@@ -176,7 +176,7 @@ func (c *Conn) setBeatData(data []byte) {
 
 // currentBeatData returns the outstanding Heartbeat Data, or an empty slice
 // when no BEAT is awaiting its Ack.
-func (c *Conn) currentBeatData() []byte {
+func (c *Association) currentBeatData() []byte {
 	c.muBeat.RLock()
 	defer c.muBeat.RUnlock()
 	return c.beatData
@@ -187,7 +187,7 @@ func (c *Conn) currentBeatData() []byte {
 // the echo is retired the moment it is accepted: leaving it registered would
 // let a peer replay a captured Ack to satisfy every later T(beat) and keep a
 // dead link looking alive indefinitely.
-func (c *Conn) consumeBeatData() bool {
+func (c *Association) consumeBeatData() bool {
 	c.muBeat.Lock()
 	defer c.muBeat.Unlock()
 	if len(c.beatData) == 0 {
@@ -199,8 +199,14 @@ func (c *Conn) consumeBeatData() bool {
 
 // heartbeat runs the RFC 4666 M3UA BEAT/BEAT Ack liveness loop. SCTP
 // HEARTBEAT chunks are transport-layer path management and are not handled here.
-func (c *Conn) heartbeat(ctx context.Context) {
-	c.beatAllow.Wait()
+func (c *Association) heartbeat(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-c.done:
+		return
+	case <-c.beatStart:
+	}
 	if !c.hb.Enabled {
 		return
 	}
@@ -271,8 +277,8 @@ func (c *Conn) heartbeat(ctx context.Context) {
 //
 // These are SGP procedures ("from the ASP"), so an ASP that receives an ASP
 // Active reports an Error and holds its state rather than acking.
-func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
-	if c.mode != modeServer {
+func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
+	if c.role != RoleSGP {
 		return NewUnexpectedMessageError(aspActive)
 	}
 
@@ -284,7 +290,7 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 	// messages". This is checked before the Ack is built, because the Ack used
 	// to go out first and only then draw the state error, acknowledging a peer
 	// that had never sent an ASP Up into carrying traffic.
-	if c.State() == StateAspDown {
+	if c.State() == StateASPDown {
 		return NewUnexpectedMessageError(aspActive)
 	}
 	if err := validateRoutingContextShape(aspActive.RoutingContext); err != nil {
@@ -335,7 +341,7 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 	if rcErr != nil && served == nil {
 		// Nothing could be activated. Section 4.3.4.3 still owes the Ack if the
 		// ASP is already ASP-ACTIVE, independently of the Routing Context.
-		if c.State() != StateAspActive {
+		if c.State() != StateASPActive {
 			return rcErr
 		}
 		acknowledged = aspActive.RoutingContext.Copy()
@@ -353,13 +359,13 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 		if served != nil {
 			servedContexts = served.RoutingContexts()
 		}
-		acknowledgedMode, err = c.as.agreeTrafficModeForConn(c, servedContexts, aspActive.TrafficModeType)
+		acknowledgedMode, err = c.as.agreeTrafficModeForAssociation(c, servedContexts, aspActive.TrafficModeType)
 		if err != nil {
 			return err
 		}
 	}
-	if served != nil && c.listener != nil {
-		if err := c.listener.writeMTP3RestartStatusBeforeAck(c, served.RoutingContexts()); err != nil {
+	if served != nil && c.mtp3Restarts != nil {
+		if err := writeMTP3RestartStatusBeforeAck(c.mtp3Restarts, c, served.RoutingContexts()); err != nil {
 			return err
 		}
 	}
@@ -406,10 +412,11 @@ func (c *Conn) handleAspActive(aspActive *messages.AspActive) error {
 
 // validateTrafficMode validates the peer's Traffic Mode Type value. Agreement
 // with local policy is resolved later, after the Routing Context scope is
-// known, by applicationServers.agreeTrafficMode. Config.TrafficModes takes
+// known, by applicationServers.agreeTrafficMode.
+// AssociationConfig.TrafficModes takes
 // precedence over the default TrafficModeType, so comparing against the default
 // before resolving scope rejects a valid per-AS override.
-func (c *Conn) validateTrafficMode(peer *params.Param) error {
+func (c *Association) validateTrafficMode(peer *params.Param) error {
 	if peer == nil {
 		return nil
 	}
@@ -429,7 +436,7 @@ func (c *Conn) validateTrafficMode(peer *params.Param) error {
 	return nil
 }
 
-func (c *Conn) validateTrafficModeForRoutingContexts(peer *params.Param, routingContexts []uint32) error {
+func (c *Association) validateTrafficModeForRoutingContexts(peer *params.Param, routingContexts []uint32) error {
 	if peer == nil {
 		return nil
 	}
@@ -456,8 +463,8 @@ func (c *Conn) validateTrafficModeForRoutingContexts(peer *params.Param, routing
 // is not acknowledged" — RFC 4666 Section 4.3.4.3), so an SGP that receives one
 // reports an Error and holds its state: it never sent an ASP Active, so nothing
 // authorises a stray Ack to move it to ASP-ACTIVE.
-func (c *Conn) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error {
-	if c.mode != modeClient {
+func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	if c.rejectStaleASPTMAck(requestAspActive) {
@@ -472,7 +479,7 @@ func (c *Conn) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error {
 	// ASP-INACTIVE threw that second Ack away, leaving the context it granted
 	// unusable.
 	switch c.State() {
-	case StateAspInactive, StateAspActive:
+	case StateASPInactive, StateASPActive:
 	default:
 		return NewUnexpectedMessageError(aspAcAck)
 	}
@@ -503,7 +510,7 @@ func (c *Conn) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error {
 	return nil
 }
 
-func (c *Conn) validateAspActiveAckTrafficMode(ack *messages.AspActiveAck) error {
+func (c *Association) validateAspActiveAckTrafficMode(ack *messages.AspActiveAck) error {
 	if ack.TrafficModeType == nil {
 		return nil
 	}
@@ -588,7 +595,7 @@ func (c *Conn) validateAspActiveAckTrafficMode(ack *messages.AspActiveAck) error
 //	  message with the Error Code 'Invalid Routing Context'."
 type unservedError func(rcs ...uint32) *RoutingContextError
 
-func (c *Conn) answerRoutingContexts(requested *params.Param, unservedAs, noKeysAs unservedError) (*params.Param, error) {
+func (c *Association) answerRoutingContexts(requested *params.Param, unservedAs, noKeysAs unservedError) (*params.Param, error) {
 	ours := make(map[uint32]struct{})
 	for _, rc := range c.configuredRoutingContexts() {
 		ours[rc] = struct{}{}
@@ -608,7 +615,7 @@ func (c *Conn) answerRoutingContexts(requested *params.Param, unservedAs, noKeys
 		//
 		// That is the no-RK case, not the dedicated-association case where local
 		// configuration intentionally carries a single AS without assigning it a
-		// numeric Routing Context. Config.RoutingContexts nil, and the empty
+		// numeric Routing Context. AssociationConfig.RoutingContexts nil, and the empty
 		// parameter produced by the public constructors from an empty slice, both
 		// represent that contextless AS. The only "no AS" shape this API can
 		// express after ASP Up is an explicit authorizer that returned no
@@ -668,12 +675,12 @@ func validateRoutingContextShape(peer *params.Param) error {
 }
 
 // validateRoutingContext checks that a peer's Routing Context parameter refers
-// to contexts this connection is configured for.
+// to contexts this association is configured for.
 //
 // The parameter is Optional (RFC 4666 Sections 3.7.1 and 3.7.2): a peer that omits it
 // is answering for the single configured context, which is not an error. When
 // present, every context named must be one of ours.
-func (c *Conn) validateRoutingContext(peer *params.Param) error {
+func (c *Association) validateRoutingContext(peer *params.Param) error {
 	// A parameter that is present and decodes to nothing is not the same as one
 	// that was omitted. Section 3.8.1: "The 'Invalid Routing Context' error is
 	// sent if a message is received with an invalid or unconfigured routing
@@ -736,15 +743,15 @@ func (c *Conn) validateRoutingContext(peer *params.Param) error {
 //
 // These are SGP procedures, so an ASP that receives an ASP Inactive reports an
 // Error and holds its state rather than acking.
-func (c *Conn) handleAspInactive(aspInactive *messages.AspInactive) error {
-	if c.mode != modeServer {
+func (c *Association) handleAspInactive(aspInactive *messages.AspInactive) error {
+	if c.role != RoleSGP {
 		return NewUnexpectedMessageError(aspInactive)
 	}
 
 	// As with ASP Active: Figure 3 defines no ASPTM transition out of ASP-DOWN,
 	// and Section 4.3.1 allows an ASP-DOWN peer only "Heartbeat, ASP Down Ack,
 	// and Error messages", so the Ack must not be written.
-	if c.State() == StateAspDown {
+	if c.State() == StateASPDown {
 		return NewUnexpectedMessageError(aspInactive)
 	}
 	if err := validateRoutingContextShape(aspInactive.RoutingContext); err != nil {
@@ -759,7 +766,7 @@ func (c *Conn) handleAspInactive(aspInactive *messages.AspInactive) error {
 	// Section 4.3.4.4 owes the Ack even when the ASP is already ASP-INACTIVE,
 	// so an unknown context withholds it only outside that state.
 	if rcErr != nil && served == nil {
-		if c.State() != StateAspInactive {
+		if c.State() != StateASPInactive {
 			return rcErr
 		}
 		acknowledged = aspInactive.RoutingContext.Copy()
@@ -770,7 +777,7 @@ func (c *Conn) handleAspInactive(aspInactive *messages.AspInactive) error {
 	// snapshots, then wait for any DATA that selected it before that mark. No AS
 	// mutex is held while waiting for the socket write.
 	postAckNotify := func() {}
-	if (served != nil || contextlessServed) && c.State() == StateAspActive {
+	if (served != nil || contextlessServed) && c.State() == StateASPActive {
 		var routingContexts []uint32
 		if served != nil {
 			routingContexts = served.RoutingContexts()
@@ -809,15 +816,15 @@ func (c *Conn) handleAspInactive(aspInactive *messages.AspInactive) error {
 //
 // As with ASP Active Ack this is an SGP-to-ASP message (RFC 4666 Section
 // 4.3.4.4), so an SGP that receives one reports an Error and holds its state.
-func (c *Conn) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) error {
-	if c.mode != modeClient {
+func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) error {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	if c.rejectStaleASPTMAck(requestAspInactive) {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	previousState := c.State()
-	if previousState != StateAspDown && previousState != StateAspInactive && previousState != StateAspActive {
+	if previousState != StateASPDown && previousState != StateASPInactive && previousState != StateASPActive {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 
@@ -834,13 +841,13 @@ func (c *Conn) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) error {
 	// Traffic has stopped only for the contexts this Ack names. Clearing every
 	// acknowledged context here made an RC-scoped ASP Inactive tear down the
 	// unaffected Application Servers carried by the same association.
-	if previousState == StateAspActive {
+	if previousState == StateASPActive {
 		c.noteRoutingContextsUnacked(aspAcAck.RoutingContext)
 	} else {
 		c.noteNoRoutingContextsAcked()
 	}
 	solicited := c.acknowledgeTAck(requestAspInactive, aspAcAck.RoutingContext)
-	if solicited || previousState != StateAspActive {
+	if solicited || previousState != StateASPActive {
 		return nil
 	}
 
@@ -860,7 +867,7 @@ func (c *Conn) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) error {
 // noteRoutingContextsUnacked removes the contexts an ASP Inactive Ack covered
 // from the set an ASP Active Ack granted. An omitted parameter covers every
 // configured AS; a named parameter affects only that subset.
-func (c *Conn) noteRoutingContextsUnacked(inactive *params.Param) {
+func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 	rcs := c.configuredRoutingContexts()
 	if inactive != nil {
 		rcs = inactive.RoutingContexts()
@@ -870,7 +877,7 @@ func (c *Conn) noteRoutingContextsUnacked(inactive *params.Param) {
 	defer c.muAckedRCs.Unlock()
 
 	if !c.ackedRCsScoped {
-		// A Conn placed directly into ASP-ACTIVE has the compatibility meaning
+		// An Association placed directly into ASP-ACTIVE has the compatibility meaning
 		// "active everywhere". Materialise that set before subtracting a scoped
 		// deactivation so the unaffected contexts remain active.
 		c.ackedRCs = make(map[uint32]struct{})
@@ -884,7 +891,7 @@ func (c *Conn) noteRoutingContextsUnacked(inactive *params.Param) {
 	}
 }
 
-func (c *Conn) noteNoRoutingContextsAcked() {
+func (c *Association) noteNoRoutingContextsAcked() {
 	c.muAckedRCs.Lock()
 	c.ackedRCs = make(map[uint32]struct{})
 	c.ackedRCsScoped = true
@@ -892,8 +899,8 @@ func (c *Conn) noteNoRoutingContextsAcked() {
 }
 
 // hasAcknowledgedRoutingContexts reports whether at least one Application
-// Server remains active at an ASP after a scoped ASP Inactive Ack.
-func (c *Conn) hasAcknowledgedRoutingContexts() bool {
+// Application Server remains active at an ASP after a scoped ASP Inactive Ack.
+func (c *Association) hasAcknowledgedRoutingContexts() bool {
 	c.muAckedRCs.RLock()
 	defer c.muAckedRCs.RUnlock()
 	return !c.ackedRCsScoped || len(c.ackedRCs) > 0
@@ -909,7 +916,7 @@ func (c *Conn) hasAcknowledgedRoutingContexts() bool {
 // The BEAT Ack is therefore unconditional: withholding it because the ASP is
 // momentarily ASP-INACTIVE lets the peer's T(beat) expire and tears down an
 // otherwise healthy association.
-func (c *Conn) handleHeartbeat(beat *messages.Heartbeat) error {
+func (c *Association) handleHeartbeat(beat *messages.Heartbeat) error {
 	// No need to create new HeartbeatAck, as it's identical to Heartbeat except the MessageType.
 	beat.Type = messages.MsgTypeHeartbeatAck
 	if _, err := c.WriteSignal(beat); err != nil {
@@ -926,7 +933,7 @@ func (c *Conn) handleHeartbeat(beat *messages.Heartbeat) error {
 // association. Only a mismatched echo is an error, per "The Heartbeat message
 // may optionally contain an opaque Heartbeat Data parameter that MUST be echoed
 // back unchanged in the related Heartbeat Ack message."
-func (c *Conn) handleHeartbeatAck(beatAck *messages.HeartbeatAck) error {
+func (c *Association) handleHeartbeatAck(beatAck *messages.HeartbeatAck) error {
 	// An Ack is only meaningful against a BEAT we actually sent. Without
 	// outstanding data any peer could forge a liveness token and defeat the
 	// T(beat) detection of a dead link.
@@ -963,11 +970,11 @@ func (c *Conn) handleHeartbeatAck(beatAck *messages.HeartbeatAck) error {
 	return nil
 }
 
-// stateForActiveRoutingContexts maps the per-AS server bookkeeping onto the
+// stateForActiveRoutingContexts maps per-AS SGP bookkeeping onto the
 // association-wide compatibility state. The association remains ASP-ACTIVE
 // while at least one Application Server is active and becomes ASP-INACTIVE only
 // when the last one stands down.
-func (c *Conn) stateForActiveRoutingContexts() State {
+func (c *Association) stateForActiveRoutingContexts() State {
 	c.muAckedRCs.RLock()
 	scoped, active := c.activeRCsScoped, len(c.activeRCs)
 	c.muAckedRCs.RUnlock()
@@ -976,9 +983,9 @@ func (c *Conn) stateForActiveRoutingContexts() State {
 		return c.State()
 	}
 	if active > 0 {
-		return StateAspActive
+		return StateASPActive
 	}
-	return StateAspInactive
+	return StateASPInactive
 }
 
 // overrideOtherASPs carries out the Override procedure of RFC 4666 Section
@@ -988,7 +995,7 @@ func (c *Conn) stateForActiveRoutingContexts() State {
 // of an ASP Active message at an SGP or IPSP causes direction of traffic to the
 // ASP sending the ASP Active message, in addition to all the other ASPs that
 // are active", so nobody is displaced.
-func (c *Conn) overrideOtherASPs(aspActive *messages.AspActive, activated []uint32) {
+func (c *Association) overrideOtherASPs(aspActive *messages.AspActive, activated []uint32) {
 	if c.as == nil {
 		return
 	}
@@ -1019,8 +1026,8 @@ func (c *Conn) overrideOtherASPs(aspActive *messages.AspActive, activated []uint
 			go as.drainRecoveryQueue()
 		}
 		for _, peer := range peers {
-			if peer.stateForActiveRoutingContexts() == StateAspInactive {
-				peer.sendState(StateAspInactive)
+			if peer.stateForActiveRoutingContexts() == StateASPInactive {
+				peer.sendState(StateASPInactive)
 			}
 			notifyAlternateASPActive(peer, key, c.peerASPIdentifierParam())
 		}

@@ -62,7 +62,7 @@ func TestAnErrorIsNeverAnsweredWithAnError(t *testing.T) {
 				t.Skip("this input parses cleanly; it cannot exercise the path")
 			}
 
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			conn.dispatchRaw(context.Background(), inbound{data: tt.raw})
 
 			select {
@@ -91,7 +91,7 @@ func TestANonErrorMessageIsStillAnswered(t *testing.T) {
 		t.Skip("this input parses cleanly")
 	}
 
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	conn.dispatchRaw(context.Background(), inbound{data: raw})
 
 	select {
@@ -119,7 +119,7 @@ func TestANonErrorMessageIsStillAnswered(t *testing.T) {
 func TestUnexpectedMessageErrorQuotesThePeersRoutingContexts(t *testing.T) {
 	// ASP-DOWN, so an ASP Active is unexpected. Its Routing Context is one this
 	// association serves, so the Error is about the state, not the context.
-	conn, sent := newTestConn(t, StateAspDown, modeClient)
+	conn, sent := newTestConn(t, StateASPDown, RoleASP)
 
 	offending := messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -143,7 +143,7 @@ func TestUnexpectedMessageErrorQuotesThePeersRoutingContexts(t *testing.T) {
 // When the unexpected message carried no Routing Context, none is invented: the
 // rule is conditional on the offending message having had them.
 func TestUnexpectedMessageErrorWithoutRoutingContextsInventsNone(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeClient)
+	conn, sent := newTestConn(t, StateASPDown, RoleASP)
 
 	if err := conn.handleErrors(NewUnexpectedMessageError(
 		messages.NewHeartbeat(params.NewHeartbeatData([]byte("x"))),
@@ -171,7 +171,7 @@ func TestUnexpectedMessageErrorWithoutRoutingContextsInventsNone(t *testing.T) {
 // to be the invalid ones, since they are exactly what the check compares
 // against.
 func TestInvalidRoutingContextErrorAlwaysQuotesThePeers(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	if err := conn.handleErrors(NewInvalidRoutingContextError(4242)); err != nil {
 		t.Fatal(err)
@@ -190,7 +190,7 @@ func TestInvalidRoutingContextErrorAlwaysQuotesThePeers(t *testing.T) {
 	}
 }
 
-// lastError returns the final Error message the Conn wrote.
+// lastError returns the final Error message the Association wrote.
 func lastError(t *testing.T, sent []messages.M3UA) *messages.Error {
 	t.Helper()
 	for i := len(sent) - 1; i >= 0; i-- {
@@ -214,7 +214,7 @@ func TestInvalidVersionErrorIndicatesOurVersionAndQuotesTheMessage(t *testing.T)
 	// An ASP Up claiming version 2.
 	raw := []byte{0x02, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x08}
 
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	conn.dispatchRaw(context.Background(), inbound{data: raw})
 
 	var reported error
@@ -246,7 +246,7 @@ func TestInvalidVersionErrorIndicatesOurVersionAndQuotesTheMessage(t *testing.T)
 
 // The Diagnostic Information belongs to the error event, not to the
 // association. The dispatcher can receive another message after handing an
-// error to monitor(), so consulting Conn-wide receive state while the Error is
+// error to monitor(), so consulting Association-wide receive state while the Error is
 // built can quote the later message instead of the one that failed.
 func TestDiagnosticInformationSurvivesTheNextReceivedMessage(t *testing.T) {
 	tests := []struct {
@@ -292,7 +292,7 @@ func TestDiagnosticInformationSurvivesTheNextReceivedMessage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			conn.dispatchRaw(context.Background(), inbound{data: tt.raw, stream: 1})
 
 			var reported error
@@ -342,7 +342,7 @@ func TestDiagnosticErrorsOwnTheirReceivedBytes(t *testing.T) {
 				raw[i] = 0xff
 			}
 
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			if err := conn.handleErrors(reported); err != nil {
 				t.Fatal(err)
 			}
@@ -368,7 +368,7 @@ func TestInvalidCommonHeaderLengthDrawsProtocolError(t *testing.T) {
 		// Supported ASP Up declaring an octet that was not received.
 		{0x01, 0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x09},
 	} {
-		conn, sent := newTestConn(t, StateAspActive, modeServer)
+		conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 		conn.dispatchRaw(context.Background(), inbound{data: raw})
 
 		var reported error
@@ -399,7 +399,7 @@ func TestMissingMandatoryParameterDrawsMissingParameterError(t *testing.T) {
 		t.Fatalf("Parse() error = %v, want ErrMissingParameter", err)
 	}
 
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	conn.dispatchRaw(context.Background(), inbound{data: raw})
 
 	var reported error
@@ -427,7 +427,7 @@ func TestInvalidINFOStringDrawsInvalidParameterValue(t *testing.T) {
 		t.Fatalf("Parse() error = %v, want params.ErrInvalidValue", err)
 	}
 
-	conn, sent := newTestConn(t, StateAspDown, modeServer)
+	conn, sent := newTestConn(t, StateASPDown, RoleSGP)
 	conn.dispatchRaw(context.Background(), inbound{data: raw, ppid: M3UAPPID})
 	reported := <-conn.errChan
 	if err := conn.handleErrors(reported); err != nil {
@@ -445,7 +445,7 @@ func TestUnsupportedMessageDiagnosticIsExactlyFirst40Octets(t *testing.T) {
 			for i := range raw {
 				raw[i] = byte(i)
 			}
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			if err := conn.handleErrors(NewUnsupportedMessageErrorFor(raw)); err != nil {
 				t.Fatal(err)
 			}
@@ -469,7 +469,7 @@ func TestInvalidVersionDiagnosticKeepsTheWholeOffendingMessage(t *testing.T) {
 	for i := range raw {
 		raw[i] = byte(i)
 	}
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	if err := conn.handleErrors(newInvalidVersionErrorFor(2, raw)); err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,7 @@ func TestDiagnosticInformationRespectsTheParameterLengthBoundary(t *testing.T) {
 			for i := range raw {
 				raw[i] = byte(i)
 			}
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			if err := conn.handleErrors(newInvalidVersionErrorFor(2, raw)); err != nil {
 				t.Fatal(err)
 			}
@@ -521,7 +521,7 @@ func TestDiagnosticInformationRespectsTheParameterLengthBoundary(t *testing.T) {
 // the section equally allows — but (a) was not available at all, so a peer
 // learned an ASP had gone only when its socket vanished.
 func TestShutdownAnnouncesBeforeClosing(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	installImmediateShutdownPeer(conn, sent)
 	// newTestConn closes done on cleanup; Shutdown closing it first is fine
 	// because closeWith is once-only.
@@ -541,7 +541,7 @@ func TestShutdownAnnouncesBeforeClosing(t *testing.T) {
 
 // From ASP-INACTIVE there is no traffic to stop, so only the ASP Down is due.
 func TestShutdownFromInactiveSendsOnlyAspDown(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeClient)
+	conn, sent := newTestConn(t, StateASPInactive, RoleASP)
 	installImmediateShutdownPeer(conn, sent)
 	_ = conn.Shutdown()
 
@@ -554,10 +554,10 @@ func TestShutdownFromInactiveSendsOnlyAspDown(t *testing.T) {
 // ASP Inactive and ASP Down are ASP-originated procedures. An SGP choosing the
 // orderly SCTP shutdown option in Section 4.9 must not impersonate its peer by
 // sending either request; it simply performs SCTP Shutdown.
-func TestServerShutdownDoesNotSendASPRequests(t *testing.T) {
-	for _, state := range []State{StateAspActive, StateAspInactive, StateAspDown} {
+func TestSGPShutdownDoesNotSendASPRequests(t *testing.T) {
+	for _, state := range []State{StateASPActive, StateASPInactive, StateASPDown} {
 		t.Run(state.String(), func(t *testing.T) {
-			conn, sent := newTestConn(t, state, modeServer)
+			conn, sent := newTestConn(t, state, RoleSGP)
 			_ = conn.Shutdown()
 
 			if got := typeNames(*sent); len(got) != 0 {

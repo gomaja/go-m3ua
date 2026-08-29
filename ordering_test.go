@@ -46,7 +46,7 @@ import (
 // TestWriteReportsEAGAINWhenTheSendBufferIsFull. These tests are about
 // ordering, not about congestion, so they retry rather than set a deadline —
 // retrying keeps them independent of how long a full buffer takes to drain.
-func writeRetrying(t *testing.T, c *Conn, b []byte, stream uint16) {
+func writeRetrying(t *testing.T, c *Association, b []byte, stream uint16) {
 	t.Helper()
 
 	deadline := time.Now().Add(20 * time.Second)
@@ -68,7 +68,7 @@ func writeRetrying(t *testing.T, c *Conn, b []byte, stream uint16) {
 // orderedPayloads sends n sequenced payloads on one stream and returns what the
 // far end read, in the order it read them. Sending and reading are concurrent so
 // the send buffer drains as it fills.
-func orderedPayloads(t *testing.T, from, to *Conn, n int) []string {
+func orderedPayloads(t *testing.T, from, to *Association, n int) []string {
 	t.Helper()
 
 	go func() {
@@ -101,7 +101,7 @@ func TestDataOnOneStreamIsDeliveredInOrder(t *testing.T) {
 	asps := mcConnect(t, ctx, ln, mcAddr(port, "127.0.0.1"), []string{"127.0.0.2"}, port)
 
 	const n = 200
-	got := orderedPayloads(t, asps[0].client, asps[0].server, n)
+	got := orderedPayloads(t, asps[0].asp, asps[0].sgp, n)
 
 	for i, s := range got {
 		if want := fmt.Sprintf("%04d", i); s != want {
@@ -112,7 +112,7 @@ func TestDataOnOneStreamIsDeliveredInOrder(t *testing.T) {
 }
 
 // Ordering must hold in the SGP-to-ASP direction too.
-func TestDataFromServerIsDeliveredInOrder(t *testing.T) {
+func TestDataFromSGPIsDeliveredInOrder(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -121,7 +121,7 @@ func TestDataFromServerIsDeliveredInOrder(t *testing.T) {
 	asps := mcConnect(t, ctx, ln, mcAddr(port, "127.0.0.1"), []string{"127.0.0.2"}, port)
 
 	const n = 200
-	got := orderedPayloads(t, asps[0].server, asps[0].client, n)
+	got := orderedPayloads(t, asps[0].sgp, asps[0].asp, n)
 
 	for i, s := range got {
 		if want := fmt.Sprintf("%04d", i); s != want {
@@ -146,12 +146,12 @@ func TestOrderingIsPerAssociation(t *testing.T) {
 		go func() {
 			go func() {
 				for i := 0; i < n; i++ {
-					writeRetrying(t, a.client, []byte(fmt.Sprintf("%04d", i)), 1)
+					writeRetrying(t, a.asp, []byte(fmt.Sprintf("%04d", i)), 1)
 				}
 			}()
 			got := make([]string, 0, n)
 			for i := 0; i < n; i++ {
-				s, err := readWithin(t, a.server, 10*time.Second)
+				s, err := readWithin(t, a.sgp, 10*time.Second)
 				if err != nil {
 					t.Errorf("read: %v", err)
 					break
@@ -191,26 +191,26 @@ func TestSignallingIsAnsweredWhileDataFlows(t *testing.T) {
 	// is about dispatcher starvation rather than the EAGAIN limit above.
 	const burst = 150
 	for i := 0; i < burst; i++ {
-		if _, err := asps[0].client.WriteToStream([]byte("flood"), 1); err != nil {
+		if _, err := asps[0].asp.WriteToStream([]byte("flood"), 1); err != nil {
 			t.Fatalf("flood write %d: %v", i, err)
 		}
 	}
 
-	if _, err := asps[0].client.WriteSignal(
+	if _, err := asps[0].asp.WriteSignal(
 		messages.NewHeartbeat(params.NewHeartbeatData([]byte("still there?"))),
 	); err != nil {
 		t.Fatalf("BEAT: %v", err)
 	}
 
-	// The server answers a BEAT with a BEAT Ack in every state; if the
+	// The SGP answers a BEAT with a BEAT Ack in every state; if the
 	// dispatcher were wedged behind the DATA burst it would never arrive.
-	if !waitFor(func() bool { return asps[0].client.State() == StateAspActive }, 5*time.Second) {
-		t.Fatal("client left ASP-ACTIVE while flooding")
+	if !waitFor(func() bool { return asps[0].asp.State() == StateASPActive }, 5*time.Second) {
+		t.Fatal("ASP left ASP-ACTIVE while flooding")
 	}
 	// Draining proves the burst really was queued rather than dropped.
 	drained := 0
 	for i := 0; i < burst; i++ {
-		if _, err := readWithin(t, asps[0].server, 5*time.Second); err != nil {
+		if _, err := readWithin(t, asps[0].sgp, 5*time.Second); err != nil {
 			break
 		}
 		drained++
@@ -236,7 +236,7 @@ func min(a, b int) int {
 // never be sent — and a healthy node would be declared dead and torn down,
 // losing the whole queue along with it.
 func TestFullDataQueueStillAnswersSignalling(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	// A legal arrival stream: DATA on stream 0 is refused outright by Section
 	// 1.4.7's rule 1, so without this the payloads never reach the queue this
 	// test is about.
@@ -287,7 +287,7 @@ func TestFullDataQueueStillAnswersSignalling(t *testing.T) {
 // Everything queued before the overflow must still be readable, and reading
 // must let the queue accept payloads again.
 func TestDataQueueRecoversAfterOverflow(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)
@@ -327,7 +327,7 @@ func TestDataQueueRecoversAfterOverflow(t *testing.T) {
 // this node was discarding from. SCON is the protocol's own way to ask it to
 // back off.
 func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)
@@ -381,7 +381,7 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 // overflow must not turn into an SCON flood on an association already in
 // trouble.
 func TestLocalCongestionSCONIsSentOncePerEpisode(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)

@@ -14,11 +14,11 @@ import (
 
 func TestASPDownCommitsAssociationAndMembershipBeforeAck(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	asp.recvStream.Store(0)
 	asp.as = registry
 	applicationServer := registry.get(1)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 
 	var stateAtAck State
 	var membershipAtAck State
@@ -35,10 +35,10 @@ func TestASPDownCommitsAssociationAndMembershipBeforeAck(t *testing.T) {
 	if err := asp.handleAspDown(messages.NewAspDown(nil)); err != nil {
 		t.Fatal(err)
 	}
-	if stateAtAck != StateAspDown {
+	if stateAtAck != StateASPDown {
 		t.Errorf("association state at ASP Down Ack = %v, want ASP-DOWN", stateAtAck)
 	}
-	if membershipAtAck != StateAspDown {
+	if membershipAtAck != StateASPDown {
 		t.Errorf("AS membership at ASP Down Ack = %v, want ASP-DOWN", membershipAtAck)
 	}
 	select {
@@ -54,11 +54,11 @@ func TestASPDownCommitsAssociationAndMembershipBeforeAck(t *testing.T) {
 
 func TestASPDownRejectsEarlierActivePublicationAfterAck(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	asp.recvStream.Store(0)
 	asp.as = registry
 	applicationServer := registry.get(1)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 
 	if err := asp.handleAspDown(messages.NewAspDown(nil)); err != nil {
 		t.Fatal(err)
@@ -67,20 +67,20 @@ func TestASPDownRejectsEarlierActivePublicationAfterAck(t *testing.T) {
 	// This is the head of an ASP-ACTIVE publication that stateChan handed to
 	// monitor before the dispatcher received ASP Down, but monitor did not apply
 	// until after the Ack.
-	if err := asp.handlePublishedStateUpdate(StateAspActive); err != nil {
+	if err := asp.handlePublishedStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("stale ASP-ACTIVE publication: %v", err)
 	}
-	if got := asp.State(); got != StateAspDown {
+	if got := asp.State(); got != StateASPDown {
 		t.Fatalf("stale publication resurrected association state %v, want ASP-DOWN", got)
 	}
 
 	// This is the other possible interleaving: the old entry action finished
 	// before ASP Down, but its registry update was delayed until afterwards.
-	registry.aspStateChangedPublished(asp, StateAspActive)
+	registry.aspStateChangedPublished(asp, StateASPActive)
 	applicationServer.mu.Lock()
 	membership := applicationServer.asps[asp]
 	applicationServer.mu.Unlock()
-	if membership != StateAspDown {
+	if membership != StateASPDown {
 		t.Fatalf("stale publication resurrected AS membership %v, want ASP-DOWN", membership)
 	}
 	if active := applicationServer.activeASPs(); len(active) != 0 {
@@ -89,24 +89,25 @@ func TestASPDownRejectsEarlierActivePublicationAfterAck(t *testing.T) {
 }
 
 func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
-	listener := &Listener{Config: NewServerConfig(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false}, 1, 2, 0,
 		params.TrafficModeLoadshare, 0, 0, []uint32{1, 2},
 		params.ServiceIndSCCP, 0, 0, 1,
-	)}
-	listener.Config.CorrelationID = nil
-	listener.as = newApplicationServers(time.Hour, listener.Config)
+	)
+	listener := newSGPListener(NewListenerConfig(config))
+	listener.AssociationConfig.CorrelationID = nil
+	listener.as = newApplicationServers(time.Hour, listener.AssociationConfig)
 
-	asp, _ := addDistributionASP(t, listener, StateAspActive, 1, 2)
-	observer, _ := addDistributionASP(t, listener, StateAspInactive, 1, 2)
+	asp, _ := addDistributionASP(t, listener, StateASPActive, 1, 2)
+	observer, _ := addDistributionASP(t, listener, StateASPInactive, 1, 2)
 	servers := map[uint32]*applicationServer{
 		1: listener.as.get(1),
 		2: listener.as.get(2),
 	}
 	for _, applicationServer := range servers {
 		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
-		applicationServer.setASPState(asp, StateAspActive, time.Hour)
-		applicationServer.setASPState(observer, StateAspInactive, time.Hour)
+		applicationServer.setASPState(asp, StateASPActive, time.Hour)
+		applicationServer.setASPState(observer, StateASPInactive, time.Hour)
 	}
 
 	var eventsMu sync.Mutex
@@ -188,7 +189,7 @@ func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
 		applicationServer.mu.Lock()
 		state := applicationServer.asps[asp]
 		applicationServer.mu.Unlock()
-		if state != StateAspDown {
+		if state != StateASPDown {
 			t.Errorf("Routing Context %d membership = %v before Ack, want ASP-DOWN", routingContext, state)
 		}
 		result, err := listener.DistributeData(distributionData(
@@ -249,7 +250,7 @@ func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
 	}
 	select {
 	case state := <-asp.stateChan:
-		if state != StateAspDown {
+		if state != StateASPDown {
 			t.Fatalf("published state = %v, want ASP-DOWN", state)
 		}
 	default:
@@ -274,13 +275,13 @@ func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
 
 func TestASPDownMarksActiveAndInactiveMembershipsDown(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+	asp, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 	asp.recvStream.Store(0)
 	asp.as = registry
 	active := registry.get(1)
 	inactive := registry.get(2)
-	active.setASPState(asp, StateAspActive, time.Hour)
-	inactive.setASPState(asp, StateAspInactive, time.Hour)
+	active.setASPState(asp, StateASPActive, time.Hour)
+	inactive.setASPState(asp, StateASPInactive, time.Hour)
 	*sent = nil
 
 	if err := asp.handleAspDown(messages.NewAspDown(nil)); err != nil {
@@ -293,7 +294,7 @@ func TestASPDownMarksActiveAndInactiveMembershipsDown(t *testing.T) {
 		applicationServer.mu.Lock()
 		state := applicationServer.asps[asp]
 		applicationServer.mu.Unlock()
-		if state != StateAspDown {
+		if state != StateASPDown {
 			t.Errorf("Routing Context %d membership = %v, want ASP-DOWN", routingContext, state)
 		}
 	}

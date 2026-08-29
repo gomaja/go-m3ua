@@ -24,7 +24,7 @@ import (
 //	Routing Context MUST be sent to identify the traffic flow, assisting
 //	in the internal distribution of Data messages.
 //
-// SelectRoutingContext stores it on the Conn instead, so naming a flow and
+// SelectRoutingContext stores it on the Association instead, so naming a flow and
 // sending on it are two steps with a window between them. This states that
 // window without any timing: the two selections are the two flows' choices, and
 // the read that follows is the first flow's write. It gets the second flow's
@@ -35,7 +35,7 @@ import (
 // association — a throughput cost paid for a field that is per-message by
 // definition.
 func TestTheAssociationWideSelectionLosesTheCallersChoice(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 
 	// Flow A names its context, then flow B names its own before flow A gets
 	// to write. Two goroutines produce this ordering; stating it directly is
@@ -73,7 +73,7 @@ func TestTheAssociationWideSelectionLosesTheCallersChoice(t *testing.T) {
 // this is the single-flow caller the selection was designed for, and it must
 // not be disturbed by the per-message form existing.
 func TestAWriteThatNamesNoContextStillUsesTheSelection(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 
 	if _, err := conn.resolveRoutingContext(nil); !errors.Is(err, ErrAmbiguousRoutingContext) {
 		t.Errorf("error = %v, want ErrAmbiguousRoutingContext with several "+
@@ -95,7 +95,7 @@ func TestAWriteThatNamesNoContextStillUsesTheSelection(t *testing.T) {
 // Naming a context is not a way around the checks the selection had to pass.
 func TestAPerMessageContextIsStillValidated(t *testing.T) {
 	t.Run("a context the association does not carry is refused", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 
 		_, err := conn.routingContextFor(9)
 		if err == nil {
@@ -111,13 +111,13 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 	// which the ASP can be activated", so a partial Ack leaves the rest
 	// inactive and naming one of those explicitly must not send traffic for it.
 	t.Run("a context the peer never acknowledged is refused", func(t *testing.T) {
-		asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+		asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 		if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
 			params.NewTrafficModeType(params.TrafficModeLoadshare),
 			params.NewRoutingContext(1), nil)); err != nil {
 			t.Fatalf("handleAspActiveAck: %v", err)
 		}
-		asp.setState(StateAspActive)
+		asp.setState(StateASPActive)
 
 		if _, err := asp.routingContextFor(1); err != nil {
 			t.Errorf("DATA refused for the acknowledged Routing Context: %v", err)
@@ -128,27 +128,27 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 		}
 	})
 
-	t.Run("server and selected paths enforce per-AS activity", func(t *testing.T) {
-		server, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
-		server.noteRoutingContextsActive([]uint32{1})
-		if _, err := server.routingContextFor(2); !errors.Is(err, ErrRoutingContextNotActive) {
-			t.Errorf("server explicit inactive RC error = %v, want ErrRoutingContextNotActive", err)
+	t.Run("SGP and selected paths enforce per-AS activity", func(t *testing.T) {
+		sgpAssociation, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
+		sgpAssociation.noteRoutingContextsActive([]uint32{1})
+		if _, err := sgpAssociation.routingContextFor(2); !errors.Is(err, ErrRoutingContextNotActive) {
+			t.Errorf("SGP explicit inactive RC error = %v, want ErrRoutingContextNotActive", err)
 		}
-		if err := server.SelectRoutingContext(2); err != nil {
+		if err := sgpAssociation.SelectRoutingContext(2); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := server.dataRoutingContext(); !errors.Is(err, ErrRoutingContextNotActive) {
-			t.Errorf("server selected inactive RC error = %v, want ErrRoutingContextNotActive", err)
+		if _, err := sgpAssociation.dataRoutingContext(); !errors.Is(err, ErrRoutingContextNotActive) {
+			t.Errorf("SGP selected inactive RC error = %v, want ErrRoutingContextNotActive", err)
 		}
 
-		client, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
-		client.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
-		client.noteRoutingContextsOverridden([]uint32{2})
-		if err := client.SelectRoutingContext(2); err != nil {
+		aspAssociation, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+		aspAssociation.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
+		aspAssociation.noteRoutingContextsOverridden([]uint32{2})
+		if err := aspAssociation.SelectRoutingContext(2); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := client.dataRoutingContext(); !errors.Is(err, ErrRoutingContextNotActive) {
-			t.Errorf("client selected overridden RC error = %v, want ErrRoutingContextNotActive", err)
+		if _, err := aspAssociation.dataRoutingContext(); !errors.Is(err, ErrRoutingContextNotActive) {
+			t.Errorf("ASP selected overridden RC error = %v, want ErrRoutingContextNotActive", err)
 		}
 	})
 
@@ -156,7 +156,7 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 	// 3.3.1 permits. Naming a flow anyway is a different statement and must not
 	// be quietly downgraded to the omission.
 	t.Run("naming a context with none coordinated is refused", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP)
 
 		if rc, err := conn.resolveRoutingContext(nil); err != nil || rc != nil {
 			t.Errorf("resolveRoutingContext(nil) = %v, %v; want the parameter omitted", rc, err)
@@ -172,7 +172,7 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 // needs to be told which flow the message arrived on to do it — including to
 // answer on that same flow.
 func TestReceivedDataReportsTheTrafficFlowItNamed(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7, 8)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7, 8)
 
 	conn.handleData(context.Background(), messages.NewData(
 		nil,
@@ -212,7 +212,7 @@ func TestReceivedDataHonoursPerRoutingContextActivation(t *testing.T) {
 	}
 
 	t.Run("SGP rejects traffic from an ASP inactive in that AS", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7, 8)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7, 8)
 		conn.noteRoutingContextsActive([]uint32{7})
 
 		conn.handleData(context.Background(), newData(8))
@@ -236,7 +236,7 @@ func TestReceivedDataHonoursPerRoutingContextActivation(t *testing.T) {
 	})
 
 	t.Run("ASP silently discards traffic for an inactive AS", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 7, 8)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8)
 		conn.noteRoutingContextsAcked(params.NewRoutingContext(7))
 
 		conn.handleData(context.Background(), newData(8))
@@ -261,7 +261,7 @@ func TestReceivedDataHonoursPerRoutingContextActivation(t *testing.T) {
 // The parameter is Conditional, so its absence has to be distinguishable from a
 // context that happens to be zero.
 func TestReceivedDataWithoutARoutingContextSaysSo(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 
 	conn.handleData(context.Background(), messages.NewData(
 		nil, nil,
@@ -281,7 +281,7 @@ func TestReceivedDataWithoutARoutingContextSaysSo(t *testing.T) {
 // A peer may legitimately use Routing Context 0, so the zero value alone cannot
 // mean "absent".
 func TestRoutingContextZeroIsReportedAsPresent(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 0)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 0)
 
 	conn.handleData(context.Background(), messages.NewData(
 		nil,
@@ -300,7 +300,7 @@ func TestRoutingContextZeroIsReportedAsPresent(t *testing.T) {
 }
 
 // End to end over a real association, in the reporting caller's own operating
-// mode: one goroutine per message, all writing to a single shared Conn, each
+// mode: one goroutine per message, all writing to a single shared Association, each
 // naming the traffic flow its message belongs to.
 //
 // Every payload carries the context it was sent for, so the receiver can check
@@ -496,7 +496,7 @@ func TestEveryWithRoutingContextWriteNamesTheFlow(t *testing.T) {
 // the first of several silently reattributes a malformed message to a flow the
 // sender did not name alone.
 func TestReceivedDataWithSeveralRoutingContextsIsRejected(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7, 8)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7, 8)
 
 	conn.handleData(context.Background(), messages.NewData(
 		nil,
@@ -541,7 +541,7 @@ func TestDataWithAMalformedRoutingContextIsRefused(t *testing.T) {
 		{"five octets", []byte{0x00, 0x00, 0x00, 0x07, 0x00}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 
 			conn.handleData(context.Background(), messages.NewData(
 				nil,
@@ -572,7 +572,7 @@ func TestDataWithAMalformedRoutingContextIsRefused(t *testing.T) {
 	// says "Where a Routing Key has not been coordinated between the SGP and
 	// ASP, sending of Routing Context is not required."
 	t.Run("an omitted parameter is still accepted", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 		conn.handleData(context.Background(), messages.NewData(
 			nil, nil,
 			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")), nil))
@@ -588,7 +588,7 @@ func TestDataWithAMalformedRoutingContextIsRefused(t *testing.T) {
 	// several Routing Keys share one association, Section 3.3.1 says Routing
 	// Context MUST be sent so the receiver can identify the traffic flow.
 	t.Run("an omitted parameter with several configured flows is rejected", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7, 8)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7, 8)
 		conn.handleData(context.Background(), messages.NewData(
 			nil, nil,
 			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")), nil))
@@ -622,7 +622,7 @@ func FuzzDataRoutingContext(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, rcData []byte) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7, 8)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7, 8)
 
 		conn.handleData(context.Background(), messages.NewData(
 			nil,

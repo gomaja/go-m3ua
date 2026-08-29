@@ -22,20 +22,20 @@ import (
 // so the only observable effects are the destination state and the status
 // channel.
 
-// ssnmConn builds a client in ASP-ACTIVE, the only state in which SSNM may be
+// ssnmConn builds an ASP in ASP-ACTIVE, the only state in which SSNM may be
 // acted on (RFC 4666 Section 4.3.1).
-func ssnmConn(t *testing.T) (*Conn, *[]messages.M3UA) {
+func ssnmConn(t *testing.T) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	return newSSNMTestConn(t, StateAspActive, modeClient)
+	return newSSNMTestConn(t, StateASPActive, RoleASP)
 }
 
 // newSSNMTestConn gives legacy SSNM tests a dedicated single-flow association.
 // Those tests exercise destination behavior rather than Routing Context
 // conditionality; multi-flow cases belong in ssnm_scope_test.go and always name
 // their scope explicitly.
-func newSSNMTestConn(t *testing.T, state State, connectionMode mode) (*Conn, *[]messages.M3UA) {
+func newSSNMTestConn(t *testing.T, state State, role Role) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	conn, sent := newTestConn(t, state, connectionMode)
+	conn, sent := newTestConn(t, state, role)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1)
 	return conn, sent
 }
@@ -46,7 +46,7 @@ func apc(pcs ...uint32) *params.Param {
 }
 
 // nextStatus returns the next SSNM status, or fails if none arrives.
-func nextStatus(t *testing.T, c *Conn) *DestinationStatus {
+func nextStatus(t *testing.T, c *Association) *DestinationStatus {
 	t.Helper()
 
 	select {
@@ -216,21 +216,21 @@ func TestDRSTMarksDestinationRestricted(t *testing.T) {
 func TestSSNMWithoutAffectedPointCodeIsRejected(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		call func(*Conn) error
+		call func(*Association) error
 	}{
-		{"DUNA", func(c *Conn) error {
+		{"DUNA", func(c *Association) error {
 			return c.handleDestinationUnavailable(messages.NewDestinationUnavailable(nil, nil, nil, nil))
 		}},
-		{"DAVA", func(c *Conn) error {
+		{"DAVA", func(c *Association) error {
 			return c.handleDestinationAvailable(messages.NewDestinationAvailable(nil, nil, nil, nil))
 		}},
-		{"DRST", func(c *Conn) error {
+		{"DRST", func(c *Association) error {
 			return c.handleDestinationRestricted(messages.NewDestinationRestricted(nil, nil, nil, nil))
 		}},
-		{"SCON", func(c *Conn) error {
+		{"SCON", func(c *Association) error {
 			return c.handleSignallingCongestion(messages.NewSignallingCongestion(nil, nil, nil, nil, nil, nil))
 		}},
-		{"DUPU", func(c *Conn) error {
+		{"DUPU", func(c *Association) error {
 			return c.handleDestinationUserPartUnavailable(
 				messages.NewDestinationUserPartUnavailable(nil, nil, nil, nil, nil))
 		}},
@@ -270,20 +270,20 @@ func TestSSNMWithEmptyAffectedPointCodeIsRejected(t *testing.T) {
 // DUNA, DAVA, DRST, SCON and DUPU travel SGP to ASP. An SGP that receives one
 // must report an Error rather than apply it: a peer must never be able to steer
 // an SG's own view of the SS7 network.
-func TestServerRejectsAspBoundSSNM(t *testing.T) {
+func TestSGPRejectsAspBoundSSNM(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		call func(*Conn) error
+		call func(*Association) error
 	}{
-		{"DUNA", func(c *Conn) error {
+		{"DUNA", func(c *Association) error {
 			return c.handleDestinationUnavailable(
 				messages.NewDestinationUnavailable(nil, nil, apc(0x1234), nil))
 		}},
-		{"DAVA", func(c *Conn) error {
+		{"DAVA", func(c *Association) error {
 			return c.handleDestinationAvailable(
 				messages.NewDestinationAvailable(nil, nil, apc(0x1234), nil))
 		}},
-		{"DRST", func(c *Conn) error {
+		{"DRST", func(c *Association) error {
 			return c.handleDestinationRestricted(
 				messages.NewDestinationRestricted(nil, nil, apc(0x1234), nil))
 		}},
@@ -292,13 +292,13 @@ func TestServerRejectsAspBoundSSNM(t *testing.T) {
 		// be sent from the M3UA layer of an ASP to an M3UA peer, indicating
 		// that the congestion level of the M3UA layer or the ASP has changed."
 		// See TestSCONFromAnASPIsAcceptedAtAnSGP.
-		{"DUPU", func(c *Conn) error {
+		{"DUPU", func(c *Association) error {
 			return c.handleDestinationUserPartUnavailable(
 				messages.NewDestinationUserPartUnavailable(nil, nil, apc(0x1234), nil, nil))
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newSSNMTestConn(t, StateAspActive, modeServer)
+			conn, _ := newSSNMTestConn(t, StateASPActive, RoleSGP)
 
 			var unexpected *UnexpectedMessageError
 			if err := tt.call(conn); !errors.As(err, &unexpected) {
@@ -313,7 +313,7 @@ func TestServerRejectsAspBoundSSNM(t *testing.T) {
 
 // DAUD is the mirror: ASP to SGP (RFC 4666 Section 3.4.3). An ASP that receives
 // one must reject it.
-func TestClientRejectsDAUD(t *testing.T) {
+func TestASPRejectsDAUD(t *testing.T) {
 	conn, sent := ssnmConn(t)
 
 	var unexpected *UnexpectedMessageError
@@ -347,7 +347,7 @@ func TestDAUDIsAnsweredFromDestinationState(t *testing.T) {
 		{"congested", DestinationCongested, []string{"Signalling Congestion", "Destination Available"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+			conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 			conn.SetDestinationState(0x1234, tt.state)
 
 			if err := conn.handleDestinationStateAudit(
@@ -371,7 +371,7 @@ func TestDAUDIsAnsweredFromDestinationState(t *testing.T) {
 
 // A DAUD naming several point codes must be answered for every one of them.
 func TestDAUDAnswersEveryAuditedPointCode(t *testing.T) {
-	conn, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+	conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 	conn.SetDestinationState(0x1111, DestinationUnavailable)
 	conn.SetDestinationState(0x2222, DestinationAvailable)
 
@@ -401,9 +401,9 @@ func TestDAUDAnswersEveryAuditedPointCode(t *testing.T) {
 // procedure" — and the ASP is in ASP-INACTIVE for the whole of it. See
 // TestSSNMIsAcceptedBeforeTheAspActiveAck.
 func TestSSNMOutsideActiveIsRejected(t *testing.T) {
-	for _, st := range []State{StateAspDown} {
+	for _, st := range []State{StateASPDown} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, _ := newSSNMTestConn(t, st, modeClient)
+			conn, _ := newSSNMTestConn(t, st, RoleASP)
 
 			var unexpected *UnexpectedMessageError
 			if err := conn.handleDestinationUnavailable(
@@ -421,7 +421,7 @@ func TestSSNMOutsideActiveIsRejected(t *testing.T) {
 // MTP3 restart. The window still requires an actual pending ASP Active; DUPU is
 // in neither exception and remains rejected.
 func TestDAVAAcceptedOnlyDuringPendingActivationAndDUPURejected(t *testing.T) {
-	conn, _ := newSSNMTestConn(t, StateAspInactive, modeClient)
+	conn, _ := newSSNMTestConn(t, StateASPInactive, RoleASP)
 
 	var unexpected *UnexpectedMessageError
 	if err := conn.handleDestinationAvailable(
@@ -490,7 +490,7 @@ func TestSSNMPublishesExactlyOneStateAndHoldsIt(t *testing.T) {
 		{"DAUD", messages.NewDestinationStateAudit(nil, nil, params.NewAffectedPointCode(0x1234), nil)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+			conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 			conn.handleSignals(context.Background(), tt.msg)
 
@@ -499,8 +499,8 @@ func TestSSNMPublishesExactlyOneStateAndHoldsIt(t *testing.T) {
 			}
 			select {
 			case got := <-conn.stateChan:
-				if got != StateAspActive && got != stateUnchanged {
-					t.Errorf("state = %v after a %s, want it held at %v", got, tt.name, StateAspActive)
+				if got != StateASPActive && got != stateUnchanged {
+					t.Errorf("state = %v after a %s, want it held at %v", got, tt.name, StateASPActive)
 				}
 			default:
 				t.Fatal("no state published")
@@ -578,12 +578,12 @@ func FuzzSSNMHandlers(f *testing.F) {
 		f.Add(seed)
 	}
 
-	// One Conn per role, reused across inputs. Building six per iteration made
+	// One Association per role, reused across inputs. Building six per iteration made
 	// the target allocation-bound (~3k execs/sec against ~100k for the parser
 	// targets), which starves the fuzzer of coverage rather than testing
 	// anything extra: destination state is reset between messages instead.
-	client := newFuzzConn(f, modeClient)
-	server := newFuzzConn(f, modeServer)
+	aspAssociation := newFuzzConn(f, RoleASP)
+	sgpAssociation := newFuzzConn(f, RoleSGP)
 
 	f.Fuzz(func(t *testing.T, apcData []byte) {
 		// An Affected Point Code carrying arbitrary bytes, as a hostile peer
@@ -592,27 +592,27 @@ func FuzzSSNMHandlers(f *testing.F) {
 
 		for _, tt := range []struct {
 			name string
-			conn *Conn
-			call func(*Conn) error
+			conn *Association
+			call func(*Association) error
 		}{
-			{"DUNA", client, func(c *Conn) error {
+			{"DUNA", aspAssociation, func(c *Association) error {
 				return c.handleDestinationUnavailable(messages.NewDestinationUnavailable(nil, nil, raw, nil))
 			}},
-			{"DAVA", client, func(c *Conn) error {
+			{"DAVA", aspAssociation, func(c *Association) error {
 				return c.handleDestinationAvailable(messages.NewDestinationAvailable(nil, nil, raw, nil))
 			}},
-			{"DRST", client, func(c *Conn) error {
+			{"DRST", aspAssociation, func(c *Association) error {
 				return c.handleDestinationRestricted(messages.NewDestinationRestricted(nil, nil, raw, nil))
 			}},
-			{"SCON", client, func(c *Conn) error {
+			{"SCON", aspAssociation, func(c *Association) error {
 				return c.handleSignallingCongestion(messages.NewSignallingCongestion(nil, nil, raw, nil, nil, nil))
 			}},
-			{"DUPU", client, func(c *Conn) error {
+			{"DUPU", aspAssociation, func(c *Association) error {
 				return c.handleDestinationUserPartUnavailable(
 					messages.NewDestinationUserPartUnavailable(
 						nil, nil, raw, params.NewUserCause(params.SCCP, params.Unequipped), nil))
 			}},
-			{"DAUD", server, func(c *Conn) error {
+			{"DAUD", sgpAssociation, func(c *Association) error {
 				return c.handleDestinationStateAudit(messages.NewDestinationStateAudit(nil, nil, raw, nil))
 			}},
 		} {
@@ -653,30 +653,30 @@ func FuzzSSNMHandlers(f *testing.F) {
 	})
 }
 
-// newFuzzConn builds a minimal ASP-ACTIVE Conn without the per-test
+// newFuzzConn builds a minimal ASP-ACTIVE Association without the per-test
 // bookkeeping newTestConn does, so a fuzz target can build one per role up
 // front and reuse it. Takes testing.TB so it can be called from F.
-func newFuzzConn(t testing.TB, m mode) *Conn {
+func newFuzzConn(t testing.TB, role Role) *Association {
 	t.Helper()
 
-	cfg := NewClientConfig(
+	cfg := newASPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
 	)
 	cfg.CorrelationID = nil
 
-	conn := &Conn{
+	conn := &Association{
 		muState:      new(sync.RWMutex),
-		mode:         m,
-		state:        StateAspActive,
+		role:         role,
+		state:        StateASPActive,
 		stateChan:    make(chan State, 4),
 		errChan:      make(chan error, 4),
 		established:  make(chan struct{}, 1),
 		beatAckChan:  make(chan struct{}, 1),
+		beatStart:    make(chan struct{}),
 		dataChan:     make(chan *DataMessage, 4),
 		done:         make(chan struct{}),
-		beatAllow:    sync.NewCond(&sync.Mutex{}),
 		cfg:          cfg,
 		destinations: newDestinations(),
 		tack:         newTAckRetransmitter(),
@@ -705,24 +705,24 @@ func newFuzzConn(t testing.TB, m mode) *Conn {
 func TestSSNMIsAcceptedBeforeTheAspActiveAck(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		send func(*Conn) error
+		send func(*Association) error
 	}{
-		{"DUNA", func(c *Conn) error {
+		{"DUNA", func(c *Association) error {
 			return c.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 				nil, nil, params.NewAffectedPointCode(0x111111), nil))
 		}},
-		{"DRST", func(c *Conn) error {
+		{"DRST", func(c *Association) error {
 			return c.handleDestinationRestricted(messages.NewDestinationRestricted(
 				nil, nil, params.NewAffectedPointCode(0x111111), nil))
 		}},
-		{"SCON", func(c *Conn) error {
+		{"SCON", func(c *Association) error {
 			return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 				nil, nil, params.NewAffectedPointCode(0x111111), nil, nil, nil))
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			// ASP-INACTIVE: the ASP Active has gone out, the Ack has not come back.
-			conn, _ := newSSNMTestConn(t, StateAspInactive, modeClient)
+			conn, _ := newSSNMTestConn(t, StateASPInactive, RoleASP)
 			conn.startTAck(messages.NewAspActive(
 				conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
 			), requestAspActive)
@@ -739,7 +739,7 @@ func TestSSNMIsAcceptedBeforeTheAspActiveAck(t *testing.T) {
 
 // Neither activation exception applies while the ASP is still ASP-DOWN.
 func TestSSNMOutsideTheActivationWindowIsStillRejected(t *testing.T) {
-	conn, _ := newSSNMTestConn(t, StateAspDown, modeClient)
+	conn, _ := newSSNMTestConn(t, StateASPDown, RoleASP)
 
 	err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 		nil, nil, params.NewAffectedPointCode(0x111111), nil))
@@ -756,7 +756,7 @@ func TestSSNMOutsideTheActivationWindowIsStillRejected(t *testing.T) {
 // only, so an SGP answered a congested ASP with "Unexpected Message" and learned
 // nothing about it.
 func TestSCONFromAnASPIsAcceptedAtAnSGP(t *testing.T) {
-	conn, _ := newSSNMTestConn(t, StateAspActive, modeServer)
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleSGP)
 
 	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(nil, nil, params.NewAffectedPointCode(0x222222), nil, nil, nil)); err != nil {
 		t.Fatalf("SCON from an ASP was rejected at an SGP: %v", err)
@@ -790,25 +790,25 @@ func TestSCONFromAnASPIsAcceptedAtAnSGP(t *testing.T) {
 func TestSGPRejectsInvalidNetworkAppearanceInASPSSNM(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
-		handle func(*Conn) error
+		handle func(*Association) error
 	}{
 		{
 			name: "DAUD",
-			handle: func(c *Conn) error {
+			handle: func(c *Association) error {
 				return c.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 					params.NewNetworkAppearance(8), nil, apc(0x222222), nil))
 			},
 		},
 		{
 			name: "SCON",
-			handle: func(c *Conn) error {
+			handle: func(c *Association) error {
 				return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 					params.NewNetworkAppearance(8), nil, apc(0x222222), nil, nil, nil))
 			},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+			conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 
 			reported := tt.handle(conn)
@@ -836,27 +836,27 @@ func TestSGPRejectsInvalidNetworkAppearanceInASPSSNM(t *testing.T) {
 func TestSSNMPreservesNetworkAppearance(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
-		handle func(*Conn, *params.Param) error
+		handle func(*Association, *params.Param) error
 	}{
-		{"DUNA", func(c *Conn, na *params.Param) error {
+		{"DUNA", func(c *Association, na *params.Param) error {
 			return c.handleDestinationUnavailable(messages.NewDestinationUnavailable(na, nil, apc(0x222222), nil))
 		}},
-		{"DAVA", func(c *Conn, na *params.Param) error {
+		{"DAVA", func(c *Association, na *params.Param) error {
 			return c.handleDestinationAvailable(messages.NewDestinationAvailable(na, nil, apc(0x222222), nil))
 		}},
-		{"DRST", func(c *Conn, na *params.Param) error {
+		{"DRST", func(c *Association, na *params.Param) error {
 			return c.handleDestinationRestricted(messages.NewDestinationRestricted(na, nil, apc(0x222222), nil))
 		}},
-		{"SCON", func(c *Conn, na *params.Param) error {
+		{"SCON", func(c *Association, na *params.Param) error {
 			return c.handleSignallingCongestion(messages.NewSignallingCongestion(na, nil, apc(0x222222), nil, nil, nil))
 		}},
-		{"DUPU", func(c *Conn, na *params.Param) error {
+		{"DUPU", func(c *Association, na *params.Param) error {
 			return c.handleDestinationUserPartUnavailable(messages.NewDestinationUserPartUnavailable(
 				na, nil, apc(0x222222), params.NewUserCause(3, 2), nil))
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+			conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 			if err := tt.handle(conn, params.NewNetworkAppearance(8)); err != nil {
 				t.Fatalf("valid SSNM was rejected: %v", err)
@@ -883,7 +883,7 @@ func TestSSNMPreservesNetworkAppearance(t *testing.T) {
 		{"omitted", nil, 0, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+			conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 			if err := conn.handleDestinationUnavailable(
 				messages.NewDestinationUnavailable(tt.value, nil, apc(0x222222), nil)); err != nil {
 				t.Fatal(err)
@@ -900,27 +900,27 @@ func TestSSNMPreservesNetworkAppearance(t *testing.T) {
 func TestSSNMRejectsMalformedNetworkAppearance(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
-		handle func(*Conn, *params.Param) error
+		handle func(*Association, *params.Param) error
 	}{
-		{"DUNA", func(c *Conn, na *params.Param) error {
+		{"DUNA", func(c *Association, na *params.Param) error {
 			return c.handleDestinationUnavailable(messages.NewDestinationUnavailable(na, nil, apc(0x222222), nil))
 		}},
-		{"DAVA", func(c *Conn, na *params.Param) error {
+		{"DAVA", func(c *Association, na *params.Param) error {
 			return c.handleDestinationAvailable(messages.NewDestinationAvailable(na, nil, apc(0x222222), nil))
 		}},
-		{"DRST", func(c *Conn, na *params.Param) error {
+		{"DRST", func(c *Association, na *params.Param) error {
 			return c.handleDestinationRestricted(messages.NewDestinationRestricted(na, nil, apc(0x222222), nil))
 		}},
-		{"SCON", func(c *Conn, na *params.Param) error {
+		{"SCON", func(c *Association, na *params.Param) error {
 			return c.handleSignallingCongestion(messages.NewSignallingCongestion(na, nil, apc(0x222222), nil, nil, nil))
 		}},
-		{"DUPU", func(c *Conn, na *params.Param) error {
+		{"DUPU", func(c *Association, na *params.Param) error {
 			return c.handleDestinationUserPartUnavailable(messages.NewDestinationUserPartUnavailable(
 				na, nil, apc(0x222222), params.NewUserCause(3, 2), nil))
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+			conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 			reported := tt.handle(conn, params.NewParam(int(params.NetworkAppearance), []byte{0, 0, 8}))
 			var parameterFault *ParameterFaultError
 			if !errors.As(reported, &parameterFault) || parameterFault.Code != params.ErrParameterFieldError {
@@ -937,7 +937,7 @@ func TestSSNMRejectsMalformedNetworkAppearance(t *testing.T) {
 
 func TestDestinationStateIsScopedByNetworkAppearance(t *testing.T) {
 	const pointCode = 0x222222
-	conn, _ := newSSNMTestConn(t, StateAspActive, modeClient)
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 
 	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
@@ -972,7 +972,7 @@ func TestDestinationStateIsScopedByNetworkAppearance(t *testing.T) {
 // told the destination was available and nothing about the congestion it had
 // asked after.
 func TestDAUDForACongestedDestinationSendsSCONBeforeDAVA(t *testing.T) {
-	conn, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+	conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 	conn.SetDestinationState(0x333333, DestinationCongested)
 
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
@@ -990,7 +990,7 @@ func TestDAUDForACongestedDestinationSendsSCONBeforeDAVA(t *testing.T) {
 // An uncongested destination is answered with the DAVA alone, so the SCON is
 // not sent indiscriminately.
 func TestDAUDForAnAvailableDestinationSendsOnlyDAVA(t *testing.T) {
-	conn, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+	conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 	// Known to be available. A point code the SG has never been told about is a
 	// different case, answered with DUNA under Section 4.5.3: "An SG SHOULD
 	// respond with a DUNA message when DAUD was received with an unknown
@@ -1024,7 +1024,7 @@ func TestDAUDResponsesKeepTheRequestedRoutingContext(t *testing.T) {
 		{name: "congested", state: DestinationCongested, want: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newSSNMTestConn(t, StateAspActive, modeServer)
+			conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 			const pointCode = 0x515151
 			conn.SetDestinationState(pointCode, tt.state)
 

@@ -74,8 +74,8 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 
 func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.PreconfiguredSocket {
 	base := &sctp.SocketConfig{
-		// A client's watcher serves one association, so its route ignores the
-		// association ID; it is set once Dial has a Conn to route to.
+		// A Dial watcher serves one association, so its route ignores the
+		// association ID; it is set once Dial has an Association to route to.
 		NotificationHandler: restarts.handle,
 		InitMsg:             p.init,
 	}
@@ -119,7 +119,7 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 	policy := oneShotSCTPDialPolicy(timeout)
 	cfg := policy.socketConfig(restarts)
 
-	conn, err := policy.dialContext(attemptCtx, cfg, network, laddr, raddr)
+	sctpAssociation, err := policy.dialContext(attemptCtx, cfg, network, laddr, raddr)
 	if err != nil {
 		// Our own budget expiring is reported as such; the caller's context
 		// ending is reported as the caller's error.
@@ -128,16 +128,16 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 		}
 		return nil, err
 	}
-	return conn, nil
+	return sctpAssociation, nil
 }
 
-// Dial establishes a M3UA connection as a client.
-// After successfully establishing the connection with peer, state-changing
+// Dial establishes an SCTP association and runs this Endpoint's M3UA role.
+// After successfully establishing the association with the peer, state-changing
 // M3UA signals and M3UA BEAT messages are automatically handled in background
 // goroutines.
 //
 // Dial makes at most one SCTP association attempt — one INIT if ctx is live,
-// none if ctx is already done — bounded by Config.InitTimeout, and never
+// none if ctx is already done — bounded by AssociationConfig.InitTimeout, and never
 // retries. A caller that wants to keep trying loops over Dial and chooses its
 // own cadence, which is the point: left to the kernel's defaults an unanswered
 // attempt runs to nine INIT chunks over 342 seconds, far too long for an
@@ -148,17 +148,54 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 // no local ABORT is intentionally emitted and the descriptor and kernel-side
 // association are gone by the time Dial returns.
 //
-// The M3UA handshake that follows has its own budget, Config.EstablishTimeout,
-// and observes ctx as well.
-func Dial(ctx context.Context, net string, laddr, raddr *sctp.SCTPAddr, cfg *Config) (*Conn, error) {
-	n, ok := netMap[net]
+// The M3UA handshake that follows has its own budget,
+// AssociationConfig.EstablishTimeout, and observes ctx as well.
+//
+// A RoleSGP Endpoint currently permits one owner of its shared protocol state:
+// either one Listener, which may accept multiple ASP associations, or one
+// dialed Association. A second owner returns ErrEndpointStateInUse rather than
+// silently creating an inconsistent AS registry.
+func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, cfg *AssociationConfig) (*Association, error) {
+	role, err := e.associationRole()
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		return nil, ErrNilAssociationConfig
+	}
+	cfg = snapshotAssociationConfig(cfg)
+	if err := validateAssociationConfigForRole(role, cfg); err != nil {
+		return nil, err
+	}
+	n, ok := netMap[network]
 	if !ok {
-		return nil, fmt.Errorf("invalid network: %s", net)
+		return nil, fmt.Errorf("invalid network: %s", network)
+	}
+	var releaseEndpointStateOwner func()
+	if role == RoleSGP {
+		releaseEndpointStateOwner, err = e.reserveSGPStateOwner()
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if releaseEndpointStateOwner != nil {
+				releaseEndpointStateOwner()
+			}
+		}()
 	}
 
-	// Nothing here writes to cfg: a caller that reuses one *Config across
-	// several Dials gets independent Conns, as the Listener does across Accepts.
-	conn := newConn(modeClient, cfg)
+	// Nothing here writes to cfg: each permitted Dial gets an independent
+	// immutable AssociationConfig snapshot.
+	association := newAssociation(role, cfg)
+	if role == RoleSGP {
+		association.releaseEndpointStateOwner = releaseEndpointStateOwner
+		association.as = newApplicationServersWithTrafficModePolicy(
+			cfg.RecoveryTimer, cfg, association.trafficModePolicy(),
+		)
+		association.nif = &nifAvailability{}
+		association.destinations = newDestinations()
+		association.mtp3Restarts = &mtp3RestartRegistry{}
+	}
 
 	initTimeout := cfg.InitTimeout
 	if initTimeout <= 0 {
@@ -173,24 +210,24 @@ func Dial(ctx context.Context, net string, laddr, raddr *sctp.SCTPAddr, cfg *Con
 	}
 
 	// Created before the association, because the handler has to be installed
-	// on the socket at dial time; the route to this Conn is set immediately
+	// on the socket at dial time; the route to this Association is set immediately
 	// after, and the handler ignores events that arrive before it exists.
 	restarts := &restartWatcher{}
-	restarts.setRoute(func(sctp.SCTPAssocID) *Conn { return conn })
+	restarts.setRoute(func(sctp.SCTPAssocID) *Association { return association })
 
 	sctpConn, err := dialAssociation(ctx, n, laddr, raddr, initTimeout, restarts)
 	if err != nil {
 		return nil, err
 	}
-	conn.sctpConn = sctpConn
+	association.sctpConn = sctpConn
 
-	if err := conn.setUpSocket(); err != nil {
+	if err := association.setUpSocket(); err != nil {
 		return nil, err
 	}
 
-	// As in server.go: the opening ASP-DOWN transition is applied inside
-	// monitor(), ahead of dispatching, instead of racing the reader from here.
-	go conn.monitor(ctx)
+	// The opening ASP-DOWN transition is applied inside monitor(), ahead of
+	// dispatching, instead of racing the reader from here.
+	go association.monitor(ctx)
 
 	establishTimeout := cfg.EstablishTimeout
 	if establishTimeout <= 0 {
@@ -198,18 +235,19 @@ func Dial(ctx context.Context, net string, laddr, raddr *sctp.SCTPAddr, cfg *Con
 	}
 
 	select {
-	case <-conn.established:
-		return conn, nil
-	case <-conn.done:
-		if err := conn.Err(); err != nil {
+	case <-association.established:
+		releaseEndpointStateOwner = nil
+		return association, nil
+	case <-association.done:
+		if err := association.Err(); err != nil {
 			return nil, err
 		}
 		return nil, ErrFailedToEstablish
 	case <-ctx.Done():
-		_ = conn.closeWith(ctx.Err())
+		_ = association.closeWith(ctx.Err())
 		return nil, ctx.Err()
 	case <-time.After(establishTimeout):
-		_ = conn.closeWith(ErrTimeout)
+		_ = association.closeWith(ErrTimeout)
 		return nil, ErrTimeout
 	}
 }

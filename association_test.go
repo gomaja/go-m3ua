@@ -18,12 +18,12 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// setupConn establishes a client/server M3UA pair over a real SCTP
+// setupConn establishes an ASP/SGP M3UA pair over a real SCTP
 // association, with BEAT disabled on both ends. Each caller passes a distinct
 // port so that tests running in the same binary cannot collide on the
 // listening address, and the listener is closed when the test finishes.
 // On platforms without SCTP support the calling test is skipped.
-func setupConn(t *testing.T, ctx context.Context, port int) (*Conn, *Conn, error) {
+func setupConn(t *testing.T, ctx context.Context, port int) (*Association, *Association, error) {
 	t.Helper()
 	return setupConnHB(t, ctx, port,
 		&HeartbeatInfo{Enabled: false}, &HeartbeatInfo{Enabled: false})
@@ -43,7 +43,7 @@ func skipIfSCTPUnsupported(t *testing.T, err error) {
 
 // setupConnHB is setupConn with per-end heartbeat configuration, so tests can
 // exercise the BEAT/BEAT Ack exchange over a real association.
-func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *HeartbeatInfo) (*Conn, *Conn, error) {
+func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *HeartbeatInfo) (*Association, *Association, error) {
 	t.Helper()
 
 	// Both buffered, so the accept goroutine below can always finish its send
@@ -54,11 +54,11 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 	// package has three tests that assert on goroutine counts, so those leaks
 	// did not stay local to the test that produced them.
 	var (
-		srvConnChan = make(chan *Conn, 1)
+		srvConnChan = make(chan *Association, 1)
 		errChan     = make(chan error, 1)
 	)
 
-	srvCfg := NewServerConfig(
+	srvCfg := newSGPAssociationConfigForTest(
 		srvHB,
 		0x22222222,                  // OriginatingPointCode
 		0x11111111,                  // DestinationPointCode
@@ -73,7 +73,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		1,                           // SignalingLinkSelection
 	)
 	// set nil on unnecessary parameters.
-	srvCfg.AspIdentifier = nil
+	srvCfg.ASPIdentifier = nil
 	srvCfg.CorrelationID = nil
 
 	// setup SCTP peer on the specified IPs and Port.
@@ -82,7 +82,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		return nil, nil, err
 	}
 
-	listener, err := Listen("m3ua", raddr, NewListenerConfig(srvCfg))
+	listener, err := listenSGP("m3ua", raddr, NewListenerConfig(srvCfg))
 	if err != nil {
 		// The sctp package returns this on platforms without SCTP support
 		// (e.g. darwin); the socket-backed tests are meaningful only where a
@@ -96,10 +96,10 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		srvConn, err := listener.Accept(ctx)
 		if err != nil {
 			// Returning here is the point: without it the failure path fell
-			// through and also sent the nil Conn on srvConnChan. Whichever
+			// through and also sent the nil Association on srvConnChan. Whichever
 			// channel the caller's select happened to take, the other send was
 			// left dangling — and if it took srvConnChan first it proceeded
-			// with a nil *Conn and panicked on the next method call, reporting
+			// with a nil Association and panicked on the next method call, reporting
 			// a crash rather than the Accept error that actually caused it.
 			errChan <- err
 			return
@@ -108,7 +108,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		srvConnChan <- srvConn
 	}()
 
-	cliCfg := NewClientConfig(
+	cliCfg := newASPAssociationConfigForTest(
 		cliHB,
 		0x11111111,                  // OriginatingPointCode
 		0x22222222,                  // DestinationPointCode
@@ -130,7 +130,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		return nil, nil, err
 	}
 
-	cliConn, err := Dial(ctx, "m3ua", laddr, raddr, cliCfg)
+	cliConn, err := dialASP(ctx, "m3ua", laddr, raddr, cliCfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -139,9 +139,9 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 	case srvConn := <-srvConnChan:
 		// Production must buffer exactly one BEAT Ack token (see
 		// notifyBeatAck); the socket tests are the only place Dial- and
-		// Accept-built Conns are visible, so pin the capacity here to guard
+		// Accept-built Associations are visible, so pin the capacity here to guard
 		// the constructors against a silent regression to unbuffered.
-		for name, c := range map[string]*Conn{"client": cliConn, "server": srvConn} {
+		for name, c := range map[string]*Association{"ASP": cliConn, "SGP": srvConn} {
 			if cap(c.beatAckChan) != 1 {
 				t.Errorf("%s beatAckChan capacity = %d, want 1 (an Ack arriving before heartbeat() parks would be lost)",
 					name, cap(c.beatAckChan))
@@ -151,7 +151,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		// one identifying its traffic flow (RFC 4666 Section 3.3.1). These
 		// tests are not about distribution across Application Servers, so both
 		// ends pick the same one.
-		for _, c := range []*Conn{cliConn, srvConn} {
+		for _, c := range []*Association{cliConn, srvConn} {
 			if err := c.SelectRoutingContext(1); err != nil {
 				return nil, nil, err
 			}
@@ -185,24 +185,24 @@ func TestDuplicateAspUpIsAcked(t *testing.T) {
 	}()
 
 	// The association is up; resend ASP Up as a desynchronised peer would. The
-	// client drops to ASP-DOWN first so that the ASP Up Ack it expects back
+	// ASP drops to ASP-DOWN first so that the ASP Up Ack it expects back
 	// drives it forward again, mirroring a peer that has lost its state.
-	if err := cliConn.handleStateUpdate(StateAspDown); err != nil {
+	if err := cliConn.handleStateUpdate(StateASPDown); err != nil {
 		t.Fatal(err)
 	}
 
 	// RFC 4666 Section 4.3.4.1: the Ack is mandatory in every state. Without
-	// it the client never leaves ASP-DOWN and would retransmit ASP Up until
+	// it the ASP never leaves ASP-DOWN and would retransmit ASP Up until
 	// T(ack) expires, indefinitely.
 	// Each phase gets its own budget: a context's Done channel stays closed
 	// once it expires, unlike a one-shot time.After that a single receive
 	// drains for good.
 	ackCtx, cancelAck := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelAck()
-	for cliConn.State() == StateAspDown {
+	for cliConn.State() == StateASPDown {
 		select {
 		case <-ackCtx.Done():
-			t.Fatal("client stuck in AspDown: no ASP Up Ack received for the duplicate ASP Up")
+			t.Fatal("ASP stuck in ASP-DOWN: no ASP Up Ack received for the duplicate ASP Up")
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
@@ -210,11 +210,11 @@ func TestDuplicateAspUpIsAcked(t *testing.T) {
 	// Both ends must converge back to ASP-ACTIVE so traffic resumes.
 	convCtx, cancelConv := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelConv()
-	for cliConn.State() != StateAspActive || srvConn.State() != StateAspActive {
+	for cliConn.State() != StateASPActive || srvConn.State() != StateASPActive {
 		select {
 		case <-convCtx.Done():
-			t.Fatalf("states = client %v / server %v, want both %v after duplicate ASP Up",
-				cliConn.State(), srvConn.State(), StateAspActive)
+			t.Fatalf("states = ASP %v / SGP %v, want both %v after duplicate ASP Up",
+				cliConn.State(), srvConn.State(), StateASPActive)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
@@ -258,11 +258,11 @@ func TestHeartbeatKeepsAssociationAlive(t *testing.T) {
 	// Roughly ten beat rounds per end.
 	time.Sleep(500 * time.Millisecond)
 
-	if got := cliConn.State(); got != StateAspActive {
-		t.Errorf("client state = %v, want %v after heartbeat soak", got, StateAspActive)
+	if got := cliConn.State(); got != StateASPActive {
+		t.Errorf("ASP state = %v, want %v after heartbeat soak", got, StateASPActive)
 	}
-	if got := srvConn.State(); got != StateAspActive {
-		t.Errorf("server state = %v, want %v after heartbeat soak", got, StateAspActive)
+	if got := srvConn.State(); got != StateASPActive {
+		t.Errorf("SGP association state = %v, want %v after heartbeat soak", got, StateASPActive)
 	}
 
 	msg := []byte{0xde, 0xad, 0xbe, 0xef}
@@ -296,7 +296,7 @@ func TestReadWrite(t *testing.T) {
 	msg := []byte{0xde, 0xad, 0xbe, 0xef}
 	buf := make([]byte, 1024)
 
-	t.Run("client-write", func(t *testing.T) {
+	t.Run("ASP-write", func(t *testing.T) {
 		if _, err := cliConn.Write(msg); err != nil {
 			t.Fatal(err)
 		}
@@ -311,7 +311,7 @@ func TestReadWrite(t *testing.T) {
 		}
 	})
 
-	t.Run("server-write", func(t *testing.T) {
+	t.Run("SGP-write", func(t *testing.T) {
 		if _, err := srvConn.Write(msg); err != nil {
 			t.Fatal(err)
 		}

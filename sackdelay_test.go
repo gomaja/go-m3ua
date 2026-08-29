@@ -68,33 +68,40 @@ func TestSackDelayIsBoundedByTheSpecification(t *testing.T) {
 // has to survive the value and let the association fail. This pins that it
 // stores what it was given rather than clamping silently.
 func TestSackConfigStoresTheValueForValidationLater(t *testing.T) {
-	cfg := (&Config{}).SetSackConfig(750, 2)
+	cfg := (&AssociationConfig{}).SetSCTPSACK(750, 2)
 
-	if cfg.SctpSackInfo == nil {
-		t.Fatal("SetSackConfig stored nothing")
+	if cfg.SCTPSACKInfo == nil {
+		t.Fatal("SetSCTPSACK stored nothing")
 	}
-	if cfg.SctpSackInfo.SackDelay != 750 {
+	if cfg.SCTPSACKInfo.SackDelay != 750 {
 		t.Errorf("SackDelay = %d, want 750 stored unchanged; a silent clamp "+
 			"would apply a timer the caller never asked for",
-			cfg.SctpSackInfo.SackDelay)
+			cfg.SCTPSACKInfo.SackDelay)
 	}
-	if err := validateSackDelay(cfg.SctpSackInfo.SackDelay); !errors.Is(err, ErrSackDelayTooLarge) {
+	if err := validateSackDelay(cfg.SCTPSACKInfo.SackDelay); !errors.Is(err, ErrSackDelayTooLarge) {
 		t.Errorf("the stored value validates as %v, want ErrSackDelayTooLarge", err)
 	}
 }
 
-// The refusal has to happen on the association the Config is applied to, not
-// only in the helper: setUpSocket is where the value reaches setsockopt, and it
-// is the last point at which a non-conformant timer can be stopped.
+// The refusal has to happen on the association receiving the AssociationConfig,
+// not only in the helper: setUpSocket is where the value reaches setsockopt, and
+// it is the last point at which a non-conformant timer can be stopped.
 func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	const port = 3217
-	newCfg := func() *Config {
-		return NewClientConfig(
+	newASPConfig := func() *AssociationConfig {
+		return newASPAssociationConfigForTest(
 			&HeartbeatInfo{Enabled: false},
 			0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
+			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
+		)
+	}
+	newSGPConfig := func() *AssociationConfig {
+		return newSGPAssociationConfigForTest(
+			&HeartbeatInfo{Enabled: false},
+			0x22222222, 0x11111111, 0, params.TrafficModeLoadshare, 0, 0,
 			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
 		)
 	}
@@ -103,7 +110,7 @@ func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen("m3ua", srvAddr, NewListenerConfig(newCfg()))
+	ln, err := listenSGP("m3ua", srvAddr, NewListenerConfig(newSGPConfig()))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -111,7 +118,7 @@ func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	accepted := make(chan *Conn, 2)
+	accepted := make(chan *Association, 2)
 	go func() {
 		for {
 			c, err := ln.Accept(ctx)
@@ -128,8 +135,8 @@ func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 	}()
 
 	// 500 ms is the ceiling and must still establish.
-	okCfg := newCfg().SetSackConfig(500, 2)
-	conn, err := Dial(ctx, "m3ua", nil, srvAddr, okCfg)
+	okCfg := newASPConfig().SetSCTPSACK(500, 2)
+	conn, err := dialASP(ctx, "m3ua", nil, srvAddr, okCfg)
 	if err != nil {
 		t.Fatalf("Dial with the permitted 500 ms ceiling failed: %v", err)
 	}
@@ -139,12 +146,12 @@ func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 	case serverConn := <-accepted:
 		defer func() { _ = serverConn.Close() }()
 	case <-time.After(5 * time.Second):
-		t.Fatal("server never accepted the permitted SACK delay association")
+		t.Fatal("SGP never accepted the permitted SACK delay association")
 	}
 
 	// One millisecond more is not configurable, so the association must not be.
-	badCfg := newCfg().SetSackConfig(501, 2)
-	conn, err = Dial(ctx, "m3ua", nil, srvAddr, badCfg)
+	badCfg := newASPConfig().SetSCTPSACK(501, 2)
+	conn, err = dialASP(ctx, "m3ua", nil, srvAddr, badCfg)
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("Dial accepted a SACK delay above the 500 ms ceiling and " +

@@ -18,7 +18,7 @@ var (
 	// atomically declared when the restart began.
 	ErrMTP3RestartScope = errors.New("destination is outside the MTP3 restart scope")
 	// ErrStaleMTP3Restart reports a handle whose restart has already completed
-	// or no longer belongs to this Listener generation.
+	// or no longer belongs to its owning SGP state generation.
 	ErrStaleMTP3Restart = errors.New("stale MTP3 restart handle")
 	// ErrEmptyMTP3Restart reports a restart declaration with no affected scope.
 	ErrEmptyMTP3Restart = errors.New("MTP3 restart has no affected destinations")
@@ -35,13 +35,21 @@ type AffectedDestination struct {
 	Mask                 uint8
 }
 
-// MTP3Restart is an opaque generation handle for one Listener restart
-// procedure. Its methods are safe to call concurrently.
+// MTP3Restart is an opaque generation handle for one SGP restart procedure.
+// Its methods are safe to call concurrently.
 type MTP3Restart struct {
-	listener   *Listener
+	target     mtp3RestartTarget
 	generation uint64
 	mu         sync.Mutex
 	completed  bool
+}
+
+type mtp3RestartTarget struct {
+	registry     *mtp3RestartRegistry
+	closed       func() bool
+	prepare      func(DestinationRange) (DestinationRange, error)
+	destinations func() *destinations
+	publish      func([]DestinationRange, bool, bool, bool) error
 }
 
 type mtp3RestartRegistry struct {
@@ -56,6 +64,17 @@ type mtp3RestartEpoch struct {
 	updates  []DestinationRange
 }
 
+func invalidateMTP3RestartRegistry(registry *mtp3RestartRegistry) {
+	if registry == nil {
+		return
+	}
+	registry.procedureMu.Lock()
+	registry.mu.Lock()
+	registry.active = nil
+	registry.mu.Unlock()
+	registry.procedureMu.Unlock()
+}
+
 // BeginMTP3Restart starts the MTP3 restart procedure in RFC 4666 Section 4.6.
 // Validation and isolation-state publication are atomic. A non-nil handle is
 // returned even when one or more ASP writes fail, so the procedure can still
@@ -64,13 +83,39 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 	if l == nil {
 		return nil, errors.New("nil Listener")
 	}
+	if l.Role() != RoleSGP {
+		return nil, ErrUnsupportedRole
+	}
+	return beginMTP3Restart(l.mtp3RestartTarget(), affected...)
+}
+
+// BeginMTP3Restart starts the MTP3 restart procedure in RFC 4666 Section 4.6
+// for an SGP Association. A dialing SGP owns the restart state directly; an
+// accepted SGP Association uses its Listener's shared restart state.
+func (c *Association) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Restart, error) {
+	if c == nil || c.Role() != RoleSGP {
+		return nil, ErrUnsupportedRole
+	}
+	select {
+	case <-c.done:
+		return nil, ErrAssociationClosed
+	default:
+	}
+	return beginMTP3Restart(c.mtp3RestartTarget(), affected...)
+}
+
+func beginMTP3Restart(target mtp3RestartTarget, affected ...AffectedDestination) (*MTP3Restart, error) {
 	if len(affected) == 0 {
 		return nil, ErrEmptyMTP3Restart
+	}
+	if target.registry == nil || target.closed == nil || target.prepare == nil ||
+		target.destinations == nil || target.publish == nil {
+		return nil, ErrNotEstablished
 	}
 
 	ranges := make([]DestinationRange, len(affected))
 	for index, destination := range affected {
-		rangeValue, err := l.prepareLocalDestinationRange(DestinationRange{
+		rangeValue, err := target.prepare(DestinationRange{
 			NetworkAppearance:    destination.NetworkAppearance,
 			NetworkAppearanceSet: destination.NetworkAppearanceSet,
 			RoutingContext:       destination.RoutingContext,
@@ -90,14 +135,11 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 		ranges[index] = rangeValue
 	}
 
-	registry := &l.mtp3Restarts
+	registry := target.registry
 	registry.procedureMu.Lock()
 	defer registry.procedureMu.Unlock()
-	l.muConns.Lock()
-	closed := l.closed
-	l.muConns.Unlock()
-	if closed {
-		return nil, ErrConnClosed
+	if target.closed() {
+		return nil, ErrAssociationClosed
 	}
 
 	registry.mu.Lock()
@@ -124,16 +166,16 @@ func (l *Listener) BeginMTP3Restart(affected ...AffectedDestination) (*MTP3Resta
 	}
 	registry.mu.Unlock()
 
-	destinations := l.destinationRegistry()
+	destinations := target.destinations()
 	destinations.setRanges(ranges)
-	handle := &MTP3Restart{listener: l, generation: generation}
-	return handle, l.publishDestinationRanges(ranges, false, false, true)
+	handle := &MTP3Restart{target: target, generation: generation}
+	return handle, target.publish(ranges, false, false, true)
 }
 
 // Update stages a destination's final state. No recovery SSNM is emitted until
 // Complete, and DAUD continues to report DUNA for the affected scope meanwhile.
 func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationState) error {
-	if r == nil || r.listener == nil {
+	if r == nil || r.target.registry == nil {
 		return ErrStaleMTP3Restart
 	}
 	r.mu.Lock()
@@ -141,7 +183,7 @@ func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationS
 	if r.completed {
 		return ErrStaleMTP3Restart
 	}
-	rangeValue, err := r.listener.prepareLocalDestinationRange(DestinationRange{
+	rangeValue, err := r.target.prepare(DestinationRange{
 		NetworkAppearance:    destination.NetworkAppearance,
 		NetworkAppearanceSet: destination.NetworkAppearanceSet,
 		RoutingContext:       destination.RoutingContext,
@@ -153,13 +195,13 @@ func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationS
 	if err != nil {
 		return err
 	}
-	return r.listener.stageMTP3RestartRange(r.generation, rangeValue)
+	return stageMTP3RestartRange(r.target.registry, r.generation, rangeValue)
 }
 
 // Complete atomically publishes all staged final states, then sends recovery
 // SSNM to the currently active and concerned ASPs. Calling it again is a no-op.
 func (r *MTP3Restart) Complete() error {
-	if r == nil || r.listener == nil {
+	if r == nil || r.target.registry == nil {
 		return ErrStaleMTP3Restart
 	}
 	r.mu.Lock()
@@ -167,15 +209,14 @@ func (r *MTP3Restart) Complete() error {
 	if r.completed {
 		return nil
 	}
-	err := r.listener.completeMTP3Restart(r.generation)
+	err := completeMTP3Restart(r.target, r.generation)
 	if !errors.Is(err, ErrStaleMTP3Restart) {
 		r.completed = true
 	}
 	return err
 }
 
-func (l *Listener) stageMTP3RestartRange(generation uint64, rangeValue DestinationRange) error {
-	registry := &l.mtp3Restarts
+func stageMTP3RestartRange(registry *mtp3RestartRegistry, generation uint64, rangeValue DestinationRange) error {
 	registry.procedureMu.RLock()
 	defer registry.procedureMu.RUnlock()
 	registry.mu.Lock()
@@ -191,10 +232,12 @@ func (l *Listener) stageMTP3RestartRange(generation uint64, rangeValue Destinati
 	return nil
 }
 
-// stageAnyMTP3RestartRangeLocked requires procedureMu to be held for reading,
-// keeping the stage-or-publish decision atomic against Complete.
-func (l *Listener) stageAnyMTP3RestartRangeLocked(rangeValue DestinationRange) bool {
-	registry := &l.mtp3Restarts
+// stageAnyMTP3RestartRangeLocked requires registry.procedureMu to be held for
+// reading, keeping the stage-or-publish decision atomic against Complete.
+func stageAnyMTP3RestartRangeLocked(registry *mtp3RestartRegistry, rangeValue DestinationRange) bool {
+	if registry == nil {
+		return false
+	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	for _, epoch := range registry.active {
@@ -219,8 +262,8 @@ func appendRestartUpdate(updates []DestinationRange, rangeValue DestinationRange
 	return append(updates, rangeValue)
 }
 
-func (l *Listener) completeMTP3Restart(generation uint64) error {
-	registry := &l.mtp3Restarts
+func completeMTP3Restart(target mtp3RestartTarget, generation uint64) error {
+	registry := target.registry
 	registry.procedureMu.Lock()
 	defer registry.procedureMu.Unlock()
 	registry.mu.Lock()
@@ -233,8 +276,46 @@ func (l *Listener) completeMTP3Restart(generation uint64) error {
 	delete(registry.active, generation)
 	registry.mu.Unlock()
 
-	l.destinationRegistry().setRanges(updates)
-	return l.publishDestinationRanges(updates, true, false, true)
+	target.destinations().setRanges(updates)
+	return target.publish(updates, true, false, true)
+}
+
+func (l *Listener) mtp3RestartTarget() mtp3RestartTarget {
+	return mtp3RestartTarget{
+		registry: &l.mtp3Restarts,
+		closed: func() bool {
+			l.muConns.Lock()
+			defer l.muConns.Unlock()
+			return l.closed
+		},
+		prepare:      l.prepareLocalDestinationRange,
+		destinations: l.destinationRegistry,
+		publish:      l.publishDestinationRanges,
+	}
+}
+
+func (c *Association) mtp3RestartTarget() mtp3RestartTarget {
+	if c.listener != nil {
+		return c.listener.mtp3RestartTarget()
+	}
+	return mtp3RestartTarget{
+		registry: c.mtp3Restarts,
+		closed: func() bool {
+			select {
+			case <-c.done:
+				return true
+			default:
+				return false
+			}
+		},
+		prepare: c.prepareLocalDestinationRange,
+		destinations: func() *destinations {
+			return c.destinations
+		},
+		publish: func(ranges []DestinationRange, completion, abateCongestion, wait bool) error {
+			return publishDestinationRanges(c.as, ranges, completion, abateCongestion, wait)
+		},
+	}
 }
 
 func (l *Listener) destinationRegistry() *destinations {
@@ -247,28 +328,36 @@ func (l *Listener) destinationRegistry() *destinations {
 }
 
 func (l *Listener) prepareLocalDestinationRange(rangeValue DestinationRange) (DestinationRange, error) {
+	l.muConns.Lock()
+	registry := l.as
+	l.muConns.Unlock()
+	return prepareLocalDestinationRange(l.AssociationConfig, registry, rangeValue)
+}
+
+func (c *Association) prepareLocalDestinationRange(rangeValue DestinationRange) (DestinationRange, error) {
+	return prepareLocalDestinationRange(c.cfg, c.as, rangeValue)
+}
+
+func prepareLocalDestinationRange(config *AssociationConfig, registry *applicationServers, rangeValue DestinationRange) (DestinationRange, error) {
 	if !validDestinationState(rangeValue.State) {
 		return DestinationRange{}, fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
 	}
-	if !rangeValue.NetworkAppearanceSet && l.Config != nil {
-		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(l.Config.NetworkAppearance)
+	if !rangeValue.NetworkAppearanceSet && config != nil {
+		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
 	}
 	rangeValue = normalizeDestinationRange(rangeValue)
 	if !rangeValue.RoutingContextSet {
 		return rangeValue, nil
 	}
-	if !l.hasLocalRoutingContext(rangeValue.RoutingContext) {
+	if !hasLocalRoutingContext(config, registry, rangeValue.RoutingContext) {
 		return DestinationRange{}, NewInvalidRoutingContextError(rangeValue.RoutingContext)
 	}
 	return rangeValue, nil
 }
 
-func (l *Listener) hasLocalRoutingContext(routingContext uint32) bool {
-	if l == nil {
-		return false
-	}
-	if l.Config != nil && l.Config.RoutingContexts != nil {
-		configured := l.Config.RoutingContexts.RoutingContexts()
+func hasLocalRoutingContext(config *AssociationConfig, registry *applicationServers, routingContext uint32) bool {
+	if config != nil && config.RoutingContexts != nil {
+		configured := config.RoutingContexts.RoutingContexts()
 		if len(configured) > 0 {
 			for _, candidate := range configured {
 				if candidate == routingContext {
@@ -277,9 +366,6 @@ func (l *Listener) hasLocalRoutingContext(routingContext uint32) bool {
 			}
 		}
 	}
-	l.muConns.Lock()
-	registry := l.as
-	l.muConns.Unlock()
 	if registry == nil {
 		return false
 	}
@@ -320,11 +406,10 @@ func destinationRangesOverlap(first, second DestinationRange) bool {
 		destinationRangeCovers(second, first.PointCode, first.Mask)
 }
 
-func (l *Listener) restartForcesUnavailable(scope destinationKey, pointCode uint32, mask uint8) bool {
-	if l == nil {
+func restartForcesUnavailable(registry *mtp3RestartRegistry, scope destinationKey, pointCode uint32, mask uint8) bool {
+	if registry == nil {
 		return false
 	}
-	registry := &l.mtp3Restarts
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	query := DestinationRange{
@@ -345,11 +430,10 @@ func (l *Listener) restartForcesUnavailable(scope destinationKey, pointCode uint
 	return false
 }
 
-func (l *Listener) writeMTP3RestartStatusBeforeAck(connection *Conn, served []uint32) error {
-	if l == nil || connection == nil || len(served) == 0 {
+func writeMTP3RestartStatusBeforeAck(registry *mtp3RestartRegistry, association *Association, served []uint32) error {
+	if registry == nil || association == nil || len(served) == 0 {
 		return nil
 	}
-	registry := &l.mtp3Restarts
 	registry.procedureMu.RLock()
 	defer registry.procedureMu.RUnlock()
 	registry.mu.Lock()
@@ -378,7 +462,7 @@ func (l *Listener) writeMTP3RestartStatusBeforeAck(connection *Conn, served []ui
 			rangeValue, contexts, DestinationUnavailable, false,
 		)...)
 	}
-	return connection.writeMandatoryControls(messagesToWrite, false, true)
+	return association.writeMandatoryControls(messagesToWrite, false, true)
 }
 
 func containsRoutingContext(routingContexts []uint32, want uint32) bool {
@@ -391,23 +475,27 @@ func containsRoutingContext(routingContexts []uint32, want uint32) bool {
 }
 
 func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completion, abateCongestion, wait bool) error {
-	if len(ranges) == 0 {
-		return nil
-	}
 	l.muConns.Lock()
 	registry := l.as
 	l.muConns.Unlock()
+	return publishDestinationRanges(registry, ranges, completion, abateCongestion, wait)
+}
+
+func publishDestinationRanges(registry *applicationServers, ranges []DestinationRange, completion, abateCongestion, wait bool) error {
+	if len(ranges) == 0 {
+		return nil
+	}
 	if registry == nil {
 		return nil
 	}
 
 	type batch struct {
-		connection *Conn
-		messages   []messages.M3UA
-		contexts   []uint32
+		association *Association
+		messages    []messages.M3UA
+		contexts    []uint32
 	}
 	batches := make([]batch, 0)
-	indices := make(map[*Conn]int)
+	indices := make(map[*Association]int)
 	for _, rangeValue := range ranges {
 		if completion && rangeValue.State == DestinationUnavailable {
 			continue
@@ -421,11 +509,11 @@ func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completio
 			scope.routingContextSet = true
 		}
 		for _, target := range registry.activeSSNMTargets(scope) {
-			index, ok := indices[target.connection]
+			index, ok := indices[target.association]
 			if !ok {
 				index = len(batches)
-				indices[target.connection] = index
-				batches = append(batches, batch{connection: target.connection})
+				indices[target.association] = index
+				batches = append(batches, batch{association: target.association})
 			}
 			batches[index].contexts = append([]uint32(nil), target.routingContexts...)
 			if abateCongestion {
@@ -445,7 +533,7 @@ func (l *Listener) publishDestinationRanges(ranges []DestinationRange, completio
 		waitGroup.Add(1)
 		go func() {
 			defer waitGroup.Done()
-			errorsByBatch[index] = batches[index].connection.writeMandatoryControls(
+			errorsByBatch[index] = batches[index].association.writeMandatoryControls(
 				batches[index].messages, false, wait,
 			)
 		}()

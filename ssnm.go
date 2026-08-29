@@ -163,7 +163,7 @@ func newDestinations() *destinations {
 	return &destinations{state: make(map[destinationKey]destinationRecord)}
 }
 
-// The nil receiver checks below keep a Conn that was assembled directly, rather
+// The nil receiver checks below keep an Association that was assembled directly, rather
 // than through Dial or Accept, from crashing on the first SSNM message a peer
 // sends. Tracking is inert in that case; state reads report the default.
 
@@ -484,7 +484,7 @@ func appearanceOf(param *params.Param) (uint32, bool) {
 	return param.NetworkAppearance(), true
 }
 
-func (c *Conn) destinationKey(networkAppearance *params.Param, pointCode uint32) destinationKey {
+func (c *Association) destinationKey(networkAppearance *params.Param, pointCode uint32) destinationKey {
 	appearance, set := appearanceOf(networkAppearance)
 	if !set && c.cfg != nil {
 		appearance, set = appearanceOf(c.cfg.NetworkAppearance)
@@ -496,7 +496,7 @@ func (c *Conn) destinationKey(networkAppearance *params.Param, pointCode uint32)
 	}
 }
 
-func (c *Conn) legacyDestinationScope(networkAppearance *params.Param) destinationKey {
+func (c *Association) legacyDestinationScope(networkAppearance *params.Param) destinationKey {
 	scope := c.destinationKey(networkAppearance, 0)
 	configured := c.configuredRoutingContexts()
 	if len(configured) == 1 {
@@ -506,7 +506,7 @@ func (c *Conn) legacyDestinationScope(networkAppearance *params.Param) destinati
 	return scope
 }
 
-func (c *Conn) destinationRoutingContexts(routingContext *params.Param) ([]uint32, bool) {
+func (c *Association) destinationRoutingContexts(routingContext *params.Param) ([]uint32, bool) {
 	if routingContext != nil {
 		return append([]uint32(nil), routingContext.RoutingContexts()...), true
 	}
@@ -524,7 +524,7 @@ func (c *Conn) destinationRoutingContexts(routingContext *params.Param) ([]uint3
 // DestinationStateForNetworkAndRoutingContext for a per-flow answer.
 // Destinations the peer has not reported on are Available, since SSNM carries
 // changes rather than a full inventory.
-func (c *Conn) DestinationState(pointCode uint32) DestinationState {
+func (c *Association) DestinationState(pointCode uint32) DestinationState {
 	scope := c.legacyDestinationScope(nil)
 	return c.destinations.get(destinationKey{
 		networkAppearance:    scope.networkAppearance,
@@ -539,7 +539,7 @@ func (c *Conn) DestinationState(pointCode uint32) DestinationState {
 // Network Appearance. On a multi-Routing-Context association it sees only
 // all-context baselines; use DestinationStateForNetworkAndRoutingContext for a
 // per-flow answer.
-func (c *Conn) DestinationStateForNetwork(networkAppearance, pointCode uint32) DestinationState {
+func (c *Association) DestinationStateForNetwork(networkAppearance, pointCode uint32) DestinationState {
 	scope := c.legacyDestinationScope(params.NewNetworkAppearance(networkAppearance))
 	return c.destinations.get(destinationKey{
 		networkAppearance:    scope.networkAppearance,
@@ -553,7 +553,7 @@ func (c *Conn) DestinationStateForNetwork(networkAppearance, pointCode uint32) D
 // DestinationStateForNetworkAndRoutingContext reports a destination's state
 // in one explicit Network Appearance and Routing Context. All-context baseline
 // ranges participate, and the newest covering update wins.
-func (c *Conn) DestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32) DestinationState {
+func (c *Association) DestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32) DestinationState {
 	return c.destinations.get(destinationKey{
 		networkAppearance:    networkAppearance,
 		networkAppearanceSet: true,
@@ -566,7 +566,7 @@ func (c *Conn) DestinationStateForNetworkAndRoutingContext(networkAppearance, ro
 // DestinationStates returns the exact, Mask-zero destination records visible
 // through DestinationState. The legacy map cannot represent ranges; use
 // DestinationRanges for a lossless snapshot.
-func (c *Conn) DestinationStates() map[uint32]DestinationState {
+func (c *Association) DestinationStates() map[uint32]DestinationState {
 	return c.destinations.snapshotForScope(c.legacyDestinationScope(nil))
 }
 
@@ -574,7 +574,7 @@ func (c *Conn) DestinationStates() map[uint32]DestinationState {
 // an explicit Network Appearance. On a multi-Routing-Context association it is
 // limited to all-context baselines. Use
 // DestinationRangesForNetworkAndRoutingContext for a lossless per-flow view.
-func (c *Conn) DestinationStatesForNetwork(networkAppearance uint32) map[uint32]DestinationState {
+func (c *Association) DestinationStatesForNetwork(networkAppearance uint32) map[uint32]DestinationState {
 	return c.destinations.snapshotForScope(
 		c.legacyDestinationScope(params.NewNetworkAppearance(networkAppearance)))
 }
@@ -582,14 +582,14 @@ func (c *Conn) DestinationStatesForNetwork(networkAppearance uint32) map[uint32]
 // DestinationRanges returns every range visible through DestinationState in
 // update order. On a multi-Routing-Context association it contains only
 // all-context baselines.
-func (c *Conn) DestinationRanges() []DestinationRange {
+func (c *Association) DestinationRanges() []DestinationRange {
 	return c.destinations.rangesForScope(c.legacyDestinationScope(nil))
 }
 
 // DestinationRangesForNetwork returns every range visible for an explicit
 // Network Appearance in update order. On a multi-Routing-Context association
 // it contains only all-context baselines.
-func (c *Conn) DestinationRangesForNetwork(networkAppearance uint32) []DestinationRange {
+func (c *Association) DestinationRangesForNetwork(networkAppearance uint32) []DestinationRange {
 	return c.destinations.rangesForScope(
 		c.legacyDestinationScope(params.NewNetworkAppearance(networkAppearance)))
 }
@@ -597,7 +597,7 @@ func (c *Conn) DestinationRangesForNetwork(networkAppearance uint32) []Destinati
 // DestinationRangesForNetworkAndRoutingContext returns every all-context and
 // per-context range visible in one Network Appearance and Routing Context, in
 // update order.
-func (c *Conn) DestinationRangesForNetworkAndRoutingContext(networkAppearance, routingContext uint32) []DestinationRange {
+func (c *Association) DestinationRangesForNetworkAndRoutingContext(networkAppearance, routingContext uint32) []DestinationRange {
 	return c.destinations.rangesForScope(destinationKey{
 		networkAppearance:    networkAppearance,
 		networkAppearanceSet: true,
@@ -615,13 +615,13 @@ func (c *Conn) DestinationRangesForNetworkAndRoutingContext(networkAppearance, r
 // marker; callers must then query destination state and treat peer-only SCON
 // and DUPU information as unknown until the peer reports it again.
 //
-// Closing the Conn closes the channel, so
+// Closing the Association closes the channel, so
 //
-//	for st := range conn.SignallingStatus() { ... }
+//	for st := range association.SignallingStatus() { ... }
 //
 // terminates with the association rather than parking forever. Anything already
 // buffered is still delivered before the range ends.
-func (c *Conn) SignallingStatus() <-chan *DestinationStatus {
+func (c *Association) SignallingStatus() <-chan *DestinationStatus {
 	return c.statusChan
 }
 
@@ -630,7 +630,7 @@ func (c *Conn) SignallingStatus() <-chan *DestinationStatus {
 // The lock is held only across a non-blocking send, and exists so that SSNM
 // arriving while the association is being torn down cannot send on the channel
 // Close has just closed.
-func (c *Conn) notifyStatus(s *DestinationStatus) {
+func (c *Association) notifyStatus(s *DestinationStatus) {
 	c.muStatus.Lock()
 	defer c.muStatus.Unlock()
 
@@ -678,8 +678,8 @@ func copyDestinationStatus(status *DestinationStatus) *DestinationStatus {
 //
 // Scoped to the ASP, as the RFC scopes it. An SGP's recorded states are its own
 // view for answering audits, not something a peer told it.
-func (c *Conn) pauseDestinations() {
-	if c.mode != modeClient {
+func (c *Association) pauseDestinations() {
+	if c.role != RoleASP {
 		return
 	}
 
@@ -702,7 +702,7 @@ func (c *Conn) pauseDestinations() {
 
 // closeStatus closes statusChan exactly once, so a caller ranging over
 // SignallingStatus() sees the association end.
-func (c *Conn) closeStatus() {
+func (c *Association) closeStatus() {
 	c.muStatus.Lock()
 	defer c.muStatus.Unlock()
 
@@ -716,7 +716,7 @@ func (c *Conn) closeStatus() {
 // applySSNM records a destination state change and reports it to the user.
 // Affected Point Code is Mandatory in every SSNM message (RFC 4666 Sections
 // 3.4.1 to 3.4.6) and may carry several point codes, each of which is updated.
-func (c *Conn) applySSNM(networkAppearance, routingContext, apc *params.Param, state DestinationState, mutate func(*DestinationStatus)) error {
+func (c *Association) applySSNM(networkAppearance, routingContext, apc *params.Param, state DestinationState, mutate func(*DestinationStatus)) error {
 	if apc == nil {
 		return ErrMissingAffectedPointCode
 	}
@@ -774,7 +774,7 @@ func (c *Conn) applySSNM(networkAppearance, routingContext, apc *params.Param, s
 // It is what an SGP does with an ASP's SCON: the report is real and worth
 // surfacing, but it describes the ASP rather than a destination, so it must not
 // reach the map the SGP answers a DAUD from.
-func (c *Conn) reportSSNM(networkAppearance, routingContext, apc *params.Param, mutate func(*DestinationStatus)) error {
+func (c *Association) reportSSNM(networkAppearance, routingContext, apc *params.Param, mutate func(*DestinationStatus)) error {
 	if apc == nil {
 		return ErrMissingAffectedPointCode
 	}
@@ -840,8 +840,8 @@ func (s destinationStatusScope) apply(status *DestinationStatus) {
 // protocol error on the peer's part, so it is reported rather than applied:
 // acting on destination state we are not entitled to receive would let an
 // out-of-state peer steer traffic.
-func (c *Conn) ssnmAllowed() bool {
-	return c.State() == StateAspActive
+func (c *Association) ssnmAllowed() bool {
+	return c.State() == StateASPActive
 }
 
 // ssnmAllowedDuringActivation is ssnmAllowed widened by the window RFC 4666
@@ -859,18 +859,18 @@ func (c *Conn) ssnmAllowed() bool {
 // The exception is tied to an actual outstanding ASP Active request. Merely
 // being ASP-INACTIVE does not prove that the peer has received one, and a stray
 // SSNM must not be allowed to steer local routing state.
-func (c *Conn) ssnmAllowedDuringActivation() bool {
-	if c.State() == StateAspActive {
+func (c *Association) ssnmAllowedDuringActivation() bool {
+	if c.State() == StateASPActive {
 		return true
 	}
-	return c.mode == modeClient && c.State() == StateAspInactive &&
+	return c.role == RoleASP && c.State() == StateASPInactive &&
 		len(c.pendingTAckRoutingContexts(requestAspActive)) > 0
 }
 
 // validateSSNMRoutingContext applies both parts of SSNM's Conditional Routing
 // Context rule. A present value must be configured, while omission is valid
 // only when the association does not carry several traffic flows.
-func (c *Conn) validateSSNMRoutingContext(routingContext *params.Param) error {
+func (c *Association) validateSSNMRoutingContext(routingContext *params.Param) error {
 	if err := c.validateRoutingContext(routingContext); err != nil {
 		return err
 	}
@@ -887,34 +887,34 @@ func (c *Conn) validateSSNMRoutingContext(routingContext *params.Param) error {
 // applied to the Routing Contexts it names. The bool is false only for the
 // RFC-permitted ASP-side silent-discard case; an SGP reports an Unexpected
 // Message when an ASP originates SSNM for an AS in which it is inactive.
-func (c *Conn) validateSSNMScope(msg messages.M3UA, routingContext *params.Param, duringActivation bool) (bool, error) {
+func (c *Association) validateSSNMScope(msg messages.M3UA, routingContext *params.Param, duringActivation bool) (bool, error) {
 	if err := c.validateSSNMRoutingContext(routingContext); err != nil {
 		return false, err
 	}
 	if c.ssnmRoutingContextsAllowed(routingContext, duringActivation) {
 		return true, nil
 	}
-	if c.mode == modeClient {
+	if c.role == RoleASP {
 		return false, nil
 	}
 	return false, NewUnexpectedMessageError(msg)
 }
 
-func (c *Conn) ssnmRoutingContextsAllowed(routingContext *params.Param, duringActivation bool) bool {
+func (c *Association) ssnmRoutingContextsAllowed(routingContext *params.Param, duringActivation bool) bool {
 	routingContexts := routingContext.RoutingContexts()
 	if routingContext == nil {
 		routingContexts = c.configuredRoutingContexts()
 	}
 
 	pendingActivation := make(map[uint32]struct{})
-	if duringActivation && c.mode == modeClient {
+	if duringActivation && c.role == RoleASP {
 		for _, rtCtx := range c.pendingTAckRoutingContexts(requestAspActive) {
 			pendingActivation[rtCtx] = struct{}{}
 		}
 	}
 
 	for _, rtCtx := range routingContexts {
-		if c.mode == modeServer {
+		if c.role == RoleSGP {
 			if !c.activeForRoutingContext(rtCtx) {
 				return false
 			}
@@ -927,7 +927,7 @@ func (c *Conn) ssnmRoutingContextsAllowed(routingContext *params.Param, duringAc
 		if _, ok := pendingActivation[rtCtx]; ok {
 			continue
 		}
-		if c.State() == StateAspActive && c.routingContextAcked(rtCtx) {
+		if c.State() == StateASPActive && c.routingContextAcked(rtCtx) {
 			continue
 		}
 		return false
@@ -944,8 +944,8 @@ func (c *Conn) ssnmRoutingContextsAllowed(routingContext *params.Param, duringAc
 //
 // SGP to ASP, so an SGP that receives one reports an Error instead of applying
 // it: a peer must not be able to steer an SG's own routing state.
-func (c *Conn) handleDestinationUnavailable(d *messages.DestinationUnavailable) error {
-	if c.mode != modeClient {
+func (c *Association) handleDestinationUnavailable(d *messages.DestinationUnavailable) error {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(d)
 	}
 	if !c.ssnmAllowedDuringActivation() {
@@ -971,8 +971,8 @@ func (c *Conn) handleDestinationUnavailable(d *messages.DestinationUnavailable) 
 // RFC 4666 Section 3.4.2: sent from an SGP "to indicate that the SG has
 // determined that one or more SS7 destinations are now reachable", restoring
 // traffic the matching DUNA stopped.
-func (c *Conn) handleDestinationAvailable(d *messages.DestinationAvailable) error {
-	if c.mode != modeClient {
+func (c *Association) handleDestinationAvailable(d *messages.DestinationAvailable) error {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(d)
 	}
 	if !c.ssnmAllowedDuringActivation() {
@@ -1001,8 +1001,8 @@ func (c *Conn) handleDestinationAvailable(d *messages.DestinationAvailable) erro
 // RFC 4666 Section 3.4.6: an optional message telling the ASP that a
 // destination is reachable but that traffic should preferably be sent
 // elsewhere.
-func (c *Conn) handleDestinationRestricted(d *messages.DestinationRestricted) error {
-	if c.mode != modeClient {
+func (c *Association) handleDestinationRestricted(d *messages.DestinationRestricted) error {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(d)
 	}
 	if !c.ssnmAllowedDuringActivation() {
@@ -1028,7 +1028,7 @@ func (c *Conn) handleDestinationRestricted(d *messages.DestinationRestricted) er
 // RFC 4666 Section 3.4.4: sent to indicate congestion towards a destination so
 // the MTP3-User can reduce traffic. The Congestion Indications parameter is
 // optional, so its absence is not an error.
-func (c *Conn) handleSignallingCongestion(s *messages.SignallingCongestion) error {
+func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestion) error {
 	// SCON is the one SSNM message that travels in both directions. RFC 4666
 	// Section 3.4.4: "The SCON message MAY also be sent from the M3UA layer of
 	// an ASP to an M3UA peer, indicating that the congestion level of the M3UA
@@ -1037,20 +1037,20 @@ func (c *Conn) handleSignallingCongestion(s *messages.SignallingCongestion) erro
 	if err := c.validateNetworkAppearance(s.NetworkAppearance); err != nil {
 		return err
 	}
-	if c.mode == modeClient && !c.ssnmAllowedDuringActivation() {
+	if c.role == RoleASP && !c.ssnmAllowedDuringActivation() {
 		return NewUnexpectedMessageError(s)
 	}
-	if c.mode == modeServer && !c.ssnmAllowed() {
+	if c.role == RoleSGP && !c.ssnmAllowed() {
 		return NewUnexpectedMessageError(s)
 	}
-	allowed, err := c.validateSSNMScope(s, s.RoutingContext, c.mode == modeClient)
+	allowed, err := c.validateSSNMScope(s, s.RoutingContext, c.role == RoleASP)
 	if err != nil {
 		return err
 	}
 	if !allowed {
 		return nil
 	}
-	if c.mode == modeClient && s.ConcernedDestination != nil {
+	if c.role == RoleASP && s.ConcernedDestination != nil {
 		return ErrInvalidParameterValue
 	}
 
@@ -1082,7 +1082,7 @@ func (c *Conn) handleSignallingCongestion(s *messages.SignallingCongestion) erro
 	// that one peer. Writing a peer's report into this node's destination map
 	// let any ASP make the SG report SS7 congestion that does not exist, to
 	// every other ASP that audited it (Section 4.5.3).
-	if c.mode == modeServer {
+	if c.role == RoleSGP {
 		c.peerCongestion.Store(uint32(level))
 		return c.reportSSNM(s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, func(st *DestinationStatus) {
 			st.CongestionLevel = level
@@ -1108,8 +1108,8 @@ func (c *Conn) handleSignallingCongestion(s *messages.SignallingCongestion) erro
 // RFC 4666 Section 3.4.5: reports that a *user part* at an otherwise reachable
 // destination is unavailable, so the destination's own availability is left
 // alone and the cause is passed to the MTP3-User instead.
-func (c *Conn) handleDestinationUserPartUnavailable(d *messages.DestinationUserPartUnavailable) error {
-	if c.mode != modeClient {
+func (c *Association) handleDestinationUserPartUnavailable(d *messages.DestinationUserPartUnavailable) error {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(d)
 	}
 	if !c.ssnmAllowed() {
@@ -1172,8 +1172,8 @@ func (c *Conn) handleDestinationUserPartUnavailable(d *messages.DestinationUserP
 // 4.4.2 has the SG respond with DUNA for unavailable destinations and DAVA for
 // available ones, so a restarting ASP can resynchronise without waiting for the
 // next spontaneous update.
-func (c *Conn) handleDestinationStateAudit(d *messages.DestinationStateAudit) error {
-	if c.mode != modeServer {
+func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAudit) error {
+	if c.role != RoleSGP {
 		return NewUnexpectedMessageError(d)
 	}
 	if err := c.validateNetworkAppearance(d.NetworkAppearance); err != nil {
@@ -1190,9 +1190,9 @@ func (c *Conn) handleDestinationStateAudit(d *messages.DestinationStateAudit) er
 	if !allowed {
 		return nil
 	}
-	if c.listener != nil {
-		c.listener.mtp3Restarts.procedureMu.RLock()
-		defer c.listener.mtp3Restarts.procedureMu.RUnlock()
+	if c.mtp3Restarts != nil {
+		c.mtp3Restarts.procedureMu.RLock()
+		defer c.mtp3Restarts.procedureMu.RUnlock()
 	}
 
 	if d.AffectedPointCode == nil {
@@ -1220,7 +1220,7 @@ func (c *Conn) handleDestinationStateAudit(d *messages.DestinationStateAudit) er
 					routingContextSet:    true,
 				}
 				state, known := c.destinations.lookupRange(scope, pc, masks[index])
-				if c.listener != nil && c.listener.restartForcesUnavailable(scope, pc, masks[index]) {
+				if restartForcesUnavailable(c.mtp3Restarts, scope, pc, masks[index]) {
 					state, known = DestinationUnavailable, true
 				}
 				if !known {
@@ -1234,7 +1234,7 @@ func (c *Conn) handleDestinationStateAudit(d *messages.DestinationStateAudit) er
 				networkAppearanceSet: appearance.networkAppearanceSet,
 			}
 			state, known := c.destinations.lookupRange(scope, pc, masks[index])
-			if c.listener != nil && c.listener.restartForcesUnavailable(scope, pc, masks[index]) {
+			if restartForcesUnavailable(c.mtp3Restarts, scope, pc, masks[index]) {
 				state, known = DestinationUnavailable, true
 			}
 			if !known {
@@ -1274,7 +1274,7 @@ func appendDestinationAuditGroup(groups []destinationAuditGroup, state Destinati
 	})
 }
 
-func (c *Conn) writeDestinationAuditReply(
+func (c *Association) writeDestinationAuditReply(
 	networkAppearance *params.Param,
 	routingContextPresent bool,
 	routingContexts []uint32,
@@ -1324,15 +1324,15 @@ func (c *Conn) writeDestinationAuditReply(
 // On an accepted association this writes the listener's node-wide view, which is
 // shared by every ASP it serves and outlives any one of them. Prefer
 // Listener.SetDestinationState, which says so; this form remains because an
-// operator holding a Conn should not have to find the Listener to record what
+// operator holding an Association should not have to find the Listener to record what
 // the SS7 network just told it.
-func (c *Conn) SetDestinationState(pointCode uint32, state DestinationState) {
+func (c *Association) SetDestinationState(pointCode uint32, state DestinationState) {
 	c.SetDestinationRange(pointCode, 0, state)
 }
 
 // SetDestinationRange records an all-Routing-Context destination range in the
 // configured Network Appearance. Mask wildcards that many low-order bits.
-func (c *Conn) SetDestinationRange(pointCode uint32, mask uint8, state DestinationState) {
+func (c *Association) SetDestinationRange(pointCode uint32, mask uint8, state DestinationState) {
 	scope := c.destinationKey(nil, pointCode)
 	_ = c.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    scope.networkAppearance,
@@ -1345,13 +1345,13 @@ func (c *Conn) SetDestinationRange(pointCode uint32, mask uint8, state Destinati
 
 // SetDestinationStateForNetwork records an SGP destination state within an
 // explicit Network Appearance.
-func (c *Conn) SetDestinationStateForNetwork(networkAppearance, pointCode uint32, state DestinationState) {
+func (c *Association) SetDestinationStateForNetwork(networkAppearance, pointCode uint32, state DestinationState) {
 	c.SetDestinationRangeForNetwork(networkAppearance, pointCode, 0, state)
 }
 
 // SetDestinationRangeForNetwork records an all-Routing-Context range within
 // an explicit Network Appearance.
-func (c *Conn) SetDestinationRangeForNetwork(networkAppearance, pointCode uint32, mask uint8, state DestinationState) {
+func (c *Association) SetDestinationRangeForNetwork(networkAppearance, pointCode uint32, mask uint8, state DestinationState) {
 	_ = c.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    networkAppearance,
 		NetworkAppearanceSet: true,
@@ -1363,14 +1363,14 @@ func (c *Conn) SetDestinationRangeForNetwork(networkAppearance, pointCode uint32
 
 // SetDestinationStateForNetworkAndRoutingContext records one exact destination
 // in an explicit Network Appearance and Routing Context.
-func (c *Conn) SetDestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, state DestinationState) {
+func (c *Association) SetDestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, state DestinationState) {
 	c.SetDestinationRangeForNetworkAndRoutingContext(
 		networkAppearance, routingContext, pointCode, 0, state)
 }
 
 // SetDestinationRangeForNetworkAndRoutingContext records a destination range
 // in one explicit Network Appearance and Routing Context.
-func (c *Conn) SetDestinationRangeForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, mask uint8, state DestinationState) {
+func (c *Association) SetDestinationRangeForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, mask uint8, state DestinationState) {
 	_ = c.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    networkAppearance,
 		NetworkAppearanceSet: true,
@@ -1383,12 +1383,12 @@ func (c *Conn) SetDestinationRangeForNetworkAndRoutingContext(networkAppearance,
 }
 
 // ReportDestinationState records and synchronously reports a destination.
-func (c *Conn) ReportDestinationState(pointCode uint32, state DestinationState) error {
+func (c *Association) ReportDestinationState(pointCode uint32, state DestinationState) error {
 	return c.ReportDestinationRange(pointCode, 0, state)
 }
 
 // ReportDestinationRange records and synchronously reports a destination range.
-func (c *Conn) ReportDestinationRange(pointCode uint32, mask uint8, state DestinationState) error {
+func (c *Association) ReportDestinationRange(pointCode uint32, mask uint8, state DestinationState) error {
 	scope := c.destinationKey(nil, pointCode)
 	return c.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    scope.networkAppearance,
@@ -1401,13 +1401,13 @@ func (c *Conn) ReportDestinationRange(pointCode uint32, mask uint8, state Destin
 
 // ReportDestinationStateForNetwork records and synchronously reports a
 // destination in an explicit Network Appearance.
-func (c *Conn) ReportDestinationStateForNetwork(networkAppearance, pointCode uint32, state DestinationState) error {
+func (c *Association) ReportDestinationStateForNetwork(networkAppearance, pointCode uint32, state DestinationState) error {
 	return c.ReportDestinationRangeForNetwork(networkAppearance, pointCode, 0, state)
 }
 
 // ReportDestinationRangeForNetwork records and synchronously reports a range
 // in an explicit Network Appearance.
-func (c *Conn) ReportDestinationRangeForNetwork(networkAppearance, pointCode uint32, mask uint8, state DestinationState) error {
+func (c *Association) ReportDestinationRangeForNetwork(networkAppearance, pointCode uint32, mask uint8, state DestinationState) error {
 	return c.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    networkAppearance,
 		NetworkAppearanceSet: true,
@@ -1419,7 +1419,7 @@ func (c *Conn) ReportDestinationRangeForNetwork(networkAppearance, pointCode uin
 
 // ReportDestinationStateForNetworkAndRoutingContext records and synchronously
 // reports one destination in one explicit traffic scope.
-func (c *Conn) ReportDestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, state DestinationState) error {
+func (c *Association) ReportDestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, state DestinationState) error {
 	return c.ReportDestinationRangeForNetworkAndRoutingContext(
 		networkAppearance, routingContext, pointCode, 0, state,
 	)
@@ -1427,7 +1427,7 @@ func (c *Conn) ReportDestinationStateForNetworkAndRoutingContext(networkAppearan
 
 // ReportDestinationRangeForNetworkAndRoutingContext records and synchronously
 // reports a destination range in one explicit traffic scope.
-func (c *Conn) ReportDestinationRangeForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, mask uint8, state DestinationState) error {
+func (c *Association) ReportDestinationRangeForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, mask uint8, state DestinationState) error {
 	return c.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    networkAppearance,
 		NetworkAppearanceSet: true,
@@ -1439,10 +1439,28 @@ func (c *Conn) ReportDestinationRangeForNetworkAndRoutingContext(networkAppearan
 	}, true)
 }
 
-func (c *Conn) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
-	if c != nil && c.mode == modeServer && c.listener != nil {
-		return c.listener.applyDestinationRange(rangeValue, wait)
+func (c *Association) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
+	if c != nil {
+		if c.role == RoleIPSP || wait && c.role != RoleSGP {
+			return ErrUnsupportedRole
+		}
+		if c.role != RoleSGP {
+			return applyLocalDestinationRange(c, rangeValue)
+		}
+		select {
+		case <-c.done:
+			return ErrAssociationClosed
+		default:
+		}
+		if c.listener != nil {
+			return c.listener.applyDestinationRange(rangeValue, wait)
+		}
+		return c.applyDialedSGPDestinationRange(rangeValue, wait)
 	}
+	return applyLocalDestinationRange(c, rangeValue)
+}
+
+func applyLocalDestinationRange(c *Association, rangeValue DestinationRange) error {
 	if !validDestinationState(rangeValue.State) {
 		return fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
 	}
@@ -1451,6 +1469,38 @@ func (c *Conn) applyDestinationRange(rangeValue DestinationRange, wait bool) err
 	}
 	c.destinations.setRanges([]DestinationRange{rangeValue})
 	return nil
+}
+
+func (c *Association) applyDialedSGPDestinationRange(rangeValue DestinationRange, wait bool) error {
+	// RFC 4666 Section 4.5.1 requires an SGP that receives an MTP-PAUSE,
+	// MTP-RESUME, or MTP-STATUS primitive to send the corresponding SSNM to
+	// concerned ASPs. SCTP association initiation does not alter that SGP duty.
+	if !validDestinationState(rangeValue.State) {
+		return fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
+	}
+	if !rangeValue.NetworkAppearanceSet && c.cfg != nil {
+		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(c.cfg.NetworkAppearance)
+	}
+	rangeValue = normalizeDestinationRange(rangeValue)
+	if rangeValue.RoutingContextSet && !containsRoutingContext(c.configuredRoutingContexts(), rangeValue.RoutingContext) {
+		return NewInvalidRoutingContextError(rangeValue.RoutingContext)
+	}
+
+	restarts := c.mtp3Restarts
+	if restarts != nil {
+		restarts.procedureMu.RLock()
+		defer restarts.procedureMu.RUnlock()
+		if stageAnyMTP3RestartRangeLocked(restarts, rangeValue) {
+			return nil
+		}
+	}
+
+	previous, known := c.destinations.lookupRange(
+		destinationRangeKey(rangeValue), rangeValue.PointCode, rangeValue.Mask,
+	)
+	c.destinations.setRanges([]DestinationRange{rangeValue})
+	abateCongestion := known && previous == DestinationCongested && rangeValue.State != DestinationCongested
+	return publishDestinationRanges(c.as, []DestinationRange{rangeValue}, false, abateCongestion, wait)
 }
 
 // PeerCongestionLevel returns the congestion level the peer last reported about
@@ -1465,6 +1515,6 @@ func (c *Conn) applyDestinationRange(rangeValue DestinationRange, wait bool) err
 //
 // The values are those of Section 3.4.4: 0 "No Congestion or Undefined", and 1
 // to 3 for the national congestion levels.
-func (c *Conn) PeerCongestionLevel() uint8 {
+func (c *Association) PeerCongestionLevel() uint8 {
 	return uint8(c.peerCongestion.Load())
 }

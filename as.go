@@ -98,7 +98,7 @@ const DefaultRecoveryTimer = 2 * time.Second
 // property of the group rather than of any one association. Nothing about "the
 // last remaining active ASP in the AS", about Override's "previously active ASP
 // in the AS", or about a Notify going "to all ASPs in the AS" can be decided
-// from inside a single Conn.
+// from inside a single Association.
 type applicationServer struct {
 	// key is the Network Appearance plus Routing Context scope this AS serves.
 	key ASKey
@@ -110,12 +110,12 @@ type applicationServer struct {
 	mu         sync.Mutex
 	// asps is every association that has claimed this Routing Context, and the
 	// ASP state each is in.
-	asps map[*Conn]State
+	asps map[*Association]State
 	// active is the stable distribution order derived only when membership
 	// changes, rather than rebuilt and sorted for every DATA message.
-	active              []*Conn
-	connectionOrder     map[*Conn]uint64
-	nextConnectionOrder uint64
+	active               []*Association
+	associationOrder     map[*Association]uint64
+	nextAssociationOrder uint64
 	// state is the AS state last computed from asps.
 	state  ASState
 	closed bool
@@ -175,7 +175,7 @@ type recoveryBudget struct {
 	bytes        int
 }
 
-func newRecoveryBudget(config *Config) *recoveryBudget {
+func newRecoveryBudget(config *AssociationConfig) *recoveryBudget {
 	budget := &recoveryBudget{
 		messageLimit: DefaultRecoveryQueueTotalMessages,
 		byteLimit:    DefaultRecoveryQueueTotalBytes,
@@ -225,7 +225,7 @@ type queuedData struct {
 	flow                broadcastFlowKey
 	size                int
 	recoveryGen         uint64
-	broadcastTargets    []*Conn
+	broadcastTargets    []*Association
 	broadcastTargetsSet bool
 	broadcastEpoch      uint64
 	broadcastMarker     bool
@@ -233,7 +233,7 @@ type queuedData struct {
 
 type asStateNotification struct {
 	state         ASState
-	targets       []*Conn
+	targets       []*Association
 	key           ASKey
 	aspIdentifier *params.Param
 	ready         chan struct{}
@@ -250,18 +250,18 @@ type applicationServers struct {
 	closed bool
 	// aspIdentifiers is the identifier each association supplied in ASP Up.
 	// Uniqueness is required only among ASPs that support a common AS.
-	aspIdentifiers map[*Conn]uint32
+	aspIdentifiers map[*Association]uint32
 	// recoveryTimer is T(r); zero means DefaultRecoveryTimer.
 	recoveryTimer time.Duration
 	// defaultNetworkAppearance is used only by legacy Routing Context-only
 	// accessors. Exact ASKey callers do not consult it.
 	defaultNetworkAppearance *params.Param
 	// distribution is immutable after construction, so DistributeData never
-	// races an application mutating its Config after the Listener starts.
+	// races an application mutating its AssociationConfig after the Listener starts.
 	distribution distributionPolicy
 	// trafficModes is the listener-wide traffic-handling policy captured with
 	// the registry. ASP Active messages are processed concurrently, so agreement
-	// must not consult the caller-owned Config map or Param after construction.
+	// must not consult caller-owned AssociationConfig maps or Params after construction.
 	trafficModes trafficModePolicy
 	// recoveryBudget bounds retained DATA across the entire Listener, in
 	// addition to each AS's own distributionPolicy limits.
@@ -269,12 +269,12 @@ type applicationServers struct {
 }
 
 type activeSSNMTarget struct {
-	connection      *Conn
+	association     *Association
 	routingContexts []uint32
 }
 
-func newApplicationServers(recovery time.Duration, configs ...*Config) *applicationServers {
-	var config *Config
+func newApplicationServers(recovery time.Duration, configs ...*AssociationConfig) *applicationServers {
+	var config *AssociationConfig
 	if len(configs) > 0 {
 		config = configs[0]
 	}
@@ -285,7 +285,7 @@ func newApplicationServers(recovery time.Duration, configs ...*Config) *applicat
 
 func newApplicationServersWithTrafficModePolicy(
 	recovery time.Duration,
-	config *Config,
+	config *AssociationConfig,
 	trafficModes trafficModePolicy,
 ) *applicationServers {
 	if recovery <= 0 {
@@ -294,7 +294,7 @@ func newApplicationServersWithTrafficModePolicy(
 	budget := newRecoveryBudget(config)
 	return &applicationServers{
 		as:             make(map[ASKey]*applicationServer),
-		aspIdentifiers: make(map[*Conn]uint32),
+		aspIdentifiers: make(map[*Association]uint32),
 		recoveryTimer:  recovery,
 		defaultNetworkAppearance: func() *params.Param {
 			if config == nil {
@@ -310,25 +310,25 @@ func newApplicationServersWithTrafficModePolicy(
 
 // claimASPIdentifier atomically saves an ASP's identifier if no other ASP in
 // any shared Application Server already owns it.
-func (r *applicationServers) claimASPIdentifier(conn *Conn, identifier uint32) bool {
+func (r *applicationServers) claimASPIdentifier(association *Association, identifier uint32) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return false
 	}
 	if r.aspIdentifiers == nil {
-		r.aspIdentifiers = make(map[*Conn]uint32)
+		r.aspIdentifiers = make(map[*Association]uint32)
 	}
 	for peer, peerIdentifier := range r.aspIdentifiers {
-		if peer != conn && peerIdentifier == identifier && connsShareApplicationServer(conn, peer) {
+		if peer != association && peerIdentifier == identifier && associationsShareApplicationServer(association, peer) {
 			return false
 		}
 	}
-	r.aspIdentifiers[conn] = identifier
+	r.aspIdentifiers[association] = identifier
 	return true
 }
 
-func connsShareApplicationServer(first, second *Conn) bool {
+func associationsShareApplicationServer(first, second *Association) bool {
 	if first == nil || second == nil {
 		return true
 	}
@@ -380,7 +380,7 @@ func (r *applicationServers) get(scope any) *applicationServer {
 	if !ok {
 		as = &applicationServer{
 			key:                key,
-			asps:               make(map[*Conn]State),
+			asps:               make(map[*Association]State),
 			broadcastFlowLimit: r.distribution.broadcastFlowCacheEntries,
 			recoveryBudget:     r.recoveryBudget,
 		}
@@ -390,7 +390,7 @@ func (r *applicationServers) get(scope any) *applicationServer {
 }
 
 func closedApplicationServer(key ASKey) *applicationServer {
-	return &applicationServer{key: key, asps: make(map[*Conn]State), state: ASDown, closed: true}
+	return &applicationServer{key: key, asps: make(map[*Association]State), state: ASDown, closed: true}
 }
 
 // lookup returns an existing AS without creating one. Local distribution uses it
@@ -508,7 +508,7 @@ func (r *applicationServers) asKeysForRoutingContext(rtCtx uint32) []ASKey {
 }
 
 // activeSSNMTargets snapshots each currently active association and the ASes
-// a destination-state update concerns for it. A Conn serving several ASes is
+// a destination-state update concerns for it. An Association serving several ASes is
 // returned once with a Routing Context list, so one SS7 event cannot be
 // duplicated merely because the ASP is active in several Application Servers.
 func (r *applicationServers) activeSSNMTargets(scope destinationKey) []activeSSNMTarget {
@@ -540,25 +540,25 @@ func (r *applicationServers) activeSSNMTargets(scope destinationKey) []activeSSN
 		return compareASKey(applicationServers[i].key, applicationServers[j].key) < 0
 	})
 	targets := make([]activeSSNMTarget, 0)
-	targetIndex := make(map[*Conn]int)
-	seenContexts := make(map[*Conn]map[uint32]struct{})
+	targetIndex := make(map[*Association]int)
+	seenContexts := make(map[*Association]map[uint32]struct{})
 	for _, scoped := range applicationServers {
-		for _, connection := range scoped.applicationServer.activeASPs() {
-			if connection == nil || !connection.activeForASKey(scoped.key) {
+		for _, association := range scoped.applicationServer.activeASPs() {
+			if association == nil || !association.activeForASKey(scoped.key) {
 				continue
 			}
-			index, exists := targetIndex[connection]
+			index, exists := targetIndex[association]
 			if !exists {
 				index = len(targets)
-				targetIndex[connection] = index
-				targets = append(targets, activeSSNMTarget{connection: connection})
-				seenContexts[connection] = make(map[uint32]struct{})
+				targetIndex[association] = index
+				targets = append(targets, activeSSNMTarget{association: association})
+				seenContexts[association] = make(map[uint32]struct{})
 			}
 			if scoped.key.RoutingContextSet {
-				if _, duplicate := seenContexts[connection][scoped.key.RoutingContext]; duplicate {
+				if _, duplicate := seenContexts[association][scoped.key.RoutingContext]; duplicate {
 					continue
 				}
-				seenContexts[connection][scoped.key.RoutingContext] = struct{}{}
+				seenContexts[association][scoped.key.RoutingContext] = struct{}{}
 				targets[index].routingContexts = append(
 					targets[index].routingContexts, scoped.key.RoutingContext,
 				)
@@ -580,7 +580,7 @@ func asKeyMatchesDestinationScope(key ASKey, scope destinationKey) bool {
 }
 
 // sole returns the only registered AS, when omission of Routing Context is
-// unambiguous even without a Config value.
+// unambiguous even without an AssociationConfig value.
 func (r *applicationServers) sole() (ASKey, *applicationServer, bool) {
 	if r == nil {
 		return ASKey{}, nil, false
@@ -600,7 +600,8 @@ func (r *applicationServers) sole() (ASKey, *applicationServer, bool) {
 }
 
 // close ends every AS-owned timer and releases all retained traffic. The
-// Listener owns the registry, so none of this state may outlive Listener.Close.
+// Listener or a dialing SGP Association owns the registry, so none of this
+// state may outlive its owner.
 func (r *applicationServers) close() {
 	if r == nil {
 		return
@@ -623,8 +624,8 @@ func (r *applicationServers) close() {
 	}
 }
 
-// forget removes a Conn from every AS it belonged to, recomputing each.
-func (r *applicationServers) forget(c *Conn) {
+// forget removes an Association from every AS it belonged to, recomputing each.
+func (r *applicationServers) forget(c *Association) {
 	r.mu.Lock()
 	if r.closed {
 		delete(r.aspIdentifiers, c)
@@ -647,7 +648,7 @@ func (r *applicationServers) forget(c *Conn) {
 // restrictASP removes an accepted association from every listener-wide AS its
 // immutable ASP Up authorization did not grant. Leaving DOWN placeholders in
 // those ASes would still leak their state Notify messages to another tenant.
-func (r *applicationServers) restrictASP(c *Conn) {
+func (r *applicationServers) restrictASP(c *Association) {
 	if r == nil || c == nil {
 		return
 	}
@@ -673,7 +674,7 @@ func (r *applicationServers) restrictASP(c *Conn) {
 	}
 }
 
-func (r *applicationServers) refreshASPOrdering(c *Conn) {
+func (r *applicationServers) refreshASPOrdering(c *Association) {
 	if r == nil || c == nil {
 		return
 	}
@@ -698,7 +699,7 @@ func (r *applicationServers) refreshASPOrdering(c *Conn) {
 
 // aspStateChanged records an ASP's new state in every AS it serves and emits
 // whatever Notify messages the change calls for.
-func (r *applicationServers) aspStateChanged(c *Conn, st State) {
+func (r *applicationServers) aspStateChanged(c *Association, st State) {
 	r.aspStateChangedFrom(c, st, false)
 }
 
@@ -706,11 +707,11 @@ func (r *applicationServers) aspStateChanged(c *Conn, st State) {
 // publication is still the association's committed state. The check is held
 // across each AS mutation, so ASP Down cannot race an older ASP Active tail and
 // leave a membership active after its Ack.
-func (r *applicationServers) aspStateChangedPublished(c *Conn, st State) {
+func (r *applicationServers) aspStateChangedPublished(c *Association, st State) {
 	r.aspStateChangedFrom(c, st, true)
 }
 
-func (r *applicationServers) aspStateChangedFrom(c *Conn, st State, published bool) {
+func (r *applicationServers) aspStateChangedFrom(c *Association, st State, published bool) {
 	if c == nil {
 		return
 	}
@@ -741,8 +742,8 @@ func (r *applicationServers) aspStateChangedFrom(c *Conn, st State, published bo
 		// of the association -- Figure 3 reaches ASP-DOWN by ASP Down or SCTP
 		// CDI, neither of which is per-AS -- so they apply everywhere.
 		state := st
-		if st == StateAspActive && !c.activeForASKey(key) {
-			state = StateAspInactive
+		if st == StateASPActive && !c.activeForASKey(key) {
+			state = StateASPInactive
 		}
 		if published {
 			r.get(key).setASPStateIfAssociationState(c, st, state, recovery)
@@ -769,7 +770,7 @@ func (r *applicationServers) agreeTrafficMode(rtCtxs []uint32, requested *params
 	return r.agreeTrafficModeForKeys(keys, r.trafficModes, requested)
 }
 
-func (r *applicationServers) agreeTrafficModeForConn(c *Conn, rtCtxs []uint32, requested *params.Param) (*params.Param, error) {
+func (r *applicationServers) agreeTrafficModeForAssociation(c *Association, rtCtxs []uint32, requested *params.Param) (*params.Param, error) {
 	keys := c.asKeysForRoutingContexts(rtCtxs)
 	return r.agreeTrafficModeForKeys(keys, c.trafficModePolicy(), requested)
 }
@@ -797,7 +798,7 @@ func (r *applicationServers) agreeTrafficModeForKeys(keys []ASKey, trafficModes 
 	agreedModes := make([]uint32, len(servers))
 	for index, applicationServer := range servers {
 		if applicationServer.closed {
-			return nil, ErrConnClosed
+			return nil, ErrAssociationClosed
 		}
 		configuredMode, configured := trafficModes.defaultMode, trafficModes.defaultModeSet
 		if applicationServer.key.RoutingContextSet {
@@ -853,7 +854,7 @@ func validTrafficMode(mode uint32) bool {
 // quiesceASPFor removes an ASP from every named AS before waiting for any
 // already-snapshotted DATA write to finish. The returned closure emits state
 // Notify messages and must run only after the related ASP Inactive Ack.
-func (r *applicationServers) quiesceASPFor(c *Conn, rtCtxs []uint32) func() {
+func (r *applicationServers) quiesceASPFor(c *Association, rtCtxs []uint32) func() {
 	if r == nil || c == nil || len(rtCtxs) == 0 {
 		return func() {}
 	}
@@ -880,7 +881,7 @@ func (r *applicationServers) quiesceASPFor(c *Conn, rtCtxs []uint32) func() {
 		applicationServer := r.get(key)
 		transitions = append(transitions, transition{
 			applicationServer: applicationServer,
-			notify:            applicationServer.markASPsInactive([]*Conn{c}, recovery),
+			notify:            applicationServer.markASPsInactive([]*Association{c}, recovery),
 		})
 	}
 
@@ -904,7 +905,7 @@ func waitForTrafficBarrier(mu *sync.Mutex) {
 // quiesceASPDown marks an ASP down in every Application Server it belongs to,
 // then waits for DATA that selected it before that mark to finish. The returned
 // closure releases AS-state Notify messages and must run only after ASP Down Ack.
-func (r *applicationServers) quiesceASPDown(c *Conn) func() {
+func (r *applicationServers) quiesceASPDown(c *Association) func() {
 	if r == nil || c == nil {
 		return func() {}
 	}
@@ -952,36 +953,36 @@ func (r *applicationServers) quiesceASPDown(c *Conn) func() {
 // markASPDown updates one existing AS membership without waiting for DATA or
 // emitting Notify. ASP Down applies to every AS, but must not create membership
 // in an AS this association never belonged to.
-func (as *applicationServer) markASPDown(connection *Conn, recovery time.Duration) (func(), bool) {
+func (as *applicationServer) markASPDown(association *Association, recovery time.Duration) (func(), bool) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.closed {
 		return func() {}, false
 	}
-	current, member := as.asps[connection]
+	current, member := as.asps[association]
 	if !member {
 		return func() {}, false
 	}
-	if current == StateAspDown {
+	if current == StateASPDown {
 		return func() {}, true
 	}
-	as.asps[connection] = StateAspDown
+	as.asps[association] = StateASPDown
 	return as.recomputeLocked(recovery, nil), true
 }
 
 // markASPsInactive updates membership and derives the AS transition without
 // waiting for DATA or emitting Notify. Callers use the split phases to satisfy
 // RFC 4666's halt-before-Ack and Ack-before-Notify ordering simultaneously.
-func (as *applicationServer) markASPsInactive(connections []*Conn, recovery time.Duration) func() {
+func (as *applicationServer) markASPsInactive(associations []*Association, recovery time.Duration) func() {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.closed {
 		return func() {}
 	}
 	changed := false
-	for _, connection := range connections {
-		if current, ok := as.asps[connection]; !ok || current != StateAspInactive {
-			as.asps[connection] = StateAspInactive
+	for _, association := range associations {
+		if current, ok := as.asps[association]; !ok || current != StateASPInactive {
+			as.asps[association] = StateASPInactive
 			changed = true
 		}
 	}
@@ -1009,7 +1010,7 @@ func (as *applicationServer) close() {
 	as.recoveryQueueBytes = as.deliveryInFlightBytes
 	as.draining = false
 	as.active = nil
-	as.connectionOrder = nil
+	as.associationOrder = nil
 	for _, event := range as.notifications {
 		event.releaseOnce.Do(func() { close(event.ready) })
 	}
@@ -1021,7 +1022,7 @@ func (as *applicationServer) close() {
 // transition. Splitting activation, peer discovery, and displacement across
 // locks lets simultaneous challengers each select the other and leave the AS
 // with nobody active.
-func (as *applicationServer) activateOverride(challenger *Conn, recovery time.Duration) ([]*Conn, func(), bool) {
+func (as *applicationServer) activateOverride(challenger *Association, recovery time.Duration) ([]*Association, func(), bool) {
 	if challenger == nil {
 		return nil, func() {}, false
 	}
@@ -1032,14 +1033,14 @@ func (as *applicationServer) activateOverride(challenger *Conn, recovery time.Du
 		return nil, func() {}, false
 	}
 
-	changed := as.asps[challenger] != StateAspActive
-	as.asps[challenger] = StateAspActive
-	displaced := make([]*Conn, 0, len(as.asps)-1)
+	changed := as.asps[challenger] != StateASPActive
+	as.asps[challenger] = StateASPActive
+	displaced := make([]*Association, 0, len(as.asps)-1)
 	for peer, state := range as.asps {
-		if peer == challenger || state != StateAspActive {
+		if peer == challenger || state != StateASPActive {
 			continue
 		}
-		as.asps[peer] = StateAspInactive
+		as.asps[peer] = StateASPInactive
 		displaced = append(displaced, peer)
 		changed = true
 	}
@@ -1057,7 +1058,7 @@ func (as *applicationServer) activateOverride(challenger *Conn, recovery time.Du
 }
 
 // remove drops an ASP from the AS and recomputes.
-func (as *applicationServer) remove(c *Conn, recovery time.Duration) {
+func (as *applicationServer) remove(c *Association, recovery time.Duration) {
 	as.mu.Lock()
 	if as.closed {
 		as.mu.Unlock()
@@ -1069,10 +1070,10 @@ func (as *applicationServer) remove(c *Conn, recovery time.Duration) {
 		return
 	}
 	delete(as.asps, c)
-	delete(as.connectionOrder, c)
+	delete(as.associationOrder, c)
 	failedIdentifier := c.peerASPIdentifierParam()
 	var stateIdentifier *params.Param
-	if failedState != StateAspDown {
+	if failedState != StateASPDown {
 		stateIdentifier = failedIdentifier
 	}
 	notify := as.recomputeLocked(recovery, stateIdentifier)
@@ -1080,21 +1081,21 @@ func (as *applicationServer) remove(c *Conn, recovery time.Duration) {
 	as.mu.Unlock()
 
 	notify()
-	if failedState != StateAspDown {
+	if failedState != StateASPDown {
 		notifyASPFailure(failureTargets, as.key, failedIdentifier)
 	}
 }
 
 // setASPState records an ASP's state and recomputes the AS state.
-func (as *applicationServer) setASPState(c *Conn, st State, recovery time.Duration) {
+func (as *applicationServer) setASPState(c *Association, st State, recovery time.Duration) {
 	as.setASPStateGuarded(c, st, recovery, 0, false)
 }
 
-func (as *applicationServer) setASPStateIfAssociationState(c *Conn, associationState, st State, recovery time.Duration) {
+func (as *applicationServer) setASPStateIfAssociationState(c *Association, associationState, st State, recovery time.Duration) {
 	as.setASPStateGuarded(c, st, recovery, associationState, true)
 }
 
-func (as *applicationServer) setASPStateGuarded(c *Conn, st State, recovery time.Duration, associationState State, guard bool) {
+func (as *applicationServer) setASPStateGuarded(c *Association, st State, recovery time.Duration, associationState State, guard bool) {
 	if c == nil {
 		return
 	}
@@ -1123,7 +1124,7 @@ func (as *applicationServer) setASPStateGuarded(c *Conn, st State, recovery time
 		return
 	}
 	as.asps[c] = st
-	if st == StateAspActive && (!known || current != StateAspActive) {
+	if st == StateASPActive && (!known || current != StateASPActive) {
 		as.noteBroadcastActivationLocked()
 	}
 	notify := as.recomputeLocked(recovery, nil)
@@ -1187,9 +1188,9 @@ func (as *applicationServer) recomputeLocked(recovery time.Duration, aspIdentifi
 	active, inactive := 0, 0
 	for _, st := range as.asps {
 		switch st {
-		case StateAspActive:
+		case StateASPActive:
 			active++
-		case StateAspInactive:
+		case StateASPInactive:
 			inactive++
 		}
 	}
@@ -1234,10 +1235,10 @@ func (as *applicationServer) recomputeLocked(recovery time.Duration, aspIdentifi
 // A head event waits for delivery to preserve existing synchronous procedure
 // ordering; an event queued behind a gated predecessor merely becomes ready, so
 // an unrelated association is never blocked on that predecessor's DATA barrier.
-func (as *applicationServer) enqueueStateNotificationLocked(state ASState, targets []*Conn, aspIdentifier *params.Param) func() {
+func (as *applicationServer) enqueueStateNotificationLocked(state ASState, targets []*Association, aspIdentifier *params.Param) func() {
 	event := &asStateNotification{
 		state:         state,
-		targets:       append([]*Conn(nil), targets...),
+		targets:       append([]*Association(nil), targets...),
 		key:           as.key,
 		aspIdentifier: aspIdentifier.Copy(),
 		ready:         make(chan struct{}),
@@ -1275,7 +1276,6 @@ func (as *applicationServer) deliverStateNotifications() {
 		if !closed {
 			notifyASState(event.targets, event.state, event.key, event.aspIdentifier)
 		}
-		close(event.done)
 
 		as.mu.Lock()
 		if len(as.notifications) > 0 && as.notifications[0] == event {
@@ -1283,6 +1283,7 @@ func (as *applicationServer) deliverStateNotifications() {
 			as.notifications = as.notifications[1:]
 		}
 		as.mu.Unlock()
+		close(event.done)
 	}
 }
 
@@ -1291,10 +1292,10 @@ func (as *applicationServer) deliverStateNotifications() {
 // RFC 4666 Section 4.3.4.5: "A Notify message reflecting a change in the AS
 // state MUST be sent to all ASPs in the AS, except those in the ASP-DOWN
 // state".
-func (as *applicationServer) notifyTargetsLocked() []*Conn {
-	targets := make([]*Conn, 0, len(as.asps))
+func (as *applicationServer) notifyTargetsLocked() []*Association {
+	targets := make([]*Association, 0, len(as.asps))
 	for c, st := range as.asps {
-		if st == StateAspDown {
+		if st == StateASPDown {
 			continue
 		}
 		targets = append(targets, c)
@@ -1337,7 +1338,7 @@ func (as *applicationServer) recoveryExpired(gen uint64) {
 
 	inactive := 0
 	for _, st := range as.asps {
-		if st == StateAspInactive {
+		if st == StateASPInactive {
 			inactive++
 		}
 	}
@@ -1370,7 +1371,7 @@ func (as *applicationServer) State() ASState {
 //
 // RFC 4666 Section 3.8.2 fixes the Status Type: "1  Application Server State
 // Change (AS-State_Change)", with the new state in Status Information.
-func notifyASState(targets []*Conn, state ASState, key ASKey, aspIdentifier *params.Param) {
+func notifyASState(targets []*Association, state ASState, key ASKey, aspIdentifier *params.Param) {
 	info, ok := state.statusInformation()
 	if !ok {
 		return
@@ -1388,7 +1389,7 @@ func notifyASState(targets []*Conn, state ASState, key ASKey, aspIdentifier *par
 	}
 }
 
-func notifyASPFailure(targets []*Conn, key ASKey, failedIdentifier *params.Param) {
+func notifyASPFailure(targets []*Association, key ASKey, failedIdentifier *params.Param) {
 	for _, target := range targets {
 		target.enqueueNotify(messages.NewNotify(
 			params.NewStatus(params.AspFailure),
@@ -1410,7 +1411,7 @@ func notifyASPFailure(targets []*Conn, key ASKey, failedIdentifier *params.Param
 // Status Type is "Other" here rather than AS-State_Change, since Section 3.8.2
 // puts "2  Alternate ASP Active" under that type: it reports what another ASP
 // did, not a change in the AS's own state.
-func notifyAlternateASPActive(target *Conn, key ASKey, overriding *params.Param) {
+func notifyAlternateASPActive(target *Association, key ASKey, overriding *params.Param) {
 	target.enqueueNotify(messages.NewNotify(
 		params.NewStatus(params.AlternateAspActive),
 		// "The ASP Identifier (if available) of the [overriding ASP]" — the
@@ -1429,7 +1430,7 @@ func notifyAlternateASPActive(target *Conn, key ASKey, overriding *params.Param)
 // preserve MTP3 sequencing: RFC 4666 Section 1.4.7, "Traffic that requires
 // sequencing SHOULD be assigned to the same stream", is defeated if consecutive
 // messages with one SLS land on different ASPs.
-func (as *applicationServer) activeASPs() []*Conn {
+func (as *applicationServer) activeASPs() []*Association {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 
@@ -1440,17 +1441,17 @@ func (as *applicationServer) activeASPs() []*Conn {
 // change. A registry-local sequence is the allocation-free tiebreak when peers
 // omit or duplicate ASP Identifier.
 func (as *applicationServer) rebuildActiveLocked() {
-	if as.connectionOrder == nil {
-		as.connectionOrder = make(map[*Conn]uint64, len(as.asps))
+	if as.associationOrder == nil {
+		as.associationOrder = make(map[*Association]uint64, len(as.asps))
 	}
-	active := make([]*Conn, 0, len(as.asps))
-	for connection, state := range as.asps {
-		if _, known := as.connectionOrder[connection]; !known {
-			as.nextConnectionOrder++
-			as.connectionOrder[connection] = as.nextConnectionOrder
+	active := make([]*Association, 0, len(as.asps))
+	for association, state := range as.asps {
+		if _, known := as.associationOrder[association]; !known {
+			as.nextAssociationOrder++
+			as.associationOrder[association] = as.nextAssociationOrder
 		}
-		if state == StateAspActive {
-			active = append(active, connection)
+		if state == StateASPActive {
+			active = append(active, association)
 		}
 	}
 	sort.Slice(active, func(i, j int) bool {
@@ -1458,12 +1459,12 @@ func (as *applicationServer) rebuildActiveLocked() {
 		if a != b {
 			return a < b
 		}
-		return as.connectionOrder[active[i]] < as.connectionOrder[active[j]]
+		return as.associationOrder[active[i]] < as.associationOrder[active[j]]
 	})
 	as.active = active
 }
 
-func aspIDOf(c *Conn) uint32 {
+func aspIDOf(c *Association) uint32 {
 	if c == nil {
 		return 0
 	}

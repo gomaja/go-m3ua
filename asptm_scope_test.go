@@ -16,7 +16,7 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func applyASPTMState(t *testing.T, conn *Conn) State {
+func applyASPTMState(t *testing.T, conn *Association) State {
 	t.Helper()
 
 	select {
@@ -61,22 +61,22 @@ func aspInactiveAckContexts(t *testing.T, sent []messages.M3UA) []uint32 {
 
 func TestDispatcherKeepsUnaffectedApplicationServerActive(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, _ := asTestConn(t, registry, StateAspInactive, 1, 2)
+	asp, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil))
-	if state := applyASPTMState(t, asp); state != StateAspActive {
-		t.Fatalf("state after unscoped ASP Active = %v, want %v", state, StateAspActive)
+	if state := applyASPTMState(t, asp); state != StateASPActive {
+		t.Fatalf("state after unscoped ASP Active = %v, want %v", state, StateASPActive)
 	}
 
 	asp.handleSignals(context.Background(), messages.NewAspInactive(
 		params.NewRoutingContext(1), nil))
-	if state := applyASPTMState(t, asp); state != StateAspActive {
-		t.Fatalf("state after RC-scoped ASP Inactive = %v, want %v", state, StateAspActive)
+	if state := applyASPTMState(t, asp); state != StateASPActive {
+		t.Fatalf("state after RC-scoped ASP Inactive = %v, want %v", state, StateASPActive)
 	}
 
-	if got := asp.State(); got != StateAspActive {
-		t.Errorf("association state = %v, want %v while RC 2 remains active", got, StateAspActive)
+	if got := asp.State(); got != StateASPActive {
+		t.Errorf("association state = %v, want %v while RC 2 remains active", got, StateASPActive)
 	}
 	if got := registry.get(1).activeASPs(); len(got) != 0 {
 		t.Errorf("RC 1 has %d active ASPs after scoped deactivation, want 0", len(got))
@@ -88,7 +88,7 @@ func TestDispatcherKeepsUnaffectedApplicationServerActive(t *testing.T) {
 
 func TestDispatcherMovesInactiveAfterTheLastApplicationServer(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, _ := asTestConn(t, registry, StateAspInactive, 1, 2)
+	asp, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil))
@@ -97,17 +97,17 @@ func TestDispatcherMovesInactiveAfterTheLastApplicationServer(t *testing.T) {
 	for index, rtCtx := range []uint32{1, 2} {
 		asp.handleSignals(context.Background(), messages.NewAspInactive(
 			params.NewRoutingContext(rtCtx), nil))
-		want := StateAspActive
+		want := StateASPActive
 		if index == 1 {
-			want = StateAspInactive
+			want = StateASPInactive
 		}
 		if state := applyASPTMState(t, asp); state != want {
 			t.Fatalf("state after deactivating RC %d = %v, want %v", rtCtx, state, want)
 		}
 	}
 
-	if got := asp.State(); got != StateAspInactive {
-		t.Errorf("association state = %v, want %v after the last RC", got, StateAspInactive)
+	if got := asp.State(); got != StateASPInactive {
+		t.Errorf("association state = %v, want %v after the last RC", got, StateASPInactive)
 	}
 	for _, rtCtx := range []uint32{1, 2} {
 		if got := registry.get(rtCtx).activeASPs(); len(got) != 0 {
@@ -119,16 +119,16 @@ func TestDispatcherMovesInactiveAfterTheLastApplicationServer(t *testing.T) {
 
 func TestScopedDuplicateASPInactiveDoesNotActivateAnotherContext(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, _ := asTestConn(t, registry, StateAspInactive, 1, 2)
+	asp, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspInactive(
 		params.NewRoutingContext(1), nil))
-	if state := applyASPTMState(t, asp); state != StateAspInactive {
+	if state := applyASPTMState(t, asp); state != StateASPInactive {
 		t.Fatalf("state after duplicate scoped ASP Inactive = %v, want %v",
-			state, StateAspInactive)
+			state, StateASPInactive)
 	}
-	if got := asp.State(); got != StateAspInactive {
-		t.Errorf("association state = %v, want %v", got, StateAspInactive)
+	if got := asp.State(); got != StateASPInactive {
+		t.Errorf("association state = %v, want %v", got, StateASPInactive)
 	}
 	for _, rtCtx := range []uint32{1, 2} {
 		if got := registry.get(rtCtx).activeASPs(); len(got) != 0 {
@@ -138,14 +138,14 @@ func TestScopedDuplicateASPInactiveDoesNotActivateAnotherContext(t *testing.T) {
 	}
 }
 
-func TestClientASPInactiveAckDeactivatesOnlyNamedContexts(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+func TestASPInactiveAckDeactivatesOnlyNamedContexts(t *testing.T) {
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	asp.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 
 	asp.handleSignals(context.Background(), messages.NewAspInactiveAck(
 		params.NewRoutingContext(1), nil))
-	if state := applyASPTMState(t, asp); state != StateAspActive {
-		t.Fatalf("state after partial ASP Inactive Ack = %v, want %v", state, StateAspActive)
+	if state := applyASPTMState(t, asp); state != StateASPActive {
+		t.Fatalf("state after partial ASP Inactive Ack = %v, want %v", state, StateASPActive)
 	}
 
 	if _, err := asp.routingContextFor(1); !errors.Is(err, ErrRoutingContextNotActive) {
@@ -156,8 +156,8 @@ func TestClientASPInactiveAckDeactivatesOnlyNamedContexts(t *testing.T) {
 	}
 }
 
-func TestClientASPInactiveAckCanDeactivateTheLastContext(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+func TestASPInactiveAckCanDeactivateTheLastContext(t *testing.T) {
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	asp.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 
 	// Call the handler directly first. The DATA gate must close before the
@@ -187,10 +187,10 @@ func TestClientASPInactiveAckCanDeactivateTheLastContext(t *testing.T) {
 	}
 }
 
-func TestClientASPInactiveAckScopesAnUnrecordedActiveFallback(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+func TestASPInactiveAckScopesAnUnrecordedActiveFallback(t *testing.T) {
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 
-	// Some callers and legacy state restoration place a Conn directly into
+	// Some callers and legacy state restoration place an Association directly into
 	// ASP-ACTIVE, where no Ack scope has been recorded and both configured
 	// contexts are the compatibility fallback. A scoped deactivation must
 	// materialise that set before subtracting from it.
@@ -208,7 +208,7 @@ func TestClientASPInactiveAckScopesAnUnrecordedActiveFallback(t *testing.T) {
 
 func TestMixedASPActiveAppliesServedSubset(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, sent := asTestConn(t, registry, StateAspInactive, 1, 2)
+	asp, sent := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -220,8 +220,8 @@ func TestMixedASPActiveAppliesServedSubset(t *testing.T) {
 	if err := firstErr(asp); !errors.Is(err, ErrNoConfiguredAS) {
 		t.Fatalf("error = %v, want %v for unserved RC 999", err, ErrNoConfiguredAS)
 	}
-	if state := applyASPTMState(t, asp); state != StateAspActive {
-		t.Fatalf("state after partially successful ASP Active = %v, want %v", state, StateAspActive)
+	if state := applyASPTMState(t, asp); state != StateASPActive {
+		t.Fatalf("state after partially successful ASP Active = %v, want %v", state, StateASPActive)
 	}
 	if got := registry.get(1).activeASPs(); len(got) != 1 || got[0] != asp {
 		t.Errorf("served RC 1 active ASPs = %v, want the requesting ASP", got)
@@ -233,7 +233,7 @@ func TestMixedASPActiveAppliesServedSubset(t *testing.T) {
 
 func TestMixedASPInactiveAppliesServedSubset(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, sent := asTestConn(t, registry, StateAspInactive, 1, 2)
+	asp, sent := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil))
@@ -249,8 +249,8 @@ func TestMixedASPInactiveAppliesServedSubset(t *testing.T) {
 	if err := firstErr(asp); !errors.Is(err, ErrInvalidRoutingContext) {
 		t.Fatalf("error = %v, want %v for unserved RC 999", err, ErrInvalidRoutingContext)
 	}
-	if state := applyASPTMState(t, asp); state != StateAspActive {
-		t.Fatalf("state after partially successful ASP Inactive = %v, want %v", state, StateAspActive)
+	if state := applyASPTMState(t, asp); state != StateASPActive {
+		t.Fatalf("state after partially successful ASP Inactive = %v, want %v", state, StateASPActive)
 	}
 	if got := registry.get(1).activeASPs(); len(got) != 0 {
 		t.Errorf("served RC 1 has %d active ASPs after deactivation, want 0", len(got))
@@ -265,14 +265,14 @@ func TestIdempotentASPTMRequestsAreAcknowledgedWithoutError(t *testing.T) {
 		name    string
 		state   State
 		message messages.M3UA
-		handle  func(*Conn) error
+		handle  func(*Association) error
 		ackName string
 	}{
 		{
 			name:    "ASP Active while active",
-			state:   StateAspActive,
+			state:   StateASPActive,
 			message: messages.NewAspActive(params.NewTrafficModeType(params.TrafficModeLoadshare), params.NewRoutingContext(1), nil),
-			handle: func(connection *Conn) error {
+			handle: func(connection *Association) error {
 				return connection.handleAspActive(messages.NewAspActive(
 					params.NewTrafficModeType(params.TrafficModeLoadshare), params.NewRoutingContext(1), nil,
 				))
@@ -281,16 +281,16 @@ func TestIdempotentASPTMRequestsAreAcknowledgedWithoutError(t *testing.T) {
 		},
 		{
 			name:    "ASP Inactive while inactive",
-			state:   StateAspInactive,
+			state:   StateASPInactive,
 			message: messages.NewAspInactive(params.NewRoutingContext(1), nil),
-			handle: func(connection *Conn) error {
+			handle: func(connection *Association) error {
 				return connection.handleAspInactive(messages.NewAspInactive(params.NewRoutingContext(1), nil))
 			},
 			ackName: "ASP Inactive Ack",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			connection, sent := newTestConnWithContexts(t, test.state, modeServer, 1)
+			connection, sent := newTestConnWithContexts(t, test.state, RoleSGP, 1)
 			if err := test.handle(connection); err != nil {
 				t.Fatalf("idempotent %s returned %v after its mandatory Ack", test.message.MessageTypeName(), err)
 			}
@@ -303,7 +303,7 @@ func TestIdempotentASPTMRequestsAreAcknowledgedWithoutError(t *testing.T) {
 
 func TestMixedASPInactiveCanDeactivateTheLastServedContext(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	asp, _ := asTestConn(t, registry, StateAspInactive, 1)
+	asp, _ := asTestConn(t, registry, StateASPInactive, 1)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil))
@@ -314,9 +314,9 @@ func TestMixedASPInactiveCanDeactivateTheLastServedContext(t *testing.T) {
 	if err := firstErr(asp); !errors.Is(err, ErrInvalidRoutingContext) {
 		t.Fatalf("error = %v, want %v for unserved RC 999", err, ErrInvalidRoutingContext)
 	}
-	if state := applyASPTMState(t, asp); state != StateAspInactive {
+	if state := applyASPTMState(t, asp); state != StateASPInactive {
 		t.Fatalf("state after deactivating the last served RC = %v, want %v",
-			state, StateAspInactive)
+			state, StateASPInactive)
 	}
 	if got := registry.get(1).activeASPs(); len(got) != 0 {
 		t.Errorf("RC 1 has %d active ASPs, want 0", len(got))
@@ -325,13 +325,13 @@ func TestMixedASPInactiveCanDeactivateTheLastServedContext(t *testing.T) {
 
 func TestOverrideIsScopedToSuccessfullyActivatedContexts(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	incumbent, incumbentSent := asTestConn(t, registry, StateAspInactive, 1, 2)
+	incumbent, incumbentSent := asTestConn(t, registry, StateASPInactive, 1, 2)
 	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 	incumbent.noteRoutingContextsActive(nil)
-	incumbent.setState(StateAspActive)
-	registry.aspStateChanged(incumbent, StateAspActive)
+	incumbent.setState(StateASPActive)
+	registry.aspStateChanged(incumbent, StateASPActive)
 
-	challenger, _ := asTestConn(t, registry, StateAspInactive, 1, 2)
+	challenger, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 
 	before := len(notifies(*incumbentSent))
@@ -340,8 +340,8 @@ func TestOverrideIsScopedToSuccessfullyActivatedContexts(t *testing.T) {
 		params.NewRoutingContext(1), nil))
 	applyASPTMState(t, challenger)
 
-	if got := incumbent.State(); got != StateAspActive {
-		t.Errorf("incumbent association state = %v, want %v while RC 2 remains active", got, StateAspActive)
+	if got := incumbent.State(); got != StateASPActive {
+		t.Errorf("incumbent association state = %v, want %v while RC 2 remains active", got, StateASPActive)
 	}
 	if got := registry.get(1).activeASPs(); len(got) != 1 || got[0] != challenger {
 		t.Errorf("RC 1 active ASPs = %v, want only challenger", got)
@@ -370,24 +370,24 @@ func TestOverrideIsScopedToSuccessfullyActivatedContexts(t *testing.T) {
 
 func TestOverrideMovesIncumbentInactiveAfterItsLastContext(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	incumbent, _ := asTestConn(t, registry, StateAspActive, 1)
+	incumbent, _ := asTestConn(t, registry, StateASPActive, 1)
 	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 	incumbent.noteRoutingContextsActive(nil)
-	registry.aspStateChanged(incumbent, StateAspActive)
+	registry.aspStateChanged(incumbent, StateASPActive)
 
-	challenger, _ := asTestConn(t, registry, StateAspInactive, 1)
+	challenger, _ := asTestConn(t, registry, StateASPInactive, 1)
 	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 	challenger.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeOverride),
 		params.NewRoutingContext(1), nil))
 	applyASPTMState(t, challenger)
 
-	if got := incumbent.State(); got != StateAspInactive {
+	if got := incumbent.State(); got != StateASPInactive {
 		t.Errorf("incumbent state = %v, want %v after its last RC was overridden",
-			got, StateAspInactive)
+			got, StateASPInactive)
 	}
-	if state := applyASPTMState(t, incumbent); state != StateAspInactive {
-		t.Errorf("incumbent published state = %v, want %v", state, StateAspInactive)
+	if state := applyASPTMState(t, incumbent); state != StateASPInactive {
+		t.Errorf("incumbent published state = %v, want %v", state, StateASPInactive)
 	}
 	if got := registry.get(1).activeASPs(); len(got) != 1 || got[0] != challenger {
 		t.Errorf("RC 1 active ASPs = %v, want only challenger", got)
@@ -396,9 +396,9 @@ func TestOverrideMovesIncumbentInactiveAfterItsLastContext(t *testing.T) {
 
 func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateAspInactive, 1, 2)
-	second, _ := asTestConn(t, registry, StateAspInactive, 1, 2)
-	for _, connection := range []*Conn{first, second} {
+	first, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
+	second, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
+	for _, connection := range []*Association{first, second} {
 		connection.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 		connection.signalWriter = func(message messages.M3UA) (int, error) {
 			return message.MarshalLen(), nil
@@ -415,8 +415,8 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 		first.noteRoutingContextsActive([]uint32{1, 2})
 		second.noteRoutingContextsActive([]uint32{1, 2})
 		applicationServer.mu.Lock()
-		applicationServer.asps[first] = StateAspInactive
-		applicationServer.asps[second] = StateAspInactive
+		applicationServer.asps[first] = StateASPInactive
+		applicationServer.asps[second] = StateASPInactive
 		applicationServer.state = ASInactive
 		applicationServer.mu.Unlock()
 
@@ -425,8 +425,8 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 		ready.Add(2)
 		var finished sync.WaitGroup
 		finished.Add(2)
-		for _, challenger := range []*Conn{first, second} {
-			go func(challenger *Conn) {
+		for _, challenger := range []*Association{first, second} {
+			go func(challenger *Association) {
 				defer finished.Done()
 				ready.Done()
 				<-start
@@ -445,7 +445,7 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 
 func TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, firstSent := asTestConn(t, registry, StateAspInactive, 1)
+	first, firstSent := asTestConn(t, registry, StateASPInactive, 1)
 	first.cfg.TrafficModeType = nil
 	if err := first.handleAspActive(messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeBroadcast),
@@ -461,7 +461,7 @@ func TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement(t *testing.T) {
 		t.Fatalf("agreed AS Traffic Mode = %d, want Broadcast", got)
 	}
 
-	second, secondSent := asTestConn(t, registry, StateAspInactive, 1)
+	second, secondSent := asTestConn(t, registry, StateASPInactive, 1)
 	second.cfg.TrafficModeType = nil
 	before := len(*secondSent)
 	err := second.handleAspActive(messages.NewAspActive(
@@ -483,22 +483,22 @@ func TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement(t *testing.T) {
 
 func TestConcurrentFirstTrafficModeAgreementHasOneWinner(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, firstSent := asTestConn(t, registry, StateAspInactive, 1)
-	second, secondSent := asTestConn(t, registry, StateAspInactive, 1)
+	first, firstSent := asTestConn(t, registry, StateASPInactive, 1)
+	second, secondSent := asTestConn(t, registry, StateASPInactive, 1)
 	first.cfg.TrafficModeType = nil
 	second.cfg.TrafficModeType = nil
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	for _, request := range []struct {
-		connection *Conn
+		connection *Association
 		mode       uint32
 	}{
 		{connection: first, mode: params.TrafficModeBroadcast},
 		{connection: second, mode: params.TrafficModeOverride},
 	} {
 		go func(request struct {
-			connection *Conn
+			connection *Association
 			mode       uint32
 		}) {
 			<-start
@@ -538,7 +538,7 @@ func TestConcurrentFirstTrafficModeAgreementHasOneWinner(t *testing.T) {
 
 func TestTrafficModeCanBeConfiguredPerApplicationServer(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	connection, sent := asTestConn(t, registry, StateAspInactive, 1, 2)
+	connection, sent := asTestConn(t, registry, StateASPInactive, 1, 2)
 	connection.cfg.TrafficModeType = nil
 	connection.cfg.TrafficModes = map[uint32]uint32{
 		1: params.TrafficModeOverride,
@@ -577,7 +577,7 @@ func TestExplicitEmptyASPTMRoutingContextIsRejected(t *testing.T) {
 	}{
 		{
 			name:  "ASP Active",
-			state: StateAspInactive,
+			state: StateASPInactive,
 			new: func(rc *params.Param) messages.M3UA {
 				return messages.NewAspActive(
 					params.NewTrafficModeType(params.TrafficModeLoadshare), rc, nil)
@@ -585,7 +585,7 @@ func TestExplicitEmptyASPTMRoutingContextIsRejected(t *testing.T) {
 		},
 		{
 			name:  "ASP Inactive",
-			state: StateAspActive,
+			state: StateASPActive,
 			new: func(rc *params.Param) messages.M3UA {
 				return messages.NewAspInactive(rc, nil)
 			},
@@ -594,7 +594,7 @@ func TestExplicitEmptyASPTMRoutingContextIsRejected(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			conn, sent := newTestConnWithContexts(t, test.state, modeServer, 1, 2)
+			conn, sent := newTestConnWithContexts(t, test.state, RoleSGP, 1, 2)
 			conn.handleSignals(context.Background(), test.new(params.NewRoutingContext()))
 
 			if len(*sent) != 0 {
@@ -615,24 +615,27 @@ func TestExplicitEmptyASPTMRoutingContextIsRejected(t *testing.T) {
 }
 
 func TestSetASUnavailableLeavesOtherContextsActive(t *testing.T) {
-	listener := &Listener{Config: NewServerConfig(&HeartbeatInfo{Enabled: false},
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)}
+		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)
+	listener := newSGPListener(NewListenerConfig(config))
 	registry, nif, _ := listener.registry()
 
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 	asp.as = registry
 	asp.nif = nif
 	asp.noteRoutingContextsActive(nil)
-	registry.aspStateChanged(asp, StateAspActive)
+	registry.aspStateChanged(asp, StateASPActive)
 	if !listener.track(asp) {
 		t.Fatal("listener refused test ASP")
 	}
 
-	listener.SetASAvailable(1, false)
+	if err := listener.SetASAvailable(1, false); err != nil {
+		t.Fatalf("SetASAvailable: %v", err)
+	}
 
-	if got := asp.State(); got != StateAspActive {
-		t.Errorf("association state = %v, want %v while RC 2 remains active", got, StateAspActive)
+	if got := asp.State(); got != StateASPActive {
+		t.Errorf("association state = %v, want %v while RC 2 remains active", got, StateASPActive)
 	}
 	if got := registry.get(1).activeASPs(); len(got) != 0 {
 		t.Errorf("unavailable RC 1 has %d active ASPs, want 0", len(got))

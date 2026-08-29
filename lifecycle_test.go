@@ -18,7 +18,7 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// Connection setup is the thinnest-covered part of the library and the place
+// Association setup is the thinnest-covered part of the library and the place
 // interop failures actually surface: a peer that is hostile, broken, or merely
 // slow must never leave Dial/Accept hung, leaking goroutines, or reporting
 // success on an association that never reached ASP-ACTIVE.
@@ -27,9 +27,9 @@ import (
 // reach that path are slow by construction; they assert the timeout is honoured
 // rather than trying to defeat it.
 
-// clientCfg builds a client Config for the lifecycle tests.
-func clientCfg(hb *HeartbeatInfo) *Config {
-	cfg := NewClientConfig(
+// aspConfig builds an ASP AssociationConfig for the lifecycle tests.
+func aspConfig(hb *HeartbeatInfo) *AssociationConfig {
+	cfg := newASPAssociationConfigForTest(
 		hb,
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
@@ -40,19 +40,19 @@ func clientCfg(hb *HeartbeatInfo) *Config {
 
 // dialTo dials a raw peer without the t.Fatal-on-error behaviour of
 // dialRawPeer, so a test can assert on the failure itself.
-func dialTo(ctx context.Context, t *testing.T, raddr *sctp.SCTPAddr, port int, cfg *Config) (*Conn, error) {
+func dialTo(ctx context.Context, t *testing.T, raddr *sctp.SCTPAddr, port int, cfg *AssociationConfig) (*Association, error) {
 	t.Helper()
 
 	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Dial(ctx, "m3ua", laddr, raddr, cfg)
+	return dialASP(ctx, "m3ua", laddr, raddr, cfg)
 }
 
 // A peer that accepts the association and then says nothing must not leave the
 // caller hung forever. Dial waits for ASP-ACTIVE and must give up on its own
-// deadline, reporting the failure rather than returning a Conn that was never
+// deadline, reporting the failure rather than returning an Association that was never
 // established.
 func TestDialAgainstMuteePeerTimesOut(t *testing.T) {
 	if testing.Short() {
@@ -66,17 +66,17 @@ func TestDialAgainstMuteePeerTimesOut(t *testing.T) {
 	peer := newRawPeer(t, 2990, func(messages.M3UA) messages.M3UA { return nil })
 
 	start := time.Now()
-	conn, err := dialTo(ctx, t, peer.addr, 2990, clientCfg(&HeartbeatInfo{Enabled: false}))
+	conn, err := dialTo(ctx, t, peer.addr, 2990, aspConfig(&HeartbeatInfo{Enabled: false}))
 	elapsed := time.Since(start)
 
 	if err == nil {
 		_ = conn.Close()
-		t.Fatal("Dial returned a Conn against a peer that never acked ASP Up; want an error")
+		t.Fatal("Dial returned an Association against a peer that never acknowledged ASP Up; want an error")
 	}
 	if !errors.Is(err, ErrTimeout) {
 		t.Errorf("Dial error = %v, want ErrTimeout", err)
 	}
-	// The peer did receive the ASP Up: the client really did try.
+	// The peer did receive ASP Up: the ASP really did try.
 	if got := peer.count("ASP Up"); got == 0 {
 		t.Error("peer received no ASP Up; the handshake never started")
 	}
@@ -95,7 +95,7 @@ func TestDialAbortsOnContextCancel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		conn, err := dialTo(ctx, t, peer.addr, 2991, clientCfg(&HeartbeatInfo{Enabled: false}))
+		conn, err := dialTo(ctx, t, peer.addr, 2991, aspConfig(&HeartbeatInfo{Enabled: false}))
 		if conn != nil {
 			_ = conn.Close()
 		}
@@ -117,7 +117,7 @@ func TestDialAbortsOnContextCancel(t *testing.T) {
 }
 
 // A peer that aborts the association mid-handshake must surface as a failure,
-// not a hang and not a half-open Conn.
+// not a hang and not a half-open Association.
 func TestDialAgainstPeerThatDropsMidHandshake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -148,7 +148,7 @@ func TestDialAgainstPeerThatDropsMidHandshake(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		conn, err := dialTo(ctx, t, addr, 2992, clientCfg(&HeartbeatInfo{Enabled: false}))
+		conn, err := dialTo(ctx, t, addr, 2992, aspConfig(&HeartbeatInfo{Enabled: false}))
 		if conn != nil {
 			_ = conn.Close()
 		}
@@ -166,7 +166,7 @@ func TestDialAgainstPeerThatDropsMidHandshake(t *testing.T) {
 }
 
 // A peer that jumps straight to ASP Active without ASP Up is out of sequence.
-// The client must not treat that as establishment: reaching ASP-ACTIVE requires
+// The ASP must not treat that as establishment: reaching ASP-ACTIVE requires
 // the ASP Up Ack, and an out-of-order message must leave state alone.
 func TestOutOfSequenceHandshakeDoesNotEstablish(t *testing.T) {
 	if testing.Short() {
@@ -177,7 +177,7 @@ func TestOutOfSequenceHandshakeDoesNotEstablish(t *testing.T) {
 	defer cancel()
 
 	// Never sends ASP Up Ack; answers the ASP Up with an ASP Active Ack, which
-	// the client did not ask for at this point in the sequence.
+	// the ASP did not ask for at this point in the sequence.
 	peer := newRawPeer(t, 2993, func(msg messages.M3UA) messages.M3UA {
 		if _, ok := msg.(*messages.AspUp); ok {
 			return messages.NewAspActiveAck(
@@ -187,7 +187,7 @@ func TestOutOfSequenceHandshakeDoesNotEstablish(t *testing.T) {
 		return nil
 	})
 
-	conn, err := dialTo(ctx, t, peer.addr, 2993, clientCfg(&HeartbeatInfo{Enabled: false}))
+	conn, err := dialTo(ctx, t, peer.addr, 2993, aspConfig(&HeartbeatInfo{Enabled: false}))
 	if err == nil {
 		state := conn.State()
 		_ = conn.Close()
@@ -198,10 +198,10 @@ func TestOutOfSequenceHandshakeDoesNotEstablish(t *testing.T) {
 	}
 }
 
-// A peer that answers with garbage must not crash the client or wedge it.
-// Undecodable input is dropped with a log line; the client should still be
+// A peer that answers with garbage must not crash the ASP or wedge it.
+// Undecodable input is dropped with a log line; the ASP should still be
 // running afterwards and still fail establishment cleanly.
-func TestGarbageFromPeerDoesNotCrashClient(t *testing.T) {
+func TestGarbageFromPeerDoesNotCrashASP(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping: exercises Dial's 10s establishment timeout")
 	}
@@ -211,7 +211,7 @@ func TestGarbageFromPeerDoesNotCrashClient(t *testing.T) {
 
 	peer := newRawPeer(t, 2994, func(messages.M3UA) messages.M3UA { return nil })
 
-	// Fire garbage at the client as soon as it connects.
+	// Fire garbage at the ASP as soon as it connects.
 	go func() {
 		for _, junk := range [][]byte{
 			{0xff}, // too short for a header
@@ -224,7 +224,7 @@ func TestGarbageFromPeerDoesNotCrashClient(t *testing.T) {
 		}
 	}()
 
-	conn, err := dialTo(ctx, t, peer.addr, 2994, clientCfg(&HeartbeatInfo{Enabled: false}))
+	conn, err := dialTo(ctx, t, peer.addr, 2994, aspConfig(&HeartbeatInfo{Enabled: false}))
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("Dial reported success against a peer sending only garbage")
@@ -237,7 +237,7 @@ func TestGarbageFromPeerDoesNotCrashClient(t *testing.T) {
 }
 
 // Accept must reject a peer that opens the association and then says nothing,
-// rather than hanging forever or returning a Conn that never established.
+// rather than hanging forever or returning an Association that never established.
 func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping: exercises Accept's 10s establishment timeout")
@@ -246,19 +246,19 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srvCfg := NewServerConfig(
+	srvCfg := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
 	)
-	srvCfg.AspIdentifier = nil
+	srvCfg.ASPIdentifier = nil
 	srvCfg.CorrelationID = nil
 
 	raddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:2995")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen("m3ua", raddr, NewListenerConfig(srvCfg))
+	ln, err := listenSGP("m3ua", raddr, NewListenerConfig(srvCfg))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -276,7 +276,7 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 		accepted <- err
 	}()
 
-	// A bare SCTP client that connects and then stays silent: no ASP Up.
+	// A bare SCTP association initiator that connects and then stays silent: no ASP Up.
 	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:2995")
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +290,7 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 	select {
 	case err := <-accepted:
 		if err == nil {
-			t.Error("Accept returned a Conn for a peer that never sent ASP Up")
+			t.Error("Accept returned an Association for a peer that never sent ASP Up")
 		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("Accept hung on a silent peer")
@@ -300,7 +300,7 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 // A peer whose ASP Active Ack names a Routing Context the ASP never asked
 // about must not put the two ends into an unbounded exchange.
 //
-// Rejecting such an Ack republished ASP-INACTIVE, and the client's ASP-INACTIVE
+// Rejecting such an Ack republished ASP-INACTIVE, and the ASP's ASP-INACTIVE
 // entry action is "send ASP Active" — so every rejected Ack produced a fresh
 // ASP Active, which produced a fresh Ack, as fast as the two could write. A
 // capture of two ASPs with different Routing Contexts against one SGP showed
@@ -321,7 +321,7 @@ func TestRejectedAspActiveAckDoesNotStorm(t *testing.T) {
 		case *messages.AspUp:
 			return messages.NewAspUpAck(nil, nil)
 		case *messages.AspActive:
-			// Routing Context 99 is not one the client asked about: clientCfg
+			// Routing Context 99 is not one the ASP asked about: cfg
 			// is configured for {1, 2}.
 			return messages.NewAspActiveAck(
 				params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -332,7 +332,7 @@ func TestRejectedAspActiveAckDoesNotStorm(t *testing.T) {
 		}
 	})
 
-	cfg := clientCfg(&HeartbeatInfo{Enabled: false})
+	cfg := aspConfig(&HeartbeatInfo{Enabled: false})
 	// T(ack) is set beyond the life of the test so no retransmission can occur:
 	// every ASP Active the peer sees past the first is then unambiguously the
 	// entry action running a second time, not a legitimate resend.
@@ -357,54 +357,52 @@ func TestRejectedAspActiveAckDoesNotStorm(t *testing.T) {
 	}
 }
 
-// NewConfig is the library's own documented constructor and it leaves
-// HeartbeatInfo nil, but Dial and Accept read HeartbeatInfo.Interval straight
-// off the Config. A caller who did not want BEATs — the documented way to build
-// a Config without them — got a nil pointer dereference before the association
-// was even attempted:
+// NewAssociationConfig is the library's documented constructor and it leaves
+// HeartbeatInfo nil. Dial and Accept previously read HeartbeatInfo.Interval
+// straight off AssociationConfig, so a caller who did not want BEATs got a nil
+// pointer dereference before the association was even attempted:
 //
 //	panic: runtime error: invalid memory address or nil pointer dereference
 //
 // A library must not panic on its own constructor's output.
-func TestConfigWithoutHeartbeatInfoDials(t *testing.T) {
+func TestAssociationConfigWithoutHeartbeatInfoDials(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	peer := newRawPeer(t, 3042, handshakeOnly)
 
-	cfg := NewConfig(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1)
+	cfg := NewAssociationConfig(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1)
 	cfg.SetTrafficModeType(params.TrafficModeLoadshare)
 	cfg.SetRoutingContexts(1, 2)
 	if cfg.HeartbeatInfo != nil {
-		t.Fatalf("NewConfig set HeartbeatInfo = %+v; this test exists to cover the nil case", cfg.HeartbeatInfo)
+		t.Fatalf("NewAssociationConfig set HeartbeatInfo = %+v; this test exists to cover the nil case", cfg.HeartbeatInfo)
 	}
 
 	conn, err := dialTo(ctx, t, peer.addr, 3042, cfg)
 	if err != nil {
-		t.Fatalf("Dial with a Config built by NewConfig: %v", err)
+		t.Fatalf("Dial with an AssociationConfig built by NewAssociationConfig: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
 
-	if got := conn.State(); got != StateAspActive {
-		t.Errorf("State = %v, want %v", got, StateAspActive)
+	if got := conn.State(); got != StateASPActive {
+		t.Errorf("State = %v, want %v", got, StateASPActive)
 	}
 }
 
-// The same for the server side: Accept read HeartbeatInfo.Interval off the
-// listener's Config and panicked identically.
-func TestConfigWithoutHeartbeatInfoAccepts(t *testing.T) {
+// The same applies to an endpoint accepting SCTP associations.
+func TestAssociationConfigWithoutHeartbeatInfoAccepts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	const port = 3044
-	srvCfg := NewConfig(0x22222222, 0x11111111, params.ServiceIndSCCP, 0, 0, 1)
-	srvCfg.SetTrafficModeType(params.TrafficModeLoadshare)
-	srvCfg.SetRoutingContexts(1, 2)
-	if srvCfg.HeartbeatInfo != nil {
-		t.Fatalf("NewConfig set HeartbeatInfo = %+v; this test exists to cover the nil case", srvCfg.HeartbeatInfo)
+	sgpConfig := NewAssociationConfig(0x22222222, 0x11111111, params.ServiceIndSCCP, 0, 0, 1)
+	sgpConfig.SetTrafficModeType(params.TrafficModeLoadshare)
+	sgpConfig.SetRoutingContexts(1, 2)
+	if sgpConfig.HeartbeatInfo != nil {
+		t.Fatalf("NewAssociationConfig set HeartbeatInfo = %+v; this test exists to cover the nil case", sgpConfig.HeartbeatInfo)
 	}
 
-	ln, err := Listen("m3ua", mcAddr(port, "127.0.0.1"), NewListenerConfig(srvCfg))
+	ln, err := listenSGP("m3ua", mcAddr(port, "127.0.0.1"), NewListenerConfig(sgpConfig))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -414,35 +412,35 @@ func TestConfigWithoutHeartbeatInfoAccepts(t *testing.T) {
 	defer func() { _ = ln.Close() }()
 
 	type acceptResult struct {
-		conn *Conn
-		err  error
+		association *Association
+		err         error
 	}
 	accepted := make(chan acceptResult, 1)
 	go func() {
-		c, err := ln.Accept(ctx)
-		accepted <- acceptResult{conn: c, err: err}
+		association, err := ln.Accept(ctx)
+		accepted <- acceptResult{association: association, err: err}
 	}()
 
-	cli, err := Dial(ctx, "m3ua", mcAddr(port+1, "127.0.0.2"), mcAddr(port, "127.0.0.1"), mcClientConfig(0xDD000001))
+	cli, err := dialASP(ctx, "m3ua", mcAddr(port+1, "127.0.0.2"), mcAddr(port, "127.0.0.1"), mcASPConfig(0xDD000001))
 	if err != nil {
 		select {
 		case result := <-accepted:
-			if result.conn != nil {
-				_ = result.conn.Close()
+			if result.association != nil {
+				_ = result.association.Close()
 			}
 		default:
 		}
-		t.Fatalf("Dial against a listener configured by NewConfig: %v", err)
+		t.Fatalf("Dial against a Listener configured by NewAssociationConfig: %v", err)
 	}
 	defer func() { _ = cli.Close() }()
 
 	select {
 	case result := <-accepted:
-		if result.conn != nil {
-			defer func() { _ = result.conn.Close() }()
+		if result.association != nil {
+			defer func() { _ = result.association.Close() }()
 		}
 		if result.err != nil {
-			t.Fatalf("Accept with a Config built by NewConfig: %v", result.err)
+			t.Fatalf("Accept with an AssociationConfig built by NewAssociationConfig: %v", result.err)
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("Accept never returned")
@@ -457,7 +455,7 @@ func TestListenRejectsInvalidNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ln, err := Listen("not-a-network", addr, NewListenerConfig(NewServerConfig(
+	ln, err := listenSGP("not-a-network", addr, NewListenerConfig(newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
@@ -480,7 +478,7 @@ func TestDialRejectsInvalidNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, err := Dial(ctx, "not-a-network", nil, addr, clientCfg(&HeartbeatInfo{Enabled: false}))
+	conn, err := dialASP(ctx, "not-a-network", nil, addr, aspConfig(&HeartbeatInfo{Enabled: false}))
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("Dial accepted an invalid network name")
@@ -522,9 +520,9 @@ func TestCloseIsIdempotentAndConcurrencySafe(t *testing.T) {
 		}
 	}
 
-	// A closed Conn must refuse writes rather than panicking on a dead socket.
+	// A closed Association must refuse writes rather than panicking on a dead socket.
 	if _, err := cliConn.Write([]byte{0xde, 0xad}); err == nil {
-		t.Error("Write on a closed Conn returned nil error")
+		t.Error("Write on a closed Association returned nil error")
 	}
 }
 
@@ -533,12 +531,12 @@ func TestCloseIsIdempotentAndConcurrencySafe(t *testing.T) {
 //
 // This must not panic either. Write and WritePD used to choose a stream before
 // checking state, and chooseStreamID feeds maxMessageStreamID to rand.Intn,
-// which panics on 0 — the value every Conn holds until a peer negotiates its
+// which panics on 0 — the value every Association holds until a peer negotiates its
 // stream count.
 func TestWriteBeforeActiveIsRefused(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive} {
+	for _, st := range []State{StateASPDown, StateASPInactive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, _ := newTestConn(t, st, modeClient)
+			conn, _ := newTestConn(t, st, RoleASP)
 
 			if _, err := conn.Write([]byte{0xde, 0xad, 0xbe, 0xef}); !errors.Is(err, ErrNotEstablished) {
 				t.Errorf("Write in %v error = %v, want ErrNotEstablished", st, err)
@@ -562,7 +560,7 @@ func TestWriteBeforeActiveIsRefused(t *testing.T) {
 func TestStreamSelectionHandlesEveryNegotiatedCount(t *testing.T) {
 	for _, max := range []uint16{0, 1, 2, 3, 17, 65534} {
 		t.Run(fmt.Sprintf("max%d", max), func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspActive, modeClient)
+			conn, _ := newTestConn(t, StateASPActive, RoleASP)
 			conn.maxMessageStreamID = max
 
 			defer func() {
@@ -588,11 +586,11 @@ func TestStreamSelectionHandlesEveryNegotiatedCount(t *testing.T) {
 }
 
 // Closing a Listener must take the associations it accepted down with it.
-// Previously Close shut only the SCTP listener, so every Conn it had produced
+// Previously Close shut only the SCTP listener, so every Association it had produced
 // kept running: monitor and reader goroutines carried on against peers that had
-// no idea the service was gone, leaking one set per client and leaving
-// half-open associations behind on a server restart.
-func TestListenerCloseShutsDownAcceptedConns(t *testing.T) {
+// no idea the service was gone, leaking one set per ASP and leaving
+// half-open associations behind on an SGP restart.
+func TestListenerCloseShutsDownAcceptedAssociations(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -602,21 +600,21 @@ func TestListenerCloseShutsDownAcceptedConns(t *testing.T) {
 	}
 	defer func() { _ = cliConn.Close() }()
 
-	if got := srvConn.State(); got != StateAspActive {
-		t.Fatalf("server state = %v, want %v", got, StateAspActive)
+	if got := srvConn.State(); got != StateASPActive {
+		t.Fatalf("SGP association state = %v, want %v", got, StateASPActive)
 	}
 
 	// setupConn registers the listener for cleanup; close it early here.
 	if srvConn.listener == nil {
-		t.Fatal("accepted Conn has no listener reference; Close cannot reach it")
+		t.Fatal("accepted Association has no listener reference; Close cannot reach it")
 	}
 	if err := srvConn.listener.Close(); err != nil {
 		t.Fatalf("Listener.Close: %v", err)
 	}
 
-	if !waitFor(func() bool { return srvConn.State() == StateAspDown }, 3*time.Second) {
-		t.Errorf("accepted Conn state = %v after the listener closed, want %v",
-			srvConn.State(), StateAspDown)
+	if !waitFor(func() bool { return srvConn.State() == StateASPDown }, 3*time.Second) {
+		t.Errorf("accepted Association state = %v after the listener closed, want %v",
+			srvConn.State(), StateASPDown)
 	}
 
 	// Closing the listener also closes the underlying sockets, so both ends
@@ -626,7 +624,7 @@ func TestListenerCloseShutsDownAcceptedConns(t *testing.T) {
 
 // Accept's documented contract is that a cancelled ctx does NOT interrupt an
 // Accept parked waiting for a peer, and that Close is the only thing that does
-// (server.go). Every caller that starts an accept goroutine and later waits for
+// (listener.go). Every caller that starts an accept goroutine and later waits for
 // it to exit depends on that second half being true, because closing the
 // listener is their only way to collect the goroutine.
 //
@@ -671,10 +669,10 @@ func TestCloseInterruptsAParkedAccept(t *testing.T) {
 	}
 }
 
-// Listener.Close takes muConns and then calls Conn.Close, which calls back into
+// Listener.Close takes muConns and then calls Association.Close, which calls back into
 // the listener to deregister. Holding the lock across that call would deadlock
 // the shutdown path, so this pins that Close completes promptly.
-func TestListenerCloseDoesNotDeadlockOnConnDeregistration(t *testing.T) {
+func TestListenerCloseDoesNotDeadlockOnAssociationDeregistration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -690,13 +688,13 @@ func TestListenerCloseDoesNotDeadlockOnConnDeregistration(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Listener.Close deadlocked: it holds muConns while Conn.Close reacquires it")
+		t.Fatal("Listener.Close deadlocked: it holds muConns while Association.Close reacquires it")
 	}
 }
 
-// Closing a Conn must remove it from its listener's set, so a long-lived server
+// Closing an Association must remove it from its listener's set, so a long-lived SGP
 // does not accumulate every association it has ever accepted.
-func TestClosedConnIsForgottenByItsListener(t *testing.T) {
+func TestClosedAssociationIsForgottenByItsListener(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -708,25 +706,25 @@ func TestClosedConnIsForgottenByItsListener(t *testing.T) {
 
 	ln := srvConn.listener
 	if ln == nil {
-		t.Fatal("accepted Conn has no listener reference")
+		t.Fatal("accepted Association has no listener reference")
 	}
 
 	ln.muConns.Lock()
 	before := len(ln.conns)
 	ln.muConns.Unlock()
 	if before == 0 {
-		t.Fatal("listener is not tracking the accepted Conn")
+		t.Fatal("listener is not tracking the accepted Association")
 	}
 
 	if err := srvConn.Close(); err != nil {
-		t.Fatalf("Conn.Close: %v", err)
+		t.Fatalf("Association.Close: %v", err)
 	}
 
 	ln.muConns.Lock()
 	after := len(ln.conns)
 	ln.muConns.Unlock()
 	if after != before-1 {
-		t.Errorf("listener tracks %d Conns after closing one, want %d", after, before-1)
+		t.Errorf("listener tracks %d Associations after closing one, want %d", after, before-1)
 	}
 }
 
@@ -746,11 +744,11 @@ func TestMonitorExitsOnDirectClose(t *testing.T) {
 	peer := newRawPeer(t, 3003, handshakeOnly)
 	conn := dialRawPeer(t, ctx, peer, 3003, &HeartbeatInfo{Enabled: false})
 
-	if !waitFor(func() bool { return conn.State() == StateAspActive }, 5*time.Second) {
+	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
 	}
 
-	before := len(goroutinesBlockedIn("go-m3ua.(*Conn).monitor"))
+	before := len(goroutinesBlockedIn("go-m3ua.(*Association).monitor"))
 	if before == 0 {
 		t.Fatal("no monitor goroutine running; the test cannot observe the exit")
 	}
@@ -762,9 +760,9 @@ func TestMonitorExitsOnDirectClose(t *testing.T) {
 	// The peer is deliberately left running, so nothing external provokes the
 	// teardown: Close alone must be enough.
 	if !waitFor(func() bool {
-		return len(goroutinesBlockedIn("go-m3ua.(*Conn).monitor")) < before
+		return len(goroutinesBlockedIn("go-m3ua.(*Association).monitor")) < before
 	}, 3*time.Second) {
 		t.Errorf("monitor goroutines %d -> %d after Close; the loop never noticed",
-			before, len(goroutinesBlockedIn("go-m3ua.(*Conn).monitor")))
+			before, len(goroutinesBlockedIn("go-m3ua.(*Association).monitor")))
 	}
 }

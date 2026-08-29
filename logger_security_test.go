@@ -81,11 +81,11 @@ func waitForLog(t *testing.T, writes <-chan string, marker string) string {
 	}
 }
 
-func newLoggingTestConn(state State, endpointMode mode) (*Conn, *[]messages.M3UA) {
+func newLoggingTestConn(state State, role Role) (*Association, *[]messages.M3UA) {
 	var sent []messages.M3UA
-	connection := &Conn{
+	connection := &Association{
 		muState:   new(sync.RWMutex),
-		mode:      endpointMode,
+		role:      role,
 		state:     state,
 		stateChan: make(chan State, 4),
 		errChan:   make(chan error, 4),
@@ -103,7 +103,7 @@ func TestMalformedInputLoggingIsBoundedAndRateLimited(t *testing.T) {
 	SetLogger(log.New(writer, "", 0))
 	t.Cleanup(func() { EnableLogging(nil) })
 
-	connection := &Conn{}
+	connection := &Association{}
 	raw := make([]byte, 4096)
 	for index := range raw {
 		raw[index] = byte(index)
@@ -216,7 +216,7 @@ func TestAsyncLoggingSnapshotsInputAndDoesNotHoldConfigurationLock(t *testing.T)
 		raw[index] = byte(index + 1)
 	}
 	wantPrefix := hex.EncodeToString(raw[:40])
-	connection := &Conn{}
+	connection := &Association{}
 	connection.logMalformedInput(errors.New("bad message"), raw)
 	for index := range raw {
 		raw[index] = 0xff
@@ -301,8 +301,8 @@ func TestBlockedMalformedLoggerDoesNotBlockDispatchOrSiblingHeartbeat(t *testing
 	t.Cleanup(func() { EnableLogging(nil) })
 	SetLogger(log.New(writer, "", 0))
 
-	attacker, _ := newLoggingTestConn(StateAspActive, modeServer)
-	sibling, sent := newLoggingTestConn(StateAspActive, modeServer)
+	attacker, _ := newLoggingTestConn(StateASPActive, RoleSGP)
+	sibling, sent := newLoggingTestConn(StateASPActive, RoleSGP)
 	malformed := []byte{
 		1, 0, messages.MsgClassTransfer, messages.MsgTypePayloadData,
 		0, 0, 0, 8,

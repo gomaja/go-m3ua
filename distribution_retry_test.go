@@ -20,7 +20,7 @@ func TestActiveFIFOTransientFailureRetriesAndRetainsGlobalBudget(t *testing.T) {
 	firstData := distributionData(1, 1, "first")
 	secondData := distributionData(1, 1, "second")
 	totalBytes := firstData.MarshalLen() + secondData.MarshalLen()
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = totalBytes
 		config.RecoveryQueueTotalMessages = 2
@@ -68,13 +68,13 @@ func TestActiveFIFOTransientFailureRetriesAndRetainsGlobalBudget(t *testing.T) {
 		}
 		return sent.write(message)
 	}
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	applicationServer.mu.Lock()
 	previousGeneration := applicationServer.recoveryGen
 	applicationServer.mu.Unlock()
 	applicationServer.recoveryExpired(previousGeneration)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	type distributionAnswer struct {
@@ -135,7 +135,7 @@ func TestActiveFIFOFailureEnteringPendingIsRetainedBeforeRecoveryExpiry(t *testi
 	firstData := distributionData(1, 1, "first")
 	secondData := distributionData(1, 1, "second")
 	totalBytes := firstData.MarshalLen() + secondData.MarshalLen()
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = totalBytes
 		config.RecoveryQueueTotalMessages = 2
@@ -188,7 +188,7 @@ func TestActiveFIFOFailureEnteringPendingIsRetainedBeforeRecoveryExpiry(t *testi
 		}
 		return sent.write(message)
 	}
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	firstDone := make(chan error, 1)
@@ -214,7 +214,7 @@ func TestActiveFIFOFailureEnteringPendingIsRetainedBeforeRecoveryExpiry(t *testi
 		t.Fatal("queued active DATA did not begin draining")
 	}
 
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	if got := applicationServer.State(); got != ASPending {
 		t.Fatalf("AS state = %v, want AS-PENDING", got)
 	}
@@ -236,7 +236,7 @@ func TestActiveFIFOFailureEnteringPendingIsRetainedBeforeRecoveryExpiry(t *testi
 			messages, bytes, secondData.MarshalLen())
 	}
 
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	if !waitFor(func() bool { return sent.dataCount() == 2 }, time.Second) {
 		t.Fatalf("reactivated DATA deliveries = %d after %d second attempts, want 2",
 			sent.dataCount(), secondAttempts.Load())
@@ -254,7 +254,7 @@ func TestActiveFIFOFailureAfterRecoveryExpiryIsDiscardedAndReleasesGlobalBudget(
 	firstData := distributionData(1, 1, "first")
 	secondData := distributionData(1, 1, "second")
 	totalBytes := firstData.MarshalLen() + secondData.MarshalLen()
-	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *Config) {
+	listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *AssociationConfig) {
 		config.RecoveryQueueMessages = 2
 		config.RecoveryQueueBytes = totalBytes
 		config.RecoveryQueueTotalMessages = 2
@@ -304,7 +304,7 @@ func TestActiveFIFOFailureAfterRecoveryExpiryIsDiscardedAndReleasesGlobalBudget(
 		}
 		return sent.write(message)
 	}
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	firstDone := make(chan error, 1)
@@ -330,7 +330,7 @@ func TestActiveFIFOFailureAfterRecoveryExpiryIsDiscardedAndReleasesGlobalBudget(
 		t.Fatal("queued active DATA did not begin draining")
 	}
 
-	applicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	applicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	applicationServer.mu.Lock()
 	recoveryGeneration := applicationServer.recoveryGen
 	applicationServer.mu.Unlock()
@@ -343,7 +343,7 @@ func TestActiveFIFOFailureAfterRecoveryExpiryIsDiscardedAndReleasesGlobalBudget(
 			messages, bytes, secondData.MarshalLen())
 	}
 
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	close(secondFailureRelease)
 	if !waitFor(func() bool {
 		messages, bytes := recoveryBudgetUsage(listener.as.recoveryBudget)

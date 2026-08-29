@@ -19,19 +19,19 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// newTestConn builds a Conn in the given state whose outbound signals are
+// newTestConn builds an Association in the given state whose outbound signals are
 // captured instead of being written to an SCTP association, so the ASPSM/ASPTM
 // handlers can be exercised without a network.
 //
 // Every channel a handler might touch is initialised and done is closed on
 // cleanup, so a test that reaches an unexpected arm fails or unblocks rather
 // than hanging until the package timeout.
-func newTestConn(t *testing.T, state State, m mode) (*Conn, *[]messages.M3UA) {
+func newTestConn(t *testing.T, state State, role Role) (*Association, *[]messages.M3UA) {
 	t.Helper()
 
 	var sent []messages.M3UA
 
-	cfg := NewServerConfig(
+	cfg := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,                  // OriginatingPointCode
 		0x11111111,                  // DestinationPointCode
@@ -48,22 +48,22 @@ func newTestConn(t *testing.T, state State, m mode) (*Conn, *[]messages.M3UA) {
 	cfg.CorrelationID = nil
 	cfg.NetworkAppearance = nil
 
-	conn := &Conn{
-		// The association is per-Conn, so the send template lives here rather
+	conn := &Association{
+		// The transport is per-Association, so the send template lives here rather
 		// than on the shared Config; these tests write through signalWriter and
 		// never touch a socket, but StreamID() reads it.
 		sctpInfo:    &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
 		muState:     new(sync.RWMutex),
-		mode:        m,
+		role:        role,
 		state:       state,
 		stateChan:   make(chan State, 8),
 		inboundChan: make(chan inbound, 8),
 		errChan:     make(chan error, 8),
 		established: make(chan struct{}, 1),
 		beatAckChan: make(chan struct{}, 1),
+		beatStart:   make(chan struct{}),
 		dataChan:    make(chan *DataMessage, 8),
 		done:        make(chan struct{}),
-		beatAllow:   sync.NewCond(&sync.Mutex{}),
 		cfg:         cfg,
 		// Matches Dial/Accept: SSNM handling needs both, and a nil map would
 		// panic on the first destination update.
@@ -84,7 +84,7 @@ func newTestConn(t *testing.T, state State, m mode) (*Conn, *[]messages.M3UA) {
 	// closeOnce unclaimed, so an asynchronous failure that later reaches
 	// closeWith can close the same channel a second time and panic during test
 	// cleanup rather than report the assertion that actually failed.
-	t.Cleanup(func() { _ = conn.closeWith(ErrConnClosed) })
+	t.Cleanup(func() { _ = conn.closeWith(ErrAssociationClosed) })
 
 	return conn, &sent
 }
@@ -118,14 +118,14 @@ func TestHandleAspUpAlwaysAcks(t *testing.T) {
 		name  string
 		state State
 	}{
-		{"from AspDown", StateAspDown},
-		{"from AspInactive", StateAspInactive},
-		{"from AspActive", StateAspActive},
+		{"from AspDown", StateASPDown},
+		{"from AspInactive", StateASPInactive},
+		{"from AspActive", StateASPActive},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, tt.state, modeServer)
+			conn, sent := newTestConn(t, tt.state, RoleSGP)
 
-			_ = conn.handleAspUp(messages.NewAspUp(conn.cfg.AspIdentifier, nil))
+			_ = conn.handleAspUp(messages.NewAspUp(conn.cfg.ASPIdentifier, nil))
 
 			if len(*sent) == 0 {
 				t.Fatalf("no signal sent; want an AspUpAck")
@@ -143,9 +143,9 @@ func TestHandleAspUpAlwaysAcks(t *testing.T) {
 //	already in the ASP-INACTIVE state, an ASP Up Ack message is returned, and
 //	no further action is taken."
 func TestHandleAspUpFromInactiveSendsNoError(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 
-	if err := conn.handleAspUp(messages.NewAspUp(conn.cfg.AspIdentifier, nil)); err != nil {
+	if err := conn.handleAspUp(messages.NewAspUp(conn.cfg.ASPIdentifier, nil)); err != nil {
 		t.Errorf("handleAspUp() error = %v, want nil (no further action)", err)
 	}
 
@@ -160,9 +160,9 @@ func TestHandleAspUpFromInactiveSendsNoError(t *testing.T) {
 //	the ASP-ACTIVE state, an ASP Up Ack message is returned, as well as an
 //	Error message ("Unexpected Message")."
 func TestHandleAspUpFromActiveAcksThenErrors(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
-	err := conn.handleAspUp(messages.NewAspUp(conn.cfg.AspIdentifier, nil))
+	err := conn.handleAspUp(messages.NewAspUp(conn.cfg.ASPIdentifier, nil))
 	if err == nil {
 		t.Fatal("handleAspUp() error = nil, want UnexpectedMessageError")
 	}
@@ -192,14 +192,14 @@ func TestHandleAspUpFromActiveAcksThenErrors(t *testing.T) {
 // RFC 4666 Section 4.3.4.1: receiving ASP Up while ASP-ACTIVE moves the remote
 // ASP back to ASP-INACTIVE, so the peers converge instead of deadlocking.
 func TestHandleAspUpFromActiveTransitionsToInactive(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 
-	conn.handleSignals(context.Background(), messages.NewAspUp(conn.cfg.AspIdentifier, nil))
+	conn.handleSignals(context.Background(), messages.NewAspUp(conn.cfg.ASPIdentifier, nil))
 
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspInactive && got != stateUnchanged {
-			t.Errorf("state = %v, want %v", got, StateAspInactive)
+		if got != StateASPInactive && got != stateUnchanged {
+			t.Errorf("state = %v, want %v", got, StateASPInactive)
 		}
 	default:
 		t.Fatal("no state update published; want AspInactive")
@@ -210,9 +210,9 @@ func TestHandleAspUpFromActiveTransitionsToInactive(t *testing.T) {
 // duplicate ASP Up Ack "should consider itself in the ASP-INACTIVE state" — no
 // Error is warranted, otherwise a retransmitting peer is answered with errors.
 func TestHandleAspUpAckFromInactiveIsAccepted(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeClient)
+	conn, sent := newTestConn(t, StateASPInactive, RoleASP)
 
-	if err := conn.handleAspUpAck(messages.NewAspUpAck(conn.cfg.AspIdentifier, nil)); err != nil {
+	if err := conn.handleAspUpAck(messages.NewAspUpAck(conn.cfg.ASPIdentifier, nil)); err != nil {
 		t.Errorf("handleAspUpAck() error = %v, want nil", err)
 	}
 
@@ -248,14 +248,14 @@ func TestExactlyOneStatePublishedPerMessage(t *testing.T) {
 					t.Fatalf("messages.Parse rejected class=%d type=%d without a valid typed fixture: %v", class, typ, err)
 				}
 			}
-			for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
-				for _, md := range []mode{modeServer, modeClient} {
+			for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
+				for _, role := range []Role{RoleSGP, RoleASP} {
 					for _, fail := range []bool{false, true} {
-						name := fmt.Sprintf("%s/%v/mode%d/writefail=%t",
-							msg.MessageTypeName(), st, md, fail)
+						name := fmt.Sprintf("%s/%v/role=%s/writefail=%t",
+							msg.MessageTypeName(), st, role, fail)
 
 						t.Run(name, func(t *testing.T) {
-							conn := newProdConn(t, st, md)
+							conn := newProdConn(t, st, role)
 							if fail {
 								conn.signalWriter = writeFails
 							}
@@ -322,9 +322,9 @@ func minimallyValidMessage(class, messageType uint8) messages.M3UA {
 // This is the same unconditional-Ack obligation as ASP Up. Withholding it
 // leaves the peer retransmitting ASP Down until T(ack) expires, indefinitely.
 func TestHandleAspDownAlwaysAcks(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+	for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, sent := newTestConn(t, st, modeServer)
+			conn, sent := newTestConn(t, st, RoleSGP)
 
 			if err := conn.handleAspDown(messages.NewAspDown(nil)); err != nil {
 				t.Errorf("handleAspDown() error = %v, want nil (ASP Down Ack is a MUST)", err)
@@ -346,9 +346,9 @@ func TestHandleAspDownAlwaysAcks(t *testing.T) {
 // withholding the Ack lets the peer's T(beat) expire and tears the association
 // down over a message the RFC required us to answer.
 func TestHeartbeatAckedInEveryState(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+	for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, sent := newTestConn(t, st, modeServer)
+			conn, sent := newTestConn(t, st, RoleSGP)
 
 			beat := messages.NewHeartbeat(params.NewHeartbeatData([]byte("beat-data")))
 			if err := conn.handleHeartbeat(beat); err != nil {
@@ -375,9 +375,9 @@ func TestHeartbeatAckedInEveryState(t *testing.T) {
 // the ASP state, otherwise our own T(beat) expires and we tear down a healthy
 // association. Only a genuinely mismatched echo is an error.
 func TestHeartbeatAckAcceptedInEveryState(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+	for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, _ := newTestConn(t, st, modeClient)
+			conn, _ := newTestConn(t, st, RoleASP)
 			conn.setBeatData([]byte("beat-data"))
 
 			ack := messages.NewHeartbeatAck(params.NewHeartbeatData([]byte("beat-data")))
@@ -393,9 +393,9 @@ func TestHeartbeatAckAcceptedInEveryState(t *testing.T) {
 // and a BEAT Ack carrying no Heartbeat Data must be rejected as unexpected
 // rather than dereferenced. Panicking here would let any peer crash the process.
 func TestHeartbeatAckWithoutDataDoesNotPanic(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+	for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, _ := newTestConn(t, st, modeClient)
+			conn, _ := newTestConn(t, st, RoleASP)
 			conn.setBeatData([]byte("beat-data"))
 
 			defer func() {
@@ -459,7 +459,7 @@ func TestDataWithoutProtocolDataIsRejected(t *testing.T) {
 				}
 			}()
 
-			conn, _ := newTestConn(t, StateAspActive, modeServer)
+			conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 			// A legal arrival stream, so the missing Protocol Data is what this
 			// exercises: DATA on stream 0 is refused earlier, by Section
 			// 1.4.7's rule 1, and would mask the guard under test.
@@ -481,7 +481,7 @@ func TestDataWithoutProtocolDataIsRejected(t *testing.T) {
 // The Missing Parameter error must reach the wire with the RFC 4666 Section
 // 3.8.1 code 0x16, not be silently swallowed.
 func TestMissingProtocolDataEmitsMissingParameterError(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	if e := conn.handleErrors(ErrMissingProtocolData); e != nil {
 		t.Fatalf("handleErrors() error = %v, want nil", e)
@@ -500,10 +500,10 @@ func TestMissingProtocolDataEmitsMissingParameterError(t *testing.T) {
 // fixed at 8 rather than Config.DataQueueSize, so tests can count publishes
 // without running a monitor() reader — do not rely on this fixture to catch a
 // blocking sendState/sendErr or production queue capacity.
-func newProdConn(t *testing.T, state State, m mode) *Conn {
+func newProdConn(t *testing.T, state State, role Role) *Association {
 	t.Helper()
 
-	conn, _ := newTestConn(t, state, m)
+	conn, _ := newTestConn(t, state, role)
 	conn.beatAckChan = make(chan struct{}, 1)
 	conn.setBeatData([]byte("outstanding"))
 	return conn
@@ -523,9 +523,9 @@ func newProdConn(t *testing.T, state State, m mode) *Conn {
 // than a replay test — a replayed Ack is rejected before notifyBeatAck and
 // would never exercise the full channel.
 func TestBeatAckNeverWedgesDispatcher(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+	for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn := newProdConn(t, st, modeServer)
+			conn := newProdConn(t, st, RoleSGP)
 			ack := messages.NewHeartbeatAck(params.NewHeartbeatData(conn.currentBeatData()))
 
 			done := make(chan struct{})
@@ -556,7 +556,7 @@ func TestBeatAckNeverWedgesDispatcher(t *testing.T) {
 // sat out the full T(beat), and a healthy association was torn down with
 // ErrHeartbeatExpired.
 func TestBeatAckBeforeReaderParksIsNotLost(t *testing.T) {
-	conn := newProdConn(t, StateAspActive, modeServer)
+	conn := newProdConn(t, StateASPActive, RoleSGP)
 	ack := messages.NewHeartbeatAck(params.NewHeartbeatData(conn.currentBeatData()))
 
 	// Ack arrives first; nobody is reading yet.
@@ -573,7 +573,7 @@ func TestBeatAckBeforeReaderParksIsNotLost(t *testing.T) {
 // The token must still reach a waiting heartbeat() — making the send
 // non-blocking must not break liveness detection on a healthy link.
 func TestBeatAckReachesWaitingHeartbeat(t *testing.T) {
-	conn := newProdConn(t, StateAspActive, modeServer)
+	conn := newProdConn(t, StateASPActive, RoleSGP)
 	ack := messages.NewHeartbeatAck(params.NewHeartbeatData(conn.currentBeatData()))
 
 	got := make(chan struct{})
@@ -600,7 +600,7 @@ func TestBeatAckReachesWaitingHeartbeat(t *testing.T) {
 // completes ASPTM and traffic resumes. If this breaks, a live link stops
 // carrying traffic and never recovers.
 func TestSGPRecoversAfterDuplicateAspUp(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	// Apply whatever the dispatch publishes, as monitor() would.
 	apply := func() State {
@@ -612,7 +612,7 @@ func TestSGPRecoversAfterDuplicateAspUp(t *testing.T) {
 			return st
 		default:
 			t.Fatal("no state published")
-			return StateAspDown
+			return StateASPDown
 		}
 	}
 	drainErr := func() {
@@ -626,10 +626,10 @@ func TestSGPRecoversAfterDuplicateAspUp(t *testing.T) {
 	}
 
 	// Step 1: the duplicate ASP Up that caused the production incident.
-	conn.handleSignals(context.Background(), messages.NewAspUp(conn.cfg.AspIdentifier, nil))
+	conn.handleSignals(context.Background(), messages.NewAspUp(conn.cfg.ASPIdentifier, nil))
 	drainErr()
-	if got := apply(); got != StateAspInactive {
-		t.Fatalf("state after ASP Up = %v, want %v", got, StateAspInactive)
+	if got := apply(); got != StateASPInactive {
+		t.Fatalf("state after ASP Up = %v, want %v", got, StateASPInactive)
 	}
 	if got := typeNames(*sent); len(got) != 2 || got[0] != "ASP Up Ack" || got[1] != "Error" {
 		t.Fatalf("signals = %v, want [ASP Up Ack Error]", got)
@@ -639,8 +639,8 @@ func TestSGPRecoversAfterDuplicateAspUp(t *testing.T) {
 	conn.handleSignals(context.Background(), messages.NewAspActive(
 		conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil))
 	drainErr()
-	if got := apply(); got != StateAspActive {
-		t.Fatalf("state after ASP Active = %v, want %v (traffic must resume)", got, StateAspActive)
+	if got := apply(); got != StateASPActive {
+		t.Fatalf("state after ASP Active = %v, want %v (traffic must resume)", got, StateASPActive)
 	}
 	if got := typeNames(*sent); len(got) != 3 || got[2] != "ASP Active Ack" {
 		t.Errorf("signals = %v, want [... ASP Active Ack]", got)
@@ -655,14 +655,14 @@ func TestSGPRecoversAfterDuplicateAspUp(t *testing.T) {
 func TestBareHeaderMessagesNeverPanic(t *testing.T) {
 	for _, class := range []uint8{3, 4} { // ASPSM, ASPTM
 		for _, typ := range []uint8{1, 2, 3, 4, 5, 6} {
-			for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
-				for _, md := range []mode{modeServer, modeClient} {
+			for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
+				for _, role := range []Role{RoleSGP, RoleASP} {
 					msg, err := messages.Parse([]byte{1, 0, class, typ, 0, 0, 0, 8})
 					if err != nil {
 						continue // not a defined message type
 					}
 
-					name := fmt.Sprintf("class%d/type%d/%v/mode%d", class, typ, st, md)
+					name := fmt.Sprintf("class%d/type%d/%v/role=%s", class, typ, st, role)
 					t.Run(name, func(t *testing.T) {
 						defer func() {
 							if r := recover(); r != nil {
@@ -670,7 +670,7 @@ func TestBareHeaderMessagesNeverPanic(t *testing.T) {
 							}
 						}()
 
-						conn, _ := newTestConn(t, st, md)
+						conn, _ := newTestConn(t, st, role)
 						conn.setBeatData([]byte("outstanding"))
 						conn.handleSignals(context.Background(), msg)
 					})
@@ -684,7 +684,7 @@ func TestBareHeaderMessagesNeverPanic(t *testing.T) {
 // have no outstanding Heartbeat Data to match it against, otherwise a peer can
 // forge liveness tokens and defeat T(beat) detection of a dead link.
 func TestHeartbeatAckRejectedWhenNoBeatOutstanding(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.setBeatData(nil) // no BEAT sent yet
 
 	ack := messages.NewHeartbeatAck(params.NewHeartbeatData([]byte{}))
@@ -695,7 +695,7 @@ func TestHeartbeatAckRejectedWhenNoBeatOutstanding(t *testing.T) {
 
 // A mismatched echo must still be rejected, whatever the state.
 func TestHeartbeatAckRejectsMismatchedEcho(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.setBeatData([]byte("beat-data"))
 
 	ack := messages.NewHeartbeatAck(params.NewHeartbeatData([]byte("different")))
@@ -710,7 +710,7 @@ func TestHeartbeatAckRejectsMismatchedEcho(t *testing.T) {
 // dead in both directions — the peer's M3UA stack gone, or an off-path attacker
 // or middlebox echoing recorded bytes — and heartbeat() would never expire.
 func TestHeartbeatAckIsNotReplayable(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.setBeatData([]byte("round-one-data"))
 
 	ack := messages.NewHeartbeatAck(params.NewHeartbeatData([]byte("round-one-data")))
@@ -733,7 +733,7 @@ func TestHeartbeatAckIsNotReplayable(t *testing.T) {
 // to match against, or an attacker could break liveness for a healthy link by
 // injecting garbage — turning a validation check into a denial of service.
 func TestBogusHeartbeatAckDoesNotRetireOutstandingBeat(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.setBeatData([]byte("round-one-data"))
 
 	bogus := messages.NewHeartbeatAck(params.NewHeartbeatData([]byte("forged-echo!!!")))
@@ -751,7 +751,7 @@ func TestBogusHeartbeatAckDoesNotRetireOutstandingBeat(t *testing.T) {
 // compare-and-clear is atomic, so exactly one wins. Run under -race this also
 // covers concurrent access to beatData.
 func TestConcurrentHeartbeatAcksClaimBeatOnce(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.setBeatData([]byte("round-one-data"))
 
 	ack := messages.NewHeartbeatAck(params.NewHeartbeatData([]byte("round-one-data")))
@@ -781,17 +781,17 @@ func TestConcurrentHeartbeatAcksClaimBeatOnce(t *testing.T) {
 // the current state, so a transient write failure cannot silently take an
 // active association out of service.
 func TestHandleSignalsHoldsStateOnNonUnexpectedError(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	conn.signalWriter = func(m3 messages.M3UA) (int, error) {
 		return 0, errors.New("sctp write failed")
 	}
 
-	conn.handleSignals(context.Background(), messages.NewAspUp(conn.cfg.AspIdentifier, nil))
+	conn.handleSignals(context.Background(), messages.NewAspUp(conn.cfg.ASPIdentifier, nil))
 
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspActive && got != stateUnchanged {
-			t.Errorf("state = %v, want %v held on a write failure", got, StateAspActive)
+		if got != StateASPActive && got != stateUnchanged {
+			t.Errorf("state = %v, want %v held on a write failure", got, StateASPActive)
 		}
 	default:
 		t.Fatal("no state published")
@@ -806,12 +806,12 @@ func TestHandleSignalsHoldsStateOnNonUnexpectedError(t *testing.T) {
 // to change state on one. It reports the Error and holds its state, rather
 // than letting a stray message take an active association's data path down or
 // silently walk an idle one to ASP-INACTIVE.
-func TestServerHoldsStateOnUnsolicitedAspUpAck(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+func TestSGPHoldsStateOnUnsolicitedAspUpAck(t *testing.T) {
+	for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, _ := newTestConn(t, st, modeServer)
+			conn, _ := newTestConn(t, st, RoleSGP)
 
-			conn.handleSignals(context.Background(), messages.NewAspUpAck(conn.cfg.AspIdentifier, nil))
+			conn.handleSignals(context.Background(), messages.NewAspUpAck(conn.cfg.ASPIdentifier, nil))
 
 			select {
 			case got := <-conn.stateChan:
@@ -836,12 +836,12 @@ func TestServerHoldsStateOnUnsolicitedAspUpAck(t *testing.T) {
 }
 
 // The mirror image of the SGP rules: ASP Up and ASP Down travel only from ASP
-// to SGP, and their Acks are messages only an SGP may send. A client (ASP)
+// to SGP, and their Acks are messages only an SGP may send. An ASP
 // that receives either must not answer with the SGP-only Ack and must not move
 // off its current state — otherwise a single stray or forged ASP Up knocks an
 // ACTIVE association's data path down to ASP-INACTIVE. It reports the Error
 // ("Unexpected Message") and holds, exactly as the SGP does for stray Acks.
-func TestClientHoldsStateOnAspUpAndAspDown(t *testing.T) {
+func TestASPHoldsStateOnAspUpAndAspDown(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		msg  messages.M3UA
@@ -849,20 +849,20 @@ func TestClientHoldsStateOnAspUpAndAspDown(t *testing.T) {
 		{"ASP Up", messages.NewAspUp(nil, nil)},
 		{"ASP Down", messages.NewAspDown(nil)},
 	} {
-		for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+		for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 			t.Run(tt.name+"/"+st.String(), func(t *testing.T) {
-				conn, sent := newTestConn(t, st, modeClient)
+				conn, sent := newTestConn(t, st, RoleASP)
 
 				conn.handleSignals(context.Background(), tt.msg)
 
 				if got := typeNames(*sent); len(got) != 0 {
-					t.Errorf("client answered %s with %v, want no signal (Acks are SGP-only)", tt.name, got)
+					t.Errorf("ASP answered %s with %v, want no signal (Acks are SGP-only)", tt.name, got)
 				}
 
 				select {
 				case got := <-conn.stateChan:
 					if got != st && got != stateUnchanged {
-						t.Errorf("client state = %v, want %v held", got, st)
+						t.Errorf("ASP state = %v, want %v held", got, st)
 					}
 				default:
 					t.Fatal("no state published")
@@ -875,7 +875,7 @@ func TestClientHoldsStateOnAspUpAndAspDown(t *testing.T) {
 						t.Errorf("error = %T, want *UnexpectedMessageError", err)
 					}
 				default:
-					t.Errorf("no Error reported for a %s received by a client", tt.name)
+					t.Errorf("no Error reported for a %s received by an ASP", tt.name)
 				}
 			})
 		}
@@ -887,19 +887,19 @@ func TestClientHoldsStateOnAspUpAndAspDown(t *testing.T) {
 // ASP-INACTIVE must not block on it, or handleStateUpdate wedges while holding
 // muState and every State() caller blocks with SCTP still up.
 func TestReactivationDoesNotBlockOnEstablished(t *testing.T) {
-	for _, m := range []struct {
+	for _, test := range []struct {
 		name string
-		mode mode
-	}{{"server", modeServer}, {"client", modeClient}} {
-		t.Run(m.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspActive, m.mode)
+		role Role
+	}{{"SGP", RoleSGP}, {"ASP", RoleASP}} {
+		t.Run(test.name, func(t *testing.T) {
+			conn, _ := newTestConn(t, StateASPActive, test.role)
 
 			// Accept()/Dial() consumed the first signal already.
 			for cycle := 1; cycle <= 4; cycle++ {
 				done := make(chan struct{})
 				go func() {
-					_ = conn.handleStateUpdate(StateAspInactive)
-					_ = conn.handleStateUpdate(StateAspActive)
+					_ = conn.handleStateUpdate(StateASPInactive)
+					_ = conn.handleStateUpdate(StateASPActive)
 					close(done)
 				}()
 
@@ -913,10 +913,10 @@ func TestReactivationDoesNotBlockOnEstablished(t *testing.T) {
 	}
 }
 
-// A client re-drives itself out of ASP-INACTIVE by initiating the ASPTM
+// An ASP re-drives itself out of ASP-INACTIVE by initiating the ASPTM
 // procedure, which is how an association returns to ASP-ACTIVE after RFC 4666
-// Section 4.3.4.1 drops it there. (A server deliberately does not: per the RFC
-// the ASP initiates ASPTM, and the server recovers when the peer's ASP Active
+// Section 4.3.4.1 drops it there. (An SGP deliberately does not: per the RFC
+// the ASP initiates ASPTM, and the SGP recovers when the peer's ASP Active
 // arrives and handleAspActive acknowledges it.)
 // An ASP demoted out of ASP-ACTIVE must NOT re-activate itself.
 //
@@ -928,10 +928,10 @@ func TestReactivationDoesNotBlockOnEstablished(t *testing.T) {
 // Section 4.3.4.5: a Notify "does not explicitly compel the ASP(s) receiving the
 // message to become active. The ASPs remain in control of what (and when)
 // traffic action is taken."
-func TestClientDoesNotReactivateAfterBeingMadeInactive(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+func TestASPDoesNotReactivateAfterBeingMadeInactive(t *testing.T) {
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 
-	if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("handleStateUpdate() error = %v, want nil", err)
 	}
 
@@ -943,10 +943,10 @@ func TestClientDoesNotReactivateAfterBeingMadeInactive(t *testing.T) {
 // Climbing out of ASP-DOWN is the case that does owe an ASP Active: RFC 4666
 // Section 4.3.4.3 has the ASP ask for traffic "Anytime after the ASP has
 // received an ASP Up Ack message".
-func TestClientAsksForTrafficAfterAspUpAck(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspDown, modeClient)
+func TestASPAsksForTrafficAfterAspUpAck(t *testing.T) {
+	conn, sent := newTestConn(t, StateASPDown, RoleASP)
 
-	if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("handleStateUpdate() error = %v, want nil", err)
 	}
 
@@ -961,14 +961,14 @@ func TestClientAsksForTrafficAfterAspUpAck(t *testing.T) {
 //	"If the ASP receives an unexpected ASP Up Ack message, the ASP should
 //	consider itself in the ASP-INACTIVE state."
 func TestHandleAspUpAckFromActiveTransitionsToInactive(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
-	conn.handleSignals(context.Background(), messages.NewAspUpAck(conn.cfg.AspIdentifier, nil))
+	conn.handleSignals(context.Background(), messages.NewAspUpAck(conn.cfg.ASPIdentifier, nil))
 
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspInactive && got != stateUnchanged {
-			t.Errorf("state = %v, want %v", got, StateAspInactive)
+		if got != StateASPInactive && got != stateUnchanged {
+			t.Errorf("state = %v, want %v", got, StateASPInactive)
 		}
 	default:
 		t.Fatal("no state update published; want AspInactive")
@@ -990,9 +990,9 @@ func TestHandleAspUpAckFromActiveTransitionsToInactive(t *testing.T) {
 // and Error messages" — so the Ack is forbidden there rather than owed. See
 // TestASPTMFromAspDownIsRefused.
 func TestHandleAspActiveAlwaysAcks(t *testing.T) {
-	for _, st := range []State{StateAspInactive, StateAspActive} {
+	for _, st := range []State{StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, sent := newTestConn(t, st, modeServer)
+			conn, sent := newTestConn(t, st, RoleSGP)
 
 			_ = conn.handleAspActive(messages.NewAspActive(
 				conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil))
@@ -1017,9 +1017,9 @@ func TestHandleAspActiveAlwaysAcks(t *testing.T) {
 // SGP already holds as ASP-INACTIVE, and Section 4.3.1 forbids sending the Ack
 // to an ASP-DOWN peer at all.
 func TestHandleAspInactiveAlwaysAcks(t *testing.T) {
-	for _, st := range []State{StateAspInactive, StateAspActive} {
+	for _, st := range []State{StateASPInactive, StateASPActive} {
 		t.Run(st.String(), func(t *testing.T) {
-			conn, sent := newTestConn(t, st, modeServer)
+			conn, sent := newTestConn(t, st, RoleSGP)
 
 			_ = conn.handleAspInactive(messages.NewAspInactive(conn.cfg.RoutingContexts, nil))
 
@@ -1037,7 +1037,7 @@ func TestHandleAspInactiveAlwaysAcks(t *testing.T) {
 // ASP-ACTIVE: the Ack is what converges the peer, so the dispatcher must not
 // let the accompanying "Unexpected Message" Error suppress the transition.
 func TestDuplicateAspActiveAcksAndHoldsActive(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	conn.handleSignals(context.Background(), messages.NewAspActive(
 		conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil))
@@ -1047,8 +1047,8 @@ func TestDuplicateAspActiveAcksAndHoldsActive(t *testing.T) {
 	}
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspActive && got != stateUnchanged {
-			t.Errorf("state = %v, want %v after a duplicate ASP Active", got, StateAspActive)
+		if got != StateASPActive && got != stateUnchanged {
+			t.Errorf("state = %v, want %v after a duplicate ASP Active", got, StateASPActive)
 		}
 	default:
 		t.Fatal("no state update published; want AspActive")
@@ -1058,7 +1058,7 @@ func TestDuplicateAspActiveAcksAndHoldsActive(t *testing.T) {
 // The same for ASP Inactive: acked, and the SGP still moves the ASP to
 // ASP-INACTIVE rather than holding the old state behind the Error.
 func TestDuplicateAspInactiveAcksAndHoldsInactive(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 
 	conn.handleSignals(context.Background(), messages.NewAspInactive(conn.cfg.RoutingContexts, nil))
 
@@ -1067,43 +1067,43 @@ func TestDuplicateAspInactiveAcksAndHoldsInactive(t *testing.T) {
 	}
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspInactive && got != stateUnchanged {
-			t.Errorf("state = %v, want %v after a duplicate ASP Inactive", got, StateAspInactive)
+		if got != StateASPInactive && got != stateUnchanged {
+			t.Errorf("state = %v, want %v after a duplicate ASP Inactive", got, StateASPInactive)
 		}
 	default:
 		t.Fatal("no state update published; want AspInactive")
 	}
 }
 
-// ASP Active and ASP Inactive are SGP procedures ("from the ASP"). A client
+// ASP Active and ASP Inactive are SGP procedures ("from the ASP"). An ASP
 // that receives one must report the Error and hold its state: a stray or forged
-// ASP Active must never move a client's data path.
-func TestClientHoldsStateOnAspActiveAndAspInactive(t *testing.T) {
-	for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
+// ASP Active must never move an ASP's data path.
+func TestASPHoldsStateOnAspActiveAndAspInactive(t *testing.T) {
+	for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
 		for _, tt := range []struct {
 			name string
-			msg  func(c *Conn) messages.M3UA
+			msg  func(c *Association) messages.M3UA
 		}{
-			{"AspActive", func(c *Conn) messages.M3UA {
+			{"AspActive", func(c *Association) messages.M3UA {
 				return messages.NewAspActive(c.cfg.TrafficModeType, c.cfg.RoutingContexts, nil)
 			}},
-			{"AspInactive", func(c *Conn) messages.M3UA {
+			{"AspInactive", func(c *Association) messages.M3UA {
 				return messages.NewAspInactive(c.cfg.RoutingContexts, nil)
 			}},
 		} {
 			t.Run(tt.name+"/"+st.String(), func(t *testing.T) {
-				conn, sent := newTestConn(t, st, modeClient)
+				conn, sent := newTestConn(t, st, RoleASP)
 
 				conn.handleSignals(context.Background(), tt.msg(conn))
 
 				if len(*sent) != 0 {
-					t.Errorf("client sent %v on a peer %s; want nothing (SGP-only procedure)",
+					t.Errorf("ASP sent %v on a peer %s; want nothing (SGP-only procedure)",
 						typeNames(*sent), tt.name)
 				}
 				select {
 				case got := <-conn.stateChan:
 					if got != st && got != stateUnchanged {
-						t.Errorf("client state = %v, want it held at %v", got, st)
+						t.Errorf("ASP state = %v, want it held at %v", got, st)
 					}
 				default:
 					t.Fatal("no state update published")
@@ -1123,7 +1123,7 @@ func TestClientHoldsStateOnAspActiveAndAspInactive(t *testing.T) {
 // The Ack must be withheld here: acking would tell the peer its incompatible
 // mode was accepted.
 func TestAspActiveWithIncompatibleTrafficModeIsRefused(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	// Configured mode is Loadshare; the peer demands Broadcast.
 	err := conn.handleAspActive(messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeBroadcast), conn.cfg.RoutingContexts, nil))
@@ -1150,7 +1150,7 @@ func TestAspActiveWithIncompatibleTrafficModeIsRefused(t *testing.T) {
 // The Traffic Mode Type parameter is optional (RFC 4666 Section 3.7.1): a peer
 // that omits it accepts the configured mode and must be acked normally.
 func TestAspActiveWithoutTrafficModeIsAccepted(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeServer)
+	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 
 	if err := conn.handleAspActive(messages.NewAspActive(nil, conn.cfg.RoutingContexts, nil)); err != nil {
 		t.Fatalf("handleAspActive() error = %v, want nil when the peer omits the mode", err)
@@ -1164,7 +1164,7 @@ func TestAspActiveWithoutTrafficModeIsAccepted(t *testing.T) {
 // other Error messages." A peer ERR must be absorbed — never answered, and
 // never allowed to tear the association down.
 func TestPeerErrorIsNotAnsweredWithError(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	peerErr := messages.NewError(
 		params.NewErrorCode(params.UnexpectedMessageError), nil, nil, nil, nil)
@@ -1175,8 +1175,8 @@ func TestPeerErrorIsNotAnsweredWithError(t *testing.T) {
 	}
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspActive && got != stateUnchanged {
-			t.Errorf("state = %v, want it held at %v on a peer ERR", got, StateAspActive)
+		if got != StateASPActive && got != stateUnchanged {
+			t.Errorf("state = %v, want it held at %v on a peer ERR", got, StateASPActive)
 		}
 	default:
 		t.Fatal("no state update published; monitor() would stop reading")
@@ -1188,8 +1188,8 @@ func TestPeerErrorIsNotAnsweredWithError(t *testing.T) {
 //	"The ASP receiving this Notify MUST consider itself now in the
 //	ASP-INACTIVE state, if it is not already aware of this via inter-ASP
 //	communication with the Overriding ASP."
-func TestNotifyAlternateAspActiveMovesClientToInactive(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+func TestNotifyAlternateAspActiveMovesASPToInactive(t *testing.T) {
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 
 	conn.handleSignals(context.Background(), messages.NewNotify(
 		params.NewStatus(params.AlternateAspActive), nil, nil, nil))
@@ -1202,8 +1202,8 @@ func TestNotifyAlternateAspActiveMovesClientToInactive(t *testing.T) {
 	}
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspInactive {
-			t.Errorf("state = %v, want %v after an Alternate ASP Active NTFY", got, StateAspInactive)
+		if got != StateASPInactive {
+			t.Errorf("state = %v, want %v after an Alternate ASP Active NTFY", got, StateASPInactive)
 		}
 	default:
 		t.Fatal("no state update published")
@@ -1211,17 +1211,17 @@ func TestNotifyAlternateAspActiveMovesClientToInactive(t *testing.T) {
 }
 
 // An SGP is the sender of an Override notification, never its subject, so a
-// NTFY arriving at a server must not move its state.
-func TestNotifyAlternateAspActiveDoesNotMoveServer(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+// NTFY arriving at an SGP must not move its association state.
+func TestNotifyAlternateAspActiveDoesNotMoveSGP(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 
 	conn.handleSignals(context.Background(), messages.NewNotify(
 		params.NewStatus(params.AlternateAspActive), nil, nil, nil))
 
 	select {
 	case got := <-conn.stateChan:
-		if got != StateAspActive && got != stateUnchanged {
-			t.Errorf("state = %v, want it held at %v", got, StateAspActive)
+		if got != StateASPActive && got != stateUnchanged {
+			t.Errorf("state = %v, want it held at %v", got, StateASPActive)
 		}
 	default:
 		t.Fatal("no state update published")
@@ -1231,7 +1231,7 @@ func TestNotifyAlternateAspActiveDoesNotMoveServer(t *testing.T) {
 // RFC 4666 Section 4.3.4.5: an AS-state Notify "does not explicitly compel the
 // ASP(s) receiving the message to become active. The ASPs remain in control of
 // what (and when) traffic action is taken." These are advisory and must hold
-// state, or an SGP could drive a client's data path from a bare notification.
+// state, or an SGP could drive an ASP's data path from a bare notification.
 func TestAdvisoryNotifyHoldsState(t *testing.T) {
 	for _, status := range []uint32{
 		params.AsStateInactive,
@@ -1240,7 +1240,7 @@ func TestAdvisoryNotifyHoldsState(t *testing.T) {
 		params.InsufficientAspResources,
 	} {
 		t.Run(notifyStatusName(status), func(t *testing.T) {
-			conn, sent := newTestConn(t, StateAspActive, modeClient)
+			conn, sent := newTestConn(t, StateASPActive, RoleASP)
 
 			conn.handleSignals(context.Background(), messages.NewNotify(
 				params.NewStatus(status), nil, nil, nil))
@@ -1253,8 +1253,8 @@ func TestAdvisoryNotifyHoldsState(t *testing.T) {
 			}
 			select {
 			case got := <-conn.stateChan:
-				if got != StateAspActive && got != stateUnchanged {
-					t.Errorf("state = %v, want it held at %v for an advisory NTFY", got, StateAspActive)
+				if got != StateASPActive && got != stateUnchanged {
+					t.Errorf("state = %v, want it held at %v for an advisory NTFY", got, StateASPActive)
 				}
 			default:
 				t.Fatal("no state update published")
@@ -1267,7 +1267,7 @@ func TestAdvisoryNotifyHoldsState(t *testing.T) {
 // 3.8.1 assigns a missing mandatory parameter its own Error code; treating the
 // whole message as merely unexpected hides the actual interoperability fault.
 func TestNotifyWithoutStatusIsRejected(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	if err := conn.handleNotify(messages.NewNotify(nil, nil, nil, nil)); !errors.Is(err, ErrMissingStatus) {
 		t.Errorf("handleNotify() error = %v for a NTFY without Status, want ErrMissingStatus", err)
@@ -1275,7 +1275,7 @@ func TestNotifyWithoutStatusIsRejected(t *testing.T) {
 }
 
 func TestNotifyIsRejectedAtAnSGP(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	notify := messages.NewNotify(params.NewStatus(params.AsStateActive), nil, nil, nil)
 
 	err := conn.handleNotify(notify)
@@ -1299,7 +1299,7 @@ func TestNotifyRejectsReservedStatusValues(t *testing.T) {
 		0xffff0001,
 	} {
 		t.Run(fmt.Sprintf("%08x", status), func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspActive, modeClient)
+			conn, _ := newTestConn(t, StateASPActive, RoleASP)
 			err := conn.handleNotify(messages.NewNotify(params.NewStatus(status), nil, nil, nil))
 			if !errors.Is(err, ErrInvalidParameterValue) {
 				t.Fatalf("handleNotify() error = %v, want ErrInvalidParameterValue", err)
@@ -1312,13 +1312,13 @@ func TestNotifyRejectsReservedStatusValues(t *testing.T) {
 }
 
 // The New*() message constructors call SetLength on every Param handed to them,
-// which writes to the caller's Param. A Conn's configuration Params are shared
+// which writes to the caller's Param. An Association's configuration Params are shared
 // by every message it sends, so two goroutines sending concurrently used to
 // write to the same Param — a data race between, for example, a DATA write and
 // an ERR built by the monitor goroutine. Copying at the send sites is what makes
 // concurrent sends safe; run under -race this fails if a copy is dropped.
 func TestConcurrentSendsDoNotShareConfigParams(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 
 	// newTestConn's capture closure appends to a slice and is single-threaded by
 	// design; this is the one test that writes from several goroutines, so it
@@ -1371,11 +1371,11 @@ func TestUnsolicitedAspDownAckReturnsTheASPToItsPreviousState(t *testing.T) {
 		from     State
 		wantBack State
 	}{
-		{"from ASP-ACTIVE", StateAspActive, StateAspActive},
-		{"from ASP-INACTIVE", StateAspInactive, StateAspInactive},
+		{"from ASP-ACTIVE", StateASPActive, StateASPActive},
+		{"from ASP-INACTIVE", StateASPInactive, StateASPInactive},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, tt.from, modeClient)
+			conn, sent := newTestConn(t, tt.from, RoleASP)
 
 			conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 
@@ -1393,15 +1393,15 @@ func TestUnsolicitedAspDownAckReturnsTheASPToItsPreviousState(t *testing.T) {
 			// And the ASP must now consider itself ASP-DOWN.
 			select {
 			case got := <-conn.stateChan:
-				if got != StateAspDown {
-					t.Fatalf("published %v, want %v after an unsolicited ASP Down Ack", got, StateAspDown)
+				if got != StateASPDown {
+					t.Fatalf("published %v, want %v after an unsolicited ASP Down Ack", got, StateASPDown)
 				}
 			default:
 				t.Fatal("no state was published")
 			}
 
 			// Applying it must start the climb back: ASP Up first.
-			if err := conn.handleStateUpdate(StateAspDown); err != nil {
+			if err := conn.handleStateUpdate(StateASPDown); err != nil {
 				t.Fatalf("handleStateUpdate(AspDown): %v", err)
 			}
 			if got := typeNames(*sent); len(got) != 1 || got[0] != "ASP Up" {
@@ -1409,16 +1409,16 @@ func TestUnsolicitedAspDownAckReturnsTheASPToItsPreviousState(t *testing.T) {
 			}
 
 			// The SGP acks, taking the ASP to ASP-INACTIVE.
-			if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+			if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 				t.Fatalf("handleStateUpdate(AspInactive): %v", err)
 			}
 			got := typeNames(*sent)
 			switch tt.wantBack {
-			case StateAspActive:
+			case StateASPActive:
 				if len(got) != 2 || got[1] != "ASP Active" {
 					t.Errorf("signals = %v, want [ASP Up, ASP Active] to return to ASP-ACTIVE", got)
 				}
-			case StateAspInactive:
+			case StateASPInactive:
 				if len(got) != 1 {
 					t.Errorf("signals = %v, want just [ASP Up]: the ASP was only ASP-INACTIVE and must not take traffic", got)
 				}

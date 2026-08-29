@@ -3,6 +3,7 @@ package m3ua
 import (
 	"errors"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 	listener, firstApplicationServer, first, firstSent := restartFixture(t, 1, 2)
 	secondApplicationServer := listener.as.get(2)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1, 2)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1, 2)
 	restartAttachConn(listener, second)
 	restartActivateASP(firstApplicationServer, first, 1)
 	restartActivateASP(secondApplicationServer, second, 2)
@@ -48,7 +49,7 @@ func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 	if got := len(ssnmMessages(secondSent.snapshot())); got != 0 {
 		t.Fatalf("unconcerned ASP received %d restart DUNAs, want 0", got)
 	}
-	if first.State() != StateAspActive || !first.activeForRoutingContext(1) {
+	if first.State() != StateASPActive || !first.activeForRoutingContext(1) {
 		t.Fatalf("restart changed ASP state/scope to %v, active RC 1 = %v", first.State(), first.activeForRoutingContext(1))
 	}
 	if got := firstApplicationServer.State(); got != ASActive {
@@ -148,6 +149,164 @@ func TestMTP3RestartStagesOrdinaryDestinationReports(t *testing.T) {
 	}
 }
 
+func TestDialingSGPAssociationRunsMTP3RestartProcedure(t *testing.T) {
+	listener, applicationServer, association, sent := restartFixture(t, 1)
+	association.listener = nil
+	association.mtp3Restarts = &mtp3RestartRegistry{}
+	association.destinations = newDestinations()
+	restartActivateASP(applicationServer, association, 1)
+	sent.reset()
+	destination := restartDestination(1, 0x123456, 0)
+
+	restart, err := association.BeginMTP3Restart(destination)
+	if err != nil {
+		t.Fatalf("begin dialing SGP MTP3 restart: %v", err)
+	}
+	assertOnlySSNMKind(t, sent.snapshot(), (*messages.DestinationUnavailable)(nil))
+	sent.reset()
+
+	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
+	); err != nil {
+		t.Fatalf("report during dialing SGP restart: %v", err)
+	}
+	if got := len(ssnmMessages(sent.snapshot())); got != 0 {
+		t.Fatalf("staged dialing SGP update emitted %d messages before completion", got)
+	}
+	if err := restart.Complete(); err != nil {
+		t.Fatalf("complete dialing SGP MTP3 restart: %v", err)
+	}
+	assertOnlySSNMKind(t, sent.snapshot(), (*messages.DestinationAvailable)(nil))
+	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, destination.PointCode); got != DestinationAvailable {
+		t.Fatalf("destination state after dialing SGP restart = %v, want available", got)
+	}
+
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestASPAssociationRejectsMTP3RestartProcedure(t *testing.T) {
+	association, _ := newTestConn(t, StateASPActive, RoleASP)
+	restart, err := association.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
+	if restart != nil || !errors.Is(err, ErrUnsupportedRole) {
+		t.Fatalf("ASP BeginMTP3Restart = (%v, %v), want (nil, ErrUnsupportedRole)", restart, err)
+	}
+}
+
+func TestASPListenerRejectsMTP3RestartProcedure(t *testing.T) {
+	endpoint, err := NewEndpoint(RoleASP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleASP): %v", err)
+	}
+	listener := newListener(endpoint, NewListenerConfig(mcASPConfig(1)))
+	restart, err := listener.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
+	if restart != nil || !errors.Is(err, ErrUnsupportedRole) {
+		t.Fatalf("ASP Listener BeginMTP3Restart = (%v, %v), want (nil, ErrUnsupportedRole)", restart, err)
+	}
+}
+
+func TestDialingSGPRestartHandlesAreInvalidatedByAssociationClose(t *testing.T) {
+	_, applicationServer, association, _ := restartFixture(t, 1)
+	association.listener = nil
+	association.mtp3Restarts = &mtp3RestartRegistry{}
+	association.destinations = newDestinations()
+	association.releaseEndpointStateOwner = func() {}
+	restartActivateASP(applicationServer, association, 1)
+	destination := restartDestination(1, 0x123456, 0)
+
+	restart, err := association.BeginMTP3Restart(destination)
+	if err != nil {
+		t.Fatalf("begin dialing SGP MTP3 restart: %v", err)
+	}
+	if err := association.Close(); err != nil {
+		t.Fatalf("close dialing SGP Association: %v", err)
+	}
+	if err := restart.Update(destination, DestinationAvailable); !errors.Is(err, ErrStaleMTP3Restart) {
+		t.Fatalf("update after Association.Close = %v, want ErrStaleMTP3Restart", err)
+	}
+	if err := restart.Complete(); !errors.Is(err, ErrStaleMTP3Restart) {
+		t.Fatalf("complete after Association.Close = %v, want ErrStaleMTP3Restart", err)
+	}
+}
+
+func TestDialingSGPRestartIsInvalidatedBeforeAssociationCleanup(t *testing.T) {
+	_, applicationServer, association, _ := restartFixture(t, 1)
+	association.listener = nil
+	association.mtp3Restarts = &mtp3RestartRegistry{}
+	association.destinations = newDestinations()
+	association.releaseEndpointStateOwner = func() {}
+	restartActivateASP(applicationServer, association, 1)
+	destination := restartDestination(1, 0x123456, 0)
+
+	restart, err := association.BeginMTP3Restart(destination)
+	if err != nil {
+		t.Fatalf("begin dialing SGP MTP3 restart: %v", err)
+	}
+	if err := restart.Update(destination, DestinationAvailable); err != nil {
+		t.Fatalf("stage available destination: %v", err)
+	}
+	restart.target.publish = func([]DestinationRange, bool, bool, bool) error { return nil }
+
+	association.muState.Lock()
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- association.Close()
+	}()
+	<-association.Done()
+	for range 100 {
+		runtime.Gosched()
+	}
+
+	completeErr := restart.Complete()
+	association.muState.Unlock()
+	if err := <-closeResult; err != nil {
+		t.Fatalf("close dialing SGP Association: %v", err)
+	}
+	if !errors.Is(completeErr, ErrStaleMTP3Restart) {
+		t.Fatalf("complete after Association.Done = %v, want ErrStaleMTP3Restart", completeErr)
+	}
+	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, destination.PointCode); got != DestinationUnavailable {
+		t.Fatalf("destination state after close race = %v, want unavailable", got)
+	}
+}
+
+func TestAcceptedSGPAssociationUsesListenerMTP3RestartState(t *testing.T) {
+	listener, applicationServer, association, _ := restartFixture(t, 1)
+	restartActivateASP(applicationServer, association, 1)
+	destination := restartDestination(1, 0x123456, 0)
+
+	restart, err := association.BeginMTP3Restart(destination)
+	if err != nil {
+		t.Fatalf("accepted SGP begin MTP3 restart: %v", err)
+	}
+	if overlapping, overlapErr := listener.BeginMTP3Restart(destination); overlapping != nil ||
+		!errors.Is(overlapErr, ErrMTP3RestartInProgress) {
+		t.Fatalf("Listener overlapping restart = (%v, %v), want (nil, ErrMTP3RestartInProgress)",
+			overlapping, overlapErr)
+	}
+	if err := restart.Complete(); err != nil {
+		t.Fatalf("complete accepted SGP restart: %v", err)
+	}
+}
+
+func TestSGPAssociationMTP3RestartRequiresEstablishedOpenAssociation(t *testing.T) {
+	association := newAssociation(RoleSGP, mcSGPConfig())
+	destination := restartDestination(1, 0x123456, 0)
+
+	if restart, err := association.BeginMTP3Restart(destination); restart != nil ||
+		!errors.Is(err, ErrNotEstablished) {
+		t.Fatalf("unestablished BeginMTP3Restart = (%v, %v), want (nil, ErrNotEstablished)", restart, err)
+	}
+	if err := association.Close(); err != nil {
+		t.Fatalf("close unestablished SGP Association: %v", err)
+	}
+	if restart, err := association.BeginMTP3Restart(destination); restart != nil ||
+		!errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("closed BeginMTP3Restart = (%v, %v), want (nil, ErrAssociationClosed)", restart, err)
+	}
+}
+
 func TestMTP3RestartForcesDAUDUnavailableUntilCompletion(t *testing.T) {
 	listener, applicationServer, asp, sent := restartFixture(t, 1)
 	restartActivateASP(applicationServer, asp, 1)
@@ -207,7 +366,7 @@ func TestMTP3RestartForcesDAUDUnavailableUntilCompletion(t *testing.T) {
 
 func TestMTP3RestartCompletionUsesCurrentActiveSnapshot(t *testing.T) {
 	listener, applicationServer, first, firstSent := restartFixture(t, 1)
-	second, secondSent := addDistributionASP(t, listener, StateAspInactive, 1)
+	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
 	restartAttachConn(listener, second)
 	restartActivateASP(applicationServer, first, 1)
 	destination := restartDestination(1, 0x123456, 0)
@@ -220,8 +379,8 @@ func TestMTP3RestartCompletionUsesCurrentActiveSnapshot(t *testing.T) {
 		t.Fatalf("stage available: %v", err)
 	}
 	first.noteRoutingContextsInactive([]uint32{1})
-	first.setState(StateAspInactive)
-	applicationServer.setASPState(first, StateAspInactive, time.Hour)
+	first.setState(StateASPInactive)
+	applicationServer.setASPState(first, StateASPInactive, time.Hour)
 	restartActivateASP(applicationServer, second, 1)
 	firstSent.reset()
 	secondSent.reset()
@@ -237,7 +396,7 @@ func TestMTP3RestartCompletionUsesCurrentActiveSnapshot(t *testing.T) {
 
 func TestMTP3RestartFanoutContinuesAfterPeerFailure(t *testing.T) {
 	listener, applicationServer, failing, _ := restartFixture(t, 1)
-	healthy, healthySent := addDistributionASP(t, listener, StateAspInactive, 1)
+	healthy, healthySent := addDistributionASP(t, listener, StateASPInactive, 1)
 	restartAttachConn(listener, healthy)
 	restartActivateASP(applicationServer, failing, 1)
 	restartActivateASP(applicationServer, healthy, 1)
@@ -369,8 +528,8 @@ func TestMTP3RestartHandlesAreInvalidatedByListenerClose(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatalf("close Listener: %v", err)
 	}
-	if next, err := listener.BeginMTP3Restart(destination); next != nil || !errors.Is(err, ErrConnClosed) {
-		t.Fatalf("begin after close = (%v, %v), want (nil, ErrConnClosed)", next, err)
+	if next, err := listener.BeginMTP3Restart(destination); next != nil || !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("begin after close = (%v, %v), want (nil, ErrAssociationClosed)", next, err)
 	}
 	if err := restart.Update(destination, DestinationAvailable); !errors.Is(err, ErrStaleMTP3Restart) {
 		t.Fatalf("update after close = %v, want ErrStaleMTP3Restart", err)
@@ -380,8 +539,8 @@ func TestMTP3RestartHandlesAreInvalidatedByListenerClose(t *testing.T) {
 	}
 	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
 		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
-	); !errors.Is(err, ErrConnClosed) {
-		t.Fatalf("report after close = %v, want ErrConnClosed", err)
+	); !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("report after close = %v, want ErrAssociationClosed", err)
 	}
 }
 
@@ -447,12 +606,13 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 	f.Add(uint32(0x123456), uint8(0), uint32(1), uint8(DestinationAvailable), true, true)
 	f.Add(uint32(0xffffff), uint8(24), uint32(2), uint8(255), true, false)
 	f.Fuzz(func(t *testing.T, pointCode uint32, mask uint8, routingContext uint32, rawState uint8, routingContextSet, networkAppearanceSet bool) {
-		listener := &Listener{Config: NewServerConfig(
+		config := newSGPAssociationConfigForTest(
 			&HeartbeatInfo{Enabled: false}, 1, 2, 0,
 			params.TrafficModeLoadshare, 7, 0, []uint32{1},
 			params.ServiceIndSCCP, 0, 0, 1,
-		)}
-		listener.Config.CorrelationID = nil
+		)
+		listener := newSGPListener(NewListenerConfig(config))
+		listener.AssociationConfig.CorrelationID = nil
 		destination := AffectedDestination{
 			NetworkAppearance:    7,
 			NetworkAppearanceSet: networkAppearanceSet,
@@ -489,29 +649,30 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 	})
 }
 
-func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applicationServer, *Conn, *distributionCapture) {
+func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	t.Helper()
 	listener, applicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, routingContexts,
-		func(config *Config) { config.NetworkAppearance = params.NewNetworkAppearance(7) },
+		func(config *AssociationConfig) { config.NetworkAppearance = params.NewNetworkAppearance(7) },
 	)
 	restartAttachConn(listener, asp)
 	return listener, applicationServer, asp, sent
 }
 
-func restartAttachConn(listener *Listener, connection *Conn) {
+func restartAttachConn(listener *Listener, connection *Association) {
 	connection.listener = listener
-	connection.cfg.NetworkAppearance = listener.Config.NetworkAppearance.Copy()
+	connection.mtp3Restarts = &listener.mtp3Restarts
+	connection.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
 	if listener.destinations == nil {
 		listener.destinations = newDestinations()
 	}
 	connection.destinations = listener.destinations
 }
 
-func restartActivateASP(applicationServer *applicationServer, asp *Conn, routingContext uint32) {
+func restartActivateASP(applicationServer *applicationServer, asp *Association, routingContext uint32) {
 	asp.noteRoutingContextsActive([]uint32{routingContext})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 }
 
 func restartDestination(routingContext, pointCode uint32, mask uint8) AffectedDestination {

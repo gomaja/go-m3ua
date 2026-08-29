@@ -14,7 +14,7 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// notifies returns every Notify the Conn wrote, with its Status decoded.
+// notifies returns every Notify the Association wrote, with its Status decoded.
 func notifies(sent []messages.M3UA) []*messages.Notify {
 	var out []*messages.Notify
 	for _, m := range sent {
@@ -34,11 +34,11 @@ func statusOf(t *testing.T, n *messages.Notify) (uint16, uint16) {
 	return n.Status.StatusType(), n.Status.StatusInfo()
 }
 
-// asTestConn builds a server-side Conn attached to a shared AS registry, as the
+// asTestConn builds an SGP Association attached to a shared AS registry, as the
 // Listener does on Accept.
-func asTestConn(t *testing.T, reg *applicationServers, state State, rtCtxs ...uint32) (*Conn, *[]messages.M3UA) {
+func asTestConn(t *testing.T, reg *applicationServers, state State, rtCtxs ...uint32) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	conn, sent := newTestConn(t, state, modeServer)
+	conn, sent := newTestConn(t, state, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(rtCtxs...)
 	conn.as = reg
 	reg.aspStateChanged(conn, state)
@@ -61,32 +61,32 @@ func TestASStateFollowsItsASPs(t *testing.T) {
 	reg := newApplicationServers(time.Hour) // T(r) long enough not to fire here
 	as := reg.get(1)
 
-	first, _ := asTestConn(t, reg, StateAspInactive, 1)
+	first, _ := asTestConn(t, reg, StateASPInactive, 1)
 	if got := as.State(); got != ASInactive {
 		t.Errorf("AS state = %v with one ASP-INACTIVE ASP, want %v", got, ASInactive)
 	}
 
-	reg.aspStateChanged(first, StateAspActive)
+	reg.aspStateChanged(first, StateASPActive)
 	if got := as.State(); got != ASActive {
 		t.Errorf("AS state = %v with an ASP-ACTIVE ASP, want %v", got, ASActive)
 	}
 
 	// A second ASP joining and going active leaves the AS active.
-	second, _ := asTestConn(t, reg, StateAspInactive, 1)
-	reg.aspStateChanged(second, StateAspActive)
+	second, _ := asTestConn(t, reg, StateASPInactive, 1)
+	reg.aspStateChanged(second, StateASPActive)
 	if got := as.State(); got != ASActive {
 		t.Errorf("AS state = %v with two active ASPs, want %v", got, ASActive)
 	}
 
 	// One of two going inactive is not the last: still active.
-	reg.aspStateChanged(second, StateAspInactive)
+	reg.aspStateChanged(second, StateASPInactive)
 	if got := as.State(); got != ASActive {
 		t.Errorf("AS state = %v after one of two ASPs went inactive, want %v",
 			got, ASActive)
 	}
 
 	// The last active ASP leaving is what makes it pending.
-	reg.aspStateChanged(first, StateAspInactive)
+	reg.aspStateChanged(first, StateASPInactive)
 	if got := as.State(); got != ASPending {
 		t.Errorf("AS state = %v after the last active ASP went inactive, want %v",
 			got, ASPending)
@@ -95,8 +95,8 @@ func TestASStateFollowsItsASPs(t *testing.T) {
 
 func TestRemovingASPDoesNotBlockOnNonReadingSibling(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	blocked, _ := asTestConn(t, registry, StateAspInactive, 1)
-	failed, _ := asTestConn(t, registry, StateAspActive, 1)
+	blocked, _ := asTestConn(t, registry, StateASPInactive, 1)
+	failed, _ := asTestConn(t, registry, StateASPActive, 1)
 
 	writeEntered := make(chan struct{})
 	writeRelease := make(chan struct{})
@@ -133,7 +133,7 @@ func TestRemovingASPDoesNotBlockOnNonReadingSibling(t *testing.T) {
 }
 
 func TestFullMandatoryNotifyQueueClosesAssociation(t *testing.T) {
-	connection, _ := newTestConn(t, StateAspActive, modeServer)
+	connection, _ := newTestConn(t, StateASPActive, RoleSGP)
 	connection.signalWriter = nil
 	connection.notificationQueue = make(chan mandatoryControl, 1)
 	// Keep the queue deliberately undrained so the second mandatory event proves
@@ -170,14 +170,14 @@ func TestFullMandatoryNotifyQueueClosesAssociation(t *testing.T) {
 func TestNotifyIsSentOnASStateChange(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 
-	conn, sent := asTestConn(t, reg, StateAspInactive, 1)
+	conn, sent := asTestConn(t, reg, StateASPInactive, 1)
 	// Entering the AS at all is a change from AS-DOWN to AS-INACTIVE.
 	if got := notifies(*sent); len(got) == 0 {
 		t.Fatal("no Notify was sent when the AS became AS-INACTIVE")
 	}
 
 	before := len(notifies(*sent))
-	reg.aspStateChanged(conn, StateAspActive)
+	reg.aspStateChanged(conn, StateASPActive)
 
 	got := notifies(*sent)
 	if len(got) <= before {
@@ -196,15 +196,67 @@ func TestNotifyIsSentOnASStateChange(t *testing.T) {
 	}
 }
 
+func TestASStateNotificationReleaseWaitsForHeadRetirement(t *testing.T) {
+	applicationServer := &applicationServer{
+		key: ASKey{RoutingContext: 1, RoutingContextSet: true},
+	}
+	association, _ := newTestConn(t, StateASPInactive, RoleSGP)
+	writeStarted := make(chan struct{})
+	allowWrite := make(chan struct{})
+	writeFinished := make(chan struct{})
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		close(writeStarted)
+		<-allowWrite
+		close(writeFinished)
+		return message.MarshalLen(), nil
+	}
+
+	applicationServer.mu.Lock()
+	release := applicationServer.enqueueStateNotificationLocked(
+		ASInactive, []*Association{association}, nil,
+	)
+	event := applicationServer.notifications[0]
+	applicationServer.mu.Unlock()
+
+	releaseReturned := make(chan struct{})
+	go func() {
+		release()
+		close(releaseReturned)
+	}()
+	<-writeStarted
+
+	applicationServer.mu.Lock()
+	close(allowWrite)
+	<-writeFinished
+	select {
+	case <-event.done:
+		applicationServer.mu.Unlock()
+		t.Fatal("notification release completed before the head event was retired")
+	case <-time.After(100 * time.Millisecond):
+	}
+	applicationServer.mu.Unlock()
+
+	select {
+	case <-releaseReturned:
+	case <-time.After(time.Second):
+		t.Fatal("notification release did not complete after the head event was retired")
+	}
+	applicationServer.mu.Lock()
+	defer applicationServer.mu.Unlock()
+	if len(applicationServer.notifications) != 0 {
+		t.Fatalf("notification queue retained %d completed events, want 0", len(applicationServer.notifications))
+	}
+}
+
 // An ASP in ASP-DOWN is excluded, exactly as the sentence says.
 func TestNotifyIsNotSentToAnAspDownPeer(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 
-	active, _ := asTestConn(t, reg, StateAspInactive, 1)
-	_, downSent := asTestConn(t, reg, StateAspDown, 1)
+	active, _ := asTestConn(t, reg, StateASPInactive, 1)
+	_, downSent := asTestConn(t, reg, StateASPDown, 1)
 
 	before := len(notifies(*downSent))
-	reg.aspStateChanged(active, StateAspActive)
+	reg.aspStateChanged(active, StateASPActive)
 
 	if got := len(notifies(*downSent)); got != before {
 		t.Errorf("an ASP-DOWN peer received %d Notify messages; Section 4.3.4.5 "+
@@ -217,15 +269,30 @@ func TestNotifyIsNotSentToAnAspDownPeer(t *testing.T) {
 func TestLastActiveASPLeavingSendsASPending(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 
-	conn, sent := asTestConn(t, reg, StateAspInactive, 1)
-	reg.aspStateChanged(conn, StateAspActive)
+	conn, sent := asTestConn(t, reg, StateASPInactive, 1)
+	reg.aspStateChanged(conn, StateASPActive)
 	before := len(notifies(*sent))
+	notificationWritten := make(chan struct{})
+	var notificationWrittenOnce sync.Once
+	signalWriter := conn.signalWriter
+	conn.signalWriter = func(message messages.M3UA) (int, error) {
+		written, err := signalWriter(message)
+		if _, ok := message.(*messages.Notify); ok {
+			notificationWrittenOnce.Do(func() { close(notificationWritten) })
+		}
+		return written, err
+	}
 
-	reg.aspStateChanged(conn, StateAspInactive)
+	reg.aspStateChanged(conn, StateASPInactive)
+	select {
+	case <-notificationWritten:
+	case <-time.After(time.Second):
+		t.Fatal("no Notify was sent when the last active ASP deactivated")
+	}
 
 	got := notifies(*sent)
-	if len(got) <= before {
-		t.Fatal("no Notify was sent when the last active ASP deactivated")
+	if len(got) != before+1 {
+		t.Fatalf("Notify count = %d, want %d after the last active ASP deactivated", len(got), before+1)
 	}
 	typ, info := statusOf(t, got[len(got)-1])
 	if typ != params.AsStateChange {
@@ -247,9 +314,9 @@ func TestRecoveryTimerResolvesPending(t *testing.T) {
 	reg := newApplicationServers(50 * time.Millisecond)
 	as := reg.get(1)
 
-	conn, _ := asTestConn(t, reg, StateAspInactive, 1)
-	reg.aspStateChanged(conn, StateAspActive)
-	reg.aspStateChanged(conn, StateAspInactive)
+	conn, _ := asTestConn(t, reg, StateASPInactive, 1)
+	reg.aspStateChanged(conn, StateASPActive)
+	reg.aspStateChanged(conn, StateASPInactive)
 
 	if got := as.State(); got != ASPending {
 		t.Fatalf("AS state = %v, want %v", got, ASPending)
@@ -267,14 +334,14 @@ func TestASPActiveBeforeRecoveryTimerRestoresActive(t *testing.T) {
 	reg := newApplicationServers(2 * time.Second)
 	as := reg.get(1)
 
-	conn, _ := asTestConn(t, reg, StateAspInactive, 1)
-	reg.aspStateChanged(conn, StateAspActive)
-	reg.aspStateChanged(conn, StateAspInactive)
+	conn, _ := asTestConn(t, reg, StateASPInactive, 1)
+	reg.aspStateChanged(conn, StateASPActive)
+	reg.aspStateChanged(conn, StateASPInactive)
 	if got := as.State(); got != ASPending {
 		t.Fatalf("AS state = %v, want %v", got, ASPending)
 	}
 
-	reg.aspStateChanged(conn, StateAspActive)
+	reg.aspStateChanged(conn, StateASPActive)
 	if got := as.State(); got != ASActive {
 		t.Errorf("AS state = %v after an ASP became active inside T(r), want %v",
 			got, ASActive)
@@ -297,11 +364,11 @@ func TestASPActiveBeforeRecoveryTimerRestoresActive(t *testing.T) {
 func TestOverrideDisplacesThePreviousASP(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 
-	incumbent, incumbentSent := asTestConn(t, reg, StateAspInactive, 1)
+	incumbent, incumbentSent := asTestConn(t, reg, StateASPInactive, 1)
 	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
-	reg.aspStateChanged(incumbent, StateAspActive)
+	reg.aspStateChanged(incumbent, StateASPActive)
 
-	challenger, _ := asTestConn(t, reg, StateAspInactive, 1)
+	challenger, _ := asTestConn(t, reg, StateASPInactive, 1)
 	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 	if err := challenger.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0xABCD), nil)); err != nil {
 		t.Fatalf("handleAspUp: %v", err)
@@ -343,10 +410,10 @@ func TestOverrideDisplacesThePreviousASP(t *testing.T) {
 func TestLoadshareDoesNotDisplaceAnyASP(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 
-	incumbent, incumbentSent := asTestConn(t, reg, StateAspInactive, 1)
-	reg.aspStateChanged(incumbent, StateAspActive)
+	incumbent, incumbentSent := asTestConn(t, reg, StateASPInactive, 1)
+	reg.aspStateChanged(incumbent, StateASPActive)
 
-	challenger, _ := asTestConn(t, reg, StateAspInactive, 1)
+	challenger, _ := asTestConn(t, reg, StateASPInactive, 1)
 
 	before := len(notifies(*incumbentSent))
 	if err := challenger.handleAspActive(messages.NewAspActive(
@@ -373,25 +440,25 @@ func TestASPStateChangesReachTheApplicationServer(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 	as := reg.get(1)
 
-	conn, _ := newTestConn(t, StateAspDown, modeServer)
+	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(1)
 	conn.as = reg
 
 	// Drive the state machine the way monitor() does, rather than poking the
 	// registry directly.
-	if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("handleStateUpdate(ASP-INACTIVE): %v", err)
 	}
 	if got := as.State(); got != ASInactive {
-		t.Errorf("AS state = %v after the Conn reached ASP-INACTIVE, want %v",
+		t.Errorf("AS state = %v after the Association reached ASP-INACTIVE, want %v",
 			got, ASInactive)
 	}
 
-	if err := conn.handleStateUpdate(StateAspActive); err != nil {
+	if err := conn.handleStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("handleStateUpdate(ASP-ACTIVE): %v", err)
 	}
 	if got := as.State(); got != ASActive {
-		t.Errorf("AS state = %v after the Conn reached ASP-ACTIVE, want %v",
+		t.Errorf("AS state = %v after the Association reached ASP-ACTIVE, want %v",
 			got, ASActive)
 	}
 }
@@ -429,11 +496,11 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("DN2IA", func(t *testing.T) {
 		reg := newApplicationServers(time.Hour)
 		as := reg.get(1)
-		c, _ := asTestConn(t, reg, StateAspDown, 1)
+		c, _ := asTestConn(t, reg, StateASPDown, 1)
 		if got := as.State(); got != ASDown {
 			t.Fatalf("start state = %v, want %v", got, ASDown)
 		}
-		reg.aspStateChanged(c, StateAspInactive)
+		reg.aspStateChanged(c, StateASPInactive)
 		if got := as.State(); got != ASInactive {
 			t.Errorf("DN2IA gave %v, want %v", got, ASInactive)
 		}
@@ -442,8 +509,8 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("IA2DN", func(t *testing.T) {
 		reg := newApplicationServers(time.Hour)
 		as := reg.get(1)
-		c, _ := asTestConn(t, reg, StateAspInactive, 1)
-		reg.aspStateChanged(c, StateAspDown)
+		c, _ := asTestConn(t, reg, StateASPInactive, 1)
+		reg.aspStateChanged(c, StateASPDown)
 		if got := as.State(); got != ASDown {
 			t.Errorf("IA2DN gave %v, want %v — the last ASP-INACTIVE ASP went "+
 				"down, so all ASPs are ASP-DOWN", got, ASDown)
@@ -453,8 +520,8 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("IA2AC", func(t *testing.T) {
 		reg := newApplicationServers(time.Hour)
 		as := reg.get(1)
-		c, _ := asTestConn(t, reg, StateAspInactive, 1)
-		reg.aspStateChanged(c, StateAspActive)
+		c, _ := asTestConn(t, reg, StateASPInactive, 1)
+		reg.aspStateChanged(c, StateASPActive)
 		if got := as.State(); got != ASActive {
 			t.Errorf("IA2AC gave %v, want %v", got, ASActive)
 		}
@@ -465,14 +532,14 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 		name string
 		to   State
 	}{
-		{"AC2PN via ASP-INACTIVE", StateAspInactive},
-		{"AC2PN via ASP-DOWN", StateAspDown},
+		{"AC2PN via ASP-INACTIVE", StateASPInactive},
+		{"AC2PN via ASP-DOWN", StateASPDown},
 	} {
 		t.Run(leaving.name, func(t *testing.T) {
 			reg := newApplicationServers(time.Hour)
 			as := reg.get(1)
-			c, _ := asTestConn(t, reg, StateAspInactive, 1)
-			reg.aspStateChanged(c, StateAspActive)
+			c, _ := asTestConn(t, reg, StateASPInactive, 1)
+			reg.aspStateChanged(c, StateASPActive)
 			reg.aspStateChanged(c, leaving.to)
 			if got := as.State(); got != ASPending {
 				t.Errorf("%s gave %v, want %v", leaving.name, got, ASPending)
@@ -483,13 +550,13 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("PN2AC", func(t *testing.T) {
 		reg := newApplicationServers(time.Hour)
 		as := reg.get(1)
-		c, _ := asTestConn(t, reg, StateAspInactive, 1)
-		reg.aspStateChanged(c, StateAspActive)
-		reg.aspStateChanged(c, StateAspInactive)
+		c, _ := asTestConn(t, reg, StateASPInactive, 1)
+		reg.aspStateChanged(c, StateASPActive)
+		reg.aspStateChanged(c, StateASPInactive)
 		if got := as.State(); got != ASPending {
 			t.Fatalf("setup: state = %v, want %v", got, ASPending)
 		}
-		reg.aspStateChanged(c, StateAspActive)
+		reg.aspStateChanged(c, StateASPActive)
 		if got := as.State(); got != ASActive {
 			t.Errorf("PN2AC gave %v, want %v", got, ASActive)
 		}
@@ -498,9 +565,9 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("PN2IA", func(t *testing.T) {
 		reg := newApplicationServers(40 * time.Millisecond)
 		as := reg.get(1)
-		c, _ := asTestConn(t, reg, StateAspInactive, 1)
-		reg.aspStateChanged(c, StateAspActive)
-		reg.aspStateChanged(c, StateAspInactive) // one ASP left in ASP-INACTIVE
+		c, _ := asTestConn(t, reg, StateASPInactive, 1)
+		reg.aspStateChanged(c, StateASPActive)
+		reg.aspStateChanged(c, StateASPInactive) // one ASP left in ASP-INACTIVE
 		if !waitFor(func() bool { return as.State() == ASInactive }, 2*time.Second) {
 			t.Errorf("PN2IA gave %v, want %v after T(r) with an ASP-INACTIVE ASP",
 				as.State(), ASInactive)
@@ -510,9 +577,9 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("PN2DN", func(t *testing.T) {
 		reg := newApplicationServers(40 * time.Millisecond)
 		as := reg.get(1)
-		c, _ := asTestConn(t, reg, StateAspInactive, 1)
-		reg.aspStateChanged(c, StateAspActive)
-		reg.aspStateChanged(c, StateAspDown) // no ASP left anywhere but ASP-DOWN
+		c, _ := asTestConn(t, reg, StateASPInactive, 1)
+		reg.aspStateChanged(c, StateASPActive)
+		reg.aspStateChanged(c, StateASPDown) // no ASP left anywhere but ASP-DOWN
 		if !waitFor(func() bool { return as.State() == ASDown }, 2*time.Second) {
 			t.Errorf("PN2DN gave %v, want %v after T(r) with every ASP ASP-DOWN",
 				as.State(), ASDown)
@@ -522,13 +589,13 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("AS-ACTIVE never leaves except through AS-PENDING", func(t *testing.T) {
 		reg := newApplicationServers(time.Hour)
 		as := reg.get(1)
-		first, _ := asTestConn(t, reg, StateAspInactive, 1)
-		second, _ := asTestConn(t, reg, StateAspInactive, 1)
-		reg.aspStateChanged(first, StateAspActive)
-		reg.aspStateChanged(second, StateAspActive)
+		first, _ := asTestConn(t, reg, StateASPInactive, 1)
+		second, _ := asTestConn(t, reg, StateASPInactive, 1)
+		reg.aspStateChanged(first, StateASPActive)
+		reg.aspStateChanged(second, StateASPActive)
 
 		// One of two leaving is not the last, so nothing changes.
-		reg.aspStateChanged(second, StateAspDown)
+		reg.aspStateChanged(second, StateASPDown)
 		if got := as.State(); got != ASActive {
 			t.Errorf("state = %v after one of two active ASPs went down, want %v: "+
 				"an AS \"keeps the AS-ACTIVE state till the last ASP turns to "+
@@ -537,7 +604,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 
 		// The last one leaving goes to AS-PENDING, never straight to
 		// AS-INACTIVE or AS-DOWN: Figure 4 has no such edge.
-		reg.aspStateChanged(first, StateAspDown)
+		reg.aspStateChanged(first, StateASPDown)
 		if got := as.State(); got != ASPending {
 			t.Errorf("state = %v when the last active ASP left, want %v", got, ASPending)
 		}
@@ -554,22 +621,22 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 // why the audit could not conclude that a multi-AS SGP routes DATA to the right
 // place.
 func TestASPsForTrafficAppliesTheTrafficMode(t *testing.T) {
-	setup := func(t *testing.T, mode uint32, n int) (*Listener, []*Conn) {
+	setup := func(t *testing.T, mode uint32, n int) (*Listener, []*Association) {
 		t.Helper()
-		l := &Listener{Config: NewServerConfig(
+		l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
 			&HeartbeatInfo{Enabled: false},
 			0x111111, 0x222222, 1, mode, 0, 0, []uint32{1}, 3, 2, 1, 0,
 		)}
 		l.as = newApplicationServers(time.Hour)
 		l.as.get(1).setTrafficMode(mode)
 
-		conns := make([]*Conn, 0, n)
+		conns := make([]*Association, 0, n)
 		for i := 0; i < n; i++ {
-			c, _ := newTestConn(t, StateAspInactive, modeServer)
+			c, _ := newTestConn(t, StateASPInactive, RoleSGP)
 			c.cfg.RoutingContexts = params.NewRoutingContext(1)
-			c.cfg.AspIdentifier = params.NewAspIdentifier(uint32(i + 1))
+			c.cfg.ASPIdentifier = params.NewAspIdentifier(uint32(i + 1))
 			c.as = l.as
-			l.as.aspStateChanged(c, StateAspActive)
+			l.as.aspStateChanged(c, StateASPActive)
 			conns = append(conns, c)
 		}
 		return l, conns
@@ -610,7 +677,7 @@ func TestASPsForTrafficAppliesTheTrafficMode(t *testing.T) {
 
 	t.Run("Loadshare spreads different SLS values", func(t *testing.T) {
 		l, _ := setup(t, params.TrafficModeLoadshare, 3)
-		seen := map[*Conn]bool{}
+		seen := map[*Association]bool{}
 		for sls := 0; sls < 12; sls++ {
 			got := l.ASPsForTraffic(1, uint8(sls))
 			if len(got) == 1 {
@@ -625,7 +692,7 @@ func TestASPsForTrafficAppliesTheTrafficMode(t *testing.T) {
 
 	t.Run("an AS with no active ASP selects nobody", func(t *testing.T) {
 		l, conns := setup(t, params.TrafficModeLoadshare, 1)
-		l.as.aspStateChanged(conns[0], StateAspInactive)
+		l.as.aspStateChanged(conns[0], StateASPInactive)
 		if got := l.ASPsForTraffic(1, 0); len(got) != 0 {
 			t.Errorf("got %d ASPs for an AS with none active, want 0", len(got))
 		}

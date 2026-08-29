@@ -16,26 +16,45 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// Listener is a M3UA listener.
+// Listener accepts SCTP associations for an Endpoint.
+//
+// Listener is a transport-orientation type, not an M3UA protocol role. The
+// Endpoint that created it determines whether accepted associations run ASP,
+// SGP, or (through explicit Single Exchange model or Double Exchange model
+// APIs) IPSP procedures.
 type Listener struct {
 	sctpListener *sctp.SCTPListener
-	*Config
+	endpoint     *Endpoint
+	*AssociationConfig
 	listenerConfig *ListenerConfig
 	// trafficModes is copied from ListenerConfig when Listen constructs the Listener.
-	// Every accepted Conn and the shared AS registry inherit this one immutable
-	// policy, even if the caller later reuses or mutates the Config.
+	// Every accepted Association and the shared AS registry inherit this one
+	// immutable policy, even if the caller later mutates AssociationConfig.
 	trafficModes trafficModeSnapshot
 
 	// muConns guards conns, which tracks the associations this listener has
 	// accepted so Close can take them down with it.
 	muConns sync.Mutex
-	conns   map[*Conn]struct{}
-	closed  bool
+	conns   map[*Association]struct{}
+	// pendingSCTP contains accepted SCTP associations that have not yet been
+	// promoted to M3UA Associations. Close owns these sockets too, including
+	// while SelectAssociationConfig is running.
+	pendingSCTP map[*sctp.SCTPConn]struct{}
+	// activeAccept counts accepted SCTP associations still inside Accept,
+	// including peer selection and M3UA establishment.
+	activeAccept int
+	closed       bool
+	// closeComplete prevents the last returning Accept from releasing Endpoint
+	// state while Close is still shutting down established Associations.
+	closeComplete bool
 
 	// restarts turns SCTP association-change events into M-SCTP_RESTART
 	// indications. One per Listener, because the dependency gives every
 	// accepted association the listener's handler; it routes by association ID.
 	restarts *restartWatcher
+	// releaseEndpointStateOwner releases the SGP Endpoint reservation after the
+	// listening socket and every accepted Association have closed.
+	releaseEndpointStateOwner func()
 
 	// nif records isolation from the nodal interworking function, which
 	// RFC 4666 Section 4.7 makes the SGP answer differently.
@@ -46,7 +65,7 @@ type Listener struct {
 	//
 	// It belongs to the node, not to any one ASP: an SG learns it from the SS7
 	// network, and Section 4.5.3 has it answer every ASP's DAUD from the same
-	// view. Held per-Conn, it was lost whenever an ASP reconnected, and the
+	// view. Held per-Association, it was lost whenever an ASP reconnected, and the
 	// audit a recovering ASP sends was then answered DUNA for destinations the
 	// SG knew were reachable.
 	destinations *destinations
@@ -56,7 +75,7 @@ type Listener struct {
 	//
 	// The AS state machine of RFC 4666 Section 4.3.2 is a property of the group
 	// of ASPs serving a Routing Context, not of any one association, so it
-	// lives here rather than on a Conn: "the last remaining active ASP in the
+	// lives here rather than on an Association: "the last remaining active ASP in the
 	// AS", Override's "previously active ASP in the AS", and a Notify sent "to
 	// all ASPs in the AS" are all statements about the set.
 	as *applicationServers
@@ -108,10 +127,11 @@ func (l *Listener) applicationServers() *applicationServers {
 	return l.as
 }
 
-// track registers an accepted Conn so Close can shut it down, and reports
-// whether the listener is still open. A Conn accepted while Close is running
+// track registers an accepted Association so Close can shut it down, and
+// reports whether the listener is still open. An Association accepted while
+// Close is running
 // would otherwise outlive the listener that produced it.
-func (l *Listener) track(c *Conn) bool {
+func (l *Listener) track(c *Association) bool {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
 
@@ -119,32 +139,94 @@ func (l *Listener) track(c *Conn) bool {
 		return false
 	}
 	if l.conns == nil {
-		l.conns = make(map[*Conn]struct{})
+		l.conns = make(map[*Association]struct{})
 	}
 	l.conns[c] = struct{}{}
 
 	return true
 }
 
-// registry returns the listener's Application Server registry and NIF state,
-// creating them on first use.
-//
-// Accept calls this before starting the Conn's goroutines, because the fields it
-// copies onto the Conn have to be in place before anything can read them: the
-// dispatcher reads Conn.as on every state change and Conn.nif on every ASP Up,
-// and assigning them after monitor() is running is a data race — which is
-// exactly what happened when they were set in track(), since track runs only
-// once the association is established.
-func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinations) {
+// beginAccept makes the Listener own an accepted SCTP association before any
+// peer configuration or M3UA establishment work starts.
+func (l *Listener) beginAccept(sctpAssociation *sctp.SCTPConn) bool {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
 
+	if l.closed {
+		return false
+	}
+	if l.pendingSCTP == nil {
+		l.pendingSCTP = make(map[*sctp.SCTPConn]struct{})
+	}
+	l.pendingSCTP[sctpAssociation] = struct{}{}
+	l.activeAccept++
+	return true
+}
+
+// rejectPendingSCTP removes a socket that will not become an M3UA Association.
+func (l *Listener) rejectPendingSCTP(sctpAssociation *sctp.SCTPConn) {
+	l.muConns.Lock()
+	delete(l.pendingSCTP, sctpAssociation)
+	l.muConns.Unlock()
+}
+
+// promoteAcceptedAssociation atomically attaches shared SGP state and moves a
+// socket from the pre-M3UA set into the Listener's Association set.
+func (l *Listener) promoteAcceptedAssociation(association *Association) bool {
+	l.muConns.Lock()
+	defer l.muConns.Unlock()
+
+	delete(l.pendingSCTP, association.sctpConn)
+	if l.closed {
+		return false
+	}
+	if association.role == RoleSGP {
+		association.as, association.nif, association.destinations = l.registryLocked()
+		association.mtp3Restarts = &l.mtp3Restarts
+	}
+	if l.conns == nil {
+		l.conns = make(map[*Association]struct{})
+	}
+	l.conns[association] = struct{}{}
+	return true
+}
+
+// finishAccept retains the Endpoint state reservation until every accepted
+// SCTP association has either become an M3UA Association or been rejected.
+func (l *Listener) finishAccept() {
+	var release func()
+	l.muConns.Lock()
+	l.activeAccept--
+	if l.closed && l.closeComplete && l.activeAccept == 0 {
+		release = l.releaseEndpointStateOwner
+		l.releaseEndpointStateOwner = nil
+	}
+	l.muConns.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// registry returns the listener's Application Server registry and NIF state,
+// creating them on first use.
+//
+// Acceptance promotion invokes registryLocked before starting the
+// Association's goroutines, because the dispatcher reads Association.as on
+// every state change and Association.nif on every ASP Up. Assigning them after
+// monitor starts is a data race.
+func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinations) {
+	l.muConns.Lock()
+	defer l.muConns.Unlock()
+	return l.registryLocked()
+}
+
+func (l *Listener) registryLocked() (*applicationServers, *nifAvailability, *destinations) {
 	if l.destinations == nil {
 		l.destinations = newDestinations()
 	}
 	if l.as == nil {
 		l.as = newApplicationServersWithTrafficModePolicy(
-			l.RecoveryTimer, l.Config, l.trafficModePolicy(),
+			l.RecoveryTimer, l.AssociationConfig, l.trafficModePolicy(),
 		)
 	}
 	if l.nif == nil {
@@ -153,17 +235,18 @@ func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinati
 	return l.as, l.nif, l.destinations
 }
 
-func newListener(config *ListenerConfig) *Listener {
+func newListener(endpoint *Endpoint, config *ListenerConfig) *Listener {
 	listenerConfig := NewListenerConfig(nil)
 	if config != nil {
-		listenerConfig = NewListenerConfig(config.DefaultConnConfig)
-		listenerConfig.SelectConnConfig = config.SelectConnConfig
+		listenerConfig = NewListenerConfig(config.DefaultAssociationConfig)
+		listenerConfig.SelectAssociationConfig = config.SelectAssociationConfig
 	}
 	listener := &Listener{
-		Config:         listenerConfig.DefaultConnConfig,
-		listenerConfig: listenerConfig,
+		AssociationConfig: listenerConfig.DefaultAssociationConfig,
+		listenerConfig:    listenerConfig,
+		endpoint:          endpoint,
 	}
-	listener.trafficModes.freeze(newTrafficModePolicy(listener.Config))
+	listener.trafficModes.freeze(newTrafficModePolicy(listener.AssociationConfig))
 	return listener
 }
 
@@ -171,7 +254,16 @@ func (l *Listener) trafficModePolicy() trafficModePolicy {
 	if l == nil {
 		return trafficModePolicy{}
 	}
-	return l.trafficModes.get(l.Config)
+	return l.trafficModes.get(l.AssociationConfig)
+}
+
+// Role returns the immutable M3UA protocol role of associations accepted by
+// this Listener.
+func (l *Listener) Role() Role {
+	if l == nil || l.endpoint == nil {
+		return 0
+	}
+	return l.endpoint.Role()
 }
 
 // SetDestinationState records a destination's availability at this SG, for every
@@ -179,7 +271,7 @@ func (l *Listener) trafficModePolicy() trafficModePolicy {
 //
 // RFC 4666 Section 4.5.3 has an SG answer a DAUD from what it knows of the SS7
 // network, and that knowledge is a property of the node: it does not arrive over
-// any ASP's association and does not leave with one. Recording it per Conn meant
+// any ASP's association and does not leave with one. Recording it per Association meant
 // an ASP that reconnected — which Section 4.4.2 has it do precisely so it can
 // resynchronise — was answered DUNA for destinations this SG knew were
 // reachable, until an operator happened to set them again on the new
@@ -194,8 +286,8 @@ func (l *Listener) SetDestinationState(pointCode uint32, state DestinationState)
 // configured Network Appearance. Mask wildcards that many low-order bits.
 func (l *Listener) SetDestinationRange(pointCode uint32, mask uint8, state DestinationState) {
 	var configured *params.Param
-	if l.Config != nil {
-		configured = l.Config.NetworkAppearance
+	if l.AssociationConfig != nil {
+		configured = l.AssociationConfig.NetworkAppearance
 	}
 	appearance, set := appearanceOf(configured)
 	_ = l.applyDestinationRange(DestinationRange{
@@ -254,8 +346,8 @@ func (l *Listener) ReportDestinationState(pointCode uint32, state DestinationSta
 // ReportDestinationRange records and synchronously reports a destination range.
 func (l *Listener) ReportDestinationRange(pointCode uint32, mask uint8, state DestinationState) error {
 	var configured *params.Param
-	if l.Config != nil {
-		configured = l.Config.NetworkAppearance
+	if l.AssociationConfig != nil {
+		configured = l.AssociationConfig.NetworkAppearance
 	}
 	appearance, set := appearanceOf(configured)
 	return l.applyDestinationRange(DestinationRange{
@@ -308,6 +400,12 @@ func (l *Listener) ReportDestinationRangeForNetworkAndRoutingContext(networkAppe
 }
 
 func (l *Listener) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
+	if l == nil || l.Role() != RoleSGP {
+		if wait {
+			return ErrUnsupportedRole
+		}
+		return nil
+	}
 	prepared, err := l.prepareLocalDestinationRange(rangeValue)
 	if err != nil {
 		return err
@@ -319,9 +417,9 @@ func (l *Listener) applyDestinationRange(rangeValue DestinationRange, wait bool)
 	closed := l.closed
 	l.muConns.Unlock()
 	if closed {
-		return ErrConnClosed
+		return ErrAssociationClosed
 	}
-	if l.stageAnyMTP3RestartRangeLocked(prepared) {
+	if stageAnyMTP3RestartRangeLocked(restarts, prepared) {
 		return nil
 	}
 	destinations := l.destinationRegistry()
@@ -338,10 +436,10 @@ func (l *Listener) legacyDestinationScope(networkAppearance uint32, networkAppea
 		networkAppearance:    networkAppearance,
 		networkAppearanceSet: networkAppearanceSet,
 	}
-	if l.Config == nil || l.Config.RoutingContexts == nil {
+	if l.AssociationConfig == nil || l.AssociationConfig.RoutingContexts == nil {
 		return scope
 	}
-	configured := l.Config.RoutingContexts.RoutingContexts()
+	configured := l.AssociationConfig.RoutingContexts.RoutingContexts()
 	if len(configured) == 1 {
 		scope.routingContext = configured[0]
 		scope.routingContextSet = true
@@ -362,8 +460,8 @@ func (l *Listener) DestinationState(pointCode uint32) (DestinationState, bool) {
 		return DestinationUnavailable, false
 	}
 	var configured *params.Param
-	if l.Config != nil {
-		configured = l.Config.NetworkAppearance
+	if l.AssociationConfig != nil {
+		configured = l.AssociationConfig.NetworkAppearance
 	}
 	appearance, set := appearanceOf(configured)
 	scope := l.legacyDestinationScope(appearance, set)
@@ -418,8 +516,8 @@ func (l *Listener) DestinationRanges() []DestinationRange {
 		return []DestinationRange{}
 	}
 	var configured *params.Param
-	if l.Config != nil {
-		configured = l.Config.NetworkAppearance
+	if l.AssociationConfig != nil {
+		configured = l.AssociationConfig.NetworkAppearance
 	}
 	appearance, set := appearanceOf(configured)
 	return d.rangesForScope(l.legacyDestinationScope(appearance, set))
@@ -458,29 +556,46 @@ func (l *Listener) DestinationRangesForNetworkAndRoutingContext(networkAppearanc
 	})
 }
 
-// forget drops a Conn from the listener's set, so a long-lived listener does
+// forget drops an Association from the listener's set, so a long-lived Listener does
 // not accumulate every association it has ever accepted.
-func (l *Listener) forget(c *Conn) {
+func (l *Listener) forget(c *Association) {
 	l.muConns.Lock()
 	as := l.as
 	delete(l.conns, c)
 	l.muConns.Unlock()
 
 	// An association that has gone is no longer an ASP of any Application
-	// Server, and its departure may be what takes the AS out of AS-ACTIVE.
+	// Server, and its departure may take the AS out of AS-ACTIVE.
 	if as != nil {
 		as.forget(c)
 	}
 }
 
-// Listen returns a M3UA listener.
-func Listen(net string, laddr *sctp.SCTPAddr, cfg *ListenerConfig) (*Listener, error) {
+// Listen returns an SCTP listener whose accepted associations run this
+// Endpoint's M3UA role. One RoleSGP Endpoint currently permits one Listener or
+// one dialed Association as its shared protocol-state owner; another returns
+// ErrEndpointStateInUse. A RoleSGP Listener itself may accept multiple ASPs.
+func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerConfig) (*Listener, error) {
 	var err error
-	l := newListener(cfg)
+	role, err := e.associationRole()
+	if err != nil {
+		return nil, err
+	}
+	l := newListener(e, cfg)
+	if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
+		return nil, err
+	}
 
-	n, ok := netMap[net]
+	n, ok := netMap[network]
 	if !ok {
-		return nil, fmt.Errorf("invalid network: %s", net)
+		return nil, fmt.Errorf("invalid network: %s", network)
+	}
+	var releaseEndpointStateOwner func()
+	if role == RoleSGP {
+		releaseEndpointStateOwner, err = e.reserveSGPStateOwner()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Through SocketConfig rather than ListenSCTP so a notification handler can
@@ -488,23 +603,28 @@ func Listen(net string, laddr *sctp.SCTPAddr, cfg *ListenerConfig) (*Listener, e
 	// and gives the same one to every association it accepts, so the handler
 	// routes by association ID; see restartWatcher.
 	l.restarts = &restartWatcher{}
-	l.restarts.setRoute(l.connForAssoc)
+	l.restarts.setRoute(l.associationForSCTPID)
 	scfg := &sctp.SocketConfig{NotificationHandler: l.restarts.handle}
 
 	l.sctpListener, err = scfg.Listen(n, laddr)
 	if err != nil {
+		if releaseEndpointStateOwner != nil {
+			releaseEndpointStateOwner()
+		}
 		return nil, fmt.Errorf("failed to listen SCTP: %w", err)
 	}
+	l.releaseEndpointStateOwner = releaseEndpointStateOwner
 	return l, nil
 }
 
-// connForAssoc finds the accepted Conn owning an association, or nil.
+// associationForSCTPID finds the accepted Association with the given SCTP
+// association identifier, or nil.
 //
 // Linear over the tracked associations rather than a second map keyed by ID:
 // the set is the ASPs a single SGP serves, it is walked only when the kernel
 // reports an association event, and a second index would be one more thing to
 // keep in step with track and forget.
-func (l *Listener) connForAssoc(id sctp.SCTPAssocID) *Conn {
+func (l *Listener) associationForSCTPID(id sctp.SCTPAssocID) *Association {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
 
@@ -516,110 +636,133 @@ func (l *Listener) connForAssoc(id sctp.SCTPAssocID) *Conn {
 	return nil
 }
 
-// Accept waits for and returns the next connection to the listener.
-// After successfully establishing the association with peer, Payload can be read with Read() func.
-// Other signals are automatically handled background in another goroutine.
+// Accept waits for and returns the next M3UA association.
+// After establishment, DATA can be read through Association.Read; M3UA control
+// procedures continue in background goroutines.
 //
 // Accept does not return until the M3UA handshake for that peer has completed,
 // or until it gives up on it after ten seconds. A single accept loop therefore
 // serves peers strictly one at a time, and one silent peer holds up every other
 // ASP waiting behind it for the whole of that budget.
 //
-// Accept is safe for concurrent use, so a server expecting several ASPs should
-// run several Accepts rather than one loop:
+// Accept is safe for concurrent use, so an endpoint expecting several SCTP
+// associations should run several Accepts rather than one loop:
 //
 //	for i := 0; i < concurrency; i++ {
 //		go func() {
 //			for {
-//				conn, err := l.Accept(ctx)
+//				association, err := l.Accept(ctx)
 //				if err != nil {
 //					return
 //				}
-//				go serve(conn)
+//				go serve(association)
 //			}
 //		}()
 //	}
 //
-// Nothing in Accept writes to the shared Config, and each accepted Conn owns its
-// own association; TestConcurrentAcceptsAreIndependent covers this.
+// Nothing in Accept writes to shared AssociationConfig, and each accepted
+// Association owns its SCTP association; TestConcurrentAcceptsAreIndependent
+// covers this.
 //
 // Cancelling ctx does not interrupt an Accept that is blocked waiting for a peer
 // to connect — only Close does. Once a peer has connected, ctx bounds the
-// handshake, alongside Config.EstablishTimeout.
-func (l *Listener) Accept(ctx context.Context) (*Conn, error) {
-
-	// The association is accepted before the Conn is built, so nothing has to be
-	// unwound if the accept itself fails.
-	c, err := l.sctpListener.AcceptSCTP()
+// handshake, alongside AssociationConfig.EstablishTimeout.
+//
+// A failure after SCTP accept and before M3UA establishment is returned as an
+// AssociationEstablishmentError. An SCTP listener failure is returned directly.
+func (l *Listener) Accept(ctx context.Context) (*Association, error) {
+	role, err := l.endpoint.associationRole()
 	if err != nil {
 		return nil, err
 	}
 
-	// Every Conn this Listener produces shares l.Config, so this function must
-	// treat it as read-only. The association and the settings derived from it
-	// live on the Conn: while they lived on the Config, this Accept would
-	// rebind the previously accepted Conn's socket to the association just
-	// taken, and that Conn would go on to serve the wrong ASP.
-	connConfig, err := l.listenerConfig.connConfigForAccept(newAcceptInfo(c.LocalAddr(), c.RemoteAddr()))
+	// The SCTP association is accepted before the Association is built, so
+	// nothing has to be unwound if the accept itself fails.
+	sctpAssociation, err := l.sctpListener.AcceptSCTP()
 	if err != nil {
-		_ = c.Close()
 		return nil, err
 	}
-	conn := newConnWithTrafficModePolicy(modeServer, connConfig, newTrafficModePolicy(connConfig))
-	conn.sctpConn = c
-	// Set at construction, before any goroutine can observe this Conn, so
+	if !l.beginAccept(sctpAssociation) {
+		_ = sctpAssociation.Close()
+		return nil, net.ErrClosed
+	}
+	defer l.finishAccept()
+
+	// Every Association this Listener produces can share AssociationConfig, so
+	// this function must treat it as read-only. The SCTP association and the
+	// settings derived from it
+	// live on the Association: while they lived on AssociationConfig, Accept
+	// rebound the previously accepted Association's socket to the SCTP
+	// association just taken, and that Association served the wrong ASP.
+	acceptInfo := newAcceptInfo(sctpAssociation.LocalAddr(), sctpAssociation.RemoteAddr())
+	associationConfig, err := l.listenerConfig.associationConfigForAccept(acceptInfo)
+	if err != nil {
+		l.rejectPendingSCTP(sctpAssociation)
+		_ = sctpAssociation.Close()
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
+	}
+	if err := validateAssociationConfigForRole(role, associationConfig); err != nil {
+		l.rejectPendingSCTP(sctpAssociation)
+		_ = sctpAssociation.Close()
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
+	}
+	association := newAssociationWithTrafficModePolicy(role, associationConfig, newTrafficModePolicy(associationConfig))
+	association.sctpConn = sctpAssociation
+	// Set at construction, before any goroutine can observe this Association, so
 	// the field is immutable for its lifetime: Close reads it concurrently
 	// with Accept, and assigning it later is a data race. The same applies to
 	// the Application Server registry and the NIF state, which the dispatcher
 	// reads as soon as monitor() starts.
-	conn.listener = l
-	conn.as, conn.nif, conn.destinations = l.registry()
+	association.listener = l
+	if !l.promoteAcceptedAssociation(association) {
+		_ = association.closeWith(ErrFailedToEstablish)
+		return nil, &AssociationEstablishmentError{
+			RemoteAddr: acceptInfo.RemoteAddr,
+			Err:        ErrFailedToEstablish,
+		}
+	}
 
-	if err := conn.setUpSocket(); err != nil {
-		return nil, err
+	if err := association.setUpSocket(); err != nil {
+		_ = association.closeWith(err)
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
 
 	// The opening ASP-DOWN transition is applied by monitor() itself, before it
 	// starts dispatching, rather than published from a goroutine here that
 	// raced the reader for it.
-	go conn.monitor(ctx)
-	establishTimeout := conn.cfg.EstablishTimeout
+	go association.monitor(ctx)
+	establishTimeout := association.cfg.EstablishTimeout
 	if establishTimeout <= 0 {
 		establishTimeout = DefaultEstablishTimeout
 	}
 
 	select {
-	case <-conn.established:
-		// Register only once established: a Conn that never came up is closed
-		// on the failure paths below and has nothing for Close to do.
-		if !l.track(conn) {
-			// The listener closed while this association was coming up, so it
-			// would never be shut down by anything else.
-			_ = conn.closeWith(ErrFailedToEstablish)
-			return nil, ErrFailedToEstablish
-		}
-		return conn, nil
-	case <-conn.done:
-		if err := conn.Err(); err != nil {
+	case <-association.established:
+		return association, nil
+	case <-association.done:
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, ErrFailedToEstablish
+		if err := association.Err(); err != nil {
+			return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
+		}
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: ErrFailedToEstablish}
 	case <-ctx.Done():
-		_ = conn.closeWith(ctx.Err())
+		_ = association.closeWith(ctx.Err())
 		return nil, ctx.Err()
 	case <-time.After(establishTimeout):
-		_ = conn.closeWith(ErrTimeout)
-		return nil, ErrTimeout
+		_ = association.closeWith(ErrTimeout)
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: ErrTimeout}
 	}
 }
 
 // Close closes the listener.
 func (l *Listener) Close() error {
 	// Take the accepted associations down with the listener. Closing only the
-	// SCTP listener left every Conn it had produced running: their monitor and
-	// reader goroutines carried on against peers that had no idea the service
-	// was gone, so a server shutdown leaked one set of goroutines per client
-	// and left half-open associations behind.
+	// SCTP listener left every Association it had produced running: their
+	// monitor and reader goroutines carried on against peers that had no idea
+	// the service was gone, so closing a Listener leaked one set of goroutines
+	// per accepted association and left half-open associations behind.
 	l.mtp3Restarts.procedureMu.Lock()
 	l.muConns.Lock()
 	if l.closed {
@@ -629,11 +772,16 @@ func (l *Listener) Close() error {
 	}
 	l.closed = true
 	as := l.as
-	conns := make([]*Conn, 0, len(l.conns))
+	conns := make([]*Association, 0, len(l.conns))
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
 	l.conns = nil
+	pendingSCTP := make([]*sctp.SCTPConn, 0, len(l.pendingSCTP))
+	for association := range l.pendingSCTP {
+		pendingSCTP = append(pendingSCTP, association)
+	}
+	l.pendingSCTP = nil
 	l.muConns.Unlock()
 	l.mtp3Restarts.mu.Lock()
 	l.mtp3Restarts.active = nil
@@ -649,13 +797,29 @@ func (l *Listener) Close() error {
 			firstErr = err
 		}
 	}
+	for _, association := range pendingSCTP {
+		if err := association.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 
-	// Conn.Close is idempotent. The listening socket is already closed, so no
+	// Association.Close is idempotent. The listening socket is already closed, so no
 	// new association can enter while the existing set is being released.
 	for _, c := range conns {
 		if err := c.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	var releaseEndpointStateOwner func()
+	l.muConns.Lock()
+	l.closeComplete = true
+	if l.activeAccept == 0 {
+		releaseEndpointStateOwner = l.releaseEndpointStateOwner
+		l.releaseEndpointStateOwner = nil
+	}
+	l.muConns.Unlock()
+	if releaseEndpointStateOwner != nil {
+		releaseEndpointStateOwner()
 	}
 
 	return firstErr
@@ -677,7 +841,7 @@ func (l *Listener) Addr() net.Addr {
 // which has no MTP3 ingress of its own; what the library can answer, and could
 // not before, is which ASPs are presently serving the AS that Routing Key maps
 // to.
-func (l *Listener) ActiveASPs(rtCtx uint32) []*Conn {
+func (l *Listener) ActiveASPs(rtCtx uint32) []*Association {
 	as := l.applicationServers()
 	if as == nil {
 		return nil
@@ -691,7 +855,7 @@ func (l *Listener) ActiveASPs(rtCtx uint32) []*Conn {
 
 // ActiveASPsForAS returns the associations currently able to carry traffic for
 // an exact ASKey.
-func (l *Listener) ActiveASPsForAS(key ASKey) []*Conn {
+func (l *Listener) ActiveASPsForAS(key ASKey) []*Association {
 	as := l.applicationServers()
 	if as == nil {
 		return nil
@@ -725,7 +889,7 @@ func (l *Listener) ActiveASPsForAS(key ASKey) []*Conn {
 // An empty result means the AS has no ASP able to take traffic, which for an
 // AS-PENDING AS is the point: Section 4.3.2 has the SGP queue rather than
 // discard while T(r) runs.
-func (l *Listener) ASPsForTraffic(rtCtx uint32, sls uint8) []*Conn {
+func (l *Listener) ASPsForTraffic(rtCtx uint32, sls uint8) []*Association {
 	registry := l.applicationServers()
 	if registry == nil {
 		return nil
@@ -739,7 +903,7 @@ func (l *Listener) ASPsForTraffic(rtCtx uint32, sls uint8) []*Conn {
 
 // ASPsForTrafficForAS returns the associations a message for this exact ASKey
 // should be sent to, applying the AS's traffic mode.
-func (l *Listener) ASPsForTrafficForAS(key ASKey, sls uint8) []*Conn {
+func (l *Listener) ASPsForTrafficForAS(key ASKey, sls uint8) []*Association {
 	registry := l.applicationServers()
 	if registry == nil {
 		return nil
@@ -751,7 +915,7 @@ func (l *Listener) ASPsForTrafficForAS(key ASKey, sls uint8) []*Conn {
 	return aspsForTraffic(as, sls)
 }
 
-func aspsForTraffic(as *applicationServer, sls uint8) []*Conn {
+func aspsForTraffic(as *applicationServer, sls uint8) []*Association {
 	if as == nil {
 		return nil
 	}
@@ -771,7 +935,7 @@ func aspsForTraffic(as *applicationServer, sls uint8) []*Conn {
 	default:
 		// Loadshare, and the unset case: one ASP, chosen by SLS so a given SLS
 		// always lands on the same one.
-		return []*Conn{active[int(sls)%len(active)]}
+		return []*Association{active[int(sls)%len(active)]}
 	}
 }
 
@@ -787,32 +951,40 @@ func aspsForTraffic(as *applicationServer, sls uint8) []*Conn {
 // The NIF is above this library — it is where MTP3 meets M3UA, and this package
 // has no MTP3 side — so only the application knows when it has gone. Declaring
 // it here is what lets the library produce the behaviour the section describes;
-// without it, error code 0x0d could never be sent at all.
-func (l *Listener) SetNIFAvailable(available bool) {
-	_, nif, _ := l.registry()
-
+// without it, error code 0x0d could never be sent at all. It returns
+// ErrUnsupportedRole for a Listener whose Endpoint is not an SGP.
+func (l *Listener) SetNIFAvailable(available bool) error {
+	if l.Role() != RoleSGP {
+		return ErrUnsupportedRole
+	}
 	l.muConns.Lock()
-	conns := make([]*Conn, 0, len(l.conns))
+	if l.closed {
+		l.muConns.Unlock()
+		return ErrAssociationClosed
+	}
+	_, nif, _ := l.registryLocked()
+	conns := make([]*Association, 0, len(l.conns))
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
+	nif.setIsolated(!available)
 	l.muConns.Unlock()
 
-	nif.setIsolated(!available)
 	if available {
-		return
+		return nil
 	}
 
 	// "the SGP should send ASP Down Ack to all its connected ASPs".
 	var isolated sync.WaitGroup
 	isolated.Add(len(conns))
 	for _, c := range conns {
-		go func(c *Conn) {
+		go func(c *Association) {
 			defer isolated.Done()
 			isolateNIFConnection(c)
 		}(c)
 	}
 	isolated.Wait()
+	return nil
 }
 
 // SetASAvailable declares whether this SGP can still service one Application
@@ -825,45 +997,55 @@ func (l *Listener) SetNIFAvailable(available bool) {
 //	Upon receiving an ASP Active message for an affected AS while still
 //	partially isolated from the NIF, the SGP should respond with an
 //	Error ("Refused - Management Blocking").
-func (l *Listener) SetASAvailable(rtCtx uint32, available bool) {
-	registry, _, _ := l.registry()
+//
+// It returns ErrUnsupportedRole for a Listener whose Endpoint is not an SGP.
+func (l *Listener) SetASAvailable(rtCtx uint32, available bool) error {
+	registry, err := l.openAvailabilityRegistry()
+	if err != nil {
+		return err
+	}
 	registryKey, _, registryOK, registryAmbiguous := registry.lookupRoutingContext(rtCtx)
 	if registryAmbiguous {
-		return
+		return nil
 	}
 	trackedKey, trackedOK, trackedAmbiguous := l.singleTrackedASKeyForRoutingContext(rtCtx)
 	if trackedAmbiguous {
-		return
+		return nil
 	}
 	if registryOK && trackedOK && registryKey != trackedKey {
-		return
+		return nil
 	}
 	if registryOK {
-		l.SetASAvailableForAS(registryKey, available)
-		return
+		return l.SetASAvailableForAS(registryKey, available)
 	}
 	if trackedOK {
-		l.SetASAvailableForAS(trackedKey, available)
-		return
+		return l.SetASAvailableForAS(trackedKey, available)
 	}
-	l.SetASAvailableForAS(registry.routingContextASKey(rtCtx), available)
+	return l.SetASAvailableForAS(registry.routingContextASKey(rtCtx), available)
 }
 
 // SetASAvailableForAS declares whether this SGP can still service one exact
-// Application Server.
-func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
-	as, nif, _ := l.registry()
-
+// Application Server. It returns ErrUnsupportedRole for a Listener whose
+// Endpoint is not an SGP.
+func (l *Listener) SetASAvailableForAS(key ASKey, available bool) error {
+	if l.Role() != RoleSGP {
+		return ErrUnsupportedRole
+	}
 	l.muConns.Lock()
-	conns := make([]*Conn, 0, len(l.conns))
+	if l.closed {
+		l.muConns.Unlock()
+		return ErrAssociationClosed
+	}
+	as, nif, _ := l.registryLocked()
+	conns := make([]*Association, 0, len(l.conns))
 	for c := range l.conns {
 		conns = append(conns, c)
 	}
+	nif.setASAvailableForAS(key, available)
 	l.muConns.Unlock()
 
-	nif.setASAvailableForAS(key, available)
 	if available {
-		return
+		return nil
 	}
 
 	// "the SGP should send ASP Inactive Ack to all its connected ASPs for the
@@ -875,7 +1057,7 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
 				continue
 			}
 			isolated.Add(1)
-			go func(c *Conn) {
+			go func(c *Association) {
 				defer isolated.Done()
 				isolateApplicationServerConnection(c, as, key)
 			}(c)
@@ -883,6 +1065,122 @@ func (l *Listener) SetASAvailableForAS(key ASKey, available bool) {
 		}
 	}
 	isolated.Wait()
+	return nil
+}
+
+func (l *Listener) openAvailabilityRegistry() (*applicationServers, error) {
+	if l.Role() != RoleSGP {
+		return nil, ErrUnsupportedRole
+	}
+	l.muConns.Lock()
+	defer l.muConns.Unlock()
+	if l.closed {
+		return nil, ErrAssociationClosed
+	}
+	registry, _, _ := l.registryLocked()
+	return registry, nil
+}
+
+// SetNIFAvailable declares whether this dialing SGP Association can reach the
+// SS7 network through its nodal interworking function. On an accepted SGP
+// Association it applies the Listener-wide NIF state. RFC 4666 Section 4.7
+// defines the resulting ASP Down Ack and management-blocking procedures.
+func (c *Association) SetNIFAvailable(available bool) error {
+	if err := c.validateSGPAvailabilityControl(); err != nil {
+		return err
+	}
+	if c.listener != nil {
+		return c.listener.SetNIFAvailable(available)
+	}
+	c.nif.setIsolated(!available)
+	if !available {
+		isolateNIFConnection(c)
+	}
+	return nil
+}
+
+// SetASAvailable declares whether this dialing SGP Association can service one
+// unambiguous Routing Context. On an accepted SGP Association it applies the
+// Listener-wide Application Server state.
+func (c *Association) SetASAvailable(rtCtx uint32, available bool) error {
+	if err := c.validateSGPAvailabilityControl(); err != nil {
+		return err
+	}
+	if c.listener != nil {
+		return c.listener.SetASAvailable(rtCtx, available)
+	}
+	registryKey, _, registryOK, registryAmbiguous := c.as.lookupRoutingContext(rtCtx)
+	if registryAmbiguous {
+		return nil
+	}
+	configuredKey, configuredOK, configuredAmbiguous := c.singleConfiguredASKeyForRoutingContext(rtCtx)
+	if configuredAmbiguous {
+		return nil
+	}
+	if registryOK && configuredOK && registryKey != configuredKey {
+		return nil
+	}
+	if registryOK {
+		return c.SetASAvailableForAS(registryKey, available)
+	}
+	if configuredOK {
+		return c.SetASAvailableForAS(configuredKey, available)
+	}
+	return c.SetASAvailableForAS(c.as.routingContextASKey(rtCtx), available)
+}
+
+// SetASAvailableForAS declares whether this dialing SGP Association can
+// service one exact Application Server. On an accepted SGP Association it
+// applies the Listener-wide Application Server state.
+func (c *Association) SetASAvailableForAS(key ASKey, available bool) error {
+	if err := c.validateSGPAvailabilityControl(); err != nil {
+		return err
+	}
+	if c.listener != nil {
+		return c.listener.SetASAvailableForAS(key, available)
+	}
+	c.nif.setASAvailableForAS(key, available)
+	if available {
+		return nil
+	}
+	for _, configuredKey := range c.configuredASKeys() {
+		if configuredKey == key {
+			isolateApplicationServerConnection(c, c.as, key)
+			break
+		}
+	}
+	return nil
+}
+
+func (c *Association) validateSGPAvailabilityControl() error {
+	if c == nil || c.Role() != RoleSGP {
+		return ErrUnsupportedRole
+	}
+	select {
+	case <-c.done:
+		return ErrAssociationClosed
+	default:
+	}
+	if c.nif == nil || c.as == nil {
+		return ErrNotEstablished
+	}
+	return nil
+}
+
+func (c *Association) singleConfiguredASKeyForRoutingContext(rtCtx uint32) (ASKey, bool, bool) {
+	var found ASKey
+	foundSet := false
+	for _, key := range c.configuredASKeys() {
+		if !key.RoutingContextSet || key.RoutingContext != rtCtx {
+			continue
+		}
+		if foundSet && key != found {
+			return ASKey{}, false, true
+		}
+		found = key
+		foundSet = true
+	}
+	return found, foundSet, false
 }
 
 func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, bool, bool) {
@@ -906,11 +1204,11 @@ func (l *Listener) singleTrackedASKeyForRoutingContext(rtCtx uint32) (ASKey, boo
 	return found, foundSet, false
 }
 
-func isolateNIFConnection(c *Conn) {
+func isolateNIFConnection(c *Association) {
 	if c == nil {
 		return
 	}
-	c.commitState(StateAspDown)
+	c.commitState(StateASPDown)
 	postAckNotify := func() {}
 	if c.as != nil {
 		postAckNotify = c.as.quiesceASPDown(c)
@@ -918,15 +1216,15 @@ func isolateNIFConnection(c *Conn) {
 	c.quiesceUnscopedTraffic()
 	_ = c.writeMandatoryControls([]messages.M3UA{messages.NewAspDownAck(nil)}, false, true)
 	postAckNotify()
-	c.sendState(StateAspDown)
+	c.sendState(StateASPDown)
 }
 
-func isolateApplicationServerConnection(c *Conn, as *applicationServers, key ASKey) {
+func isolateApplicationServerConnection(c *Association, as *applicationServers, key ASKey) {
 	if c == nil {
 		return
 	}
 	postAckNotify := func() {}
-	if c.State() == StateAspActive {
+	if c.State() == StateASPActive {
 		if key.RoutingContextSet {
 			c.noteRoutingContextsInactive([]uint32{key.RoutingContext})
 		} else {
@@ -945,7 +1243,7 @@ func isolateApplicationServerConnection(c *Conn, as *applicationServers, key ASK
 		messages.NewAspInactiveAck(routingContextParamForASKey(key), nil),
 	}, false, true)
 	postAckNotify()
-	if c.stateForActiveRoutingContexts() == StateAspInactive {
-		c.sendState(StateAspInactive)
+	if c.stateForActiveRoutingContexts() == StateASPInactive {
+		c.sendState(StateASPInactive)
 	}
 }

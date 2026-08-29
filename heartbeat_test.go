@@ -32,7 +32,7 @@ func TestPeerTalkingWithoutBeatAcksIsNotDeclaredDead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Answers ASP Up and ASP Active so the client establishes, then answers
+	// Answers ASP Up and ASP Active so the ASP establishes, then answers
 	// every BEAT with a Notify instead of a BEAT Ack: plenty of evidence of
 	// life, none of it an Ack.
 	peer := newRawPeer(t, 3130, func(msg messages.M3UA) messages.M3UA {
@@ -60,9 +60,9 @@ func TestPeerTalkingWithoutBeatAcksIsNotDeclaredDead(t *testing.T) {
 	// answers every one of them, so it is plainly reachable.
 	time.Sleep(2 * time.Second)
 
-	if got := conn.State(); got != StateAspActive {
+	if got := conn.State(); got != StateASPActive {
 		t.Fatalf("state = %v after 2s of unanswered BEATs on a talking peer, want %v: "+
-			"liveness ignored every message that was not a BEAT Ack", got, StateAspActive)
+			"liveness ignored every message that was not a BEAT Ack", got, StateASPActive)
 	}
 	if got := peer.count("Heartbeat"); got < 2 {
 		t.Errorf("peer saw %d BEATs; the heartbeat was not running and the check above proves nothing", got)
@@ -83,7 +83,7 @@ func TestSilentPeerIsStillDeclaredDead(t *testing.T) {
 		Timer:    200 * time.Millisecond,
 	})
 
-	if !waitFor(func() bool { return conn.State() != StateAspActive }, 10*time.Second) {
+	if !waitFor(func() bool { return conn.State() != StateASPActive }, 10*time.Second) {
 		t.Fatalf("state is still %v against a peer that stopped answering entirely", conn.State())
 	}
 }
@@ -104,12 +104,12 @@ func TestHeartbeatTimerDefaultsToTwiceTheInterval(t *testing.T) {
 		{"both unset leaves BEATs off", 0, 0, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewClientConfig(
+			cfg := newASPAssociationConfigForTest(
 				&HeartbeatInfo{Enabled: true, Interval: tt.interval, Timer: tt.timer},
 				0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 				[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
 			)
-			conn := newConn(modeClient, cfg)
+			conn := newAssociation(RoleASP, cfg)
 
 			if got := conn.hb.Timer; got != tt.want {
 				t.Errorf("resolved T(beat) deadline = %v, want %v", got, tt.want)

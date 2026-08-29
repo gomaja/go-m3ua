@@ -50,7 +50,7 @@ func TestRKMIsAnsweredWithUnsupportedClass(t *testing.T) {
 		{"DEREG RSP", messages.MsgTypeDeregistrationResponse},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 			conn.handleSignals(context.Background(), rkmMessage(t, tt.msgType))
 
@@ -91,7 +91,7 @@ func TestRKMIsAnsweredWithUnsupportedClass(t *testing.T) {
 // supported here, so the class is what is wrong with the message. This used to
 // report Unsupported Message Type, which tells the peer its class was fine.
 func TestUnassignedClassDrawsTheClassLevelError(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeServer)
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	msg, err := messages.Parse([]byte{0x01, 0x00, 0x07, 0x01, 0x00, 0x00, 0x00, 0x08})
 	if err != nil {
@@ -149,9 +149,9 @@ func TestGenericReportsItsActualClass(t *testing.T) {
 // The RKM answer must not depend on role or state: an ASP and an SGP both lack
 // the procedures, and a peer may send REG REQ at any point after ASP Up.
 func TestRKMAnswerIsRoleAndStateIndependent(t *testing.T) {
-	for _, m := range []mode{modeClient, modeServer} {
-		for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
-			conn, _ := newTestConn(t, st, m)
+	for _, role := range []Role{RoleASP, RoleSGP} {
+		for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
+			conn, _ := newTestConn(t, st, role)
 
 			conn.handleSignals(context.Background(),
 				rkmMessage(t, messages.MsgTypeRegistrationRequest))
@@ -160,32 +160,32 @@ func TestRKMAnswerIsRoleAndStateIndependent(t *testing.T) {
 			case err := <-conn.errChan:
 				var unsupportedClass *UnsupportedClassError
 				if !errors.As(err, &unsupportedClass) {
-					t.Errorf("mode %d state %v: reported %T, want *UnsupportedClassError", m, st, err)
+					t.Errorf("role %s state %v: reported %T, want *UnsupportedClassError", role, st, err)
 				}
 			default:
-				t.Errorf("mode %d state %v: no error reported for RKM", m, st)
+				t.Errorf("role %s state %v: no error reported for RKM", role, st)
 			}
 
 			// And it must still publish exactly one state, holding the current one.
 			if got := len(conn.stateChan); got != 1 {
-				t.Errorf("mode %d state %v: published %d states, want 1", m, st, got)
+				t.Errorf("role %s state %v: published %d states, want 1", role, st, got)
 			}
 		}
 	}
 }
 
-// Only client and server modes exist. A Conn holding any other mode must report
-// it rather than falling through to the client path: IPSP (RFC 4666 Section
+// Only ASP and SGP roles are implemented here. An Association holding any other
+// role must report it rather than falling through to the ASP path: IPSP (RFC 4666 Section
 // 1.4.3.4) is the same procedures with symmetric roles, so adding it means
 // adding an arm here, and a missed one would run an IPSP through the ASP state
 // machine — sending ASP Up to a peer that is itself waiting to send one.
 func TestUnsupportedModeIsReported(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeClient)
-	conn.mode = mode(0xff)
+	conn, _ := newTestConn(t, StateASPDown, RoleASP)
+	conn.role = Role(0xff)
 
-	err := conn.handleStateUpdate(StateAspDown)
-	if !errors.Is(err, ErrUnsupportedMode) {
-		t.Errorf("handleStateUpdate() error = %v, want ErrUnsupportedMode", err)
+	err := conn.handleStateUpdate(StateASPDown)
+	if !errors.Is(err, ErrUnsupportedRole) {
+		t.Errorf("handleStateUpdate() error = %v, want ErrUnsupportedRole", err)
 	}
 }
 
@@ -208,7 +208,7 @@ func FuzzDispatchAnyClassAndType(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, class, msgType, stateSeed uint8) {
-		states := []State{StateAspDown, StateAspInactive, StateAspActive}
+		states := []State{StateASPDown, StateASPInactive, StateASPActive}
 		st := states[int(stateSeed)%len(states)]
 
 		msg, err := messages.Parse([]byte{
@@ -218,16 +218,16 @@ func FuzzDispatchAnyClassAndType(f *testing.F) {
 			return // a bare header this package rejects is not our concern
 		}
 
-		for _, m := range []mode{modeClient, modeServer} {
-			conn, _ := newTestConn(t, st, m)
+		for _, role := range []Role{RoleASP, RoleSGP} {
+			conn, _ := newTestConn(t, st, role)
 
 			conn.handleSignals(context.Background(), msg)
 
 			// Exactly one state per message: publishing none silently drops the
 			// transition, publishing two applies a spurious one.
 			if got := len(conn.stateChan); got != 1 {
-				t.Fatalf("class=%d type=%d state=%v mode=%d: published %d states, want 1",
-					class, msgType, st, m, got)
+				t.Fatalf("class=%d type=%d state=%v role=%s: published %d states, want 1",
+					class, msgType, st, role, got)
 			}
 
 			// RKM must always be answered at the class level (Section 4.4.1).

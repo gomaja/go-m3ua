@@ -46,7 +46,7 @@ import (
 // A given SLS must always map to the same stream, or nothing about ordering
 // holds.
 func TestStreamForIsStableAcrossCalls(t *testing.T) {
-	c := &Conn{maxMessageStreamID: 9}
+	c := &Association{maxMessageStreamID: 9}
 
 	for _, sls := range []uint8{0, 1, 7, 15, 200, 255} {
 		first := c.streamFor(sls)
@@ -66,7 +66,7 @@ func TestStreamForIsStableAcrossCalls(t *testing.T) {
 // negotiated stream count is wasted and everything serialises behind one
 // stream.
 func TestStreamForSpreadsAcrossTheNegotiatedStreams(t *testing.T) {
-	c := &Conn{maxMessageStreamID: 9}
+	c := &Association{maxMessageStreamID: 9}
 
 	seen := map[uint16]bool{}
 	for sls := 0; sls < 256; sls++ {
@@ -89,7 +89,7 @@ func TestStreamForHandlesDegenerateStreamCounts(t *testing.T) {
 		{0, 0}, // no data stream exists; the write paths refuse it
 		{1, 1},
 	} {
-		c := &Conn{maxMessageStreamID: tt.maxStream}
+		c := &Association{maxMessageStreamID: tt.maxStream}
 		for sls := 0; sls < 256; sls++ {
 			if got := c.streamFor(uint8(sls)); got != tt.want {
 				t.Fatalf("maxMessageStreamID=%d SLS=%d: stream %d, want %d", tt.maxStream, sls, got, tt.want)
@@ -115,7 +115,7 @@ func TestCheckDataStreamEnforcesNegotiatedBounds(t *testing.T) {
 		{name: "uint16 maximum is negotiated", maxStream: 0xffff, stream: 0xffff},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			conn := &Conn{maxMessageStreamID: test.maxStream}
+			conn := &Association{maxMessageStreamID: test.maxStream}
 			err := conn.checkDataStream(test.stream)
 
 			switch {
@@ -141,7 +141,7 @@ func TestCheckDataStreamEnforcesNegotiatedBounds(t *testing.T) {
 }
 
 func TestOutOfRangeDataStreamMapsToInvalidStreamError(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	conn.maxMessageStreamID = 4
 
 	// InvalidSCTPStreamIDError is also what the monitor maps to RFC 4666's
@@ -172,21 +172,21 @@ func TestDataIsNeverSentOnStreamZero(t *testing.T) {
 	asps := mcConnect(t, ctx, ln, mcAddr(port, "127.0.0.1"), []string{"127.0.0.2"}, port)
 
 	// Explicitly asking for stream 0 must be refused.
-	if _, err := asps[0].client.WriteToStream([]byte("nope"), 0); !errors.Is(err, ErrNoDataStream) {
+	if _, err := asps[0].asp.WriteToStream([]byte("nope"), 0); !errors.Is(err, ErrNoDataStream) {
 		t.Errorf("WriteToStream(_, 0) error = %v, want ErrNoDataStream", err)
 	}
 	pd := params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("nope"))
-	if _, err := asps[0].client.WritePDToStream(pd, 0); !errors.Is(err, ErrNoDataStream) {
+	if _, err := asps[0].asp.WritePDToStream(pd, 0); !errors.Is(err, ErrNoDataStream) {
 		t.Errorf("WritePDToStream(_, 0) error = %v, want ErrNoDataStream", err)
 	}
 
 	// And an association that negotiated only stream 0 must refuse Write too,
 	// rather than choosing stream 0 for it.
-	asps[0].client.maxMessageStreamID = 0
-	if _, err := asps[0].client.Write([]byte("nope")); !errors.Is(err, ErrNoDataStream) {
+	asps[0].asp.maxMessageStreamID = 0
+	if _, err := asps[0].asp.Write([]byte("nope")); !errors.Is(err, ErrNoDataStream) {
 		t.Errorf("Write with no data stream = %v, want ErrNoDataStream", err)
 	}
-	if _, err := asps[0].client.WritePD(pd); !errors.Is(err, ErrNoDataStream) {
+	if _, err := asps[0].asp.WritePD(pd); !errors.Is(err, ErrNoDataStream) {
 		t.Errorf("WritePD with no data stream = %v, want ErrNoDataStream", err)
 	}
 }
@@ -208,7 +208,7 @@ func TestWriteKeepsOrderForOneSLS(t *testing.T) {
 			// Write, not WriteToStream: the library chooses the stream, and the
 			// Config carries one SLS, so every message shares it.
 			for {
-				_, err := fmt.Fprintf(asps[0].client, "%04d", i)
+				_, err := fmt.Fprintf(asps[0].asp, "%04d", i)
 				if err == nil {
 					break
 				}
@@ -218,7 +218,7 @@ func TestWriteKeepsOrderForOneSLS(t *testing.T) {
 	}()
 
 	for i := 0; i < n; i++ {
-		got, err := readWithin(t, asps[0].server, 10*time.Second)
+		got, err := readWithin(t, asps[0].sgp, 10*time.Second)
 		if err != nil {
 			t.Fatalf("only %d of %d payloads arrived: %v", i, n, err)
 		}
@@ -248,7 +248,7 @@ func TestWritePDKeepsOrderPerSLS(t *testing.T) {
 				[]byte(fmt.Sprintf("%04d", i)),
 			)
 			for {
-				_, err := asps[0].client.WritePD(pd)
+				_, err := asps[0].asp.WritePD(pd)
 				if err == nil {
 					break
 				}
@@ -258,15 +258,15 @@ func TestWritePDKeepsOrderPerSLS(t *testing.T) {
 	}()
 
 	for i := 0; i < n; i++ {
-		pd, err := readPDWithin(t, asps[0].server, 10*time.Second)
+		pd, err := readPDWithin(t, asps[0].sgp, 10*time.Second)
 		if err != nil {
 			t.Fatalf("only %d of %d payloads arrived: %v", i, n, err)
 		}
 		if want := fmt.Sprintf("%04d", i); string(pd.Data) != want {
 			t.Fatalf("payload %d read as %q, want %q: one SLS was spread across streams", i, pd.Data, want)
 		}
-		if pd.SignalingLinkSelection != sls {
-			t.Errorf("payload %d carried SLS %d, want %d", i, pd.SignalingLinkSelection, sls)
+		if pd.SignallingLinkSelection != sls {
+			t.Errorf("payload %d carried SLS %d, want %d", i, pd.SignallingLinkSelection, sls)
 		}
 	}
 }
@@ -279,33 +279,33 @@ func TestWriteSignalUsesTheDatasOwnSLS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	client, server, err := setupConn(t, ctx, 3120)
+	aspAssociation, sgpAssociation, err := setupConn(t, ctx, 3120)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_ = client.Close()
-		_ = server.Close()
+		_ = aspAssociation.Close()
+		_ = sgpAssociation.Close()
 	}()
 
-	configStream := client.streamFor(client.cfg.SignalingLinkSelection)
+	configStream := aspAssociation.streamFor(aspAssociation.cfg.SignallingLinkSelection)
 	var messageSLS uint8
 	for candidate := 2; candidate < 256; candidate++ {
-		if client.streamFor(uint8(candidate)) != configStream {
+		if aspAssociation.streamFor(uint8(candidate)) != configStream {
 			messageSLS = uint8(candidate)
 			break
 		}
 	}
-	if messageSLS == 0 && client.streamFor(0) != configStream {
+	if messageSLS == 0 && aspAssociation.streamFor(0) != configStream {
 		messageSLS = 0
 	}
-	wantStream := client.streamFor(messageSLS)
+	wantStream := aspAssociation.streamFor(messageSLS)
 	if wantStream == configStream {
 		t.Skipf("association negotiated only one DATA stream (%d)", wantStream)
 	}
 
 	data := messages.NewData(
-		client.cfg.NetworkAppearance.Copy(),
+		aspAssociation.cfg.NetworkAppearance.Copy(),
 		params.NewRoutingContext(1),
 		params.NewProtocolData(
 			0x11111111, 0x22222222, params.ServiceIndSCCP, 2, 3,
@@ -313,24 +313,24 @@ func TestWriteSignalUsesTheDatasOwnSLS(t *testing.T) {
 		),
 		nil,
 	)
-	if _, err := client.WriteSignal(data); err != nil {
+	if _, err := aspAssociation.WriteSignal(data); err != nil {
 		t.Fatalf("WriteSignal(DATA): %v", err)
 	}
-	got, err := readDataWithin(t, server, 10*time.Second)
+	got, err := readDataWithin(t, sgpAssociation, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got.ProtocolData.Data) != "write-signal-sls" {
 		t.Fatalf("payload = %q, want %q", got.ProtocolData.Data, "write-signal-sls")
 	}
-	if gotStream := server.receivedStreamID(); gotStream != wantStream {
+	if gotStream := sgpAssociation.receivedStreamID(); gotStream != wantStream {
 		t.Errorf("DATA with SLS %d arrived on stream %d, want %d; config SLS %d maps to %d",
-			messageSLS, gotStream, wantStream, client.cfg.SignalingLinkSelection, configStream)
+			messageSLS, gotStream, wantStream, aspAssociation.cfg.SignallingLinkSelection, configStream)
 	}
 }
 
 func TestOutboundSignalStreamUsesProtocolDataSLS(t *testing.T) {
-	conn := &Conn{maxMessageStreamID: 9}
+	conn := &Association{maxMessageStreamID: 9}
 	for _, sls := range []uint8{0, 1, 7, 15, 255} {
 		t.Run(fmt.Sprintf("SLS %d", sls), func(t *testing.T) {
 			data := messages.NewData(nil, nil, params.NewProtocolData(
@@ -361,7 +361,7 @@ func TestOutboundSignalStreamUsesProtocolDataSLS(t *testing.T) {
 
 // readPDWithin is ReadPD with a deadline, so a stalled test reports rather than
 // hanging to the package timeout.
-func readPDWithin(t *testing.T, c *Conn, d time.Duration) (*params.ProtocolDataPayload, error) {
+func readPDWithin(t *testing.T, c *Association, d time.Duration) (*params.ProtocolDataPayload, error) {
 	t.Helper()
 
 	type result struct {
@@ -382,7 +382,7 @@ func readPDWithin(t *testing.T, c *Conn, d time.Duration) (*params.ProtocolDataP
 	}
 }
 
-func readDataWithin(t *testing.T, c *Conn, d time.Duration) (*DataMessage, error) {
+func readDataWithin(t *testing.T, c *Association, d time.Duration) (*DataMessage, error) {
 	t.Helper()
 
 	type result struct {

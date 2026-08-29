@@ -30,7 +30,7 @@ func TestM3UAPPIDIsExportedAndUsedForSends(t *testing.T) {
 		t.Fatalf("M3UAPPID = %d, want the RFC-assigned value 3", M3UAPPID)
 	}
 
-	conn := newConn(modeClient, NewConfig(1, 2, params.ServiceIndSCCP, 0, 0, 1))
+	conn := newAssociation(RoleASP, NewAssociationConfig(1, 2, params.ServiceIndSCCP, 0, 0, 1))
 	if got := conn.sctpInfo.PPID; got != M3UAPPID {
 		t.Errorf("send template PPID = %d, want M3UAPPID (%d)", got, M3UAPPID)
 	}
@@ -125,7 +125,7 @@ func TestReceiveAcceptsM3UAAndUnspecifiedPPID(t *testing.T) {
 
 	for _, ppid := range []uint32{0, 3} {
 		t.Run(fmt.Sprintf("PPID-%d", ppid), func(t *testing.T) {
-			conn, sent := newTestConn(t, StateAspActive, modeServer)
+			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 			conn.lastRecv.Store(1)
 
 			conn.dispatchRaw(context.Background(), inbound{
@@ -172,7 +172,7 @@ func TestReceiveSilentlyDiscardsEveryOtherPPID(t *testing.T) {
 
 	for _, ppid := range []uint32{1, 2, 4, 0xffffffff} {
 		t.Run(fmt.Sprintf("PPID-%d", ppid), func(t *testing.T) {
-			conn, sent := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+			conn, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 			conn.lastRecv.Store(1)
 			conn.recvStream.Store(9)
 
@@ -235,7 +235,7 @@ func TestMalformedM3UABytesDoNotRefreshPeerLiveness(t *testing.T) {
 			},
 		} {
 			t.Run(fmt.Sprintf("PPID-%d/%s", ppid, test.name), func(t *testing.T) {
-				conn, _ := newTestConn(t, StateAspActive, modeServer)
+				conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 				conn.lastRecv.Store(1)
 
 				conn.dispatchRaw(context.Background(), inbound{
@@ -274,7 +274,7 @@ func TestValidGenericUnsupportedMessageRefreshesPeerLiveness(t *testing.T) {
 				t.Fatalf("parsed as %T, want *messages.Generic", parsed)
 			}
 
-			conn, _ := newTestConn(t, StateAspActive, modeServer)
+			conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 			conn.lastRecv.Store(1)
 			conn.dispatchRaw(context.Background(), inbound{
 				kind: inboundMessage, data: raw, stream: 0, ppid: 3,

@@ -32,7 +32,7 @@ import (
 // the application; it could see that a decision was due but not which Application
 // Server it was about.
 func TestNotifyReportsWhichApplicationServerItIsAbout(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 
 	// The SGP tells this ASP that another ASP took over Routing Context 2.
 	if err := conn.handleNotify(messages.NewNotify(
@@ -55,15 +55,15 @@ func TestNotifyReportsWhichApplicationServerItIsAbout(t *testing.T) {
 	}
 	// Section 3.8.2 lists the ASP Identifier Conditional, and an "Alternate ASP
 	// Active" notification uses it to name the ASP that took over.
-	if !ind.AspIdentifierSet || ind.AspIdentifier != 0x2a {
-		t.Errorf("AspIdentifier = %d (set=%v), want 42", ind.AspIdentifier, ind.AspIdentifierSet)
+	if !ind.ASPIdentifierSet || ind.ASPIdentifier != 0x2a {
+		t.Errorf("AspIdentifier = %d (set=%v), want 42", ind.ASPIdentifier, ind.ASPIdentifierSet)
 	}
 }
 
 // The parameter is not always present, and absence must stay distinguishable
 // from Routing Context zero.
 func TestNotifyWithoutARoutingContextSaysSo(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 
 	if err := conn.handleNotify(messages.NewNotify(
 		params.NewStatus(params.AsStatePending), nil, nil, nil)); err != nil {
@@ -74,11 +74,11 @@ func TestNotifyWithoutARoutingContextSaysSo(t *testing.T) {
 	if ind.RoutingContextSet {
 		t.Errorf("a Notify carrying no Routing Context reported one (%d)", ind.RoutingContext)
 	}
-	if ind.AspIdentifierSet {
-		t.Errorf("a Notify carrying no ASP Identifier reported one (%d)", ind.AspIdentifier)
+	if ind.ASPIdentifierSet {
+		t.Errorf("a Notify carrying no ASP Identifier reported one (%d)", ind.ASPIdentifier)
 	}
 	// Routing Context 0 is a context like any other.
-	zeroConn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 0)
+	zeroConn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 0)
 	if err := zeroConn.handleNotify(messages.NewNotify(
 		params.NewStatus(params.AsStatePending), nil, params.NewRoutingContext(0), nil)); err != nil {
 		t.Fatalf("handleNotify: %v", err)
@@ -106,7 +106,7 @@ func TestNotifyWithoutARoutingContextSaysSo(t *testing.T) {
 // saying which context, which network or which destinations was refused was not
 // heard: the application learned only that something had been refused.
 func TestErrorReportsWhatThePeerRefused(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 
 	if err := conn.handleError(messages.NewError(
 		params.NewErrorCode(params.ErrInvalidRoutingContext),
@@ -141,7 +141,7 @@ func TestErrorReportsWhatThePeerRefused(t *testing.T) {
 // An Error carrying only the code — which most codes permit — must report the
 // rest as absent rather than as zeros a caller would read as real values.
 func TestErrorWithoutTheOptionalContextSaysSo(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 
 	if err := conn.handleError(messages.NewError(
 		params.NewErrorCode(params.UnexpectedMessageError), nil, nil, nil, nil)); err != nil {
@@ -163,7 +163,7 @@ func TestErrorWithoutTheOptionalContextSaysSo(t *testing.T) {
 // A malformed Routing Context is not the same as an omitted one. It must be
 // rejected before an ambiguous indication reaches Layer Management.
 func TestManagementRoutingContextOfAnOddLength(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 
 	for _, data := range [][]byte{{}, {0x00, 0x00, 0x09}, {0x00, 0x00, 0x00, 0x09, 0x00}} {
 		err := conn.handleNotify(messages.NewNotify(
@@ -190,7 +190,7 @@ func TestManagementRoutingContextOfAnOddLength(t *testing.T) {
 // was still the active ASP for.
 func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 	t.Run("a partial override leaves the association carrying the rest", func(t *testing.T) {
-		asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+		asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 		// Override is the mode an "Alternate ASP Active" notification arises in
 		// (Section 3.7.1: "the ASP takes over all traffic in an Application
 		// Server"), and the Ack's mode is checked against the configured one.
@@ -200,7 +200,7 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 			params.NewRoutingContext(1, 2), nil)); err != nil {
 			t.Fatalf("handleAspActiveAck: %v", err)
 		}
-		asp.setState(StateAspActive)
+		asp.setState(StateASPActive)
 
 		// Another ASP takes over Routing Context 2 only.
 		notify := messages.NewNotify(params.NewStatus(params.AlternateAspActive),
@@ -224,7 +224,7 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 	})
 
 	t.Run("an override covering every context stands the association down", func(t *testing.T) {
-		asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+		asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 		notify := messages.NewNotify(params.NewStatus(params.AlternateAspActive),
 			nil, params.NewRoutingContext(1, 2), nil)
 		if !asp.overrideScope(notify) {
@@ -234,7 +234,7 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 	})
 
 	t.Run("an override naming no context covers every configured AS", func(t *testing.T) {
-		asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+		asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 		notify := messages.NewNotify(params.NewStatus(params.AlternateAspActive), nil, nil, nil)
 		if !asp.overrideScope(notify) {
 			t.Error("a contextless override did not cover every configured AS")
@@ -242,7 +242,7 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 	})
 
 	t.Run("an explicit single-context override stands the association down", func(t *testing.T) {
-		asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+		asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 		notify := messages.NewNotify(params.NewStatus(params.AlternateAspActive),
 			nil, params.NewRoutingContext(1), nil)
 		if !asp.overrideScope(notify) {
@@ -251,7 +251,7 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 	})
 
 	t.Run("a contextless single-AS override is unambiguous", func(t *testing.T) {
-		asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+		asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 		notify := messages.NewNotify(params.NewStatus(params.AlternateAspActive), nil, nil, nil)
 		if !asp.overrideScope(notify) {
 			t.Error("the only configured Application Server was not overridden")
@@ -260,7 +260,7 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 
 	// A fresh activation decides again which contexts this ASP may carry.
 	t.Run("re-activation clears the override", func(t *testing.T) {
-		asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+		asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 		asp.noteRoutingContextsOverridden([]uint32{2})
 		if !asp.routingContextOverridden(2) {
 			t.Fatal("the override was not recorded")
@@ -276,16 +276,16 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 // publishes state. Testing overrideScope alone leaves the call site free to be
 // deleted, and the defect this fixes lives at the call site.
 func TestTheDispatcherAppliesTheOverrideScope(t *testing.T) {
-	activeASP := func(t *testing.T) *Conn {
+	activeASP := func(t *testing.T) *Association {
 		t.Helper()
-		asp, _ := newTestConnWithContexts(t, StateAspInactive, modeClient, 1, 2)
+		asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 		asp.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 		if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
 			params.NewTrafficModeType(params.TrafficModeOverride),
 			params.NewRoutingContext(1, 2), nil)); err != nil {
 			t.Fatalf("handleAspActiveAck: %v", err)
 		}
-		asp.setState(StateAspActive)
+		asp.setState(StateASPActive)
 		// Drain what the Ack published so the next read is the Notify's.
 		for len(asp.stateChan) > 0 {
 			<-asp.stateChan
@@ -319,9 +319,9 @@ func TestTheDispatcherAppliesTheOverrideScope(t *testing.T) {
 
 		select {
 		case got := <-asp.stateChan:
-			if got != StateAspInactive {
+			if got != StateASPInactive {
 				t.Errorf("published %v for an override of every Routing Context, "+
-					"want %v (Section 4.3.4.3)", got, StateAspInactive)
+					"want %v (Section 4.3.4.3)", got, StateASPInactive)
 			}
 		default:
 			t.Fatal("the dispatcher published no state at all")
@@ -334,7 +334,7 @@ func TestTheDispatcherAppliesTheOverrideScope(t *testing.T) {
 // value for every one of these fields, so reporting it as present would hand the
 // caller a zero it cannot tell from a genuine one.
 func TestAMismatchedParameterIsReportedAsAbsent(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 
 	// An INFO String sitting where the ASP Identifier belongs. Parse assigns by
 	// tag so the wire cannot produce this, but a hand-built message can — and
@@ -346,9 +346,9 @@ func TestAMismatchedParameterIsReportedAsAbsent(t *testing.T) {
 		t.Fatalf("handleNotify: %v", err)
 	}
 	ind := <-conn.ManagementIndications()
-	if ind.AspIdentifierSet {
+	if ind.ASPIdentifierSet {
 		t.Errorf("a parameter tagged %#x was reported as ASP Identifier %d",
-			n.AspIdentifier.Tag, ind.AspIdentifier)
+			n.AspIdentifier.Tag, ind.ASPIdentifier)
 	}
 
 	e := messages.NewError(params.NewErrorCode(params.UnexpectedMessageError), nil, nil, nil, nil)

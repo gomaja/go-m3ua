@@ -10,8 +10,8 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func TestConnFreezesTrafficModePolicyAtConstruction(t *testing.T) {
-	config := NewServerConfig(
+func TestAssociationFreezesTrafficModePolicyAtConstruction(t *testing.T) {
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,
 		0x11111111,
@@ -30,7 +30,7 @@ func TestConnFreezesTrafficModePolicyAtConstruction(t *testing.T) {
 		2: params.TrafficModeBroadcast,
 	}
 	config.TrafficModes = configuredModes
-	connection := newConn(modeClient, config)
+	connection := newAssociation(RoleASP, config)
 
 	configuredModes[1] = params.TrafficModeBroadcast
 	configuredModes[2] = params.TrafficModeOverride
@@ -66,8 +66,8 @@ func TestConnFreezesTrafficModePolicyAtConstruction(t *testing.T) {
 	}
 }
 
-func TestConnFreezesTrafficModePolicyForActiveAckValidation(t *testing.T) {
-	config := NewServerConfig(
+func TestAssociationFreezesTrafficModePolicyForActiveAckValidation(t *testing.T) {
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,
 		0x11111111,
@@ -82,7 +82,7 @@ func TestConnFreezesTrafficModePolicyForActiveAckValidation(t *testing.T) {
 		1,
 	)
 	configuredDefault := config.TrafficModeType
-	connection := newConn(modeClient, config)
+	connection := newAssociation(RoleASP, config)
 
 	configuredDefault.Data[3] = byte(params.TrafficModeBroadcast)
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
@@ -99,7 +99,7 @@ func TestConnFreezesTrafficModePolicyForActiveAckValidation(t *testing.T) {
 }
 
 func TestApplicationServerRegistryFreezesTrafficModePolicyAtConstruction(t *testing.T) {
-	config := NewServerConfig(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,
 		0x11111111,
@@ -130,8 +130,8 @@ func TestApplicationServerRegistryFreezesTrafficModePolicyAtConstruction(t *test
 	}
 }
 
-func TestListenerTrafficModePolicyIsInheritedByRegistryAndAcceptedConnections(t *testing.T) {
-	config := NewServerConfig(
+func TestListenerTrafficModePolicyIsInheritedByRegistryAndAcceptedAssociations(t *testing.T) {
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,
 		0x11111111,
@@ -147,7 +147,7 @@ func TestListenerTrafficModePolicyIsInheritedByRegistryAndAcceptedConnections(t 
 	)
 	configuredModes := map[uint32]uint32{1: params.TrafficModeOverride}
 	config.TrafficModes = configuredModes
-	listener := newListener(NewListenerConfig(config))
+	listener := newSGPListener(NewListenerConfig(config))
 
 	configuredModes[1] = params.TrafficModeBroadcast
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
@@ -162,27 +162,27 @@ func TestListenerTrafficModePolicyIsInheritedByRegistryAndAcceptedConnections(t 
 		t.Fatalf("listener registry mode = %v, want construction-time Override", agreed)
 	}
 
-	accepted := newConnWithTrafficModePolicy(
-		modeServer, listener.Config, listener.trafficModePolicy(),
+	accepted := newAssociationWithTrafficModePolicy(
+		RoleSGP, listener.AssociationConfig, listener.trafficModePolicy(),
 	)
 	requests, err := accepted.aspActiveRequests(params.NewRoutingContext(1))
 	if err != nil {
-		t.Fatalf("accepted Conn ASP Active request: %v", err)
+		t.Fatalf("accepted Association ASP Active request: %v", err)
 	}
 	if len(requests) != 1 || requests[0].trafficMode == nil ||
 		requests[0].trafficMode.TrafficModeType() != params.TrafficModeOverride {
-		t.Fatalf("accepted Conn inherited traffic mode %v, want construction-time Override", requests)
+		t.Fatalf("accepted Association inherited traffic mode %v, want construction-time Override", requests)
 	}
 }
 
 func TestPerRoutingContextTrafficModePrecedesConfiguredDefault(t *testing.T) {
-	connection, sent := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	connection, sent := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	connection.cfg.TrafficModes = map[uint32]uint32{
 		1: params.TrafficModeOverride,
 	}
 	registry := newApplicationServers(time.Hour, connection.cfg)
 	connection.as = registry
-	registry.aspStateChanged(connection, StateAspInactive)
+	registry.aspStateChanged(connection, StateASPInactive)
 
 	for _, request := range []struct {
 		routingContext uint32
@@ -213,7 +213,7 @@ func TestPerRoutingContextTrafficModePrecedesConfiguredDefault(t *testing.T) {
 }
 
 func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
-	connection, sent := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	connection, sent := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	connection.cfg.TrafficModes = map[uint32]uint32{
 		1: params.TrafficModeOverride,
 	}
@@ -232,7 +232,7 @@ func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 		}
 	}
 	connection.as = registry
-	registry.aspStateChanged(connection, StateAspInactive)
+	registry.aspStateChanged(connection, StateASPInactive)
 
 	before := len(*sent)
 	err := connection.handleAspActive(messages.NewAspActive(
@@ -256,7 +256,7 @@ func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 }
 
 func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
-	config := NewServerConfig(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x22222222,
 		0x11111111,
@@ -271,7 +271,7 @@ func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
 		1,
 	)
 	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeOverride}
-	connection := newConn(modeClient, config)
+	connection := newAssociation(RoleASP, config)
 	registry := newApplicationServers(time.Hour, config)
 	ack := messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeOverride),
@@ -305,7 +305,7 @@ func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
 			}
 			if len(requests) != 1 || requests[0].trafficMode == nil ||
 				requests[0].trafficMode.TrafficModeType() != params.TrafficModeOverride {
-				readErrors <- errors.New("client request grouping observed a post-construction Config mutation")
+				readErrors <- errors.New("ASP request grouping observed a post-construction AssociationConfig mutation")
 				return
 			}
 			if err := connection.validateAspActiveAckTrafficMode(ack); err != nil {

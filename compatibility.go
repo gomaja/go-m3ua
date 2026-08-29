@@ -59,7 +59,7 @@ func AcceptInvalidOptionalInfoString() CompatibilityPolicy {
 	}
 }
 
-func (c *Conn) parseInboundMessage(raw []byte) (messages.M3UA, error) {
+func (c *Association) parseInboundMessage(raw []byte) (messages.M3UA, error) {
 	if c == nil || c.cfg == nil {
 		return messages.Parse(raw)
 	}

@@ -168,8 +168,8 @@ func skipUnlessBlackholed(t *testing.T, err error) {
 	}
 }
 
-func dialCfg(initTimeout time.Duration) *Config {
-	cfg := NewClientConfig(
+func dialCfg(initTimeout time.Duration) *AssociationConfig {
+	cfg := newASPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
@@ -188,7 +188,7 @@ func TestDialGivesUpOnItsOwnTimeout(t *testing.T) {
 
 	ctx := context.Background()
 	start := time.Now()
-	conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(2*time.Second))
+	conn, err := dialASP(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(2*time.Second))
 	elapsed := time.Since(start)
 
 	if conn != nil {
@@ -222,7 +222,7 @@ func TestDialAbandonsOnContextCancellation(t *testing.T) {
 	}()
 
 	start := time.Now()
-	conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
+	conn, err := dialASP(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
 	elapsed := time.Since(start)
 
 	if conn != nil {
@@ -247,7 +247,7 @@ func TestDialWithACancelledContextDoesNotAttempt(t *testing.T) {
 
 	fdBaseline, haveFDs := openDescriptors()
 	start := time.Now()
-	conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
+	conn, err := dialASP(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
 	elapsed := time.Since(start)
 
 	if conn != nil {
@@ -303,7 +303,7 @@ func TestRepeatedFailedDialsDoNotLeak(t *testing.T) {
 	cfg := dialCfg(time.Second)
 
 	// One warm-up so lazily started machinery is not counted.
-	if conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), cfg); err == nil {
+	if conn, err := dialASP(ctx, "m3ua4", nil, blackholeAddr(t), cfg); err == nil {
 		_ = conn.Close()
 		t.Skip("the blackhole address answered; this environment cannot run the test")
 	} else {
@@ -316,7 +316,7 @@ func TestRepeatedFailedDialsDoNotLeak(t *testing.T) {
 
 	const rounds = 5
 	for i := 0; i < rounds; i++ {
-		conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), cfg)
+		conn, err := dialASP(ctx, "m3ua4", nil, blackholeAddr(t), cfg)
 		if err == nil {
 			_ = conn.Close()
 			t.Fatal("the blackhole address answered mid-test")
@@ -359,7 +359,7 @@ func TestRepeatedCancelledDialsDoNotLeak(t *testing.T) {
 	// One warm-up so lazily started machinery is not counted.
 	warmCtx, warmCancel := context.WithCancel(context.Background())
 	warmCancel()
-	conn, err := Dial(warmCtx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
+	conn, err := dialASP(warmCtx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
 	if conn != nil {
 		_ = conn.Close()
 	}
@@ -377,7 +377,7 @@ func TestRepeatedCancelledDialsDoNotLeak(t *testing.T) {
 		time.AfterFunc(10*time.Millisecond, cancel)
 
 		start := time.Now()
-		conn, err := Dial(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
+		conn, err := dialASP(ctx, "m3ua4", nil, blackholeAddr(t), dialCfg(30*time.Second))
 		elapsed := time.Since(start)
 		cancel()
 		if conn != nil {
@@ -430,7 +430,7 @@ func TestEstablishTimeoutBoundsTheM3UAHandshake(t *testing.T) {
 	}
 
 	start := time.Now()
-	conn, err := Dial(ctx, "m3ua", laddr, peer.addr, cfg)
+	conn, err := dialASP(ctx, "m3ua", laddr, peer.addr, cfg)
 	elapsed := time.Since(start)
 	if conn != nil {
 		_ = conn.Close()

@@ -110,7 +110,7 @@ func TestMultihomedAssociationKeepsEveryAddress(t *testing.T) {
 	}
 
 	type accepted struct {
-		conn *Conn
+		conn *Association
 		err  error
 	}
 	accepts := make(chan accepted, 1)
@@ -119,13 +119,13 @@ func TestMultihomedAssociationKeepsEveryAddress(t *testing.T) {
 		accepts <- accepted{c, err}
 	}()
 
-	cli, err := Dial(ctx, "m3ua", mcAddr(port+1, cliIPs...), mcAddr(port, srvIPs...), mcClientConfig(0xAA000001))
+	cli, err := dialASP(ctx, "m3ua", mcAddr(port+1, cliIPs...), mcAddr(port, srvIPs...), mcASPConfig(0xAA000001))
 	if err != nil {
 		t.Fatalf("multi-homed Dial: %v", err)
 	}
 	defer func() { _ = cli.Close() }()
 
-	var srv *Conn
+	var srv *Association
 	select {
 	case a := <-accepts:
 		if a.err != nil {
@@ -142,10 +142,10 @@ func TestMultihomedAssociationKeepsEveryAddress(t *testing.T) {
 		got  []string
 		want []string
 	}{
-		{"client LocalAddr", addrsOf(cli.LocalAddr()), cliIPs},
-		{"client RemoteAddr", addrsOf(cli.RemoteAddr()), srvIPs},
-		{"server LocalAddr", addrsOf(srv.LocalAddr()), srvIPs},
-		{"server RemoteAddr", addrsOf(srv.RemoteAddr()), cliIPs},
+		{"ASP LocalAddr", addrsOf(cli.LocalAddr()), cliIPs},
+		{"ASP RemoteAddr", addrsOf(cli.RemoteAddr()), srvIPs},
+		{"SGP LocalAddr", addrsOf(srv.LocalAddr()), srvIPs},
+		{"SGP RemoteAddr", addrsOf(srv.RemoteAddr()), cliIPs},
 	} {
 		if !sameAddrs(tc.got, tc.want) {
 			t.Errorf("%s = %v, want %v: the association did not negotiate every bound address", tc.name, tc.got, tc.want)
@@ -167,7 +167,7 @@ func TestMultihomedAssociationCarriesPayloadBothWays(t *testing.T) {
 	ln := mcListen(t, mcAddr(port, srvIPs...))
 
 	type accepted struct {
-		conn *Conn
+		conn *Association
 		err  error
 	}
 	accepts := make(chan accepted, 1)
@@ -176,7 +176,7 @@ func TestMultihomedAssociationCarriesPayloadBothWays(t *testing.T) {
 		accepts <- accepted{c, err}
 	}()
 
-	cli, err := Dial(ctx, "m3ua", mcAddr(port+1, cliIPs...), mcAddr(port, srvIPs...), mcClientConfig(0xAA000002))
+	cli, err := dialASP(ctx, "m3ua", mcAddr(port+1, cliIPs...), mcAddr(port, srvIPs...), mcASPConfig(0xAA000002))
 	if err != nil {
 		t.Fatalf("multi-homed Dial: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestMultihomedAssociationCarriesPayloadBothWays(t *testing.T) {
 	// Both ends coordinate two Routing Contexts, so each DATA has to name the
 	// one identifying its traffic flow (RFC 4666 Section 3.3.1). This test is
 	// about multi-homing, so both ends pick the same one.
-	for _, c := range []*Conn{cli, srv} {
+	for _, c := range []*Association{cli, srv} {
 		if err := c.SelectRoutingContext(1); err != nil {
 			t.Fatalf("SelectRoutingContext: %v", err)
 		}
@@ -200,7 +200,7 @@ func TestMultihomedAssociationCarriesPayloadBothWays(t *testing.T) {
 
 	for _, tc := range []struct {
 		name       string
-		from, to   *Conn
+		from, to   *Association
 		payload    string
 		wantOnRead string
 	}{
@@ -238,7 +238,7 @@ func TestMultihomedListenerServesSeveralASPs(t *testing.T) {
 	ln := mcListen(t, mcAddr(port, srvIPs...))
 
 	type accepted struct {
-		conn *Conn
+		conn *Association
 		err  error
 	}
 	accepts := make(chan accepted, len(aspIPs))
@@ -250,7 +250,7 @@ func TestMultihomedListenerServesSeveralASPs(t *testing.T) {
 	}()
 
 	for i, ips := range aspIPs {
-		cli, err := Dial(ctx, "m3ua", mcAddr(port+1+i, ips...), mcAddr(port, srvIPs...), mcClientConfig(0xCC000000+uint32(i)))
+		cli, err := dialASP(ctx, "m3ua", mcAddr(port+1+i, ips...), mcAddr(port, srvIPs...), mcASPConfig(0xCC000000+uint32(i)))
 		if err != nil {
 			t.Fatalf("ASP #%d multi-homed dial: %v", i+1, err)
 		}
@@ -264,10 +264,10 @@ func TestMultihomedListenerServesSeveralASPs(t *testing.T) {
 			defer func() { _ = a.conn.Close() }()
 
 			if got := addrsOf(a.conn.LocalAddr()); !sameAddrs(got, srvIPs) {
-				t.Errorf("server Conn #%d LocalAddr = %v, want the listener's %v", i+1, got, srvIPs)
+				t.Errorf("SGP Association #%d LocalAddr = %v, want the listener's %v", i+1, got, srvIPs)
 			}
 			if got := addrsOf(a.conn.RemoteAddr()); !sameAddrs(got, ips) {
-				t.Errorf("server Conn #%d RemoteAddr = %v, want ASP #%d's %v", i+1, got, i+1, ips)
+				t.Errorf("SGP Association #%d RemoteAddr = %v, want ASP #%d's %v", i+1, got, i+1, ips)
 			}
 
 			// One of the two coordinated Routing Contexts names the flow
@@ -282,10 +282,10 @@ func TestMultihomedListenerServesSeveralASPs(t *testing.T) {
 			}
 			got, err := readWithin(t, a.conn, 5*time.Second)
 			if err != nil {
-				t.Fatalf("server Conn #%d read: %v", i+1, err)
+				t.Fatalf("SGP Association #%d read: %v", i+1, err)
 			}
 			if got != payload {
-				t.Errorf("server Conn #%d read %q, want %q", i+1, got, payload)
+				t.Errorf("SGP Association #%d read %q, want %q", i+1, got, payload)
 			}
 		case <-time.After(15 * time.Second):
 			t.Fatalf("Accept for ASP #%d never returned", i+1)

@@ -39,7 +39,7 @@ func assocChangeEvent(state sctp.SCTPState, assocID uint32) []byte {
 
 // dispatchRestartMarker runs the ordered event a production dispatchLoop would
 // consume. Synthetic watcher tests use buffered queues and no dispatcher.
-func dispatchRestartMarker(t *testing.T, conn *Conn) {
+func dispatchRestartMarker(t *testing.T, conn *Association) {
 	t.Helper()
 
 	select {
@@ -55,14 +55,14 @@ func dispatchRestartMarker(t *testing.T, conn *Conn) {
 
 // applyRestartTransition additionally runs the state update monitor() would
 // consume after the dispatcher publishes ASP-DOWN.
-func applyRestartTransition(t *testing.T, conn *Conn) {
+func applyRestartTransition(t *testing.T, conn *Association) {
 	t.Helper()
 	dispatchRestartMarker(t, conn)
 
 	select {
 	case state := <-conn.stateChan:
-		if state != StateAspDown {
-			t.Fatalf("restart published %v, want %v", state, StateAspDown)
+		if state != StateASPDown {
+			t.Fatalf("restart published %v, want %v", state, StateASPDown)
 		}
 		if err := conn.handleStateUpdate(state); err != nil {
 			t.Fatalf("applying restart state: %v", err)
@@ -76,11 +76,11 @@ func applyRestartTransition(t *testing.T, conn *Conn) {
 // M3UA state is reset underneath it. RFC 4666 Section 1.6.3 gives that event a
 // Layer Management primitive of its own so the reset is not silent.
 func TestSCTPRestartIsReportedToLayerManagement(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.assocID.Store(7)
 
 	w := &restartWatcher{}
-	w.setRoute(func(id sctp.SCTPAssocID) *Conn {
+	w.setRoute(func(id sctp.SCTPAssocID) *Association {
 		if int32(id) == conn.assocID.Load() {
 			return conn
 		}
@@ -110,9 +110,9 @@ func TestSCTPRestartIsReportedToLayerManagement(t *testing.T) {
 // Application Server last carried traffic, so the SGP must stop selecting the
 // restarted ASP in every configured AS and discard its old activation scope.
 func TestSCTPRestartMovesRemoteASPDownInEveryApplicationServer(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	conn.assocID.Store(7)
-	if err := conn.handleStateUpdate(StateAspActive); err != nil {
+	if err := conn.handleStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("entering ASP-ACTIVE: %v", err)
 	}
 	<-conn.StateChanges()
@@ -128,7 +128,7 @@ func TestSCTPRestartMovesRemoteASPDownInEveryApplicationServer(t *testing.T) {
 	})
 	conn.as = registry
 	conn.noteRoutingContextsActive([]uint32{1, 2})
-	registry.aspStateChanged(conn, StateAspActive)
+	registry.aspStateChanged(conn, StateASPActive)
 	for _, rtCtx := range []uint32{1, 2} {
 		if got := registry.get(rtCtx).activeASPs(); len(got) != 1 || got[0] != conn {
 			t.Fatalf("Routing Context %d active ASPs before restart = %v, want the peer", rtCtx, got)
@@ -136,20 +136,20 @@ func TestSCTPRestartMovesRemoteASPDownInEveryApplicationServer(t *testing.T) {
 	}
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Conn { return conn })
+	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
 	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
 		t.Fatalf("handle returned %v; an event must never fail the read", err)
 	}
 
 	applyRestartTransition(t, conn)
-	if got := conn.State(); got != StateAspDown {
-		t.Errorf("State after dispatched restart = %v, want %v", got, StateAspDown)
+	if got := conn.State(); got != StateASPDown {
+		t.Errorf("State after dispatched restart = %v, want %v", got, StateASPDown)
 	}
 
 	select {
 	case got := <-conn.StateChanges():
-		if got != StateAspDown {
-			t.Errorf("state indication = %v, want %v", got, StateAspDown)
+		if got != StateASPDown {
+			t.Errorf("state indication = %v, want %v", got, StateASPDown)
 		}
 	default:
 		t.Error("Layer Management was not told that the ASP moved to ASP-DOWN")
@@ -177,10 +177,10 @@ func TestSCTPRestartMovesRemoteASPDownInEveryApplicationServer(t *testing.T) {
 // destination. The restarted association is still usable, so Close cannot do
 // either job on this path.
 func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
 	conn.assocID.Store(7)
-	if err := conn.handleStateUpdate(StateAspActive); err != nil {
+	if err := conn.handleStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("entering ASP-ACTIVE: %v", err)
 	}
 	<-conn.StateChanges()
@@ -193,18 +193,18 @@ func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) 
 	conn.destinations.set(alreadyDown, DestinationUnavailable)
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Conn { return conn })
+	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
 	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
 		t.Fatalf("handle returned %v; an event must never fail the read", err)
 	}
 	applyRestartTransition(t, conn)
-	if got := conn.State(); got != StateAspDown {
-		t.Errorf("State after dispatched restart = %v, want %v", got, StateAspDown)
+	if got := conn.State(); got != StateASPDown {
+		t.Errorf("State after dispatched restart = %v, want %v", got, StateASPDown)
 	}
 	select {
 	case got := <-conn.StateChanges():
-		if got != StateAspDown {
-			t.Errorf("state indication = %v, want %v", got, StateAspDown)
+		if got != StateASPDown {
+			t.Errorf("state indication = %v, want %v", got, StateASPDown)
 		}
 	default:
 		t.Error("Layer Management was not told that the local ASP moved to ASP-DOWN")
@@ -247,7 +247,7 @@ func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) 
 // ASP Up, or the peer can receive ASP Active/Inactive/Down before the new
 // ASP-Up procedure has re-established the M3UA relationship.
 func TestSCTPRestartCancelsEveryOldTAckBeforeFreshAspUp(t *testing.T) {
-	conn, snapshot := tackConn(t, StateAspActive, 10*time.Millisecond, 100)
+	conn, snapshot := tackConn(t, StateASPActive, 10*time.Millisecond, 100)
 	conn.assocID.Store(7)
 	conn.startTAck(messages.NewAspUp(nil, params.NewInfoString("old")), requestAspUp)
 	conn.startTAck(messages.NewAspActive(
@@ -257,7 +257,7 @@ func TestSCTPRestartCancelsEveryOldTAckBeforeFreshAspUp(t *testing.T) {
 	conn.startTAck(messages.NewAspDown(params.NewInfoString("old")), requestAspDown)
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Conn { return conn })
+	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
 	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestSCTPRestartCancelsEveryOldTAckBeforeFreshAspUp(t *testing.T) {
 // it publishes ASP-DOWN; otherwise the old ASPTM request can land after the
 // fresh ASP Up and invert the required recovery order.
 func TestSCTPRestartFencesAnInFlightOldTAckWrite(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = 10 * time.Millisecond
 	conn.cfg.TAckRetries = 100
 
@@ -335,7 +335,7 @@ func TestSCTPRestartFencesAnInFlightOldTAckWrite(t *testing.T) {
 
 	select {
 	case state := <-conn.stateChan:
-		if state != StateAspDown {
+		if state != StateASPDown {
 			t.Fatalf("restart state = %v, want ASP-DOWN", state)
 		}
 		if err := conn.handleStateUpdate(state); err != nil {
@@ -350,7 +350,7 @@ func TestSCTPRestartFencesAnInFlightOldTAckWrite(t *testing.T) {
 // belong to the new association epoch. A delayed Ack from before the restart
 // must therefore be reported/ignored without activating or inactivating it.
 func TestSCTPRestartRejectsDelayedOldASPTMAcksUntilAspUpCompletes(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
 	conn.startTAck(messages.NewAspActive(
 		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
@@ -366,7 +366,7 @@ func TestSCTPRestartRejectsDelayedOldASPTMAcksUntilAspUpCompletes(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("restart state was not published")
 	}
-	if got := conn.State(); got != StateAspDown {
+	if got := conn.State(); got != StateASPDown {
 		t.Fatalf("state after restart = %v, want ASP-DOWN", got)
 	}
 
@@ -376,7 +376,7 @@ func TestSCTPRestartRejectsDelayedOldASPTMAcksUntilAspUpCompletes(t *testing.T) 
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(
 		params.NewRoutingContext(2), nil,
 	))
-	if got := conn.State(); got != StateAspDown {
+	if got := conn.State(); got != StateASPDown {
 		t.Errorf("delayed old ASPTM Ack changed state to %v before fresh ASP Up Ack", got)
 	}
 	conn.muAckedRCs.RLock()
@@ -393,7 +393,7 @@ func TestSCTPRestartRejectsDelayedOldASPTMAcksUntilAspUpCompletes(t *testing.T) 
 // so relying only on the entry action cancels the old timer and starts no
 // replacement. Every SCTP epoch still requires its own fresh ASP Up.
 func TestRepeatedSCTPRestartWhileAspDownStartsAnotherFreshAspUp(t *testing.T) {
-	conn, snapshot := tackConn(t, StateAspActive, time.Hour, 10)
+	conn, snapshot := tackConn(t, StateASPActive, time.Hour, 10)
 
 	conn.handleSCTPRestart()
 	select {
@@ -429,7 +429,7 @@ func TestRepeatedSCTPRestartWhileAspDownStartsAnotherFreshAspUp(t *testing.T) {
 // new epoch's ASP Active procedure and Ack must work normally. Leaving the gate
 // armed would replace stale-state protection with a permanently inactive ASP.
 func TestSCTPRestartAllowsASPTMAcksAfterFreshAspUpAck(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
 
 	conn.handleSCTPRestart()
@@ -444,7 +444,7 @@ func TestSCTPRestartAllowsASPTMAcksAfterFreshAspUpAck(t *testing.T) {
 	conn.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	select {
 	case state := <-conn.stateChan:
-		if state != StateAspInactive {
+		if state != StateASPInactive {
 			t.Fatalf("fresh ASP Up Ack published %v, want ASP-INACTIVE", state)
 		}
 		if err := conn.handleStateUpdate(state); err != nil {
@@ -457,7 +457,7 @@ func TestSCTPRestartAllowsASPTMAcksAfterFreshAspUpAck(t *testing.T) {
 	conn.handleSignals(context.Background(), messages.NewAspActiveAck(
 		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
 	))
-	if got := conn.State(); got != StateAspActive {
+	if got := conn.State(); got != StateASPActive {
 		t.Errorf("state after new-epoch ASP Active Ack = %v, want ASP-ACTIVE", got)
 	}
 
@@ -467,7 +467,7 @@ func TestSCTPRestartAllowsASPTMAcksAfterFreshAspUpAck(t *testing.T) {
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(
 		conn.cfg.RoutingContexts.Copy(), nil,
 	))
-	if got := conn.State(); got != StateAspInactive {
+	if got := conn.State(); got != StateASPInactive {
 		t.Errorf("post-recovery unsolicited ASP Inactive Ack left state %v, want ASP-INACTIVE", got)
 	}
 }
@@ -479,9 +479,9 @@ func TestSCTPRestartAllowsASPTMAcksAfterFreshAspUpAck(t *testing.T) {
 // earlier ASP Active can then publish ASP-ACTIVE after the later restart and
 // resurrect a peer whose SCTP state was reset.
 func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspInactive, modeServer)
+	conn, _ := newTestConn(t, StateASPInactive, RoleSGP)
 	conn.assocID.Store(7)
-	if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("entering ASP-INACTIVE: %v", err)
 	}
 	<-conn.StateChanges()
@@ -515,13 +515,13 @@ func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
 	}
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Conn { return conn })
+	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
 	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
 		t.Fatalf("handle restart: %v", err)
 	}
 	close(allowHandlerToFinish)
 
-	want := []State{StateAspActive, StateAspDown}
+	want := []State{StateASPActive, StateASPDown}
 	for i, expected := range want {
 		select {
 		case state := <-conn.stateChan:
@@ -536,8 +536,8 @@ func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
 			t.Fatalf("only %d of %d state publications arrived", i, len(want))
 		}
 	}
-	if got := conn.State(); got != StateAspDown {
-		t.Errorf("final state = %v, want %v after the later SCTP restart", got, StateAspDown)
+	if got := conn.State(); got != StateASPDown {
+		t.Errorf("final state = %v, want %v after the later SCTP restart", got, StateASPDown)
 	}
 }
 
@@ -550,9 +550,9 @@ func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
 		sctp.SCTP_COMM_UP, sctp.SCTP_COMM_LOST,
 		sctp.SCTP_SHUTDOWN_COMP, sctp.SCTP_CANT_STR_ASSOC,
 	} {
-		conn, _ := newTestConn(t, StateAspActive, modeClient)
+		conn, _ := newTestConn(t, StateASPActive, RoleASP)
 		w := &restartWatcher{}
-		w.setRoute(func(sctp.SCTPAssocID) *Conn { return conn })
+		w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
 
 		if err := w.handle(assocChangeEvent(st, 1)); err != nil {
 			t.Fatalf("handle(%v) returned %v", st, err)
@@ -576,13 +576,13 @@ func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
 // other. A Listener installs one handler for every ASP it serves, so getting
 // this wrong tells the wrong ASP that its peer restarted.
 func TestRestartIsRoutedToTheNamedAssociationOnly(t *testing.T) {
-	a, _ := newTestConn(t, StateAspActive, modeServer)
-	b, _ := newTestConn(t, StateAspActive, modeServer)
+	a, _ := newTestConn(t, StateASPActive, RoleSGP)
+	b, _ := newTestConn(t, StateASPActive, RoleSGP)
 	a.assocID.Store(11)
 	b.assocID.Store(22)
 
 	w := &restartWatcher{}
-	w.setRoute(func(id sctp.SCTPAssocID) *Conn {
+	w.setRoute(func(id sctp.SCTPAssocID) *Association {
 		switch int32(id) {
 		case a.assocID.Load():
 			return a
@@ -619,7 +619,7 @@ func TestRestartIsRoutedToTheNamedAssociationOnly(t *testing.T) {
 // read, which would kill an association over an event that is not even ours.
 func TestUnparseableOrUnknownEventsDoNotFailTheRead(t *testing.T) {
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Conn { return nil })
+	w.setRoute(func(sctp.SCTPAssocID) *Association { return nil })
 
 	for _, b := range [][]byte{
 		nil,
@@ -633,7 +633,7 @@ func TestUnparseableOrUnknownEventsDoNotFailTheRead(t *testing.T) {
 	}
 
 	// And with no route installed at all, which is the window between the
-	// socket being created and Dial having a Conn to route to.
+	// socket being created and Dial having an Association to route to.
 	empty := &restartWatcher{}
 	if err := empty.handle(assocChangeEvent(sctp.SCTP_RESTART, 1)); err != nil {
 		t.Errorf("handle with no route = %v, want nil", err)

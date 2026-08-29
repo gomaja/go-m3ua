@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -43,7 +44,7 @@ func NewHeartbeatInfo(interval, timer time.Duration, data []byte) *HeartbeatInfo
 	}
 }
 
-// SctpSackInfo is a set of information for SCTP SACK timer configuration.
+// SCTPSACKInfo configures the SCTP delayed-SACK timer.
 //
 // SackDelay sack_delay: This parameter contains the number of milliseconds the
 // user is requesting that the delayed SACK timer be set to.
@@ -62,18 +63,18 @@ func NewHeartbeatInfo(interval, timer time.Duration, data []byte) *HeartbeatInfo
 // be received before a SACK is sent without waiting for the delay
 // timer to expire.  The default value is 2; setting this value to 1
 // will disable the delayed SACK algorithm.
-type SctpSackInfo struct {
+type SCTPSACKInfo struct {
 	Enabled       bool
 	SackDelay     uint32
 	SackFrequency uint32
 }
 
-// SctpNoDelayInfo is a set of information for SCTP NODELAY configuration.
+// SCTPNoDelayInfo is a set of information for SCTP NODELAY configuration.
 //
 // NoDelay, when true, disables the Nagle-like bundling algorithm so that
 // user messages are sent as soon as possible (SCTP_NODELAY = 1). When
 // false, small messages may be bundled to improve throughput.
-type SctpNoDelayInfo struct {
+type SCTPNoDelayInfo struct {
 	Enabled bool
 	NoDelay bool
 }
@@ -90,12 +91,13 @@ const DefaultReadBufferSize = 65535
 // SCTPConfig holds all SCTP-related configuration parameters.
 // This separates SCTP layer configuration from M3UA layer configuration.
 //
-// A Config — and so this SCTPConfig — may be shared by every Conn a Listener
+// An AssociationConfig — and therefore its SCTPConfig — may be shared by every
+// association a Listener
 // accepts, and by repeated Dials. It therefore holds settings only: the
-// association itself and everything derived from it belong to the Conn.
+// SCTP association and everything derived from it belong to the Association.
 type SCTPConfig struct {
-	*SctpSackInfo
-	*SctpNoDelayInfo
+	*SCTPSACKInfo
+	*SCTPNoDelayInfo
 
 	// InitTimeout bounds Dial's one-shot SCTP association attempt. Zero
 	// selects DefaultInitTimeout.
@@ -138,7 +140,7 @@ const DefaultEstablishTimeout = 10 * time.Second
 
 // DefaultDataQueueSize is the number of inbound DATA messages one association
 // retains while its application is not reading. It is large enough to absorb
-// ordinary traffic bursts without the 65,535-slot allocation every Conn used
+// ordinary traffic bursts without the 65,535-slot allocation every Association used
 // to make; sustained overflow remains non-blocking and reports local congestion.
 const DefaultDataQueueSize = 1024
 
@@ -186,7 +188,7 @@ type BroadcastFlowIdentifier func(*params.ProtocolDataPayload) (string, error)
 
 // ASPIdentity identifies an ASP at the point its ASP Up is received. The ASP
 // Identifier is optional in RFC 4666, so ASPIdentifierSet distinguishes an
-// omitted identifier from the valid value zero. RemoteAddr is nil for a Conn
+// omitted identifier from the valid value zero. RemoteAddr is nil for an Association
 // constructed without a live SCTP association.
 type ASPIdentity struct {
 	ASPIdentifier    uint32
@@ -195,17 +197,18 @@ type ASPIdentity struct {
 }
 
 // ASPAuthorizer returns the Routing Contexts an accepted ASP is configured to
-// serve. The result is copied and must be a subset of Config.RoutingContexts.
+// serve. The result is copied and must be a subset of
+// AssociationConfig.RoutingContexts.
 // Returning an empty slice authorizes no Application Server. The decision is
 // resolved once at ASP Up and remains immutable for that association.
 type ASPAuthorizer func(ASPIdentity) []uint32
 
-// ConnConfig configures one M3UA association.
+// AssociationConfig configures one M3UA association.
 //
-// A server Listener owns the shared SCTP socket and shared SGP state; each
-// accepted SCTP association uses an immutable ConnConfig snapshot selected by
+// A Listener owns the shared SCTP listening socket; each accepted SCTP
+// association uses an immutable AssociationConfig snapshot selected by
 // ListenerConfig before any M3UA message is parsed.
-type ConnConfig struct {
+type AssociationConfig struct {
 	// HeartbeatInfo controls M3UA BEAT/BEAT Ack liveness only; it is separate
 	// from SCTP HEARTBEAT path management.
 	*HeartbeatInfo
@@ -225,10 +228,10 @@ type ConnConfig struct {
 	// DefaultDataQueueSize. Once full, further DATA is discarded and local
 	// congestion is reported without blocking the association dispatcher.
 	DataQueueSize int
-	AspIdentifier *params.Param
+	ASPIdentifier *params.Param
 	// TrafficModeType is the default traffic-handling mode. Its value is copied
-	// when a Conn or Listener is constructed; later mutations do not alter
-	// established protocol policy.
+	// when an Association or Listener is constructed; later mutations do not
+	// alter established protocol policy.
 	TrafficModeType *params.Param
 	// AuthorizeASP optionally narrows the listener-wide Routing Context inventory
 	// to the immutable set this peer may serve. Without it, accepted ASPs retain
@@ -237,7 +240,7 @@ type ConnConfig struct {
 	// TrafficModes optionally configures Traffic Mode per Routing Context. It
 	// takes precedence over TrafficModeType and permits one association to serve
 	// ASes with different modes. Values must be Override, Loadshare, or Broadcast.
-	// The map is copied when a Conn or Listener is constructed.
+	// The map is copied when an Association or Listener is constructed.
 	TrafficModes      map[uint32]uint32
 	NetworkAppearance *params.Param
 	// RecoveryTimer is T(r), the AS-PENDING recovery timer of RFC 4666
@@ -245,8 +248,8 @@ type ConnConfig struct {
 	// signalling messages SHOULD be queued by the SGP.  If an ASP becomes
 	// ASP-ACTIVE before T(r) expires, the AS is moved to the AS-ACTIVE state".
 	//
-	// Zero selects DefaultRecoveryTimer. Server-side only: the AS state machine
-	// is maintained on the SGP.
+	// Zero selects DefaultRecoveryTimer. This applies only to an SGP role,
+	// where the AS state machine is maintained.
 	RecoveryTimer time.Duration
 	// RecoveryQueueMessages and RecoveryQueueBytes bound the DATA retained for
 	// an AS while T(r) runs. Values less than or equal to zero select the
@@ -275,18 +278,15 @@ type ConnConfig struct {
 	// protocol violations. The zero value keeps RFC-strict behaviour.
 	Compatibility CompatibilityPolicy
 
-	RoutingContexts        *params.Param
-	CorrelationID          *params.Param
-	OriginatingPointCode   uint32
-	DestinationPointCode   uint32
-	ServiceIndicator       uint8
-	NetworkIndicator       uint8
-	MessagePriority        uint8
-	SignalingLinkSelection uint8
+	RoutingContexts         *params.Param
+	CorrelationID           *params.Param
+	OriginatingPointCode    uint32
+	DestinationPointCode    uint32
+	ServiceIndicator        uint8
+	NetworkIndicator        uint8
+	MessagePriority         uint8
+	SignallingLinkSelection uint8
 }
-
-// Config is retained as the historical name for ConnConfig.
-type Config = ConnConfig
 
 // AcceptInfo identifies an SCTP association before its M3UA handshake starts.
 //
@@ -298,50 +298,50 @@ type AcceptInfo struct {
 	RemoteAddr *sctp.SCTPAddr
 }
 
-// ConnConfigSelector chooses the immutable per-association ConnConfig for an
+// AssociationConfigSelector chooses the immutable AssociationConfig for an
 // accepted SCTP association.
-type ConnConfigSelector func(AcceptInfo) (*ConnConfig, error)
+type AssociationConfigSelector func(AcceptInfo) (*AssociationConfig, error)
 
 // ListenerConfig configures a shared M3UA listener.
 //
-// DefaultConnConfig is the fallback per-association configuration. If
-// SelectConnConfig is set, it runs after SCTP accept and before socket options,
-// monitor goroutines, ASP Up parsing, or compatibility handling.
+// DefaultAssociationConfig is the fallback per-association configuration. If
+// SelectAssociationConfig is set, it runs after SCTP accept and before socket
+// options, monitor goroutines, ASP Up parsing, or compatibility handling.
 type ListenerConfig struct {
-	DefaultConnConfig *ConnConfig
-	SelectConnConfig  ConnConfigSelector
+	DefaultAssociationConfig *AssociationConfig
+	SelectAssociationConfig  AssociationConfigSelector
 }
 
 // NewListenerConfig creates a listener configuration with an immutable default
-// per-association ConnConfig snapshot.
-func NewListenerConfig(defaultConnConfig *ConnConfig) *ListenerConfig {
-	if defaultConnConfig == nil {
-		defaultConnConfig = NewConfig(0, 0, 0, 0, 0, 0)
+// AssociationConfig snapshot.
+func NewListenerConfig(defaultAssociationConfig *AssociationConfig) *ListenerConfig {
+	if defaultAssociationConfig == nil {
+		defaultAssociationConfig = NewAssociationConfig(0, 0, 0, 0, 0, 0)
 	}
 	return &ListenerConfig{
-		DefaultConnConfig: snapshotConnConfig(defaultConnConfig),
+		DefaultAssociationConfig: snapshotAssociationConfig(defaultAssociationConfig),
 	}
 }
 
-func (l *ListenerConfig) connConfigForAccept(info AcceptInfo) (*ConnConfig, error) {
+func (l *ListenerConfig) associationConfigForAccept(info AcceptInfo) (*AssociationConfig, error) {
 	if l == nil {
 		return nil, errors.New("nil ListenerConfig")
 	}
-	selected := l.DefaultConnConfig
-	if l.SelectConnConfig != nil {
+	selected := l.DefaultAssociationConfig
+	if l.SelectAssociationConfig != nil {
 		var err error
-		selected, err = l.SelectConnConfig(info)
+		selected, err = l.SelectAssociationConfig(info)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if selected == nil {
-		return nil, errors.New("nil ConnConfig")
+		return nil, errors.New("nil AssociationConfig")
 	}
-	return snapshotConnConfig(selected), nil
+	return snapshotAssociationConfig(selected), nil
 }
 
-func snapshotConnConfig(config *ConnConfig) *ConnConfig {
+func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 	if config == nil {
 		return nil
 	}
@@ -353,17 +353,19 @@ func snapshotConnConfig(config *ConnConfig) *ConnConfig {
 	}
 	if config.SCTPConfig != nil {
 		sctpConfig := *config.SCTPConfig
-		if config.SCTPConfig.SctpSackInfo != nil {
-			sack := *config.SCTPConfig.SctpSackInfo
-			sctpConfig.SctpSackInfo = &sack
+		if config.SCTPConfig.SCTPSACKInfo != nil {
+			sack := *config.SCTPConfig.SCTPSACKInfo
+			sctpConfig.SCTPSACKInfo = &sack
 		}
-		if config.SCTPConfig.SctpNoDelayInfo != nil {
-			noDelay := *config.SCTPConfig.SctpNoDelayInfo
-			sctpConfig.SctpNoDelayInfo = &noDelay
+		if config.SCTPConfig.SCTPNoDelayInfo != nil {
+			noDelay := *config.SCTPConfig.SCTPNoDelayInfo
+			sctpConfig.SCTPNoDelayInfo = &noDelay
 		}
 		snapshot.SCTPConfig = &sctpConfig
+	} else {
+		snapshot.SCTPConfig = &SCTPConfig{}
 	}
-	snapshot.AspIdentifier = config.AspIdentifier.Copy()
+	snapshot.ASPIdentifier = config.ASPIdentifier.Copy()
 	snapshot.TrafficModeType = config.TrafficModeType.Copy()
 	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
 	snapshot.RoutingContexts = config.RoutingContexts.Copy()
@@ -375,6 +377,35 @@ func snapshotConnConfig(config *ConnConfig) *ConnConfig {
 		}
 	}
 	return &snapshot
+}
+
+func validateAssociationConfigForRole(role Role, config *AssociationConfig) error {
+	if config == nil {
+		return ErrNilAssociationConfig
+	}
+	switch role {
+	case RoleASP:
+		if config.AuthorizeASP != nil {
+			return fmt.Errorf("%w: AuthorizeASP applies only to an SGP", ErrInvalidRoleConfiguration)
+		}
+		if config.RecoveryTimer != 0 ||
+			config.RecoveryQueueMessages != 0 ||
+			config.RecoveryQueueBytes != 0 ||
+			config.RecoveryQueueTotalMessages != 0 ||
+			config.RecoveryQueueTotalBytes != 0 ||
+			config.BroadcastFlowIdentifier != nil ||
+			config.BroadcastFlowCacheEntries != 0 ||
+			config.BroadcastFlowIdentifierBytes != 0 {
+			return fmt.Errorf("%w: AS recovery and distribution policy applies only to an SGP", ErrInvalidRoleConfiguration)
+		}
+	case RoleSGP:
+		if config.ASPIdentifier != nil {
+			return fmt.Errorf("%w: ASPIdentifier applies only to an ASP", ErrInvalidRoleConfiguration)
+		}
+	default:
+		return ErrUnsupportedRole
+	}
+	return nil
 }
 
 func newAcceptInfo(local, remote net.Addr) AcceptInfo {
@@ -409,21 +440,28 @@ func cloneSCTPAddr(addr *sctp.SCTPAddr) *sctp.SCTPAddr {
 	return clone
 }
 
-// NewConfig creates a new ConnConfig.
+// NewAssociationConfig creates a role-neutral M3UA association configuration.
 //
 // To set additional parameters, use constructors in param package or
 // setters defined in this package. Note that the params left nil won't
 // appear in the packets but the initialized params will, with zero
 // values.
-func NewConfig(opc, dpc uint32, si, ni, mp, sls uint8) *ConnConfig {
-	return &ConnConfig{
-		SCTPConfig:             &SCTPConfig{},
-		OriginatingPointCode:   opc,
-		DestinationPointCode:   dpc,
-		ServiceIndicator:       si,
-		NetworkIndicator:       ni,
-		MessagePriority:        mp,
-		SignalingLinkSelection: sls,
+func NewAssociationConfig(
+	originatingPointCode,
+	destinationPointCode uint32,
+	serviceIndicator,
+	networkIndicator,
+	messagePriority,
+	signallingLinkSelection uint8,
+) *AssociationConfig {
+	return &AssociationConfig{
+		SCTPConfig:              &SCTPConfig{},
+		OriginatingPointCode:    originatingPointCode,
+		DestinationPointCode:    destinationPointCode,
+		ServiceIndicator:        serviceIndicator,
+		NetworkIndicator:        networkIndicator,
+		MessagePriority:         messagePriority,
+		SignallingLinkSelection: signallingLinkSelection,
 	}
 }
 
@@ -436,7 +474,7 @@ func NewConfig(opc, dpc uint32, si, ni, mp, sls uint8) *ConnConfig {
 // Each BEAT carries freshly generated random Heartbeat Data, and the BEAT
 // Ack's echo is validated against it, so BEAT/BEAT Ack pairs identify
 // themselves; the HeartbeatInfo.Data field does not influence the exchange.
-func (c *Config) EnableHeartbeat(interval, timer time.Duration) *Config {
+func (c *AssociationConfig) EnableHeartbeat(interval, timer time.Duration) *AssociationConfig {
 	c.HeartbeatInfo = NewHeartbeatInfo(
 		interval, timer,
 		[]byte("Hi, this is a BEAT from go-m3ua. Are you alive?"),
@@ -444,7 +482,7 @@ func (c *Config) EnableHeartbeat(interval, timer time.Duration) *Config {
 	return c
 }
 
-// SetSackConfig sets the SCTP SACK timer configuration.
+// SetSCTPSACK sets the SCTP SACK timer configuration.
 //
 // sackDelay is the number of milliseconds for the delayed SACK timer. RFC 9260
 // Section 6.2 allows any value up to 500 ms and forbids more. This setter is
@@ -456,11 +494,11 @@ func (c *Config) EnableHeartbeat(interval, timer time.Duration) *Config {
 // SACK algorithm.
 //
 // Note: sackDelay=0, sackFrequency=1 (disables delayed SACK)
-func (c *Config) SetSackConfig(sackDelay, sackFrequency uint32) *Config {
+func (c *AssociationConfig) SetSCTPSACK(sackDelay, sackFrequency uint32) *AssociationConfig {
 	if c.SCTPConfig == nil {
 		c.SCTPConfig = &SCTPConfig{}
 	}
-	c.SCTPConfig.SctpSackInfo = &SctpSackInfo{
+	c.SCTPConfig.SCTPSACKInfo = &SCTPSACKInfo{
 		Enabled:       true,
 		SackDelay:     sackDelay,
 		SackFrequency: sackFrequency,
@@ -468,92 +506,48 @@ func (c *Config) SetSackConfig(sackDelay, sackFrequency uint32) *Config {
 	return c
 }
 
-// SetNoDelayConfig sets the SCTP_NODELAY option.
+// SetSCTPNoDelay sets the SCTP_NODELAY option.
 //
 // When noDelay is true, the Nagle-like bundling algorithm is disabled and
 // user messages are sent as soon as possible. When false, small messages
 // may be bundled to improve throughput.
-func (c *Config) SetNoDelayConfig(noDelay bool) *Config {
+func (c *AssociationConfig) SetSCTPNoDelay(noDelay bool) *AssociationConfig {
 	if c.SCTPConfig == nil {
 		c.SCTPConfig = &SCTPConfig{}
 	}
-	c.SCTPConfig.SctpNoDelayInfo = &SctpNoDelayInfo{
+	c.SCTPConfig.SCTPNoDelayInfo = &SCTPNoDelayInfo{
 		Enabled: true,
 		NoDelay: noDelay,
 	}
 	return c
 }
 
-// SetAspIdentifier sets AspIdentifier in Config.
-func (c *Config) SetAspIdentifier(id uint32) *Config {
-	c.AspIdentifier = params.NewAspIdentifier(id)
+// SetASPIdentifier sets the optional RFC 4666 ASP Identifier parameter.
+func (c *AssociationConfig) SetASPIdentifier(id uint32) *AssociationConfig {
+	c.ASPIdentifier = params.NewAspIdentifier(id)
 	return c
 }
 
-// SetTrafficModeType sets TrafficModeType in Config.
-func (c *Config) SetTrafficModeType(tmType uint32) *Config {
-	c.TrafficModeType = params.NewTrafficModeType(tmType)
+// SetTrafficModeType sets the RFC 4666 Traffic Mode Type parameter.
+func (c *AssociationConfig) SetTrafficModeType(trafficMode uint32) *AssociationConfig {
+	c.TrafficModeType = params.NewTrafficModeType(trafficMode)
 	return c
 }
 
-// SetNetworkAppearance sets NetworkAppearance in Config.
-func (c *Config) SetNetworkAppearance(nwApr uint32) *Config {
-	c.NetworkAppearance = params.NewNetworkAppearance(nwApr)
+// SetNetworkAppearance sets the RFC 4666 Network Appearance parameter.
+func (c *AssociationConfig) SetNetworkAppearance(networkAppearance uint32) *AssociationConfig {
+	c.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
 	return c
 }
 
-// SetRoutingContexts sets RoutingContexts in Config.
-func (c *Config) SetRoutingContexts(rtCtxs ...uint32) *Config {
-	c.RoutingContexts = params.NewRoutingContext(rtCtxs...)
+// SetRoutingContexts sets the RFC 4666 Routing Context parameter.
+func (c *AssociationConfig) SetRoutingContexts(routingContexts ...uint32) *AssociationConfig {
+	c.RoutingContexts = params.NewRoutingContext(routingContexts...)
 	return c
 }
 
-// SetCorrelationID sets CorrelationID in Config.
-func (c *Config) SetCorrelationID(id uint32) *Config {
+// SetCorrelationID sets the RFC 4666 Correlation ID parameter.
+func (c *AssociationConfig) SetCorrelationID(id uint32) *AssociationConfig {
 	c.CorrelationID = params.NewCorrelationID(id)
 	return c
-}
-
-// NewClientConfig creates a new Config for Client.
-//
-// The optional parameters that is not required (like CorrelationID)
-// can be omitted by setting it to nil after created *Config.
-func NewClientConfig(hbInfo *HeartbeatInfo, opc, dpc, aspID, tmt, nwApr, corrID uint32, rtCtxs []uint32, si, ni, mp, sls uint8) *ConnConfig {
-	return &ConnConfig{
-		HeartbeatInfo:          hbInfo,
-		SCTPConfig:             &SCTPConfig{},
-		AspIdentifier:          params.NewAspIdentifier(aspID),
-		TrafficModeType:        params.NewTrafficModeType(tmt),
-		NetworkAppearance:      params.NewNetworkAppearance(nwApr),
-		RoutingContexts:        params.NewRoutingContext(rtCtxs...),
-		CorrelationID:          params.NewCorrelationID(corrID),
-		OriginatingPointCode:   opc,
-		DestinationPointCode:   dpc,
-		ServiceIndicator:       si,
-		NetworkIndicator:       ni,
-		MessagePriority:        mp,
-		SignalingLinkSelection: sls,
-	}
-}
-
-// NewServerConfig creates a new Config for Server.
-//
-// The optional parameters that is not required (like CorrelationID)
-// can be omitted by setting it to nil after created *Config.
-func NewServerConfig(hbInfo *HeartbeatInfo, opc, dpc, aspID, tmt, nwApr, corrID uint32, rtCtxs []uint32, si, ni, mp, sls uint8) *ConnConfig {
-	return &ConnConfig{
-		HeartbeatInfo:          hbInfo,
-		SCTPConfig:             &SCTPConfig{},
-		AspIdentifier:          params.NewAspIdentifier(aspID),
-		TrafficModeType:        params.NewTrafficModeType(tmt),
-		NetworkAppearance:      params.NewNetworkAppearance(nwApr),
-		RoutingContexts:        params.NewRoutingContext(rtCtxs...),
-		CorrelationID:          params.NewCorrelationID(corrID),
-		OriginatingPointCode:   opc,
-		DestinationPointCode:   dpc,
-		ServiceIndicator:       si,
-		NetworkIndicator:       ni,
-		MessagePriority:        mp,
-		SignalingLinkSelection: sls,
-	}
 }

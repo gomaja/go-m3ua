@@ -31,7 +31,7 @@ func affectedPointCodeOf(message messages.M3UA) *params.Param {
 	}
 }
 
-func requireDestinationStateForScope(t *testing.T, conn *Conn, networkAppearance, routingContext, pointCode uint32, want DestinationState) {
+func requireDestinationStateForScope(t *testing.T, conn *Association, networkAppearance, routingContext, pointCode uint32, want DestinationState) {
 	t.Helper()
 	if got := conn.DestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode); got != want {
 		t.Fatalf("state for NA=%d RC=%d PC=%#x = %v, want %v",
@@ -42,7 +42,7 @@ func requireDestinationStateForScope(t *testing.T, conn *Conn, networkAppearance
 func TestDestinationStatusPreservesAffectedPointCodeMask(t *testing.T) {
 	for _, mask := range []uint8{0, 3, 8, 14, 24, 255} {
 		t.Run(maskName(mask), func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 			const pointCode = uint32(0x123457)
 			if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 				params.NewNetworkAppearance(7), nil,
@@ -61,7 +61,7 @@ func TestDestinationStatusPreservesAffectedPointCodeMask(t *testing.T) {
 	}
 
 	t.Run("positionally matches several APCs", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 		apc := params.NewAffectedPointCode(
 			uint32(3)<<24|0x111117,
 			uint32(14)<<24|0x222222,
@@ -80,7 +80,7 @@ func TestDestinationStatusPreservesAffectedPointCodeMask(t *testing.T) {
 	})
 
 	t.Run("peer congestion report", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 		conn.noteRoutingContextsActive([]uint32{1})
 		if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 			nil, nil, params.NewAffectedPointCodeWithMask(8, 0x1234aa), nil, nil, nil,
@@ -111,7 +111,7 @@ func TestDestinationRangeMaskMatching(t *testing.T) {
 		{name: "mask 255", mask: 255, stored: 0x123456, inside: 0xfedcba, all: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 			if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 				params.NewNetworkAppearance(7), nil,
 				params.NewAffectedPointCodeWithMask(test.mask, test.stored), nil,
@@ -128,7 +128,7 @@ func TestDestinationRangeMaskMatching(t *testing.T) {
 }
 
 func TestNewestMatchingDestinationRangeWins(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	const networkAppearance = uint32(7)
 	const pointCode = uint32(0x123456)
 
@@ -168,7 +168,7 @@ func TestNewestMatchingDestinationRangeWins(t *testing.T) {
 }
 
 func TestEquivalentDestinationRangeUpdateReplacesItsCanonicalPrefix(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(
 		7, 1, 0x1234aa, 8, DestinationUnavailable)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(
@@ -186,7 +186,7 @@ func TestEquivalentDestinationRangeUpdateReplacesItsCanonicalPrefix(t *testing.T
 }
 
 func TestDestinationRangeSettersNormalizePointCodesTo24Bits(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 0)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 0)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(
 		0, 0, 0xff123456, 3, DestinationUnavailable)
 
@@ -201,7 +201,7 @@ func TestDestinationRangeSettersNormalizePointCodesTo24Bits(t *testing.T) {
 }
 
 func TestDestinationStateIsScopedByNetworkAndRoutingContext(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 	const pointCode = uint32(0x234567)
 
@@ -234,7 +234,7 @@ func TestDestinationStateIsScopedByNetworkAndRoutingContext(t *testing.T) {
 	}
 
 	t.Run("omitted RC resolves the single configured flow", func(t *testing.T) {
-		single, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 9)
+		single, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 9)
 		if err := single.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 			params.NewNetworkAppearance(7), nil,
 			params.NewAffectedPointCodeWithMask(0, pointCode), nil,
@@ -250,7 +250,7 @@ func TestDestinationStateIsScopedByNetworkAndRoutingContext(t *testing.T) {
 }
 
 func TestDestinationScopePresenceIsDistinctFromExplicitZero(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	conn.cfg.NetworkAppearance = nil
 	const pointCode = uint32(0x234567)
 	conn.SetDestinationStateForNetworkAndRoutingContext(
@@ -262,7 +262,7 @@ func TestDestinationScopePresenceIsDistinctFromExplicitZero(t *testing.T) {
 	requireDestinationStateForScope(t, conn, 0, 1, pointCode, DestinationUnavailable)
 
 	t.Run("Routing Context", func(t *testing.T) {
-		multi, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 0, 1)
+		multi, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 0, 1)
 		multi.SetDestinationStateForNetworkAndRoutingContext(
 			0, 0, pointCode, DestinationUnavailable)
 		if got := multi.DestinationStateForNetwork(0, pointCode); got != DestinationAvailable {
@@ -273,7 +273,7 @@ func TestDestinationScopePresenceIsDistinctFromExplicitZero(t *testing.T) {
 }
 
 func TestDestinationRangeSnapshotsPreserveScopeAndUpdateOrder(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 	conn.SetDestinationRangeForNetwork(7, 0x120001, 14, DestinationUnavailable)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, 0x1234aa, 8, DestinationRestricted)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, 0x123456, 0, DestinationAvailable)
@@ -302,11 +302,12 @@ func TestDestinationRangeSnapshotsPreserveScopeAndUpdateOrder(t *testing.T) {
 }
 
 func TestListenerDestinationRangesProvideAllRCBaselineAndScopedOverride(t *testing.T) {
-	listener := &Listener{Config: NewServerConfig(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false},
 		0x222222, 0x111111, 1, params.TrafficModeLoadshare, 7, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)}
+	)
+	listener := newSGPListener(NewListenerConfig(config))
 	listener.SetDestinationRangeForNetwork(7, 0x1234aa, 8, DestinationUnavailable)
 	listener.SetDestinationStateForNetworkAndRoutingContext(7, 2, 0x123456, DestinationAvailable)
 
@@ -330,7 +331,7 @@ func TestListenerDestinationRangesProvideAllRCBaselineAndScopedOverride(t *testi
 func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 	for _, mask := range []uint8{0, 3, 8, 14, 24, 255} {
 		t.Run(maskName(mask), func(t *testing.T) {
-			conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+			conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 			const pointCode = uint32(0x123457)
 			conn.SetDestinationRangeForNetworkAndRoutingContext(
@@ -379,7 +380,7 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 }
 
 func TestDAUDSplitsRoutingContextsByResolvedState(t *testing.T) {
-	conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1, 2)
+	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	conn.noteRoutingContextsActive([]uint32{1, 2})
 	const pointCode = uint32(0x234567)
@@ -424,7 +425,7 @@ func TestDAUDSplitsRoutingContextsByResolvedState(t *testing.T) {
 }
 
 func TestDAUDCongestedRangePreservesMaskOnBothReplies(t *testing.T) {
-	conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	const pointCode = uint32(0x456789)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(
@@ -450,13 +451,13 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client, server, err := setupConn(t, ctx, 3296)
+	aspAssociation, sgpAssociation, err := setupConn(t, ctx, 3296)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_ = client.Close()
-		_ = server.Close()
+		_ = aspAssociation.Close()
+		_ = sgpAssociation.Close()
 	}()
 
 	for _, test := range []struct {
@@ -469,7 +470,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 		{name: "exact control", pointCode: 0x654321, mask: 0, state: DestinationAvailable},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			server.destinations.setRanges([]DestinationRange{{
+			sgpAssociation.destinations.setRanges([]DestinationRange{{
 				NetworkAppearance:    0,
 				NetworkAppearanceSet: true,
 				RoutingContext:       1,
@@ -478,7 +479,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 				Mask:                 test.mask,
 				State:                test.state,
 			}})
-			if _, err := client.WriteSignal(messages.NewDestinationStateAudit(
+			if _, err := aspAssociation.WriteSignal(messages.NewDestinationStateAudit(
 				nil, params.NewRoutingContext(1),
 				params.NewAffectedPointCodeWithMask(test.mask, test.pointCode), nil,
 			)); err != nil {
@@ -486,7 +487,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 			}
 
 			select {
-			case status := <-client.SignallingStatus():
+			case status := <-aspAssociation.SignallingStatus():
 				if status.PointCode != test.pointCode || status.Mask != test.mask ||
 					status.State != test.state || !status.RoutingContextSet ||
 					!reflect.DeepEqual(status.RoutingContexts, []uint32{1}) {
@@ -501,7 +502,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 }
 
 func TestDAUDRangeLookupDoesNotLetAnExactOverrideInventAWholeRangeState(t *testing.T) {
-	conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	const pointCode = uint32(0x123456)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, pointCode, 8, DestinationUnavailable)
@@ -530,7 +531,7 @@ func TestDAUDRangeLookupDoesNotLetAnExactOverrideInventAWholeRangeState(t *testi
 }
 
 func TestSSNMMultiRoutingContextUpdateIsAtomic(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 	const networkAppearance = uint32(7)
 	const pointCode = uint32(0x345678)
@@ -604,7 +605,7 @@ func TestSSNMMultiRoutingContextUpdateIsAtomic(t *testing.T) {
 }
 
 func TestPausePreservesDestinationRangeScope(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(
 		7, 2, 0x5678ab, 8, DestinationAvailable)
 

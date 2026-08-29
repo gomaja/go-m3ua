@@ -75,13 +75,13 @@ func (p *tackMessageProbe) MessageTypeName() string      { return "ASP Up" }
 // state — strands the association forever, because we wait for an Ack that will
 // never come while the peer waits for a request it never saw.
 
-// tackConn builds a client whose T(ack) fires quickly, with its outbound
+// tackConn builds an ASP whose T(ack) fires quickly, with its outbound
 // signals captured under a mutex so the retransmit goroutine and the test can
 // both touch them.
-func tackConn(t *testing.T, state State, interval time.Duration, retries int) (*Conn, func() []messages.M3UA) {
+func tackConn(t *testing.T, state State, interval time.Duration, retries int) (*Association, func() []messages.M3UA) {
 	t.Helper()
 
-	conn, _ := newTestConn(t, state, modeClient)
+	conn, _ := newTestConn(t, state, RoleASP)
 	conn.cfg.TAck = interval
 	conn.cfg.TAckRetries = retries
 
@@ -118,7 +118,7 @@ func countType(msgs []messages.M3UA, name string) int {
 // resent. Before T(ack) existed, a single lost ASP Up left the association
 // stranded with no recovery short of tearing down the SCTP association.
 func TestTAckResendsUnacknowledgedAspUp(t *testing.T) {
-	conn, snapshot := tackConn(t, StateAspDown, 50*time.Millisecond, 5)
+	conn, snapshot := tackConn(t, StateASPDown, 50*time.Millisecond, 5)
 
 	if err := conn.initiateASPSM(); err != nil {
 		t.Fatalf("initiateASPSM() error = %v", err)
@@ -135,7 +135,7 @@ func TestTAckResendsUnacknowledgedAspUp(t *testing.T) {
 // the handshake completes floods the peer with duplicate requests, and RFC 4666
 // has the SGP answer every one of them — turning a healthy link into a loop.
 func TestTAckStopsOnAck(t *testing.T) {
-	conn, snapshot := tackConn(t, StateAspDown, 50*time.Millisecond, 20)
+	conn, snapshot := tackConn(t, StateASPDown, 50*time.Millisecond, 20)
 
 	if err := conn.initiateASPSM(); err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestTAckStopsOnAck(t *testing.T) {
 
 	// The Ack arrives.
 	conn.muState.Lock()
-	conn.state = StateAspInactive
+	conn.state = StateASPInactive
 	conn.muState.Unlock()
 	if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
 		t.Fatalf("handleAspUpAck() error = %v", err)
@@ -169,7 +169,7 @@ func TestTAckStopsOnAck(t *testing.T) {
 // loads a network already in trouble; the budget converts a silent hang into a
 // reportable failure an operator can see.
 func TestTAckGivesUpAndReportsFailure(t *testing.T) {
-	conn, snapshot := tackConn(t, StateAspDown, 30*time.Millisecond, 3)
+	conn, snapshot := tackConn(t, StateASPDown, 30*time.Millisecond, 3)
 
 	if err := conn.initiateASPSM(); err != nil {
 		t.Fatal(err)
@@ -211,7 +211,7 @@ func TestTAckGivesUpAndReportsFailure(t *testing.T) {
 // must stop it. This is the request that carries traffic mode and routing
 // context, so a lost one leaves an ASP that is up but never carries traffic.
 func TestTAckResendsAspActiveUntilAcked(t *testing.T) {
-	conn, snapshot := tackConn(t, StateAspInactive, 50*time.Millisecond, 20)
+	conn, snapshot := tackConn(t, StateASPInactive, 50*time.Millisecond, 20)
 
 	if err := conn.initiateASPTM(); err != nil {
 		t.Fatalf("initiateASPTM() error = %v", err)
@@ -237,7 +237,7 @@ func TestTAckResendsAspActiveUntilAcked(t *testing.T) {
 // writing to a closing socket leaks for the lifetime of the process, which is
 // exactly the failure mode the heartbeat fix addressed elsewhere.
 func TestTAckStopsOnClose(t *testing.T) {
-	conn, _ := tackConn(t, StateAspDown, 50*time.Millisecond, 100)
+	conn, _ := tackConn(t, StateASPDown, 50*time.Millisecond, 100)
 
 	if err := conn.initiateASPSM(); err != nil {
 		t.Fatal(err)
@@ -252,18 +252,18 @@ func TestTAckStopsOnClose(t *testing.T) {
 		t.Errorf("pendingTAck() = %d after stopping, want 0", got)
 	}
 	if !waitFor(func() bool {
-		return len(goroutinesBlockedIn("go-m3ua.(*Conn).runTAck")) == 0
+		return len(goroutinesBlockedIn("go-m3ua.(*Association).runTAck")) == 0
 	}, 2*time.Second) {
 		t.Error("a T(ack) goroutine outlived the association")
 	}
 }
 
 // A second request of the same kind supersedes the first: only the most recent
-// one can still be legitimately answered. Without this, a client that retried a
+// one can still be legitimately answered. Without this, an ASP that retried a
 // handshake would accumulate one retransmitter per attempt, each resending a
 // stale request.
 func TestTAckSupersedesEarlierRequestOfSameKind(t *testing.T) {
-	conn, _ := tackConn(t, StateAspDown, 50*time.Millisecond, 50)
+	conn, _ := tackConn(t, StateASPDown, 50*time.Millisecond, 50)
 
 	for range 5 {
 		if err := conn.initiateASPSM(); err != nil {
@@ -280,7 +280,7 @@ func TestTAckSupersedesEarlierRequestOfSameKind(t *testing.T) {
 // armed. When that stale attempt returns, it must neither delete the new timer
 // nor report that the new request expired.
 func TestStaleTAckCannotRetireSupersedingRequest(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeClient)
+	conn, _ := newTestConn(t, StateASPDown, RoleASP)
 	conn.cfg.TAck = 5 * time.Millisecond
 	conn.cfg.TAckRetries = 1
 
@@ -329,7 +329,7 @@ func TestStaleTAckCannotRetireSupersedingRequest(t *testing.T) {
 // once when T(ack) is short, which is both a data race and potentially corrupts
 // the control message put on the wire. The retry must own an immutable clone.
 func TestTAckRetransmissionDoesNotReuseTheInitiatingMessage(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeClient)
+	conn, _ := newTestConn(t, StateASPDown, RoleASP)
 	conn.cfg.TAck = time.Millisecond
 	conn.cfg.TAckRetries = 100
 	conn.signalWriter = func(message messages.M3UA) (int, error) {
@@ -369,7 +369,7 @@ func TestTAckRetransmissionDoesNotReuseTheInitiatingMessage(t *testing.T) {
 }
 
 func TestTAckRetrySnapshotDeepCopiesEveryParameter(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspInactive, modeClient)
+	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 	request := messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
 		params.NewRoutingContext(1, 2),
@@ -410,7 +410,7 @@ func TestTAckRetrySnapshotDeepCopiesEveryParameter(t *testing.T) {
 // Different request kinds are tracked independently: acknowledging one must not
 // silently cancel another that is still outstanding.
 func TestTAckTracksRequestKindsIndependently(t *testing.T) {
-	conn, _ := tackConn(t, StateAspDown, 50*time.Millisecond, 50)
+	conn, _ := tackConn(t, StateASPDown, 50*time.Millisecond, 50)
 
 	aspUp := messages.NewAspUp(nil, nil)
 	aspActive := messages.NewAspActive(nil, nil, nil)
@@ -430,7 +430,7 @@ func TestTAckTracksRequestKindsIndependently(t *testing.T) {
 
 // T(ack) defaults to the RFC's 2 seconds when unset, and honours configuration.
 func TestTAckIntervalDefaultsToRFCValue(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeClient)
+	conn, _ := newTestConn(t, StateASPDown, RoleASP)
 
 	if got := conn.tackInterval(); got != DefaultTAck {
 		t.Errorf("tackInterval() = %v with no configuration, want %v (RFC 4666 default)", got, DefaultTAck)
@@ -449,7 +449,7 @@ func TestTAckIntervalDefaultsToRFCValue(t *testing.T) {
 // Ack that stops it. Under -race this pins that the two do not collide on the
 // pending map.
 func TestTAckStartAndStopAreConcurrencySafe(t *testing.T) {
-	conn, _ := tackConn(t, StateAspDown, time.Millisecond, 100)
+	conn, _ := tackConn(t, StateASPDown, time.Millisecond, 100)
 
 	var wg sync.WaitGroup
 	for range 8 {
@@ -471,9 +471,9 @@ func TestTAckStartAndStopAreConcurrencySafe(t *testing.T) {
 }
 
 // An SGP must never retransmit: it answers requests, it does not make them.
-// A server that ran T(ack) would resend Acks as though they were requests.
-func TestServerDoesNotRetransmitOnTAck(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeServer)
+// An SGP that ran T(ack) would resend Acks as though they were requests.
+func TestSGPDoesNotRetransmitOnTAck(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 	conn.cfg.TAck = 20 * time.Millisecond
 
 	// The SGP's own send paths never call startTAck; nothing must be pending
@@ -489,7 +489,7 @@ func TestServerDoesNotRetransmitOnTAck(t *testing.T) {
 // not take the data path active. RFC 4666 Section 3.8.1 defines "Invalid
 // Routing Context" for exactly this.
 func TestAspActiveAckWithForeignRoutingContextIsRejected(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspInactive, modeClient)
+	conn, sent := newTestConn(t, StateASPInactive, RoleASP)
 
 	// Configured contexts are 1 and 2; the peer answers about 99.
 	err := conn.handleAspActiveAck(messages.NewAspActiveAck(
@@ -512,7 +512,7 @@ func TestAspActiveAckWithForeignRoutingContextIsRejected(t *testing.T) {
 // Ack that omits it is answering for the configured context and must be
 // accepted — rejecting it would break every peer that leaves it out.
 func TestAspActiveAckWithoutRoutingContextIsAccepted(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspInactive, modeClient)
+	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 
 	if err := conn.handleAspActiveAck(messages.NewAspActiveAck(
 		conn.cfg.TrafficModeType, nil, nil)); err != nil {
@@ -523,7 +523,7 @@ func TestAspActiveAckWithoutRoutingContextIsAccepted(t *testing.T) {
 // An Ack naming a traffic mode incompatible with ours is not agreement: the two
 // ends would run different traffic handling for the same AS.
 func TestAspActiveAckWithIncompatibleTrafficModeIsRejected(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspInactive, modeClient)
+	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 
 	err := conn.handleAspActiveAck(messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeBroadcast),
@@ -535,24 +535,24 @@ func TestAspActiveAckWithIncompatibleTrafficModeIsRejected(t *testing.T) {
 
 // The Acks travel SGP to ASP, so an SGP that receives one must report an Error
 // and hold its state: nothing authorises a stray Ack to move an SG.
-func TestServerRejectsAspBoundAcks(t *testing.T) {
+func TestSGPRejectsAspBoundAcks(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		call func(*Conn) error
+		call func(*Association) error
 	}{
-		{"ASP Down Ack", func(c *Conn) error {
+		{"ASP Down Ack", func(c *Association) error {
 			return c.handleAspDownAck(messages.NewAspDownAck(nil))
 		}},
-		{"ASP Active Ack", func(c *Conn) error {
+		{"ASP Active Ack", func(c *Association) error {
 			return c.handleAspActiveAck(messages.NewAspActiveAck(nil, nil, nil))
 		}},
-		{"ASP Inactive Ack", func(c *Conn) error {
+		{"ASP Inactive Ack", func(c *Association) error {
 			return c.handleAspInactiveAck(messages.NewAspInactiveAck(nil, nil))
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			for _, st := range []State{StateAspDown, StateAspInactive, StateAspActive} {
-				conn, _ := newTestConn(t, st, modeServer)
+			for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
+				conn, _ := newTestConn(t, st, RoleSGP)
 
 				var unexpected *UnexpectedMessageError
 				if err := tt.call(conn); !errors.As(err, &unexpected) {
@@ -578,14 +578,14 @@ func FuzzAckValidation(f *testing.F) {
 		f.Add(seed, uint32(params.TrafficModeLoadshare))
 	}
 
-	conn := newFuzzConn(f, modeClient)
+	conn := newFuzzConn(f, RoleASP)
 
 	f.Fuzz(func(t *testing.T, rcData []byte, mode uint32) {
 		rc := params.NewParam(int(params.RoutingContext), rcData)
 		tm := params.NewTrafficModeType(mode)
 
 		conn.muState.Lock()
-		conn.state = StateAspInactive
+		conn.state = StateASPInactive
 		conn.muState.Unlock()
 
 		// Any error is acceptable; a panic is not.
@@ -611,7 +611,7 @@ func FuzzAckValidation(f *testing.F) {
 		}
 
 		conn.muState.Lock()
-		conn.state = StateAspActive
+		conn.state = StateASPActive
 		conn.muState.Unlock()
 		_ = conn.handleAspInactiveAck(messages.NewAspInactiveAck(rc, nil))
 	})
@@ -625,13 +625,13 @@ func TestAckDispatchStillPublishesOneState(t *testing.T) {
 		state State
 		msg   messages.M3UA
 	}{
-		{"ASP Up Ack", StateAspDown, messages.NewAspUpAck(nil, nil)},
-		{"ASP Down Ack", StateAspDown, messages.NewAspDownAck(nil)},
-		{"ASP Active Ack", StateAspInactive, messages.NewAspActiveAck(nil, nil, nil)},
-		{"ASP Inactive Ack", StateAspActive, messages.NewAspInactiveAck(nil, nil)},
+		{"ASP Up Ack", StateASPDown, messages.NewAspUpAck(nil, nil)},
+		{"ASP Down Ack", StateASPDown, messages.NewAspDownAck(nil)},
+		{"ASP Active Ack", StateASPInactive, messages.NewAspActiveAck(nil, nil, nil)},
+		{"ASP Inactive Ack", StateASPActive, messages.NewAspInactiveAck(nil, nil)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, tt.state, modeClient)
+			conn, _ := newTestConn(t, tt.state, RoleASP)
 
 			conn.handleSignals(context.Background(), tt.msg)
 
@@ -648,7 +648,7 @@ func TestAckDispatchStillPublishesOneState(t *testing.T) {
 // and leaves a fresh retransmitter running after the handshake completed.
 func TestTAckIsArmedBeforeAnImmediateAck(t *testing.T) {
 	t.Run("ASP Up", func(t *testing.T) {
-		conn, _ := newTestConn(t, StateAspDown, modeClient)
+		conn, _ := newTestConn(t, StateASPDown, RoleASP)
 		conn.signalWriter = func(message messages.M3UA) (int, error) {
 			if _, ok := message.(*messages.AspUp); ok {
 				if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
@@ -667,7 +667,7 @@ func TestTAckIsArmedBeforeAnImmediateAck(t *testing.T) {
 	})
 
 	t.Run("ASP Active", func(t *testing.T) {
-		conn, _ := newTestConn(t, StateAspInactive, modeClient)
+		conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 		conn.signalWriter = func(message messages.M3UA) (int, error) {
 			if _, ok := message.(*messages.AspActive); ok {
 				if err := conn.handleAspActiveAck(messages.NewAspActiveAck(
@@ -691,7 +691,7 @@ func TestTAckIsArmedBeforeAnImmediateAck(t *testing.T) {
 // Arming before the write must not turn a local write failure into a phantom
 // outstanding request that retransmits a message which never left this node.
 func TestFailedInitialRequestLeavesNoTAck(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspDown, modeClient)
+	conn, _ := newTestConn(t, StateASPDown, RoleASP)
 	conn.signalWriter = func(messages.M3UA) (int, error) { return 0, ErrFailedToWriteSignal }
 
 	if err := conn.initiateASPSM(); !errors.Is(err, ErrFailedToWriteSignal) {
@@ -724,7 +724,7 @@ func TestInvalidAspActiveAckDoesNotStopTAck(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspInactive, modeClient)
+			conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 			conn.startTAck(messages.NewAspActive(
 				conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
 			), requestAspActive)
@@ -744,7 +744,7 @@ func TestInvalidAspActiveAckDoesNotStopTAck(t *testing.T) {
 // Context subsets. The first partial Ack completes only that subset; the timer
 // must remain armed for the rest and stop after the final subset arrives.
 func TestTAckTracksPartialAspActiveAcknowledgements(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspInactive, modeClient)
+	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 	conn.startTAck(messages.NewAspActive(
 		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1, 2), nil,
 	), requestAspActive)
@@ -769,7 +769,7 @@ func TestTAckTracksPartialAspActiveAcknowledgements(t *testing.T) {
 }
 
 func TestTAckTracksPartialAspInactiveAcknowledgements(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 	conn.startTAck(messages.NewAspInactive(params.NewRoutingContext(1, 2), nil), requestAspInactive)
 
@@ -795,44 +795,44 @@ func TestTAckTracksConcurrentScopedASPTMRequests(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		state   State
-		request func(*Conn, uint32) error
-		ack     func(*Conn, uint32) error
-		active  func(*Conn, uint32) bool
+		request func(*Association, uint32) error
+		ack     func(*Association, uint32) error
+		active  func(*Association, uint32) bool
 	}{
 		{
 			name:  "ASP Active",
-			state: StateAspInactive,
-			request: func(connection *Conn, routingContext uint32) error {
+			state: StateASPInactive,
+			request: func(connection *Association, routingContext uint32) error {
 				return connection.ActivateRoutingContexts(routingContext)
 			},
-			ack: func(connection *Conn, routingContext uint32) error {
+			ack: func(connection *Association, routingContext uint32) error {
 				return connection.handleAspActiveAck(messages.NewAspActiveAck(
 					connection.cfg.TrafficModeType.Copy(), params.NewRoutingContext(routingContext), nil,
 				))
 			},
-			active: func(connection *Conn, routingContext uint32) bool {
+			active: func(connection *Association, routingContext uint32) bool {
 				return connection.routingContextAcked(routingContext)
 			},
 		},
 		{
 			name:  "ASP Inactive",
-			state: StateAspActive,
-			request: func(connection *Conn, routingContext uint32) error {
+			state: StateASPActive,
+			request: func(connection *Association, routingContext uint32) error {
 				return connection.DeactivateRoutingContexts(routingContext)
 			},
-			ack: func(connection *Conn, routingContext uint32) error {
+			ack: func(connection *Association, routingContext uint32) error {
 				return connection.handleAspInactiveAck(messages.NewAspInactiveAck(
 					params.NewRoutingContext(routingContext), nil,
 				))
 			},
-			active: func(connection *Conn, routingContext uint32) bool {
+			active: func(connection *Association, routingContext uint32) bool {
 				return connection.routingContextAcked(routingContext)
 			},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			connection, _ := newTestConn(t, test.state, modeClient)
-			if test.state == StateAspActive {
+			connection, _ := newTestConn(t, test.state, RoleASP)
+			if test.state == StateASPActive {
 				connection.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 			}
 			if err := test.request(connection, 1); err != nil {
@@ -853,7 +853,7 @@ func TestTAckTracksConcurrentScopedASPTMRequests(t *testing.T) {
 			if got := connection.pendingTAck(); got != 0 {
 				t.Fatalf("pending T(ack) after both Acks = %d, want 0", got)
 			}
-			wantActive := test.state == StateAspInactive
+			wantActive := test.state == StateASPInactive
 			for _, routingContext := range []uint32{1, 2} {
 				if got := test.active(connection, routingContext); got != wantActive {
 					t.Errorf("RC %d active = %t, want %t", routingContext, got, wantActive)
@@ -873,7 +873,7 @@ func TestInvalidAspInactiveAckDoesNotStopTAck(t *testing.T) {
 		{name: "missing context", ack: nil, want: ErrMissingRoutingContext},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspActive, modeClient)
+			conn, _ := newTestConn(t, StateASPActive, RoleASP)
 			conn.startTAck(messages.NewAspInactive(params.NewRoutingContext(1), nil), requestAspInactive)
 
 			err := conn.handleAspInactiveAck(messages.NewAspInactiveAck(tt.ack, nil))
@@ -889,18 +889,18 @@ func TestInvalidAspInactiveAckDoesNotStopTAck(t *testing.T) {
 }
 
 func TestUnsolicitedAspInactiveAckReturnsToThePreviousActiveState(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	conn.noteRoutingContextsAcked(conn.cfg.RoutingContexts)
 
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(conn.cfg.RoutingContexts.Copy(), nil))
-	if got := conn.State(); got != StateAspInactive {
+	if got := conn.State(); got != StateASPInactive {
 		t.Fatalf("state after unsolicited ASP Inactive Ack = %v, want ASP-INACTIVE first", got)
 	}
 	if !conn.resumeAfterStrayAck() {
 		t.Fatal("unsolicited ASP Inactive Ack did not arm return to ASP-ACTIVE")
 	}
 
-	if err := conn.handleStateUpdate(StateAspInactive); err != nil {
+	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("ASP-INACTIVE entry action: %v", err)
 	}
 	if got := countType(*sent, "ASP Active"); got != 1 {
@@ -912,11 +912,11 @@ func TestUnsolicitedAspInactiveAckReturnsToThePreviousActiveState(t *testing.T) 
 }
 
 func TestUnsolicitedScopedAspInactiveAckReactivatesOnlyThatScope(t *testing.T) {
-	conn, sent := newTestConn(t, StateAspActive, modeClient)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(params.NewRoutingContext(1), nil))
-	if got := conn.State(); got != StateAspActive {
+	if got := conn.State(); got != StateASPActive {
 		t.Fatalf("association state = %v, want ASP-ACTIVE while RC 2 remains active", got)
 	}
 	if !conn.routingContextAcked(2) || conn.routingContextAcked(1) {
@@ -941,11 +941,11 @@ func TestUnsolicitedScopedAspInactiveAckReactivatesOnlyThatScope(t *testing.T) {
 }
 
 func TestUnsolicitedAspInactiveAckMovesDownOrInactiveASPToInactive(t *testing.T) {
-	for _, state := range []State{StateAspDown, StateAspInactive} {
+	for _, state := range []State{StateASPDown, StateASPInactive} {
 		t.Run(state.String(), func(t *testing.T) {
-			conn, sent := newTestConn(t, state, modeClient)
+			conn, sent := newTestConn(t, state, RoleASP)
 			conn.handleSignals(context.Background(), messages.NewAspInactiveAck(nil, nil))
-			if got := conn.State(); got != StateAspInactive {
+			if got := conn.State(); got != StateASPInactive {
 				t.Errorf("state = %v, want ASP-INACTIVE", got)
 			}
 			if conn.resumeAfterStrayAck() {
@@ -962,18 +962,18 @@ func TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		state   State
-		request func(*Conn) error
-		ack     func(*Conn) error
+		request func(*Association) error
+		ack     func(*Association) error
 		kind    requestKind
 		want    string
 	}{
 		{
 			name:  "activate",
-			state: StateAspInactive,
-			request: func(conn *Conn) error {
+			state: StateASPInactive,
+			request: func(conn *Association) error {
 				return conn.ActivateRoutingContexts(2)
 			},
-			ack: func(conn *Conn) error {
+			ack: func(conn *Association) error {
 				return conn.handleAspActiveAck(messages.NewAspActiveAck(
 					conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
 				))
@@ -983,11 +983,11 @@ func TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting(t *testing.T) {
 		},
 		{
 			name:  "deactivate",
-			state: StateAspActive,
-			request: func(conn *Conn) error {
+			state: StateASPActive,
+			request: func(conn *Association) error {
 				return conn.DeactivateRoutingContexts(2)
 			},
-			ack: func(conn *Conn) error {
+			ack: func(conn *Association) error {
 				return conn.handleAspInactiveAck(messages.NewAspInactiveAck(params.NewRoutingContext(2), nil))
 			},
 			kind: requestAspInactive,
@@ -995,7 +995,7 @@ func TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, test.state, modeClient)
+			conn, sent := newTestConn(t, test.state, RoleASP)
 			conn.signalWriter = func(message messages.M3UA) (int, error) {
 				if requestKindOf(message) == test.kind {
 					if conn.pendingTAck() != 1 {
@@ -1035,20 +1035,20 @@ func TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting(t *testing.T) {
 func TestScopedActivationAndDeactivationAPIsRejectInvalidUse(t *testing.T) {
 	for _, test := range []struct {
 		name  string
-		call  func(*Conn) error
-		mode  mode
+		call  func(*Association) error
+		role  Role
 		state State
 		want  error
 	}{
-		{name: "server activate", call: func(c *Conn) error { return c.ActivateRoutingContexts(1) }, mode: modeServer, state: StateAspInactive, want: ErrUnsupportedMode},
-		{name: "server deactivate", call: func(c *Conn) error { return c.DeactivateRoutingContexts(1) }, mode: modeServer, state: StateAspActive, want: ErrUnsupportedMode},
-		{name: "activate while down", call: func(c *Conn) error { return c.ActivateRoutingContexts(1) }, mode: modeClient, state: StateAspDown, want: ErrInvalidState},
-		{name: "deactivate while inactive", call: func(c *Conn) error { return c.DeactivateRoutingContexts(1) }, mode: modeClient, state: StateAspInactive, want: ErrInvalidState},
-		{name: "foreign activate scope", call: func(c *Conn) error { return c.ActivateRoutingContexts(99) }, mode: modeClient, state: StateAspInactive, want: ErrInvalidRoutingContext},
-		{name: "foreign deactivate scope", call: func(c *Conn) error { return c.DeactivateRoutingContexts(99) }, mode: modeClient, state: StateAspActive, want: ErrInvalidRoutingContext},
+		{name: "SGP activate", call: func(c *Association) error { return c.ActivateRoutingContexts(1) }, role: RoleSGP, state: StateASPInactive, want: ErrUnsupportedRole},
+		{name: "SGP deactivate", call: func(c *Association) error { return c.DeactivateRoutingContexts(1) }, role: RoleSGP, state: StateASPActive, want: ErrUnsupportedRole},
+		{name: "activate while down", call: func(c *Association) error { return c.ActivateRoutingContexts(1) }, role: RoleASP, state: StateASPDown, want: ErrInvalidState},
+		{name: "deactivate while inactive", call: func(c *Association) error { return c.DeactivateRoutingContexts(1) }, role: RoleASP, state: StateASPInactive, want: ErrInvalidState},
+		{name: "foreign activate scope", call: func(c *Association) error { return c.ActivateRoutingContexts(99) }, role: RoleASP, state: StateASPInactive, want: ErrInvalidRoutingContext},
+		{name: "foreign deactivate scope", call: func(c *Association) error { return c.DeactivateRoutingContexts(99) }, role: RoleASP, state: StateASPActive, want: ErrInvalidRoutingContext},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, test.state, test.mode)
+			conn, sent := newTestConn(t, test.state, test.role)
 			if err := test.call(conn); !errors.Is(err, test.want) {
 				t.Fatalf("error = %v, want %v", err, test.want)
 			}
@@ -1073,7 +1073,7 @@ func TestAspActiveAckMustStayWithinTheOutstandingRequest(t *testing.T) {
 		{name: "missing context", ack: nil, want: ErrMissingRoutingContext},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspInactive, modeClient)
+			conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 			conn.startTAck(messages.NewAspActive(
 				conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
 			), requestAspActive)

@@ -15,7 +15,7 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// Conn is documented as satisfying net.Conn, where a read deadline bounds the
+// Association is documented as satisfying net.Conn, where a read deadline bounds the
 // read and nothing else: the error reports Timeout() true and the connection
 // stays usable.
 //
@@ -54,7 +54,7 @@ func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 	pd := params.NewProtocolData(
 		0x22222222, 0x11111111, params.ServiceIndSCCP, 0, 0, 1, []byte("wake"))
 	if _, err := srvConn.WritePDWithRoutingContext(pd, 1); err != nil {
-		t.Fatalf("server write: %v", err)
+		t.Fatalf("peer write: %v", err)
 	}
 	if _, err := cliConn.ReadPD(); err != nil {
 		t.Fatalf("reading the first message: %v", err)
@@ -79,9 +79,9 @@ func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 
 	// The association must be untouched. This is the assertion that fails
 	// against the old behaviour even if the error above somehow matched.
-	if state := cliConn.State(); state != StateAspActive {
+	if state := cliConn.State(); state != StateASPActive {
 		t.Errorf("state = %v after a read deadline expired, want %v; the "+
-			"deadline tore down a healthy association", state, StateAspActive)
+			"deadline tore down a healthy association", state, StateASPActive)
 	}
 	select {
 	case <-cliConn.Done():
@@ -94,7 +94,7 @@ func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 		t.Fatalf("clearing the deadline: %v", err)
 	}
 	if _, err := srvConn.WritePDWithRoutingContext(pd, 1); err != nil {
-		t.Fatalf("server write after the deadline: %v", err)
+		t.Fatalf("peer write after the deadline: %v", err)
 	}
 	got, err := cliConn.ReadPD()
 	if err != nil {
@@ -162,7 +162,7 @@ func TestReadDeadlineBoundaries(t *testing.T) {
 		pd := params.NewProtocolData(
 			0x22222222, 0x11111111, params.ServiceIndSCCP, 0, 0, 1, []byte("ok"))
 		if _, err := srvConn.WritePDWithRoutingContext(pd, 1); err != nil {
-			t.Fatalf("server write: %v", err)
+			t.Fatalf("peer write: %v", err)
 		}
 		got, err := cliConn.ReadPD()
 		if err != nil {
@@ -174,8 +174,8 @@ func TestReadDeadlineBoundaries(t *testing.T) {
 	})
 
 	// After all of that the association is still the one we started with.
-	if state := cliConn.State(); state != StateAspActive {
-		t.Errorf("state = %v, want %v", state, StateAspActive)
+	if state := cliConn.State(); state != StateASPActive {
+		t.Errorf("state = %v, want %v", state, StateASPActive)
 	}
 }
 
@@ -202,9 +202,9 @@ func TestReadDeadlineOnAnAcceptedAssociation(t *testing.T) {
 	if _, err := srvConn.Read(make([]byte, 16)); !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("Read = %v, want os.ErrDeadlineExceeded", err)
 	}
-	if state := srvConn.State(); state != StateAspActive {
+	if state := srvConn.State(); state != StateASPActive {
 		t.Errorf("accepted association went to %v on a read deadline, want %v",
-			state, StateAspActive)
+			state, StateASPActive)
 	}
 	select {
 	case <-srvConn.Done():
@@ -218,7 +218,7 @@ func TestReadDeadlineOnAnAcceptedAssociation(t *testing.T) {
 	}
 	if _, err := cliConn.WritePDWithRoutingContext(params.NewProtocolData(
 		0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("up")), 1); err != nil {
-		t.Fatalf("client write: %v", err)
+		t.Fatalf("association write: %v", err)
 	}
 	got, err := srvConn.ReadPD()
 	if err != nil {

@@ -12,7 +12,7 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// Conn.Read copied as much of the DATA payload as fitted but returned the
+// Association.Read copied as much of the DATA payload as fitted but returned the
 // payload's full length, so a caller whose buffer was smaller than the message
 // was told it had received more bytes than its buffer holds. The idiomatic
 //
@@ -23,7 +23,7 @@ import (
 // The payload beyond the buffer was gone either way, since the message had
 // already been taken off the queue.
 func TestReadIntoShortBufferReportsWhatItWrote(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	payload := []byte("0123456789")
 	conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: payload}}
@@ -56,7 +56,7 @@ func TestReadIntoAdequateBufferIsUnaffected(t *testing.T) {
 		{"room to spare", 64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			conn, _ := newTestConn(t, StateAspActive, modeClient)
+			conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 			payload := []byte("0123456789")
 			conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: payload}}
@@ -79,7 +79,7 @@ func TestReadIntoAdequateBufferIsUnaffected(t *testing.T) {
 // An empty DATA payload must read as zero bytes and no error, not as a short
 // buffer: nothing was truncated.
 func TestReadOfEmptyPayloadIsNotShortBuffer(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: nil}}
 
@@ -95,7 +95,7 @@ func TestReadOfEmptyPayloadIsNotShortBuffer(t *testing.T) {
 // ReadPD is the way to take a payload whole, and must be unaffected by any of
 // the above: it never sizes a buffer.
 func TestReadPDReturnsTheWholePayload(t *testing.T) {
-	conn, _ := newTestConn(t, StateAspActive, modeClient)
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 
 	payload := []byte("0123456789")
 	conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: payload}}

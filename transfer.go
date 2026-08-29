@@ -11,8 +11,8 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func (c *Conn) handleData(ctx context.Context, data *messages.Data) {
-	if c.State() != StateAspActive {
+func (c *Association) handleData(ctx context.Context, data *messages.Data) {
+	if c.State() != StateASPActive {
 		c.sendErr(NewUnexpectedMessageError(data))
 		return
 	}
@@ -43,13 +43,13 @@ func (c *Conn) handleData(ctx context.Context, data *messages.Data) {
 	// report DATA from an ASP-INACTIVE flow as Unexpected Message; an ASP is the
 	// explicit silent-discard example in Section 3.8.1.
 	if rtCtx, ok := c.receivedDataRoutingContext(data.RoutingContext); ok {
-		switch c.mode {
-		case modeServer:
+		switch c.role {
+		case RoleSGP:
 			if !c.activeForRoutingContext(rtCtx) {
 				c.sendErr(NewUnexpectedMessageError(data))
 				return
 			}
-		case modeClient:
+		case RoleASP:
 			if !c.routingContextAcked(rtCtx) || c.routingContextOverridden(rtCtx) {
 				return
 			}
@@ -124,7 +124,7 @@ func (c *Conn) handleData(ctx context.Context, data *messages.Data) {
 // on a dedicated or uncoordinated association and mandatory when several
 // Routing Keys share the association, because without it the traffic flow is
 // unknowable.
-func (c *Conn) validateDataRoutingContext(peer *params.Param) error {
+func (c *Association) validateDataRoutingContext(peer *params.Param) error {
 	configured := c.configuredRoutingContexts()
 	if peer == nil {
 		if len(configured) > 1 {
@@ -146,7 +146,7 @@ func (c *Conn) validateDataRoutingContext(peer *params.Param) error {
 // receivedDataRoutingContext returns the DATA's explicit flow, or the single
 // configured flow an omitted parameter unambiguously implies. With no
 // coordinated Routing Key there is no per-AS state to consult.
-func (c *Conn) receivedDataRoutingContext(peer *params.Param) (uint32, bool) {
+func (c *Association) receivedDataRoutingContext(peer *params.Param) (uint32, bool) {
 	if peer != nil {
 		return peer.RoutingContexts()[0], true
 	}
@@ -160,7 +160,7 @@ func (c *Conn) receivedDataRoutingContext(peer *params.Param) (uint32, bool) {
 // then applies RFC 4666 Section 3.8.1's SGP-specific configuration rule.
 // Absence is valid: Network Appearance is Optional, and a dedicated association
 // can identify its SS7 network without carrying it in every message.
-func (c *Conn) validateNetworkAppearance(peer *params.Param) error {
+func (c *Association) validateNetworkAppearance(peer *params.Param) error {
 	if peer == nil {
 		return nil
 	}
@@ -174,7 +174,7 @@ func (c *Conn) validateNetworkAppearance(peer *params.Param) error {
 	// The Invalid Network Appearance Error is explicitly originated by an SGP
 	// when an ASP sends an invalid value. An ASP receiving an SGP's value keeps
 	// it for the MTP3-User rather than reflecting Error code 21 back.
-	if c.mode != modeServer {
+	if c.role != RoleSGP {
 		return nil
 	}
 

@@ -7,6 +7,7 @@ package m3ua
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -29,11 +30,11 @@ import (
 // Server the association was configured for, and ASPsForTraffic handed it
 // traffic for Application Servers it had never asked to serve.
 func TestAnASPIsActiveOnlyInTheApplicationServersItActivatedFor(t *testing.T) {
-	l := &Listener{Config: NewServerConfig(&HeartbeatInfo{Enabled: false},
+	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)}
 
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
 	asp.as = as
 
@@ -43,8 +44,8 @@ func TestAnASPIsActiveOnlyInTheApplicationServersItActivatedFor(t *testing.T) {
 		params.NewRoutingContext(1), nil)); err != nil {
 		t.Fatalf("handleAspActive: %v", err)
 	}
-	asp.setState(StateAspActive)
-	as.aspStateChanged(asp, StateAspActive)
+	asp.setState(StateASPActive)
+	as.aspStateChanged(asp, StateASPActive)
 
 	if got := l.ActiveASPs(1); len(got) != 1 {
 		t.Errorf("Routing Context 1 has %d active ASPs, want 1; the ASP asked "+
@@ -70,14 +71,50 @@ func TestAnASPIsActiveOnlyInTheApplicationServersItActivatedFor(t *testing.T) {
 	}
 }
 
+func TestSGPAssociationExposesApplicationServerState(t *testing.T) {
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
+	association.as = newApplicationServers(time.Hour, association.cfg)
+	key := routingContextASKey(1)
+	association.as.get(key).setASPState(association, StateASPActive, time.Hour)
+
+	if got := association.ApplicationServerState(1); got != ASActive {
+		t.Fatalf("Routing Context 1 AS state = %v, want %v", got, ASActive)
+	}
+	if got := association.ApplicationServerStateForAS(key); got != ASActive {
+		t.Fatalf("ASKey %v state = %v, want %v", key, got, ASActive)
+	}
+	if got := association.ApplicationServerState(2); got != ASDown {
+		t.Fatalf("untracked Routing Context 2 AS state = %v, want %v", got, ASDown)
+	}
+}
+
+func TestSGPAssociationRoutingContextStateRejectsAmbiguousNetworkAppearances(t *testing.T) {
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
+	association.as = newApplicationServers(time.Hour, association.cfg)
+	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
+	association.as.get(key10).setASPState(association, StateASPActive, time.Hour)
+	association.as.get(key20)
+
+	if got := association.ApplicationServerState(1); got != ASDown {
+		t.Fatalf("ambiguous Routing Context 1 AS state = %v, want %v", got, ASDown)
+	}
+	if got := association.ApplicationServerStateForAS(key10); got != ASActive {
+		t.Fatalf("ASKey %v state = %v, want %v", key10, got, ASActive)
+	}
+	if got := association.ApplicationServerStateForAS(key20); got != ASDown {
+		t.Fatalf("ASKey %v state = %v, want %v", key20, got, ASDown)
+	}
+}
+
 // Activating for the second Application Server as well adds to the first rather
 // than replacing it: an ASP may serve several.
 func TestActivatingASecondApplicationServerKeepsTheFirst(t *testing.T) {
-	l := &Listener{Config: NewServerConfig(&HeartbeatInfo{Enabled: false},
+	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)}
 
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
 	asp.as = as
 
@@ -95,8 +132,8 @@ func TestActivatingASecondApplicationServerKeepsTheFirst(t *testing.T) {
 				t.Fatalf("handleAspActive(%d): %v", rtCtx, err)
 			}
 		}
-		asp.setState(StateAspActive)
-		as.aspStateChanged(asp, StateAspActive)
+		asp.setState(StateASPActive)
+		as.aspStateChanged(asp, StateASPActive)
 	}
 
 	for _, rtCtx := range []uint32{1, 2} {
@@ -110,11 +147,11 @@ func TestActivatingASecondApplicationServerKeepsTheFirst(t *testing.T) {
 // association carries, which is what Section 4.3.4.3 means by acting on the
 // configured set when the parameter is absent.
 func TestAnUnscopedASPActiveCoversEveryApplicationServer(t *testing.T) {
-	l := &Listener{Config: NewServerConfig(&HeartbeatInfo{Enabled: false},
+	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)}
 
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
 	asp.as = as
 
@@ -122,8 +159,8 @@ func TestAnUnscopedASPActiveCoversEveryApplicationServer(t *testing.T) {
 		params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil)); err != nil {
 		t.Fatalf("handleAspActive: %v", err)
 	}
-	asp.setState(StateAspActive)
-	as.aspStateChanged(asp, StateAspActive)
+	asp.setState(StateASPActive)
+	as.aspStateChanged(asp, StateASPActive)
 
 	for _, rtCtx := range []uint32{1, 2} {
 		if got := l.ActiveASPs(rtCtx); len(got) != 1 {
@@ -134,11 +171,11 @@ func TestAnUnscopedASPActiveCoversEveryApplicationServer(t *testing.T) {
 
 // Standing down in one Application Server leaves the ASP active in the other.
 func TestASPInactiveForOneApplicationServerLeavesTheOther(t *testing.T) {
-	l := &Listener{Config: NewServerConfig(&HeartbeatInfo{Enabled: false},
+	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)}
 
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
 	asp.as = as
 
@@ -146,15 +183,15 @@ func TestASPInactiveForOneApplicationServerLeavesTheOther(t *testing.T) {
 		params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil)); err != nil {
 		t.Fatalf("handleAspActive: %v", err)
 	}
-	asp.setState(StateAspActive)
-	as.aspStateChanged(asp, StateAspActive)
+	asp.setState(StateASPActive)
+	as.aspStateChanged(asp, StateASPActive)
 
 	// Now it stands down for Routing Context 1 alone.
 	if err := asp.handleAspInactive(messages.NewAspInactive(
 		params.NewRoutingContext(1), nil)); err != nil {
 		t.Fatalf("handleAspInactive: %v", err)
 	}
-	as.aspStateChanged(asp, StateAspActive)
+	as.aspStateChanged(asp, StateASPActive)
 
 	if got := l.ActiveASPs(1); len(got) != 0 {
 		t.Errorf("Routing Context 1 still has %d active ASPs after the ASP stood "+
@@ -171,11 +208,11 @@ func TestASPInactiveForOneApplicationServerLeavesTheOther(t *testing.T) {
 // and its next ASP Active decides afresh -- it must not inherit the Application
 // Servers it happened to hold before it went down.
 func TestGoingDownClearsEveryApplicationServer(t *testing.T) {
-	l := &Listener{Config: NewServerConfig(&HeartbeatInfo{Enabled: false},
+	l := &Listener{AssociationConfig: newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)}
 
-	asp, _ := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
 	asp.as = as
 
@@ -188,8 +225,8 @@ func TestGoingDownClearsEveryApplicationServer(t *testing.T) {
 		if err != nil && !errors.As(err, &unexpected) {
 			t.Fatalf("handleAspActive(%d): %v", rtCtx, err)
 		}
-		asp.setState(StateAspActive)
-		as.aspStateChanged(asp, StateAspActive)
+		asp.setState(StateASPActive)
+		as.aspStateChanged(asp, StateASPActive)
 	}
 
 	// Active in Application Server 1 only.
@@ -199,7 +236,7 @@ func TestGoingDownClearsEveryApplicationServer(t *testing.T) {
 	}
 
 	// The association goes down, taking the ASP out of every AS.
-	if err := asp.handleStateUpdate(StateAspDown); err != nil {
+	if err := asp.handleStateUpdate(StateASPDown); err != nil {
 		t.Fatalf("handleStateUpdate(ASP-DOWN): %v", err)
 	}
 	for _, rtCtx := range []uint32{1, 2} {
@@ -212,7 +249,7 @@ func TestGoingDownClearsEveryApplicationServer(t *testing.T) {
 	// It comes back and activates for the OTHER Application Server. If the old
 	// scope survived, it would be recorded active in Application Server 1 too --
 	// one it did not ask for this time.
-	asp.setState(StateAspInactive)
+	asp.setState(StateASPInactive)
 	activate(2)
 
 	if got := l.ActiveASPs(2); len(got) != 1 {
@@ -230,7 +267,7 @@ func TestGoingDownClearsEveryApplicationServer(t *testing.T) {
 // behaviour, kept as the fallback for a state reached without an ASP Active to
 // scope it, and it is the branch a scoped record replaces.
 func TestWithNothingRecordedTheASPCountsAsActiveEverywhere(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspInactive, modeServer, 1, 2)
+	conn, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 
 	for _, rtCtx := range []uint32{1, 2, 99} {
 		if !conn.activeForRoutingContext(rtCtx) {

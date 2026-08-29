@@ -18,9 +18,9 @@ import (
 // newTestConnWithContexts is newTestConn with the association's Routing
 // Contexts chosen by the test, since what DATA may carry depends on how many
 // have been coordinated.
-func newTestConnWithContexts(t *testing.T, state State, m mode, rtCtxs ...uint32) (*Conn, *[]messages.M3UA) {
+func newTestConnWithContexts(t *testing.T, state State, role Role, rtCtxs ...uint32) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	conn, sent := newTestConn(t, state, m)
+	conn, sent := newTestConn(t, state, role)
 	conn.cfg.RoutingContexts = params.NewRoutingContext(rtCtxs...)
 	// DATA must not go out on stream 0 (Section 1.4.7 rule 1), so give the
 	// association a data stream to use and record arrivals on it.
@@ -29,8 +29,8 @@ func newTestConnWithContexts(t *testing.T, state State, m mode, rtCtxs ...uint32
 	return conn, sent
 }
 
-// firstErr drains one error from the Conn's error channel, or nil.
-func firstErr(c *Conn) error {
+// firstErr drains one error from the Association's error channel, or nil.
+func firstErr(c *Association) error {
 	select {
 	case e := <-c.errChan:
 		return e
@@ -55,7 +55,7 @@ func firstErr(c *Conn) error {
 // is the one it gets most wrong.
 func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 	t.Run("one configured context is used", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 7)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7)
 		rc, err := conn.dataRoutingContext()
 		if err != nil {
 			t.Fatalf("dataRoutingContext: %v", err)
@@ -69,7 +69,7 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 	})
 
 	t.Run("several configured contexts need one selected", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 7, 8, 9)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8, 9)
 		rc, err := conn.dataRoutingContext()
 		if err == nil {
 			t.Errorf("DATA would go out naming %v with none selected; it cannot "+
@@ -81,7 +81,7 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 	})
 
 	t.Run("the selected context is the one sent", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 7, 8, 9)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8, 9)
 		if err := conn.SelectRoutingContext(8); err != nil {
 			t.Fatalf("SelectRoutingContext: %v", err)
 		}
@@ -95,7 +95,7 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 	})
 
 	t.Run("selecting an unconfigured context is refused", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 7, 8)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8)
 		if err := conn.SelectRoutingContext(11); err == nil {
 			t.Error("selected a Routing Context that is not configured")
 		}
@@ -111,7 +111,7 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 // left out. Emitting a zero-length one instead puts a parameter on the wire
 // that names no context at all.
 func TestDataOmitsAnEmptyRoutingContext(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeClient)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP)
 	rc, err := conn.dataRoutingContext()
 	if err != nil {
 		t.Fatalf("dataRoutingContext: %v", err)
@@ -146,7 +146,7 @@ func TestDataOmitsAnEmptyRoutingContext(t *testing.T) {
 // A DATA naming a context this association does not serve was delivered to the
 // user as though it belonged to a flow we had agreed to carry.
 func TestDataWithAnUnconfiguredRoutingContextIsRejected(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 
 	conn.handleData(context.Background(), messages.NewData(
 		nil,
@@ -174,7 +174,7 @@ func TestDataWithAnUnconfiguredRoutingContextIsRejected(t *testing.T) {
 
 // A DATA whose Routing Context is one we serve is delivered as before.
 func TestDataWithAConfiguredRoutingContextIsDelivered(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 
 	conn.handleData(context.Background(), messages.NewData(
 		nil,
@@ -194,7 +194,7 @@ func TestDataWithAConfiguredRoutingContextIsDelivered(t *testing.T) {
 // Conditional, and "Where a Routing Key has not been coordinated between the
 // SGP and ASP, sending of Routing Context is not required."
 func TestDataWithoutARoutingContextIsDelivered(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 
 	conn.handleData(context.Background(), messages.NewData(
 		nil, nil,
@@ -224,7 +224,7 @@ func TestDataWithAnUnconfiguredNetworkAppearanceIsRejected(t *testing.T) {
 		{"none configured", nil, 8},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+			conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 			conn.cfg.NetworkAppearance = tt.configured
 
 			conn.handleData(context.Background(), messages.NewData(
@@ -270,19 +270,19 @@ func TestDataWithAnUnconfiguredNetworkAppearanceIsRejected(t *testing.T) {
 func TestDataPreservesNetworkAppearanceAndPresence(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
-		role       mode
+		role       Role
 		configured *params.Param
 		peer       *params.Param
 		want       uint32
 		wantSet    bool
 	}{
-		{"matching at SGP", modeServer, params.NewNetworkAppearance(7), params.NewNetworkAppearance(7), 7, true},
-		{"different value at ASP", modeClient, params.NewNetworkAppearance(7), params.NewNetworkAppearance(8), 8, true},
-		{"explicit zero", modeServer, params.NewNetworkAppearance(0), params.NewNetworkAppearance(0), 0, true},
-		{"omitted", modeServer, params.NewNetworkAppearance(7), nil, 0, false},
+		{"matching at SGP", RoleSGP, params.NewNetworkAppearance(7), params.NewNetworkAppearance(7), 7, true},
+		{"different value at ASP", RoleASP, params.NewNetworkAppearance(7), params.NewNetworkAppearance(8), 8, true},
+		{"explicit zero", RoleSGP, params.NewNetworkAppearance(0), params.NewNetworkAppearance(0), 0, true},
+		{"omitted", RoleSGP, params.NewNetworkAppearance(7), nil, 0, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, tt.role, 7)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, tt.role, 7)
 			conn.cfg.NetworkAppearance = tt.configured
 			conn.handleData(context.Background(), messages.NewData(
 				tt.peer,
@@ -321,7 +321,7 @@ func TestDataNetworkAppearanceValidationMatrix(t *testing.T) {
 		{name: "local present peer omitted", configured: params.NewNetworkAppearance(7)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 			conn.cfg.NetworkAppearance = tt.configured
 			conn.handleData(context.Background(), messages.NewData(
 				tt.peer,
@@ -351,7 +351,7 @@ func TestDataNetworkAppearanceValidationMatrix(t *testing.T) {
 func TestMalformedDataNetworkAppearanceIsAParameterFieldError(t *testing.T) {
 	for _, size := range []int{0, 1, 3, 5, 8} {
 		t.Run(string(rune('0'+size)), func(t *testing.T) {
-			conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 			conn.handleData(context.Background(), messages.NewData(
 				params.NewParam(int(params.NetworkAppearance), make([]byte, size)),
@@ -390,7 +390,7 @@ func FuzzDataNetworkAppearance(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, appearanceData []byte) {
-		conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 		conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 		conn.handleData(context.Background(), messages.NewData(
 			params.NewParam(int(params.NetworkAppearance), appearanceData),
@@ -423,13 +423,13 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
-	client, server, err := setupConn(t, ctx, 3121)
+	aspAssociation, sgpAssociation, err := setupConn(t, ctx, 3121)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		_ = client.Close()
-		_ = server.Close()
+		_ = aspAssociation.Close()
+		_ = sgpAssociation.Close()
 	}()
 
 	data := func(appearance uint32, payload string) *messages.Data {
@@ -444,10 +444,10 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 		)
 	}
 
-	if _, err := client.WriteSignal(data(0, "configured-network")); err != nil {
+	if _, err := aspAssociation.WriteSignal(data(0, "configured-network")); err != nil {
 		t.Fatalf("WriteSignal(valid DATA): %v", err)
 	}
-	delivered, err := readDataWithin(t, server, 10*time.Second)
+	delivered, err := readDataWithin(t, sgpAssociation, 10*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,15 +460,15 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal invalid DATA: %v", err)
 	}
-	sctpInfo := *client.sctpInfo
-	sctpInfo.Stream = client.streamFor(2)
-	if _, err := client.sctpConn.SCTPWrite(rawInvalid, &sctpInfo); err != nil {
+	sctpInfo := *aspAssociation.sctpInfo
+	sctpInfo.Stream = aspAssociation.streamFor(2)
+	if _, err := aspAssociation.sctpConn.SCTPWrite(rawInvalid, &sctpInfo); err != nil {
 		t.Fatalf("raw write invalid DATA: %v", err)
 	}
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
-		case indication := <-client.ManagementIndications():
+		case indication := <-aspAssociation.ManagementIndications():
 			if indication.Kind != ManagementError {
 				continue
 			}
@@ -479,7 +479,7 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 				t.Errorf("Error Network Appearance = %d (set=%v), want 8",
 					indication.NetworkAppearance, indication.NetworkAppearanceSet)
 			}
-			if len(server.dataChan) != 0 {
+			if len(sgpAssociation.dataChan) != 0 {
 				t.Error("the invalid DATA was delivered despite the Error")
 			}
 			return
@@ -497,7 +497,7 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 // stream, using the same recorded arrival stream; DATA was the direction of the
 // rule left unchecked, so a peer breaking it was rewarded with delivery.
 func TestDataOnStreamZeroIsRejected(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 7)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 	conn.recvStream.Store(0)
 
 	conn.handleData(context.Background(), messages.NewData(

@@ -234,7 +234,7 @@ func (p *Param) decodeMultiUint32ValData() []uint32 {
 //
 // The New*() message constructors call SetLength on the Params handed to them,
 // which writes to the caller's Param. Long-lived Params — notably those held in
-// a connection's configuration and reused for every outgoing message — must
+// an association's configuration and reused for every outgoing message — must
 // therefore be copied before being passed to a constructor, or two goroutines
 // building messages concurrently will write to the same Param.
 func (p *Param) Copy() *Param {

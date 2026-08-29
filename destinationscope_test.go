@@ -19,7 +19,7 @@ import (
 // network. That knowledge belongs to the node: it does not arrive over any ASP's
 // association, and it does not leave with one.
 //
-// It was kept on the Conn, and Accept builds a fresh Conn per association, so an
+// It was kept on the Association, and Accept builds a fresh Association per SCTP association, so an
 // ASP that reconnected — which Section 4.4.2 has it do precisely in order to
 // resynchronise — was audited against an empty map. lookup returned not-known,
 // which the handler turns into DUNA. Measured before the fix on a real pair of
@@ -34,8 +34,8 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	const port = 3225
 	const pointCode = uint32(0x123456)
 
-	srvCfg := func() *Config {
-		return NewServerConfig(&HeartbeatInfo{Enabled: false},
+	srvCfg := func() *AssociationConfig {
+		return newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 			0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
 	}
@@ -43,7 +43,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := Listen("m3ua", srvAddr, NewListenerConfig(srvCfg()))
+	ln, err := listenSGP("m3ua", srvAddr, NewListenerConfig(srvCfg()))
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -52,7 +52,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 
-	accepted := make(chan *Conn, 4)
+	accepted := make(chan *Association, 4)
 	go func() {
 		for {
 			c, err := ln.Accept(ctx)
@@ -63,7 +63,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 		}
 	}()
 
-	cliCfg := NewClientConfig(&HeartbeatInfo{Enabled: false},
+	cliCfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
 	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -75,7 +75,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	// records it against the node.
 	ln.SetDestinationState(pointCode, DestinationAvailable)
 
-	auditState := func(t *testing.T, asp *Conn) DestinationState {
+	auditState := func(t *testing.T, asp *Association) DestinationState {
 		t.Helper()
 		audit := messages.NewDestinationStateAudit(nil,
 			params.NewRoutingContext(1),
@@ -92,7 +92,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 		}
 	}
 
-	first, err := Dial(ctx, "m3ua", laddr, srvAddr, cliCfg)
+	first, err := dialASP(ctx, "m3ua", laddr, srvAddr, cliCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 
 	// The ASP comes back on a new association.
 	time.Sleep(300 * time.Millisecond)
-	second, err := Dial(ctx, "m3ua", laddr, srvAddr, cliCfg)
+	second, err := dialASP(ctx, "m3ua", laddr, srvAddr, cliCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,10 +122,10 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	}
 }
 
-// The setter on a Conn writes the same node-wide view, so an operator holding an
+// The setter on an Association writes the same node-wide view, so an operator holding an
 // accepted association does not have to find the Listener, and what they record
 // is still there for the next ASP.
-func TestConnAndListenerShareTheSGsDestinationView(t *testing.T) {
+func TestAssociationAndListenerShareTheSGsDestinationView(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -142,7 +142,7 @@ func TestConnAndListenerShareTheSGsDestinationView(t *testing.T) {
 	// it must be visible to the node.
 	srvConn.SetDestinationState(0xabcdef, DestinationRestricted)
 	if srvConn.listener == nil {
-		t.Fatal("an accepted Conn has no listener")
+		t.Fatal("an accepted Association has no listener")
 	}
 	got, known := srvConn.listener.DestinationState(0xabcdef)
 	if !known {
@@ -152,7 +152,7 @@ func TestConnAndListenerShareTheSGsDestinationView(t *testing.T) {
 		t.Errorf("DestinationState = %v, want %v", got, DestinationRestricted)
 	}
 
-	// A client keeps its own view: an ASP's destination states are what a peer
+	// An ASP keeps its own view: its destination states are what a peer
 	// told it, not a node-wide record, and pauseDestinations already scopes them
 	// that way.
 	cliConn.SetDestinationState(0x999999, DestinationAvailable)
@@ -168,9 +168,10 @@ func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
 	// through the embedded *Config and dereferences nil without one. The setter
 	// under test needs no Config at all, which is the point — it is usable
 	// before anything has been accepted.
-	l := &Listener{Config: NewServerConfig(&HeartbeatInfo{Enabled: false},
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)}
+		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
+	l := newSGPListener(NewListenerConfig(config))
 
 	if _, known := l.DestinationState(0x111111); known {
 		t.Error("an unset destination reported as known")
@@ -190,7 +191,7 @@ func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
 	if as == nil || nif == nil || dests == nil {
 		t.Fatal("registry returned a nil member")
 	}
-	appearance, set := appearanceOf(l.Config.NetworkAppearance)
+	appearance, set := appearanceOf(l.AssociationConfig.NetworkAppearance)
 	if state, known := dests.lookup(destinationKey{
 		networkAppearance:    appearance,
 		networkAppearanceSet: set,

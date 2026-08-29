@@ -20,10 +20,10 @@ import (
 // Nothing is written back. Section 3.8.1 requires that "Error messages MUST NOT
 // be generated in response to other Error messages", and every non-nil error
 // returned from here reaches handleErrors, which answers recognised errors with
-// an ERR on the wire and closes the Conn on the rest. Returning an error for a
+// an ERR on the wire and closes the Association on the rest. Returning an error for a
 // well-formed peer ERR would therefore either bounce an ERR back or tear down a
 // healthy association.
-func (c *Conn) handleError(e *messages.Error) error {
+func (c *Association) handleError(e *messages.Error) error {
 	switch c.State() {
 	case StateSCTPCDI, StateSCTPRI:
 		return NewUnexpectedMessageError(e)
@@ -122,7 +122,7 @@ func errorCodeName(code uint32) string {
 // itself now in the ASP-INACTIVE state, if it is not already aware of this via
 // inter-ASP communication with the Overriding ASP." That transition is applied
 // by the dispatcher, which owns state publishing.
-func (c *Conn) handleNotify(n *messages.Notify) error {
+func (c *Association) handleNotify(n *messages.Notify) error {
 	switch c.State() {
 	case StateSCTPCDI, StateSCTPRI:
 		return NewUnexpectedMessageError(n)
@@ -130,7 +130,7 @@ func (c *Conn) handleNotify(n *messages.Notify) error {
 	// Notify is originated by an SGP and consumed by an ASP. Accepting one in
 	// the reverse direction would let an ASP inject AS state and peer-ASP
 	// identity into the SGP's Layer Management view.
-	if c.mode != modeClient {
+	if c.role != RoleASP {
 		return NewUnexpectedMessageError(n)
 	}
 
@@ -199,7 +199,7 @@ func (c *Conn) handleNotify(n *messages.Notify) error {
 		ind.RoutingContexts = append([]uint32(nil), configured...)
 	}
 	ind.RoutingContext, ind.RoutingContextSet = firstRoutingContext(n.RoutingContext)
-	ind.AspIdentifier, ind.AspIdentifierSet = uint32ParamOf(
+	ind.ASPIdentifier, ind.ASPIdentifierSet = uint32ParamOf(
 		n.AspIdentifier, params.AspIdentifier, (*params.Param).AspIdentifier)
 	c.notifyManagement(ind)
 
@@ -232,8 +232,8 @@ func notifyStatusName(status uint32) string {
 //
 // Scoped to an ASP: an SGP is the sender of this notification, never its
 // subject, so a Notify arriving at an SGP must not move its state.
-func (c *Conn) overriddenByAlternateAsp(n *messages.Notify) bool {
-	if c.mode != modeClient || n.Status == nil {
+func (c *Association) overriddenByAlternateAsp(n *messages.Notify) bool {
+	if c.role != RoleASP || n.Status == nil {
 		return false
 	}
 
@@ -256,7 +256,7 @@ func (c *Conn) overriddenByAlternateAsp(n *messages.Notify) bool {
 // memberships and the receiver takes the appropriate action in each AS.
 // Anything narrower is recorded per context; see noteRoutingContextsOverridden
 // for what that does and does not implement.
-func (c *Conn) overrideScope(n *messages.Notify) bool {
+func (c *Association) overrideScope(n *messages.Notify) bool {
 	named := n.RoutingContext.RoutingContexts()
 	configured := c.configuredRoutingContexts()
 	if len(named) == 0 {

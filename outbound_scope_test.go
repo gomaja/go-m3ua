@@ -11,15 +11,15 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-func TestWriteSignalDataEnforcesServerPerApplicationServerState(t *testing.T) {
+func TestWriteSignalDataEnforcesSGPPerApplicationServerState(t *testing.T) {
 	listener, firstApplicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 	)
 	secondApplicationServer := listener.as.get(2)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	firstApplicationServer.setASPState(asp, StateAspActive, time.Hour)
-	secondApplicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	asp.setState(StateASPActive)
+	firstApplicationServer.setASPState(asp, StateASPActive, time.Hour)
+	secondApplicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	sent.reset()
 
 	if _, err := asp.WriteSignal(distributionData(2, 3, "inactive AS")); !errors.Is(err, ErrRoutingContextNotActive) {
@@ -37,8 +37,8 @@ func TestWriteSignalDataEnforcesServerPerApplicationServerState(t *testing.T) {
 	}
 }
 
-func TestWriteSignalDataEnforcesClientAcknowledgedScope(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeClient, 1, 2)
+func TestWriteSignalDataEnforcesASPAcknowledgedScope(t *testing.T) {
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
 	asp.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	var writes atomic.Int32
@@ -55,15 +55,15 @@ func TestWriteSignalDataEnforcesClientAcknowledgedScope(t *testing.T) {
 	}
 }
 
-func TestWriteSignalSSNMRejectsInactiveServerScopeAtomically(t *testing.T) {
+func TestWriteSignalSSNMRejectsInactiveSGPScopeAtomically(t *testing.T) {
 	listener, firstApplicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 	)
 	secondApplicationServer := listener.as.get(2)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	firstApplicationServer.setASPState(asp, StateAspActive, time.Hour)
-	secondApplicationServer.setASPState(asp, StateAspInactive, time.Hour)
+	asp.setState(StateASPActive)
+	firstApplicationServer.setASPState(asp, StateASPActive, time.Hour)
+	secondApplicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	sent.reset()
 
 	unavailable := messages.NewDestinationUnavailable(
@@ -83,13 +83,13 @@ func TestWriteSignalSSNMRejectsInactiveServerScopeAtomically(t *testing.T) {
 func TestWriteSignalUnscopedSSNMRequiresAnActiveAssociation(t *testing.T) {
 	for _, endpoint := range []struct {
 		name string
-		mode mode
+		role Role
 	}{
-		{name: "server", mode: modeServer},
-		{name: "client", mode: modeClient},
+		{name: "SGP", role: RoleSGP},
+		{name: "ASP", role: RoleASP},
 	} {
 		t.Run(endpoint.name, func(t *testing.T) {
-			asp, _ := newTestConnWithContexts(t, StateAspDown, endpoint.mode)
+			asp, _ := newTestConnWithContexts(t, StateASPDown, endpoint.role)
 			var writes atomic.Int32
 			asp.signalWriter = func(message messages.M3UA) (int, error) {
 				writes.Add(1)
@@ -110,7 +110,7 @@ func TestWriteSignalUnscopedSSNMRequiresAnActiveAssociation(t *testing.T) {
 }
 
 func TestWriteSignalSSNMRejectsAnEmptyAuthorizedScope(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer, 1)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	asp.muAuthorizedRCs.Lock()
 	asp.authorizationResolved = true
 	asp.authorizedRCs = nil
@@ -135,8 +135,8 @@ func TestWriteSignalSSNMRejectsAnEmptyAuthorizedScope(t *testing.T) {
 func TestWriteSignalRejectsUnconfiguredNetworkAppearance(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
 	for _, test := range []struct {
@@ -173,8 +173,8 @@ func TestWriteSignalRejectsUnconfiguredNetworkAppearance(t *testing.T) {
 func TestDirectWriteSignalDataParticipatesInInactiveBarrier(t *testing.T) {
 	listener, applicationServer, asp, _ := distributionFixture(t, params.TrafficModeLoadshare)
 	asp.noteRoutingContextsActive([]uint32{1})
-	asp.setState(StateAspActive)
-	applicationServer.setASPState(asp, StateAspActive, time.Hour)
+	asp.setState(StateASPActive)
+	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})
@@ -226,18 +226,18 @@ func TestDirectWriteSignalDataParticipatesInInactiveBarrier(t *testing.T) {
 func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 	tests := []struct {
 		name string
-		call func(*Conn) error
+		call func(*Association) error
 	}{
 		{
 			name: "WriteToStreamWithRoutingContext",
-			call: func(connection *Conn) error {
+			call: func(connection *Association) error {
 				_, err := connection.WriteToStreamWithRoutingContext([]byte("payload"), 1, 1)
 				return err
 			},
 		},
 		{
 			name: "WritePDToStreamWithRoutingContext",
-			call: func(connection *Conn) error {
+			call: func(connection *Association) error {
 				_, err := connection.WritePDToStreamWithRoutingContext(
 					params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 3, []byte("payload")),
 					1,
@@ -251,9 +251,9 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			listener, applicationServer, asp, _ := distributionFixture(t, params.TrafficModeLoadshare)
 			asp.noteRoutingContextsActive([]uint32{1})
-			asp.setState(StateAspActive)
+			asp.setState(StateASPActive)
 			asp.maxMessageStreamID = 4
-			applicationServer.setASPState(asp, StateAspActive, time.Hour)
+			applicationServer.setASPState(asp, StateASPActive, time.Hour)
 
 			writeStarted := make(chan struct{})
 			releaseWrite := make(chan struct{})
@@ -308,7 +308,7 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 }
 
 func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	asp.as = newApplicationServers(time.Hour, asp.cfg)
 	asp.maxMessageStreamID = 4
 	asp.recvStream.Store(0)
@@ -362,7 +362,7 @@ func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 }
 
 func TestASPDownAckWaitsForUnscopedSSNM(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	asp.as = newApplicationServers(time.Hour, asp.cfg)
 	asp.recvStream.Store(0)
 	writeStarted := make(chan struct{})
@@ -419,7 +419,7 @@ func TestASPDownAckWaitsForUnscopedSSNM(t *testing.T) {
 }
 
 func TestASPInactiveAckWaitsForUnscopedDirectData(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	asp.maxMessageStreamID = 4
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})
@@ -450,7 +450,7 @@ func TestASPInactiveAckWaitsForUnscopedDirectData(t *testing.T) {
 		t.Fatal("unscoped DATA did not start")
 	}
 	// The write has already resolved and locked the dedicated-association path.
-	// Give the directly constructed Conn a static AS so ASP Inactive can name
+	// Give the directly constructed Association a static AS so ASP Inactive can name
 	// the Ack scope without changing the in-flight write's resolved scope.
 	asp.cfg.RoutingContexts = params.NewRoutingContext(1)
 	inactiveDone := make(chan error, 1)
@@ -475,7 +475,7 @@ func TestASPInactiveAckWaitsForUnscopedDirectData(t *testing.T) {
 }
 
 func TestASPInactiveAckWaitsForUnscopedSSNM(t *testing.T) {
-	asp, _ := newTestConnWithContexts(t, StateAspActive, modeServer)
+	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})
 	acknowledged := make(chan struct{})
