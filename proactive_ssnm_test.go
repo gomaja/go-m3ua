@@ -285,6 +285,103 @@ func TestDialedSGPDestinationUpdateReportsToItsActiveASP(t *testing.T) {
 	}
 }
 
+func TestDialedSGPDestinationUpdateUsesEndpointApplicationServerScope(t *testing.T) {
+	endpoint, first, firstSent, second, secondSent := multiAssociationDialedSGPFixture(t)
+	defer func() { _ = endpoint.Close() }()
+
+	if err := first.ReportDestinationRangeForNetworkAndRoutingContext(
+		7, 2, 0x123456, 4, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("report sibling Application Server destination: %v", err)
+	}
+	if got := len(ssnmMessages(firstSent.snapshot())); got != 0 {
+		t.Fatalf("unconcerned Association received %d SSNM messages, want 0", got)
+	}
+	reports := ssnmMessages(secondSent.snapshot())
+	if len(reports) != 1 {
+		t.Fatalf("concerned sibling Association received %d SSNM messages, want 1", len(reports))
+	}
+	if _, ok := reports[0].(*messages.DestinationUnavailable); !ok {
+		t.Fatalf("sibling report = %T, want DUNA", reports[0])
+	}
+	if state, known := second.destinations.lookupRange(
+		destinationKey{networkAppearance: 7, networkAppearanceSet: true, routingContext: 2, routingContextSet: true},
+		0x123456, 4,
+	); !known || state != DestinationUnavailable {
+		t.Fatalf("shared destination state = (%v, %v), want (Unavailable, true)", state, known)
+	}
+}
+
+func TestDialedSGPDestinationSetterUsesEndpointApplicationServerScope(t *testing.T) {
+	endpoint, first, _, second, _ := multiAssociationDialedSGPFixture(t)
+	defer func() { _ = endpoint.Close() }()
+
+	first.SetDestinationRangeForNetworkAndRoutingContext(
+		7, 2, 0x234567, 4, DestinationRestricted,
+	)
+	if state, known := second.destinations.lookupRange(
+		destinationKey{networkAppearance: 7, networkAppearanceSet: true, routingContext: 2, routingContextSet: true},
+		0x234567, 4,
+	); !known || state != DestinationRestricted {
+		t.Fatalf("shared destination state = (%v, %v), want (Restricted, true)", state, known)
+	}
+}
+
+func TestDialedSGPDestinationUpdateRejectsUnknownExactApplicationServer(t *testing.T) {
+	endpoint, first, firstSent, _, secondSent := multiAssociationDialedSGPFixture(t)
+	defer func() { _ = endpoint.Close() }()
+
+	err := first.ReportDestinationRangeForNetworkAndRoutingContext(
+		8, 2, 0x345678, 4, DestinationUnavailable,
+	)
+	if !errors.Is(err, ErrInvalidRoutingContext) {
+		t.Fatalf("unknown exact Application Server error = %v, want ErrInvalidRoutingContext", err)
+	}
+	if _, known := first.destinations.lookupRange(
+		destinationKey{networkAppearance: 8, networkAppearanceSet: true, routingContext: 2, routingContextSet: true},
+		0x345678, 4,
+	); known {
+		t.Fatal("unknown exact Application Server destination was recorded")
+	}
+	if got := len(ssnmMessages(firstSent.snapshot())) + len(ssnmMessages(secondSent.snapshot())); got != 0 {
+		t.Fatalf("unknown exact Application Server emitted %d SSNM messages, want 0", got)
+	}
+}
+
+func multiAssociationDialedSGPFixture(t *testing.T) (*Endpoint, *Association, *distributionCapture, *Association, *distributionCapture) {
+	t.Helper()
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	attach := func(routingContext uint32) (*Association, *distributionCapture) {
+		association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, routingContext)
+		association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
+		association.as.register(association.configuredASKeys())
+		if !endpoint.trackAssociation(association) {
+			t.Fatal("failed to attach SCTP-initiating Association")
+		}
+		association.noteRoutingContextsActive([]uint32{routingContext})
+		key := ASKey{
+			NetworkAppearance:    7,
+			NetworkAppearanceSet: true,
+			RoutingContext:       routingContext,
+			RoutingContextSet:    true,
+		}
+		applicationServer := endpoint.as.get(key)
+		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
+		applicationServer.setASPState(association, StateASPActive, time.Hour)
+		capture := new(distributionCapture)
+		association.signalWriter = capture.write
+		return association, capture
+	}
+	first, firstSent := attach(1)
+	second, secondSent := attach(2)
+	return endpoint, first, firstSent, second, secondSent
+}
+
 func TestClosedDialedSGPRejectsDestinationReports(t *testing.T) {
 	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
 	if err := association.Close(); err != nil {
