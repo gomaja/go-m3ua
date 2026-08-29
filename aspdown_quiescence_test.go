@@ -89,11 +89,12 @@ func TestASPDownRejectsEarlierActivePublicationAfterAck(t *testing.T) {
 }
 
 func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
-	listener := &Listener{AssociationConfig: newSGPAssociationConfigForTest(
+	config := newSGPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false}, 1, 2, 0,
 		params.TrafficModeLoadshare, 0, 0, []uint32{1, 2},
 		params.ServiceIndSCCP, 0, 0, 1,
-	)}
+	)
+	listener := newSGPListener(NewListenerConfig(config))
 	listener.AssociationConfig.CorrelationID = nil
 	listener.as = newApplicationServers(time.Hour, listener.AssociationConfig)
 

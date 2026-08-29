@@ -379,6 +379,23 @@ func TestASPAssociationCannotRunSGPDistribution(t *testing.T) {
 	}
 }
 
+func TestASPListenerCannotRunSGPDistribution(t *testing.T) {
+	endpoint, err := NewEndpoint(RoleASP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleASP): %v", err)
+	}
+
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("closed=%t", closed), func(t *testing.T) {
+			listener := newListener(endpoint, NewListenerConfig(mcASPConfig(1)))
+			listener.closed = closed
+			if _, err := listener.DistributeData(distributionData(1, 1, "wrong role")); !errors.Is(err, ErrUnsupportedRole) {
+				t.Fatalf("Listener.DistributeData error = %v, want ErrUnsupportedRole", err)
+			}
+		})
+	}
+}
+
 func TestDialingSGPAssociationCloseReleasesRecoveryState(t *testing.T) {
 	_, applicationServer, association, _ := distributionFixture(t, params.TrafficModeLoadshare)
 	applicationServer.setASPState(association, StateASPActive, time.Hour)

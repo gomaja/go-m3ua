@@ -53,16 +53,20 @@ type broadcastFlowKey struct {
 	applicationFlow      string
 }
 
-// DistributeData sends one DATA message to the ASPs serving its Application
-// Server. It applies Override, Loadshare, and Broadcast traffic modes, retains
-// traffic while the AS is AS-PENDING, and adds the Broadcast synchronization
-// marker RFC 4666 Section 4.3.4.3 requires after an ASP becomes active.
+// DistributeData sends one DATA message from an SGP Listener to the ASPs
+// serving its Application Server. It applies Override, Loadshare, and Broadcast
+// traffic modes, retains traffic while the AS is AS-PENDING, and adds the
+// Broadcast synchronization marker RFC 4666 Section 4.3.4.3 requires after an
+// ASP becomes active.
 //
 // The message is copied before the call returns. The caller may reuse or mutate
 // it immediately, including when the result says it was queued.
 func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, error) {
 	if l == nil {
 		return TrafficDistribution{}, errors.New("cannot distribute DATA through a nil Listener")
+	}
+	if l.Role() != RoleSGP {
+		return TrafficDistribution{}, ErrUnsupportedRole
 	}
 
 	l.muConns.Lock()
