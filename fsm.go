@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -265,7 +264,7 @@ func (c *Association) handleStateUpdateAsASP(current, previous State, entering b
 	case StateASPActive:
 		if entering {
 			c.notifyEstablished()
-			c.beatAllow.Broadcast()
+			c.allowHeartbeat()
 		}
 		return nil
 	case StateSCTPCDI, StateSCTPRI:
@@ -297,7 +296,7 @@ func (c *Association) handleStateUpdateAsSGP(current State, entering bool) error
 	case StateASPActive:
 		if entering {
 			c.notifyEstablished()
-			c.beatAllow.Broadcast()
+			c.allowHeartbeat()
 		}
 		return nil
 	case StateSCTPCDI, StateSCTPRI:
@@ -318,6 +317,12 @@ func (c *Association) notifyEstablished() {
 	case c.established <- struct{}{}:
 	default:
 	}
+}
+
+func (c *Association) allowHeartbeat() {
+	c.beatStartOnce.Do(func() {
+		close(c.beatStart)
+	})
 }
 
 // notifyBeatAck hands a validated M3UA BEAT Ack to the heartbeat goroutine.
@@ -839,11 +844,7 @@ func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
 }
 
 func (c *Association) monitor(ctx context.Context) {
-
-	c.beatAllow = sync.NewCond(&sync.Mutex{})
-	c.beatAllow.L.Lock()
 	go c.heartbeat(ctx)
-	defer c.beatAllow.Broadcast()
 
 	// readErr is buffered so the reader can report a failed read and exit even
 	// if monitor() is already on its way out; inboundChan is unbuffered, which

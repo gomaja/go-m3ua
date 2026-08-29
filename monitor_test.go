@@ -244,6 +244,48 @@ func waitFor(cond func() bool, budget time.Duration) bool {
 	return cond()
 }
 
+func TestHeartbeatWaitingForASPActiveStopsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	conn := &Association{
+		beatStart: make(chan struct{}),
+		done:      make(chan struct{}),
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		conn.heartbeat(ctx)
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat remained blocked waiting for ASP-ACTIVE after context cancellation")
+	}
+}
+
+func TestHeartbeatObservesASPActiveBeforeItStarts(t *testing.T) {
+	conn := &Association{
+		beatStart: make(chan struct{}),
+		done:      make(chan struct{}),
+	}
+	conn.allowHeartbeat()
+
+	stopped := make(chan struct{})
+	go func() {
+		conn.heartbeat(context.Background())
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("heartbeat missed the ASP-ACTIVE transition that preceded its startup")
+	}
+}
+
 // The headline regression: a peer that completes the handshake and then stops
 // answering BEATs must be detected.
 //

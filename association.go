@@ -149,10 +149,11 @@ type Association struct {
 	// identifier and is shared by every association a Listener accepts.
 	muPeerASPIdentifier sync.RWMutex
 	peerASPIdentifier   *params.Param
-	// beatAllow gates the M3UA BEAT loop until the ASP is ASP-ACTIVE. monitor
-	// also broadcasts it on exit so an Association that never becomes active cannot
-	// leave the loop goroutine parked.
-	beatAllow *sync.Cond
+	// beatStart gates the M3UA BEAT loop until the ASP is ASP-ACTIVE. Closing a
+	// channel records the transition permanently, unlike a condition-variable
+	// broadcast that can be missed when a fast transition wins the scheduler.
+	beatStart     chan struct{}
+	beatStartOnce sync.Once
 	// muBeat guards beatData: heartbeat() registers it, while the dispatch
 	// goroutine's handleHeartbeatAck compares the peer's echo against it.
 	muBeat sync.RWMutex
@@ -385,6 +386,7 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		errChan:      make(chan error),
 		dataChan:     make(chan *DataMessage, dataQueueSize),
 		beatAckChan:  make(chan struct{}, 1), // see notifyBeatAck: buffers an Ack that beats heartbeat() to its select
+		beatStart:    make(chan struct{}),
 		destinations: newDestinations(),
 		tack:         newTAckRetransmitter(),
 		statusChan:   make(chan *DestinationStatus, 64),

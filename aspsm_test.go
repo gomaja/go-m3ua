@@ -61,9 +61,9 @@ func newTestConn(t *testing.T, state State, role Role) (*Association, *[]message
 		errChan:     make(chan error, 8),
 		established: make(chan struct{}, 1),
 		beatAckChan: make(chan struct{}, 1),
+		beatStart:   make(chan struct{}),
 		dataChan:    make(chan *DataMessage, 8),
 		done:        make(chan struct{}),
-		beatAllow:   sync.NewCond(&sync.Mutex{}),
 		cfg:         cfg,
 		// Matches Dial/Accept: SSNM handling needs both, and a nil map would
 		// panic on the first destination update.
