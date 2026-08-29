@@ -1153,12 +1153,32 @@ func TestIPSPSingleExchangeInactiveAckExcludesOverriddenContextsFromState(t *tes
 	association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
 	association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 	association.noteRoutingContextsActive([]uint32{1, 2})
+	registry := newApplicationServers(time.Hour)
+	t.Cleanup(registry.close)
+	association.as = registry
+	servers := map[uint32]*applicationServer{}
+	for _, routingContext := range []uint32{1, 2} {
+		servers[routingContext] = registry.get(associationConfigASKey(association.cfg, routingContext))
+		servers[routingContext].setASPState(association, StateASPActive, time.Hour)
+	}
 	association.handleSignals(context.Background(), messages.NewNotify(
 		params.NewStatus(params.AlternateAspActive), nil,
 		params.NewRoutingContext(1), nil,
 	))
 	if !association.routingContextOverridden(1) {
 		t.Fatal("Alternate ASP Active Notify did not override Routing Context 1")
+	}
+	servers[1].mu.Lock()
+	overriddenState := servers[1].asps[association]
+	servers[1].mu.Unlock()
+	if overriddenState != StateASPInactive {
+		t.Fatalf("shared Routing Context 1 membership = %v, want ASP-INACTIVE", overriddenState)
+	}
+	servers[2].mu.Lock()
+	unaffectedState := servers[2].asps[association]
+	servers[2].mu.Unlock()
+	if unaffectedState != StateASPActive {
+		t.Fatalf("shared Routing Context 2 membership = %v, want ASP-ACTIVE", unaffectedState)
 	}
 	association.startTAck(messages.NewAspInactive(params.NewRoutingContext(2), nil), requestAspInactive)
 	t.Cleanup(association.stopAllTAck)
@@ -1173,6 +1193,26 @@ func TestIPSPSingleExchangeInactiveAckExcludesOverriddenContextsFromState(t *tes
 	for _, routingContext := range []uint32{1, 2} {
 		if association.outboundRoutingContextActive(routingContext) {
 			t.Errorf("Routing Context %d remained active", routingContext)
+		}
+	}
+}
+
+func TestIPSPSingleExchangeScopedOverridesCumulativelyDeactivateAssociation(t *testing.T) {
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+	association.noteRoutingContextsActive([]uint32{1, 2})
+
+	for index, routingContext := range []uint32{1, 2} {
+		association.handleSignals(context.Background(), messages.NewNotify(
+			params.NewStatus(params.AlternateAspActive), nil,
+			params.NewRoutingContext(routingContext), nil,
+		))
+		want := StateASPActive
+		if index == 1 {
+			want = StateASPInactive
+		}
+		if got := association.State(); got != want {
+			t.Fatalf("state after Routing Context %d override = %v, want %v", routingContext, got, want)
 		}
 	}
 }

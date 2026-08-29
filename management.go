@@ -259,25 +259,51 @@ func (c *Association) overriddenByAlternateAsp(n *messages.Notify) bool {
 func (c *Association) overrideScope(n *messages.Notify) bool {
 	named := n.RoutingContext.RoutingContexts()
 	configured := c.configuredRoutingContexts()
-	if len(named) == 0 {
-		return true
+	wholeAssociation := len(named) == 0 || len(configured) == 0
+	if !wholeAssociation {
+		overridden := make(map[uint32]struct{}, len(named))
+		for _, rc := range named {
+			overridden[rc] = struct{}{}
+		}
+		wholeAssociation = true
+		for _, rc := range configured {
+			if _, ok := overridden[rc]; !ok {
+				wholeAssociation = false
+				break
+			}
+		}
 	}
 
-	if len(configured) == 0 {
-		return true
-	}
-
-	overridden := make(map[uint32]struct{}, len(named))
-	for _, rc := range named {
-		overridden[rc] = struct{}{}
-	}
-	for _, rc := range configured {
-		if _, ok := overridden[rc]; !ok {
+	if c.role != RoleIPSP {
+		if !wholeAssociation {
 			// At least one Application Server is untouched, so the association
 			// carries on and only the named contexts stop.
 			c.noteRoutingContextsOverridden(named)
-			return false
 		}
+		return wholeAssociation
 	}
-	return true
+
+	// RFC 4666 Section 4.3.4.5.1 applies the same Notify procedure between
+	// IPSPs. Single Exchange uses one per-AS state for both directions, so the
+	// shared registry must become inactive in the notified scopes as well as the
+	// association's outbound gate. Apply that state before draining traffic so
+	// no new DATA can select the displaced IPSP while admitted writes finish.
+	affected := named
+	if wholeAssociation {
+		c.commitState(StateASPInactive)
+		c.noteRoutingContextsInactive(nil)
+		affected = configured
+	} else {
+		c.noteRoutingContextsOverridden(named)
+	}
+	postTransitionNotify := func() {}
+	if c.as != nil {
+		postTransitionNotify = c.as.quiesceASPFor(c, affected)
+	}
+	c.quiesceUnscopedTraffic()
+	postTransitionNotify()
+
+	// Separate scoped notifications can cumulatively displace every AS even
+	// when no single Notify names the complete configured set.
+	return wholeAssociation || c.stateForActiveRoutingContexts() == StateASPInactive
 }
