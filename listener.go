@@ -62,8 +62,8 @@ type Listener struct {
 	// SG knew were reachable.
 	destinations *destinations
 
-	// as references the Application Servers owned by the SGP Endpoint, keyed by
-	// ASKey.
+	// as references the Application Servers owned by the SGP or IPSP Endpoint,
+	// keyed by ASKey.
 	//
 	// The AS state machine of RFC 4666 Section 4.3.2 is a property of the group
 	// of ASPs serving a Routing Context, not of any one association, so it
@@ -77,9 +77,10 @@ type Listener struct {
 	mtp3Restarts *mtp3RestartRegistry
 }
 
-// ApplicationServerState returns the AS state for a Routing Context, as
-// maintained by RFC 4666 Section 4.3.2: "The state of the AS is maintained in
-// the M3UA layer on the SGPs."
+// ApplicationServerState returns this Endpoint's AS state for a Routing
+// Context. RFC 4666 Section 4.3.2 defines the SGP's AS state machine, while
+// Sections 4.3.1 and 4.3.4.3 require an IPSP to retain the corresponding
+// per-AS state of its remote IPSPs.
 func (l *Listener) ApplicationServerState(rtCtx uint32) ASState {
 	as := l.applicationServers()
 	if as == nil {
@@ -105,8 +106,8 @@ func (l *Listener) ApplicationServerStateForAS(key ASKey) ASState {
 	return scoped.State()
 }
 
-// applicationServers returns the SGP Endpoint's Application Server registry,
-// or nil when this Listener does not belong to an SGP Endpoint.
+// applicationServers returns the SGP or IPSP Endpoint's Application Server
+// registry, or nil when this Listener belongs to an ASP Endpoint.
 func (l *Listener) applicationServers() *applicationServers {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
@@ -167,9 +168,14 @@ func (l *Listener) promoteAcceptedAssociation(association *Association) bool {
 	if l.closed {
 		return false
 	}
-	if association.role == RoleSGP {
+	switch association.role {
+	case RoleSGP:
 		association.as, association.nif, association.destinations = l.registryLocked()
 		association.mtp3Restarts = l.mtp3Restarts
+	case RoleIPSP:
+		association.as = l.as
+	}
+	if association.as != nil {
 		association.as.register(association.configuredASKeys())
 	}
 	if l.endpoint == nil || !l.endpoint.trackAssociation(association) {
@@ -217,8 +223,13 @@ func newListener(endpoint *Endpoint, config *ListenerConfig) *Listener {
 		endpoint:          endpoint,
 		closeDone:         make(chan struct{}),
 	}
-	if endpoint != nil && endpoint.Role() == RoleSGP {
-		listener.as, listener.nif, listener.destinations, listener.mtp3Restarts = endpoint.sgpRegistry()
+	if endpoint != nil {
+		switch endpoint.Role() {
+		case RoleSGP:
+			listener.as, listener.nif, listener.destinations, listener.mtp3Restarts = endpoint.sgpRegistry()
+		case RoleIPSP:
+			listener.as = endpoint.applicationServerRegistry()
+		}
 	}
 	return listener
 }

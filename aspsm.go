@@ -83,13 +83,30 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 		}
 	}
 
-	if _, err := c.WriteSignal(
+	previousState := c.State()
+
+	// RFC 4666 Section 4.3.4.1 makes a received ASP Up establish the remote
+	// ASP/IPSP as ASP-INACTIVE. If it was ASP-ACTIVE, the same section removes
+	// it from every relevant AS. Commit that state and halt traffic before the
+	// Ack: once the peer receives ASP Up Ack, both ends may act on the new
+	// state, so no DATA admitted under the previous state may follow it.
+	c.commitState(StateASPInactive)
+	c.noteRoutingContextsInactive(nil)
+	postAckNotify := func() {}
+	if c.as != nil {
+		postAckNotify = c.as.quiesceASPFor(c, c.configuredRoutingContexts())
+	}
+	c.quiesceUnscopedTraffic()
+
+	_, ackErr := c.WriteSignal(
 		messages.NewAspUpAck(
 			c.cfg.ASPIdentifier.Copy(),
 			nil,
 		),
-	); err != nil {
-		return err
+	)
+	postAckNotify()
+	if ackErr != nil {
+		return ackErr
 	}
 	if c.role == RoleIPSP {
 		c.completeRestartASPSM()
@@ -97,7 +114,7 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 
 	// Only ASP-ACTIVE additionally warrants an Error ("Unexpected Message").
 	// The caller keeps the resulting state at ASP-INACTIVE either way.
-	if c.role == RoleSGP && c.State() == StateASPActive {
+	if c.role == RoleSGP && previousState == StateASPActive {
 		return NewUnexpectedMessageError(aspUp)
 	}
 

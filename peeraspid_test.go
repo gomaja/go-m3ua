@@ -162,15 +162,19 @@ func TestOverrideNotifyNamesTheRemoteOverridingASP(t *testing.T) {
 
 func TestActiveASPsAreOrderedBySavedPeerIdentifier(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	first, _ := asTestConn(t, registry, StateASPActive, 1)
-	second, _ := asTestConn(t, registry, StateASPActive, 1)
+	first, _ := asTestConn(t, registry, StateASPInactive, 1)
+	second, _ := asTestConn(t, registry, StateASPInactive, 1)
 
-	if err := first.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(20), nil)); err == nil {
-		t.Fatal("ASP Up received while active should also report Unexpected Message")
+	if err := first.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(20), nil)); err != nil {
+		t.Fatal(err)
 	}
-	if err := second.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(10), nil)); err == nil {
-		t.Fatal("ASP Up received while active should also report Unexpected Message")
+	if err := second.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(10), nil)); err != nil {
+		t.Fatal(err)
 	}
+	first.noteRoutingContextsActive([]uint32{1})
+	second.noteRoutingContextsActive([]uint32{1})
+	registry.aspStateChanged(first, StateASPActive)
+	registry.aspStateChanged(second, StateASPActive)
 	ordered := registry.get(1).activeASPs()
 	if len(ordered) != 2 || ordered[0] != second || ordered[1] != first {
 		t.Errorf("active ASP order = %p, %p; want peer IDs 10 then 20", ordered[0], ordered[1])
@@ -179,11 +183,13 @@ func TestActiveASPsAreOrderedBySavedPeerIdentifier(t *testing.T) {
 
 func TestRemovingAnASPNotifiesItsSurvivingPeersOfFailure(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	failed, _ := asTestConn(t, registry, StateASPActive, 1)
+	failed, _ := asTestConn(t, registry, StateASPInactive, 1)
 	_, survivorSent := asTestConn(t, registry, StateASPActive, 1)
-	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err == nil {
-		t.Fatal("ASP Up received while active should also report Unexpected Message")
+	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err != nil {
+		t.Fatal(err)
 	}
+	failed.noteRoutingContextsActive([]uint32{1})
+	registry.aspStateChanged(failed, StateASPActive)
 
 	before := len(notifies(*survivorSent))
 	registry.forget(failed)
@@ -213,11 +219,13 @@ func TestRemovingAnASPNotifiesItsSurvivingPeersOfFailure(t *testing.T) {
 
 func TestFailureDrivenASStateNotifyNamesTheFailedASP(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
-	failed, _ := asTestConn(t, registry, StateASPActive, 1)
+	failed, _ := asTestConn(t, registry, StateASPInactive, 1)
 	_, survivorSent := asTestConn(t, registry, StateASPInactive, 1)
-	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err == nil {
-		t.Fatal("ASP Up received while active should also report Unexpected Message")
+	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err != nil {
+		t.Fatal(err)
 	}
+	failed.noteRoutingContextsActive([]uint32{1})
+	registry.aspStateChanged(failed, StateASPActive)
 
 	before := len(notifies(*survivorSent))
 	registry.forget(failed)

@@ -194,12 +194,18 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	}()
 
 	// Nothing here writes to cfg: each permitted Dial gets an independent
-	// immutable AssociationConfig snapshot. An SGP registers its Application
-	// Server scope only after cancellation and Endpoint closure have been ruled
-	// out, so an attempt that never starts cannot change Endpoint state.
+	// immutable AssociationConfig snapshot. An SGP or IPSP registers its
+	// Application Server scope only after cancellation and Endpoint closure
+	// have been ruled out, so an attempt that never starts cannot change
+	// Endpoint state.
 	association := newAssociation(role, cfg)
-	if role == RoleSGP {
+	switch role {
+	case RoleSGP:
 		association.as, association.nif, association.destinations, association.mtp3Restarts = e.sgpRegistry()
+	case RoleIPSP:
+		association.as = e.applicationServerRegistry()
+	}
+	if association.as != nil {
 		association.as.register(association.configuredASKeys())
 	}
 

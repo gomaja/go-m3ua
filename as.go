@@ -242,8 +242,8 @@ type asStateNotification struct {
 	waitOnRelease bool
 }
 
-// applicationServers is the registry an SGP Endpoint keeps, one entry per
-// Application Server traffic scope it serves.
+// applicationServers is the registry an SGP or IPSP Endpoint keeps, one entry
+// per Application Server traffic scope it serves.
 type applicationServers struct {
 	mu     sync.Mutex
 	as     map[ASKey]*applicationServer
@@ -811,11 +811,12 @@ func validTrafficMode(mode uint32) bool {
 	}
 }
 
-// quiesceASPFor removes an ASP from every named AS before waiting for any
-// already-snapshotted DATA write to finish. The returned closure emits state
-// Notify messages and must run only after the related ASP Inactive Ack.
+// quiesceASPFor removes an ASP/IPSP from every selected AS before waiting for
+// any already-snapshotted DATA write to finish. An empty Routing Context set
+// selects the configured contextless AS. The returned closure emits state
+// Notify messages and must run only after the related acknowledgement.
 func (r *applicationServers) quiesceASPFor(c *Association, rtCtxs []uint32) func() {
-	if r == nil || c == nil || len(rtCtxs) == 0 {
+	if r == nil || c == nil || (len(rtCtxs) == 0 && c.hasExplicitlyEmptyASPAuthorization()) {
 		return func() {}
 	}
 	r.mu.Lock()

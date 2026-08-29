@@ -185,6 +185,139 @@ func TestIPSPSingleExchangeSimultaneousASPSMAndASPTM(t *testing.T) {
 	}
 }
 
+func TestIPSPEndpointSharesApplicationServerStateAcrossAssociations(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	listener := newListener(endpoint, NewListenerConfig(config))
+
+	incumbent, incumbentSent := newSingleExchangeIPSPForTest(t, StateASPInactive)
+	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
+	for _, association := range []*Association{incumbent, challenger} {
+		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		if !listener.promoteAcceptedAssociation(association) {
+			t.Fatal("promoteAcceptedAssociation() = false")
+		}
+	}
+	if incumbent.as == nil || incumbent.as != challenger.as {
+		t.Fatal("IPSP associations do not share their Endpoint Application Server registry")
+	}
+
+	incumbent.handleSignals(context.Background(), messages.NewAspActive(
+		params.NewTrafficModeType(params.TrafficModeOverride),
+		params.NewRoutingContext(1), nil,
+	))
+	if got := incumbent.State(); got != StateASPActive {
+		t.Fatalf("incumbent state = %v, want ASP-ACTIVE", got)
+	}
+	before := len(notifies(*incumbentSent))
+
+	challenger.handleSignals(context.Background(), messages.NewAspUp(params.NewAspIdentifier(77), nil))
+	challenger.handleSignals(context.Background(), messages.NewAspActive(
+		params.NewTrafficModeType(params.TrafficModeOverride),
+		params.NewRoutingContext(1), nil,
+	))
+
+	if got := incumbent.State(); got != StateASPInactive {
+		t.Fatalf("overridden IPSP state = %v, want ASP-INACTIVE", got)
+	}
+	got := notifies(*incumbentSent)
+	if len(got) <= before {
+		t.Fatal("overridden IPSP received no Alternate ASP Active Notify")
+	}
+	last := got[len(got)-1]
+	if _, status := statusOf(t, last); status != uint16(params.AlternateAspActive&0xffff) {
+		t.Fatalf("Notify Status Information = %d, want Alternate ASP Active", status)
+	}
+	if last.AspIdentifier == nil || last.AspIdentifier.AspIdentifier() != 77 {
+		t.Fatalf("Notify ASP Identifier = %v, want overriding IPSP identifier 77", last.AspIdentifier)
+	}
+}
+
+func TestIPSPASPUpAckWaitsForActiveTrafficToQuiesce(t *testing.T) {
+	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	association.maxMessageStreamID = 4
+	association.recvStream.Store(0)
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	ackSeen := make(chan struct{})
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		switch message.(type) {
+		case *messages.Data:
+			close(dataStarted)
+			<-releaseData
+		case *messages.AspUpAck:
+			close(ackSeen)
+		}
+		return message.MarshalLen(), nil
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseData:
+		default:
+			close(releaseData)
+		}
+	})
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := association.WriteSignal(distributionData(1, 1, "in flight"))
+		writeDone <- err
+	}()
+	select {
+	case <-dataStarted:
+	case err := <-writeDone:
+		t.Fatalf("outbound DATA returned before entering the traffic path: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("outbound DATA did not enter the IPSP traffic path")
+	}
+
+	handleDone := make(chan struct{})
+	go func() {
+		association.handleSignals(context.Background(), messages.NewAspUp(nil, nil))
+		close(handleDone)
+	}()
+
+	select {
+	case <-ackSeen:
+		t.Fatal("ASP Up Ack overtook outbound DATA admitted while the peer was ASP-ACTIVE")
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for association.State() != StateASPInactive && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := association.State(); got != StateASPInactive {
+		t.Fatalf("state while quiescing = %v, want ASP-INACTIVE", got)
+	}
+	if _, err := association.WriteSignal(distributionData(1, 1, "too late")); !errors.Is(err, ErrNotEstablished) {
+		t.Fatalf("DATA admitted after ASP Up committed ASP-INACTIVE: %v", err)
+	}
+
+	close(releaseData)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("in-flight DATA: %v", err)
+	}
+	select {
+	case <-ackSeen:
+	case <-time.After(time.Second):
+		t.Fatal("ASP Up Ack was not sent after outbound DATA quiesced")
+	}
+	select {
+	case <-handleDone:
+	case <-time.After(time.Second):
+		t.Fatal("ASP Up handler did not finish after outbound DATA quiesced")
+	}
+}
+
 func TestIPSPSingleExchangeReorderedAcknowledgementsChangePeerState(t *testing.T) {
 	tests := []struct {
 		name    string

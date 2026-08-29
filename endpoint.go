@@ -88,10 +88,17 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 			mtp3Restarts: &mtp3RestartRegistry{},
 			aspRoutes:    routes,
 		}
-		if config.Role == RoleSGP {
+		switch config.Role {
+		case RoleSGP:
 			endpoint.as = newApplicationServersForSGP(snapshotSGPConfig(config.SGP))
 			endpoint.nif = &nifAvailability{}
 			endpoint.destinations = newDestinations()
+		case RoleIPSP:
+			// RFC 4666 Sections 4.3.1 and 4.3.4.3 require the peer M3UA
+			// layer to maintain each remote IPSP's per-AS state, including
+			// Override across all IPSPs serving the same AS. The registry is
+			// therefore Endpoint state, not Association state.
+			endpoint.as = newApplicationServers(DefaultRecoveryTimer)
 		}
 		return endpoint, nil
 	default:
@@ -367,6 +374,13 @@ func (e *Endpoint) sgpRegistry() (*applicationServers, *nifAvailability, *destin
 		return nil, nil, nil, nil
 	}
 	return e.as, e.nif, e.destinations, e.mtp3Restarts
+}
+
+func (e *Endpoint) applicationServerRegistry() *applicationServers {
+	if e == nil || (e.role != RoleSGP && e.role != RoleIPSP) {
+		return nil
+	}
+	return e.as
 }
 
 func (e *Endpoint) associationRole() (Role, error) {
