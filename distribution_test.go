@@ -342,6 +342,75 @@ func TestPendingApplicationServerQueuesAndFlushesInOrder(t *testing.T) {
 	}
 }
 
+func TestSGPAssociationDistributesThroughItsRecoveryQueue(t *testing.T) {
+	listener, applicationServer, association, sent := distributionFixture(t, params.TrafficModeLoadshare)
+	applicationServer.setASPState(association, StateASPActive, time.Hour)
+	applicationServer.setASPState(association, StateASPInactive, time.Hour)
+	if got := applicationServer.State(); got != ASPending {
+		t.Fatalf("AS state = %v, want AS-PENDING", got)
+	}
+	sent.reset()
+
+	result, err := association.DistributeData(distributionData(1, 5, "dialed SGP recovery"))
+	if err != nil {
+		t.Fatalf("Association.DistributeData: %v", err)
+	}
+	if !result.Queued || result.Delivered != 0 {
+		t.Fatalf("distribution result = %#v, want queued", result)
+	}
+	if sent.dataCount() != 0 {
+		t.Fatalf("AS-PENDING traffic was sent immediately: %d messages", sent.dataCount())
+	}
+
+	applicationServer.setASPState(association, StateASPActive, time.Hour)
+	if !waitFor(func() bool { return sent.dataCount() == 1 }, time.Second) {
+		t.Fatalf("queued DATA count after recovery = %d, want 1", sent.dataCount())
+	}
+
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestASPAssociationCannotRunSGPDistribution(t *testing.T) {
+	association, _ := newTestConn(t, StateASPActive, RoleASP)
+	if _, err := association.DistributeData(distributionData(1, 1, "wrong role")); !errors.Is(err, ErrUnsupportedRole) {
+		t.Fatalf("Association.DistributeData error = %v, want ErrUnsupportedRole", err)
+	}
+}
+
+func TestDialingSGPAssociationCloseReleasesRecoveryState(t *testing.T) {
+	_, applicationServer, association, _ := distributionFixture(t, params.TrafficModeLoadshare)
+	applicationServer.setASPState(association, StateASPActive, time.Hour)
+	applicationServer.setASPState(association, StateASPInactive, time.Hour)
+	if _, err := association.DistributeData(distributionData(1, 1, "retained")); err != nil {
+		t.Fatalf("queue DATA: %v", err)
+	}
+	released := false
+	association.releaseEndpointStateOwner = func() { released = true }
+
+	if err := association.Close(); err != nil {
+		t.Fatalf("close dialing SGP Association: %v", err)
+	}
+	if !released {
+		t.Fatal("dialing SGP Association did not release Endpoint state ownership")
+	}
+	if _, err := association.DistributeData(distributionData(1, 1, "after close")); !errors.Is(err, ErrAssociationClosed) {
+		t.Fatalf("distribution after Association.Close error = %v, want ErrAssociationClosed", err)
+	}
+
+	applicationServer.mu.Lock()
+	closed := applicationServer.closed
+	queued := len(applicationServer.recoveryQueue)
+	queuedBytes := applicationServer.recoveryQueueBytes
+	recovery := applicationServer.recovery
+	applicationServer.mu.Unlock()
+	if !closed || queued != 0 || queuedBytes != 0 || recovery != nil {
+		t.Fatalf("closed dialing SGP AS state = closed:%v queued:%d bytes:%d recovery:%v",
+			closed, queued, queuedBytes, recovery)
+	}
+}
+
 func TestRecoveryDrainIsAsyncAndQueuesNewTrafficBehindBacklog(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)

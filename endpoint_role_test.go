@@ -159,6 +159,137 @@ func TestSGPEndpointDialOwnsStateUntilAssociationCloses(t *testing.T) {
 	}
 }
 
+func TestSGPListenerRetainsStateOwnershipUntilInFlightAcceptReturns(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	selectorEntered := make(chan struct{})
+	selectorRelease := make(chan struct{})
+	config := NewListenerConfig(mcSGPConfig())
+	config.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
+		close(selectorEntered)
+		<-selectorRelease
+		return mcSGPConfig(), nil
+	}
+
+	endpoint, err := NewEndpoint(RoleSGP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	address := mcAddr(0, "127.0.0.1")
+	listener, err := endpoint.Listen("m3ua", address, config)
+	if err != nil {
+		skipIfSCTPUnsupported(t, err)
+		t.Fatalf("SGP Listen: %v", err)
+	}
+
+	accepted := make(chan error, 1)
+	go func() {
+		association, acceptErr := listener.Accept(ctx)
+		if association != nil {
+			_ = association.Close()
+		}
+		accepted <- acceptErr
+	}()
+
+	raw, err := sctp.DialSCTP("sctp", nil, listener.Addr().(*sctp.SCTPAddr))
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("raw SCTP association: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+
+	select {
+	case <-selectorEntered:
+	case <-ctx.Done():
+		_ = listener.Close()
+		t.Fatalf("selector was not entered: %v", ctx.Err())
+	}
+
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close Listener: %v", err)
+	}
+	cancelled, cancelDial := context.WithCancel(context.Background())
+	cancelDial()
+	if _, err := endpoint.Dial(cancelled, "m3ua", nil, nil, mcSGPConfig()); !errors.Is(err, ErrEndpointStateInUse) {
+		t.Fatalf("SGP Dial while Accept is in flight error = %v, want ErrEndpointStateInUse", err)
+	}
+
+	close(selectorRelease)
+	select {
+	case err := <-accepted:
+		if err == nil {
+			t.Fatal("Accept succeeded after Listener.Close")
+		}
+	case <-ctx.Done():
+		t.Fatalf("Accept did not return after selector release: %v", ctx.Err())
+	}
+	if _, err := endpoint.Dial(cancelled, "m3ua", nil, nil, mcSGPConfig()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SGP Dial after Accept returned error = %v, want context.Canceled", err)
+	}
+}
+
+func TestSGPListenerCloseStopsAssociationDuringM3UAEstablishment(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	endpoint, err := NewEndpoint(RoleSGP)
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	config := mcSGPConfig()
+	config.EstablishTimeout = 30 * time.Second
+	listener, err := endpoint.Listen(
+		"m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(config),
+	)
+	if err != nil {
+		skipIfSCTPUnsupported(t, err)
+		t.Fatalf("SGP Listen: %v", err)
+	}
+
+	accepted := make(chan error, 1)
+	go func() {
+		association, acceptErr := listener.Accept(ctx)
+		if association != nil {
+			_ = association.Close()
+		}
+		accepted <- acceptErr
+	}()
+	raw, err := sctp.DialSCTP("sctp", nil, listener.Addr().(*sctp.SCTPAddr))
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("raw SCTP association: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+
+	if !waitFor(func() bool {
+		listener.muConns.Lock()
+		defer listener.muConns.Unlock()
+		return listener.activeAccept == 1 && len(listener.conns) == 1
+	}, 5*time.Second) {
+		_ = listener.Close()
+		t.Fatal("accepted SCTP association never entered M3UA establishment")
+	}
+
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close Listener: %v", err)
+	}
+	select {
+	case err := <-accepted:
+		if err == nil {
+			t.Fatal("Accept succeeded for a peer that never sent ASP Up")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Accept remained in M3UA establishment after Listener.Close")
+	}
+
+	cancelled, cancelDial := context.WithCancel(context.Background())
+	cancelDial()
+	if _, err := endpoint.Dial(cancelled, "m3ua", nil, nil, mcSGPConfig()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SGP Dial after in-flight establishment stopped error = %v, want context.Canceled", err)
+	}
+}
+
 func TestIPSPDialAndListenRequireAnExplicitExchangeModel(t *testing.T) {
 	endpoint, err := NewEndpoint(RoleIPSP)
 	if err != nil {

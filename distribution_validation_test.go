@@ -644,7 +644,6 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 		)
 		registry := newApplicationServers(time.Hour, config)
 		registry.get(1)
-		listener := &Listener{AssociationConfig: config, as: registry}
 		data := distributionData(1, 1, "payload")
 		data.CorrelationID = params.NewCorrelationID(1)
 
@@ -671,7 +670,7 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 			data.CorrelationID = parameter
 		}
 
-		owned, _, _, _, err := listener.prepareDistributionData(registry, registry.distribution, data)
+		owned, _, _, _, err := prepareDistributionData(registry, registry.distribution, data)
 		if !correctTag {
 			if !errors.Is(err, params.ErrInvalidType) {
 				t.Fatalf("slot %d wrong-tag error = %v, want params.ErrInvalidType", slot, err)

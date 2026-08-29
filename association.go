@@ -1368,6 +1368,7 @@ func (c *Association) closeWith(cause error) error {
 			c.listener.forget(c)
 		}
 		if c.releaseEndpointStateOwner != nil {
+			c.as.close()
 			c.releaseEndpointStateOwner()
 		}
 	})

@@ -600,7 +600,8 @@ func (r *applicationServers) sole() (ASKey, *applicationServer, bool) {
 }
 
 // close ends every AS-owned timer and releases all retained traffic. The
-// Listener owns the registry, so none of this state may outlive Listener.Close.
+// Listener or a dialing SGP Association owns the registry, so none of this
+// state may outlive its owner.
 func (r *applicationServers) close() {
 	if r == nil {
 		return

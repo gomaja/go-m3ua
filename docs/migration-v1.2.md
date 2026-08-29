@@ -28,6 +28,12 @@ A `RoleSGP` endpoint currently admits one shared protocol-state owner: one
 `Association`. A second owner returns `ErrEndpointStateInUse` instead of
 creating an independent AS registry for the same SGP.
 
+Use `Listener.DistributeData` for an SGP that accepts SCTP associations and
+`Association.DistributeData` for an SGP that initiates its SCTP association.
+Both paths apply the same Application Server state, recovery queue, and Traffic
+Mode rules. Calling `Association.DistributeData` on an ASP returns
+`ErrUnsupportedRole`.
+
 ## Renamed API
 
 | Before v1.2 | v1.2 |

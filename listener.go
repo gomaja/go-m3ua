@@ -36,7 +36,17 @@ type Listener struct {
 	// accepted so Close can take them down with it.
 	muConns sync.Mutex
 	conns   map[*Association]struct{}
-	closed  bool
+	// pendingSCTP contains accepted SCTP associations that have not yet been
+	// promoted to M3UA Associations. Close owns these sockets too, including
+	// while SelectAssociationConfig is running.
+	pendingSCTP map[*sctp.SCTPConn]struct{}
+	// activeAccept counts accepted SCTP associations still inside Accept,
+	// including peer selection and M3UA establishment.
+	activeAccept int
+	closed       bool
+	// closeComplete prevents the last returning Accept from releasing Endpoint
+	// state while Close is still shutting down established Associations.
+	closeComplete bool
 
 	// restarts turns SCTP association-change events into M-SCTP_RESTART
 	// indications. One per Listener, because the dependency gives every
@@ -136,20 +146,81 @@ func (l *Listener) track(c *Association) bool {
 	return true
 }
 
-// registry returns the listener's Application Server registry and NIF state,
-// creating them on first use.
-//
-// Accept calls this before starting the Association's goroutines, because the
-// fields it copies onto the Association have to be in place before anything
-// can read them: the dispatcher reads Association.as on every state change and
-// Association.nif on every ASP Up,
-// and assigning them after monitor() is running is a data race — which is
-// exactly what happened when they were set in track(), since track runs only
-// once the association is established.
-func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinations) {
+// beginAccept makes the Listener own an accepted SCTP association before any
+// peer configuration or M3UA establishment work starts.
+func (l *Listener) beginAccept(sctpAssociation *sctp.SCTPConn) bool {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
 
+	if l.closed {
+		return false
+	}
+	if l.pendingSCTP == nil {
+		l.pendingSCTP = make(map[*sctp.SCTPConn]struct{})
+	}
+	l.pendingSCTP[sctpAssociation] = struct{}{}
+	l.activeAccept++
+	return true
+}
+
+// rejectPendingSCTP removes a socket that will not become an M3UA Association.
+func (l *Listener) rejectPendingSCTP(sctpAssociation *sctp.SCTPConn) {
+	l.muConns.Lock()
+	delete(l.pendingSCTP, sctpAssociation)
+	l.muConns.Unlock()
+}
+
+// promoteAcceptedAssociation atomically attaches shared SGP state and moves a
+// socket from the pre-M3UA set into the Listener's Association set.
+func (l *Listener) promoteAcceptedAssociation(association *Association) bool {
+	l.muConns.Lock()
+	defer l.muConns.Unlock()
+
+	delete(l.pendingSCTP, association.sctpConn)
+	if l.closed {
+		return false
+	}
+	if association.role == RoleSGP {
+		association.as, association.nif, association.destinations = l.registryLocked()
+		association.mtp3Restarts = &l.mtp3Restarts
+	}
+	if l.conns == nil {
+		l.conns = make(map[*Association]struct{})
+	}
+	l.conns[association] = struct{}{}
+	return true
+}
+
+// finishAccept retains the Endpoint state reservation until every accepted
+// SCTP association has either become an M3UA Association or been rejected.
+func (l *Listener) finishAccept() {
+	var release func()
+	l.muConns.Lock()
+	l.activeAccept--
+	if l.closed && l.closeComplete && l.activeAccept == 0 {
+		release = l.releaseEndpointStateOwner
+		l.releaseEndpointStateOwner = nil
+	}
+	l.muConns.Unlock()
+	if release != nil {
+		release()
+	}
+}
+
+// registry returns the listener's Application Server registry and NIF state,
+// creating them on first use.
+//
+// Acceptance promotion invokes registryLocked before starting the
+// Association's goroutines, because the dispatcher reads Association.as on
+// every state change and Association.nif on every ASP Up. Assigning them after
+// monitor starts is a data race.
+func (l *Listener) registry() (*applicationServers, *nifAvailability, *destinations) {
+	l.muConns.Lock()
+	defer l.muConns.Unlock()
+	return l.registryLocked()
+}
+
+func (l *Listener) registryLocked() (*applicationServers, *nifAvailability, *destinations) {
 	if l.destinations == nil {
 		l.destinations = newDestinations()
 	}
@@ -605,6 +676,11 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !l.beginAccept(sctpAssociation) {
+		_ = sctpAssociation.Close()
+		return nil, net.ErrClosed
+	}
+	defer l.finishAccept()
 
 	// Every Association this Listener produces can share AssociationConfig, so
 	// this function must treat it as read-only. The SCTP association and the
@@ -615,10 +691,12 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	acceptInfo := newAcceptInfo(sctpAssociation.LocalAddr(), sctpAssociation.RemoteAddr())
 	associationConfig, err := l.listenerConfig.associationConfigForAccept(acceptInfo)
 	if err != nil {
+		l.rejectPendingSCTP(sctpAssociation)
 		_ = sctpAssociation.Close()
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
 	if err := validateAssociationConfigForRole(role, associationConfig); err != nil {
+		l.rejectPendingSCTP(sctpAssociation)
 		_ = sctpAssociation.Close()
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
@@ -630,12 +708,16 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	// the Application Server registry and the NIF state, which the dispatcher
 	// reads as soon as monitor() starts.
 	association.listener = l
-	if role == RoleSGP {
-		association.as, association.nif, association.destinations = l.registry()
-		association.mtp3Restarts = &l.mtp3Restarts
+	if !l.promoteAcceptedAssociation(association) {
+		_ = association.closeWith(ErrFailedToEstablish)
+		return nil, &AssociationEstablishmentError{
+			RemoteAddr: acceptInfo.RemoteAddr,
+			Err:        ErrFailedToEstablish,
+		}
 	}
 
 	if err := association.setUpSocket(); err != nil {
+		_ = association.closeWith(err)
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
 
@@ -650,17 +732,6 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 
 	select {
 	case <-association.established:
-		// Register only once established: an Association that never came up is closed
-		// on the failure paths below and has nothing for Close to do.
-		if !l.track(association) {
-			// The listener closed while this association was coming up, so it
-			// would never be shut down by anything else.
-			_ = association.closeWith(ErrFailedToEstablish)
-			return nil, &AssociationEstablishmentError{
-				RemoteAddr: acceptInfo.RemoteAddr,
-				Err:        ErrFailedToEstablish,
-			}
-		}
 		return association, nil
 	case <-association.done:
 		if err := ctx.Err(); err != nil {
@@ -700,6 +771,11 @@ func (l *Listener) Close() error {
 		conns = append(conns, c)
 	}
 	l.conns = nil
+	pendingSCTP := make([]*sctp.SCTPConn, 0, len(l.pendingSCTP))
+	for association := range l.pendingSCTP {
+		pendingSCTP = append(pendingSCTP, association)
+	}
+	l.pendingSCTP = nil
 	l.muConns.Unlock()
 	l.mtp3Restarts.mu.Lock()
 	l.mtp3Restarts.active = nil
@@ -715,6 +791,11 @@ func (l *Listener) Close() error {
 			firstErr = err
 		}
 	}
+	for _, association := range pendingSCTP {
+		if err := association.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 
 	// Association.Close is idempotent. The listening socket is already closed, so no
 	// new association can enter while the existing set is being released.
@@ -723,8 +804,16 @@ func (l *Listener) Close() error {
 			firstErr = err
 		}
 	}
-	if l.releaseEndpointStateOwner != nil {
-		l.releaseEndpointStateOwner()
+	var releaseEndpointStateOwner func()
+	l.muConns.Lock()
+	l.closeComplete = true
+	if l.activeAccept == 0 {
+		releaseEndpointStateOwner = l.releaseEndpointStateOwner
+		l.releaseEndpointStateOwner = nil
+	}
+	l.muConns.Unlock()
+	if releaseEndpointStateOwner != nil {
+		releaseEndpointStateOwner()
 	}
 
 	return firstErr

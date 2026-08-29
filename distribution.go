@@ -75,8 +75,35 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 	if registry == nil {
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
+	return distributeData(registry, data)
+}
+
+// DistributeData sends one DATA message through the Application Server
+// registry owned by an SGP Association. This is the distribution entry point
+// for an SGP that initiated its SCTP association, as permitted by RFC 4666
+// Section 1.4.8. Accepted SGP associations use the same Listener-owned registry,
+// so either entry point applies the same AS state and traffic-mode decisions.
+func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, error) {
+	if c == nil {
+		return TrafficDistribution{}, errors.New("cannot distribute DATA through a nil Association")
+	}
+	if c.Role() != RoleSGP {
+		return TrafficDistribution{}, ErrUnsupportedRole
+	}
+	select {
+	case <-c.done:
+		return TrafficDistribution{}, ErrAssociationClosed
+	default:
+	}
+	if c.as == nil {
+		return TrafficDistribution{}, ErrNoActiveASP
+	}
+	return distributeData(c.as, data)
+}
+
+func distributeData(registry *applicationServers, data *messages.Data) (TrafficDistribution, error) {
 	policy := registry.distribution
-	owned, protocolData, encodedSize, key, err := l.prepareDistributionData(registry, policy, data)
+	owned, protocolData, encodedSize, key, err := prepareDistributionData(registry, policy, data)
 	if err != nil {
 		return TrafficDistribution{}, err
 	}
@@ -95,7 +122,7 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 	return applicationServer.distribute(owned, protocolData, flow, encodedSize, policy.messageLimit, policy.byteLimit)
 }
 
-func (l *Listener) prepareDistributionData(registry *applicationServers, policy distributionPolicy, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, ASKey, error) {
+func prepareDistributionData(registry *applicationServers, policy distributionPolicy, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, ASKey, error) {
 	if data == nil {
 		return nil, nil, 0, ASKey{}, errors.New("cannot distribute nil DATA")
 	}
