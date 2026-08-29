@@ -1292,6 +1292,42 @@ func TestNotifyIsRejectedAtAnSGP(t *testing.T) {
 	}
 }
 
+func TestNotifyIsRejectedWhileASPDown(t *testing.T) {
+	for _, role := range []Role{RoleASP, RoleIPSP} {
+		t.Run(role.String(), func(t *testing.T) {
+			association, sent := newTestConn(t, StateASPDown, role)
+			if role == RoleIPSP {
+				association.cfg.IPSP = &IPSPConfig{
+					ExchangeModel: IPSPExchangeSingle,
+					InitiateASPTM: true,
+				}
+			}
+
+			association.handleSignals(context.Background(), messages.NewNotify(
+				params.NewStatus(params.AlternateAspActive), nil, nil, nil))
+
+			var unexpected *UnexpectedMessageError
+			if err := firstErr(association); !errors.As(err, &unexpected) {
+				t.Fatalf("Notify error = %v, want UnexpectedMessageError", err)
+			}
+			select {
+			case state := <-association.stateChan:
+				if state != stateUnchanged {
+					t.Fatalf("published state = %v, want stateUnchanged", state)
+				}
+			default:
+				t.Fatal("Notify published no state update")
+			}
+			if len(association.mgmtChan) != 0 {
+				t.Fatal("ASP-DOWN Notify reached Layer Management")
+			}
+			if len(*sent) != 0 {
+				t.Fatalf("ASP-DOWN Notify sent %v, want no protocol response from this handler", typeNames(*sent))
+			}
+		})
+	}
+}
+
 func TestNotifyRejectsReservedStatusValues(t *testing.T) {
 	for _, status := range []uint32{
 		0,

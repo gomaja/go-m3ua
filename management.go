@@ -124,7 +124,7 @@ func errorCodeName(code uint32) string {
 // by the dispatcher, which owns state publishing.
 func (c *Association) handleNotify(n *messages.Notify) error {
 	switch c.State() {
-	case StateSCTPCDI, StateSCTPRI:
+	case StateSCTPCDI, StateSCTPRI, StateASPDown:
 		return NewUnexpectedMessageError(n)
 	}
 	// In the SG-AS model Notify is originated by an SGP and consumed by an ASP.
