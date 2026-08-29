@@ -640,7 +640,7 @@ func TestIPSPDoubleExchangeLocalInactiveAckDoesNotWaitForTrafficToPeerDATA(t *te
 		if err != nil {
 			t.Fatalf("TrafficToLocal ASP Inactive Ack: %v", err)
 		}
-	case <-time.After(25 * time.Millisecond):
+	case <-time.After(2 * time.Second):
 		close(releaseData)
 		<-writeDone
 		t.Fatal("TrafficToLocal ASP Inactive Ack waited behind TrafficToPeer DATA")
@@ -700,28 +700,31 @@ func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testin
 
 			ackDone := make(chan error, 1)
 			go func() { ackDone <- association.handleAspDownAck(messages.NewAspDownAck(nil)) }()
-			select {
-			case err := <-ackDone:
-				if test.wantBlocked {
+			if test.wantBlocked {
+				select {
+				case <-ackDone:
 					close(releaseData)
 					<-writeDone
 					t.Fatal("Single ASPSM ASP Down Ack did not wait for TrafficToPeer DATA")
+				case <-time.After(25 * time.Millisecond):
+					close(releaseData)
+					if err := <-writeDone; err != nil {
+						t.Fatalf("TrafficToPeer DATA: %v", err)
+					}
+					if err := <-ackDone; err != nil {
+						t.Fatalf("ASP Down Ack after quiescence: %v", err)
+					}
 				}
-				if err != nil {
-					t.Fatalf("ASP Down Ack: %v", err)
-				}
-			case <-time.After(25 * time.Millisecond):
-				if !test.wantBlocked {
+			} else {
+				select {
+				case err := <-ackDone:
+					if err != nil {
+						t.Fatalf("ASP Down Ack: %v", err)
+					}
+				case <-time.After(2 * time.Second):
 					close(releaseData)
 					<-writeDone
 					t.Fatal("normal Double Exchange ASP Down Ack waited behind TrafficToPeer DATA")
-				}
-				close(releaseData)
-				if err := <-writeDone; err != nil {
-					t.Fatalf("TrafficToPeer DATA: %v", err)
-				}
-				if err := <-ackDone; err != nil {
-					t.Fatalf("ASP Down Ack after quiescence: %v", err)
 				}
 			}
 			if !test.wantBlocked {
@@ -737,6 +740,87 @@ func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testin
 				t.Fatalf("state after ASP Down Ack = %+v", got)
 			}
 		})
+	}
+}
+
+func TestIPSPSingleASPSMDownAckDefersASNotifyUntilTrafficDrains(t *testing.T) {
+	association, _ := newDoubleExchangeIPSPForTest(t)
+	association.cfg.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPActive,
+		TrafficToPeer:  StateASPActive,
+	})
+	association.noteRoutingContextsActive([]uint32{22})
+	association.maxMessageStreamID = 4
+
+	registry := newApplicationServers(time.Hour)
+	association.as = registry
+	observer, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 22)
+	observer.as = registry
+	applicationServer := registry.get(22)
+	applicationServer.mu.Lock()
+	applicationServer.asps[association] = StateASPActive
+	applicationServer.asps[observer] = StateASPInactive
+	applicationServer.state = ASActive
+	applicationServer.rebuildActiveLocked()
+	applicationServer.mu.Unlock()
+
+	notify := make(chan struct{}, 1)
+	observer.signalWriter = func(message messages.M3UA) (int, error) {
+		if _, ok := message.(*messages.Notify); ok {
+			notify <- struct{}{}
+		}
+		return message.MarshalLen(), nil
+	}
+	if _, err := association.initiateASPDown(); err != nil {
+		t.Fatalf("begin local ASP Down: %v", err)
+	}
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+		close(dataStarted)
+		<-releaseData
+		return len(data), nil
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := association.WriteWithRoutingContext([]byte("to-peer"), 22)
+		writeDone <- err
+	}()
+	select {
+	case <-dataStarted:
+	case <-time.After(time.Second):
+		t.Fatal("TrafficToPeer DATA did not enter its transport write")
+	}
+
+	ackDone := make(chan error, 1)
+	go func() { ackDone <- association.handleAspDownAck(messages.NewAspDownAck(nil)) }()
+	select {
+	case <-notify:
+		close(releaseData)
+		<-writeDone
+		<-ackDone
+		t.Fatal("AS-state Notify overtook admitted TrafficToPeer DATA")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseData)
+	if err := <-writeDone; err != nil {
+		t.Fatalf("TrafficToPeer DATA: %v", err)
+	}
+	select {
+	case err := <-ackDone:
+		if err != nil {
+			t.Fatalf("ASP Down Ack after quiescence: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ASP Down Ack handling did not finish after TrafficToPeer DATA drained")
+	}
+	select {
+	case <-notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("AS-state Notify was not released after TrafficToPeer DATA drained")
 	}
 }
 

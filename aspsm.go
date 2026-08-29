@@ -354,11 +354,12 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 			c.noteNoRoutingContextsAcked()
 			if c.usesSingleASPSMExchange() {
 				c.commitState(StateASPDown)
+				postTransitionNotify := func() {}
 				if c.as != nil {
-					postTransitionNotify := c.as.quiesceASPDown(c)
-					postTransitionNotify()
+					postTransitionNotify = c.as.quiesceASPDown(c)
 				}
 				c.quiesceUnscopedTraffic()
+				postTransitionNotify()
 			}
 			acknowledgement.complete()
 			return nil

@@ -313,9 +313,23 @@ func assertIPSPDoubleExchangeContextlessTransfer(
 	if _, err := sender.Write(payload); err != nil {
 		t.Fatalf("write contextless IPSP DATA %q: %v", payload, err)
 	}
-	message, err := receiver.ReadData()
-	if err != nil {
+	data := make(chan *DataMessage, 1)
+	errs := make(chan error, 1)
+	go func() {
+		message, err := receiver.ReadData()
+		if err != nil {
+			errs <- err
+			return
+		}
+		data <- message
+	}()
+	var message *DataMessage
+	select {
+	case message = <-data:
+	case err := <-errs:
 		t.Fatalf("read contextless IPSP DATA: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out reading contextless IPSP DATA")
 	}
 	if string(message.ProtocolData.Data) != string(payload) {
 		t.Fatalf("received contextless IPSP DATA %q, want %q", message.ProtocolData.Data, payload)
