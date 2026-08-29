@@ -240,6 +240,147 @@ func TestIPSPEndpointSharesApplicationServerStateAcrossAssociations(t *testing.T
 	}
 }
 
+func TestIPSPSingleExchangeActiveAckAppliesSharedASOverride(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	incumbent, incumbentSent := newSingleExchangeIPSPForTest(t, StateASPActive)
+	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
+	for _, association := range []*Association{incumbent, challenger} {
+		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		association.as = registry
+	}
+	incumbent.noteRoutingContextsActive([]uint32{1})
+	registry.aspStateChanged(incumbent, StateASPActive)
+	registry.aspStateChanged(challenger, StateASPInactive)
+
+	if err := challenger.initiateASPActive(params.NewRoutingContext(1)); err != nil {
+		t.Fatalf("initiateASPActive(): %v", err)
+	}
+	if err := challenger.handleAspActiveAck(messages.NewAspActiveAck(
+		params.NewTrafficModeType(params.TrafficModeOverride),
+		params.NewRoutingContext(1), nil,
+	)); err != nil {
+		t.Fatalf("handleAspActiveAck(): %v", err)
+	}
+	if err := challenger.handleStateUpdate(StateASPActive); err != nil {
+		t.Fatalf("challenger enter ASP-ACTIVE: %v", err)
+	}
+
+	if got := registry.get(1).activeASPs(); len(got) != 1 || got[0] != challenger {
+		t.Fatalf("Override active IPSPs = %v, want only challenger", got)
+	}
+	if got := incumbent.State(); got != StateASPInactive {
+		t.Fatalf("incumbent state = %v, want ASP-INACTIVE", got)
+	}
+	var alternate bool
+	for _, notify := range notifies(*incumbentSent) {
+		_, information := statusOf(t, notify)
+		if information == uint16(params.AlternateAspActive&0xffff) {
+			alternate = true
+			break
+		}
+	}
+	if !alternate {
+		t.Fatal("incumbent received no Alternate ASP Active Notify")
+	}
+}
+
+func TestIPSPSingleExchangeOverrideDrainsDisplacedDirectTrafficBeforeNotify(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	incumbent, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
+	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
+	for _, association := range []*Association{incumbent, challenger} {
+		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		association.as = registry
+	}
+	incumbent.noteRoutingContextsActive([]uint32{1})
+	registry.aspStateChanged(incumbent, StateASPActive)
+	registry.aspStateChanged(challenger, StateASPInactive)
+
+	dataStarted := make(chan struct{})
+	releaseData := make(chan struct{})
+	notifySeen := make(chan struct{})
+	incumbent.signalWriter = func(message messages.M3UA) (int, error) {
+		switch message.(type) {
+		case *messages.Data:
+			close(dataStarted)
+			<-releaseData
+		case *messages.Notify:
+			close(notifySeen)
+		}
+		return message.MarshalLen(), nil
+	}
+	activeAckSeen := make(chan struct{})
+	challenger.signalWriter = func(message messages.M3UA) (int, error) {
+		if _, ok := message.(*messages.AspActiveAck); ok {
+			close(activeAckSeen)
+		}
+		return message.MarshalLen(), nil
+	}
+
+	data := messages.NewData(nil, params.NewRoutingContext(1), params.NewProtocolData(
+		1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte{0x01},
+	), nil)
+	dataDone := make(chan error, 1)
+	go func() {
+		_, err := incumbent.WriteSignal(data)
+		dataDone <- err
+	}()
+	select {
+	case <-dataStarted:
+	case <-time.After(time.Second):
+		t.Fatal("incumbent DATA did not enter its direct traffic write")
+	}
+
+	activationDone := make(chan error, 1)
+	go func() {
+		activationDone <- challenger.handleAspActive(messages.NewAspActive(
+			params.NewTrafficModeType(params.TrafficModeOverride),
+			params.NewRoutingContext(1), nil,
+		))
+	}()
+	select {
+	case <-activeAckSeen:
+	case <-time.After(time.Second):
+		t.Fatal("challenger sent no ASP Active Ack")
+	}
+	select {
+	case err := <-activationDone:
+		t.Fatalf("Override completed before admitted DATA drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-notifySeen:
+		t.Fatal("Alternate ASP Active Notify overtook admitted DATA")
+	default:
+	}
+
+	close(releaseData)
+	select {
+	case err := <-dataDone:
+		if err != nil {
+			t.Fatalf("incumbent DATA write: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("incumbent DATA did not finish")
+	}
+	select {
+	case err := <-activationDone:
+		if err != nil {
+			t.Fatalf("handleAspActive(): %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Override did not complete after admitted DATA drained")
+	}
+	select {
+	case <-notifySeen:
+	case <-time.After(time.Second):
+		t.Fatal("incumbent received no Alternate ASP Active Notify")
+	}
+	if _, err := incumbent.WriteSignal(data); !errors.Is(err, ErrNotEstablished) {
+		t.Fatalf("DATA after Override error = %v, want ErrNotEstablished", err)
+	}
+}
+
 func TestIPSPASPUpAckWaitsForActiveTrafficToQuiesce(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.maxMessageStreamID = 4

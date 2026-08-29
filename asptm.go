@@ -402,7 +402,7 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 		//
 		// The ordering is Section 4.3.4.5's: the Notify follows the related Ack.
 		if len(servedContexts) > 0 || contextlessServed {
-			c.overrideOtherASPs(aspActive, servedContexts)
+			c.overrideOtherASPs(servedContexts)
 		}
 	}
 	if rcErr != nil {
@@ -507,15 +507,25 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	// association active, so DATA went out for contexts the SGP had never
 	// agreed to carry.
 	if c.role == RoleIPSP {
-		var routingContexts []uint32
+		routingContexts := c.configuredRoutingContexts()
 		if aspAcAck.RoutingContext != nil {
 			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
 		}
+		if c.as != nil {
+			if _, err := c.as.agreeTrafficModeForAssociation(
+				c, routingContexts, aspAcAck.TrafficModeType,
+			); err != nil {
+				return err
+			}
+		}
+		acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
 		c.noteRoutingContextsActive(routingContexts)
+		c.overrideOtherASPs(routingContexts)
+		acknowledgement.complete()
 	} else {
 		c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
+		c.acknowledgeTAck(requestAspActive, aspAcAck.RoutingContext)
 	}
-	c.acknowledgeTAck(requestAspActive, aspAcAck.RoutingContext)
 
 	return nil
 }
@@ -1035,7 +1045,7 @@ func (c *Association) stateForActiveRoutingContexts() State {
 // of an ASP Active message at an SGP or IPSP causes direction of traffic to the
 // ASP sending the ASP Active message, in addition to all the other ASPs that
 // are active", so nobody is displaced.
-func (c *Association) overrideOtherASPs(aspActive *messages.AspActive, activated []uint32) {
+func (c *Association) overrideOtherASPs(activated []uint32) {
 	if c.as == nil {
 		return
 	}
@@ -1052,15 +1062,24 @@ func (c *Association) overrideOtherASPs(aspActive *messages.AspActive, activated
 		for _, peer := range peers {
 			// "Any previously active ASP in the AS is now considered to be in
 			// the state ASP-INACTIVE" in this AS, not every AS on the
-			// association. Record the scoped state before Notify so no further
-			// traffic is selected for the displaced ASP after it is told.
+			// association. Record the scoped state before the traffic barriers so
+			// no later DATA is admitted for the displaced scope.
 			if key.RoutingContextSet {
 				peer.noteRoutingContextsInactive([]uint32{key.RoutingContext})
 			} else {
 				peer.noteRoutingContextsInactive(nil)
 			}
+			if peer.stateForActiveRoutingContexts() == StateASPInactive {
+				peer.commitState(StateASPInactive)
+			}
 		}
 		waitForTrafficBarrier(&as.deliveryMu)
+		for _, peer := range peers {
+			// SGP distribution holds deliveryMu, while an IPSP's direct DATA path
+			// and a contextless SGP path hold the association barrier. Both must
+			// finish before the peer is told that another ASP is active.
+			peer.quiesceUnscopedTraffic()
+		}
 		postBarrierNotify()
 		if startDrain {
 			go as.drainRecoveryQueue()
