@@ -69,10 +69,9 @@ func (h *Heartbeat) MarshalTo(b []byte) error {
 		offset += param.MarshalLen()
 	}
 
-	// RFC 4666 Section 3.5.6: the BEAT Ack "includes all the parameters of the
-	// received BEAT message, without any change". The handler answers a BEAT by
-	// re-marshalling it with the type changed, so anything this version does not
-	// recognise has to go back out with the rest.
+	// RFC 4666 Section 3 permits unrecognised extension parameters. They are
+	// retained so a received BEAT can be answered with the unchanged parameter
+	// set RFC 4666 Section 3.5.6 requires in BEAT Ack.
 	if err := marshalOtherParams(h.Header.Payload, offset, h.Others); err != nil {
 		return err
 	}

@@ -1037,17 +1037,17 @@ func TestSGPListenerCloseStopsAssociationDuringM3UAEstablishment(t *testing.T) {
 	}
 }
 
-func TestIPSPDialAndListenRequireAnExplicitExchangeModel(t *testing.T) {
+func TestIPSPDialAndListenRejectMissingExchangeModel(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}
 
-	if _, err := endpoint.Dial(context.Background(), "m3ua", nil, nil, NewAssociationConfig(0, 0, 0, 0, 0, 0)); !errors.Is(err, ErrUnsupportedRole) {
-		t.Fatalf("Dial error = %v, want ErrUnsupportedRole", err)
+	if _, err := endpoint.Dial(context.Background(), "m3ua", nil, nil, NewAssociationConfig(0, 0, 0, 0, 0, 0)); !errors.Is(err, ErrInvalidRoleConfiguration) {
+		t.Fatalf("Dial error = %v, want ErrInvalidRoleConfiguration", err)
 	}
-	if _, err := endpoint.Listen("m3ua", nil, NewListenerConfig(nil)); !errors.Is(err, ErrUnsupportedRole) {
-		t.Fatalf("Listen error = %v, want ErrUnsupportedRole", err)
+	if _, err := endpoint.Listen("m3ua", nil, NewListenerConfig(nil)); !errors.Is(err, ErrInvalidRoleConfiguration) {
+		t.Fatalf("Listen error = %v, want ErrInvalidRoleConfiguration", err)
 	}
 }
 

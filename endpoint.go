@@ -378,6 +378,8 @@ func (e *Endpoint) associationRole() (Role, error) {
 		return RoleASP, nil
 	case RoleSGP:
 		return RoleSGP, nil
+	case RoleIPSP:
+		return RoleIPSP, nil
 	default:
 		return 0, ErrUnsupportedRole
 	}

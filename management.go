@@ -127,10 +127,10 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 	case StateSCTPCDI, StateSCTPRI:
 		return NewUnexpectedMessageError(n)
 	}
-	// Notify is originated by an SGP and consumed by an ASP. Accepting one in
-	// the reverse direction would let an ASP inject AS state and peer-ASP
-	// identity into the SGP's Layer Management view.
-	if c.role != RoleASP {
+	// In the SG-AS model Notify is originated by an SGP and consumed by an ASP.
+	// RFC 4666 Section 4.3.4.5.1 applies the same procedure between IPSPs and
+	// permits either peer to send it to a remote IPSP that is not ASP-DOWN.
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(n)
 	}
 
@@ -226,14 +226,14 @@ func notifyStatusName(status uint32) string {
 	}
 }
 
-// overriddenByAlternateAsp reports whether a Notify tells this ASP that another
-// ASP has taken over its traffic in an Override mode AS, which RFC 4666 Section
-// 4.3.4.3 requires the receiving ASP to treat as a move to ASP-INACTIVE.
+// overriddenByAlternateAsp reports whether a Notify tells this ASP or IPSP that
+// another ASP/IPSP has taken over its traffic in an Override mode AS, which RFC
+// 4666 Section 4.3.4.3 requires the receiver to treat as ASP-INACTIVE.
 //
-// Scoped to an ASP: an SGP is the sender of this notification, never its
-// subject, so a Notify arriving at an SGP must not move its state.
+// An SGP is the sender of this notification, never its subject. Section
+// 4.3.4.5.1 extends the same Notify procedure between IPSPs.
 func (c *Association) overriddenByAlternateAsp(n *messages.Notify) bool {
-	if c.role != RoleASP || n.Status == nil {
+	if (c.role != RoleASP && c.role != RoleIPSP) || n.Status == nil {
 		return false
 	}
 

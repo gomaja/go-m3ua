@@ -124,7 +124,7 @@ func (c *Association) beginASPInactive(routingContext *params.Param) (*pendingRe
 // Application Servers. With no arguments it requests every configured Routing
 // Context. The request remains protected by T(ack) until all scoped Acks arrive.
 func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
 	if state := c.State(); state != StateASPInactive && state != StateASPActive {
@@ -141,7 +141,7 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 // Application Servers. With no arguments it requests every configured Routing
 // Context. Local traffic eligibility changes only as the scoped Acks arrive.
 func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
 	if c.State() != StateASPActive {
@@ -275,10 +275,12 @@ func (c *Association) heartbeat(ctx context.Context) {
 // the Ack because the ASP is already ASP-ACTIVE leaves the peer retransmitting
 // on T(ack) forever — the same interop deadlock ASP Up suffered.
 //
-// These are SGP procedures ("from the ASP"), so an ASP that receives an ASP
-// Active reports an Error and holds its state rather than acking.
+// In the SG-AS model this is an SGP procedure, so an ASP that receives ASP
+// Active reports an Error. RFC 4666 Section 4.3.4.3.1 separately requires an
+// IPSP receiving ASP Active to mark the remote IPSP ASP-ACTIVE and return ASP
+// Active Ack.
 func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspActive)
 	}
 
@@ -307,7 +309,7 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 			requested = named
 		}
 	}
-	if !c.nif.servicableASKeys(c.asKeysForRoutingContexts(requested)) {
+	if c.role == RoleSGP && !c.nif.servicableASKeys(c.asKeysForRoutingContexts(requested)) {
 		return ErrManagementBlocking
 	}
 
@@ -459,12 +461,12 @@ func (c *Association) validateTrafficModeForRoutingContexts(peer *params.Param, 
 
 // handleAspActiveAck validates the ASP Active Ack that answers our ASP Active.
 //
-// The Ack travels SGP to ASP ("At the ASP, the ASP Active Ack message received
-// is not acknowledged" — RFC 4666 Section 4.3.4.3), so an SGP that receives one
-// reports an Error and holds its state: it never sent an ASP Active, so nothing
-// authorises a stray Ack to move it to ASP-ACTIVE.
+// In the SG-AS model the Ack travels SGP to ASP ("At the ASP, the ASP Active
+// Ack message received is not acknowledged" — RFC 4666 Section 4.3.4.3), so an
+// SGP that receives one reports an Error. RFC 4666 Section 4.3.4.3.1 permits an
+// IPSP receiving the Ack to mark the remote IPSP ASP-ACTIVE.
 func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	if c.rejectStaleASPTMAck(requestAspActive) {
@@ -504,7 +506,15 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	// Only what this Ack named is active. A partial Ack used to take the whole
 	// association active, so DATA went out for contexts the SGP had never
 	// agreed to carry.
-	c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
+	if c.role == RoleIPSP {
+		var routingContexts []uint32
+		if aspAcAck.RoutingContext != nil {
+			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
+		}
+		c.noteRoutingContextsActive(routingContexts)
+	} else {
+		c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
+	}
 	c.acknowledgeTAck(requestAspActive, aspAcAck.RoutingContext)
 
 	return nil
@@ -741,10 +751,12 @@ func (c *Association) validateRoutingContext(peer *params.Param) error {
 // owed even when the requested state is the current one, so a peer that has
 // lost its state converges instead of retransmitting on T(ack).
 //
-// These are SGP procedures, so an ASP that receives an ASP Inactive reports an
-// Error and holds its state rather than acking.
+// In the SG-AS model this is an SGP procedure, so an ASP that receives ASP
+// Inactive reports an Error. RFC 4666 Section 4.3.4.4.1 separately permits an
+// IPSP receiving ASP Inactive to consider the remote IPSP ASP-INACTIVE and
+// return ASP Inactive Ack.
 func (c *Association) handleAspInactive(aspInactive *messages.AspInactive) error {
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspInactive)
 	}
 
@@ -814,10 +826,11 @@ func (c *Association) handleAspInactive(aspInactive *messages.AspInactive) error
 // handleAspInactiveAck validates the ASP Inactive Ack that answers our ASP
 // Inactive.
 //
-// As with ASP Active Ack this is an SGP-to-ASP message (RFC 4666 Section
-// 4.3.4.4), so an SGP that receives one reports an Error and holds its state.
+// In the SG-AS model this is an SGP-to-ASP message (RFC 4666 Section 4.3.4.4),
+// so an SGP that receives one reports an Error. RFC 4666 Section 4.3.4.4.1
+// permits an IPSP receiving it to consider the remote IPSP ASP-INACTIVE.
 func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) error {
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 	if c.rejectStaleASPTMAck(requestAspInactive) {
@@ -836,6 +849,15 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	}
 	if err := c.validateTAckRoutingContexts(requestAspInactive, aspAcAck.RoutingContext); err != nil {
 		return err
+	}
+	if c.role == RoleIPSP {
+		var routingContexts []uint32
+		if aspAcAck.RoutingContext != nil {
+			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
+		}
+		c.noteRoutingContextsInactive(routingContexts)
+		c.acknowledgeTAck(requestAspInactive, aspAcAck.RoutingContext)
+		return nil
 	}
 
 	// Traffic has stopped only for the contexts this Ack names. Clearing every
@@ -923,9 +945,13 @@ func (c *Association) hasAcknowledgedRoutingContexts() bool {
 // momentarily ASP-INACTIVE lets the peer's T(beat) expire and tears down an
 // otherwise healthy association.
 func (c *Association) handleHeartbeat(beat *messages.Heartbeat) error {
-	// No need to create new HeartbeatAck, as it's identical to Heartbeat except the MessageType.
-	beat.Type = messages.MsgTypeHeartbeatAck
-	if _, err := c.WriteSignal(beat); err != nil {
+	ack := messages.NewHeartbeatAck(beat.HeartbeatData.Copy())
+	ack.Others = make([]*params.Param, 0, len(beat.Others))
+	for _, parameter := range beat.Others {
+		ack.Others = append(ack.Others, parameter.Copy())
+	}
+	ack.SetLength()
+	if _, err := c.WriteSignal(ack); err != nil {
 		return err
 	}
 	return nil

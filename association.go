@@ -1075,6 +1075,22 @@ func (c *Association) lockOutboundDataScope(raw []byte) (func(), error) {
 }
 
 func (c *Association) lockResolvedOutboundDataScope(routingContext *params.Param) (func(), error) {
+	if c.role == RoleIPSP {
+		c.unscopedDeliveryMu.Lock()
+		if c.State() != StateASPActive {
+			c.unscopedDeliveryMu.Unlock()
+			return nil, ErrNotEstablished
+		}
+		if routingContext != nil {
+			for _, rtCtx := range routingContext.RoutingContexts() {
+				if !c.outboundRoutingContextActive(rtCtx) {
+					c.unscopedDeliveryMu.Unlock()
+					return nil, ErrRoutingContextNotActive
+				}
+			}
+		}
+		return c.unscopedDeliveryMu.Unlock, nil
+	}
 	if c.role != RoleSGP {
 		return func() {}, nil
 	}
@@ -1097,7 +1113,7 @@ func (c *Association) lockResolvedOutboundDataScope(routingContext *params.Param
 }
 
 func (c *Association) quiesceUnscopedTraffic() {
-	if c == nil || c.role != RoleSGP {
+	if c == nil || (c.role != RoleSGP && c.role != RoleIPSP) {
 		return
 	}
 	waitForTrafficBarrier(&c.unscopedDeliveryMu)
@@ -1107,6 +1123,11 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	decoded, err := messages.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid SSNM: %w", err)
+	}
+	if c.role == RoleIPSP {
+		if _, ok := decoded.(*messages.SignallingCongestion); !ok {
+			return nil, ErrUnsupportedRole
+		}
 	}
 	routingContext, known := ssnmRoutingContext(decoded)
 	if !known {
@@ -1136,12 +1157,18 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 		if c.role == RoleSGP {
 			return c.lockResolvedOutboundDataScope(nil)
 		}
+		if c.role == RoleIPSP {
+			return c.lockResolvedOutboundDataScope(nil)
+		}
 		return func() {}, nil
 	}
 	for _, rtCtx := range routingContexts {
 		if _, err := c.routingContextFor(rtCtx); err != nil {
 			return nil, err
 		}
+	}
+	if c.role == RoleIPSP {
+		return c.lockResolvedOutboundDataScope(params.NewRoutingContext(routingContexts...))
 	}
 	return c.lockSGPApplicationServers(routingContexts)
 }
@@ -1482,7 +1509,7 @@ func (c *Association) SetWriteDeadline(t time.Time) error {
 	return c.sctpConn.SetWriteDeadline(t)
 }
 
-// State returns the current ASP state of the Association.
+// State returns the current RFC 4666 ASP/IPSP state of the Association.
 func (c *Association) State() State {
 	c.muState.RLock()
 	defer c.muState.RUnlock()
@@ -1871,8 +1898,8 @@ func (c *Association) routingContextFor(rtCtx uint32) (*params.Param, error) {
 }
 
 func (c *Association) outboundRoutingContextActive(rtCtx uint32) bool {
-	if c.role == RoleSGP {
-		return c.activeForRoutingContext(rtCtx)
+	if c.role == RoleSGP || c.role == RoleIPSP {
+		return c.activeForRoutingContext(rtCtx) && !c.routingContextOverridden(rtCtx)
 	}
 	return c.routingContextAcked(rtCtx) && !c.routingContextOverridden(rtCtx)
 }
@@ -2040,15 +2067,18 @@ func (c *Association) notifyASPRouteStateChanged() {
 	c.endpoint.aspRoutes.associationStateChanged(c)
 }
 
-// noteRoutingContextsActive records, at an SGP, which Application Servers this
-// ASP has just been activated in. An empty set means every configured one, which
-// is what an ASP Active naming no Routing Context asks for.
+// noteRoutingContextsActive records which Application Servers the peer has just
+// been activated in. At an SGP the peer is an ASP; in IPSP Single Exchange the
+// same state controls traffic in both directions. An empty set means every
+// configured one, which is what an ASP Active naming no Routing Context asks
+// for.
 func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 	c.muAckedRCs.Lock()
 	defer c.muAckedRCs.Unlock()
 
 	if len(rcs) == 0 {
 		c.activeRCs, c.activeRCsScoped = nil, false
+		c.overriddenRCs = nil
 		return
 	}
 	if c.activeRCs == nil {
@@ -2057,6 +2087,7 @@ func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 	c.activeRCsScoped = true
 	for _, rc := range rcs {
 		c.activeRCs[rc] = struct{}{}
+		delete(c.overriddenRCs, rc)
 	}
 }
 
@@ -2164,11 +2195,10 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		return c.finishTermination(err)
 	}
 
-	// ASP Inactive and ASP Down are initiated by an ASP. An SGP has no mirror
-	// request to send; Section 4.9's orderly option for it is the SCTP Shutdown
-	// procedure alone. Sending ASP requests from an SGP reverses the protocol
-	// roles and makes the peer report Unexpected Message while the socket closes.
-	if c.role != RoleASP {
+	// ASP Inactive and ASP Down are initiated by an ASP or, under RFC 4666
+	// Sections 4.3.4.1.2 and 4.3.4.4.1, by either IPSP. An SGP has no mirror
+	// request to send; Section 4.9's orderly option for it is SCTP Shutdown.
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return c.Close()
 	}
 

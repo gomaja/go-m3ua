@@ -509,10 +509,19 @@ func (c *Association) resetTAckEpoch() {
 	}
 	c.tack.retryMu.Lock()
 	c.tack.mu.Lock()
-	c.tack.awaitingRestartAspUp = c.role == RoleASP
+	c.tack.awaitingRestartAspUp = c.role == RoleASP || c.role == RoleIPSP
 	c.cancelAllTAckLocked()
 	c.tack.mu.Unlock()
 	c.tack.retryMu.Unlock()
+}
+
+func (c *Association) completeRestartASPSM() {
+	if c.tack == nil {
+		return
+	}
+	c.tack.mu.Lock()
+	c.tack.awaitingRestartAspUp = false
+	c.tack.mu.Unlock()
 }
 
 func (c *Association) cancelAllTAckLocked() {

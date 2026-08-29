@@ -752,9 +752,9 @@ func TestSSNMOutsideTheActivationWindowIsStillRejected(t *testing.T) {
 // layer of an ASP to an M3UA peer, indicating that the congestion level of the
 // M3UA layer or the ASP has changed."
 //
-// SCON is the one SSNM message that travels both ways. It was gated to clients
-// only, so an SGP answered a congested ASP with "Unexpected Message" and learned
-// nothing about it.
+// SCON is the one SSNM message that travels both ways. It was gated to the ASP
+// role only, so an SGP answered a congested ASP with "Unexpected Message" and
+// learned nothing about it.
 func TestSCONFromAnASPIsAcceptedAtAnSGP(t *testing.T) {
 	conn, _ := newSSNMTestConn(t, StateASPActive, RoleSGP)
 

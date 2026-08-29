@@ -39,12 +39,12 @@ func (c *Association) initiateASPSM() error {
 // Withholding the Ack would leave the peer retransmitting ASP Up until T(ack)
 // expires, indefinitely.
 //
-// All of those rules are SGP procedures: "The ASP is always the initiator of
-// the ASP Up message", so an ASP can never legitimately receive one, and ASP
-// Up Ack is a message only an SGP may send. An ASP therefore reports the
-// Error and holds its state instead of acking.
+// Those are the SG-AS procedures: "The ASP is always the initiator of the ASP
+// Up message", so an ASP cannot legitimately receive one. RFC 4666 Section
+// 4.3.4.1.2 separately permits an IPSP to receive ASP Up and consider the
+// remote IPSP ASP-INACTIVE after the request or acknowledgement.
 func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspUp)
 	}
 
@@ -52,7 +52,7 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 	// from the NIF, the SGP should respond with an Error ("Refused -
 	// Management Blocking")." There is nothing to bring up: the SGP cannot
 	// reach the SS7 network at all.
-	if c.nif.isolatedEntirely() {
+	if c.role == RoleSGP && c.nif.isolatedEntirely() {
 		return ErrManagementBlocking
 	}
 	if c.receivedStreamID() != 0 {
@@ -64,14 +64,16 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 			return ErrInvalidParameterValue
 		}
 	}
-	if err := c.resolveASPAuthorization(aspUp.AspIdentifier); err != nil {
-		return err
-	}
-	if c.as != nil {
-		c.as.restrictASP(c)
+	if c.role == RoleSGP {
+		if err := c.resolveASPAuthorization(aspUp.AspIdentifier); err != nil {
+			return err
+		}
+		if c.as != nil {
+			c.as.restrictASP(c)
+		}
 	}
 	if aspUp.AspIdentifier != nil {
-		if c.as != nil && !c.hasExplicitlyEmptyASPAuthorization() &&
+		if c.role == RoleSGP && c.as != nil && !c.hasExplicitlyEmptyASPAuthorization() &&
 			!c.as.claimASPIdentifier(c, aspUp.AspIdentifier.AspIdentifier()) {
 			return ErrInvalidASPIdentifier
 		}
@@ -89,10 +91,13 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 	); err != nil {
 		return err
 	}
+	if c.role == RoleIPSP {
+		c.completeRestartASPSM()
+	}
 
 	// Only ASP-ACTIVE additionally warrants an Error ("Unexpected Message").
 	// The caller keeps the resulting state at ASP-INACTIVE either way.
-	if c.State() == StateASPActive {
+	if c.role == RoleSGP && c.State() == StateASPActive {
 		return NewUnexpectedMessageError(aspUp)
 	}
 
@@ -109,9 +114,10 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 // The move to ASP-INACTIVE therefore happens even when the Ack is unexpected,
 // so both ends converge instead of holding conflicting views of the state.
 //
-// That clause is scoped to the ASP. An SGP never sends ASP Up, so it can never
-// legitimately receive an ASP Up Ack in any state: it reports the Error and
-// the dispatcher holds its state.
+// That clause is scoped to the ASP. An SGP never sends ASP Up, so it cannot
+// legitimately receive ASP Up Ack. RFC 4666 Section 4.3.4.1.2 separately
+// permits an IPSP to receive the acknowledgement and consider the remote IPSP
+// ASP-INACTIVE.
 func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	// Validated first: a message that arrived on a stream it is not allowed to
 	// use is rejected before anything acts on it, and in particular before it
@@ -124,8 +130,20 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	// one was outstanding decides what follows.
 	solicited := c.stopTAck(requestAspUp)
 
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspUpAck)
+	}
+	if c.role == RoleIPSP {
+		// RFC 4666 Section 3.5.2 makes the optional ASP Identifier in ASP Up
+		// Ack specifically useful for IPSP communication: the answering IPSP
+		// may identify itself independently of the initiator's ASP Up.
+		if aspUpAck.AspIdentifier != nil {
+			if aspUpAck.AspIdentifier.Tag != params.AspIdentifier || len(aspUpAck.AspIdentifier.Data) != 4 {
+				return ErrInvalidParameterValue
+			}
+			c.savePeerASPIdentifier(aspUpAck.AspIdentifier)
+		}
+		return nil
 	}
 
 	// An Ack that answers an ASP Up this node actually sent is not "an
@@ -164,15 +182,15 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 // leaves the peer retransmitting ASP Down until T(ack) expires, indefinitely,
 // so the Ack is written unconditionally.
 //
-// Like ASP Up, ASP Down travels only from ASP to SGP and ASP Down Ack is the
-// SGP's response, so an ASP that receives an ASP Down reports the Error and
-// holds its state instead of acking.
+// In the SG-AS model ASP Down travels from ASP to SGP and ASP Down Ack is the
+// SGP's response. RFC 4666 Section 4.3.4.1.2 also permits either message from
+// an IPSP and allows the receiving IPSP to consider the remote IPSP ASP-DOWN.
 func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 	if c.receivedStreamID() != 0 {
 		return NewInvalidSCTPStreamIDError(c.receivedStreamID())
 	}
 
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspDown)
 	}
 
@@ -202,8 +220,9 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 
 // handleAspDownAck validates the ASP Down Ack that answers our ASP Down.
 //
-// Like the other Acks this travels SGP to ASP (RFC 4666 Section 4.3.4.2), so an
-// SGP that receives one reports an Error rather than acting on it.
+// In the SG-AS model this travels SGP to ASP (RFC 4666 Section 4.3.4.2), so an
+// SGP that receives one reports an Error. RFC 4666 Section 4.3.4.1.2 also
+// permits an IPSP to receive it and consider the remote IPSP ASP-DOWN.
 func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 	// Validated first, as in handleAspUpAck. This one matters most: below, an
 	// unsolicited ASP Down Ack takes the ASP down, so accepting one that
@@ -215,8 +234,11 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 
 	solicited := c.stopTAck(requestAspDown)
 
-	if c.role != RoleASP {
+	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspDownAck)
+	}
+	if c.role == RoleIPSP {
+		return nil
 	}
 	if solicited {
 		return nil

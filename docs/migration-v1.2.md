@@ -30,10 +30,26 @@ Use `Endpoint.Dial` when that endpoint initiates SCTP, or
 `Endpoint.Listen` and `Listener.Accept` when it accepts SCTP. Either
 `RoleASP` or `RoleSGP` supports either orientation.
 
-`RoleIPSP` is reserved for the explicit Single Exchange model and Double
-Exchange model APIs defined by RFC 4666 Section 4.3. Calling `Dial` or
-`Listen` directly on an IPSP endpoint returns `ErrUnsupportedRole` rather than
-guessing either model.
+An IPSP Association must select its RFC 4666 Section 4.3 exchange model
+explicitly:
+
+```go
+ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleIPSP})
+
+associationConfig := m3ua.NewAssociationConfig(0, 0, 0, 0, 0, 0)
+associationConfig.IPSP = &m3ua.IPSPConfig{
+    ExchangeModel: m3ua.IPSPExchangeSingle,
+    InitiateASPSM: true,
+    InitiateASPTM: false,
+}
+```
+
+Single Exchange is implemented. Double Exchange is rejected with
+`ErrUnsupportedIPSPExchangeModel` until its independent directional state is
+implemented. `InitiateASPSM` and `InitiateASPTM` are independent because RFC
+4666 permits either IPSP to initiate either exchange. Neither setting selects
+which IPSP initiates SCTP; use `Dial` or `Listen`/`Accept` for that separate
+RFC 4666 Section 1.4.8 choice.
 
 A `RoleSGP` endpoint owns one shared Application Server registry, NIF state,
 destination state, MTP3 restart coordinator, and recovery budget. Any number of
