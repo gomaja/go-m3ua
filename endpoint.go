@@ -461,6 +461,13 @@ func (e *Endpoint) validateAssociationActivationPolicy(config *AssociationConfig
 	if e.as == nil || config == nil {
 		return nil
 	}
+	if e.role == RoleSGP && config.AuthorizeASP != nil {
+		// The ASP Identifier that selects the peer's immutable AS subset is only
+		// available in ASP Up. RFC 4666 Section 4.3.4.3 applies Traffic Mode
+		// agreement per AS, so validating the listener-wide inventory here would
+		// reject modes belonging only to ASes this peer will not be authorized for.
+		return nil
+	}
 
 	keys := associationConfigASKeys(config)
 	policy := newTrafficModePolicy(config)
@@ -476,10 +483,21 @@ func (e *Endpoint) validateAssociationActivationPolicy(config *AssociationConfig
 		policy = newIPSPTrafficModePolicy(peer)
 	}
 
+	return validateActivationPolicyTrafficModes(e.as, keys, policy)
+}
+
+func validateActivationPolicyTrafficModes(
+	applicationServers *applicationServers,
+	keys []ASKey,
+	policy trafficModePolicy,
+) error {
+	if applicationServers == nil {
+		return nil
+	}
 	for _, key := range keys {
 		mode, configured := policy.configuredForASKey(key)
 		if configured && mode == params.TrafficModeOverride &&
-			e.as.activationPolicyFor(key).requiredActive() != 1 {
+			applicationServers.activationPolicyFor(key).requiredActive() != 1 {
 			return fmt.Errorf("%w: Override requires one active ASP for %+v",
 				ErrInvalidApplicationServerConfig, key)
 		}

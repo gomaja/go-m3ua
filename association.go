@@ -2337,6 +2337,17 @@ func (c *Association) resolveASPAuthorization(identifier *params.Param) error {
 			owned = append(owned, rtCtx)
 		}
 	}
+	keys := c.asKeysForRoutingContexts(owned)
+	if explicitAuthorization && len(owned) == 0 {
+		keys = nil
+	}
+	// RFC 4666 Section 4.3.4.3 applies Traffic Mode agreement to the ASes the
+	// ASP actually serves. AuthorizeASP cannot be evaluated until ASP Up supplies
+	// the peer identity, so reject an incompatible authorized subset before
+	// committing it rather than validating unrelated listener-wide ASes.
+	if err := validateActivationPolicyTrafficModes(c.as, keys, c.trafficModePolicy()); err != nil {
+		return err
+	}
 
 	c.muAuthorizedRCs.Lock()
 	if c.authorizationResolved {

@@ -338,6 +338,57 @@ func TestAssociationOverrideValidationUsesExactASKey(t *testing.T) {
 	}
 }
 
+func TestSGPDefersOverrideValidationUntilASPAuthorization(t *testing.T) {
+	restrictedKey := ASKey{RoutingContext: 1, RoutingContextSet: true}
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		ApplicationServers: &ApplicationServerConfig{
+			ActivationPolicies: map[ASKey]ASActivationPolicy{
+				restrictedKey: {RequiredActiveASPs: 2},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	configFor := func(authorized uint32) *AssociationConfig {
+		config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+		config.RoutingContexts = params.NewRoutingContext(1, 2)
+		config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		config.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{authorized} }
+		return config
+	}
+
+	permittedConfig := configFor(2)
+	if err := endpoint.validateAssociationConfig(permittedConfig); err != nil {
+		t.Fatalf("pre-authorization validation rejected a potentially valid peer: %v", err)
+	}
+	permitted := newAssociation(RoleSGP, permittedConfig)
+	permitted.as = endpoint.as
+	if err := permitted.resolveASPAuthorization(params.NewAspIdentifier(7)); err != nil {
+		t.Fatalf("authorization for valid AS 2: %v", err)
+	}
+	if got := permitted.configuredRoutingContexts(); !equalTrafficModeContexts(got, []uint32{2}) {
+		t.Fatalf("authorized Routing Contexts = %v, want [2]", got)
+	}
+
+	restrictedConfig := configFor(1)
+	if err := endpoint.validateAssociationConfig(restrictedConfig); err != nil {
+		t.Fatalf("pre-authorization validation rejected before identity resolution: %v", err)
+	}
+	restricted := newAssociation(RoleSGP, restrictedConfig)
+	restricted.as = endpoint.as
+	if err := restricted.resolveASPAuthorization(params.NewAspIdentifier(8)); !errors.Is(err, ErrInvalidApplicationServerConfig) {
+		t.Fatalf("authorization for restricted AS 1 error = %v, want %v",
+			err, ErrInvalidApplicationServerConfig)
+	}
+	if restricted.authorizationResolved {
+		t.Fatal("invalid authorization was committed")
+	}
+}
+
 func TestContextlessAssociationOverrideValidationUsesDefaultTrafficMode(t *testing.T) {
 	tests := []struct {
 		name        string
