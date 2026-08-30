@@ -338,6 +338,78 @@ func TestAssociationOverrideValidationUsesExactASKey(t *testing.T) {
 	}
 }
 
+func TestContextlessAssociationOverrideValidationUsesDefaultTrafficMode(t *testing.T) {
+	tests := []struct {
+		name        string
+		role        Role
+		defaultMode uint32
+		zeroMode    uint32
+		want        error
+	}{
+		{
+			name:        "SGP rejects default Override",
+			role:        RoleSGP,
+			defaultMode: params.TrafficModeOverride,
+			zeroMode:    params.TrafficModeLoadshare,
+			want:        ErrInvalidApplicationServerConfig,
+		},
+		{
+			name:        "SGP permits default Loadshare",
+			role:        RoleSGP,
+			defaultMode: params.TrafficModeLoadshare,
+			zeroMode:    params.TrafficModeOverride,
+		},
+		{
+			name:        "IPSP Double Exchange rejects peer default Override",
+			role:        RoleIPSP,
+			defaultMode: params.TrafficModeOverride,
+			zeroMode:    params.TrafficModeLoadshare,
+			want:        ErrInvalidApplicationServerConfig,
+		},
+		{
+			name:        "IPSP Double Exchange permits peer default Loadshare",
+			role:        RoleIPSP,
+			defaultMode: params.TrafficModeLoadshare,
+			zeroMode:    params.TrafficModeOverride,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint, err := NewEndpoint(EndpointConfig{
+				Role: test.role,
+				ApplicationServers: &ApplicationServerConfig{
+					DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewEndpoint: %v", err)
+			}
+			t.Cleanup(func() { _ = endpoint.Close() })
+
+			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			if test.role == RoleIPSP {
+				config.IPSP = &IPSPConfig{
+					ExchangeModel: IPSPExchangeDouble,
+					ASPSMExchange: IPSPASPSMExchangeDouble,
+					TrafficToPeer: &IPSPTrafficConfig{
+						TrafficModeType: params.NewTrafficModeType(test.defaultMode),
+						TrafficModes:    map[uint32]uint32{0: test.zeroMode},
+					},
+				}
+			} else {
+				config.TrafficModeType = params.NewTrafficModeType(test.defaultMode)
+				config.TrafficModes = map[uint32]uint32{0: test.zeroMode}
+			}
+
+			err = endpoint.validateAssociationConfig(config)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("validateAssociationConfig error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
 func TestIPSPDoubleExchangeLocalOverrideDoesNotUsePeerActivationPolicy(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleIPSP,

@@ -1112,10 +1112,7 @@ func (r *applicationServers) agreeTrafficModeForKeys(keys []ASKey, trafficModes 
 		if applicationServer.closed {
 			return nil, ErrAssociationClosed
 		}
-		configuredMode, configured := trafficModes.defaultMode, trafficModes.defaultModeSet
-		if applicationServer.key.RoutingContextSet {
-			configuredMode, configured = trafficModes.configured(applicationServer.key.RoutingContext)
-		}
+		configuredMode, configured := trafficModes.configuredForASKey(applicationServer.key)
 		if configured && !validTrafficMode(configuredMode) {
 			return nil, ErrUnsupportedTrafficMode
 		}

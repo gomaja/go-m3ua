@@ -477,7 +477,7 @@ func (e *Endpoint) validateAssociationActivationPolicy(config *AssociationConfig
 	}
 
 	for _, key := range keys {
-		mode, configured := policy.configured(key.RoutingContext)
+		mode, configured := policy.configuredForASKey(key)
 		if configured && mode == params.TrafficModeOverride &&
 			e.as.activationPolicyFor(key).requiredActive() != 1 {
 			return fmt.Errorf("%w: Override requires one active ASP for %+v",
