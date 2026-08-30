@@ -985,6 +985,54 @@ func TestRoutingKeyRegistrationPublishesShortageAfterAdoptingTrafficMode(t *test
 	}
 }
 
+func TestASPActivePublishesShortageAfterAdoptingTrafficMode(t *testing.T) {
+	applicationServers := applicationServerRegistryForActivationTest(t, ASActivationPolicy{RequiredActiveASPs: 2})
+	applicationServer := applicationServers.get(1)
+	active, activeSent := asTestConn(t, applicationServers, StateASPActive, 1)
+	withdrawing, withdrawingSent := asTestConn(t, applicationServers, StateASPActive, 1)
+	_, inactiveSent := asTestConn(t, applicationServers, StateASPInactive, 1)
+	applicationServers.aspStateChanged(withdrawing, StateASPInactive)
+	if got := applicationServer.State(); got != ASActive {
+		t.Fatalf("state below n before Traffic Mode adoption = %v, want %v", got, ASActive)
+	}
+	if got := applicationServer.TrafficMode(); got != 0 {
+		t.Fatalf("Traffic Mode before ASP Active = %d, want unknown", got)
+	}
+	activeBefore := len(*activeSent)
+	withdrawingBefore := len(*withdrawingSent)
+	inactiveBefore := len(*inactiveSent)
+
+	if err := active.handleAspActive(messages.NewAspActive(
+		params.NewTrafficModeType(params.TrafficModeLoadshare),
+		params.NewRoutingContext(1),
+		nil,
+	)); err != nil {
+		t.Fatalf("handleAspActive: %v", err)
+	}
+	if got := applicationServer.TrafficMode(); got != params.TrafficModeLoadshare {
+		t.Fatalf("Traffic Mode after ASP Active = %d, want Loadshare", got)
+	}
+	activeMessages := (*activeSent)[activeBefore:]
+	if len(activeMessages) != 1 {
+		t.Fatalf("messages before ASP state publication = %v, want ASP Active Ack only", typeNames(activeMessages))
+	}
+	if _, ok := activeMessages[0].(*messages.AspActiveAck); !ok {
+		t.Fatalf("first message = %T, want *messages.AspActiveAck", activeMessages[0])
+	}
+	assertNoNotifyStatus(t, (*withdrawingSent)[withdrawingBefore:], params.InsufficientAspResources)
+	assertNoNotifyStatus(t, (*inactiveSent)[inactiveBefore:], params.InsufficientAspResources)
+
+	if err := active.handleStateUpdate(StateASPActive); err != nil {
+		t.Fatalf("handleStateUpdate: %v", err)
+	}
+	assertNoNotifyStatus(t, (*activeSent)[activeBefore:], params.InsufficientAspResources)
+	assertNotifyStatus(t, (*withdrawingSent)[withdrawingBefore:], params.InsufficientAspResources)
+	assertNotifyStatus(t, (*inactiveSent)[inactiveBefore:], params.InsufficientAspResources)
+	if got := applicationServer.State(); got != ASActive {
+		t.Fatalf("state after shortage publication = %v, want %v", got, ASActive)
+	}
+}
+
 func applicationServerRegistryForActivationTest(t *testing.T, policy ASActivationPolicy) *applicationServers {
 	t.Helper()
 	endpoint, err := NewEndpoint(EndpointConfig{

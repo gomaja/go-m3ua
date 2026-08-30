@@ -1445,22 +1445,16 @@ func (as *applicationServer) setASPStateGuarded(
 		return
 	}
 	current, known := as.asps[c]
-	if known && !ifAbsent && current == st {
-		as.mu.Unlock()
-		if guard {
-			c.muState.Unlock()
-		}
-		return
-	}
 	if !known || !ifAbsent {
 		as.asps[c] = st
 		if st == StateASPActive && (!known || current != StateASPActive) {
 			as.noteBroadcastActivationLocked()
 		}
 	}
-	// An existing static membership reaches this path after REG RSP. RKM may
-	// have just supplied the previously unknown Traffic Mode, so recompute the
-	// derived shortage advisory without overwriting the ASP's current state.
+	// A state restatement can follow adoption of a previously unknown Traffic
+	// Mode through ASP Active, while an existing static membership reaches this
+	// path after REG RSP. Recompute the RFC 4666 Sections 3.8.2 and 5.2.3
+	// insufficient-resource condition in both cases without changing membership.
 	notify := as.recomputeLocked(recovery, nil)
 	startDrain := as.state == ASActive && len(as.recoveryQueue) > 0 && !as.draining && !as.activeSending
 	if startDrain {
