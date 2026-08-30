@@ -537,6 +537,44 @@ func TestASPUpReceivesCurrentASStateBelowThreshold(t *testing.T) {
 	}
 }
 
+func TestEstablishedWaitsForApplicationServerStatePublication(t *testing.T) {
+	registry := applicationServerRegistryForActivationTest(t, ASActivationPolicy{})
+	association, _ := asTestConn(t, registry, StateASPInactive, 1)
+
+	registry.mu.Lock()
+	updated := make(chan error, 1)
+	go func() {
+		updated <- association.handleStateUpdate(StateASPActive)
+	}()
+
+	if !waitFor(func() bool { return association.State() == StateASPActive }, time.Second) {
+		registry.mu.Unlock()
+		t.Fatal("association did not commit ASP-ACTIVE while AS publication was blocked")
+	}
+	early := false
+	select {
+	case <-association.established:
+		early = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	registry.mu.Unlock()
+
+	if early {
+		t.Fatal("association became established before its Application Server state was published")
+	}
+	if err := <-updated; err != nil {
+		t.Fatalf("ASP-ACTIVE state update: %v", err)
+	}
+	select {
+	case <-association.established:
+	case <-time.After(time.Second):
+		t.Fatal("association did not become established after Application Server state publication")
+	}
+	if got := association.ApplicationServerStateForAS(ASKey{RoutingContext: 1, RoutingContextSet: true}); got != ASActive {
+		t.Fatalf("Application Server state = %v, want %v", got, ASActive)
+	}
+}
+
 func TestApplicationServerSmoothStartIsExplicit(t *testing.T) {
 	registry := applicationServerRegistryForActivationTest(t, ASActivationPolicy{
 		RequiredActiveASPs: 2,

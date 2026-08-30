@@ -134,6 +134,15 @@ func (c *Association) handleStateUpdateFrom(current State, published bool) error
 			c.as.aspStateChanged(c, current)
 		}
 	}
+	// Dial and Accept expose an ASP-ACTIVE Association to the caller. Publish
+	// its per-AS state first because direct DATA and SSNM writes enforce the
+	// RFC 4666 Sections 4.3.1 and 4.3.2 Application Server state immediately.
+	// Signalling earlier creates a window where the returned Association says
+	// ASP-ACTIVE but its Application Server still rejects traffic as inactive.
+	if current == StateASPActive && c.State() == StateASPActive {
+		c.notifyEstablished()
+		c.allowHeartbeat()
+	}
 
 	return err
 }
@@ -245,10 +254,6 @@ func (c *Association) handleStateUpdateAsIPSPDoubleExchange(current State, enter
 		}
 		return nil
 	case StateASPActive:
-		if entering {
-			c.notifyEstablished()
-			c.allowHeartbeat()
-		}
 		return nil
 	case StateSCTPCDI, StateSCTPRI:
 		return ErrSCTPNotAlive
@@ -284,10 +289,6 @@ func (c *Association) handleStateUpdateAsIPSPSingleExchange(current, previous St
 		// the ASPTM exchange. This choice is deliberately separate from ASPSM.
 		return c.initiateASPTM()
 	case StateASPActive:
-		if entering {
-			c.notifyEstablished()
-			c.allowHeartbeat()
-		}
 		return nil
 	case StateSCTPCDI, StateSCTPRI:
 		return ErrSCTPNotAlive
@@ -345,10 +346,6 @@ func (c *Association) handleStateUpdateAsASP(current, previous State, entering b
 		}
 		return c.initiateASPTM()
 	case StateASPActive:
-		if entering {
-			c.notifyEstablished()
-			c.allowHeartbeat()
-		}
 		return nil
 	case StateSCTPCDI, StateSCTPRI:
 		return ErrSCTPNotAlive
@@ -377,10 +374,6 @@ func (c *Association) handleStateUpdateAsSGP(current State, entering bool) error
 		// XXX - send DAVA to notify peer?
 		return nil
 	case StateASPActive:
-		if entering {
-			c.notifyEstablished()
-			c.allowHeartbeat()
-		}
 		return nil
 	case StateSCTPCDI, StateSCTPRI:
 		return ErrSCTPNotAlive
