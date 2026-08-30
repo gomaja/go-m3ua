@@ -353,23 +353,22 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 	}
 
 	c.rkmCorrelationMu.Lock()
-	defer c.rkmCorrelationMu.Unlock()
 
 	awaiting := c.rkmAwaiting == rkmAwaitingDeregistrationResponse && c.rkmResponseChan != nil
 	filtered := make([]*params.Param, 0, len(results))
 	seenPending := make(map[uint32]struct{}, len(results))
 	pendingStatus := make(map[uint32]DeregistrationStatus, len(results))
-	seenStale := make(map[uint32]struct{}, len(results))
+	staleStatus := make(map[uint32]DeregistrationStatus, len(results))
 	for _, result := range results {
 		if _, stale := c.rkmUnresolvedDeregistrationRCs[result.routingContext]; stale {
-			delete(c.rkmUnresolvedDeregistrationRCs, result.routingContext)
-			seenStale[result.routingContext] = struct{}{}
-			continue
-		}
-		if _, duplicateStale := seenStale[result.routingContext]; duplicateStale {
+			if _, duplicate := staleStatus[result.routingContext]; duplicate {
+				continue
+			}
+			staleStatus[result.routingContext] = result.status
 			continue
 		}
 		if !awaiting {
+			c.rkmCorrelationMu.Unlock()
 			return NewUnexpectedMessageError(message)
 		}
 		if _, expected := c.rkmPendingDeregistrationRCs[result.routingContext]; expected {
@@ -384,23 +383,37 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 		if _, duplicate := c.rkmDeliveredDeregistrationStatus[result.routingContext]; duplicate {
 			continue
 		}
+		c.rkmCorrelationMu.Unlock()
 		return fmt.Errorf("unexpected Deregistration Result Routing Context %d", result.routingContext)
 	}
-	if len(filtered) == 0 {
-		return nil
+	if len(filtered) > 0 {
+		filteredResponse := messages.NewDeregistrationResponse(filtered...)
+		select {
+		case c.rkmResponseChan <- filteredResponse:
+		default:
+			c.rkmCorrelationMu.Unlock()
+			return NewUnexpectedMessageError(message)
+		}
 	}
 
-	filteredResponse := messages.NewDeregistrationResponse(filtered...)
-	select {
-	case c.rkmResponseChan <- filteredResponse:
+	for routingContext, status := range staleStatus {
+		// RFC 4666 Section 4.4.2 makes a successful DEREG RSP the peer's
+		// confirmation that this ASP was removed from the related AS. A late
+		// response therefore has to repair the local dynamic scope before the
+		// Routing Context becomes eligible for another procedure.
+		if status == DeregistrationSuccessfullyDeregistered {
+			c.removeDynamicASKey(routingContext, c.isIPSPDoubleExchange())
+		}
+		delete(c.rkmUnresolvedDeregistrationRCs, routingContext)
+	}
+	if len(filtered) > 0 {
 		for routingContext, status := range pendingStatus {
 			delete(c.rkmPendingDeregistrationRCs, routingContext)
 			c.rkmDeliveredDeregistrationStatus[routingContext] = status
 		}
-		return nil
-	default:
-		return NewUnexpectedMessageError(message)
 	}
+	c.rkmCorrelationMu.Unlock()
+	return nil
 }
 
 func (c *Association) deliverRegistrationResponse(message *messages.RegistrationResponse) error {

@@ -1298,6 +1298,105 @@ func TestRKMRequesterRejectsAmbiguousDeregistrationRetryAfterCancellation(t *tes
 	}
 }
 
+func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	association.addDynamicASKey(ASKey{
+		RoutingContext:    100,
+		RoutingContextSet: true,
+	}, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+	written := make(chan struct{}, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		written <- struct{}{}
+		return message.MarshalLen(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := association.DeregisterRoutingContexts(ctx, 100)
+		done <- err
+	}()
+	<-written
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeregisterRoutingContexts error = %v, want context.Canceled", err)
+	}
+	if _, ok := association.dynamicASKey(100, false); !ok {
+		t.Fatal("dynamic ASKey removed before the unresolved response arrived")
+	}
+
+	response := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(100),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		),
+	))
+	if err := association.handleDeregistrationResponse(response); err != nil {
+		t.Fatalf("deliver late Deregistration Response: %v", err)
+	}
+	if key, ok := association.dynamicASKey(100, false); ok {
+		t.Fatalf("dynamic ASKey remains after successful late Deregistration Response: %+v", key)
+	}
+}
+
+func TestRKMLateDeregistrationResponseIsAppliedAtomically(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	association.addDynamicASKey(ASKey{
+		RoutingContext:    100,
+		RoutingContextSet: true,
+	}, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+	written := make(chan struct{}, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		written <- struct{}{}
+		return message.MarshalLen(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := association.DeregisterRoutingContexts(ctx, 100)
+		done <- err
+	}()
+	<-written
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeregisterRoutingContexts error = %v, want context.Canceled", err)
+	}
+
+	result := func(routingContext uint32) *params.Param {
+		return params.NewDeregistrationResult(params.NewDeregResultPayload(
+			params.NewRoutingContext(routingContext),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		))
+	}
+	if err := association.handleDeregistrationResponse(
+		messages.NewDeregistrationResponse(result(100), result(999)),
+	); err == nil {
+		t.Fatal("mixed late Deregistration Response accepted")
+	}
+	if _, ok := association.dynamicASKey(100, false); !ok {
+		t.Fatal("mixed late response partially removed the dynamic ASKey")
+	}
+	if _, err := association.beginDeregistrationResponseCorrelation(map[uint32]int{100: 0}); !errors.Is(err, ErrDeregistrationOutcomeUnknown) {
+		t.Fatalf("mixed late response cleared unresolved outcome: %v", err)
+	}
+
+	if err := association.handleDeregistrationResponse(
+		messages.NewDeregistrationResponse(result(100)),
+	); err != nil {
+		t.Fatalf("deliver valid late Deregistration Response: %v", err)
+	}
+	if _, ok := association.dynamicASKey(100, false); ok {
+		t.Fatal("valid late response did not remove the dynamic ASKey")
+	}
+}
+
 func TestRKMDeregistrationWriteFailureDoesNotMakeOutcomeUnknown(t *testing.T) {
 	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
 	association.muState.Lock()

@@ -153,6 +153,64 @@ func TestRoutingKeyRegistryRequestedRoutingContextAndAllocatorFailures(t *testin
 	}
 }
 
+func TestRoutingKeyRegistryRejectsAssociationRoutingContextAppearanceCollision(t *testing.T) {
+	provisioned := testRoutingKey(20, 100, params.ServiceIndSCCP)
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisioned}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	association.cfg.RoutingContexts = params.NewRoutingContext(7)
+
+	for index, request := range []RoutingKeyRegistrationRequest{
+		{LocalRoutingKeyIdentifier: 1, RoutingKey: provisioned},
+		{
+			LocalRoutingKeyIdentifier: 2,
+			RoutingKey:                provisioned,
+			RoutingContextRequested:   true,
+			RequestedRoutingContext:   7,
+		},
+	} {
+		result := registry.register(association, []RoutingKeyRegistrationRequest{request})[0]
+		if result.Status != RegistrationCannotSupportUniqueRouting || result.RoutingContext != 0 {
+			t.Fatalf("request %d result = %+v, want Cannot Support Unique Routing", index+1, result)
+		}
+		if key, ok := association.dynamicASKey(7, false); ok {
+			t.Fatalf("request %d installed conflicting dynamic ASKey %+v", index+1, key)
+		}
+	}
+}
+
+func TestRoutingKeyRegistryAllowsSameRoutingContextAppearanceOnAnotherAssociation(t *testing.T) {
+	provisioned := testRoutingKey(20, 100, params.ServiceIndSCCP)
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisioned}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	association.cfg.RoutingContexts = params.NewRoutingContext(7)
+
+	result := registry.register(association, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                provisioned,
+	}})[0]
+	if result.Status != RegistrationSuccessfullyRegistered || result.RoutingContext != 7 {
+		t.Fatalf("registration result = %+v, want successful Routing Context 7", result)
+	}
+}
+
 func TestRoutingKeyRegistryRejectsConflictingTrafficModeForExistingKey(t *testing.T) {
 	provisioned := testRoutingKey(10, 100, 3)
 	provisioned.TrafficMode = params.TrafficModeLoadshare

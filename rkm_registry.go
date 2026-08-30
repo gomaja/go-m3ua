@@ -109,8 +109,12 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 	replayState := cloneRegistrationReplayState(registry.replays[association])
 	registry.mu.Unlock()
 	var configuredRoutingContexts []uint32
+	var staticallyConfiguredASKeys []ASKey
 	if association != nil && association.as != nil {
 		configuredRoutingContexts = association.as.routingContexts()
+	}
+	if association != nil {
+		staticallyConfiguredASKeys = association.staticallyConfiguredASKeys()
 	}
 
 	for index, originalRequest := range requests {
@@ -140,6 +144,8 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyChangeRefused, 0)
 			case !entry.canonical.equal(canonical):
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyChangeRefused, 0)
+			case routingContextConflictsWithAssociationScope(staticallyConfiguredASKeys, entry.asKey()):
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
 			case !registrationTrafficModeCompatible(entry.routingKey, request.RoutingKey):
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
 			case entry.hasMember(association):
@@ -162,6 +168,8 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 
 		exact, overlap := findRoutingKeyEntry(entries, canonical)
 		switch {
+		case exact != nil && routingContextConflictsWithAssociationScope(staticallyConfiguredASKeys, exact.asKey()):
+			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
 		case exact != nil && !registrationTrafficModeCompatible(exact.routingKey, request.RoutingKey):
 			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
 		case exact != nil && exact.hasMember(association):
@@ -542,6 +550,19 @@ func associationHasNetworkAppearanceConflict(entries map[uint32]*routingKeyEntry
 		if !entry.canonical.networkAppearanceSet || !requested.networkAppearanceSet {
 			return true
 		}
+	}
+	return false
+}
+
+func routingContextConflictsWithAssociationScope(configured []ASKey, candidate ASKey) bool {
+	for _, key := range configured {
+		if !key.RoutingContextSet || key.RoutingContext != candidate.RoutingContext {
+			continue
+		}
+		// RFC 4666 Sections 1.4.2.1 and 3.7.1 require a Routing Context on
+		// one association to identify one AS traffic flow. The same numeric
+		// value cannot name a second Network Appearance on that association.
+		return key != candidate
 	}
 	return false
 }

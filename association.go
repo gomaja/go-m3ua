@@ -1829,6 +1829,10 @@ func (c *Association) PeerASPIdentifier() (uint32, bool) {
 // configured to carry. At an SGP that is the immutable per-peer authorization
 // resolved at ASP Up, not the Listener's aggregate inventory.
 func (c *Association) configuredRoutingContexts() []uint32 {
+	return appendRoutingContexts(c.staticallyConfiguredRoutingContexts(), c.dynamicRoutingContexts(false))
+}
+
+func (c *Association) staticallyConfiguredRoutingContexts() []uint32 {
 	if c == nil {
 		return nil
 	}
@@ -1837,20 +1841,17 @@ func (c *Association) configuredRoutingContexts() []uint32 {
 		if c.authorizationResolved {
 			configured := append([]uint32(nil), c.authorizedRCs...)
 			c.muAuthorizedRCs.RUnlock()
-			return appendRoutingContexts(configured, c.dynamicRoutingContexts(false))
+			return configured
 		}
 		c.muAuthorizedRCs.RUnlock()
 	}
 	if c.isIPSPDoubleExchange() {
-		return appendRoutingContexts(
-			routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToPeer),
-			c.dynamicRoutingContexts(false),
-		)
+		return routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToPeer)
 	}
 	if c.cfg == nil || c.cfg.RoutingContexts == nil {
-		return c.dynamicRoutingContexts(false)
+		return nil
 	}
-	return appendRoutingContexts(c.cfg.RoutingContexts.RoutingContexts(), c.dynamicRoutingContexts(false))
+	return append([]uint32(nil), c.cfg.RoutingContexts.RoutingContexts()...)
 }
 
 func (c *Association) configuredLocalRoutingContexts() []uint32 {
@@ -1900,6 +1901,32 @@ func (c *Association) configuredASKeys() []ASKey {
 		return nil
 	}
 	return c.asKeysForRoutingContexts(c.configuredRoutingContexts())
+}
+
+func (c *Association) staticallyConfiguredASKeys() []ASKey {
+	if c == nil {
+		return nil
+	}
+	routingContexts := c.staticallyConfiguredRoutingContexts()
+	if len(routingContexts) == 0 {
+		return nil
+	}
+	appearance, appearanceSet := appearanceOf(c.applicationServerNetworkAppearance())
+	keys := make([]ASKey, 0, len(routingContexts))
+	seen := make(map[uint32]struct{}, len(routingContexts))
+	for _, routingContext := range routingContexts {
+		if _, duplicate := seen[routingContext]; duplicate {
+			continue
+		}
+		seen[routingContext] = struct{}{}
+		keys = append(keys, ASKey{
+			NetworkAppearance:    appearance,
+			NetworkAppearanceSet: appearanceSet,
+			RoutingContext:       routingContext,
+			RoutingContextSet:    true,
+		})
+	}
+	return keys
 }
 
 func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey {
