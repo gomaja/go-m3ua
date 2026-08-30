@@ -189,9 +189,11 @@ func canonicalizeRoutingKey(key RoutingKey) (canonicalRoutingKey, error) {
 		return canonicalRoutingKey{}, fmt.Errorf("routing key has no destination point code group")
 	}
 	canonical := canonicalRoutingKey{
-		networkAppearance:    key.NetworkAppearance,
 		networkAppearanceSet: key.NetworkAppearanceSet,
 		groups:               make([]canonicalRoutingKeyGroup, 0, len(key.Groups)),
+	}
+	if key.NetworkAppearanceSet {
+		canonical.networkAppearance = key.NetworkAppearance
 	}
 	for _, group := range key.Groups {
 		if group.DestinationPointCode > 0x00ffffff {
@@ -423,6 +425,9 @@ func snapshotRoutingKeyManagementConfig(config *RoutingKeyManagementConfig) *Rou
 
 func snapshotRoutingKey(key RoutingKey) RoutingKey {
 	snapshot := key
+	if !snapshot.NetworkAppearanceSet {
+		snapshot.NetworkAppearance = 0
+	}
 	snapshot.Groups = make([]RoutingKeyGroup, len(key.Groups))
 	for index, group := range key.Groups {
 		snapshot.Groups[index] = RoutingKeyGroup{

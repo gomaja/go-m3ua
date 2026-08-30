@@ -918,6 +918,8 @@ func snapshotRoutingKeyDeregistrationRequest(request RoutingKeyDeregistrationReq
 
 func routingKeyDeregistrationRequestsEqual(first, second RoutingKeyDeregistrationRequest) bool {
 	if first.RoutingContext != second.RoutingContext || first.Provisioned != second.Provisioned ||
+		first.RoutingKey.TrafficMode != second.RoutingKey.TrafficMode ||
+		first.RoutingKey.TrafficModeSet != second.RoutingKey.TrafficModeSet ||
 		!routingKeyPeersEqual(first.Peer, second.Peer) {
 		return false
 	}

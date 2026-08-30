@@ -54,6 +54,46 @@ func TestRoutingKeyRegistryRegistrationStatusesAndReplay(t *testing.T) {
 	}
 }
 
+func TestRoutingKeyRegistryIgnoresUnsetNetworkAppearanceValue(t *testing.T) {
+	provisionedKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	provisionedKey.NetworkAppearanceSet = false
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisionedKey}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	requestKey := snapshotRoutingKey(provisionedKey)
+	requestKey.NetworkAppearance = 0
+	provisionedCanonical, err := canonicalizeRoutingKey(provisionedKey)
+	if err != nil {
+		t.Fatalf("canonicalize provisioned Routing Key: %v", err)
+	}
+	requestCanonical, err := canonicalizeRoutingKey(requestKey)
+	if err != nil {
+		t.Fatalf("canonicalize requested Routing Key: %v", err)
+	}
+	if !provisionedCanonical.equal(requestCanonical) {
+		t.Fatal("omitted Network Appearance values changed canonical Routing Key identity")
+	}
+
+	result := registry.register(association, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                requestKey,
+	}})[0]
+	if result.Status != RegistrationSuccessfullyRegistered || result.RoutingContext != 7 {
+		t.Fatalf("registration result = %+v, want successful Routing Context 7", result)
+	}
+	key, ok := registry.asKey(7)
+	if !ok || key.NetworkAppearanceSet || key.NetworkAppearance != 0 {
+		t.Fatalf("registered ASKey = %+v, %t; want omitted Network Appearance with a zero value", key, ok)
+	}
+}
+
 func TestRoutingKeyRegistryPartialBatchIsAtomicAndDeterministic(t *testing.T) {
 	deniedDPC := uint32(300)
 	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
@@ -877,6 +917,61 @@ func TestRoutingKeyRegistryDeregistrationAuthorizationIsNotRepeatedAfterConcurre
 	}
 	if endpoint.routingKeys.dynamicCount() != 0 {
 		t.Fatalf("dynamic Routing Key count = %d, want 0", endpoint.routingKeys.dynamicCount())
+	}
+}
+
+func TestRoutingKeyRegistryReauthorizesDeregistrationAfterTrafficModeAdoption(t *testing.T) {
+	provisionedKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	policyEntered := make(chan struct{})
+	releasePolicy := make(chan struct{})
+	var policyCalls atomic.Int32
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		AuthorizeDeregistration: func(request RoutingKeyDeregistrationRequest) bool {
+			if policyCalls.Add(1) == 1 {
+				close(policyEntered)
+				<-releasePolicy
+			}
+			return request.RoutingKey.TrafficModeSet &&
+				request.RoutingKey.TrafficMode == params.TrafficModeLoadshare
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisionedKey}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	firstAssociation := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	registerRoutingKeyForTest(t, registry, firstAssociation, 1, provisionedKey)
+
+	deregistrationDone := make(chan RoutingKeyDeregistrationResult, 1)
+	go func() {
+		deregistrationDone <- registry.deregister(firstAssociation, []uint32{7})[0]
+	}()
+	select {
+	case <-policyEntered:
+	case <-time.After(time.Second):
+		t.Fatal("Deregistration authorization was not called")
+	}
+
+	secondAssociation := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	requestKey := snapshotRoutingKey(provisionedKey)
+	requestKey.TrafficMode = params.TrafficModeLoadshare
+	requestKey.TrafficModeSet = true
+	registerRoutingKeyForTest(t, registry, secondAssociation, 2, requestKey)
+	close(releasePolicy)
+
+	select {
+	case result := <-deregistrationDone:
+		if result.Status != DeregistrationSuccessfullyDeregistered {
+			t.Fatalf("Deregistration = %+v, want success after Traffic Mode adoption", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Deregistration did not finish")
+	}
+	if calls := policyCalls.Load(); calls != 2 {
+		t.Fatalf("Deregistration authorization calls = %d, want 2 requests with distinct Traffic Modes", calls)
 	}
 }
 

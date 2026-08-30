@@ -71,7 +71,8 @@ SGP, and IPSP Endpoints:
   deterministic without inventing an RKM T(ack).
 - Unresolved requester outcomes share a 1,024-result Association budget. New
   REG/DEREG procedures fail before transmission with `ErrRKMOutcomeLimit` when
-  that budget is exhausted, and delayed responses release capacity.
+  accepting the new request would exceed that budget, and delayed responses
+  release capacity.
 
 ## Go implementation survey
 
