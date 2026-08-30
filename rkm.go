@@ -214,18 +214,16 @@ func canonicalizeRoutingKey(key RoutingKey) (canonicalRoutingKey, error) {
 			if pointCode.PointCode > 0x00ffffff {
 				return canonicalRoutingKey{}, fmt.Errorf("originating point code %#x exceeds 24 bits", pointCode.PointCode)
 			}
-			// RFC 4666 Section 3.6.1 encodes each OPC as an 8-bit Mask and a
-			// 24-bit point code. A mask wider than the point-code field cannot
-			// identify a valid selector and must not be clamped into a broader key.
-			if pointCode.Mask > 24 {
-				return canonicalRoutingKey{}, fmt.Errorf(
-					"originating point code mask %d exceeds 24-bit point code width",
-					pointCode.Mask,
-				)
+			// RFC 4666 Sections 3.4.1 and 3.6.1 make a mask equal to or
+			// greater than the point-code width select the entire Network Appearance.
+			// Canonicalize every such wire value to the 24-bit selector.
+			mask := pointCode.Mask
+			if mask > 24 {
+				mask = 24
 			}
 			originatingPointCodes = append(originatingPointCodes, canonicalPointCodeRange{
-				pointCode: canonicalPointCode(pointCode.PointCode, pointCode.Mask),
-				mask:      pointCode.Mask,
+				pointCode: canonicalPointCode(pointCode.PointCode, mask),
+				mask:      mask,
 			})
 		}
 		sort.Slice(originatingPointCodes, func(i, j int) bool {

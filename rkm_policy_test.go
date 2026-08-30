@@ -73,21 +73,33 @@ func TestCanonicalRoutingKeyMaskAtPointCodeWidthMatchesAllPointCodes(t *testing.
 	}
 }
 
-func TestCanonicalRoutingKeyRejectsMaskWiderThanPointCode(t *testing.T) {
+func TestCanonicalRoutingKeyCanonicalizesMaskWiderThanPointCode(t *testing.T) {
+	base := RoutingKey{Groups: []RoutingKeyGroup{{
+		DestinationPointCode:  100,
+		OriginatingPointCodes: []PointCodeRange{{PointCode: 0x123456, Mask: 24}},
+	}}}
+	want, err := canonicalizeRoutingKey(base)
+	if err != nil {
+		t.Fatalf("canonicalize mask 24: %v", err)
+	}
 	for _, mask := range []uint8{25, 255} {
 		t.Run(fmt.Sprintf("mask %d", mask), func(t *testing.T) {
 			key := RoutingKey{Groups: []RoutingKeyGroup{{
 				DestinationPointCode:  100,
 				OriginatingPointCodes: []PointCodeRange{{PointCode: 0x123456, Mask: mask}},
 			}}}
-			if _, err := canonicalizeRoutingKey(key); err == nil {
-				t.Fatalf("canonicalizeRoutingKey accepted mask %d", mask)
+			got, err := canonicalizeRoutingKey(key)
+			if err != nil {
+				t.Fatalf("canonicalize mask %d: %v", mask, err)
+			}
+			if !got.equal(want) {
+				t.Fatalf("mask %d canonical key = %+v, want mask-24 key %+v", mask, got, want)
 			}
 		})
 	}
 }
 
-func TestRoutingKeyManagementConfigRejectsWideOriginatingPointCodeMask(t *testing.T) {
+func TestRoutingKeyManagementConfigAcceptsWideOriginatingPointCodeMask(t *testing.T) {
 	key := RoutingKey{Groups: []RoutingKeyGroup{{
 		DestinationPointCode:  100,
 		OriginatingPointCodes: []PointCodeRange{{PointCode: 0x123456, Mask: 25}},
@@ -98,8 +110,8 @@ func TestRoutingKeyManagementConfigRejectsWideOriginatingPointCodeMask(t *testin
 		},
 		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: key}},
 	})
-	if err == nil {
-		t.Fatal("newRoutingKeyRegistry accepted a provisioned mask wider than 24 bits")
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
 }
 

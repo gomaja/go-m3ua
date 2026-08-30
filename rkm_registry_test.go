@@ -1514,10 +1514,11 @@ func TestRoutingKeyRegistryNormalizesInvalidAuthorizationResults(t *testing.T) {
 	}
 }
 
-func TestRoutingKeyRegistryRejectsWideOriginatingPointCodeMask(t *testing.T) {
+func TestRoutingKeyRegistryAcceptsWideOriginatingPointCodeMask(t *testing.T) {
+	authorizations := 0
 	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
 		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
-			t.Fatal("authorization was called for an invalid Routing Key")
+			authorizations++
 			return RegistrationSuccessfullyRegistered
 		},
 		AllowDynamicRoutingKeys: true,
@@ -1533,8 +1534,15 @@ func TestRoutingKeyRegistryRejectsWideOriginatingPointCodeMask(t *testing.T) {
 		LocalRoutingKeyIdentifier: 1,
 		RoutingKey:                key,
 	}})[0]
-	if result.Status != RegistrationInvalidRoutingKey || result.RoutingContext != 0 {
-		t.Fatalf("registration result = %+v, want Invalid Routing Key with Routing Context 0", result)
+	if result.Status != RegistrationSuccessfullyRegistered || result.RoutingContext == 0 {
+		t.Fatalf("registration result = %+v, want success with nonzero Routing Context", result)
+	}
+	if authorizations != 1 {
+		t.Fatalf("authorization calls = %d, want 1", authorizations)
+	}
+	matches, configured := registry.matchingASKeys(10, true, 0xffffff, 100, params.ServiceIndSCCP)
+	if !configured || len(matches) != 1 || matches[0].RoutingContext != result.RoutingContext {
+		t.Fatalf("all-OPC match = %v, configured = %t, want Routing Context %d", matches, configured, result.RoutingContext)
 	}
 }
 

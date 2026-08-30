@@ -1409,6 +1409,54 @@ func setRegistrationResultWriter(
 	}
 }
 
+func TestRKMRequesterAcceptsWideOriginatingPointCodeMask(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := false
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request, ok := message.(*messages.RegistrationRequest)
+		if !ok {
+			return 0, fmt.Errorf("wrote %T, want Registration Request", message)
+		}
+		payload, err := request.RoutingKeys[0].RoutingKey()
+		if err != nil {
+			return 0, err
+		}
+		decoded, err := routingKeyFromPayload(payload)
+		if err != nil {
+			return 0, err
+		}
+		originatingPointCodes := decoded.RoutingKey.Groups[0].OriginatingPointCodes
+		if len(originatingPointCodes) != 1 || originatingPointCodes[0].Mask != 255 {
+			return 0, fmt.Errorf("written originating point codes = %+v, want mask 255", originatingPointCodes)
+		}
+		written = true
+		response := messages.NewRegistrationResponse(params.NewRegistrationResult(
+			params.NewRegistrationResultPayload(
+				payload.LocalRoutingKeyIdentifier.Copy(),
+				params.NewRegistrationStatus(params.SuccessfullyRegistered),
+				params.NewRoutingContext(77),
+			),
+		))
+		return message.MarshalLen(), association.handleRegistrationResponse(response)
+	}
+
+	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	routingKey.Groups[0].OriginatingPointCodes = []PointCodeRange{{PointCode: 0x123456, Mask: 255}}
+	results, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{RoutingKey: routingKey})
+	if err != nil {
+		t.Fatalf("RegisterRoutingKeys: %v", err)
+	}
+	if !written {
+		t.Fatal("RegisterRoutingKeys did not write a Registration Request")
+	}
+	if len(results) != 1 || results[0].Status != RegistrationSuccessfullyRegistered || results[0].RoutingContext != 77 {
+		t.Fatalf("Registration Results = %+v, want one success for Routing Context 77", results)
+	}
+}
+
 func TestRKMRequesterRejectsConflictingRegistrationResultScopesAtomically(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
 	if err != nil {
@@ -4183,7 +4231,7 @@ func TestRKMResponderRejectsUnsupportedRoutingKeyParameterFields(t *testing.T) {
 	}
 }
 
-func TestRKMResponderReportsWideOriginatingPointCodeMaskAsInvalidRoutingKey(t *testing.T) {
+func TestRKMResponderAcceptsWideOriginatingPointCodeMask(t *testing.T) {
 	authorizations := 0
 	endpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleSGP,
@@ -4241,11 +4289,11 @@ func TestRKMResponderReportsWideOriginatingPointCodeMaskAsInvalidRoutingKey(t *t
 	if err != nil {
 		t.Fatalf("Registration Result: %v", err)
 	}
-	if status := result.RegistrationStatus.RegistrationStatus(); status != params.InvalidRoutingKey {
-		t.Fatalf("Registration Status = %d, want Invalid Routing Key", status)
+	if status := result.RegistrationStatus.RegistrationStatus(); status != params.SuccessfullyRegistered {
+		t.Fatalf("Registration Status = %d, want success", status)
 	}
-	if routingContext := result.RoutingContext.RoutingContext(); routingContext != 0 {
-		t.Fatalf("Registration Routing Context = %d, want 0", routingContext)
+	if routingContext := result.RoutingContext.RoutingContext(); routingContext == 0 {
+		t.Fatal("Registration Routing Context = 0")
 	}
 	supportedResult, err := response.RegistrationResults[1].RegistrationResult()
 	if err != nil {
@@ -4257,10 +4305,10 @@ func TestRKMResponderReportsWideOriginatingPointCodeMaskAsInvalidRoutingKey(t *t
 	if routingContext := supportedResult.RoutingContext.RoutingContext(); routingContext == 0 {
 		t.Fatal("supported Registration Routing Context = 0")
 	}
-	if authorizations != 1 {
-		t.Fatalf("authorization calls = %d, want only the supported Routing Key", authorizations)
+	if authorizations != 2 {
+		t.Fatalf("authorization calls = %d, want both Routing Keys", authorizations)
 	}
-	if dynamic := endpoint.routingKeys.dynamicCount(); dynamic != 1 {
-		t.Fatalf("dynamic Routing Keys = %d, want only the supported Routing Key", dynamic)
+	if dynamic := endpoint.routingKeys.dynamicCount(); dynamic != 2 {
+		t.Fatalf("dynamic Routing Keys = %d, want both Routing Keys", dynamic)
 	}
 }
