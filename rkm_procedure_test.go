@@ -1508,19 +1508,36 @@ func TestRKMRequesterRejectsAmbiguousDeregistrationRetryAfterCancellation(t *tes
 }
 
 func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	association := newAssociation(RoleIPSP, config)
+	association.as = endpoint.as
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
-	association.addDynamicASKey(ASKey{
-		RoutingContext:    100,
-		RoutingContextSet: true,
-	}, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("trackAssociation returned false")
+	}
+	key := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       100,
+		RoutingContextSet:    true,
+	}
 	written := make(chan struct{}, 1)
 	association.signalWriter = func(message messages.M3UA) (int, error) {
-		written <- struct{}{}
+		if _, deregistration := message.(*messages.DeregistrationRequest); deregistration {
+			written <- struct{}{}
+		}
 		return message.MarshalLen(), nil
 	}
+	association.addDynamicASKey(key, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+	endpoint.as.registerDynamicASP(association, key)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -1548,6 +1565,9 @@ func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
 	}
 	if key, ok := association.dynamicASKey(100, false); ok {
 		t.Fatalf("dynamic ASKey remains after successful late Deregistration Response: %+v", key)
+	}
+	if _, ok := endpoint.as.lookup(key); ok {
+		t.Fatal("late successful Deregistration Response retained the requester-created Application Server")
 	}
 }
 

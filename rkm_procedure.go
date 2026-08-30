@@ -422,7 +422,7 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 		// response therefore has to repair the local dynamic scope before the
 		// Routing Context becomes eligible for another procedure.
 		if status == DeregistrationSuccessfullyDeregistered {
-			c.removeDynamicASKey(routingContext, c.isIPSPDoubleExchange())
+			c.removeRequesterRoutingKey(routingContext)
 		}
 		delete(c.rkmUnresolvedDeregistrationRCs, routingContext)
 	}
@@ -635,13 +635,17 @@ func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) 
 	c.rkmResponseChan = nil
 	c.rkmCorrelationMu.Unlock()
 
-	local := c.isIPSPDoubleExchange()
 	for _, routingContext := range successful {
-		key, registered := c.dynamicASKey(routingContext, local)
-		c.removeDynamicASKey(routingContext, local)
-		if !local && registered && c.as != nil {
-			c.as.deregisterDynamicASP(c, key, true)
-		}
+		c.removeRequesterRoutingKey(routingContext)
+	}
+}
+
+func (c *Association) removeRequesterRoutingKey(routingContext uint32) {
+	local := c.isIPSPDoubleExchange()
+	key, registered := c.dynamicASKey(routingContext, local)
+	c.removeDynamicASKey(routingContext, local)
+	if !local && registered && c.as != nil {
+		c.as.deregisterDynamicASP(c, key, true)
 	}
 }
 
