@@ -344,6 +344,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		}
 		trafficModeConflicts := registrationTrafficModeConflictsLocked(
 			applicationServers,
+			association,
 			lockedApplicationServers,
 			requests,
 			entries,
@@ -423,6 +424,7 @@ func unlockRegistrationApplicationServers(locked []lockedRegistrationApplication
 
 func registrationTrafficModeConflictsLocked(
 	registry *applicationServers,
+	association *Association,
 	locked []lockedRegistrationApplicationServer,
 	requests []RoutingKeyRegistrationRequest,
 	entries map[uint32]*routingKeyEntry,
@@ -439,12 +441,20 @@ func registrationTrafficModeConflictsLocked(
 			continue
 		}
 		entry := entries[result.RoutingContext]
-		if entry == nil || !entry.routingKey.TrafficModeSet {
+		if entry == nil {
 			continue
 		}
-		applicationServer := serversByKey[entry.asKey()]
 		key := entry.asKey()
-		if entry.routingKey.TrafficMode == params.TrafficModeOverride &&
+		mode := entry.routingKey.TrafficMode
+		modeSet := entry.routingKey.TrafficModeSet
+		if !modeSet && association != nil {
+			mode, modeSet = association.trafficModePolicy().configuredForASKey(key)
+		}
+		// RFC 4666 Sections 3.6.1 and 4.4.1 make Traffic Mode optional in
+		// REG REQ. When it is omitted, the Association policy remains the
+		// effective mode for the allocated Routing Context and must still be
+		// compatible with the local Application Server activation policy.
+		if modeSet && mode == params.TrafficModeOverride &&
 			applicationServersRegistryRequiresSeveralActive(registry, key) {
 			conflicts = append(conflicts, index)
 			continue
@@ -455,6 +465,7 @@ func registrationTrafficModeConflictsLocked(
 		// RFC 4666 Section 4.4.1 requires a requested Traffic Mode to match
 		// the existing Routing Key. The live AS mode is part of that existing
 		// traffic identity even when the provisioned Routing Key omitted it.
+		applicationServer := serversByKey[key]
 		if applicationServer != nil && applicationServer.trafficMode != 0 &&
 			applicationServer.trafficMode != requests[index].RoutingKey.TrafficMode {
 			conflicts = append(conflicts, index)

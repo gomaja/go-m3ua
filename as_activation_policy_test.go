@@ -864,10 +864,49 @@ func TestRoutingKeyRegistrationRejectsOverrideWhenNExceedsOne(t *testing.T) {
 		name                string
 		provisioned         bool
 		requestIncludesMode bool
+		requestMode         uint32
+		associationMode     uint32
+		wantStatus          RegistrationStatus
 	}{
-		{name: "provisioned explicit mode", provisioned: true, requestIncludesMode: true},
-		{name: "provisioned inherited mode", provisioned: true},
-		{name: "dynamic", requestIncludesMode: true},
+		{
+			name:                "provisioned explicit mode",
+			provisioned:         true,
+			requestIncludesMode: true,
+			requestMode:         params.TrafficModeOverride,
+			wantStatus:          RegistrationUnsupportedTrafficHandlingMode,
+		},
+		{
+			name:        "provisioned inherited Routing Key mode",
+			provisioned: true,
+			wantStatus:  RegistrationUnsupportedTrafficHandlingMode,
+		},
+		{
+			name:                "dynamic explicit mode",
+			requestIncludesMode: true,
+			requestMode:         params.TrafficModeOverride,
+			wantStatus:          RegistrationUnsupportedTrafficHandlingMode,
+		},
+		{
+			name:                "dynamic explicit Loadshare overrides association default",
+			requestIncludesMode: true,
+			requestMode:         params.TrafficModeLoadshare,
+			associationMode:     params.TrafficModeOverride,
+			wantStatus:          RegistrationSuccessfullyRegistered,
+		},
+		{
+			name:            "dynamic inherited association mode",
+			associationMode: params.TrafficModeOverride,
+			wantStatus:      RegistrationUnsupportedTrafficHandlingMode,
+		},
+		{
+			name:            "dynamic inherited Loadshare",
+			associationMode: params.TrafficModeLoadshare,
+			wantStatus:      RegistrationSuccessfullyRegistered,
+		},
+		{
+			name:       "dynamic unknown mode",
+			wantStatus: RegistrationSuccessfullyRegistered,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -904,12 +943,19 @@ func TestRoutingKeyRegistrationRejectsOverrideWhenNExceedsOne(t *testing.T) {
 					}: {RequiredActiveASPs: 2},
 				},
 			})
-			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			associationConfig := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			if test.associationMode != 0 {
+				associationConfig.TrafficModeType = params.NewTrafficModeType(test.associationMode)
+			}
+			association := newAssociation(RoleSGP, associationConfig)
 			association.as = applicationServers
 			t.Cleanup(func() { _ = association.Close() })
 
 			requestedRoutingKey := routingKey
-			if !test.requestIncludesMode {
+			if test.requestIncludesMode {
+				requestedRoutingKey.TrafficMode = test.requestMode
+				requestedRoutingKey.TrafficModeSet = true
+			} else {
 				requestedRoutingKey.TrafficMode = 0
 				requestedRoutingKey.TrafficModeSet = false
 			}
@@ -917,8 +963,17 @@ func TestRoutingKeyRegistrationRejectsOverrideWhenNExceedsOne(t *testing.T) {
 				LocalRoutingKeyIdentifier: 1,
 				RoutingKey:                requestedRoutingKey,
 			}})[0]
-			if result.Status != RegistrationUnsupportedTrafficHandlingMode || result.RoutingContext != 0 {
-				t.Fatalf("registration result = %+v, want Unsupported Traffic Handling Mode", result)
+			if result.Status != test.wantStatus {
+				t.Fatalf("registration status = %v, want %v", result.Status, test.wantStatus)
+			}
+			if test.wantStatus == RegistrationSuccessfullyRegistered {
+				if result.RoutingContext == 0 {
+					t.Fatal("successful registration omitted Routing Context")
+				}
+				return
+			}
+			if result.RoutingContext != 0 {
+				t.Fatalf("rejected registration returned Routing Context %d", result.RoutingContext)
 			}
 			if keys := applicationServers.keys(); len(keys) != 0 {
 				t.Fatalf("rejected registration created Application Servers %v", keys)
