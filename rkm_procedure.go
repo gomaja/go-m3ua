@@ -114,10 +114,14 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 			delete(pending, identifier)
 		}
 	}
-	for index, result := range results {
-		c.applyRegistrationResult(requests[index], result)
-	}
 	completed = true
+	applications := make([]registrationResultApplication, len(results))
+	for index, result := range results {
+		applications[index] = registrationResultApplication{request: requests[index], result: result}
+	}
+	if err := c.applyRegistrationResults(applications); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -505,10 +509,14 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	}
 	c.rkmCorrelationMu.Unlock()
 
+	applications := make([]registrationResultApplication, 0, len(lateResults))
 	for identifier, result := range lateResults {
-		c.applyRegistrationResult(lateRequests[identifier], result)
+		applications = append(applications, registrationResultApplication{
+			request: lateRequests[identifier],
+			result:  result,
+		})
 	}
-	return nil
+	return c.applyRegistrationResults(applications)
 }
 
 func (c *Association) waitForRKMResponse(
@@ -679,35 +687,139 @@ func (c *Association) endRegistrationResponseCorrelation(requestWritten, complet
 	if completed {
 		return
 	}
+	applications := make([]registrationResultApplication, 0, len(delivered))
 	for identifier, result := range delivered {
-		c.applyRegistrationResult(requests[identifier], result)
+		applications = append(applications, registrationResultApplication{
+			request: requests[identifier],
+			result:  result,
+		})
 	}
+	_ = c.applyRegistrationResults(applications)
 }
 
-func (c *Association) applyRegistrationResult(
-	request RoutingKeyRegistrationRequest,
-	result RoutingKeyRegistrationResult,
-) {
-	if result.Status != RegistrationSuccessfullyRegistered && result.Status != RegistrationRoutingKeyAlreadyRegistered {
-		return
-	}
+type registrationResultApplication struct {
+	request RoutingKeyRegistrationRequest
+	result  RoutingKeyRegistrationResult
+}
+
+type preparedRegistrationResult struct {
+	key        ASKey
+	routingKey RoutingKey
+	local      bool
+}
+
+type assignedRegistrationResultScope struct {
+	key            ASKey
+	trafficMode    uint32
+	trafficModeSet bool
+}
+
+func (c *Association) applyRegistrationResults(applications []registrationResultApplication) error {
 	c.rkmLifecycleMu.Lock()
 	defer c.rkmLifecycleMu.Unlock()
 	if associationEnded(c) {
-		return
+		return nil
 	}
-	effectiveRoutingKey, _ := routingKeyWithImpliedNetworkAppearance(request.RoutingKey, c.localNetworkAppearance())
-	key := ASKey{
-		NetworkAppearance:    effectiveRoutingKey.NetworkAppearance,
-		NetworkAppearanceSet: effectiveRoutingKey.NetworkAppearanceSet,
-		RoutingContext:       result.RoutingContext,
-		RoutingContextSet:    true,
-	}
+
 	local := c.isIPSPDoubleExchange()
-	c.addDynamicASKey(key, effectiveRoutingKey, local)
-	if !local && c.as != nil {
-		c.as.registerDynamicASP(c, key)
+	configuredContexts := c.staticallyConfiguredRoutingContexts()
+	configuredAppearance := c.applicationServerNetworkAppearance()
+	if local {
+		configuredContexts = routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal)
+		configuredAppearance = c.localNetworkAppearance()
 	}
+	trafficModes := c.trafficModes.get(c.cfg)
+	if local {
+		trafficModes = c.localIPSPTrafficModes.get(nil)
+	}
+	appearance, appearanceSet := appearanceOf(configuredAppearance)
+	assigned := make(map[uint32]assignedRegistrationResultScope, len(configuredContexts)+len(applications))
+	for _, routingContext := range configuredContexts {
+		trafficMode, trafficModeSet := trafficModes.configured(routingContext)
+		assigned[routingContext] = assignedRegistrationResultScope{
+			key: ASKey{
+				NetworkAppearance:    appearance,
+				NetworkAppearanceSet: appearanceSet,
+				RoutingContext:       routingContext,
+				RoutingContextSet:    true,
+			},
+			trafficMode:    trafficMode,
+			trafficModeSet: trafficModeSet,
+		}
+	}
+	c.muDynamicASKeys.RLock()
+	dynamic := c.dynamicPeerASKeys
+	dynamicTrafficModes := c.dynamicPeerTrafficModes
+	if local {
+		dynamic = c.dynamicLocalASKeys
+		dynamicTrafficModes = c.dynamicLocalTrafficModes
+	}
+	for routingContext, key := range dynamic {
+		scope := assigned[routingContext]
+		if scope.key.RoutingContextSet && scope.key != key {
+			c.muDynamicASKeys.RUnlock()
+			return NewInvalidRoutingContextError(routingContext)
+		}
+		scope.key = key
+		if trafficMode, ok := dynamicTrafficModes[routingContext]; ok {
+			if scope.trafficModeSet && scope.trafficMode != trafficMode {
+				c.muDynamicASKeys.RUnlock()
+				return NewInvalidRoutingContextError(routingContext)
+			}
+			scope.trafficMode = trafficMode
+			scope.trafficModeSet = true
+		}
+		assigned[routingContext] = scope
+	}
+	c.muDynamicASKeys.RUnlock()
+
+	prepared := make([]preparedRegistrationResult, 0, len(applications))
+	for _, application := range applications {
+		result := application.result
+		if result.Status != RegistrationSuccessfullyRegistered && result.Status != RegistrationRoutingKeyAlreadyRegistered {
+			continue
+		}
+		effectiveRoutingKey, _ := routingKeyWithImpliedNetworkAppearance(
+			application.request.RoutingKey,
+			c.localNetworkAppearance(),
+		)
+		key := ASKey{
+			NetworkAppearance:    effectiveRoutingKey.NetworkAppearance,
+			NetworkAppearanceSet: effectiveRoutingKey.NetworkAppearanceSet,
+			RoutingContext:       result.RoutingContext,
+			RoutingContextSet:    true,
+		}
+		// RFC 4666 Sections 1.4.2.1 and 3.7.1 require one Routing Context on
+		// one Association to identify one AS traffic flow. Validate the whole
+		// successful result batch before publishing any requester scope.
+		existing, exists := assigned[result.RoutingContext]
+		if exists {
+			if existing.key != key || existing.trafficModeSet && effectiveRoutingKey.TrafficModeSet &&
+				existing.trafficMode != effectiveRoutingKey.TrafficMode {
+				return NewInvalidRoutingContextError(result.RoutingContext)
+			}
+		} else {
+			existing.key = key
+		}
+		if effectiveRoutingKey.TrafficModeSet {
+			existing.trafficMode = effectiveRoutingKey.TrafficMode
+			existing.trafficModeSet = true
+		}
+		assigned[result.RoutingContext] = existing
+		prepared = append(prepared, preparedRegistrationResult{
+			key:        key,
+			routingKey: effectiveRoutingKey,
+			local:      local,
+		})
+	}
+
+	for _, registration := range prepared {
+		c.addDynamicASKey(registration.key, registration.routingKey, registration.local)
+		if !registration.local && c.as != nil {
+			c.as.registerDynamicASP(c, registration.key)
+		}
+	}
+	return nil
 }
 
 func (c *Association) routingKeyRegistry() *routingKeyRegistry {

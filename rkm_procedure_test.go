@@ -1098,6 +1098,294 @@ func TestRKMRequesterRejectsUnexpectedResultsWithoutPartialScopeMutation(t *test
 	})
 }
 
+func setRegistrationResultWriter(
+	t *testing.T,
+	association *Association,
+	status uint32,
+	routingContexts ...uint32,
+) {
+	t.Helper()
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request, ok := message.(*messages.RegistrationRequest)
+		if !ok {
+			return message.MarshalLen(), nil
+		}
+		if len(routingContexts) != 1 && len(routingContexts) != len(request.RoutingKeys) {
+			return 0, fmt.Errorf(
+				"Registration Result Routing Contexts = %d, want one or %d",
+				len(routingContexts),
+				len(request.RoutingKeys),
+			)
+		}
+		results := make([]*params.Param, len(request.RoutingKeys))
+		for index, parameter := range request.RoutingKeys {
+			payload, err := parameter.RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			routingContextIndex := index
+			if len(routingContexts) == 1 {
+				routingContextIndex = 0
+			}
+			results[index] = params.NewRegistrationResult(params.NewRegistrationResultPayload(
+				payload.LocalRoutingKeyIdentifier.Copy(),
+				params.NewRegistrationStatus(status),
+				params.NewRoutingContext(routingContexts[routingContextIndex]),
+			))
+		}
+		return message.MarshalLen(), association.handleRegistrationResponse(messages.NewRegistrationResponse(results...))
+	}
+}
+
+func TestRKMRequesterRejectsConflictingRegistrationResultScopesAtomically(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	association := newAssociation(RoleIPSP, config)
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	setRegistrationResultWriter(t, association, params.SuccessfullyRegistered, 77)
+
+	_, err = association.RegisterRoutingKeys(
+		context.Background(),
+		RoutingKeyRegistration{RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP)},
+		RoutingKeyRegistration{RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP)},
+	)
+	if !errors.Is(err, ErrInvalidRoutingContext) {
+		t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidRoutingContext", err)
+	}
+	if contexts := association.dynamicRoutingContexts(false); len(contexts) != 0 {
+		t.Fatalf("conflicting Registration Results installed dynamic Routing Contexts: %v", contexts)
+	}
+	for _, appearance := range []uint32{10, 20} {
+		key := ASKey{
+			NetworkAppearance:    appearance,
+			NetworkAppearanceSet: true,
+			RoutingContext:       77,
+			RoutingContextSet:    true,
+		}
+		if _, ok := endpoint.as.lookup(key); ok {
+			t.Fatalf("conflicting Registration Result installed Application Server %+v", key)
+		}
+	}
+}
+
+func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingScope(t *testing.T) {
+	t.Run("Static", func(t *testing.T) {
+		config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+		config.NetworkAppearance = params.NewNetworkAppearance(10)
+		config.RoutingContexts = params.NewRoutingContext(77)
+		association := newAssociation(RoleASP, config)
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		setRegistrationResultWriter(t, association, params.SuccessfullyRegistered, 77)
+
+		_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+		})
+		if !errors.Is(err, ErrInvalidRoutingContext) {
+			t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidRoutingContext", err)
+		}
+		if _, ok := association.dynamicASKey(77, false); ok {
+			t.Fatal("conflicting Registration Result replaced the static Routing Context scope")
+		}
+	})
+
+	t.Run("Dynamic", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		existing := ASKey{
+			NetworkAppearance:    10,
+			NetworkAppearanceSet: true,
+			RoutingContext:       77,
+			RoutingContextSet:    true,
+		}
+		association.addDynamicASKey(existing, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+		setRegistrationResultWriter(t, association, params.SuccessfullyRegistered, 77)
+
+		_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+		})
+		if !errors.Is(err, ErrInvalidRoutingContext) {
+			t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidRoutingContext", err)
+		}
+		if key, ok := association.dynamicASKey(77, false); !ok || key != existing {
+			t.Fatalf("dynamic ASKey = %+v, %t; want existing %+v", key, ok, existing)
+		}
+	})
+}
+
+func TestRKMRequesterAllowsRegistrationResultForExistingASKey(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	existing := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       77,
+		RoutingContextSet:    true,
+	}
+	association.addDynamicASKey(existing, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+	setRegistrationResultWriter(t, association, params.RoutingKeyAlreadyRegistered, 77)
+
+	results, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+		RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+	})
+	if err != nil {
+		t.Fatalf("RegisterRoutingKeys: %v", err)
+	}
+	if len(results) != 1 || results[0].Status != RegistrationRoutingKeyAlreadyRegistered {
+		t.Fatalf("Registration Results = %+v, want Routing Key Already Registered", results)
+	}
+	if key, ok := association.dynamicASKey(77, false); !ok || key != existing {
+		t.Fatalf("dynamic ASKey = %+v, %t; want existing %+v", key, ok, existing)
+	}
+}
+
+func TestRKMRequesterRejectsConflictingRegistrationResultTrafficModesAtomically(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	setRegistrationResultWriter(t, association, params.SuccessfullyRegistered, 77)
+	first := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	first.TrafficMode = params.TrafficModeOverride
+	first.TrafficModeSet = true
+	second := testRoutingKey(10, 200, params.ServiceIndISUP)
+	second.TrafficMode = params.TrafficModeLoadshare
+	second.TrafficModeSet = true
+
+	_, err := association.RegisterRoutingKeys(
+		context.Background(),
+		RoutingKeyRegistration{RoutingKey: first},
+		RoutingKeyRegistration{RoutingKey: second},
+	)
+	if !errors.Is(err, ErrInvalidRoutingContext) {
+		t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidRoutingContext", err)
+	}
+	if contexts := association.dynamicRoutingContexts(false); len(contexts) != 0 {
+		t.Fatalf("conflicting Registration Result Traffic Modes installed dynamic Routing Contexts: %v", contexts)
+	}
+}
+
+func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingTrafficMode(t *testing.T) {
+	request := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	request.TrafficMode = params.TrafficModeLoadshare
+	request.TrafficModeSet = true
+
+	t.Run("Static", func(t *testing.T) {
+		config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+		config.NetworkAppearance = params.NewNetworkAppearance(10)
+		config.RoutingContexts = params.NewRoutingContext(77)
+		config.TrafficModes = map[uint32]uint32{77: params.TrafficModeOverride}
+		association := newAssociation(RoleASP, config)
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		setRegistrationResultWriter(t, association, params.RoutingKeyAlreadyRegistered, 77)
+
+		_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{RoutingKey: request})
+		if !errors.Is(err, ErrInvalidRoutingContext) {
+			t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidRoutingContext", err)
+		}
+		if _, ok := association.dynamicASKey(77, false); ok {
+			t.Fatal("conflicting Registration Result Traffic Mode replaced the static policy")
+		}
+	})
+
+	t.Run("Dynamic", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		key := ASKey{
+			NetworkAppearance:    10,
+			NetworkAppearanceSet: true,
+			RoutingContext:       77,
+			RoutingContextSet:    true,
+		}
+		existing := testRoutingKey(10, 100, params.ServiceIndSCCP)
+		existing.TrafficMode = params.TrafficModeOverride
+		existing.TrafficModeSet = true
+		association.addDynamicASKey(key, existing, false)
+		setRegistrationResultWriter(t, association, params.RoutingKeyAlreadyRegistered, 77)
+
+		_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{RoutingKey: request})
+		if !errors.Is(err, ErrInvalidRoutingContext) {
+			t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidRoutingContext", err)
+		}
+		if mode, ok := association.trafficModePolicy().configured(77); !ok || mode != params.TrafficModeOverride {
+			t.Fatalf("dynamic Traffic Mode = %d, %t; want Override", mode, ok)
+		}
+	})
+}
+
+func TestRKMLateRegistrationResponseRejectsConflictingScopesAtomically(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan []uint32, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request := message.(*messages.RegistrationRequest)
+		identifiers := make([]uint32, len(request.RoutingKeys))
+		for index, parameter := range request.RoutingKeys {
+			payload, err := parameter.RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			identifiers[index] = payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+		}
+		written <- identifiers
+		return message.MarshalLen(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := association.RegisterRoutingKeys(
+			ctx,
+			RoutingKeyRegistration{RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP)},
+			RoutingKeyRegistration{RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP)},
+		)
+		done <- err
+	}()
+	identifiers := <-written
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("RegisterRoutingKeys error = %v, want context.Canceled", err)
+	}
+
+	response := messages.NewRegistrationResponse(
+		params.NewRegistrationResult(params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(identifiers[0]),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(77),
+		)),
+		params.NewRegistrationResult(params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(identifiers[1]),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(77),
+		)),
+	)
+	if err := association.handleRegistrationResponse(response); !errors.Is(err, ErrInvalidRoutingContext) {
+		t.Fatalf("late Registration Response error = %v, want ErrInvalidRoutingContext", err)
+	}
+	if contexts := association.dynamicRoutingContexts(false); len(contexts) != 0 {
+		t.Fatalf("late conflicting Registration Results installed dynamic Routing Contexts: %v", contexts)
+	}
+}
+
 func TestRKMRequesterWaitStopsOnContextAndAssociationClose(t *testing.T) {
 	newWaitingAssociation := func(t *testing.T) (*Association, <-chan struct{}) {
 		t.Helper()
@@ -1651,6 +1939,46 @@ func TestRKMCanceledRegistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
 	}
 }
 
+func TestRKMCanceledRegistrationRejectsConflictingDeliveredScopesAtomically(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	requests := map[uint32]RoutingKeyRegistrationRequest{
+		1: {
+			LocalRoutingKeyIdentifier: 1,
+			RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+		},
+		2: {
+			LocalRoutingKeyIdentifier: 2,
+			RoutingKey:                testRoutingKey(20, 200, params.ServiceIndISUP),
+		},
+	}
+	if _, err := association.beginRegistrationResponseCorrelation(
+		map[uint32]int{1: 0, 2: 1},
+		requests,
+	); err != nil {
+		t.Fatalf("beginRegistrationResponseCorrelation: %v", err)
+	}
+	response := messages.NewRegistrationResponse(
+		params.NewRegistrationResult(params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(1),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(77),
+		)),
+		params.NewRegistrationResult(params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(2),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(77),
+		)),
+	)
+	if err := association.deliverRegistrationResponse(response); err != nil {
+		t.Fatalf("deliverRegistrationResponse: %v", err)
+	}
+
+	association.endRegistrationResponseCorrelation(true, false)
+	if contexts := association.dynamicRoutingContexts(false); len(contexts) != 0 {
+		t.Fatalf("canceled conflicting Registration Results installed dynamic Routing Contexts: %v", contexts)
+	}
+}
+
 func TestRKMLateDeregistrationResponseIsAppliedAtomically(t *testing.T) {
 	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
 	association.muState.Lock()
@@ -2084,6 +2412,44 @@ func TestIPSPDoubleExchangeRKMScopesDirectionsIndependently(t *testing.T) {
 	if localContexts := local.dynamicRoutingContexts(true); len(localContexts) != 0 {
 		t.Fatalf("local Deregistration retained TrafficToLocal contexts: %v", localContexts)
 	}
+}
+
+func TestIPSPDoubleExchangeRKMValidatesRequesterResultsAgainstLocalScope(t *testing.T) {
+	newAssociationForResult := func(t *testing.T, routingContext uint32) *Association {
+		t.Helper()
+		association := newAssociation(RoleIPSP, newDoubleExchangeAssociationConfigForTest())
+		association.setIPSPState(IPSPState{TrafficToLocal: StateASPInactive, TrafficToPeer: StateASPDown})
+		setRegistrationResultWriter(t, association, params.SuccessfullyRegistered, routingContext)
+		return association
+	}
+
+	t.Run("RejectLocalCollision", func(t *testing.T) {
+		association := newAssociationForResult(t, 11)
+		_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+		})
+		if !errors.Is(err, ErrInvalidRoutingContext) {
+			t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidRoutingContext", err)
+		}
+		if contexts := association.dynamicRoutingContexts(true); len(contexts) != 0 {
+			t.Fatalf("conflicting local Registration Result installed Routing Contexts: %v", contexts)
+		}
+	})
+
+	t.Run("AllowPeerDirectionContext", func(t *testing.T) {
+		association := newAssociationForResult(t, 22)
+		if _, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+		}); err != nil {
+			t.Fatalf("RegisterRoutingKeys: %v", err)
+		}
+		if contexts := association.dynamicRoutingContexts(true); len(contexts) != 1 || contexts[0] != 22 {
+			t.Fatalf("TrafficToLocal dynamic Routing Contexts = %v, want [22]", contexts)
+		}
+		if contexts := association.dynamicRoutingContexts(false); len(contexts) != 0 {
+			t.Fatalf("TrafficToPeer dynamic Routing Contexts = %v, want none", contexts)
+		}
+	})
 }
 
 func TestIPSPSingleExchangeRKMUsesSharedRoutingKeyScope(t *testing.T) {
