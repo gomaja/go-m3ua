@@ -464,6 +464,15 @@ func (r *applicationServers) deregisterDynamicASP(association *Association, key 
 		r.mu.Unlock()
 		return
 	}
+	if registration.provisional > 0 {
+		// RFC 4666 Section 4.4.2 permits dynamic Routing Key and AS deletion
+		// after deregistration leaves no ASPs.  A concurrently establishing
+		// statically configured association still owns this provisional scope;
+		// retain it for commit, but let the last rollback remove it.
+		registration.persistent = false
+		r.mu.Unlock()
+		return
+	}
 	delete(r.registrations, key)
 	delete(r.as, key)
 	r.mu.Unlock()
