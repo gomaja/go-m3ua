@@ -229,7 +229,7 @@ func resolveDistributionRoutingContext(
 	}
 	routingContexts := data.RoutingContext.RoutingContexts()
 	rtCtx := routingContexts[0]
-	return resolveExplicitDistributionRoutingContext(registry, data.NetworkAppearance, rtCtx)
+	return resolveExplicitDistributionRoutingContext(registry, routingKeys, data.NetworkAppearance, rtCtx)
 }
 
 func resolveOmittedDistributionRoutingContext(registry *applicationServers, data *messages.Data) (ASKey, error) {
@@ -260,7 +260,12 @@ func resolveOmittedDistributionRoutingContextForKeys(keys []ASKey, data *message
 	return ASKey{}, ErrInvalidNetworkAppearance
 }
 
-func resolveExplicitDistributionRoutingContext(registry *applicationServers, networkAppearance *params.Param, rtCtx uint32) (ASKey, error) {
+func resolveExplicitDistributionRoutingContext(
+	registry *applicationServers,
+	routingKeys *routingKeyRegistry,
+	networkAppearance *params.Param,
+	rtCtx uint32,
+) (ASKey, error) {
 	if networkAppearance == nil {
 		matches := registry.asKeysForRoutingContext(rtCtx)
 		switch len(matches) {
@@ -277,6 +282,13 @@ func resolveExplicitDistributionRoutingContext(registry *applicationServers, net
 	key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(networkAppearance)
 	if _, ok := registry.lookup(key); ok {
 		return key, nil
+	}
+	if routingKey, ok := routingKeys.asKey(rtCtx); ok && !routingKey.NetworkAppearanceSet {
+		// RFC 4666 Section 3.6.1: an omitted Network Appearance can make the
+		// Routing Key apply to all Network Appearances.
+		if _, registered := registry.lookup(routingKey); registered {
+			return routingKey, nil
+		}
 	}
 	if len(registry.asKeysForRoutingContext(rtCtx)) > 0 {
 		return ASKey{}, NewInvalidNetworkAppearanceError(key.NetworkAppearance)
