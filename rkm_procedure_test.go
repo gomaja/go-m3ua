@@ -13,6 +13,21 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
+type rkmInitialCheckContext struct {
+	context.Context
+	checked chan struct{}
+	once    sync.Once
+}
+
+func newRKMInitialCheckContext() *rkmInitialCheckContext {
+	return &rkmInitialCheckContext{Context: context.Background(), checked: make(chan struct{})}
+}
+
+func (c *rkmInitialCheckContext) Err() error {
+	c.once.Do(func() { close(c.checked) })
+	return c.Context.Err()
+}
+
 func TestSGPRegistrationAndDeregistrationProcedures(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleSGP,
@@ -971,6 +986,263 @@ func TestRKMRequesterSerializesConcurrentProcedures(t *testing.T) {
 	if second.err != nil || len(second.results) != 1 || second.results[0].RoutingContext != secondIdentifier+100 {
 		t.Fatalf("second RKM result = %+v, error = %v", second.results, second.err)
 	}
+}
+
+func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
+	t.Run("Registration", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		written := make(chan uint32, 1)
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			request := message.(*messages.RegistrationRequest)
+			payload, err := request.RoutingKeys[0].RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			written <- payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+			return message.MarshalLen(), nil
+		}
+		firstDone := make(chan error, 1)
+		go func() {
+			_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+				RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+			})
+			firstDone <- err
+		}()
+		identifier := <-written
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		secondDone := make(chan error, 1)
+		go func() {
+			_, err := association.RegisterRoutingKeys(ctx, RoutingKeyRegistration{
+				RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+			})
+			secondDone <- err
+		}()
+		var secondErr error
+		returnedBeforeRelease := false
+		select {
+		case secondErr = <-secondDone:
+			returnedBeforeRelease = true
+		case <-time.After(250 * time.Millisecond):
+		}
+		if err := association.handleRegistrationResponse(messages.NewRegistrationResponse(
+			params.NewRegistrationResult(params.NewRegistrationResultPayload(
+				params.NewLocalRoutingKeyIdentifier(identifier),
+				params.NewRegistrationStatus(params.SuccessfullyRegistered),
+				params.NewRoutingContext(100),
+			)),
+		)); err != nil {
+			t.Fatalf("first Registration Response: %v", err)
+		}
+		if err := <-firstDone; err != nil {
+			t.Fatalf("first RegisterRoutingKeys: %v", err)
+		}
+		if !returnedBeforeRelease {
+			<-secondDone
+			t.Fatal("queued RegisterRoutingKeys ignored its context deadline until the first procedure completed")
+		}
+		if !errors.Is(secondErr, context.DeadlineExceeded) {
+			t.Fatalf("queued RegisterRoutingKeys error = %v, want context.DeadlineExceeded", secondErr)
+		}
+	})
+
+	t.Run("Deregistration", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		for _, routingContext := range []uint32{100, 200} {
+			association.addDynamicASKey(
+				ASKey{RoutingContext: routingContext, RoutingContextSet: true},
+				testRoutingKey(10, routingContext, params.ServiceIndSCCP),
+				false,
+			)
+		}
+		written := make(chan uint32, 1)
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			request := message.(*messages.DeregistrationRequest)
+			written <- request.RoutingContext.RoutingContexts()[0]
+			return message.MarshalLen(), nil
+		}
+		firstDone := make(chan error, 1)
+		go func() {
+			_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+			firstDone <- err
+		}()
+		<-written
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		secondDone := make(chan error, 1)
+		go func() {
+			_, err := association.DeregisterRoutingContexts(ctx, 200)
+			secondDone <- err
+		}()
+		var secondErr error
+		returnedBeforeRelease := false
+		select {
+		case secondErr = <-secondDone:
+			returnedBeforeRelease = true
+		case <-time.After(250 * time.Millisecond):
+		}
+		if err := association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+			params.NewDeregistrationResult(params.NewDeregResultPayload(
+				params.NewRoutingContext(100),
+				params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+			)),
+		)); err != nil {
+			t.Fatalf("first Deregistration Response: %v", err)
+		}
+		if err := <-firstDone; err != nil {
+			t.Fatalf("first DeregisterRoutingContexts: %v", err)
+		}
+		if !returnedBeforeRelease {
+			<-secondDone
+			t.Fatal("queued DeregisterRoutingContexts ignored its context deadline until the first procedure completed")
+		}
+		if !errors.Is(secondErr, context.DeadlineExceeded) {
+			t.Fatalf("queued DeregisterRoutingContexts error = %v, want context.DeadlineExceeded", secondErr)
+		}
+	})
+}
+
+func TestRKMRequesterRechecksStateAfterSerialization(t *testing.T) {
+	t.Run("Registration", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		written := make(chan uint32, 2)
+		writeCount := 0
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			request := message.(*messages.RegistrationRequest)
+			payload, err := request.RoutingKeys[0].RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			identifier := payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+			writeCount++
+			written <- identifier
+			if writeCount == 1 {
+				return message.MarshalLen(), nil
+			}
+			return message.MarshalLen(), association.handleRegistrationResponse(messages.NewRegistrationResponse(
+				params.NewRegistrationResult(params.NewRegistrationResultPayload(
+					params.NewLocalRoutingKeyIdentifier(identifier),
+					params.NewRegistrationStatus(params.SuccessfullyRegistered),
+					params.NewRoutingContext(200),
+				)),
+			))
+		}
+		firstDone := make(chan error, 1)
+		go func() {
+			_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+				RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+			})
+			firstDone <- err
+		}()
+		firstIdentifier := <-written
+
+		ctx := newRKMInitialCheckContext()
+		secondDone := make(chan error, 1)
+		go func() {
+			_, err := association.RegisterRoutingKeys(ctx, RoutingKeyRegistration{
+				RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+			})
+			secondDone <- err
+		}()
+		<-ctx.checked
+		association.muState.Lock()
+		association.state = StateASPDown
+		association.muState.Unlock()
+		if err := association.handleRegistrationResponse(messages.NewRegistrationResponse(
+			params.NewRegistrationResult(params.NewRegistrationResultPayload(
+				params.NewLocalRoutingKeyIdentifier(firstIdentifier),
+				params.NewRegistrationStatus(params.SuccessfullyRegistered),
+				params.NewRoutingContext(100),
+			)),
+		)); err != nil {
+			t.Fatalf("first Registration Response: %v", err)
+		}
+		if err := <-firstDone; err != nil {
+			t.Fatalf("first RegisterRoutingKeys: %v", err)
+		}
+		if err := <-secondDone; !errors.Is(err, ErrNotEstablished) {
+			t.Fatalf("queued RegisterRoutingKeys error = %v, want ErrNotEstablished", err)
+		}
+		if writeCount != 1 {
+			t.Fatalf("Registration Request writes = %d, want only the first procedure", writeCount)
+		}
+	})
+
+	t.Run("Deregistration", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		for _, routingContext := range []uint32{100, 200} {
+			association.addDynamicASKey(
+				ASKey{RoutingContext: routingContext, RoutingContextSet: true},
+				testRoutingKey(10, routingContext, params.ServiceIndSCCP),
+				false,
+			)
+		}
+		written := make(chan uint32, 2)
+		writeCount := 0
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			request := message.(*messages.DeregistrationRequest)
+			routingContext := request.RoutingContext.RoutingContexts()[0]
+			writeCount++
+			written <- routingContext
+			if writeCount == 1 {
+				return message.MarshalLen(), nil
+			}
+			return message.MarshalLen(), association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+				params.NewDeregistrationResult(params.NewDeregResultPayload(
+					params.NewRoutingContext(routingContext),
+					params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+				)),
+			))
+		}
+		firstDone := make(chan error, 1)
+		go func() {
+			_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+			firstDone <- err
+		}()
+		<-written
+
+		ctx := newRKMInitialCheckContext()
+		secondDone := make(chan error, 1)
+		go func() {
+			_, err := association.DeregisterRoutingContexts(ctx, 200)
+			secondDone <- err
+		}()
+		<-ctx.checked
+		association.muState.Lock()
+		association.state = StateASPDown
+		association.muState.Unlock()
+		if err := association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+			params.NewDeregistrationResult(params.NewDeregResultPayload(
+				params.NewRoutingContext(100),
+				params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+			)),
+		)); err != nil {
+			t.Fatalf("first Deregistration Response: %v", err)
+		}
+		if err := <-firstDone; err != nil {
+			t.Fatalf("first DeregisterRoutingContexts: %v", err)
+		}
+		if err := <-secondDone; !errors.Is(err, ErrNotEstablished) {
+			t.Fatalf("queued DeregisterRoutingContexts error = %v, want ErrNotEstablished", err)
+		}
+		if writeCount != 1 {
+			t.Fatalf("Deregistration Request writes = %d, want only the first procedure", writeCount)
+		}
+	})
 }
 
 func TestRKMResponseChannelPublicationIsRaceSafe(t *testing.T) {

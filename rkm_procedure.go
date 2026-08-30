@@ -40,10 +40,15 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		return nil, err
 	}
 
-	c.rkmRequestMu.Lock()
-	defer c.rkmRequestMu.Unlock()
+	if err := c.acquireRKMRequest(ctx); err != nil {
+		return nil, err
+	}
+	defer c.releaseRKMRequest()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if c.rkmRequesterState() == StateASPDown {
+		return nil, ErrNotEstablished
 	}
 	requests := make([]RoutingKeyRegistrationRequest, len(registrations))
 	parameters := make([]*params.Param, len(registrations))
@@ -141,10 +146,15 @@ func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingCont
 		return nil, err
 	}
 
-	c.rkmRequestMu.Lock()
-	defer c.rkmRequestMu.Unlock()
+	if err := c.acquireRKMRequest(ctx); err != nil {
+		return nil, err
+	}
+	defer c.releaseRKMRequest()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if c.rkmRequesterState() == StateASPDown {
+		return nil, ErrNotEstablished
 	}
 	pending := make(map[uint32]int, len(routingContexts))
 	for index, routingContext := range routingContexts {
@@ -545,6 +555,24 @@ func (c *Association) waitForRKMResponse(
 		}
 		return nil, ErrAssociationClosed
 	}
+}
+
+func (c *Association) acquireRKMRequest(ctx context.Context) error {
+	select {
+	case c.rkmRequestGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ErrAssociationClosed
+	}
+}
+
+func (c *Association) releaseRKMRequest() {
+	<-c.rkmRequestGate
 }
 
 func (c *Association) nextLocalRoutingKeyIdentifier() uint32 {

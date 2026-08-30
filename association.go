@@ -379,9 +379,11 @@ type Association struct {
 	// notificationWriter is the asynchronous control-worker test seam. Production
 	// leaves it nil and writes through WriteSignal.
 	notificationWriter func(messages.M3UA) (int, error)
-	// rkmRequestMu serializes local RFC 4666 Registration and Deregistration
+	// rkmRequestGate serializes local RFC 4666 Registration and Deregistration
 	// procedures; RKM responses have no association-wide transaction identifier.
-	rkmRequestMu sync.Mutex
+	// A channel gate lets a queued caller stop on context cancellation or
+	// Association closure instead of blocking indefinitely behind another peer.
+	rkmRequestGate chan struct{}
 	// rkmLifecycleMu serializes responder-side RKM state publication with
 	// association teardown so an in-flight REG RSP cannot recreate membership
 	// after the Endpoint has forgotten the association.
@@ -459,6 +461,7 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		dynamicLocalASKeys:       make(map[uint32]ASKey),
 		dynamicPeerTrafficModes:  make(map[uint32]uint32),
 		dynamicLocalTrafficModes: make(map[uint32]uint32),
+		rkmRequestGate:           make(chan struct{}, 1),
 		// A dialing ASP wants to carry traffic; Dial does not return until
 		// it does.
 		resumeTo: StateASPActive,
