@@ -44,8 +44,6 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	c.rkmResponseChan = make(chan messages.M3UA, len(registrations))
-
 	requests := make([]RoutingKeyRegistrationRequest, len(registrations))
 	parameters := make([]*params.Param, len(registrations))
 	pending := make(map[uint32]int, len(registrations))
@@ -69,15 +67,15 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		pending[identifier] = index
 	}
 
-	c.beginRegistrationResponseCorrelation(pending)
-	defer c.endRegistrationResponseCorrelation()
+	responses := c.beginRegistrationResponseCorrelation(pending)
+	defer c.endRKMResponseCorrelation()
 	if _, err := c.WriteSignal(messages.NewRegistrationRequest(parameters...)); err != nil {
 		return nil, err
 	}
 
 	results := make([]RoutingKeyRegistrationResult, len(registrations))
 	for len(pending) > 0 {
-		response, err := c.waitForRKMResponse(ctx, rkmAwaitingRegistrationResponse)
+		response, err := c.waitForRKMResponse(ctx, responses, rkmAwaitingRegistrationResponse)
 		if err != nil {
 			return nil, err
 		}
@@ -144,7 +142,6 @@ func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingCont
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	c.rkmResponseChan = make(chan messages.M3UA, len(routingContexts))
 	pending := make(map[uint32]int, len(routingContexts))
 	for index, routingContext := range routingContexts {
 		if _, duplicate := pending[routingContext]; duplicate {
@@ -153,15 +150,15 @@ func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingCont
 		pending[routingContext] = index
 	}
 
-	c.rkmAwaiting.Store(rkmAwaitingDeregistrationResponse)
-	defer c.rkmAwaiting.Store(rkmAwaitingNone)
+	responses := c.beginRKMResponseCorrelation(rkmAwaitingDeregistrationResponse, len(routingContexts))
+	defer c.endRKMResponseCorrelation()
 	if _, err := c.WriteSignal(messages.NewDeregistrationRequest(params.NewRoutingContext(routingContexts...))); err != nil {
 		return nil, err
 	}
 
 	results := make([]RoutingKeyDeregistrationResult, len(routingContexts))
 	for len(pending) > 0 {
-		response, err := c.waitForRKMResponse(ctx, rkmAwaitingDeregistrationResponse)
+		response, err := c.waitForRKMResponse(ctx, responses, rkmAwaitingDeregistrationResponse)
 		if err != nil {
 			return nil, err
 		}
@@ -334,7 +331,9 @@ func (c *Association) handleDeregistrationResponse(message *messages.Deregistrat
 }
 
 func (c *Association) deliverRKMResponse(message messages.M3UA, expected uint32) error {
-	if c.rkmAwaiting.Load() != expected {
+	c.rkmCorrelationMu.Lock()
+	defer c.rkmCorrelationMu.Unlock()
+	if c.rkmAwaiting != expected || c.rkmResponseChan == nil {
 		return NewUnexpectedMessageError(message)
 	}
 	select {
@@ -359,7 +358,7 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	defer c.rkmCorrelationMu.Unlock()
 
 	pending := make([]uint32, 0, len(identifiers))
-	awaiting := c.rkmAwaiting.Load() == rkmAwaitingRegistrationResponse
+	awaiting := c.rkmAwaiting == rkmAwaitingRegistrationResponse
 	for _, identifier := range identifiers {
 		if awaiting {
 			if _, ok := c.rkmPendingLocalIDs[identifier]; ok {
@@ -375,6 +374,9 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	if len(pending) == 0 {
 		return nil
 	}
+	if c.rkmResponseChan == nil {
+		return NewUnexpectedMessageError(message)
+	}
 
 	select {
 	case c.rkmResponseChan <- message:
@@ -387,9 +389,13 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	}
 }
 
-func (c *Association) waitForRKMResponse(ctx context.Context, expected uint32) (messages.M3UA, error) {
+func (c *Association) waitForRKMResponse(
+	ctx context.Context,
+	responses <-chan messages.M3UA,
+	expected uint32,
+) (messages.M3UA, error) {
 	select {
-	case response := <-c.rkmResponseChan:
+	case response := <-responses:
 		switch expected {
 		case rkmAwaitingRegistrationResponse:
 			if _, ok := response.(*messages.RegistrationResponse); !ok {
@@ -436,21 +442,33 @@ func (c *Association) localRoutingKeyIdentifierWasIssuedLocked(identifier uint32
 	return c.rkmNextLocalID-identifier < 1<<31
 }
 
-func (c *Association) beginRegistrationResponseCorrelation(pending map[uint32]int) {
+func (c *Association) beginRegistrationResponseCorrelation(pending map[uint32]int) chan messages.M3UA {
 	c.rkmCorrelationMu.Lock()
 	defer c.rkmCorrelationMu.Unlock()
+	c.rkmResponseChan = make(chan messages.M3UA, len(pending))
 	c.rkmPendingLocalIDs = make(map[uint32]struct{}, len(pending))
 	for identifier := range pending {
 		c.rkmPendingLocalIDs[identifier] = struct{}{}
 	}
-	c.rkmAwaiting.Store(rkmAwaitingRegistrationResponse)
+	c.rkmAwaiting = rkmAwaitingRegistrationResponse
+	return c.rkmResponseChan
 }
 
-func (c *Association) endRegistrationResponseCorrelation() {
+func (c *Association) beginRKMResponseCorrelation(expected uint32, capacity int) chan messages.M3UA {
 	c.rkmCorrelationMu.Lock()
 	defer c.rkmCorrelationMu.Unlock()
-	c.rkmAwaiting.Store(rkmAwaitingNone)
+	c.rkmResponseChan = make(chan messages.M3UA, capacity)
 	c.rkmPendingLocalIDs = nil
+	c.rkmAwaiting = expected
+	return c.rkmResponseChan
+}
+
+func (c *Association) endRKMResponseCorrelation() {
+	c.rkmCorrelationMu.Lock()
+	defer c.rkmCorrelationMu.Unlock()
+	c.rkmAwaiting = rkmAwaitingNone
+	c.rkmPendingLocalIDs = nil
+	c.rkmResponseChan = nil
 }
 
 func (c *Association) routingKeyRegistry() *routingKeyRegistry {

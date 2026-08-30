@@ -173,6 +173,7 @@ endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
         AuthorizeDeregistration: func(request m3ua.RoutingKeyDeregistrationRequest) bool {
             return true
         },
+        AllocateRoutingContext: nil, // Select the lowest available non-zero value.
         ProvisionedRoutingKeys: []m3ua.ProvisionedRoutingKey{
             // Optional static Routing Key inventory.
         },

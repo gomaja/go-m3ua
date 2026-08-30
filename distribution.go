@@ -209,6 +209,10 @@ func resolveDistributionRoutingContext(
 				return matches[0], nil
 			case 0:
 				if configured {
+					staticKeys := registry.staticallyConfiguredKeys()
+					if len(staticKeys) > 0 {
+						return resolveOmittedDistributionRoutingContextForKeys(staticKeys, data)
+					}
 					return ASKey{}, ErrNoMatchingRoutingKey
 				}
 			default:
@@ -229,7 +233,10 @@ func resolveDistributionRoutingContext(
 }
 
 func resolveOmittedDistributionRoutingContext(registry *applicationServers, data *messages.Data) (ASKey, error) {
-	keys := registry.keys()
+	return resolveOmittedDistributionRoutingContextForKeys(registry.keys(), data)
+}
+
+func resolveOmittedDistributionRoutingContextForKeys(keys []ASKey, data *messages.Data) (ASKey, error) {
 	if data.NetworkAppearance != nil {
 		networkAppearance := data.NetworkAppearance.NetworkAppearance()
 		keys = filterASKeysForNetworkAppearance(keys, networkAppearance)

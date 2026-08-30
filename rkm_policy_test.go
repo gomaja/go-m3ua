@@ -2,6 +2,7 @@ package m3ua
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 
@@ -50,6 +51,29 @@ func TestCanonicalRoutingKeysIgnoreSetOrdering(t *testing.T) {
 	}
 	if !firstCanonical.equal(secondCanonical) {
 		t.Fatalf("equivalent Routing Keys differ:\n%+v\n%+v", firstCanonical, secondCanonical)
+	}
+}
+
+func TestCanonicalRoutingKeyMaskAtLeastPointCodeWidthMatchesAllPointCodes(t *testing.T) {
+	for _, mask := range []uint8{24, 25, 255} {
+		t.Run(fmt.Sprintf("mask %d", mask), func(t *testing.T) {
+			key := RoutingKey{Groups: []RoutingKeyGroup{{
+				DestinationPointCode:  100,
+				OriginatingPointCodes: []PointCodeRange{{PointCode: 0x123456, Mask: mask}},
+			}}}
+			canonical, err := canonicalizeRoutingKey(key)
+			if err != nil {
+				t.Fatalf("canonicalizeRoutingKey: %v", err)
+			}
+			ranges := canonical.groups[0].originatingPointCodes
+			if len(ranges) != 1 || ranges[0].mask != 24 {
+				t.Fatalf("canonical ranges = %+v, want one mask-24 range", ranges)
+			}
+			lower, upper := ranges[0].bounds()
+			if lower != 0 || upper != 0x00ffffff {
+				t.Fatalf("range bounds = %#x-%#x, want all 24-bit point codes", lower, upper)
+			}
+		})
 	}
 }
 
@@ -190,7 +214,7 @@ func TestRoutingKeyRegistrationRequestSnapshotOwnsPeerAddress(t *testing.T) {
 		RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
 	}
 	snapshot := snapshotRoutingKeyRegistrationRequest(request)
-	request.Peer.RemoteAddr.IPAddrs[0].IP[0] = 0
+	request.Peer.RemoteAddr.IPAddrs[0].IP[len(request.Peer.RemoteAddr.IPAddrs[0].IP)-1] = 9
 	request.Peer.RemoteAddr.IPAddrs[0].Zone = "changed"
 	request.Peer.RemoteAddr.Port = 1
 

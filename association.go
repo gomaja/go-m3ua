@@ -376,7 +376,7 @@ type Association struct {
 	// the requesting goroutine and the association monitor.
 	rkmCorrelationMu   sync.Mutex
 	rkmPendingLocalIDs map[uint32]struct{}
-	rkmAwaiting        atomic.Uint32
+	rkmAwaiting        uint32
 	rkmNextLocalID     uint32
 	rkmResponseChan    chan messages.M3UA
 }
@@ -439,7 +439,6 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		dynamicLocalASKeys:       make(map[uint32]ASKey),
 		dynamicPeerTrafficModes:  make(map[uint32]uint32),
 		dynamicLocalTrafficModes: make(map[uint32]uint32),
-		rkmResponseChan:          make(chan messages.M3UA, 1),
 		// A dialing ASP wants to carry traffic; Dial does not return until
 		// it does.
 		resumeTo: StateASPActive,

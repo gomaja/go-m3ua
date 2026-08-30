@@ -3,6 +3,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -850,6 +851,52 @@ func TestRKMRequesterSerializesConcurrentProcedures(t *testing.T) {
 	if second.err != nil || len(second.results) != 1 || second.results[0].RoutingContext != secondIdentifier+100 {
 		t.Fatalf("second RKM result = %+v, error = %v", second.results, second.err)
 	}
+}
+
+func TestRKMResponseChannelPublicationIsRaceSafe(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan struct{}, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		written <- struct{}{}
+		return message.MarshalLen(), nil
+	}
+	response := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(1),
+			params.NewDeregistrationStatus(params.DeregNotRegistered),
+		),
+	))
+	stop := make(chan struct{})
+	responderDone := make(chan struct{})
+	go func() {
+		defer close(responderDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = association.handleDeregistrationResponse(response)
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	for range 1_000 {
+		ctx, cancel := context.WithCancel(context.Background())
+		requestDone := make(chan struct{})
+		go func() {
+			defer close(requestDone)
+			_, _ = association.DeregisterRoutingContexts(ctx, 1)
+		}()
+		<-written
+		cancel()
+		<-requestDone
+	}
+	close(stop)
+	<-responderDone
 }
 
 func TestRKMRequesterRejectsUnexpectedResultsWithoutPartialScopeMutation(t *testing.T) {

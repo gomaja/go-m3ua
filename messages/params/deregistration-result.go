@@ -89,7 +89,7 @@ func (d *DeregResultPayload) unmarshalBinaryAtDepth(b []byte, depth int) error {
 			}
 			decoded.DeregistrationStatus = p
 		default:
-			if isDefinedParameterTag(p.Tag) {
+			if IsKnownM3UAParameterTag(p.Tag) {
 				return invalidNestedParameter("Deregistration Result", fmt.Sprintf("unexpected parameter tag %#04x", p.Tag))
 			}
 			decoded.Others = append(decoded.Others, p)

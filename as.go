@@ -762,6 +762,26 @@ func (r *applicationServers) keys() []ASKey {
 	return keys
 }
 
+func (r *applicationServers) staticallyConfiguredKeys() []ASKey {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	keys := make([]ASKey, 0, len(r.registrations))
+	for key, registration := range r.registrations {
+		if registration == nil || registration.removable {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
+	return keys
+}
+
 // activeSSNMTargets snapshots each currently active association and the ASes
 // a destination-state update concerns for it. An Association serving several ASes is
 // returned once with a Routing Context list, so one SS7 event cannot be

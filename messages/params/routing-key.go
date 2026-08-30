@@ -191,7 +191,7 @@ func (r *RoutingKeyPayload) unmarshalBinaryAtDepth(b []byte, depth int) error {
 			}
 			group.OriginatingPointCodeList = p
 		default:
-			if isDefinedParameterTag(p.Tag) {
+			if IsKnownM3UAParameterTag(p.Tag) {
 				return invalidNestedParameter("Routing Key", fmt.Sprintf("unexpected parameter tag %#04x", p.Tag))
 			}
 			decoded.Others = append(decoded.Others, p)

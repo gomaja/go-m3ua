@@ -118,6 +118,41 @@ func TestSGPDistributionResolvesOmittedRoutingContextFromRegisteredRoutingKey(t 
 	}
 }
 
+func TestSGPDistributionFallsBackToStaticApplicationServerAfterRoutingKeyMiss(t *testing.T) {
+	routingKeys, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{
+			RoutingContext: 2,
+			RoutingKey:     testRoutingKey(10, 200, params.ServiceIndISUP),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	applicationServers := newApplicationServers(time.Hour)
+	staticKey := ASKey{RoutingContext: 1, RoutingContextSet: true}
+	applicationServers.register([]ASKey{staticKey})
+
+	data := messages.NewData(
+		nil,
+		nil,
+		params.NewProtocolData(50, 100, params.ServiceIndSCCP, 0, 0, 1, []byte("static")),
+		nil,
+	)
+	prepared, _, _, key, err := prepareDistributionData(applicationServers, routingKeys, data)
+	if err != nil {
+		t.Fatalf("prepareDistributionData: %v", err)
+	}
+	if key != staticKey {
+		t.Fatalf("resolved ASKey = %+v, want %+v", key, staticKey)
+	}
+	if prepared.RoutingContext == nil || prepared.RoutingContext.RoutingContext() != staticKey.RoutingContext {
+		t.Fatalf("prepared Routing Context = %v, want %d", prepared.RoutingContext, staticKey.RoutingContext)
+	}
+}
+
 func TestSGPDistributionRoutingKeySelectionRequiresNetworkAppearanceWhenAmbiguous(t *testing.T) {
 	provisioned := []ProvisionedRoutingKey{
 		{RoutingContext: 1, RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP)},

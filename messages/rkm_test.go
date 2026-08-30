@@ -2,6 +2,7 @@ package messages
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -108,6 +109,49 @@ func TestRKMMessageCardinality(t *testing.T) {
 	}
 }
 
+func TestRKMMessageMarshalRejectsInvalidNestedPayloads(t *testing.T) {
+	tests := []struct {
+		name    string
+		message M3UA
+	}{
+		{
+			name: "Routing Key missing Local RK Identifier",
+			message: NewRegistrationRequest(params.NewRoutingKey(params.NewRoutingKeyPayload(
+				nil,
+				nil,
+				nil,
+				params.NewDestinationPointCode(101),
+				nil,
+				nil,
+				nil,
+			))),
+		},
+		{
+			name: "successful Registration Result has zero Routing Context",
+			message: NewRegistrationResponse(params.NewRegistrationResult(params.NewRegistrationResultPayload(
+				params.NewLocalRoutingKeyIdentifier(1),
+				params.NewRegistrationStatus(params.SuccessfullyRegistered),
+				params.NewRoutingContext(0),
+			))),
+		},
+		{
+			name: "Deregistration Result missing status",
+			message: NewDeregistrationResponse(params.NewDeregistrationResult(params.NewDeregResultPayload(
+				params.NewRoutingContext(101),
+				nil,
+			))),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.message.MarshalBinary(); !errors.Is(err, params.ErrInvalidValue) {
+				t.Fatalf("MarshalBinary error = %v, want params.ErrInvalidValue", err)
+			}
+		})
+	}
+}
+
 func TestRKMMessageWireParsingRejectsMissingAndWrongKnownParameters(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -185,6 +229,57 @@ func TestRKMMessageParsingPreservesExtensionsAndRejectsDuplicateRoutingContext(t
 	}
 	if _, err := ParseDeregistrationRequest(wire); !errors.Is(err, ErrInvalidParameter) {
 		t.Fatalf("ParseDeregistrationRequest error = %v, want ErrInvalidParameter", err)
+	}
+}
+
+func TestRKMMessageRejectsReservedAndNotUsedM3UAParameterTags(t *testing.T) {
+	tags := []uint16{
+		0x0000, 0x0001, 0x0002, 0x0003, 0x0005, 0x0008, 0x000a, 0x000e, 0x000f, 0x0010,
+		0x0201, 0x0202, 0x0203, 0x020d, 0x020f, 0x0211,
+	}
+	for _, tag := range tags {
+		t.Run(fmt.Sprintf("%#04x", tag), func(t *testing.T) {
+			invalid := params.NewParam(int(tag), []byte{0, 0, 0, 0})
+			request := NewRegistrationRequest(validRoutingKeyParam(1, 101))
+			request.Others = []*params.Param{invalid}
+			if _, err := request.MarshalBinary(); !errors.Is(err, ErrInvalidParameter) {
+				t.Fatalf("MarshalBinary error = %v, want ErrInvalidParameter", err)
+			}
+
+			wire, err := New(1, MsgClassRKM, MsgTypeRegistrationRequest,
+				validRoutingKeyParam(1, 101), invalid,
+			).MarshalBinary()
+			if err != nil {
+				t.Fatalf("marshal wire fixture: %v", err)
+			}
+			if _, err := ParseRegistrationRequest(wire); !errors.Is(err, ErrInvalidParameter) {
+				t.Fatalf("ParseRegistrationRequest error = %v, want ErrInvalidParameter", err)
+			}
+		})
+	}
+}
+
+func TestRoutingKeyRejectsReservedAndNotUsedM3UAParameterTags(t *testing.T) {
+	tags := []uint16{
+		0x0000, 0x0001, 0x0002, 0x0003, 0x0005, 0x0008, 0x000a, 0x000e, 0x000f, 0x0010,
+		0x0201, 0x0202, 0x0203, 0x020d, 0x020f, 0x0211,
+	}
+	for _, tag := range tags {
+		t.Run(fmt.Sprintf("%#04x", tag), func(t *testing.T) {
+			payload := params.NewRoutingKeyPayload(
+				params.NewLocalRoutingKeyIdentifier(1),
+				nil,
+				nil,
+				params.NewDestinationPointCode(101),
+				nil,
+				nil,
+				nil,
+			)
+			payload.Others = []*params.Param{params.NewParam(int(tag), []byte{0, 0, 0, 0})}
+			if _, err := params.NewRoutingKey(payload).MarshalBinary(); !errors.Is(err, params.ErrInvalidValue) {
+				t.Fatalf("MarshalBinary error = %v, want params.ErrInvalidValue", err)
+			}
+		})
 	}
 }
 

@@ -54,7 +54,7 @@ func (message *RegistrationRequest) UnmarshalBinary(b []byte) error {
 		if parameter.Tag == params.RoutingKey {
 			message.RoutingKeys = append(message.RoutingKeys, parameter)
 		} else {
-			if isKnownM3UAParameterTag(parameter.Tag) {
+			if params.IsKnownM3UAParameterTag(parameter.Tag) {
 				return fmt.Errorf("%w: Registration Request parameter tag %#04x", ErrInvalidParameter, parameter.Tag)
 			}
 			message.Others = append(message.Others, parameter)
@@ -155,7 +155,7 @@ func (message *RegistrationResponse) UnmarshalBinary(b []byte) error {
 		if parameter.Tag == params.RegistrationResult {
 			message.RegistrationResults = append(message.RegistrationResults, parameter)
 		} else {
-			if isKnownM3UAParameterTag(parameter.Tag) {
+			if params.IsKnownM3UAParameterTag(parameter.Tag) {
 				return fmt.Errorf("%w: Registration Response parameter tag %#04x", ErrInvalidParameter, parameter.Tag)
 			}
 			message.Others = append(message.Others, parameter)
@@ -259,7 +259,7 @@ func (message *DeregistrationRequest) UnmarshalBinary(b []byte) error {
 			}
 			message.RoutingContext = parameter
 		} else {
-			if isKnownM3UAParameterTag(parameter.Tag) {
+			if params.IsKnownM3UAParameterTag(parameter.Tag) {
 				return fmt.Errorf("%w: Deregistration Request parameter tag %#04x", ErrInvalidParameter, parameter.Tag)
 			}
 			message.Others = append(message.Others, parameter)
@@ -365,7 +365,7 @@ func (message *DeregistrationResponse) UnmarshalBinary(b []byte) error {
 		if parameter.Tag == params.DeregistrationResult {
 			message.DeregistrationResults = append(message.DeregistrationResults, parameter)
 		} else {
-			if isKnownM3UAParameterTag(parameter.Tag) {
+			if params.IsKnownM3UAParameterTag(parameter.Tag) {
 				return fmt.Errorf("%w: Deregistration Response parameter tag %#04x", ErrInvalidParameter, parameter.Tag)
 			}
 			message.Others = append(message.Others, parameter)
@@ -456,7 +456,7 @@ func validateRKMExtensions(parameters []*params.Param, messageName string) error
 		if parameter == nil {
 			continue
 		}
-		if isKnownM3UAParameterTag(parameter.Tag) {
+		if params.IsKnownM3UAParameterTag(parameter.Tag) {
 			return fmt.Errorf(
 				"%w: %s Others[%d] contains known parameter tag %#04x",
 				ErrInvalidParameter,
@@ -467,38 +467,6 @@ func validateRKMExtensions(parameters []*params.Param, messageName string) error
 		}
 	}
 	return nil
-}
-
-func isKnownM3UAParameterTag(tag uint16) bool {
-	switch tag {
-	case params.InfoString,
-		params.RoutingContext,
-		params.DiagnosticInformation,
-		params.HeartbeatData,
-		params.TrafficModeType,
-		params.ErrorCode,
-		params.Status,
-		params.AspIdentifier,
-		params.AffectedPointCode,
-		params.CorrelationID,
-		params.NetworkAppearance,
-		params.UserCause,
-		params.CongestionIndications,
-		params.ConcernedDestination,
-		params.RoutingKey,
-		params.RegistrationResult,
-		params.DeregistrationResult,
-		params.LocalRoutingKeyIdentifier,
-		params.DestinationPointCode,
-		params.ServiceIndicators,
-		params.OriginatingPointCodeList,
-		params.ProtocolData,
-		params.RegistrationStatus,
-		params.DeregistrationStatus:
-		return true
-	default:
-		return false
-	}
 }
 
 func appendRKMParameters(required, others []*params.Param) []*params.Param {
