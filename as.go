@@ -1440,6 +1440,10 @@ func (as *applicationServer) setASPStateGuarded(
 func (as *applicationServer) setTrafficMode(mode uint32) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	as.setTrafficModeLocked(mode)
+}
+
+func (as *applicationServer) setTrafficModeLocked(mode uint32) {
 	if as.trafficMode == 0 {
 		as.trafficMode = mode
 		if mode == params.TrafficModeBroadcast && as.hasActiveASPLocked() {

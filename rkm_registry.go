@@ -113,6 +113,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 	}
 	allocations := make([]allocationDecision, len(requests))
 	forcedASPIdentifierConflicts := make(map[ASKey]struct{})
+	forcedTrafficModeConflicts := make(map[int]struct{})
 
 	for {
 		if associationEnded(association) {
@@ -151,6 +152,15 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 				results[index] = registrationResult(
 					request.LocalRoutingKeyIdentifier,
 					RegistrationUnsupportedRoutingKeyParameterField,
+					0,
+				)
+				storeRegistrationReplay(replayState, request, results[index])
+				continue
+			}
+			if _, conflict := forcedTrafficModeConflicts[index]; conflict {
+				results[index] = registrationResult(
+					request.LocalRoutingKeyIdentifier,
+					RegistrationUnsupportedTrafficHandlingMode,
 					0,
 				)
 				storeRegistrationReplay(replayState, request, results[index])
@@ -296,9 +306,11 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		if applicationServers != nil {
 			applicationServers.mu.Lock()
 		}
+		lockedApplicationServers := lockRegistrationApplicationServersLocked(applicationServers, entries, results)
 		registry.mu.Lock()
 		if registry.revision != revision {
 			registry.mu.Unlock()
+			unlockRegistrationApplicationServers(lockedApplicationServers)
 			if applicationServers != nil {
 				applicationServers.mu.Unlock()
 			}
@@ -306,6 +318,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		}
 		if associationEnded(association) {
 			registry.mu.Unlock()
+			unlockRegistrationApplicationServers(lockedApplicationServers)
 			if applicationServers != nil {
 				applicationServers.mu.Unlock()
 			}
@@ -320,9 +333,25 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		)
 		if len(identifierConflicts) > 0 {
 			registry.mu.Unlock()
+			unlockRegistrationApplicationServers(lockedApplicationServers)
 			applicationServers.mu.Unlock()
 			for _, key := range identifierConflicts {
 				forcedASPIdentifierConflicts[key] = struct{}{}
+			}
+			continue
+		}
+		trafficModeConflicts := registrationTrafficModeConflictsLocked(
+			lockedApplicationServers,
+			requests,
+			entries,
+			results,
+		)
+		if len(trafficModeConflicts) > 0 {
+			registry.mu.Unlock()
+			unlockRegistrationApplicationServers(lockedApplicationServers)
+			applicationServers.mu.Unlock()
+			for _, index := range trafficModeConflicts {
+				forcedTrafficModeConflicts[index] = struct{}{}
 			}
 			continue
 		}
@@ -331,11 +360,119 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		registry.replays[association] = replayState
 		registry.deregReplays[association] = deregistrationReplays
 		registry.revision++
+		adoptRegistrationTrafficModesLocked(lockedApplicationServers, entries, results)
 		registry.mu.Unlock()
+		unlockRegistrationApplicationServers(lockedApplicationServers)
 		if applicationServers != nil {
 			applicationServers.mu.Unlock()
 		}
 		return results
+	}
+}
+
+type lockedRegistrationApplicationServer struct {
+	key               ASKey
+	applicationServer *applicationServer
+}
+
+func lockRegistrationApplicationServersLocked(
+	applicationServers *applicationServers,
+	entries map[uint32]*routingKeyEntry,
+	results []RoutingKeyRegistrationResult,
+) []lockedRegistrationApplicationServer {
+	if applicationServers == nil || applicationServers.closed {
+		return nil
+	}
+	byKey := make(map[ASKey]*applicationServer)
+	for _, result := range results {
+		if result.Status != RegistrationSuccessfullyRegistered &&
+			result.Status != RegistrationRoutingKeyAlreadyRegistered {
+			continue
+		}
+		entry := entries[result.RoutingContext]
+		if entry == nil {
+			continue
+		}
+		key := entry.asKey()
+		if applicationServer := applicationServers.as[key]; applicationServer != nil {
+			byKey[key] = applicationServer
+		}
+	}
+	locked := make([]lockedRegistrationApplicationServer, 0, len(byKey))
+	for key, applicationServer := range byKey {
+		locked = append(locked, lockedRegistrationApplicationServer{
+			key:               key,
+			applicationServer: applicationServer,
+		})
+	}
+	sort.Slice(locked, func(i, j int) bool { return compareASKey(locked[i].key, locked[j].key) < 0 })
+	for _, entry := range locked {
+		entry.applicationServer.mu.Lock()
+	}
+	return locked
+}
+
+func unlockRegistrationApplicationServers(locked []lockedRegistrationApplicationServer) {
+	for index := len(locked) - 1; index >= 0; index-- {
+		locked[index].applicationServer.mu.Unlock()
+	}
+}
+
+func registrationTrafficModeConflictsLocked(
+	locked []lockedRegistrationApplicationServer,
+	requests []RoutingKeyRegistrationRequest,
+	entries map[uint32]*routingKeyEntry,
+	results []RoutingKeyRegistrationResult,
+) []int {
+	applicationServers := make(map[ASKey]*applicationServer, len(locked))
+	for _, entry := range locked {
+		applicationServers[entry.key] = entry.applicationServer
+	}
+	var conflicts []int
+	for index, result := range results {
+		if result.Status != RegistrationSuccessfullyRegistered &&
+			result.Status != RegistrationRoutingKeyAlreadyRegistered {
+			continue
+		}
+		if !requests[index].RoutingKey.TrafficModeSet {
+			continue
+		}
+		entry := entries[result.RoutingContext]
+		if entry == nil {
+			continue
+		}
+		applicationServer := applicationServers[entry.asKey()]
+		// RFC 4666 Section 4.4.1 requires a requested Traffic Mode to match
+		// the existing Routing Key. The live AS mode is part of that existing
+		// traffic identity even when the provisioned Routing Key omitted it.
+		if applicationServer != nil && applicationServer.trafficMode != 0 &&
+			applicationServer.trafficMode != requests[index].RoutingKey.TrafficMode {
+			conflicts = append(conflicts, index)
+		}
+	}
+	return conflicts
+}
+
+func adoptRegistrationTrafficModesLocked(
+	locked []lockedRegistrationApplicationServer,
+	entries map[uint32]*routingKeyEntry,
+	results []RoutingKeyRegistrationResult,
+) {
+	desired := make(map[ASKey]uint32, len(locked))
+	for _, result := range results {
+		if result.Status != RegistrationSuccessfullyRegistered &&
+			result.Status != RegistrationRoutingKeyAlreadyRegistered {
+			continue
+		}
+		entry := entries[result.RoutingContext]
+		if entry != nil && entry.routingKey.TrafficModeSet {
+			desired[entry.asKey()] = entry.routingKey.TrafficMode
+		}
+	}
+	for _, entry := range locked {
+		if mode := desired[entry.key]; mode != 0 {
+			entry.applicationServer.setTrafficModeLocked(mode)
+		}
 	}
 }
 

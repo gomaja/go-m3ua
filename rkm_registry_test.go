@@ -365,6 +365,135 @@ func TestRoutingKeyRegistryAdoptsFirstTrafficModeForUnspecifiedProvisionedKey(t 
 	}
 }
 
+func TestRoutingKeyRegistryRejectsTrafficModeConflictingWithLiveApplicationServer(t *testing.T) {
+	provisioned := testRoutingKey(10, 100, 3)
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisioned}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	applicationServers := newApplicationServers(time.Hour)
+	incumbent := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	incumbent.as = applicationServers
+	registered := registry.register(incumbent, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                provisioned,
+	}})[0]
+	if registered.Status != RegistrationSuccessfullyRegistered || registered.RoutingContext != 7 {
+		t.Fatalf("incumbent registration = %+v, want successful Routing Context 7", registered)
+	}
+	key, ok := registry.asKey(7)
+	if !ok {
+		t.Fatal("Routing Context 7 has no ASKey")
+	}
+	applicationServers.get(key).setTrafficMode(params.TrafficModeLoadshare)
+
+	for _, requestedRoutingContext := range []bool{false, true} {
+		t.Run(fmt.Sprintf("requested Routing Context %t", requestedRoutingContext), func(t *testing.T) {
+			challenger := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			challenger.as = applicationServers
+			conflicting := snapshotRoutingKey(provisioned)
+			conflicting.TrafficMode = params.TrafficModeBroadcast
+			conflicting.TrafficModeSet = true
+			result := registry.register(challenger, []RoutingKeyRegistrationRequest{{
+				LocalRoutingKeyIdentifier: 2,
+				RoutingKey:                conflicting,
+				RequestedRoutingContext:   7,
+				RoutingContextRequested:   requestedRoutingContext,
+			}})[0]
+			if result.Status != RegistrationUnsupportedTrafficHandlingMode || result.RoutingContext != 0 {
+				t.Fatalf("conflicting registration = %+v, want Unsupported Traffic Handling Mode", result)
+			}
+		})
+	}
+}
+
+func TestRoutingKeyRegistryAdoptsTrafficModeIntoLiveApplicationServer(t *testing.T) {
+	provisioned := testRoutingKey(10, 100, 3)
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisioned}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	key, ok := registry.asKey(7)
+	if !ok {
+		t.Fatal("Routing Context 7 has no ASKey")
+	}
+	applicationServers := newApplicationServers(time.Hour)
+	applicationServer := applicationServers.get(key)
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.as = applicationServers
+	requested := snapshotRoutingKey(provisioned)
+	requested.TrafficMode = params.TrafficModeLoadshare
+	requested.TrafficModeSet = true
+
+	result := registry.register(association, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                requested,
+	}})[0]
+	if result.Status != RegistrationSuccessfullyRegistered || result.RoutingContext != 7 {
+		t.Fatalf("registration = %+v, want successful Routing Context 7", result)
+	}
+	if mode := applicationServer.TrafficMode(); mode != params.TrafficModeLoadshare {
+		t.Fatalf("live AS Traffic Mode = %d, want Loadshare", mode)
+	}
+}
+
+func TestRoutingKeyRegistryIsolatesLiveTrafficModeConflictWithinBatch(t *testing.T) {
+	for _, conflictingFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("conflicting first %t", conflictingFirst), func(t *testing.T) {
+			provisioned := testRoutingKey(10, 100, 3)
+			registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+				AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+					return RegistrationSuccessfullyRegistered
+				},
+				ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisioned}},
+			})
+			if err != nil {
+				t.Fatalf("newRoutingKeyRegistry: %v", err)
+			}
+			key, ok := registry.asKey(7)
+			if !ok {
+				t.Fatal("Routing Context 7 has no ASKey")
+			}
+			applicationServers := newApplicationServers(time.Hour)
+			applicationServers.get(key).setTrafficMode(params.TrafficModeLoadshare)
+			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association.as = applicationServers
+			conflicting := snapshotRoutingKey(provisioned)
+			conflicting.TrafficMode = params.TrafficModeBroadcast
+			conflicting.TrafficModeSet = true
+			requests := []RoutingKeyRegistrationRequest{
+				{LocalRoutingKeyIdentifier: 1, RoutingKey: provisioned},
+				{LocalRoutingKeyIdentifier: 2, RoutingKey: conflicting},
+			}
+			if conflictingFirst {
+				requests[0], requests[1] = requests[1], requests[0]
+			}
+
+			results := registry.register(association, requests)
+			byIdentifier := make(map[uint32]RoutingKeyRegistrationResult, len(results))
+			for _, result := range results {
+				byIdentifier[result.LocalRoutingKeyIdentifier] = result
+			}
+			if result := byIdentifier[1]; result.Status != RegistrationSuccessfullyRegistered || result.RoutingContext != 7 {
+				t.Fatalf("mode-omitting registration = %+v, want successful Routing Context 7", result)
+			}
+			if result := byIdentifier[2]; result.Status != RegistrationUnsupportedTrafficHandlingMode || result.RoutingContext != 0 {
+				t.Fatalf("conflicting registration = %+v, want Unsupported Traffic Handling Mode", result)
+			}
+		})
+	}
+}
+
 func TestRoutingKeyRegistryReportsUnprovisionedWhenDynamicCreationIsDisabled(t *testing.T) {
 	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
 		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
