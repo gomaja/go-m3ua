@@ -1071,6 +1071,64 @@ func TestRoutingKeyRegistrationRejectsOverrideWhenNExceedsOne(t *testing.T) {
 	}
 }
 
+func TestRoutingKeyRegistrationValidatesDuplicateRequestModesIndependently(t *testing.T) {
+	for _, overrideFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("Override first %t", overrideFirst), func(t *testing.T) {
+			registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+				AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+					return RegistrationSuccessfullyRegistered
+				},
+				AllowDynamicRoutingKeys: true,
+			})
+			if err != nil {
+				t.Fatalf("newRoutingKeyRegistry: %v", err)
+			}
+			applicationServers := newApplicationServersForIPSP(&ApplicationServerConfig{
+				DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
+			})
+			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association.as = applicationServers
+
+			omittedMode := testRoutingKey(10, 100, params.ServiceIndSCCP)
+			override := snapshotRoutingKey(omittedMode)
+			override.TrafficMode = params.TrafficModeOverride
+			override.TrafficModeSet = true
+			requests := []RoutingKeyRegistrationRequest{
+				{LocalRoutingKeyIdentifier: 1, RoutingKey: omittedMode},
+				{LocalRoutingKeyIdentifier: 2, RoutingKey: override},
+			}
+			if overrideFirst {
+				requests[0], requests[1] = requests[1], requests[0]
+			}
+			results := registry.register(association, requests)
+			byIdentifier := make(map[uint32]RoutingKeyRegistrationResult, len(results))
+			for _, result := range results {
+				byIdentifier[result.LocalRoutingKeyIdentifier] = result
+			}
+
+			omittedResult := byIdentifier[1]
+			if omittedResult.Status != RegistrationSuccessfullyRegistered || omittedResult.RoutingContext == 0 {
+				t.Fatalf("mode-omitting registration = %+v, want successful allocated Routing Context", omittedResult)
+			}
+			if result := byIdentifier[2]; result.Status != RegistrationUnsupportedTrafficHandlingMode || result.RoutingContext != 0 {
+				t.Fatalf("duplicate Override registration = %+v, want Unsupported Traffic Handling Mode", result)
+			}
+			if got := registry.dynamicCount(); got != 1 {
+				t.Fatalf("dynamic Routing Key count = %d, want 1", got)
+			}
+			registry.mu.Lock()
+			entry := registry.entries[omittedResult.RoutingContext]
+			registry.mu.Unlock()
+			if entry == nil {
+				t.Fatal("successful registration was not published")
+			}
+			if entry.routingKey.TrafficModeSet {
+				t.Fatalf("rejected duplicate mutated Traffic Mode to %d", entry.routingKey.TrafficMode)
+			}
+		})
+	}
+}
+
 func TestRoutingKeyRegistrationPublishesShortageAfterAdoptingTrafficMode(t *testing.T) {
 	applicationServers := applicationServerRegistryForActivationTest(t, ASActivationPolicy{RequiredActiveASPs: 2})
 	applicationServer := applicationServers.get(1)
