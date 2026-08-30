@@ -401,6 +401,72 @@ func (r *applicationServers) register(keys []ASKey) {
 	}
 }
 
+// registerDynamicASP adds one Association to an Application Server created or
+// selected by RFC 4666 Routing Key Management. The caller writes REG RSP
+// before invoking this method so AS-state Notify cannot overtake the response.
+func (r *applicationServers) registerDynamicASP(association *Association, key ASKey) {
+	if r == nil || association == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	applicationServer, created := r.getOrCreateLocked(key)
+	registration := r.registrationForLocked(key, applicationServer, created)
+	registration.persistent = true
+	if created {
+		registration.removable = true
+	}
+	recovery := r.recoveryTimer
+	r.mu.Unlock()
+	applicationServer.setASPState(association, association.State(), recovery)
+}
+
+// deregisterDynamicASP removes one dynamically registered Association
+// membership. removeApplicationServer permits deletion only for an AS that was
+// itself created dynamically and has no remaining ASPs.
+func (r *applicationServers) deregisterDynamicASP(association *Association, key ASKey, removeApplicationServer bool) {
+	if r == nil || association == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	applicationServer := r.as[key]
+	recovery := r.recoveryTimer
+	r.mu.Unlock()
+	if applicationServer == nil {
+		return
+	}
+	applicationServer.remove(association, recovery)
+	if !removeApplicationServer {
+		return
+	}
+
+	r.mu.Lock()
+	registration := r.registrations[key]
+	if registration == nil || registration.applicationServer != applicationServer ||
+		!registration.removable || r.as[key] != applicationServer {
+		r.mu.Unlock()
+		return
+	}
+	applicationServer.mu.Lock()
+	empty := len(applicationServer.asps) == 0
+	applicationServer.mu.Unlock()
+	if !empty {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.registrations, key)
+	delete(r.as, key)
+	r.mu.Unlock()
+	applicationServer.close()
+}
+
 func (r *applicationServers) reserve(keys []ASKey) *applicationServerReservation {
 	reservation := &applicationServerReservation{registry: r}
 	if r == nil {

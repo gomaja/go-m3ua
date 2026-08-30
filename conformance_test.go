@@ -19,12 +19,11 @@ import (
 //	"The 'Unsupported Message Class' error is sent if a message with an
 //	unexpected or unsupported Message Class is received."
 //
-// Only RKM used to draw it. Every other class this library does not implement —
-// the reserved 5 to 8, and everything from 10 to 255 — drew the *type* error
+// Every class this library does not implement — the reserved 5 to 8, and
+// everything from 10 to 255 — drew the *type* error
 // instead, which tells a peer its class is supported and only the type is wrong.
 func TestUnsupportedClassIsReportedAsAClassError(t *testing.T) {
 	for _, class := range []uint8{
-		messages.MsgClassRKM,
 		5, 6, 7, 8, // reserved for other SIGTRAN adaptation layers
 		10, 64, 127, // reserved by the IETF
 		128, 200, 255, // reserved for IETF-defined extensions
@@ -58,6 +57,7 @@ func TestUnsupportedTypeInAKnownClassStaysATypeError(t *testing.T) {
 		messages.MsgClassSSNM,
 		messages.MsgClassASPSM,
 		messages.MsgClassASPTM,
+		messages.MsgClassRKM,
 	} {
 		conn, _ := newTestConn(t, StateASPActive, RoleSGP)
 

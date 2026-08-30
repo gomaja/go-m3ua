@@ -673,7 +673,7 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 			data.CorrelationID = parameter
 		}
 
-		owned, _, _, _, err := prepareDistributionData(registry, data)
+		owned, _, _, _, err := prepareDistributionData(registry, nil, data)
 		if !correctTag {
 			if !errors.Is(err, params.ErrInvalidType) {
 				t.Fatalf("slot %d wrong-tag error = %v, want params.ErrInvalidType", slot, err)

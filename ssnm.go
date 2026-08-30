@@ -970,7 +970,7 @@ func (c *Association) handleDestinationUnavailable(d *messages.DestinationUnavai
 	if !c.ssnmAllowedDuringActivation() {
 		return NewUnexpectedMessageError(d)
 	}
-	if err := c.validateNetworkAppearance(d.NetworkAppearance); err != nil {
+	if err := c.validateSSNMNetworkAppearance(d.NetworkAppearance, d.RoutingContext); err != nil {
 		return err
 	}
 
@@ -1004,7 +1004,7 @@ func (c *Association) handleDestinationAvailable(d *messages.DestinationAvailabl
 	if !c.ssnmAllowedDuringActivation() {
 		return NewUnexpectedMessageError(d)
 	}
-	if err := c.validateNetworkAppearance(d.NetworkAppearance); err != nil {
+	if err := c.validateSSNMNetworkAppearance(d.NetworkAppearance, d.RoutingContext); err != nil {
 		return err
 	}
 
@@ -1041,7 +1041,7 @@ func (c *Association) handleDestinationRestricted(d *messages.DestinationRestric
 	if !c.ssnmAllowedDuringActivation() {
 		return NewUnexpectedMessageError(d)
 	}
-	if err := c.validateNetworkAppearance(d.NetworkAppearance); err != nil {
+	if err := c.validateSSNMNetworkAppearance(d.NetworkAppearance, d.RoutingContext); err != nil {
 		return err
 	}
 
@@ -1074,7 +1074,7 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	// an ASP to an M3UA peer, indicating that the congestion level of the M3UA
 	// layer or the ASP has changed." Gating it to the ASP made an SGP answer a
 	// congested ASP with "Unexpected Message" and learn nothing from it.
-	if err := c.validateNetworkAppearance(s.NetworkAppearance); err != nil {
+	if err := c.validateSSNMNetworkAppearance(s.NetworkAppearance, s.RoutingContext); err != nil {
 		return err
 	}
 	if c.role == RoleASP && !c.ssnmAllowedDuringActivation() {
@@ -1163,7 +1163,7 @@ func (c *Association) handleDestinationUserPartUnavailable(d *messages.Destinati
 	if !c.ssnmAllowed() {
 		return NewUnexpectedMessageError(d)
 	}
-	if err := c.validateNetworkAppearance(d.NetworkAppearance); err != nil {
+	if err := c.validateSSNMNetworkAppearance(d.NetworkAppearance, d.RoutingContext); err != nil {
 		return err
 	}
 
@@ -1224,7 +1224,7 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 	if c.role != RoleSGP {
 		return NewUnexpectedMessageError(d)
 	}
-	if err := c.validateNetworkAppearance(d.NetworkAppearance); err != nil {
+	if err := c.validateSSNMNetworkAppearance(d.NetworkAppearance, d.RoutingContext); err != nil {
 		return err
 	}
 	if !c.ssnmAllowed() {

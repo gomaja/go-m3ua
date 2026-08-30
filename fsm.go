@@ -756,6 +756,28 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			c.sendErrForMessage(msg, err)
 		}
 		c.sendState(stateUnchanged)
+	// Routing Key Management. These procedures do not change the ASP state
+	// machine; successful Registration changes per-AS membership instead.
+	case *messages.RegistrationRequest:
+		if err := c.handleRegistrationRequest(msg); err != nil {
+			c.sendErrForMessage(msg, err)
+		}
+		c.sendState(stateUnchanged)
+	case *messages.RegistrationResponse:
+		if err := c.handleRegistrationResponse(msg); err != nil {
+			c.sendErrForMessage(msg, err)
+		}
+		c.sendState(stateUnchanged)
+	case *messages.DeregistrationRequest:
+		if err := c.handleDeregistrationRequest(msg); err != nil {
+			c.sendErrForMessage(msg, err)
+		}
+		c.sendState(stateUnchanged)
+	case *messages.DeregistrationResponse:
+		if err := c.handleDeregistrationResponse(msg); err != nil {
+			c.sendErrForMessage(msg, err)
+		}
+		c.sendState(stateUnchanged)
 	default:
 		// RFC 4666 Section 3.8.1 draws the distinction by class, not by one
 		// particular class: "The 'Unsupported Message Class' error is sent if a
@@ -809,6 +831,17 @@ func (c *Association) dispatchRaw(ctx context.Context, raw inbound) {
 	// validating the arrival stream sees this message's.
 	c.recvStream.Store(uint32(raw.stream))
 
+	// RFC 4666 Section 4.4.1 requires an SGP that does not support Routing Key
+	// registration to return Unsupported Message Class. That capability answer
+	// precedes validation of a REG REQ's nested parameters: without this guard,
+	// a structurally incomplete request is reported as Missing Parameter and
+	// falsely tells the ASP that this SGP implements the procedure. DEREG REQ is
+	// part of the same optional RKM procedure and follows the same boundary.
+	if c.rkmResponderUnsupported(raw.data) {
+		c.sendErr(NewUnsupportedClassErrorFor(raw.data))
+		return
+	}
+
 	msg, err := c.parseInboundMessage(raw.data)
 	if err != nil {
 		c.logMalformedInput(err, raw.data)
@@ -855,17 +888,32 @@ func (c *Association) dispatchRaw(ctx context.Context, raw inbound) {
 	c.handleReceivedSignals(ctx, msg, raw.data)
 }
 
+func (c *Association) rkmResponderUnsupported(raw []byte) bool {
+	if len(raw) < 8 || raw[0] != 1 || rawClass(raw) != messages.MsgClassRKM {
+		return false
+	}
+	switch rawType(raw) {
+	case messages.MsgTypeRegistrationRequest, messages.MsgTypeDeregistrationRequest:
+	default:
+		return false
+	}
+	if c.role != RoleSGP && c.role != RoleIPSP {
+		return false
+	}
+	return !c.routingKeyRegistry().enabled()
+}
+
 // implementedClass reports whether this library implements the message class,
 // and so whether an unrecognised message within it is a type-level or a
-// class-level failure. RKM is deliberately absent: its message types are
-// defined by RFC 4666 Section 3.6 but no codec here handles them.
+// class-level failure.
 func implementedClass(class uint8) bool {
 	switch class {
 	case messages.MsgClassManagement,
 		messages.MsgClassTransfer,
 		messages.MsgClassSSNM,
 		messages.MsgClassASPSM,
-		messages.MsgClassASPTM:
+		messages.MsgClassASPTM,
+		messages.MsgClassRKM:
 		return true
 	default:
 		return false

@@ -149,6 +149,13 @@ type Association struct {
 	trafficModes          trafficModeSnapshot
 	localIPSPTrafficModes trafficModeSnapshot
 	peerIPSPTrafficModes  trafficModeSnapshot
+	// Dynamic Routing Keys are keyed by Routing Context because one
+	// Association may coordinate keys in several Network Appearances.
+	muDynamicASKeys          sync.RWMutex
+	dynamicPeerASKeys        map[uint32]ASKey
+	dynamicLocalASKeys       map[uint32]ASKey
+	dynamicPeerTrafficModes  map[uint32]uint32
+	dynamicLocalTrafficModes map[uint32]uint32
 	// peerASPIdentifier is the identifier an ASP supplied in ASP Up. It is
 	// distinct from cfg.ASPIdentifier, which is this endpoint's own optional
 	// identifier and is shared by every association a Listener accepts.
@@ -362,6 +369,12 @@ type Association struct {
 	// notificationWriter is the asynchronous control-worker test seam. Production
 	// leaves it nil and writes through WriteSignal.
 	notificationWriter func(messages.M3UA) (int, error)
+	// rkmRequestMu serializes local RFC 4666 Registration and Deregistration
+	// procedures; RKM responses have no association-wide transaction identifier.
+	rkmRequestMu    sync.Mutex
+	rkmAwaiting     atomic.Uint32
+	rkmNextLocalID  uint32
+	rkmResponseChan chan messages.M3UA
 }
 
 var netMap = map[string]string{
@@ -414,10 +427,15 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		stateEventChan: make(chan State, 16),
 		// A peer under stress can emit Notifies steadily, so this is sized like
 		// statusChan rather than like the state channel.
-		mgmtChan:          make(chan *ManagementIndication, 64),
-		notificationQueue: make(chan mandatoryControl, defaultNotificationQueueSize),
-		cfg:               cfg,
-		sctpInfo:          &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
+		mgmtChan:                 make(chan *ManagementIndication, 64),
+		notificationQueue:        make(chan mandatoryControl, defaultNotificationQueueSize),
+		cfg:                      cfg,
+		sctpInfo:                 &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
+		dynamicPeerASKeys:        make(map[uint32]ASKey),
+		dynamicLocalASKeys:       make(map[uint32]ASKey),
+		dynamicPeerTrafficModes:  make(map[uint32]uint32),
+		dynamicLocalTrafficModes: make(map[uint32]uint32),
+		rkmResponseChan:          make(chan messages.M3UA, 1),
 		// A dialing ASP wants to carry traffic; Dial does not return until
 		// it does.
 		resumeTo: StateASPActive,
@@ -488,9 +506,9 @@ func (c *Association) trafficModePolicy() trafficModePolicy {
 		return trafficModePolicy{}
 	}
 	if c.isIPSPDoubleExchange() {
-		return c.peerIPSPTrafficModes.get(nil)
+		return c.withDynamicTrafficModes(c.peerIPSPTrafficModes.get(nil), false)
 	}
-	return c.trafficModes.get(c.cfg)
+	return c.withDynamicTrafficModes(c.trafficModes.get(c.cfg), false)
 }
 
 func (c *Association) localTrafficModePolicy() trafficModePolicy {
@@ -498,9 +516,31 @@ func (c *Association) localTrafficModePolicy() trafficModePolicy {
 		return trafficModePolicy{}
 	}
 	if c.isIPSPDoubleExchange() {
-		return c.localIPSPTrafficModes.get(nil)
+		return c.withDynamicTrafficModes(c.localIPSPTrafficModes.get(nil), true)
 	}
-	return c.trafficModes.get(c.cfg)
+	return c.withDynamicTrafficModes(c.trafficModes.get(c.cfg), true)
+}
+
+func (c *Association) withDynamicTrafficModes(policy trafficModePolicy, local bool) trafficModePolicy {
+	c.muDynamicASKeys.RLock()
+	dynamic := c.dynamicPeerTrafficModes
+	if local {
+		dynamic = c.dynamicLocalTrafficModes
+	}
+	if len(dynamic) == 0 {
+		c.muDynamicASKeys.RUnlock()
+		return policy
+	}
+	modes := make(map[uint32]uint32, len(policy.modes)+len(dynamic))
+	for routingContext, mode := range policy.modes {
+		modes[routingContext] = mode
+	}
+	for routingContext, mode := range dynamic {
+		modes[routingContext] = mode
+	}
+	c.muDynamicASKeys.RUnlock()
+	policy.modes = modes
+	return policy
 }
 
 func (c *Association) freezeTrafficModePolicies() {
@@ -849,7 +889,7 @@ func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, 
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.outboundNetworkAppearance().Copy(), rc, params.NewProtocolData(
+		c.networkAppearanceForRoutingContext(rc, false).Copy(), rc, params.NewProtocolData(
 			c.cfg.OriginatingPointCode, c.cfg.DestinationPointCode,
 			c.cfg.ServiceIndicator, c.cfg.NetworkIndicator,
 			c.cfg.MessagePriority, c.cfg.SignallingLinkSelection, b,
@@ -973,7 +1013,7 @@ func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDat
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.outboundNetworkAppearance().Copy(),
+		c.networkAppearanceForRoutingContext(rc, false).Copy(),
 		rc,           // the one context identifying this traffic flow
 		protocolData, // custom mtp3 protocol data OPC, DPC, SI, NI, MP, and SLS, flexible on active connections
 		c.cfg.CorrelationID.Copy(),
@@ -1192,7 +1232,9 @@ func (c *Association) lockOutboundDataScope(raw []byte) (func(), error) {
 	// peer-directed traffic flow. Its Network Appearance is independent of the
 	// local-directed flow used by outbound SCON.
 	if err := validateOutboundNetworkAppearanceAgainst(
-		data.NetworkAppearance, c.outboundNetworkAppearance(),
+		data.NetworkAppearance,
+		c.networkAppearanceForRoutingContext(data.RoutingContext, false),
+		c.allNetworkAppearancesForRoutingContext(data.RoutingContext, false),
 	); err != nil {
 		return nil, err
 	}
@@ -1291,7 +1333,9 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	// RFC 4666 Section 5.6.2 defines SCON as flowing opposite DATA between
 	// IPSPs, so Double Exchange validates it against the local-directed flow.
 	if err := validateOutboundNetworkAppearanceAgainst(
-		ssnmNetworkAppearance(decoded), c.localNetworkAppearance(),
+		ssnmNetworkAppearance(decoded),
+		c.networkAppearanceForRoutingContext(routingContext, true),
+		c.allNetworkAppearancesForRoutingContext(routingContext, true),
 	); err != nil {
 		return nil, err
 	}
@@ -1392,12 +1436,15 @@ func ssnmNetworkAppearance(message messages.M3UA) *params.Param {
 	}
 }
 
-func validateOutboundNetworkAppearanceAgainst(networkAppearance, configured *params.Param) error {
+func validateOutboundNetworkAppearanceAgainst(networkAppearance, configured *params.Param, allNetworkAppearances bool) error {
 	if networkAppearance == nil {
 		return nil
 	}
 	if networkAppearance.Tag != params.NetworkAppearance || len(networkAppearance.Data) != 4 {
 		return ErrInvalidNetworkAppearance
+	}
+	if allNetworkAppearances {
+		return nil
 	}
 	if configured == nil || configured.Tag != params.NetworkAppearance ||
 		len(configured.Data) != 4 ||
@@ -1770,17 +1817,20 @@ func (c *Association) configuredRoutingContexts() []uint32 {
 		if c.authorizationResolved {
 			configured := append([]uint32(nil), c.authorizedRCs...)
 			c.muAuthorizedRCs.RUnlock()
-			return configured
+			return appendRoutingContexts(configured, c.dynamicRoutingContexts(false))
 		}
 		c.muAuthorizedRCs.RUnlock()
 	}
 	if c.isIPSPDoubleExchange() {
-		return routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToPeer)
+		return appendRoutingContexts(
+			routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToPeer),
+			c.dynamicRoutingContexts(false),
+		)
 	}
 	if c.cfg == nil || c.cfg.RoutingContexts == nil {
-		return nil
+		return c.dynamicRoutingContexts(false)
 	}
-	return append([]uint32(nil), c.cfg.RoutingContexts.RoutingContexts()...)
+	return appendRoutingContexts(c.cfg.RoutingContexts.RoutingContexts(), c.dynamicRoutingContexts(false))
 }
 
 func (c *Association) configuredLocalRoutingContexts() []uint32 {
@@ -1788,7 +1838,10 @@ func (c *Association) configuredLocalRoutingContexts() []uint32 {
 		return nil
 	}
 	if c.isIPSPDoubleExchange() {
-		return routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal)
+		return appendRoutingContexts(
+			routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal),
+			c.dynamicRoutingContexts(true),
+		)
 	}
 	return c.configuredRoutingContexts()
 }
@@ -1820,7 +1873,7 @@ func (c *Association) configuredASKeys() []ASKey {
 	if c == nil {
 		return nil
 	}
-	if c.hasExplicitlyEmptyASPAuthorization() {
+	if c.hasExplicitlyEmptyASPAuthorization() && len(c.dynamicRoutingContexts(false)) == 0 {
 		return nil
 	}
 	if c.isIPSPDoubleExchange() && !c.hasPeerIPSPTrafficDirection() {
@@ -1840,6 +1893,14 @@ func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey
 	keys := make([]ASKey, 0, len(routingContexts))
 	seen := make(map[ASKey]struct{}, len(routingContexts))
 	for _, routingContext := range routingContexts {
+		if dynamic, ok := c.dynamicASKey(routingContext, false); ok {
+			if _, duplicate := seen[dynamic]; duplicate {
+				continue
+			}
+			seen[dynamic] = struct{}{}
+			keys = append(keys, dynamic)
+			continue
+		}
 		key := ASKey{
 			NetworkAppearance:    appearance,
 			NetworkAppearanceSet: appearanceSet,
@@ -1853,6 +1914,153 @@ func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey
 		keys = append(keys, key)
 	}
 	return keys
+}
+
+func appendRoutingContexts(configured, dynamic []uint32) []uint32 {
+	combined := make([]uint32, 0, len(configured)+len(dynamic))
+	seen := make(map[uint32]struct{}, len(configured)+len(dynamic))
+	for _, routingContext := range configured {
+		if _, duplicate := seen[routingContext]; duplicate {
+			continue
+		}
+		seen[routingContext] = struct{}{}
+		combined = append(combined, routingContext)
+	}
+	for _, routingContext := range dynamic {
+		if _, duplicate := seen[routingContext]; duplicate {
+			continue
+		}
+		seen[routingContext] = struct{}{}
+		combined = append(combined, routingContext)
+	}
+	return combined
+}
+
+func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bool) {
+	if c == nil || !key.RoutingContextSet {
+		return
+	}
+	c.muDynamicASKeys.Lock()
+	if local {
+		c.dynamicLocalASKeys[key.RoutingContext] = key
+		if routingKey.TrafficModeSet {
+			c.dynamicLocalTrafficModes[key.RoutingContext] = routingKey.TrafficMode
+		}
+	} else {
+		c.dynamicPeerASKeys[key.RoutingContext] = key
+		if routingKey.TrafficModeSet {
+			c.dynamicPeerTrafficModes[key.RoutingContext] = routingKey.TrafficMode
+		}
+	}
+	c.muDynamicASKeys.Unlock()
+}
+
+func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
+	if c == nil {
+		return
+	}
+	c.muDynamicASKeys.Lock()
+	if local {
+		delete(c.dynamicLocalASKeys, routingContext)
+		delete(c.dynamicLocalTrafficModes, routingContext)
+	} else {
+		delete(c.dynamicPeerASKeys, routingContext)
+		delete(c.dynamicPeerTrafficModes, routingContext)
+	}
+	c.muDynamicASKeys.Unlock()
+}
+
+func (c *Association) dynamicASKey(routingContext uint32, local bool) (ASKey, bool) {
+	if c == nil {
+		return ASKey{}, false
+	}
+	c.muDynamicASKeys.RLock()
+	var key ASKey
+	var ok bool
+	if local {
+		key, ok = c.dynamicLocalASKeys[routingContext]
+	} else {
+		key, ok = c.dynamicPeerASKeys[routingContext]
+	}
+	c.muDynamicASKeys.RUnlock()
+	return key, ok
+}
+
+func (c *Association) dynamicRoutingContexts(local bool) []uint32 {
+	if c == nil {
+		return nil
+	}
+	c.muDynamicASKeys.RLock()
+	target := c.dynamicPeerASKeys
+	if local {
+		target = c.dynamicLocalASKeys
+	}
+	routingContexts := make([]uint32, 0, len(target))
+	for routingContext := range target {
+		routingContexts = append(routingContexts, routingContext)
+	}
+	c.muDynamicASKeys.RUnlock()
+	sort.Slice(routingContexts, func(i, j int) bool { return routingContexts[i] < routingContexts[j] })
+	return routingContexts
+}
+
+func (c *Association) networkAppearanceForRoutingContext(routingContext *params.Param, local bool) *params.Param {
+	configured := c.outboundNetworkAppearance()
+	if local {
+		configured = c.localNetworkAppearance()
+	}
+	var value uint32
+	valueSet := false
+	if routingContext != nil {
+		contexts := routingContext.RoutingContexts()
+		if len(contexts) == 1 {
+			value, valueSet = contexts[0], true
+		}
+	} else {
+		contexts := c.configuredRoutingContexts()
+		if local && c.isIPSPDoubleExchange() {
+			contexts = c.configuredLocalRoutingContexts()
+		}
+		if len(contexts) == 1 {
+			value, valueSet = contexts[0], true
+		}
+	}
+	if valueSet {
+		if key, ok := c.dynamicASKey(value, local); ok {
+			if !key.NetworkAppearanceSet {
+				return nil
+			}
+			return params.NewNetworkAppearance(key.NetworkAppearance)
+		}
+	}
+	return configured
+}
+
+func (c *Association) allNetworkAppearancesForRoutingContext(routingContext *params.Param, local bool) bool {
+	if c == nil {
+		return false
+	}
+	var routingContextValue uint32
+	var routingContextSet bool
+	if routingContext != nil {
+		contexts := routingContext.RoutingContexts()
+		if len(contexts) == 1 {
+			routingContextValue, routingContextSet = contexts[0], true
+		}
+	} else {
+		contexts := c.configuredRoutingContexts()
+		if local && c.isIPSPDoubleExchange() {
+			contexts = c.configuredLocalRoutingContexts()
+		}
+		if len(contexts) == 1 {
+			routingContextValue, routingContextSet = contexts[0], true
+		}
+	}
+	if !routingContextSet {
+		return false
+	}
+	key, ok := c.dynamicASKey(routingContextValue, local)
+	return ok && !key.NetworkAppearanceSet
 }
 
 func (c *Association) applicationServerNetworkAppearance() *params.Param {

@@ -193,6 +193,15 @@ func newMessageFor(class, msgType uint8) M3UA {
 		m = &AspInactive{}
 	case combine(MsgClassASPTM, MsgTypeAspInactiveAck):
 		m = &AspInactiveAck{}
+	// Routing Key Management Messages
+	case combine(MsgClassRKM, MsgTypeRegistrationRequest):
+		m = &RegistrationRequest{}
+	case combine(MsgClassRKM, MsgTypeRegistrationResponse):
+		m = &RegistrationResponse{}
+	case combine(MsgClassRKM, MsgTypeDeregistrationRequest):
+		m = &DeregistrationRequest{}
+	case combine(MsgClassRKM, MsgTypeDeregistrationResponse):
+		m = &DeregistrationResponse{}
 	// Management Messages
 	case combine(MsgClassManagement, MsgTypeError):
 		m = &Error{}

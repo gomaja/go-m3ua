@@ -158,6 +158,70 @@ The same APIs apply whether the ASP or SGP initiated SCTP. `Dial`, `Listen`,
 and `Accept` describe SCTP establishment only; `RoleASP` and `RoleSGP` select
 the RFC procedures.
 
+## Routing Key Management
+
+An SGP or IPSP that supports the optional RFC 4666 Sections 3.6 and 4.4
+procedures configures the policy on `EndpointConfig`, not on an Association:
+
+```go
+endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Role: m3ua.RoleSGP,
+    RoutingKeyManagement: &m3ua.RoutingKeyManagementConfig{
+        AuthorizeRegistration: func(request m3ua.RoutingKeyRegistrationRequest) m3ua.RegistrationStatus {
+            return m3ua.RegistrationSuccessfullyRegistered
+        },
+        AuthorizeDeregistration: func(request m3ua.RoutingKeyDeregistrationRequest) bool {
+            return true
+        },
+        ProvisionedRoutingKeys: []m3ua.ProvisionedRoutingKey{
+            // Optional static Routing Key inventory.
+        },
+        AllowDynamicRoutingKeys: true,
+        MaxDynamicRoutingKeys: 1024,
+        RemoveUnusedRoutingKeys: true,
+    },
+})
+```
+
+`AuthorizeRegistration` is mandatory whenever `RoutingKeyManagement` is
+configured. Returning `RegistrationSuccessfullyRegistered` approves the
+request; a defined failure `RegistrationStatus` becomes that Routing Key's REG
+RSP result. `RegistrationRoutingKeyAlreadyRegistered` is determined by the
+Endpoint registry rather than authorization policy. `AuthorizeDeregistration`
+is optional and defaults to allowing an inactive registered ASP/IPSP to
+deregister. A custom `AllocateRoutingContext` may select a non-zero unused
+value; otherwise the Endpoint selects the lowest available non-zero value.
+
+An ASP or IPSP starts the corresponding Layer Management procedure through its
+Association:
+
+```go
+registrations, err := association.RegisterRoutingKeys(ctx,
+    m3ua.RoutingKeyRegistration{RoutingKey: routingKey},
+)
+if err != nil {
+    return err
+}
+
+_, err = association.DeregisterRoutingContexts(ctx,
+    registrations[0].RoutingContext,
+)
+```
+
+The Association must have completed ASP Up in the relevant traffic direction.
+For IPSP Double Exchange, locally originated registration changes only
+`TrafficToLocal`; a peer's REG REQ changes only `TrafficToPeer`. Single
+Exchange uses its shared traffic scope.
+
+If a wire Routing Key omits Network Appearance and the Association has one
+configured Network Appearance, the authorization request exposes that implied
+value and sets `NetworkAppearanceImplied`. If neither carries a value, the
+Routing Key applies to all Network Appearances and must be the only Routing Key
+registered on that Association, per RFC 4666 Section 3.6.1.
+
+The request context bounds a local REG/DEREG wait. RFC 4666 defines no RKM
+T(ack); duplicate peer requests are answered from deterministic replay state.
+
 ## Renamed API
 
 | Before v1.2 | v1.2 |

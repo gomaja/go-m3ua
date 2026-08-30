@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -56,6 +57,7 @@ type Endpoint struct {
 	nif          *nifAvailability
 	destinations *destinations
 	mtp3Restarts *mtp3RestartRegistry
+	routingKeys  *routingKeyRegistry
 }
 
 // NewEndpoint creates an M3UA endpoint with an immutable protocol role and
@@ -69,12 +71,26 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		if config.Role != RoleSGP && config.SGP != nil {
 			return nil, ErrInvalidRoleConfiguration
 		}
+		if config.Role == RoleASP && config.RoutingKeyManagement != nil {
+			return nil, fmt.Errorf("%w: Routing Key Management responder policy applies only to an SGP or IPSP", ErrInvalidRoleConfiguration)
+		}
+		if err := validateRoutingKeyManagementConfig(config.RoutingKeyManagement); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidRoleConfiguration, err)
+		}
 		var routes *aspRoutes
 		if config.Role == RoleASP {
 			var err error
 			routes, err = newASPRoutes(config.ASP)
 			if err != nil {
 				return nil, err
+			}
+		}
+		var routingKeys *routingKeyRegistry
+		if config.Role == RoleSGP || config.Role == RoleIPSP {
+			var err error
+			routingKeys, err = newRoutingKeyRegistry(config.RoutingKeyManagement)
+			if err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrInvalidRoleConfiguration, err)
 			}
 		}
 		ctx, cancel := context.WithCancelCause(context.Background())
@@ -87,6 +103,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 			cancel:       cancel,
 			mtp3Restarts: &mtp3RestartRegistry{},
 			aspRoutes:    routes,
+			routingKeys:  routingKeys,
 		}
 		switch config.Role {
 		case RoleSGP:
@@ -188,13 +205,18 @@ func (e *Endpoint) forgetAssociation(association *Association) {
 	e.mu.Lock()
 	delete(e.associations, association)
 	applicationServers := e.as
+	routingKeys := e.routingKeys
 	aspRoutes := e.aspRoutes
 	e.mu.Unlock()
 	if aspRoutes != nil {
 		aspRoutes.detach(association)
 	}
+	removedDynamicKeys := routingKeys.forgetAssociation(association)
 	if applicationServers != nil {
 		applicationServers.forget(association)
+		for _, key := range removedDynamicKeys {
+			applicationServers.deregisterDynamicASP(association, key, true)
+		}
 	}
 }
 

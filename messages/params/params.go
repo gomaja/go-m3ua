@@ -39,6 +39,38 @@ const (
 	CorrelationID
 )
 
+func isDefinedParameterTag(tag uint16) bool {
+	switch tag {
+	case InfoString,
+		RoutingContext,
+		DiagnosticInformation,
+		HeartbeatData,
+		TrafficModeType,
+		ErrorCode,
+		Status,
+		AspIdentifier,
+		AffectedPointCode,
+		CorrelationID,
+		NetworkAppearance,
+		UserCause,
+		CongestionIndications,
+		ConcernedDestination,
+		RoutingKey,
+		RegistrationResult,
+		DeregistrationResult,
+		LocalRoutingKeyIdentifier,
+		DestinationPointCode,
+		ServiceIndicators,
+		OriginatingPointCodeList,
+		ProtocolData,
+		RegistrationStatus,
+		DeregistrationStatus:
+		return true
+	default:
+		return false
+	}
+}
+
 // M3UA-specific Parameter Tag definitions.
 const (
 	NetworkAppearance uint16 = uint16(0x200 | iota)

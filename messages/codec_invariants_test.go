@@ -482,6 +482,10 @@ func validTypedMessageFixtures() []typedMessageFixture {
 		{name: "ASPAC Ack", message: NewAspActiveAck(trafficMode(), routingContext(), infoString())},
 		{name: "ASPIA", message: NewAspInactive(routingContext(), infoString())},
 		{name: "ASPIA Ack", message: NewAspInactiveAck(routingContext(), infoString())},
+		{name: "REG REQ", message: NewRegistrationRequest(validRoutingKeyParam(1, 7))},
+		{name: "REG RSP", message: NewRegistrationResponse(validRegistrationResultParam(1, 7))},
+		{name: "DEREG REQ", message: NewDeregistrationRequest(routingContext())},
+		{name: "DEREG RSP", message: NewDeregistrationResponse(validDeregistrationResultParam(7))},
 	}
 }
 
