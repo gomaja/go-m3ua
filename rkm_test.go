@@ -13,69 +13,111 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// RKM (dynamic Routing Key registration) is not implemented, and RFC 4666 is
-// specific about how a node says so. Section 4.4.1: "If the SGP does not
-// support the registration procedure, the SGP returns an Error message to the
-// ASP, with an error code of 'Unsupported Message Class'."
-//
-// Answering with the type-level error instead tells a peer that the class is
-// supported but that particular type is not, so an ASP attempting dynamic
-// registration cannot tell it must fall back to static configuration. It
-// retries, or treats a working SGP as broken.
-
-// rkmMessage builds a bare RKM message of the given type. RKM has no codecs
-// here, so these parse as *messages.Generic — which is exactly the path a real
-// REG REQ takes today.
-func rkmMessage(t *testing.T, msgType uint8) messages.M3UA {
+func registrationRequestMessage(t *testing.T) *messages.RegistrationRequest {
 	t.Helper()
-
-	m, err := messages.Parse([]byte{
-		0x01, 0x00, messages.MsgClassRKM, msgType, 0x00, 0x00, 0x00, 0x08,
+	routingKey, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                testRoutingKey(10, 100, 3),
 	})
 	if err != nil {
-		t.Fatalf("parsing a bare RKM message: %v", err)
+		t.Fatalf("routingKeyParameter: %v", err)
 	}
-	return m
+	return messages.NewRegistrationRequest(routingKey)
 }
 
-// Every RKM message type must be answered with "Unsupported Message Class".
-func TestRKMIsAnsweredWithUnsupportedClass(t *testing.T) {
+func deregistrationRequestMessage() *messages.DeregistrationRequest {
+	return messages.NewDeregistrationRequest(params.NewRoutingContext(1))
+}
+
+// RFC 4666 Section 4.4.1 requires an SGP that does not support Registration
+// to answer REG REQ with Unsupported Message Class. Deregistration belongs to
+// the same optional RKM procedure and is rejected at the same class boundary.
+func TestRKMDisabledResponderReturnsUnsupportedClass(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
-		msgType uint8
+		message messages.M3UA
 	}{
-		{"REG REQ", messages.MsgTypeRegistrationRequest},
-		{"REG RSP", messages.MsgTypeRegistrationResponse},
-		{"DEREG REQ", messages.MsgTypeDeregistrationRequest},
-		{"DEREG RSP", messages.MsgTypeDeregistrationResponse},
+		{"REG REQ", registrationRequestMessage(t)},
+		{"DEREG REQ", deregistrationRequestMessage()},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
+		for _, role := range []Role{RoleSGP, RoleIPSP} {
+			t.Run(tt.name+"/"+role.String(), func(t *testing.T) {
+				conn, sent := newTestConn(t, StateASPInactive, role)
 
-			conn.handleSignals(context.Background(), rkmMessage(t, tt.msgType))
+				conn.handleSignals(context.Background(), tt.message)
 
-			// The dispatcher reports through errChan; handleErrors is what puts
-			// the Error on the wire, so run it as monitor() would.
-			var reported error
+				var reported error
+				select {
+				case reported = <-conn.errChan:
+				default:
+					t.Fatal("no error reported for a disabled RKM request")
+				}
+
+				var unsupportedClass *UnsupportedClassError
+				if !errors.As(reported, &unsupportedClass) {
+					t.Fatalf("reported %T (%v), want *UnsupportedClassError per RFC 4666 Section 4.4.1",
+						reported, reported)
+				}
+
+				if err := conn.handleErrors(reported); err != nil {
+					t.Fatalf("handleErrors: %v", err)
+				}
+				codes := errorCodes(*sent)
+				if len(codes) != 1 || codes[0] != params.UnsupportedMessageErrorClass {
+					t.Errorf("error code = %v, want [%d]", codes, params.UnsupportedMessageErrorClass)
+				}
+			})
+		}
+	}
+}
+
+func TestRKMDisabledResponderReturnsUnsupportedClassBeforeParameterValidation(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPInactive, RoleSGP)
+	conn.dispatchRaw(context.Background(), inbound{
+		data:   []byte{0x01, 0x00, messages.MsgClassRKM, messages.MsgTypeRegistrationRequest, 0, 0, 0, 8},
+		ppid:   M3UAPPID,
+		stream: 0,
+	})
+
+	select {
+	case reported := <-conn.errChan:
+		var unsupportedClass *UnsupportedClassError
+		if !errors.As(reported, &unsupportedClass) {
+			t.Fatalf("reported %T (%v), want *UnsupportedClassError", reported, reported)
+		}
+	default:
+		t.Fatal("no error reported for malformed disabled REG REQ")
+	}
+}
+
+func TestRKMUnexpectedDirectionReturnsUnexpectedMessage(t *testing.T) {
+	registrationResponse := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(1),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(1),
+		),
+	))
+	tests := []struct {
+		name    string
+		role    Role
+		message messages.M3UA
+	}{
+		{"ASP receives REG REQ", RoleASP, registrationRequestMessage(t)},
+		{"SGP receives REG RSP", RoleSGP, registrationResponse},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			conn, _ := newTestConn(t, StateASPInactive, test.role)
+			conn.handleSignals(context.Background(), test.message)
 			select {
-			case reported = <-conn.errChan:
+			case reported := <-conn.errChan:
+				var unexpected *UnexpectedMessageError
+				if !errors.As(reported, &unexpected) {
+					t.Fatalf("reported %T (%v), want *UnexpectedMessageError", reported, reported)
+				}
 			default:
-				t.Fatal("no error reported for an RKM message")
-			}
-
-			var unsupportedClass *UnsupportedClassError
-			if !errors.As(reported, &unsupportedClass) {
-				t.Fatalf("reported %T (%v), want *UnsupportedClassError per RFC 4666 Section 4.4.1",
-					reported, reported)
-			}
-
-			if e := conn.handleErrors(reported); e != nil {
-				t.Fatalf("handleErrors() error = %v", e)
-			}
-			codes := errorCodes(*sent)
-			if len(codes) != 1 || codes[0] != params.UnsupportedMessageErrorClass {
-				t.Errorf("error code = %v, want [%d] (Unsupported Message Class); [%d] is the type-level error",
-					codes, params.UnsupportedMessageErrorClass, params.UnsupportedMessageErrorType)
+				t.Fatal("no error reported for wrong RKM direction")
 			}
 		})
 	}
@@ -146,34 +188,6 @@ func TestGenericReportsItsActualClass(t *testing.T) {
 	}
 }
 
-// The RKM answer must not depend on role or state: an ASP and an SGP both lack
-// the procedures, and a peer may send REG REQ at any point after ASP Up.
-func TestRKMAnswerIsRoleAndStateIndependent(t *testing.T) {
-	for _, role := range []Role{RoleASP, RoleSGP} {
-		for _, st := range []State{StateASPDown, StateASPInactive, StateASPActive} {
-			conn, _ := newTestConn(t, st, role)
-
-			conn.handleSignals(context.Background(),
-				rkmMessage(t, messages.MsgTypeRegistrationRequest))
-
-			select {
-			case err := <-conn.errChan:
-				var unsupportedClass *UnsupportedClassError
-				if !errors.As(err, &unsupportedClass) {
-					t.Errorf("role %s state %v: reported %T, want *UnsupportedClassError", role, st, err)
-				}
-			default:
-				t.Errorf("role %s state %v: no error reported for RKM", role, st)
-			}
-
-			// And it must still publish exactly one state, holding the current one.
-			if got := len(conn.stateChan); got != 1 {
-				t.Errorf("role %s state %v: published %d states, want 1", role, st, got)
-			}
-		}
-	}
-}
-
 // Only ASP and SGP roles are implemented here. An Association holding any other
 // role must report it rather than falling through to the ASP path: IPSP (RFC 4666 Section
 // 1.4.3.4) is the same procedures with symmetric roles, so adding it means
@@ -230,13 +244,15 @@ func FuzzDispatchAnyClassAndType(f *testing.F) {
 					class, msgType, st, role, got)
 			}
 
-			// RKM must always be answered at the class level (Section 4.4.1).
+			// An unknown type inside implemented RKM is a type-level error. A
+			// supported RKM type is parsed above or rejected as malformed before
+			// it reaches this dispatcher sweep.
 			if class == messages.MsgClassRKM {
 				select {
 				case err := <-conn.errChan:
-					var unsupportedClass *UnsupportedClassError
-					if !errors.As(err, &unsupportedClass) {
-						t.Fatalf("class=%d type=%d: reported %T, want *UnsupportedClassError",
+					var unsupportedType *UnsupportedMessageError
+					if !errors.As(err, &unsupportedType) {
+						t.Fatalf("class=%d type=%d: reported %T, want *UnsupportedMessageError",
 							class, msgType, err)
 					}
 				default:

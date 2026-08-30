@@ -4,7 +4,10 @@
 
 package params
 
-import "log"
+import (
+	"fmt"
+	"log"
+)
 
 // RegistrationResultPayload is the payload of RegistrationResult.
 type RegistrationResultPayload struct {
@@ -103,6 +106,9 @@ func (d *RegistrationResultPayload) unmarshalBinaryAtDepth(b []byte, depth int) 
 			}
 			decoded.RoutingContext = p
 		default:
+			if IsKnownM3UAParameterTag(p.Tag) {
+				return invalidNestedParameter("Registration Result", fmt.Sprintf("unexpected parameter tag %#04x", p.Tag))
+			}
 			decoded.Others = append(decoded.Others, p)
 		}
 	}
@@ -124,7 +130,11 @@ func (d *RegistrationResultPayload) unmarshalBinaryAtDepth(b []byte, depth int) 
 
 	status := decoded.RegistrationStatus.RegistrationStatus()
 	routingContext := decoded.RoutingContext.RoutingContext()
-	if status != SuccessfullyRegistered && status != RoutingKeyAlreadyRegistered && routingContext != 0 {
+	registered := status == SuccessfullyRegistered || status == RoutingKeyAlreadyRegistered
+	if registered && routingContext == 0 {
+		return invalidNestedParameter("Registration Result", "successful or already registered status requires the actual Routing Context")
+	}
+	if !registered && routingContext != 0 {
 		return invalidNestedParameter("Registration Result", "failure status requires Routing Context 0")
 	}
 	*d = decoded

@@ -77,7 +77,11 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 	if registry == nil {
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
-	return distributeData(registry, data)
+	var routingKeys *routingKeyRegistry
+	if l.endpoint != nil {
+		routingKeys = l.endpoint.routingKeys
+	}
+	return distributeData(registry, routingKeys, data)
 }
 
 // DistributeData sends one DATA message through the Application Server
@@ -101,12 +105,12 @@ func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, 
 	if c.as == nil {
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
-	return distributeData(c.as, data)
+	return distributeData(c.as, c.routingKeyRegistry(), data)
 }
 
-func distributeData(registry *applicationServers, data *messages.Data) (TrafficDistribution, error) {
+func distributeData(registry *applicationServers, routingKeys *routingKeyRegistry, data *messages.Data) (TrafficDistribution, error) {
 	policy := registry.distribution
-	owned, protocolData, encodedSize, key, err := prepareDistributionData(registry, data)
+	owned, protocolData, encodedSize, key, err := prepareDistributionData(registry, routingKeys, data)
 	if err != nil {
 		return TrafficDistribution{}, err
 	}
@@ -125,7 +129,7 @@ func distributeData(registry *applicationServers, data *messages.Data) (TrafficD
 	return applicationServer.distribute(owned, protocolData, flow, encodedSize, policy.messageLimit, policy.byteLimit)
 }
 
-func prepareDistributionData(registry *applicationServers, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, ASKey, error) {
+func prepareDistributionData(registry *applicationServers, routingKeys *routingKeyRegistry, data *messages.Data) (*messages.Data, *params.ProtocolDataPayload, int, ASKey, error) {
 	if data == nil {
 		return nil, nil, 0, ASKey{}, errors.New("cannot distribute nil DATA")
 	}
@@ -149,11 +153,18 @@ func prepareDistributionData(registry *applicationServers, data *messages.Data) 
 	if owned.ProtocolData.Tag != params.ProtocolData {
 		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", params.ErrInvalidType)
 	}
+	if len(owned.ProtocolData.Data) < 12 {
+		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", params.ErrInvalidLength)
+	}
 
 	if err := validateDistributionNetworkAppearanceShape(owned.NetworkAppearance); err != nil {
 		return nil, nil, 0, ASKey{}, err
 	}
-	key, err := resolveDistributionRoutingContext(registry, owned)
+	protocolData, err := owned.ProtocolData.ProtocolData()
+	if err != nil {
+		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", err)
+	}
+	key, err := resolveDistributionRoutingContext(registry, routingKeys, owned, protocolData)
 	if err != nil {
 		return nil, nil, 0, ASKey{}, err
 	}
@@ -176,8 +187,38 @@ func prepareDistributionData(registry *applicationServers, data *messages.Data) 
 	return validated, validatedProtocolData, len(raw), key, nil
 }
 
-func resolveDistributionRoutingContext(registry *applicationServers, data *messages.Data) (ASKey, error) {
+func resolveDistributionRoutingContext(
+	registry *applicationServers,
+	routingKeys *routingKeyRegistry,
+	data *messages.Data,
+	protocolData *params.ProtocolDataPayload,
+) (ASKey, error) {
 	if data.RoutingContext == nil {
+		if routingKeys != nil {
+			networkAppearance, networkAppearanceSet := appearanceOf(data.NetworkAppearance)
+			matches, configured := routingKeys.matchingASKeys(
+				networkAppearance,
+				networkAppearanceSet,
+				protocolData.OriginatingPointCode,
+				protocolData.DestinationPointCode,
+				protocolData.ServiceIndicator,
+			)
+			switch len(matches) {
+			case 1:
+				data.RoutingContext = params.NewRoutingContext(matches[0].RoutingContext)
+				return matches[0], nil
+			case 0:
+				if configured {
+					staticKeys := registry.staticallyConfiguredKeys()
+					if len(staticKeys) > 0 {
+						return resolveOmittedDistributionRoutingContextForKeys(staticKeys, data)
+					}
+					return ASKey{}, ErrNoMatchingRoutingKey
+				}
+			default:
+				return ASKey{}, ErrInvalidNetworkAppearance
+			}
+		}
 		return resolveOmittedDistributionRoutingContext(registry, data)
 	}
 	if data.RoutingContext.Tag != params.RoutingContext {
@@ -188,11 +229,14 @@ func resolveDistributionRoutingContext(registry *applicationServers, data *messa
 	}
 	routingContexts := data.RoutingContext.RoutingContexts()
 	rtCtx := routingContexts[0]
-	return resolveExplicitDistributionRoutingContext(registry, data.NetworkAppearance, rtCtx)
+	return resolveExplicitDistributionRoutingContext(registry, routingKeys, data.NetworkAppearance, rtCtx)
 }
 
 func resolveOmittedDistributionRoutingContext(registry *applicationServers, data *messages.Data) (ASKey, error) {
-	keys := registry.keys()
+	return resolveOmittedDistributionRoutingContextForKeys(registry.keys(), data)
+}
+
+func resolveOmittedDistributionRoutingContextForKeys(keys []ASKey, data *messages.Data) (ASKey, error) {
 	if data.NetworkAppearance != nil {
 		networkAppearance := data.NetworkAppearance.NetworkAppearance()
 		keys = filterASKeysForNetworkAppearance(keys, networkAppearance)
@@ -216,7 +260,12 @@ func resolveOmittedDistributionRoutingContext(registry *applicationServers, data
 	return ASKey{}, ErrInvalidNetworkAppearance
 }
 
-func resolveExplicitDistributionRoutingContext(registry *applicationServers, networkAppearance *params.Param, rtCtx uint32) (ASKey, error) {
+func resolveExplicitDistributionRoutingContext(
+	registry *applicationServers,
+	routingKeys *routingKeyRegistry,
+	networkAppearance *params.Param,
+	rtCtx uint32,
+) (ASKey, error) {
 	if networkAppearance == nil {
 		matches := registry.asKeysForRoutingContext(rtCtx)
 		switch len(matches) {
@@ -233,6 +282,13 @@ func resolveExplicitDistributionRoutingContext(registry *applicationServers, net
 	key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(networkAppearance)
 	if _, ok := registry.lookup(key); ok {
 		return key, nil
+	}
+	if routingKey, ok := routingKeys.asKey(rtCtx); ok && !routingKey.NetworkAppearanceSet {
+		// RFC 4666 Section 3.6.1: an omitted Network Appearance can make the
+		// Routing Key apply to all Network Appearances.
+		if _, registered := registry.lookup(routingKey); registered {
+			return routingKey, nil
+		}
 	}
 	if len(registry.asKeysForRoutingContext(rtCtx)) > 0 {
 		return ASKey{}, NewInvalidNetworkAppearanceError(key.NetworkAppearance)

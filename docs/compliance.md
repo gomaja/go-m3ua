@@ -47,9 +47,36 @@ The ASP Endpoint implements the route function described by RFC 4666 Sections
 
 ## RKM scope
 
-Dynamic Routing Key Management is intentionally not implemented. RFC 4666 Section 4.4.1 permits a node that does not support the registration procedure to answer RKM with Error "Unsupported Message Class". The repository has tests covering that behavior for REG REQ, REG RSP, DEREG REQ, and DEREG RSP across roles and states.
+RFC 4666 Sections 3.6 and 4.4 Routing Key Management is implemented for ASP,
+SGP, and IPSP Endpoints:
 
-Static Routing Context and Routing Key behavior is implemented and tested separately. If dynamic RKM is later added, it must include full message codecs, AS/ASP registry mutation rules, permission/status handling, collision handling, and race tests.
+- REG REQ, REG RSP, DEREG REQ, and DEREG RSP use strict typed codecs with
+  message and nested-parameter fuzz coverage.
+- The SGP/IPSP registry applies authorization, deterministic Routing Context
+  allocation, provisioned/dynamic coexistence, duplicate replay, overlap
+  rejection, resource bounds, and inactive-only deregistration atomically.
+- Registration batches return one independent result per Routing Key. REG RSP
+  and DEREG RSP may be split across messages as RFC 4666 permits.
+- An unsupported nested Routing Key field produces Registration Status 9 for
+  that key instead of silently widening its traffic selector. Identical result
+  replay is tolerated, while contradictory REG RSP or DEREG RSP results for
+  one correlation value are rejected without applying that response.
+- Routing Keys with an omitted Network Appearance use the Association's single
+  configured appearance when available. Otherwise the key applies to all
+  Network Appearances and is enforced as the only key registered on that
+  Association, as required by Section 3.6.1.
+- SGP DATA distribution resolves an omitted Routing Context from the registered
+  DPC, SI, OPC mask, and Network Appearance traffic selector; ambiguity is
+  rejected rather than guessed.
+- IPSP Single Exchange shares one RKM traffic scope. IPSP Double Exchange keeps
+  locally and remotely registered traffic directions independent.
+- RFC 4666 defines no RKM acknowledgement timer. Local waits use caller
+  contexts, while responder replay state makes peer retransmissions
+  deterministic without inventing an RKM T(ack).
+- Unresolved requester outcomes share a 1,024-result Association budget. New
+  REG/DEREG procedures fail before transmission with `ErrRKMOutcomeLimit` when
+  accepting the new request would exceed that budget, and delayed responses
+  release capacity.
 
 ## Go implementation survey
 
@@ -70,7 +97,7 @@ Application/plugin hits from GitHub code search were not treated as competing li
 | Original upstream #28 / PR #27 | Broken SCTP connections did not close correctly | Covered by close/reconnect/read-deadline tests. |
 | Original upstream #25 / PR #26 | M3UA BEAT started before ASP Up and dropped connections | Covered by state-gated heartbeat tests and echo validation. |
 | Original upstream #17 / PR #18 | M3UA length calculation errors | Covered by codec invariant and wire length tests. |
-| Original upstream #3 | RKM not implemented | Deliberately answered as Unsupported Message Class per RFC 4666 Section 4.4.1. |
+| Original upstream #3 | RKM not implemented | Full strict codecs, registration/deregistration procedures, policy, allocation, collision handling, and race coverage are implemented. |
 | Original upstream #59 / PR #60 | ASP Down handling from SGP to ASP | Covered by ASP Down state/quiescence tests. |
 | Original upstream PR #61 | Optional SCTP SACK timer control | Implemented through `AssociationConfig.SetSCTPSACK` / `Association.SetSCTPSACK`, with RFC 9260 500 ms validation. |
 | Original upstream PR #63 | SCTP dependency PPID handling | Implemented and tested with exported `M3UAPPID == 3` and inbound PPID filtering. |

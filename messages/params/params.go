@@ -39,6 +39,13 @@ const (
 	CorrelationID
 )
 
+// IsKnownM3UAParameterTag reports whether RFC 4666 Section 3.2 assigns,
+// reserves, or marks a parameter tag as not used by M3UA. Such values are not
+// future-extension tags and cannot be accepted as opaque RKM extensions.
+func IsKnownM3UAParameterTag(tag uint16) bool {
+	return tag <= CorrelationID || tag >= NetworkAppearance && tag <= DeregistrationStatus
+}
+
 // M3UA-specific Parameter Tag definitions.
 const (
 	NetworkAppearance uint16 = uint16(0x200 | iota)

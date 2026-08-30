@@ -4,7 +4,10 @@
 
 package params
 
-import "log"
+import (
+	"fmt"
+	"log"
+)
 
 // RoutingKeyGroup is one Destination Point Code and its optional Service
 // Indicators and Originating Point Code List.
@@ -188,6 +191,9 @@ func (r *RoutingKeyPayload) unmarshalBinaryAtDepth(b []byte, depth int) error {
 			}
 			group.OriginatingPointCodeList = p
 		default:
+			if IsKnownM3UAParameterTag(p.Tag) {
+				return invalidNestedParameter("Routing Key", fmt.Sprintf("unexpected parameter tag %#04x", p.Tag))
+			}
 			decoded.Others = append(decoded.Others, p)
 		}
 	}

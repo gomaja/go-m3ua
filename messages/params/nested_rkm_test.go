@@ -613,7 +613,6 @@ func TestRegistrationResultStructureAndCrossFieldRules(t *testing.T) {
 		{name: "success carries assigned context", status: SuccessfullyRegistered, ctx: 7},
 		{name: "ordinary failure carries zero context", status: PermissionDenied, ctx: 0},
 		{name: "already registered carries actual context", status: RoutingKeyAlreadyRegistered, ctx: 7},
-		{name: "already registered may carry context zero", status: RoutingKeyAlreadyRegistered, ctx: 0},
 	}
 	for _, test := range valid {
 		t.Run("valid/"+test.name, func(t *testing.T) {
@@ -645,6 +644,22 @@ func TestRegistrationResultStructureAndCrossFieldRules(t *testing.T) {
 		name   string
 		params []*Param
 	}{
+		{
+			name: "successful registration with zero Routing Context",
+			params: []*Param{
+				localIdentifier,
+				NewRegistrationStatus(SuccessfullyRegistered),
+				NewRoutingContext(0),
+			},
+		},
+		{
+			name: "already registered with zero Routing Context",
+			params: []*Param{
+				localIdentifier,
+				NewRegistrationStatus(RoutingKeyAlreadyRegistered),
+				NewRoutingContext(0),
+			},
+		},
 		{
 			name:   "missing Local RK Identifier",
 			params: []*Param{NewRegistrationStatus(SuccessfullyRegistered), NewRoutingContext(1)},
@@ -777,6 +792,59 @@ func TestNestedResultUnknownParametersArePreserved(t *testing.T) {
 		t.Fatalf("DeregistrationResult() error = %v", err)
 	} else if len(decoded.Others) != 2 {
 		t.Fatalf("deregistration round-trip extensions = %d, want 2", len(decoded.Others))
+	}
+}
+
+func TestNestedRKMContainersRejectMisplacedDefinedParameters(t *testing.T) {
+	tests := []struct {
+		name  string
+		parse func([]byte) error
+		value []byte
+	}{
+		{
+			name: "Routing Key Protocol Data",
+			parse: func(value []byte) error {
+				_, err := ParseRoutingKeyPayload(value)
+				return err
+			},
+			value: joinNestedParams(t,
+				NewLocalRoutingKeyIdentifier(1),
+				NewDestinationPointCode(1),
+				NewProtocolData(1, 2, ServiceIndSCCP, 0, 0, 1, nil),
+			),
+		},
+		{
+			name: "Registration Result INFO String",
+			parse: func(value []byte) error {
+				_, err := ParseRegistrationResultPayload(value)
+				return err
+			},
+			value: joinNestedParams(t,
+				NewLocalRoutingKeyIdentifier(1),
+				NewRegistrationStatus(SuccessfullyRegistered),
+				NewRoutingContext(1),
+				NewInfoString("misplaced"),
+			),
+		},
+		{
+			name: "Deregistration Result Traffic Mode",
+			parse: func(value []byte) error {
+				_, err := ParseDeregResultPayload(value)
+				return err
+			},
+			value: joinNestedParams(t,
+				NewRoutingContext(1),
+				NewDeregistrationStatus(SuccessfullyDeregistered),
+				NewTrafficModeType(TrafficModeLoadshare),
+			),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.parse(test.value); !errors.Is(err, ErrInvalidValue) {
+				t.Fatalf("parse error = %v, want ErrInvalidValue", err)
+			}
+		})
 	}
 }
 

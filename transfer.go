@@ -27,7 +27,7 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 		return
 	}
 
-	if err := c.validateDataNetworkAppearance(data.NetworkAppearance); err != nil {
+	if err := c.validateDataNetworkAppearance(data.NetworkAppearance, data.RoutingContext); err != nil {
 		c.sendErrForMessage(data, err)
 		return
 	}
@@ -172,29 +172,23 @@ func (c *Association) receivedDataRoutingContext(peer *params.Param) (uint32, bo
 	return 0, false
 }
 
-// validateNetworkAppearance checks the fixed-width field for every receiver,
-// then applies RFC 4666 Section 3.8.1's SGP-specific configuration rule.
-// Absence is valid: Network Appearance is Optional, and a dedicated association
-// can identify its SS7 network without carrying it in every message.
-func (c *Association) validateNetworkAppearance(peer *params.Param) error {
-	var configured *params.Param
-	if c != nil && c.cfg != nil {
-		configured = c.cfg.NetworkAppearance
-		if c.isIPSPDoubleExchange() && c.cfg.IPSP.TrafficToPeer != nil {
-			configured = c.cfg.IPSP.TrafficToPeer.NetworkAppearance
-		}
+func (c *Association) validateDataNetworkAppearance(peer, routingContext *params.Param) error {
+	configured, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(routingContext, c.isIPSPDoubleExchange())
+	if err != nil {
+		return err
 	}
-	return c.validateNetworkAppearanceAgainst(peer, configured)
+	return c.validateNetworkAppearanceAgainst(peer, configured, allNetworkAppearances)
 }
 
-func (c *Association) validateDataNetworkAppearance(peer *params.Param) error {
-	if !c.isIPSPDoubleExchange() {
-		return c.validateNetworkAppearance(peer)
+func (c *Association) validateSSNMNetworkAppearance(peer, routingContext *params.Param) error {
+	configured, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(routingContext, false)
+	if err != nil {
+		return err
 	}
-	return c.validateNetworkAppearanceAgainst(peer, c.localNetworkAppearance())
+	return c.validateNetworkAppearanceAgainst(peer, configured, allNetworkAppearances)
 }
 
-func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.Param) error {
+func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.Param, allNetworkAppearances bool) error {
 	if peer == nil {
 		return nil
 	}
@@ -209,6 +203,9 @@ func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.
 	// when an ASP sends an invalid value. An ASP receiving an SGP's value keeps
 	// it for the MTP3-User rather than reflecting Error code 21 back.
 	if c.role != RoleSGP && c.role != RoleIPSP {
+		return nil
+	}
+	if allNetworkAppearances {
 		return nil
 	}
 

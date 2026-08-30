@@ -332,6 +332,30 @@ func (r *applicationServers) claimASPIdentifier(association *Association, identi
 	return true
 }
 
+func (r *applicationServers) hasASPIdentifierConflictLocked(
+	association *Association,
+	key ASKey,
+	identifier uint32,
+) bool {
+	if r.closed {
+		return true
+	}
+	for peer, peerIdentifier := range r.aspIdentifiers {
+		if peer == association || peerIdentifier != identifier {
+			continue
+		}
+		for _, peerKey := range peer.configuredASKeys() {
+			if peerKey == key {
+				// RFC 4666 Section 3.5.1 requires the ASP Identifier to be
+				// unique among every ASP supporting the same AS, whether the
+				// membership was provisioned or created through RKM.
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func associationsShareApplicationServer(first, second *Association) bool {
 	if first == nil || second == nil {
 		return true
@@ -349,6 +373,10 @@ func associationsShareApplicationServer(first, second *Association) bool {
 		if _, ok := set[key]; ok {
 			return true
 		}
+	}
+	registry := first.routingKeyRegistry()
+	if registry != nil && registry == second.routingKeyRegistry() && registry.associationsShareRoutingKey(first, second) {
+		return true
 	}
 	return false
 }
@@ -399,6 +427,84 @@ func (r *applicationServers) register(keys []ASKey) {
 		registration.persistent = true
 		registration.removable = false
 	}
+}
+
+// registerDynamicASP adds one Association to an Application Server created or
+// selected by RFC 4666 Routing Key Management. The caller writes REG RSP
+// before invoking this method so AS-state Notify cannot overtake the response.
+func (r *applicationServers) registerDynamicASP(association *Association, key ASKey) {
+	if r == nil || association == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	applicationServer, _ := r.getOrCreateLocked(key)
+	registration := r.registrations[key]
+	if registration == nil || registration.applicationServer != applicationServer {
+		registration = r.registrationForLocked(key, applicationServer, true)
+	}
+	registration.persistent = true
+	recovery := r.recoveryTimer
+	r.mu.Unlock()
+	// RFC 4666 Sections 4.3.1 and 4.3.4.3 maintain ASP state per AS and make
+	// ASP Active, not Registration, the procedure that activates a new traffic
+	// scope. A replay for an existing membership must preserve its current state.
+	applicationServer.setASPStateIfAbsent(association, StateASPInactive, recovery)
+}
+
+// deregisterDynamicASP removes one dynamically registered Association
+// membership. removeApplicationServer permits deletion only for an AS that was
+// itself created dynamically and has no remaining ASPs.
+func (r *applicationServers) deregisterDynamicASP(association *Association, key ASKey, removeApplicationServer bool) {
+	if r == nil || association == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	applicationServer := r.as[key]
+	recovery := r.recoveryTimer
+	r.mu.Unlock()
+	if applicationServer == nil {
+		return
+	}
+	applicationServer.remove(association, recovery)
+	if !removeApplicationServer {
+		return
+	}
+
+	r.mu.Lock()
+	registration := r.registrations[key]
+	if registration == nil || registration.applicationServer != applicationServer ||
+		!registration.removable || r.as[key] != applicationServer {
+		r.mu.Unlock()
+		return
+	}
+	applicationServer.mu.Lock()
+	empty := len(applicationServer.asps) == 0
+	applicationServer.mu.Unlock()
+	if !empty {
+		r.mu.Unlock()
+		return
+	}
+	if registration.provisional > 0 {
+		// RFC 4666 Section 4.4.2 permits dynamic Routing Key and AS deletion
+		// after deregistration leaves no ASPs.  A concurrently establishing
+		// statically configured association still owns this provisional scope;
+		// retain it for commit, but let the last rollback remove it.
+		registration.persistent = false
+		r.mu.Unlock()
+		return
+	}
+	delete(r.registrations, key)
+	delete(r.as, key)
+	r.mu.Unlock()
+	applicationServer.close()
 }
 
 func (r *applicationServers) reserve(keys []ASKey) *applicationServerReservation {
@@ -573,6 +679,28 @@ func (r *applicationServers) lookup(scope any) (*applicationServer, bool) {
 	return as, ok
 }
 
+func (r *applicationServers) routingContexts() []uint32 {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	contexts := make([]uint32, 0, len(r.as))
+	seen := make(map[uint32]struct{}, len(r.as))
+	for key := range r.as {
+		if !key.RoutingContextSet {
+			continue
+		}
+		if _, duplicate := seen[key.RoutingContext]; duplicate {
+			continue
+		}
+		seen[key.RoutingContext] = struct{}{}
+		contexts = append(contexts, key.RoutingContext)
+	}
+	r.mu.Unlock()
+	sort.Slice(contexts, func(i, j int) bool { return contexts[i] < contexts[j] })
+	return contexts
+}
+
 func legacyRoutingContextScope(scope any) (uint32, bool) {
 	switch value := scope.(type) {
 	case uint32:
@@ -665,6 +793,26 @@ func (r *applicationServers) keys() []ASKey {
 	}
 	keys := make([]ASKey, 0, len(r.as))
 	for key := range r.as {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
+	return keys
+}
+
+func (r *applicationServers) staticallyConfiguredKeys() []ASKey {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	keys := make([]ASKey, 0, len(r.registrations))
+	for key, registration := range r.registrations {
+		if registration == nil || registration.removable {
+			continue
+		}
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
@@ -1216,14 +1364,25 @@ func (as *applicationServer) remove(c *Association, recovery time.Duration) {
 
 // setASPState records an ASP's state and recomputes the AS state.
 func (as *applicationServer) setASPState(c *Association, st State, recovery time.Duration) {
-	as.setASPStateGuarded(c, st, recovery, 0, false)
+	as.setASPStateGuarded(c, st, recovery, 0, false, false)
 }
 
 func (as *applicationServer) setASPStateIfAssociationState(c *Association, associationState, st State, recovery time.Duration) {
-	as.setASPStateGuarded(c, st, recovery, associationState, true)
+	as.setASPStateGuarded(c, st, recovery, associationState, true, false)
 }
 
-func (as *applicationServer) setASPStateGuarded(c *Association, st State, recovery time.Duration, associationState State, guard bool) {
+func (as *applicationServer) setASPStateIfAbsent(c *Association, st State, recovery time.Duration) {
+	as.setASPStateGuarded(c, st, recovery, 0, false, true)
+}
+
+func (as *applicationServer) setASPStateGuarded(
+	c *Association,
+	st State,
+	recovery time.Duration,
+	associationState State,
+	guard bool,
+	ifAbsent bool,
+) {
 	if c == nil {
 		return
 	}
@@ -1244,7 +1403,7 @@ func (as *applicationServer) setASPStateGuarded(c *Association, st State, recove
 		return
 	}
 	current, known := as.asps[c]
-	if known && current == st {
+	if known && (ifAbsent || current == st) {
 		as.mu.Unlock()
 		if guard {
 			c.muState.Unlock()
@@ -1281,6 +1440,10 @@ func (as *applicationServer) setASPStateGuarded(c *Association, st State, recove
 func (as *applicationServer) setTrafficMode(mode uint32) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	as.setTrafficModeLocked(mode)
+}
+
+func (as *applicationServer) setTrafficModeLocked(mode uint32) {
 	if as.trafficMode == 0 {
 		as.trafficMode = mode
 		if mode == params.TrafficModeBroadcast && as.hasActiveASPLocked() {

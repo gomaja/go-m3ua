@@ -291,6 +291,77 @@ if err != nil {
 listener, err := endpoint.Listen("m3ua", local, listenerConfig)
 ```
 
+## Routing Key Management
+
+An SGP or IPSP Endpoint enables the optional RFC 4666 Sections 3.6 and 4.4
+Routing Key Management procedures with an immutable authorization and Routing
+Context allocation policy:
+
+```go
+endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Role: m3ua.RoleSGP,
+    RoutingKeyManagement: &m3ua.RoutingKeyManagementConfig{
+        AuthorizeRegistration: func(request m3ua.RoutingKeyRegistrationRequest) m3ua.RegistrationStatus {
+            return m3ua.RegistrationSuccessfullyRegistered
+        },
+        AuthorizeDeregistration: func(request m3ua.RoutingKeyDeregistrationRequest) bool {
+            return true
+        },
+        AllowDynamicRoutingKeys: true,
+        MaxDynamicRoutingKeys: 1024,
+        RemoveUnusedRoutingKeys: true,
+    },
+})
+```
+
+An ASP or IPSP registers and deregisters Routing Keys through its established
+Association:
+
+```go
+results, err := association.RegisterRoutingKeys(ctx, m3ua.RoutingKeyRegistration{
+    RoutingKey: m3ua.RoutingKey{
+        NetworkAppearance: 10,
+        NetworkAppearanceSet: true,
+        TrafficMode: params.TrafficModeLoadshare,
+        TrafficModeSet: true,
+        Groups: []m3ua.RoutingKeyGroup{{
+            DestinationPointCode: dpc,
+            ServiceIndicators: []uint8{params.ServiceIndSCCP},
+            OriginatingPointCodes: []m3ua.PointCodeRange{{
+                PointCode: opc,
+                Mask: 0,
+            }},
+        }},
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+_, err = association.DeregisterRoutingContexts(ctx, results[0].RoutingContext)
+```
+
+The responder handles each Routing Key in a batch independently, preserves
+deterministic results for duplicate requests, rejects ambiguous overlaps, and
+keeps provisioned and dynamically created keys in one collision-checked
+registry. A Routing Key that omits Network Appearance uses the Association's
+single configured appearance when one exists. Without one, it applies to all
+Network Appearances and RFC 4666 Section 3.6.1 permits no second Routing Key on
+that Association.
+
+RFC 4666 defines no RKM acknowledgement timer. Caller context cancellation
+bounds a local wait; peer retransmissions are handled idempotently rather than
+by inventing an RKM T(ack). If cancellation occurs after a DEREG REQ is written,
+the same Routing Context cannot be retried until its delayed DEREG RSP arrives:
+`DeregisterRoutingContexts` returns `ErrDeregistrationOutcomeUnknown` because
+RFC 4666 Sections 3.6.4 and 4.4.2 provide no transaction identifier that could
+distinguish the old response from the retry.
+
+An Association retains at most 1,024 unresolved REG/DEREG outcomes. A new
+request that could exceed that bound returns `ErrRKMOutcomeLimit` before writing
+to the Association. A delayed response releases capacity, so the application
+can retry without reconnecting once the peer resolves an older outcome.
+
 ## Supported Features
 
 ### Messages
@@ -310,10 +381,10 @@ listener, err := endpoint.Listen("m3ua", local, listenerConfig)
 |          | ASP Down Acknowledgement (ASP Down Ack)         | Yes       |                                                                |
 |          | Heartbeat (BEAT)                                | Yes       |                                                                |
 |          | Heartbeat Acknowledgement (BEAT Ack)            | Yes       |                                                                |
-| RKM      | Registration Request (REG REQ)                  | No        | Dynamic RKM is not implemented; RKM is answered with Unsupported Message Class per [RFC4666#4.4.1](https://www.rfc-editor.org/rfc/rfc4666#section-4.4.1). |
-|          | Registration Response (REG RSP)                 | No        | Same as above. |
-|          | Deregistration Request (DEREG REQ)              | No        | Same as above. |
-|          | Deregistration Response (DEREG RSP)             | No        | Same as above. |
+| RKM      | Registration Request (REG REQ)                  | Yes       | Strict codec and SGP/IPSP responder procedure per [RFC4666#3.6](https://www.rfc-editor.org/rfc/rfc4666#section-3.6) and [RFC4666#4.4](https://www.rfc-editor.org/rfc/rfc4666#section-4.4). |
+|          | Registration Response (REG RSP)                 | Yes       | Split responses, partial results, replay, and ASP/IPSP correlation are covered. |
+|          | Deregistration Request (DEREG REQ)              | Yes       | Multi-Routing-Context requests and active-AS rejection are covered. |
+|          | Deregistration Response (DEREG RSP)             | Yes       | Split responses, status validation, replay, and scope removal are covered. |
 | ASPTM    | ASP Active                                      | Yes       | [RFC4666#3.7](https://www.rfc-editor.org/rfc/rfc4666#section-3.7) |
 |          | ASP Active Acknowledgement (ASP Active Ack)     | Yes       |                                                                |
 |          | ASP Inactive                                    | Yes       |                                                                |

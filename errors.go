@@ -99,6 +99,12 @@ var (
 	// that situation so the receiver can identify the concerned traffic flow.
 	ErrMissingRoutingContext = errors.New("routing context required on a multi-flow association")
 
+	// ErrNoMatchingRoutingKey reports locally originated SS7 traffic that does
+	// not match any provisioned or dynamically registered Routing Key. RFC 4666
+	// Sections 1.2.1 and 4.4.1 make the Routing Key the SGP's AS selection rule;
+	// falling back to an arbitrary AS would misroute the MSU.
+	ErrNoMatchingRoutingKey = errors.New("no Routing Key matches the MTP3 traffic")
+
 	// ErrMissingStatus is used when a Notify arrives without the Status
 	// parameter, which RFC 4666 Section 3.8.2 lists as Mandatory.
 	ErrMissingStatus = errors.New("notify without Status parameter")
@@ -266,6 +272,14 @@ var (
 	// ErrEndpointClosed reports an operation started after Endpoint.Close or
 	// interrupted because the owning Endpoint closed.
 	ErrEndpointClosed = errors.New("M3UA endpoint is closed")
+	// ErrDeregistrationOutcomeUnknown prevents an ambiguous retry after a local
+	// cancellation. RFC 4666 Sections 3.6.4 and 4.4.2 correlate DEREG RSP only
+	// by Routing Context, so a delayed response cannot be distinguished from a
+	// response to a new request for the same Routing Context.
+	ErrDeregistrationOutcomeUnknown = errors.New("previous Routing Key Deregistration outcome is unresolved")
+	// ErrRKMOutcomeLimit reports that another local REG REQ or DEREG REQ would
+	// exceed the bounded set of requests whose peer outcome remains unresolved.
+	ErrRKMOutcomeLimit = errors.New("unresolved Routing Key Management outcome limit reached")
 )
 
 // InvalidVersionError is used if a message with an unsupported version is received.
@@ -587,20 +601,20 @@ func (c *Association) handleErrors(e error) error {
 			diagnostic,
 		)
 	}
-	//nolint:errorlint
-	if err, ok := e.(*UnsupportedClassError); ok {
+	var unsupportedClassError *UnsupportedClassError
+	if errors.As(e, &unsupportedClassError) {
 		res = messages.NewError(
 			params.NewErrorCode(params.UnsupportedMessageErrorClass),
 			nil, nil, nil,
-			params.NewDiagnosticInformation(err.first40Octets()),
+			params.NewDiagnosticInformation(unsupportedClassError.first40Octets()),
 		)
 	}
-	//nolint:errorlint
-	if err, ok := e.(*UnsupportedMessageError); ok {
+	var unsupportedMessageError *UnsupportedMessageError
+	if errors.As(e, &unsupportedMessageError) {
 		res = messages.NewError(
 			params.NewErrorCode(params.UnsupportedMessageErrorType),
 			nil, nil, nil,
-			params.NewDiagnosticInformation(err.first40Octets()),
+			params.NewDiagnosticInformation(unsupportedMessageError.first40Octets()),
 		)
 	}
 	if errors.Is(e, ErrManagementBlocking) {

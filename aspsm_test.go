@@ -324,6 +324,28 @@ func minimallyValidMessage(class, messageType uint8) messages.M3UA {
 		return messages.NewError(params.NewErrorCode(params.ErrProtocolError), nil, nil, nil, nil)
 	case uint16(messages.MsgClassManagement)<<8 | uint16(messages.MsgTypeNotify):
 		return messages.NewNotify(params.NewStatus(params.AsStateActive), nil, nil, nil)
+	case uint16(messages.MsgClassRKM)<<8 | uint16(messages.MsgTypeRegistrationRequest):
+		return messages.NewRegistrationRequest(params.NewRoutingKey(params.NewRoutingKeyPayload(
+			params.NewLocalRoutingKeyIdentifier(1), nil, nil,
+			params.NewDestinationPointCode(1), nil, nil, nil,
+		)))
+	case uint16(messages.MsgClassRKM)<<8 | uint16(messages.MsgTypeRegistrationResponse):
+		return messages.NewRegistrationResponse(params.NewRegistrationResult(
+			params.NewRegistrationResultPayload(
+				params.NewLocalRoutingKeyIdentifier(1),
+				params.NewRegistrationStatus(params.SuccessfullyRegistered),
+				params.NewRoutingContext(1),
+			),
+		))
+	case uint16(messages.MsgClassRKM)<<8 | uint16(messages.MsgTypeDeregistrationRequest):
+		return messages.NewDeregistrationRequest(params.NewRoutingContext(1))
+	case uint16(messages.MsgClassRKM)<<8 | uint16(messages.MsgTypeDeregistrationResponse):
+		return messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+			params.NewDeregResultPayload(
+				params.NewRoutingContext(1),
+				params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+			),
+		))
 	default:
 		return nil
 	}

@@ -4,7 +4,10 @@
 
 package params
 
-import "log"
+import (
+	"fmt"
+	"log"
+)
 
 // DeregResultPayload is the payload of DeregistrationResult.
 type DeregResultPayload struct {
@@ -86,6 +89,9 @@ func (d *DeregResultPayload) unmarshalBinaryAtDepth(b []byte, depth int) error {
 			}
 			decoded.DeregistrationStatus = p
 		default:
+			if IsKnownM3UAParameterTag(p.Tag) {
+				return invalidNestedParameter("Deregistration Result", fmt.Sprintf("unexpected parameter tag %#04x", p.Tag))
+			}
 			decoded.Others = append(decoded.Others, p)
 		}
 	}

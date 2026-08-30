@@ -606,6 +606,10 @@ func TestIPSPSingleExchangeReceivedASPUpAckQuiescesActiveTraffic(t *testing.T) {
 	if got := association.State(); got != StateASPInactive {
 		t.Fatalf("state while applying ASP Up Ack = %v, want ASP-INACTIVE", got)
 	}
+	deadline = time.Now().Add(time.Second)
+	for len(applicationServer.activeASPs()) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if active := applicationServer.activeASPs(); len(active) != 0 {
 		t.Fatalf("Application Server retained %d active IPSPs while applying ASP Up Ack", len(active))
 	}

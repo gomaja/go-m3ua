@@ -85,6 +85,62 @@ func TestApplicationServerReservationPreservesExistingAndCommittedScopes(t *test
 	})
 }
 
+func TestDynamicApplicationServerCreatedByStateLookupRemainsRemovable(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
+	association, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
+
+	registry.get(key)
+	registry.registerDynamicASP(association, key)
+	if keys := registry.staticallyConfiguredKeys(); len(keys) != 0 {
+		t.Fatalf("dynamic Application Server classified as static: %v", keys)
+	}
+
+	registry.deregisterDynamicASP(association, key, true)
+	if _, exists := registry.lookup(key); exists {
+		t.Fatal("unused dynamic Application Server was not removed")
+	}
+}
+
+func TestDynamicApplicationServerSurvivesProvisionalStaticCommit(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
+	dynamicAssociation, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
+
+	registry.registerDynamicASP(dynamicAssociation, key)
+	reservation := registry.reserve([]ASKey{key})
+	registry.deregisterDynamicASP(dynamicAssociation, key, true)
+	if _, exists := registry.lookup(key); !exists {
+		t.Fatal("dynamic deregistration removed an Application Server reserved by an establishing static association")
+	}
+
+	reservation.commit()
+	if _, exists := registry.lookup(key); !exists {
+		t.Fatal("static reservation commit did not retain the Application Server")
+	}
+	if keys := registry.staticallyConfiguredKeys(); len(keys) != 1 || keys[0] != key {
+		t.Fatalf("static reservation commit keys = %v, want [%v]", keys, key)
+	}
+}
+
+func TestDynamicApplicationServerSurvivesProvisionalStaticRollback(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
+	dynamicAssociation, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
+
+	registry.registerDynamicASP(dynamicAssociation, key)
+	reservation := registry.reserve([]ASKey{key})
+	registry.deregisterDynamicASP(dynamicAssociation, key, true)
+	if _, exists := registry.lookup(key); !exists {
+		t.Fatal("dynamic deregistration removed an Application Server reserved by an establishing static association")
+	}
+
+	reservation.rollback()
+	if _, exists := registry.lookup(key); exists {
+		t.Fatal("failed static reservation retained an unused dynamic Application Server")
+	}
+}
+
 // TestASStateFollowsItsASPs covers the AS state machine of RFC 4666 Section
 // 4.3.2, which had no implementation at all: there was no AS type, no
 // AS-ACTIVE/INACTIVE/PENDING, and NewNotify was never called outside tests.

@@ -280,9 +280,10 @@ type IPSPConfig struct {
 // EndpointConfig gives one M3UA Endpoint its immutable RFC 4666 role and any
 // role-specific node policy.
 type EndpointConfig struct {
-	Role Role
-	ASP  *ASPConfig
-	SGP  *SGPConfig
+	Role                 Role
+	ASP                  *ASPConfig
+	SGP                  *SGPConfig
+	RoutingKeyManagement *RoutingKeyManagementConfig
 }
 
 func snapshotSGPConfig(config *SGPConfig) *SGPConfig {
