@@ -29,8 +29,8 @@ type RoutingKeyDeregistrationResult struct {
 }
 
 type routingKeyRegistry struct {
-	operations   sync.Mutex
 	mu           sync.Mutex
+	revision     uint64
 	config       *RoutingKeyManagementConfig
 	entries      map[uint32]*routingKeyEntry
 	replays      map[*Association]*registrationReplayState
@@ -100,135 +100,180 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		return results
 	}
 
-	registry.operations.Lock()
-	defer registry.operations.Unlock()
-
-	registry.mu.Lock()
-	entries := cloneRoutingKeyEntries(registry.entries)
-	dynamicCount := registry.dynamic
-	replayState := cloneRegistrationReplayState(registry.replays[association])
-	registry.mu.Unlock()
-	var configuredRoutingContexts []uint32
-	var staticallyConfiguredASKeys []ASKey
-	if association != nil && association.as != nil {
-		configuredRoutingContexts = association.as.routingContexts()
+	authorizationSet := make([]bool, len(requests))
+	authorizations := make([]RegistrationStatus, len(requests))
+	type allocationDecision struct {
+		set            bool
+		routingContext uint32
+		err            error
 	}
-	if association != nil {
-		staticallyConfiguredASKeys = association.staticallyConfiguredASKeys()
-	}
+	allocations := make([]allocationDecision, len(requests))
 
-	for index, originalRequest := range requests {
-		request := snapshotRoutingKeyRegistrationRequest(originalRequest)
-		if replay, ok := replayState.byIdentifier[request.LocalRoutingKeyIdentifier]; ok &&
-			routingKeyRegistrationRequestsEqual(replay.request, request) {
-			results[index] = replay.result
-			continue
+	for {
+		if associationEnded(association) {
+			return make([]RoutingKeyRegistrationResult, len(requests))
+		}
+		registry.mu.Lock()
+		revision := registry.revision
+		entries := cloneRoutingKeyEntries(registry.entries)
+		dynamicCount := registry.dynamic
+		replayState := cloneRegistrationReplayState(registry.replays[association])
+		deregistrationReplays := cloneDeregistrationReplayState(registry.deregReplays[association])
+		registry.mu.Unlock()
+
+		results = make([]RoutingKeyRegistrationResult, len(requests))
+		var configuredRoutingContexts []uint32
+		var staticallyConfiguredASKeys []ASKey
+		if association != nil && association.as != nil {
+			configuredRoutingContexts = association.as.routingContexts()
+		}
+		if association != nil {
+			staticallyConfiguredASKeys = association.staticallyConfiguredASKeys()
 		}
 
-		canonical, err := canonicalizeRoutingKey(request.RoutingKey)
-		if err != nil {
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInvalidRoutingKey, 0)
-			storeRegistrationReplay(replayState, request, results[index])
-			continue
-		}
-		if associationHasNetworkAppearanceConflict(entries, association, canonical) {
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
-			storeRegistrationReplay(replayState, request, results[index])
-			continue
-		}
+		for index, originalRequest := range requests {
+			request := snapshotRoutingKeyRegistrationRequest(originalRequest)
+			if replay, ok := replayState.byIdentifier[request.LocalRoutingKeyIdentifier]; ok &&
+				routingKeyRegistrationRequestsEqual(replay.request, request) {
+				results[index] = replay.result
+				continue
+			}
 
-		if request.RoutingContextRequested {
-			entry := entries[request.RequestedRoutingContext]
-			switch {
-			case entry == nil:
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyChangeRefused, 0)
-			case !entry.canonical.equal(canonical):
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyChangeRefused, 0)
-			case routingContextConflictsWithAssociationScope(staticallyConfiguredASKeys, entry.asKey()):
+			canonical, err := canonicalizeRoutingKey(request.RoutingKey)
+			if err != nil {
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInvalidRoutingKey, 0)
+				storeRegistrationReplay(replayState, request, results[index])
+				continue
+			}
+			if associationHasNetworkAppearanceConflict(entries, association, canonical) {
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
-			case !registrationTrafficModeCompatible(entry.routingKey, request.RoutingKey):
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
-			case entry.hasMember(association):
-				entry.adoptTrafficMode(request.RoutingKey)
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, entry.routingContext)
-			case entry.hasASPIdentifierConflict(association):
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
-			default:
-				status := registry.authorize(request)
-				if status == RegistrationSuccessfullyRegistered {
+				storeRegistrationReplay(replayState, request, results[index])
+				continue
+			}
+
+			authorize := func() RegistrationStatus {
+				if !authorizationSet[index] {
+					authorizations[index] = registry.authorize(request)
+					authorizationSet[index] = true
+				}
+				return authorizations[index]
+			}
+			if request.RoutingContextRequested {
+				entry := entries[request.RequestedRoutingContext]
+				switch {
+				case entry == nil:
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyChangeRefused, 0)
+				case !entry.canonical.equal(canonical):
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyChangeRefused, 0)
+				case routingContextConflictsWithAssociationScope(staticallyConfiguredASKeys, entry.asKey()):
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
+				case !registrationTrafficModeCompatible(entry.routingKey, request.RoutingKey):
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
+				case entry.hasMember(association):
 					entry.adoptTrafficMode(request.RoutingKey)
-					entry.members[association] = struct{}{}
-					registry.clearDeregistrationReplay(association, entry.routingContext)
-					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, entry.routingContext)
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, entry.routingContext)
+				case entry.hasASPIdentifierConflict(association):
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
+				default:
+					status := authorize()
+					if status == RegistrationSuccessfullyRegistered {
+						entry.adoptTrafficMode(request.RoutingKey)
+						entry.members[association] = struct{}{}
+						clearDeregistrationReplayState(deregistrationReplays, entry.routingContext)
+						results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, entry.routingContext)
+					} else {
+						results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, 0)
+					}
+				}
+				storeRegistrationReplay(replayState, request, results[index])
+				continue
+			}
+
+			exact, overlap := findRoutingKeyEntry(entries, canonical)
+			switch {
+			case exact != nil && routingContextConflictsWithAssociationScope(staticallyConfiguredASKeys, exact.asKey()):
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
+			case exact != nil && !registrationTrafficModeCompatible(exact.routingKey, request.RoutingKey):
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
+			case exact != nil && exact.hasMember(association):
+				exact.adoptTrafficMode(request.RoutingKey)
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, exact.routingContext)
+			case exact != nil && exact.hasASPIdentifierConflict(association):
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
+			case exact != nil:
+				status := authorize()
+				if status == RegistrationSuccessfullyRegistered {
+					exact.adoptTrafficMode(request.RoutingKey)
+					exact.members[association] = struct{}{}
+					clearDeregistrationReplayState(deregistrationReplays, exact.routingContext)
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, exact.routingContext)
 				} else {
 					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, 0)
 				}
+			case overlap:
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
+			default:
+				status := authorize()
+				if status != RegistrationSuccessfullyRegistered {
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, 0)
+					break
+				}
+				if !registry.config.AllowDynamicRoutingKeys {
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyNotCurrentlyProvisioned, 0)
+					break
+				}
+				if dynamicCount >= registry.maxDynamicRoutingKeys() {
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInsufficientResources, 0)
+					break
+				}
+				allocator := registry.config.AllocateRoutingContext
+				if allocator != nil {
+					allocator = func(allocation RoutingContextAllocationRequest) (uint32, error) {
+						if !allocations[index].set {
+							allocations[index].routingContext, allocations[index].err = registry.config.AllocateRoutingContext(allocation)
+							allocations[index].set = true
+						}
+						return allocations[index].routingContext, allocations[index].err
+					}
+				}
+				routingContext, ok := registry.allocateRoutingContext(request, entries, configuredRoutingContexts, allocator)
+				if !ok {
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInsufficientResources, 0)
+					break
+				}
+				entries[routingContext] = &routingKeyEntry{
+					routingKey:     snapshotRoutingKey(request.RoutingKey),
+					canonical:      canonical,
+					routingContext: routingContext,
+					members:        map[*Association]struct{}{association: {}},
+				}
+				dynamicCount++
+				clearDeregistrationReplayState(deregistrationReplays, routingContext)
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationSuccessfullyRegistered, routingContext)
 			}
 			storeRegistrationReplay(replayState, request, results[index])
+		}
+
+		if associationEnded(association) {
+			return make([]RoutingKeyRegistrationResult, len(requests))
+		}
+		registry.mu.Lock()
+		if registry.revision != revision {
+			registry.mu.Unlock()
 			continue
 		}
-
-		exact, overlap := findRoutingKeyEntry(entries, canonical)
-		switch {
-		case exact != nil && routingContextConflictsWithAssociationScope(staticallyConfiguredASKeys, exact.asKey()):
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
-		case exact != nil && !registrationTrafficModeCompatible(exact.routingKey, request.RoutingKey):
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
-		case exact != nil && exact.hasMember(association):
-			exact.adoptTrafficMode(request.RoutingKey)
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, exact.routingContext)
-		case exact != nil && exact.hasASPIdentifierConflict(association):
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
-		case exact != nil:
-			status := registry.authorize(request)
-			if status == RegistrationSuccessfullyRegistered {
-				exact.adoptTrafficMode(request.RoutingKey)
-				exact.members[association] = struct{}{}
-				registry.clearDeregistrationReplay(association, exact.routingContext)
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, exact.routingContext)
-			} else {
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, 0)
-			}
-		case overlap:
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
-		default:
-			status := registry.authorize(request)
-			if status != RegistrationSuccessfullyRegistered {
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, status, 0)
-				break
-			}
-			if !registry.config.AllowDynamicRoutingKeys {
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyNotCurrentlyProvisioned, 0)
-				break
-			}
-			if dynamicCount >= registry.maxDynamicRoutingKeys() {
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInsufficientResources, 0)
-				break
-			}
-			routingContext, ok := registry.allocateRoutingContext(request, entries, configuredRoutingContexts)
-			if !ok {
-				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInsufficientResources, 0)
-				break
-			}
-			entries[routingContext] = &routingKeyEntry{
-				routingKey:     snapshotRoutingKey(request.RoutingKey),
-				canonical:      canonical,
-				routingContext: routingContext,
-				members:        map[*Association]struct{}{association: {}},
-			}
-			dynamicCount++
-			registry.clearDeregistrationReplay(association, routingContext)
-			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationSuccessfullyRegistered, routingContext)
+		if associationEnded(association) {
+			registry.mu.Unlock()
+			return make([]RoutingKeyRegistrationResult, len(requests))
 		}
-		storeRegistrationReplay(replayState, request, results[index])
+		registry.entries = entries
+		registry.dynamic = dynamicCount
+		registry.replays[association] = replayState
+		registry.deregReplays[association] = deregistrationReplays
+		registry.revision++
+		registry.mu.Unlock()
+		return results
 	}
-
-	registry.mu.Lock()
-	registry.entries = entries
-	registry.dynamic = dynamicCount
-	registry.replays[association] = replayState
-	registry.mu.Unlock()
-	return results
 }
 
 func registrationTrafficModeCompatible(existing, requested RoutingKey) bool {
@@ -244,81 +289,101 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 		return results
 	}
 
-	registry.operations.Lock()
-	defer registry.operations.Unlock()
-
-	registry.mu.Lock()
-	entries := cloneRoutingKeyEntries(registry.entries)
-	dynamicCount := registry.dynamic
-	deregistrationReplays := cloneDeregistrationReplayState(registry.deregReplays[association])
-	registrationReplays := cloneRegistrationReplayState(registry.replays[association])
-	registry.mu.Unlock()
-
-	peer := association.routingKeyPeer()
-	batchResults := make(map[uint32]RoutingKeyDeregistrationResult, len(routingContexts))
-	for index, routingContext := range routingContexts {
-		if previous, duplicate := batchResults[routingContext]; duplicate {
-			results[index] = previous
-			continue
+	type authorizationDecision struct {
+		set     bool
+		request RoutingKeyDeregistrationRequest
+		allow   bool
+	}
+	authorizations := make([]authorizationDecision, len(routingContexts))
+	for {
+		if associationEnded(association) {
+			return make([]RoutingKeyDeregistrationResult, len(routingContexts))
 		}
-		result := RoutingKeyDeregistrationResult{RoutingContext: routingContext}
-		if replay, ok := deregistrationReplays.byRoutingContext[routingContext]; ok {
-			result = replay
-		} else {
-			entry := entries[routingContext]
-			switch {
-			case entry == nil:
-				result.Status = DeregistrationInvalidRoutingContext
-			case !entry.hasMember(association):
-				result.Status = DeregistrationNotRegistered
-			case association != nil && association.State() == StateASPActive && association.activeForASKey(entry.asKey()):
-				result.Status = DeregistrationASPActiveForRoutingContext
-			case registry.config.AuthorizeDeregistration != nil && !registry.config.AuthorizeDeregistration(RoutingKeyDeregistrationRequest{
-				Peer:           peer,
-				RoutingContext: routingContext,
-				RoutingKey:     snapshotRoutingKey(entry.routingKey),
-				Provisioned:    entry.provisioned,
-			}):
-				result.Status = DeregistrationPermissionDenied
-			default:
-				delete(entry.members, association)
-				result.Status = DeregistrationSuccessfullyDeregistered
-				result.asKey = entry.asKey()
-				storeDeregistrationReplay(deregistrationReplays, result)
-				purgeRegistrationReplayState(registrationReplays, routingContext)
-				if !entry.provisioned && len(entry.members) == 0 && registry.config.RemoveUnusedRoutingKeys {
-					result.removeAS = true
+		registry.mu.Lock()
+		revision := registry.revision
+		entries := cloneRoutingKeyEntries(registry.entries)
+		dynamicCount := registry.dynamic
+		deregistrationReplays := cloneDeregistrationReplayState(registry.deregReplays[association])
+		registrationReplays := cloneRegistrationReplayState(registry.replays[association])
+		registry.mu.Unlock()
+
+		results = make([]RoutingKeyDeregistrationResult, len(routingContexts))
+		peer := association.routingKeyPeer()
+		batchResults := make(map[uint32]RoutingKeyDeregistrationResult, len(routingContexts))
+		for index, routingContext := range routingContexts {
+			if previous, duplicate := batchResults[routingContext]; duplicate {
+				results[index] = previous
+				continue
+			}
+			result := RoutingKeyDeregistrationResult{RoutingContext: routingContext}
+			if replay, ok := deregistrationReplays.byRoutingContext[routingContext]; ok {
+				result = replay
+			} else {
+				entry := entries[routingContext]
+				switch {
+				case entry == nil:
+					result.Status = DeregistrationInvalidRoutingContext
+				case !entry.hasMember(association):
+					result.Status = DeregistrationNotRegistered
+				case association != nil && association.State() == StateASPActive && association.activeForASKey(entry.asKey()):
+					result.Status = DeregistrationASPActiveForRoutingContext
+				default:
+					request := RoutingKeyDeregistrationRequest{
+						Peer:           peer,
+						RoutingContext: routingContext,
+						RoutingKey:     snapshotRoutingKey(entry.routingKey),
+						Provisioned:    entry.provisioned,
+					}
+					allowed := true
+					if registry.config.AuthorizeDeregistration != nil {
+						decision := &authorizations[index]
+						if !decision.set || !routingKeyDeregistrationRequestsEqual(decision.request, request) {
+							decision.request = snapshotRoutingKeyDeregistrationRequest(request)
+							decision.allow = registry.config.AuthorizeDeregistration(decision.request)
+							decision.set = true
+						}
+						allowed = decision.allow
+					}
+					if !allowed {
+						result.Status = DeregistrationPermissionDenied
+						break
+					}
+					delete(entry.members, association)
+					result.Status = DeregistrationSuccessfullyDeregistered
+					result.asKey = entry.asKey()
 					storeDeregistrationReplay(deregistrationReplays, result)
-					delete(entries, routingContext)
-					dynamicCount--
+					purgeRegistrationReplayState(registrationReplays, routingContext)
+					if !entry.provisioned && len(entry.members) == 0 && registry.config.RemoveUnusedRoutingKeys {
+						result.removeAS = true
+						storeDeregistrationReplay(deregistrationReplays, result)
+						delete(entries, routingContext)
+						dynamicCount--
+					}
 				}
 			}
+			results[index] = result
+			batchResults[routingContext] = result
 		}
-		results[index] = result
-		batchResults[routingContext] = result
-	}
 
-	registry.mu.Lock()
-	registry.entries = entries
-	registry.dynamic = dynamicCount
-	registry.replays[association] = registrationReplays
-	registry.deregReplays[association] = deregistrationReplays
-	registry.mu.Unlock()
-	return results
-}
-
-func (registry *routingKeyRegistry) clearDeregistrationReplay(association *Association, routingContext uint32) {
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	if replay := registry.deregReplays[association]; replay != nil {
-		delete(replay.byRoutingContext, routingContext)
-		filtered := replay.order[:0]
-		for _, retained := range replay.order {
-			if retained != routingContext {
-				filtered = append(filtered, retained)
-			}
+		if associationEnded(association) {
+			return make([]RoutingKeyDeregistrationResult, len(routingContexts))
 		}
-		replay.order = filtered
+		registry.mu.Lock()
+		if registry.revision != revision {
+			registry.mu.Unlock()
+			continue
+		}
+		if associationEnded(association) {
+			registry.mu.Unlock()
+			return make([]RoutingKeyDeregistrationResult, len(routingContexts))
+		}
+		registry.entries = entries
+		registry.dynamic = dynamicCount
+		registry.replays[association] = registrationReplays
+		registry.deregReplays[association] = deregistrationReplays
+		registry.revision++
+		registry.mu.Unlock()
+		return results
 	}
 }
 
@@ -334,6 +399,7 @@ func (registry *routingKeyRegistry) allocateRoutingContext(
 	request RoutingKeyRegistrationRequest,
 	entries map[uint32]*routingKeyEntry,
 	configuredRoutingContexts []uint32,
+	allocator RoutingContextAllocator,
 ) (uint32, bool) {
 	usedSet := make(map[uint32]struct{}, len(entries)+len(configuredRoutingContexts))
 	for routingContext := range entries {
@@ -347,8 +413,8 @@ func (registry *routingKeyRegistry) allocateRoutingContext(
 		used = append(used, routingContext)
 	}
 	sort.Slice(used, func(i, j int) bool { return used[i] < used[j] })
-	if registry.config.AllocateRoutingContext != nil {
-		routingContext, err := registry.config.AllocateRoutingContext(RoutingContextAllocationRequest{
+	if allocator != nil {
+		routingContext, err := allocator(RoutingContextAllocationRequest{
 			Registration:         snapshotRoutingKeyRegistrationRequest(request),
 			InUseRoutingContexts: append([]uint32(nil), used...),
 		})
@@ -458,8 +524,6 @@ func (registry *routingKeyRegistry) forgetAssociation(association *Association) 
 	if registry == nil || association == nil {
 		return nil
 	}
-	registry.operations.Lock()
-	defer registry.operations.Unlock()
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	removed := make([]ASKey, 0)
@@ -476,7 +540,34 @@ func (registry *routingKeyRegistry) forgetAssociation(association *Association) 
 	}
 	delete(registry.replays, association)
 	delete(registry.deregReplays, association)
+	registry.revision++
 	return removed
+}
+
+func associationEnded(association *Association) bool {
+	if association == nil {
+		return false
+	}
+	select {
+	case <-association.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func clearDeregistrationReplayState(state *deregistrationReplayState, routingContext uint32) {
+	if state == nil {
+		return
+	}
+	delete(state.byRoutingContext, routingContext)
+	filtered := state.order[:0]
+	for _, retained := range state.order {
+		if retained != routingContext {
+			filtered = append(filtered, retained)
+		}
+	}
+	state.order = filtered
 }
 
 func purgeRegistrationReplayState(state *registrationReplayState, routingContext uint32) {
@@ -686,4 +777,41 @@ func routingKeyRegistrationRequestsEqual(first, second RoutingKeyRegistrationReq
 	firstCanonical, firstErr := canonicalizeRoutingKey(first.RoutingKey)
 	secondCanonical, secondErr := canonicalizeRoutingKey(second.RoutingKey)
 	return firstErr == nil && secondErr == nil && firstCanonical.equal(secondCanonical)
+}
+
+func snapshotRoutingKeyDeregistrationRequest(request RoutingKeyDeregistrationRequest) RoutingKeyDeregistrationRequest {
+	snapshot := request
+	snapshot.Peer.RemoteAddr = cloneSCTPAddr(request.Peer.RemoteAddr)
+	snapshot.RoutingKey = snapshotRoutingKey(request.RoutingKey)
+	return snapshot
+}
+
+func routingKeyDeregistrationRequestsEqual(first, second RoutingKeyDeregistrationRequest) bool {
+	if first.RoutingContext != second.RoutingContext || first.Provisioned != second.Provisioned ||
+		!routingKeyPeersEqual(first.Peer, second.Peer) {
+		return false
+	}
+	firstCanonical, firstErr := canonicalizeRoutingKey(first.RoutingKey)
+	secondCanonical, secondErr := canonicalizeRoutingKey(second.RoutingKey)
+	return firstErr == nil && secondErr == nil && firstCanonical.equal(secondCanonical)
+}
+
+func routingKeyPeersEqual(first, second RoutingKeyPeer) bool {
+	if first.Role != second.Role || first.ASPIdentifier != second.ASPIdentifier ||
+		first.ASPIdentifierSet != second.ASPIdentifierSet {
+		return false
+	}
+	if first.RemoteAddr == nil || second.RemoteAddr == nil {
+		return first.RemoteAddr == nil && second.RemoteAddr == nil
+	}
+	if first.RemoteAddr.Port != second.RemoteAddr.Port || len(first.RemoteAddr.IPAddrs) != len(second.RemoteAddr.IPAddrs) {
+		return false
+	}
+	for index, firstIP := range first.RemoteAddr.IPAddrs {
+		secondIP := second.RemoteAddr.IPAddrs[index]
+		if firstIP.Zone != secondIP.Zone || !firstIP.IP.Equal(secondIP.IP) {
+			return false
+		}
+	}
+	return true
 }

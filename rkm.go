@@ -106,7 +106,8 @@ type RoutingKeyRegistrationRequest struct {
 // defined failure RegistrationStatus rejects it with that status.
 // RegistrationRoutingKeyAlreadyRegistered is derived by the registry and is
 // not a policy result; returning it or an undefined value is normalized to
-// RegistrationInvalidRoutingKey.
+// RegistrationInvalidRoutingKey. The callback runs without internal registry
+// locks and may run concurrently for independent Associations.
 type RoutingKeyRegistrationAuthorizer func(RoutingKeyRegistrationRequest) RegistrationStatus
 
 // RoutingKeyDeregistrationRequest is the immutable request passed to a Routing
@@ -120,7 +121,9 @@ type RoutingKeyDeregistrationRequest struct {
 
 // RoutingKeyDeregistrationAuthorizer decides whether a registered peer may
 // deregister one Routing Context. Returning false produces the RFC 4666
-// Permission Denied status without changing registry membership.
+// Permission Denied status without changing registry membership. The callback
+// runs without internal registry locks and may run concurrently for independent
+// Associations.
 type RoutingKeyDeregistrationAuthorizer func(RoutingKeyDeregistrationRequest) bool
 
 // RoutingContextAllocationRequest is passed to a custom Routing Context
@@ -132,7 +135,8 @@ type RoutingContextAllocationRequest struct {
 
 // RoutingContextAllocator chooses a non-zero Routing Context for a new Routing
 // Key. Returning an error or a value already in use produces Insufficient
-// Resources for that registration.
+// Resources for that registration. The callback runs without internal registry
+// locks and may run concurrently for independent Associations.
 type RoutingContextAllocator func(RoutingContextAllocationRequest) (uint32, error)
 
 // RoutingKeyManagementConfig enables the optional RFC 4666 Routing Key

@@ -648,6 +648,261 @@ func TestRoutingKeyRegistryPoliciesRunOutsideStateLock(t *testing.T) {
 	}
 }
 
+func TestRoutingKeyRegistryRegistrationPoliciesCanCloseAssociation(t *testing.T) {
+	for _, policy := range []string{"authorization", "allocation"} {
+		t.Run(policy, func(t *testing.T) {
+			var association *Association
+			config := &RoutingKeyManagementConfig{
+				AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+					if policy == "authorization" {
+						_ = association.Close()
+					}
+					return RegistrationSuccessfullyRegistered
+				},
+				AllowDynamicRoutingKeys: true,
+				RemoveUnusedRoutingKeys: true,
+			}
+			if policy == "allocation" {
+				config.AllocateRoutingContext = func(RoutingContextAllocationRequest) (uint32, error) {
+					_ = association.Close()
+					return 7, nil
+				}
+			}
+			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: config})
+			if err != nil {
+				t.Fatalf("NewEndpoint: %v", err)
+			}
+			defer func() { _ = endpoint.Close() }()
+			association = newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association.as = endpoint.as
+			if !endpoint.trackAssociation(association) {
+				t.Fatal("trackAssociation returned false")
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				endpoint.routingKeys.register(association, []RoutingKeyRegistrationRequest{{
+					LocalRoutingKeyIdentifier: 1,
+					RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+				}})
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("Registration policy deadlocked while closing the association")
+			}
+			if endpoint.routingKeys.dynamicCount() != 0 {
+				t.Fatal("closed association retained a dynamically registered Routing Key")
+			}
+		})
+	}
+}
+
+func TestRoutingKeyRegistryDeregistrationPolicyCanCloseAssociation(t *testing.T) {
+	var association *Association
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AuthorizeDeregistration: func(RoutingKeyDeregistrationRequest) bool {
+				_ = association.Close()
+				return true
+			},
+			AllowDynamicRoutingKeys: true,
+			RemoveUnusedRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	association = newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.as = endpoint.as
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("trackAssociation returned false")
+	}
+	registration := endpoint.routingKeys.register(association, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+	}})[0]
+	if registration.Status != RegistrationSuccessfullyRegistered {
+		t.Fatalf("Registration = %+v, want success", registration)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		endpoint.routingKeys.deregister(association, []uint32{registration.RoutingContext})
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Deregistration policy deadlocked while closing the association")
+	}
+	if endpoint.routingKeys.dynamicCount() != 0 {
+		t.Fatal("closed association retained a dynamically registered Routing Key")
+	}
+}
+
+func TestRoutingKeyRegistryRegistrationAuthorizationIsNotRepeatedAfterConcurrentTeardown(t *testing.T) {
+	var victim *Association
+	policyCalls := 0
+	triggerTeardown := false
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				if triggerTeardown {
+					policyCalls++
+					_ = victim.Close()
+				}
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+			RemoveUnusedRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	victim = newTrackedRoutingKeyAssociation(t, endpoint)
+	registerRoutingKeyForTest(t, endpoint.routingKeys, victim, 1, testRoutingKey(10, 100, params.ServiceIndSCCP))
+	target := newTrackedRoutingKeyAssociation(t, endpoint)
+
+	triggerTeardown = true
+	result := registerRoutingKeyForTest(t, endpoint.routingKeys, target, 2, testRoutingKey(10, 200, params.ServiceIndSCCP))
+	if policyCalls != 1 {
+		t.Fatalf("Registration authorization calls = %d, want 1", policyCalls)
+	}
+	if endpoint.routingKeys.dynamicCount() != 1 {
+		t.Fatalf("dynamic Routing Key count = %d, want only the target registration", endpoint.routingKeys.dynamicCount())
+	}
+	registered, ok := endpoint.routingKeys.routingKey(result.RoutingContext)
+	if !ok || registered.Groups[0].DestinationPointCode != 200 {
+		t.Fatalf("retained Routing Key = %+v, %t; want target DPC 200", registered, ok)
+	}
+}
+
+func TestRoutingKeyRegistryAllocatorIsNotRepeatedAfterConcurrentTeardown(t *testing.T) {
+	var victim *Association
+	allocatorCalls := 0
+	triggerTeardown := false
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AllocateRoutingContext: func(RoutingContextAllocationRequest) (uint32, error) {
+				if triggerTeardown {
+					allocatorCalls++
+					_ = victim.Close()
+					return 9, nil
+				}
+				return 7, nil
+			},
+			AllowDynamicRoutingKeys: true,
+			RemoveUnusedRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	victim = newTrackedRoutingKeyAssociation(t, endpoint)
+	registerRoutingKeyForTest(t, endpoint.routingKeys, victim, 1, testRoutingKey(10, 100, params.ServiceIndSCCP))
+	target := newTrackedRoutingKeyAssociation(t, endpoint)
+
+	triggerTeardown = true
+	result := registerRoutingKeyForTest(t, endpoint.routingKeys, target, 2, testRoutingKey(10, 200, params.ServiceIndSCCP))
+	if allocatorCalls != 1 {
+		t.Fatalf("Routing Context allocator calls = %d, want 1", allocatorCalls)
+	}
+	if result.RoutingContext != 9 {
+		t.Fatalf("allocated Routing Context = %d, want 9", result.RoutingContext)
+	}
+	if endpoint.routingKeys.dynamicCount() != 1 {
+		t.Fatalf("dynamic Routing Key count = %d, want only the target registration", endpoint.routingKeys.dynamicCount())
+	}
+}
+
+func TestRoutingKeyRegistryDeregistrationAuthorizationIsNotRepeatedAfterConcurrentTeardown(t *testing.T) {
+	var victim *Association
+	policyCalls := 0
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AuthorizeDeregistration: func(RoutingKeyDeregistrationRequest) bool {
+				policyCalls++
+				_ = victim.Close()
+				return true
+			},
+			AllowDynamicRoutingKeys: true,
+			RemoveUnusedRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	victim = newTrackedRoutingKeyAssociation(t, endpoint)
+	registerRoutingKeyForTest(t, endpoint.routingKeys, victim, 1, testRoutingKey(10, 100, params.ServiceIndSCCP))
+	target := newTrackedRoutingKeyAssociation(t, endpoint)
+	targetRegistration := registerRoutingKeyForTest(
+		t,
+		endpoint.routingKeys,
+		target,
+		2,
+		testRoutingKey(10, 200, params.ServiceIndSCCP),
+	)
+
+	result := endpoint.routingKeys.deregister(target, []uint32{targetRegistration.RoutingContext})[0]
+	if result.Status != DeregistrationSuccessfullyDeregistered {
+		t.Fatalf("Deregistration = %+v, want success", result)
+	}
+	if policyCalls != 1 {
+		t.Fatalf("Deregistration authorization calls = %d, want 1", policyCalls)
+	}
+	if endpoint.routingKeys.dynamicCount() != 0 {
+		t.Fatalf("dynamic Routing Key count = %d, want 0", endpoint.routingKeys.dynamicCount())
+	}
+}
+
+func newTrackedRoutingKeyAssociation(t *testing.T, endpoint *Endpoint) *Association {
+	t.Helper()
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.as = endpoint.as
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("trackAssociation returned false")
+	}
+	return association
+}
+
+func registerRoutingKeyForTest(
+	t *testing.T,
+	registry *routingKeyRegistry,
+	association *Association,
+	identifier uint32,
+	routingKey RoutingKey,
+) RoutingKeyRegistrationResult {
+	t.Helper()
+	result := registry.register(association, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: identifier,
+		RoutingKey:                routingKey,
+	}})[0]
+	if result.Status != RegistrationSuccessfullyRegistered {
+		t.Fatalf("Registration = %+v, want success", result)
+	}
+	return result
+}
+
 func TestRoutingKeyRegistrySerializesConcurrentRegistrations(t *testing.T) {
 	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
 		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
