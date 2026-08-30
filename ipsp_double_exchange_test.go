@@ -887,7 +887,7 @@ func TestIPSPSingleASPSMDownAckDefersASNotifyUntilTrafficDrains(t *testing.T) {
 	association.as = registry
 	observer, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 22)
 	observer.as = registry
-	applicationServer := registry.get(22)
+	applicationServer := registry.get(association.configuredASKeys()[0])
 	applicationServer.mu.Lock()
 	applicationServer.asps[association] = StateASPActive
 	applicationServer.asps[observer] = StateASPInactive

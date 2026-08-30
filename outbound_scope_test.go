@@ -37,6 +37,164 @@ func TestWriteSignalDataEnforcesSGPPerApplicationServerState(t *testing.T) {
 	}
 }
 
+func TestDirectSGPTrafficRequiresActiveApplicationServer(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		routingContexts []uint32
+		data            *messages.Data
+		ssnm            messages.M3UA
+	}{
+		{
+			name:            "Routing Context",
+			routingContexts: []uint32{1},
+			data: messages.NewData(
+				nil, params.NewRoutingContext(1),
+				params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 3, []byte("below threshold")),
+				nil,
+			),
+			ssnm: messages.NewDestinationUnavailable(
+				nil, params.NewRoutingContext(1), params.NewAffectedPointCode(0x123456), nil,
+			),
+		},
+		{
+			name: "contextless",
+			data: messages.NewData(
+				nil, nil,
+				params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 3, []byte("below threshold")),
+				nil,
+			),
+			ssnm: messages.NewDestinationUnavailable(
+				nil, nil, params.NewAffectedPointCode(0x123456), nil,
+			),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := applicationServerRegistryForActivationTest(t, ASActivationPolicy{RequiredActiveASPs: 2})
+			active, sent := asTestConn(t, registry, StateASPActive, test.routingContexts...)
+			waiting, _ := asTestConn(t, registry, StateASPInactive, test.routingContexts...)
+			active.noteRoutingContextsActive(test.routingContexts)
+
+			for _, message := range []messages.M3UA{test.data, test.ssnm} {
+				before := len(*sent)
+				if _, err := active.WriteSignal(message); !errors.Is(err, ErrNoActiveASP) {
+					t.Fatalf("WriteSignal(%T) below threshold error = %v, want %v",
+						message, err, ErrNoActiveASP)
+				}
+				if got := len(*sent); got != before {
+					t.Fatalf("WriteSignal(%T) below threshold performed %d writes, want 0",
+						message, got-before)
+				}
+			}
+
+			registry.aspStateChanged(waiting, StateASPActive)
+			for _, message := range []messages.M3UA{test.data, test.ssnm} {
+				if _, err := active.WriteSignal(message); err != nil {
+					t.Fatalf("WriteSignal(%T) at threshold: %v", message, err)
+				}
+			}
+
+			registry.aspStateChanged(waiting, StateASPInactive)
+			key := active.configuredASKeys()[0]
+			if got := registry.get(key).State(); got != ASActive {
+				t.Fatalf("Application Server below n after activation = %v, want %v", got, ASActive)
+			}
+			for _, message := range []messages.M3UA{test.data, test.ssnm} {
+				if _, err := active.WriteSignal(message); err != nil {
+					t.Fatalf("WriteSignal(%T) during post-activation shortage: %v", message, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDirectIPSPTrafficRequiresActiveApplicationServer(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, *applicationServers) (*Association, *Association, *[]messages.M3UA, []messages.M3UA)
+	}{
+		{
+			name: "Single Exchange",
+			setup: func(t *testing.T, registry *applicationServers) (*Association, *Association, *[]messages.M3UA, []messages.M3UA) {
+				active, sent := newSingleExchangeIPSPForTest(t, StateASPActive)
+				waiting, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
+				active.as = registry
+				waiting.as = registry
+				active.noteRoutingContextsActive([]uint32{1})
+				return active, waiting, sent, []messages.M3UA{
+					messages.NewSignallingCongestion(
+						nil, params.NewRoutingContext(1), params.NewAffectedPointCode(0x123456), nil,
+						params.NewCongestionIndications(2), nil,
+					),
+					messages.NewData(
+						nil, params.NewRoutingContext(1),
+						params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 3, []byte("below threshold")),
+						nil,
+					),
+				}
+			},
+		},
+		{
+			name: "Double Exchange",
+			setup: func(t *testing.T, registry *applicationServers) (*Association, *Association, *[]messages.M3UA, []messages.M3UA) {
+				active, sent := newDoubleExchangeIPSPForTest(t)
+				waiting, _ := newDoubleExchangeIPSPForTest(t)
+				active.as = registry
+				waiting.as = registry
+				active.setIPSPState(IPSPState{TrafficToLocal: StateASPInactive, TrafficToPeer: StateASPActive})
+				waiting.setIPSPState(IPSPState{TrafficToLocal: StateASPInactive, TrafficToPeer: StateASPInactive})
+				active.noteRoutingContextsActive([]uint32{22})
+				return active, waiting, sent, []messages.M3UA{messages.NewData(
+					params.NewNetworkAppearance(20),
+					params.NewRoutingContext(22),
+					params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 3, []byte("below threshold")),
+					nil,
+				)}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := newApplicationServersForIPSP(&ApplicationServerConfig{
+				RecoveryTimer:           time.Hour,
+				DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
+			})
+			t.Cleanup(registry.close)
+			active, waiting, sent, traffic := test.setup(t, registry)
+			registry.aspStateChanged(active, StateASPActive)
+			registry.aspStateChanged(waiting, StateASPInactive)
+
+			for _, message := range traffic {
+				before := len(*sent)
+				if _, err := active.WriteSignal(message); !errors.Is(err, ErrNoActiveASP) {
+					t.Fatalf("WriteSignal(%T) below threshold error = %v, want %v", message, err, ErrNoActiveASP)
+				}
+				if got := len(*sent); got != before {
+					t.Fatalf("WriteSignal(%T) below threshold performed %d writes, want 0", message, got-before)
+				}
+			}
+
+			registry.aspStateChanged(waiting, StateASPActive)
+			for _, message := range traffic {
+				if _, err := active.WriteSignal(message); err != nil {
+					t.Fatalf("WriteSignal(%T) at threshold: %v", message, err)
+				}
+			}
+
+			registry.aspStateChanged(waiting, StateASPInactive)
+			key := active.configuredASKeys()[0]
+			if got := registry.get(key).State(); got != ASActive {
+				t.Fatalf("Application Server below n after activation = %v, want %v", got, ASActive)
+			}
+			for _, message := range traffic {
+				if _, err := active.WriteSignal(message); err != nil {
+					t.Fatalf("WriteSignal(%T) during post-activation shortage: %v", message, err)
+				}
+			}
+		})
+	}
+}
+
 func TestWriteSignalDataEnforcesASPAcknowledgedScope(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
 	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
@@ -310,6 +468,7 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	asp.as = newApplicationServers(time.Hour)
+	asp.as.aspStateChanged(asp, StateASPActive)
 	asp.maxMessageStreamID = 4
 	asp.recvStream.Store(0)
 	writeStarted := make(chan struct{})
@@ -364,6 +523,7 @@ func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 func TestASPDownAckWaitsForUnscopedSSNM(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	asp.as = newApplicationServers(time.Hour)
+	asp.as.aspStateChanged(asp, StateASPActive)
 	asp.recvStream.Store(0)
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})

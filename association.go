@@ -255,11 +255,10 @@ type Association struct {
 	nif *nifAvailability
 
 	// as is the Application Server registry this Association belongs to. It is
-	// nil for an ASP and shared by all Associations owned by an SGP Endpoint.
-	//
-	// The AS state machine of RFC 4666 Section 4.3.2 lives on the SGP and spans
-	// every ASP serving a Routing Context, so an Association reports its own ASP state
-	// changes into it rather than deciding anything itself.
+	// nil for an ASP and shared by all Associations owned by an SGP or IPSP
+	// Endpoint. RFC 4666 Sections 4.3.1 and 4.3.2 maintain remote ASP/IPSP state
+	// per AS, so an Association reports its peer state changes into the shared
+	// registry rather than deciding aggregate AS state itself.
 	as *applicationServers
 	// asReservation keeps an accepted SGP or IPSP association's configured AS
 	// scopes provisional until M3UA establishment succeeds. A failed handshake
@@ -1301,39 +1300,40 @@ func (c *Association) lockOutboundDataScope(raw []byte) (func(), error) {
 }
 
 func (c *Association) lockResolvedOutboundDataScope(routingContext *params.Param) (func(), error) {
-	if c.role == RoleIPSP {
-		c.unscopedDeliveryMu.Lock()
-		if c.State() != StateASPActive {
-			c.unscopedDeliveryMu.Unlock()
-			return nil, ErrNotEstablished
-		}
-		if routingContext != nil {
-			for _, rtCtx := range routingContext.RoutingContexts() {
-				if !c.outboundRoutingContextActive(rtCtx) {
-					c.unscopedDeliveryMu.Unlock()
-					return nil, ErrRoutingContextNotActive
-				}
-			}
-		}
-		return c.unscopedDeliveryMu.Unlock, nil
-	}
-	if c.role != RoleSGP {
+	if c.role != RoleSGP && c.role != RoleIPSP {
 		return func() {}, nil
 	}
-	if routingContext == nil {
-		c.unscopedDeliveryMu.Lock()
-		if c.State() != StateASPActive {
-			c.unscopedDeliveryMu.Unlock()
-			return nil, ErrNotEstablished
-		}
-		return c.unscopedDeliveryMu.Unlock, nil
+	var routingContexts []uint32
+	if routingContext != nil {
+		routingContexts = routingContext.RoutingContexts()
 	}
-	release, err := c.lockSGPApplicationServers(routingContext.RoutingContexts())
+	releaseApplicationServers, err := c.lockOutboundApplicationServers(routingContexts)
 	if err != nil {
 		if c.State() != StateASPActive {
 			return nil, ErrNotEstablished
 		}
 		return nil, err
+	}
+	if c.role == RoleSGP && routingContext != nil {
+		return releaseApplicationServers, nil
+	}
+
+	c.unscopedDeliveryMu.Lock()
+	release := func() {
+		c.unscopedDeliveryMu.Unlock()
+		releaseApplicationServers()
+	}
+	if c.State() != StateASPActive {
+		release()
+		return nil, ErrNotEstablished
+	}
+	if c.role == RoleIPSP && routingContext != nil {
+		for _, rtCtx := range routingContexts {
+			if !c.outboundRoutingContextActive(rtCtx) {
+				release()
+				return nil, ErrRoutingContextNotActive
+			}
+		}
 	}
 	return release, nil
 }
@@ -1424,7 +1424,7 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	if c.role == RoleIPSP {
 		return c.lockResolvedOutboundDataScope(params.NewRoutingContext(routingContexts...))
 	}
-	return c.lockSGPApplicationServers(routingContexts)
+	return c.lockOutboundApplicationServers(routingContexts)
 }
 
 func (c *Association) validateOutboundSSNMRoutingContext(routingContext *params.Param) error {
@@ -1514,12 +1514,22 @@ func ssnmRoutingContext(message messages.M3UA) (*params.Param, bool) {
 	}
 }
 
-func (c *Association) lockSGPApplicationServers(routingContexts []uint32) (func(), error) {
-	if c.role != RoleSGP || c.as == nil || len(routingContexts) == 0 {
+// lockOutboundApplicationServers admits direct traffic only while every named
+// Application Server is AS-ACTIVE. RFC 4666 Section 4.3.4.3 permits an SGP to
+// withhold traffic until n ASPs are ASP-ACTIVE; Association writes must honor
+// the same aggregate state as Endpoint distribution.
+func (c *Association) lockOutboundApplicationServers(routingContexts []uint32) (func(), error) {
+	if (c.role != RoleSGP && c.role != RoleIPSP) || c.as == nil {
 		return func() {}, nil
 	}
 
 	ordered := c.asKeysForRoutingContexts(routingContexts)
+	if len(routingContexts) == 0 {
+		ordered = c.configuredASKeys()
+	}
+	if len(ordered) == 0 {
+		return func() {}, nil
+	}
 	sort.Slice(ordered, func(i, j int) bool { return compareASKey(ordered[i], ordered[j]) < 0 })
 
 	applicationServers := make([]*applicationServer, 0, len(ordered))
@@ -1540,11 +1550,21 @@ func (c *Association) lockSGPApplicationServers(routingContexts []uint32) (func(
 	}
 	for index, applicationServer := range applicationServers {
 		applicationServer.mu.Lock()
-		active := !applicationServer.closed && applicationServer.asps[c] == StateASPActive
+		closed := applicationServer.closed
+		applicationServerActive := applicationServer.state == ASActive
+		associationActive := applicationServer.asps[c] == StateASPActive
 		applicationServer.mu.Unlock()
-		if !active || !c.activeForASKey(ordered[index]) {
+		if closed {
+			unlock()
+			return nil, ErrAssociationClosed
+		}
+		if !associationActive || !c.activeForASKey(ordered[index]) {
 			unlock()
 			return nil, ErrRoutingContextNotActive
+		}
+		if !applicationServerActive {
+			unlock()
+			return nil, ErrNoActiveASP
 		}
 	}
 	return unlock, nil
