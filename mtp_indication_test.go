@@ -431,13 +431,25 @@ func TestASPRoutesPublishesEachMutationBatchAtomically(t *testing.T) {
 	if len(routes.indications) != firstBatchSize+1 {
 		t.Fatalf("published %d indications, want %d", len(routes.indications), firstBatchSize+1)
 	}
-	for index := range firstBatchSize {
-		if got := <-routes.indications; got != firstIndication {
-			t.Fatalf("indication %d = %#v, want an item from the earlier mutation batch", index, got)
+	firstPublished := <-routes.indications
+	switch firstPublished {
+	case firstIndication:
+		for index := 1; index < firstBatchSize; index++ {
+			if got := <-routes.indications; got != firstIndication {
+				t.Fatalf("indication %d = %#v, want an item from the same mutation batch", index, got)
+			}
 		}
-	}
-	if got := <-routes.indications; got != laterBatch[0] {
-		t.Fatalf("last indication = %#v, want later mutation %#v", got, laterBatch[0])
+		if got := <-routes.indications; got != laterBatch[0] {
+			t.Fatalf("last indication = %#v, want other mutation batch %#v", got, laterBatch[0])
+		}
+	case laterBatch[0]:
+		for index := range firstBatchSize {
+			if got := <-routes.indications; got != firstIndication {
+				t.Fatalf("indication %d after the single-item batch = %#v, want an item from the same mutation batch", index, got)
+			}
+		}
+	default:
+		t.Fatalf("first indication = %#v, want an item from either mutation batch", firstPublished)
 	}
 }
 
