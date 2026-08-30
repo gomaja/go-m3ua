@@ -1111,13 +1111,13 @@ func (c *Association) handleHeartbeatAck(beatAck *messages.HeartbeatAck) error {
 // when the last one stands down.
 func (c *Association) stateForActiveRoutingContexts() State {
 	c.muAckedRCs.RLock()
-	scoped, active := c.activeRCsScoped, len(c.activeRCs)
+	scoped, active, contextlessActive := c.activeRCsScoped, len(c.activeRCs), c.contextlessASActive
 	c.muAckedRCs.RUnlock()
 
 	if !scoped {
 		return c.State()
 	}
-	if active > 0 {
+	if active > 0 || contextlessActive {
 		return StateASPActive
 	}
 	return StateASPInactive

@@ -357,6 +357,11 @@ the same Routing Context cannot be retried until its delayed DEREG RSP arrives:
 RFC 4666 Sections 3.6.4 and 4.4.2 provide no transaction identifier that could
 distinguish the old response from the retry.
 
+An Association retains at most 1,024 unresolved REG/DEREG outcomes. A new
+request that could exceed that bound returns `ErrRKMOutcomeLimit` before writing
+to the Association. A delayed response releases capacity, so the application
+can retry without reconnecting once the peer resolves an older outcome.
+
 ## Supported Features
 
 ### Messages

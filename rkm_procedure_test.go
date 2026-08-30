@@ -258,9 +258,63 @@ func TestRKMRegistrationAfterUnscopedActivationRequiresNewASPActive(t *testing.T
 	if !association.activeForASKey(contextlessKey) {
 		t.Fatal("Registration inactivated the previously active contextless Application Server")
 	}
+	association.noteRoutingContextsActive([]uint32{routingContext})
+	endpoint.as.aspStateChanged(association, StateASPActive)
+	if !association.activeForASKey(contextlessKey) {
+		t.Fatal("scoped ASP Active inactivated the previously active contextless Application Server")
+	}
+	if !association.activeForRoutingContext(routingContext) {
+		t.Fatalf("scoped ASP Active did not activate Routing Context %d", routingContext)
+	}
+	association.noteRoutingContextsActive(nil)
+	association.noteRoutingContextsInactive([]uint32{routingContext})
+	endpoint.as.aspStateChanged(association, StateASPActive)
+	if !association.activeForASKey(contextlessKey) {
+		t.Fatal("scoped ASP Inactive inactivated the unrelated contextless Application Server")
+	}
+	if association.activeForRoutingContext(routingContext) {
+		t.Fatalf("scoped ASP Inactive retained Routing Context %d", routingContext)
+	}
+	contextlessApplicationServer, ok := endpoint.as.lookup(contextlessKey)
+	if !ok {
+		t.Fatal("contextless Application Server disappeared after scoped activation changes")
+	}
+	active := contextlessApplicationServer.activeASPs()
+	if len(active) != 1 || active[0] != association {
+		t.Fatalf("contextless Application Server active ASPs = %v, want the original Association", active)
+	}
 	deregistration := endpoint.routingKeys.deregister(association, []uint32{routingContext})
 	if len(deregistration) != 1 || deregistration[0].Status != DeregistrationSuccessfullyDeregistered {
 		t.Fatalf("inactive new Routing Context Deregistration = %+v, want success", deregistration)
+	}
+}
+
+func TestRKMContextlessIPSPRemainsActiveAfterScopedOverride(t *testing.T) {
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	association := newAssociation(RoleIPSP, config)
+	association.muState.Lock()
+	association.state = StateASPActive
+	association.muState.Unlock()
+	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	association.addDynamicASKey(ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       7,
+		RoutingContextSet:    true,
+	}, routingKey, false)
+	association.noteRoutingContextsActive(nil)
+	association.noteRoutingContextsOverridden([]uint32{7})
+
+	contextlessKey := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true}
+	if !association.activeForASKey(contextlessKey) {
+		t.Fatal("scoped override inactivated the unrelated contextless Application Server")
+	}
+	if association.activeForRoutingContext(7) {
+		t.Fatal("scoped override retained the overridden Routing Context")
+	}
+	if state := association.stateForActiveRoutingContexts(); state != StateASPActive {
+		t.Fatalf("Association state after scoped override = %v, want ASP-ACTIVE for contextless AS", state)
 	}
 }
 
@@ -1092,6 +1146,160 @@ func TestRKMRequesterWaitStopsOnContextAndAssociationClose(t *testing.T) {
 	})
 }
 
+func TestRKMRequesterBoundsUnresolvedRegistrationOutcomes(t *testing.T) {
+	const unresolvedLimit = 1024
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	defer func() { _ = association.Close() }()
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+
+	writes := 0
+	for attempt := 0; attempt <= unresolvedLimit; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			writes++
+			cancel()
+			return message.MarshalLen(), nil
+		}
+		_, err := association.RegisterRoutingKeys(ctx, RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		cancel()
+		if attempt < unresolvedLimit {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Registration attempt %d error = %v, want context.Canceled", attempt+1, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrRKMOutcomeLimit) {
+			t.Fatalf("Registration above unresolved limit error = %v, want ErrRKMOutcomeLimit", err)
+		}
+	}
+	if writes != unresolvedLimit {
+		t.Fatalf("Registration writes = %d, want bounded %d", writes, unresolvedLimit)
+	}
+	association.rkmCorrelationMu.Lock()
+	unresolved := len(association.rkmUnresolvedRegistrations)
+	association.rkmCorrelationMu.Unlock()
+	if unresolved != unresolvedLimit {
+		t.Fatalf("unresolved Registrations = %d, want bounded %d", unresolved, unresolvedLimit)
+	}
+	lateResponse := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(1),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(77),
+		),
+	))
+	if err := association.handleRegistrationResponse(lateResponse); err != nil {
+		t.Fatalf("late Registration Response: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		writes++
+		cancel()
+		return message.MarshalLen(), nil
+	}
+	_, err := association.RegisterRoutingKeys(ctx, RoutingKeyRegistration{
+		RoutingKey: testRoutingKey(10, 200, params.ServiceIndSCCP),
+	})
+	cancel()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Registration after late result error = %v, want context.Canceled", err)
+	}
+	if writes != unresolvedLimit+1 {
+		t.Fatalf("Registration writes after late result = %d, want %d", writes, unresolvedLimit+1)
+	}
+}
+
+func TestRKMRequesterBoundsUnresolvedDeregistrationOutcomes(t *testing.T) {
+	const unresolvedLimit = 1024
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	defer func() { _ = association.Close() }()
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+
+	writes := 0
+	for attempt := 0; attempt <= unresolvedLimit; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			writes++
+			cancel()
+			return message.MarshalLen(), nil
+		}
+		_, err := association.DeregisterRoutingContexts(ctx, uint32(attempt+1))
+		cancel()
+		if attempt < unresolvedLimit {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Deregistration attempt %d error = %v, want context.Canceled", attempt+1, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrRKMOutcomeLimit) {
+			t.Fatalf("Deregistration above unresolved limit error = %v, want ErrRKMOutcomeLimit", err)
+		}
+	}
+	if writes != unresolvedLimit {
+		t.Fatalf("Deregistration writes = %d, want bounded %d", writes, unresolvedLimit)
+	}
+	association.rkmCorrelationMu.Lock()
+	unresolved := len(association.rkmUnresolvedDeregistrationRCs)
+	association.rkmCorrelationMu.Unlock()
+	if unresolved != unresolvedLimit {
+		t.Fatalf("unresolved Deregistrations = %d, want bounded %d", unresolved, unresolvedLimit)
+	}
+	lateResponse := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(1),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		),
+	))
+	if err := association.handleDeregistrationResponse(lateResponse); err != nil {
+		t.Fatalf("late Deregistration Response: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		writes++
+		cancel()
+		return message.MarshalLen(), nil
+	}
+	_, err := association.DeregisterRoutingContexts(ctx, unresolvedLimit+2)
+	cancel()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Deregistration after late result error = %v, want context.Canceled", err)
+	}
+	if writes != unresolvedLimit+1 {
+		t.Fatalf("Deregistration writes after late result = %d, want %d", writes, unresolvedLimit+1)
+	}
+}
+
+func TestRKMRequesterSharesUnresolvedOutcomeBudget(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.rkmUnresolvedRegistrations = make(map[uint32]RoutingKeyRegistrationRequest, rkmUnresolvedOutcomeLimit/2)
+	association.rkmUnresolvedDeregistrationRCs = make(map[uint32]struct{}, rkmUnresolvedOutcomeLimit/2)
+	for index := 0; index < rkmUnresolvedOutcomeLimit/2; index++ {
+		identifier := uint32(index + 1)
+		association.rkmUnresolvedRegistrations[identifier] = RoutingKeyRegistrationRequest{
+			LocalRoutingKeyIdentifier: identifier,
+			RoutingKey:                testRoutingKey(10, uint32(index+1), params.ServiceIndSCCP),
+		}
+		association.rkmUnresolvedDeregistrationRCs[uint32(index+1)] = struct{}{}
+	}
+	if _, err := association.beginRegistrationResponseCorrelation(
+		map[uint32]int{rkmUnresolvedOutcomeLimit + 1: 0},
+		map[uint32]RoutingKeyRegistrationRequest{
+			rkmUnresolvedOutcomeLimit + 1: {
+				LocalRoutingKeyIdentifier: rkmUnresolvedOutcomeLimit + 1,
+				RoutingKey:                testRoutingKey(10, 2000, params.ServiceIndSCCP),
+			},
+		},
+	); !errors.Is(err, ErrRKMOutcomeLimit) {
+		t.Fatalf("combined unresolved outcome error = %v, want ErrRKMOutcomeLimit", err)
+	}
+}
+
 func TestRKMRequesterIgnoresStaleRegistrationResponseAfterCancellation(t *testing.T) {
 	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
 	association.muState.Lock()
@@ -1399,10 +1607,12 @@ func TestRKMCanceledRegistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
 		LocalRoutingKeyIdentifier: 1,
 		RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
 	}
-	association.beginRegistrationResponseCorrelation(
+	if _, err := association.beginRegistrationResponseCorrelation(
 		map[uint32]int{1: 0},
 		map[uint32]RoutingKeyRegistrationRequest{1: request},
-	)
+	); err != nil {
+		t.Fatalf("beginRegistrationResponseCorrelation: %v", err)
+	}
 	response := messages.NewRegistrationResponse(params.NewRegistrationResult(
 		params.NewRegistrationResultPayload(
 			params.NewLocalRoutingKeyIdentifier(1),

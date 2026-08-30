@@ -228,6 +228,10 @@ Sections 3.6.4 and 4.4.2 correlate the response only by Routing Context, so the
 Association cannot safely guess whether a response belongs to the old request
 or its retry.
 
+Unresolved REG/DEREG outcomes share a 1,024-result Association budget. A call
+that could exceed it returns `ErrRKMOutcomeLimit` without writing a new request;
+late responses release capacity.
+
 ## Renamed API
 
 | Before v1.2 | v1.2 |

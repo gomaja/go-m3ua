@@ -236,6 +236,12 @@ type Association struct {
 	// activeRCsScoped distinguishes "activated for everything" from "activated
 	// for nothing", since both leave activeRCs empty.
 	activeRCsScoped bool
+	// activeScopeInitialized distinguishes the initial compatibility fallback
+	// from an ASP Active that explicitly activated every configured AS.
+	activeScopeInitialized bool
+	// contextlessASActive preserves an active contextless AS when a later
+	// scoped procedure changes only Routing-Context-qualified AS state.
+	contextlessASActive bool
 	// inactiveDynamicRCs excludes Routing Contexts registered after an unscoped
 	// ASP Active. RFC 4666 Section 4.3.4.3 requires a subsequent ASP Active
 	// procedure before the new Application Server becomes active.
@@ -1693,6 +1699,8 @@ func (c *Association) closeWith(cause error) error {
 			c.ackedRCsScoped = true
 			c.activeRCs = nil
 			c.activeRCsScoped = true
+			c.activeScopeInitialized = true
+			c.contextlessASActive = false
 			c.inactiveDynamicRCs = nil
 			c.overriddenRCs = nil
 			c.muAckedRCs.Unlock()
@@ -2627,15 +2635,7 @@ func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 		// subtracting a partial override so later acknowledgements cannot count the
 		// overridden context as the last active AS.
 		if !c.activeRCsScoped {
-			c.activeRCs = make(map[uint32]struct{})
-			for _, rc := range c.configuredRoutingContexts() {
-				if _, inactive := c.inactiveDynamicRCs[rc]; inactive {
-					continue
-				}
-				c.activeRCs[rc] = struct{}{}
-			}
-			c.activeRCsScoped = true
-			c.inactiveDynamicRCs = nil
+			c.materializeUnscopedActiveRoutingContextsLocked()
 		}
 		for _, rc := range rcs {
 			delete(c.activeRCs, rc)
@@ -2670,16 +2670,22 @@ func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 
 	if len(rcs) == 0 {
 		c.activeRCs, c.activeRCsScoped = nil, false
+		c.activeScopeInitialized = true
+		c.contextlessASActive = false
 		c.inactiveDynamicRCs = nil
 		if !c.isIPSPDoubleExchange() {
 			c.overriddenRCs = nil
 		}
 		return
 	}
+	if !c.activeRCsScoped && c.activeScopeInitialized {
+		c.materializeUnscopedActiveRoutingContextsLocked()
+	}
 	if c.activeRCs == nil {
 		c.activeRCs = make(map[uint32]struct{}, len(rcs))
 	}
 	c.activeRCsScoped = true
+	c.activeScopeInitialized = true
 	for _, rc := range rcs {
 		c.activeRCs[rc] = struct{}{}
 		delete(c.inactiveDynamicRCs, rc)
@@ -2697,21 +2703,20 @@ func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
 
 	if len(rcs) == 0 {
 		c.activeRCs, c.activeRCsScoped = nil, true
+		c.activeScopeInitialized = true
+		c.contextlessASActive = false
 		c.inactiveDynamicRCs = nil
 		return
 	}
-	if c.activeRCs == nil {
+	if !c.activeRCsScoped {
 		// Was active everywhere; narrowing it needs the full set to subtract
 		// from, so start from what the association carries.
+		c.materializeUnscopedActiveRoutingContextsLocked()
+	} else if c.activeRCs == nil {
 		c.activeRCs = make(map[uint32]struct{})
-		for _, rc := range c.configuredRoutingContexts() {
-			if _, inactive := c.inactiveDynamicRCs[rc]; inactive {
-				continue
-			}
-			c.activeRCs[rc] = struct{}{}
-		}
 	}
 	c.activeRCsScoped = true
+	c.activeScopeInitialized = true
 	c.inactiveDynamicRCs = nil
 	for _, rc := range rcs {
 		delete(c.activeRCs, rc)
@@ -2723,8 +2728,34 @@ func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
 func (c *Association) forgetActiveRoutingContexts() {
 	c.muAckedRCs.Lock()
 	c.activeRCs, c.activeRCsScoped = nil, false
+	c.activeScopeInitialized = false
+	c.contextlessASActive = false
 	c.inactiveDynamicRCs = nil
 	c.muAckedRCs.Unlock()
+}
+
+func (c *Association) materializeUnscopedActiveRoutingContextsLocked() {
+	c.activeRCs = make(map[uint32]struct{})
+	for _, routingContext := range c.configuredRoutingContexts() {
+		if _, inactive := c.inactiveDynamicRCs[routingContext]; inactive {
+			continue
+		}
+		c.activeRCs[routingContext] = struct{}{}
+	}
+	c.activeRCsScoped = true
+	c.activeScopeInitialized = true
+	c.contextlessASActive = c.hasStaticallyConfiguredContextlessAS()
+	c.inactiveDynamicRCs = nil
+}
+
+func (c *Association) hasStaticallyConfiguredContextlessAS() bool {
+	if c == nil || c.hasExplicitlyEmptyASPAuthorization() {
+		return false
+	}
+	if c.isIPSPDoubleExchange() && !c.hasPeerIPSPTrafficDirection() {
+		return false
+	}
+	return len(c.staticallyConfiguredRoutingContexts()) == 0
 }
 
 // activeForRoutingContext reports whether this ASP is ASP-ACTIVE in the
@@ -2746,7 +2777,7 @@ func (c *Association) activeForASKey(key ASKey) bool {
 	if !key.RoutingContextSet {
 		c.muAckedRCs.RLock()
 		defer c.muAckedRCs.RUnlock()
-		return !c.activeRCsScoped
+		return !c.activeRCsScoped || c.contextlessASActive
 	}
 	return c.activeForRoutingContext(key.RoutingContext)
 }

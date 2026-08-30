@@ -12,6 +12,7 @@ const (
 	rkmAwaitingNone uint32 = iota
 	rkmAwaitingRegistrationResponse
 	rkmAwaitingDeregistrationResponse
+	rkmUnresolvedOutcomeLimit = 1024
 )
 
 // RoutingKeyRegistration describes one Routing Key to register. A requested
@@ -69,7 +70,10 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		requestsByIdentifier[identifier] = request
 	}
 
-	responses := c.beginRegistrationResponseCorrelation(pending, requestsByIdentifier)
+	responses, err := c.beginRegistrationResponseCorrelation(pending, requestsByIdentifier)
+	if err != nil {
+		return nil, err
+	}
 	requestWritten := false
 	completed := false
 	defer func() { c.endRegistrationResponseCorrelation(requestWritten, completed) }()
@@ -563,9 +567,12 @@ func (c *Association) localRoutingKeyIdentifierWasIssuedLocked(identifier uint32
 func (c *Association) beginRegistrationResponseCorrelation(
 	pending map[uint32]int,
 	requests map[uint32]RoutingKeyRegistrationRequest,
-) chan messages.M3UA {
+) (chan messages.M3UA, error) {
 	c.rkmCorrelationMu.Lock()
 	defer c.rkmCorrelationMu.Unlock()
+	if c.unresolvedRKMOutcomeCountLocked()+len(pending) > rkmUnresolvedOutcomeLimit {
+		return nil, ErrRKMOutcomeLimit
+	}
 	c.rkmResponseChan = make(chan messages.M3UA, len(pending))
 	c.rkmPendingLocalIDs = make(map[uint32]struct{}, len(pending))
 	c.rkmRegistrationRequests = make(map[uint32]RoutingKeyRegistrationRequest, len(requests))
@@ -577,7 +584,7 @@ func (c *Association) beginRegistrationResponseCorrelation(
 		c.rkmRegistrationRequests[identifier] = snapshotRoutingKeyRegistrationRequest(request)
 	}
 	c.rkmAwaiting = rkmAwaitingRegistrationResponse
-	return c.rkmResponseChan
+	return c.rkmResponseChan, nil
 }
 
 func (c *Association) beginDeregistrationResponseCorrelation(pending map[uint32]int) (chan messages.M3UA, error) {
@@ -588,6 +595,9 @@ func (c *Association) beginDeregistrationResponseCorrelation(pending map[uint32]
 			return nil, fmt.Errorf("routing context %d: %w", routingContext, ErrDeregistrationOutcomeUnknown)
 		}
 	}
+	if c.unresolvedRKMOutcomeCountLocked()+len(pending) > rkmUnresolvedOutcomeLimit {
+		return nil, ErrRKMOutcomeLimit
+	}
 	c.rkmResponseChan = make(chan messages.M3UA, len(pending))
 	c.rkmPendingLocalIDs = nil
 	c.rkmPendingDeregistrationRCs = make(map[uint32]struct{}, len(pending))
@@ -597,6 +607,10 @@ func (c *Association) beginDeregistrationResponseCorrelation(pending map[uint32]
 	c.rkmDeliveredDeregistrationStatus = make(map[uint32]DeregistrationStatus, len(pending))
 	c.rkmAwaiting = rkmAwaitingDeregistrationResponse
 	return c.rkmResponseChan, nil
+}
+
+func (c *Association) unresolvedRKMOutcomeCountLocked() int {
+	return len(c.rkmUnresolvedRegistrations) + len(c.rkmUnresolvedDeregistrationRCs)
 }
 
 func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) {

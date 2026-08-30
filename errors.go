@@ -277,6 +277,9 @@ var (
 	// by Routing Context, so a delayed response cannot be distinguished from a
 	// response to a new request for the same Routing Context.
 	ErrDeregistrationOutcomeUnknown = errors.New("previous Routing Key Deregistration outcome is unresolved")
+	// ErrRKMOutcomeLimit reports that another local REG REQ or DEREG REQ would
+	// exceed the bounded set of requests whose peer outcome remains unresolved.
+	ErrRKMOutcomeLimit = errors.New("unresolved Routing Key Management outcome limit reached")
 )
 
 // InvalidVersionError is used if a message with an unsupported version is received.

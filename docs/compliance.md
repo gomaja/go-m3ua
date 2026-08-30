@@ -69,6 +69,9 @@ SGP, and IPSP Endpoints:
 - RFC 4666 defines no RKM acknowledgement timer. Local waits use caller
   contexts, while responder replay state makes peer retransmissions
   deterministic without inventing an RKM T(ack).
+- Unresolved requester outcomes share a 1,024-result Association budget. New
+  REG/DEREG procedures fail before transmission with `ErrRKMOutcomeLimit` when
+  that budget is exhausted, and delayed responses release capacity.
 
 ## Go implementation survey
 
