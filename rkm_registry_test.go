@@ -1082,9 +1082,11 @@ func TestRoutingKeyRegistryBoundsDeregistrationReplayState(t *testing.T) {
 		if index == 0 {
 			firstRoutingContext = registration.RoutingContext
 		}
-		if deregistration := registry.deregister(association, []uint32{registration.RoutingContext})[0]; deregistration.Status != DeregistrationSuccessfullyDeregistered {
+		deregistration := registry.deregister(association, []uint32{registration.RoutingContext})[0]
+		if deregistration.Status != DeregistrationSuccessfullyDeregistered {
 			t.Fatalf("deregistration %d = %+v, want success", index, deregistration)
 		}
+		registry.deregistrationResponseWritten(association, []RoutingKeyDeregistrationResult{deregistration})
 	}
 
 	if replay := registry.deregister(association, []uint32{firstRoutingContext})[0]; replay.Status != DeregistrationInvalidRoutingContext {

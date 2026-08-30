@@ -50,6 +50,7 @@ type routingKeyEntry struct {
 type registrationReplayState struct {
 	byIdentifier map[uint32]registrationReplay
 	order        []uint32
+	pending      map[uint32]struct{}
 }
 
 type registrationReplay struct {
@@ -60,6 +61,7 @@ type registrationReplay struct {
 type deregistrationReplayState struct {
 	byRoutingContext map[uint32]RoutingKeyDeregistrationResult
 	order            []uint32
+	pending          map[uint32]struct{}
 }
 
 func newRoutingKeyRegistry(config *RoutingKeyManagementConfig) (*routingKeyRegistry, error) {
@@ -138,6 +140,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 			if replay, ok := replayState.byIdentifier[request.LocalRoutingKeyIdentifier]; ok &&
 				routingKeyRegistrationRequestsEqual(replay.request, request) {
 				results[index] = replay.result
+				storeRegistrationReplay(replayState, request, results[index])
 				continue
 			}
 
@@ -321,6 +324,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 			result := RoutingKeyDeregistrationResult{RoutingContext: routingContext}
 			if replay, ok := deregistrationReplays.byRoutingContext[routingContext]; ok {
 				result = replay
+				storeDeregistrationReplay(deregistrationReplays, result)
 			} else {
 				entry := entries[routingContext]
 				switch {
@@ -575,6 +579,7 @@ func clearDeregistrationReplayState(state *deregistrationReplayState, routingCon
 		return
 	}
 	delete(state.byRoutingContext, routingContext)
+	delete(state.pending, routingContext)
 	filtered := state.order[:0]
 	for _, retained := range state.order {
 		if retained != routingContext {
@@ -596,6 +601,7 @@ func purgeRegistrationReplayState(state *registrationReplayState, routingContext
 		}
 		if replay.result.RoutingContext == routingContext {
 			delete(state.byIdentifier, identifier)
+			delete(state.pending, identifier)
 			continue
 		}
 		filtered = append(filtered, identifier)
@@ -604,7 +610,10 @@ func purgeRegistrationReplayState(state *registrationReplayState, routingContext
 }
 
 func cloneDeregistrationReplayState(state *deregistrationReplayState) *deregistrationReplayState {
-	clone := &deregistrationReplayState{byRoutingContext: make(map[uint32]RoutingKeyDeregistrationResult)}
+	clone := &deregistrationReplayState{
+		byRoutingContext: make(map[uint32]RoutingKeyDeregistrationResult),
+		pending:          make(map[uint32]struct{}),
+	}
 	if state == nil {
 		return clone
 	}
@@ -612,20 +621,39 @@ func cloneDeregistrationReplayState(state *deregistrationReplayState) *deregistr
 	for routingContext, result := range state.byRoutingContext {
 		clone.byRoutingContext[routingContext] = result
 	}
+	for routingContext := range state.pending {
+		clone.pending[routingContext] = struct{}{}
+	}
 	return clone
 }
 
 func storeDeregistrationReplay(state *deregistrationReplayState, result RoutingKeyDeregistrationResult) {
+	if state.pending == nil {
+		state.pending = make(map[uint32]struct{})
+	}
 	if _, exists := state.byRoutingContext[result.RoutingContext]; !exists {
 		state.order = append(state.order, result.RoutingContext)
 	}
 	state.byRoutingContext[result.RoutingContext] = result
-	if len(state.order) <= deregistrationReplayLimit {
+	state.pending[result.RoutingContext] = struct{}{}
+	trimDeregistrationReplayState(state)
+}
+
+func trimDeregistrationReplayState(state *deregistrationReplayState) {
+	excess := len(state.order) - deregistrationReplayLimit
+	if excess <= 0 {
 		return
 	}
-	evicted := state.order[0]
-	state.order = state.order[1:]
-	delete(state.byRoutingContext, evicted)
+	retained := state.order[:0]
+	for _, routingContext := range state.order {
+		if _, pending := state.pending[routingContext]; excess > 0 && !pending {
+			delete(state.byRoutingContext, routingContext)
+			excess--
+			continue
+		}
+		retained = append(retained, routingContext)
+	}
+	state.order = retained
 }
 
 func registrationResult(identifier uint32, status RegistrationStatus, routingContext uint32) RoutingKeyRegistrationResult {
@@ -743,7 +771,10 @@ func cloneRoutingKeyEntries(entries map[uint32]*routingKeyEntry) map[uint32]*rou
 }
 
 func cloneRegistrationReplayState(state *registrationReplayState) *registrationReplayState {
-	clone := &registrationReplayState{byIdentifier: make(map[uint32]registrationReplay)}
+	clone := &registrationReplayState{
+		byIdentifier: make(map[uint32]registrationReplay),
+		pending:      make(map[uint32]struct{}),
+	}
 	if state == nil {
 		return clone
 	}
@@ -754,10 +785,16 @@ func cloneRegistrationReplayState(state *registrationReplayState) *registrationR
 			result:  replay.result,
 		}
 	}
+	for identifier := range state.pending {
+		clone.pending[identifier] = struct{}{}
+	}
 	return clone
 }
 
 func storeRegistrationReplay(state *registrationReplayState, request RoutingKeyRegistrationRequest, result RoutingKeyRegistrationResult) {
+	if state.pending == nil {
+		state.pending = make(map[uint32]struct{})
+	}
 	if _, exists := state.byIdentifier[request.LocalRoutingKeyIdentifier]; !exists {
 		state.order = append(state.order, request.LocalRoutingKeyIdentifier)
 	}
@@ -765,12 +802,91 @@ func storeRegistrationReplay(state *registrationReplayState, request RoutingKeyR
 		request: snapshotRoutingKeyRegistrationRequest(request),
 		result:  result,
 	}
-	if len(state.order) <= registrationReplayLimit {
+	state.pending[request.LocalRoutingKeyIdentifier] = struct{}{}
+	trimRegistrationReplayState(state)
+}
+
+func trimRegistrationReplayState(state *registrationReplayState) {
+	excess := len(state.order) - registrationReplayLimit
+	if excess <= 0 {
 		return
 	}
-	evicted := state.order[0]
-	state.order = state.order[1:]
-	delete(state.byIdentifier, evicted)
+	retained := state.order[:0]
+	for _, identifier := range state.order {
+		if _, pending := state.pending[identifier]; excess > 0 && !pending {
+			delete(state.byIdentifier, identifier)
+			excess--
+			continue
+		}
+		retained = append(retained, identifier)
+	}
+	state.order = retained
+}
+
+func (registry *routingKeyRegistry) registrationResponseWritten(
+	association *Association,
+	requests []RoutingKeyRegistrationRequest,
+	results []RoutingKeyRegistrationResult,
+) {
+	if registry == nil {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	state := registry.replays[association]
+	if state == nil {
+		return
+	}
+	changed := false
+	for index, request := range requests {
+		if index >= len(results) {
+			break
+		}
+		replay, ok := state.byIdentifier[request.LocalRoutingKeyIdentifier]
+		if !ok || replay.result != results[index] || !routingKeyRegistrationRequestsEqual(replay.request, request) {
+			continue
+		}
+		if _, pending := state.pending[request.LocalRoutingKeyIdentifier]; pending {
+			delete(state.pending, request.LocalRoutingKeyIdentifier)
+			changed = true
+		}
+	}
+	before := len(state.order)
+	trimRegistrationReplayState(state)
+	if changed || len(state.order) != before {
+		registry.revision++
+	}
+}
+
+func (registry *routingKeyRegistry) deregistrationResponseWritten(
+	association *Association,
+	results []RoutingKeyDeregistrationResult,
+) {
+	if registry == nil {
+		return
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	state := registry.deregReplays[association]
+	if state == nil {
+		return
+	}
+	changed := false
+	for _, result := range results {
+		replay, ok := state.byRoutingContext[result.RoutingContext]
+		if !ok || replay != result {
+			continue
+		}
+		if _, pending := state.pending[result.RoutingContext]; pending {
+			delete(state.pending, result.RoutingContext)
+			changed = true
+		}
+	}
+	before := len(state.order)
+	trimDeregistrationReplayState(state)
+	if changed || len(state.order) != before {
+		registry.revision++
+	}
 }
 
 func snapshotRoutingKeyRegistrationRequest(request RoutingKeyRegistrationRequest) RoutingKeyRegistrationRequest {

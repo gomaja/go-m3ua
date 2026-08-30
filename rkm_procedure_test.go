@@ -2028,6 +2028,250 @@ func TestRKMResponderReplayCompletesASMutationAfterResponseWriteFailure(t *testi
 	}
 }
 
+func TestRKMRegistrationBatchRemainsReplayableUntilResponseWrite(t *testing.T) {
+	const registrationCount = registrationReplayLimit + 1
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+			MaxDynamicRoutingKeys:   registrationCount,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	association.notificationQueue = make(chan mandatoryControl, registrationCount+1)
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+
+	routingKeys := make([]*params.Param, registrationCount)
+	for index := range routingKeys {
+		routingKeys[index], err = routingKeyParameter(RoutingKeyRegistrationRequest{
+			LocalRoutingKeyIdentifier: uint32(index + 1),
+			RoutingKey:                testRoutingKey(10, uint32(index+1), params.ServiceIndSCCP),
+		})
+		if err != nil {
+			t.Fatalf("routingKeyParameter %d: %v", index, err)
+		}
+	}
+	request := messages.NewRegistrationRequest(routingKeys...)
+	writeErr := errors.New("registration response write failed")
+	var responses []*messages.RegistrationResponse
+	failResponseWrite := true
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		response, ok := message.(*messages.RegistrationResponse)
+		if !ok {
+			return message.MarshalLen(), nil
+		}
+		responses = append(responses, response)
+		if failResponseWrite {
+			failResponseWrite = false
+			return 0, writeErr
+		}
+		return message.MarshalLen(), nil
+	}
+
+	if err := association.handleRegistrationRequest(request); !errors.Is(err, writeErr) {
+		t.Fatalf("first Registration error = %v, want write failure", err)
+	}
+	endpoint.routingKeys.mu.Lock()
+	pendingState := endpoint.routingKeys.replays[association]
+	if pendingState == nil {
+		endpoint.routingKeys.mu.Unlock()
+		t.Fatalf("pending Registration replay state missing; Association error = %v", association.Err())
+	}
+	pendingReplayCount := len(pendingState.order)
+	pendingResponseCount := len(pendingState.pending)
+	endpoint.routingKeys.mu.Unlock()
+	if pendingReplayCount != registrationCount || pendingResponseCount != registrationCount {
+		t.Fatalf("pending Registration replay state = %d results, %d awaiting response; want %d, %d",
+			pendingReplayCount,
+			pendingResponseCount,
+			registrationCount,
+			registrationCount,
+		)
+	}
+	if err := association.handleRegistrationRequest(request); err != nil {
+		t.Fatalf("replayed Registration: %v", err)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("Registration Responses = %d, want 2", len(responses))
+	}
+	for index := range responses[0].RegistrationResults {
+		first, err := responses[0].RegistrationResults[index].RegistrationResult()
+		if err != nil {
+			t.Fatalf("first Registration Result %d: %v", index, err)
+		}
+		replayed, err := responses[1].RegistrationResults[index].RegistrationResult()
+		if err != nil {
+			t.Fatalf("replayed Registration Result %d: %v", index, err)
+		}
+		if first.RegistrationStatus.RegistrationStatus() != uint32(RegistrationSuccessfullyRegistered) {
+			t.Fatalf("first Registration Result %d status = %d, want success", index, first.RegistrationStatus.RegistrationStatus())
+		}
+		if replayed.RegistrationStatus.RegistrationStatus() != first.RegistrationStatus.RegistrationStatus() ||
+			replayed.RoutingContext.RoutingContext() != first.RoutingContext.RoutingContext() {
+			t.Fatalf("replayed Registration Result %d = status %d, RC %d; want original status %d, RC %d",
+				index,
+				replayed.RegistrationStatus.RegistrationStatus(),
+				replayed.RoutingContext.RoutingContext(),
+				first.RegistrationStatus.RegistrationStatus(),
+				first.RoutingContext.RoutingContext(),
+			)
+		}
+	}
+	endpoint.routingKeys.mu.Lock()
+	confirmedState := endpoint.routingKeys.replays[association]
+	if confirmedState == nil {
+		endpoint.routingKeys.mu.Unlock()
+		t.Fatalf("confirmed Registration replay state missing; Association error = %v", association.Err())
+	}
+	confirmedReplayCount := len(confirmedState.order)
+	confirmedPendingCount := len(confirmedState.pending)
+	endpoint.routingKeys.mu.Unlock()
+	if confirmedReplayCount != registrationReplayLimit || confirmedPendingCount != 0 {
+		t.Fatalf("confirmed Registration replay state = %d results, %d awaiting response; want %d, 0",
+			confirmedReplayCount,
+			confirmedPendingCount,
+			registrationReplayLimit,
+		)
+	}
+}
+
+func TestRKMDeregistrationBatchRemainsReplayableUntilResponseWrite(t *testing.T) {
+	const deregistrationCount = deregistrationReplayLimit + 1
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+			MaxDynamicRoutingKeys:   deregistrationCount,
+			RemoveUnusedRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+
+	registrations := make([]RoutingKeyRegistrationRequest, deregistrationCount)
+	for index := range registrations {
+		registrations[index] = RoutingKeyRegistrationRequest{
+			LocalRoutingKeyIdentifier: uint32(index + 1),
+			RoutingKey:                testRoutingKey(10, uint32(index+1), params.ServiceIndSCCP),
+		}
+	}
+	registrationResults := endpoint.routingKeys.register(association, registrations)
+	routingContexts := make([]uint32, len(registrationResults))
+	for index, result := range registrationResults {
+		if result.Status != RegistrationSuccessfullyRegistered {
+			t.Fatalf("Registration Result %d = %+v, want success", index, result)
+		}
+		routingContexts[index] = result.RoutingContext
+	}
+
+	request := messages.NewDeregistrationRequest(params.NewRoutingContext(routingContexts...))
+	writeErr := errors.New("deregistration response write failed")
+	var responses []*messages.DeregistrationResponse
+	failResponseWrite := true
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		response, ok := message.(*messages.DeregistrationResponse)
+		if !ok {
+			return message.MarshalLen(), nil
+		}
+		responses = append(responses, response)
+		if failResponseWrite {
+			failResponseWrite = false
+			return 0, writeErr
+		}
+		return message.MarshalLen(), nil
+	}
+
+	if err := association.handleDeregistrationRequest(request); !errors.Is(err, writeErr) {
+		t.Fatalf("first Deregistration error = %v, want write failure", err)
+	}
+	endpoint.routingKeys.mu.Lock()
+	pendingState := endpoint.routingKeys.deregReplays[association]
+	if pendingState == nil {
+		endpoint.routingKeys.mu.Unlock()
+		t.Fatalf("pending Deregistration replay state missing; Association error = %v", association.Err())
+	}
+	pendingReplayCount := len(pendingState.order)
+	pendingResponseCount := len(pendingState.pending)
+	endpoint.routingKeys.mu.Unlock()
+	if pendingReplayCount != deregistrationCount || pendingResponseCount != deregistrationCount {
+		t.Fatalf("pending Deregistration replay state = %d results, %d awaiting response; want %d, %d",
+			pendingReplayCount,
+			pendingResponseCount,
+			deregistrationCount,
+			deregistrationCount,
+		)
+	}
+	if err := association.handleDeregistrationRequest(request); err != nil {
+		t.Fatalf("replayed Deregistration: %v", err)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("Deregistration Responses = %d, want 2", len(responses))
+	}
+	for index := range responses[0].DeregistrationResults {
+		first, err := responses[0].DeregistrationResults[index].DeregistrationResult()
+		if err != nil {
+			t.Fatalf("first Deregistration Result %d: %v", index, err)
+		}
+		replayed, err := responses[1].DeregistrationResults[index].DeregistrationResult()
+		if err != nil {
+			t.Fatalf("replayed Deregistration Result %d: %v", index, err)
+		}
+		if first.DeregistrationStatus.DeregistrationStatus() != uint32(DeregistrationSuccessfullyDeregistered) {
+			t.Fatalf("first Deregistration Result %d status = %d, want success", index, first.DeregistrationStatus.DeregistrationStatus())
+		}
+		if replayed.DeregistrationStatus.DeregistrationStatus() != first.DeregistrationStatus.DeregistrationStatus() ||
+			replayed.RoutingContext.RoutingContext() != first.RoutingContext.RoutingContext() {
+			t.Fatalf("replayed Deregistration Result %d = status %d, RC %d; want original status %d, RC %d",
+				index,
+				replayed.DeregistrationStatus.DeregistrationStatus(),
+				replayed.RoutingContext.RoutingContext(),
+				first.DeregistrationStatus.DeregistrationStatus(),
+				first.RoutingContext.RoutingContext(),
+			)
+		}
+	}
+	endpoint.routingKeys.mu.Lock()
+	confirmedState := endpoint.routingKeys.deregReplays[association]
+	if confirmedState == nil {
+		endpoint.routingKeys.mu.Unlock()
+		t.Fatalf("confirmed Deregistration replay state missing; Association error = %v", association.Err())
+	}
+	confirmedReplayCount := len(confirmedState.order)
+	confirmedPendingCount := len(confirmedState.pending)
+	endpoint.routingKeys.mu.Unlock()
+	if confirmedReplayCount != deregistrationReplayLimit || confirmedPendingCount != 0 {
+		t.Fatalf("confirmed Deregistration replay state = %d results, %d awaiting response; want %d, 0",
+			confirmedReplayCount,
+			confirmedPendingCount,
+			deregistrationReplayLimit,
+		)
+	}
+}
+
 func TestRKMRegistrationCloseRaceDoesNotRecreateMembership(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleSGP,
