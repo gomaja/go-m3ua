@@ -272,6 +272,11 @@ var (
 	// ErrEndpointClosed reports an operation started after Endpoint.Close or
 	// interrupted because the owning Endpoint closed.
 	ErrEndpointClosed = errors.New("M3UA endpoint is closed")
+	// ErrDeregistrationOutcomeUnknown prevents an ambiguous retry after a local
+	// cancellation. RFC 4666 Sections 3.6.4 and 4.4.2 correlate DEREG RSP only
+	// by Routing Context, so a delayed response cannot be distinguished from a
+	// response to a new request for the same Routing Context.
+	ErrDeregistrationOutcomeUnknown = errors.New("previous Routing Key Deregistration outcome is unresolved")
 )
 
 // InvalidVersionError is used if a message with an unsupported version is received.

@@ -150,11 +150,19 @@ func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingCont
 		pending[routingContext] = index
 	}
 
-	responses := c.beginRKMResponseCorrelation(rkmAwaitingDeregistrationResponse, len(routingContexts))
-	defer c.endRKMResponseCorrelation()
+	responses, err := c.beginDeregistrationResponseCorrelation(pending)
+	if err != nil {
+		return nil, err
+	}
+	requestWritten := false
+	defer func() { c.endDeregistrationResponseCorrelation(requestWritten) }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := c.WriteSignal(messages.NewDeregistrationRequest(params.NewRoutingContext(routingContexts...))); err != nil {
 		return nil, err
 	}
+	requestWritten = true
 
 	results := make([]RoutingKeyDeregistrationResult, len(routingContexts))
 	for len(pending) > 0 {
@@ -179,11 +187,6 @@ func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingCont
 			}
 			results[index] = result
 			delete(pending, routingContext)
-		}
-	}
-	for _, result := range results {
-		if result.Status == DeregistrationSuccessfullyDeregistered {
-			c.removeDynamicASKey(result.RoutingContext, c.isIPSPDoubleExchange())
 		}
 	}
 	return results, nil
@@ -327,17 +330,73 @@ func (c *Association) handleDeregistrationResponse(message *messages.Deregistrat
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(message)
 	}
-	return c.deliverRKMResponse(message, rkmAwaitingDeregistrationResponse)
+	return c.deliverDeregistrationResponse(message)
 }
 
-func (c *Association) deliverRKMResponse(message messages.M3UA, expected uint32) error {
+func (c *Association) deliverDeregistrationResponse(message *messages.DeregistrationResponse) error {
+	type deregistrationResult struct {
+		routingContext uint32
+		status         DeregistrationStatus
+		parameter      *params.Param
+	}
+	results := make([]deregistrationResult, len(message.DeregistrationResults))
+	for index, parameter := range message.DeregistrationResults {
+		payload, err := parameter.DeregistrationResult()
+		if err != nil {
+			return err
+		}
+		results[index] = deregistrationResult{
+			routingContext: payload.RoutingContext.RoutingContext(),
+			status:         DeregistrationStatus(payload.DeregistrationStatus.DeregistrationStatus()),
+			parameter:      parameter,
+		}
+	}
+
 	c.rkmCorrelationMu.Lock()
 	defer c.rkmCorrelationMu.Unlock()
-	if c.rkmAwaiting != expected || c.rkmResponseChan == nil {
-		return NewUnexpectedMessageError(message)
+
+	awaiting := c.rkmAwaiting == rkmAwaitingDeregistrationResponse && c.rkmResponseChan != nil
+	filtered := make([]*params.Param, 0, len(results))
+	seenPending := make(map[uint32]struct{}, len(results))
+	pendingStatus := make(map[uint32]DeregistrationStatus, len(results))
+	seenStale := make(map[uint32]struct{}, len(results))
+	for _, result := range results {
+		if _, stale := c.rkmUnresolvedDeregistrationRCs[result.routingContext]; stale {
+			delete(c.rkmUnresolvedDeregistrationRCs, result.routingContext)
+			seenStale[result.routingContext] = struct{}{}
+			continue
+		}
+		if _, duplicateStale := seenStale[result.routingContext]; duplicateStale {
+			continue
+		}
+		if !awaiting {
+			return NewUnexpectedMessageError(message)
+		}
+		if _, expected := c.rkmPendingDeregistrationRCs[result.routingContext]; expected {
+			if _, duplicate := seenPending[result.routingContext]; duplicate {
+				continue
+			}
+			seenPending[result.routingContext] = struct{}{}
+			pendingStatus[result.routingContext] = result.status
+			filtered = append(filtered, result.parameter.Copy())
+			continue
+		}
+		if _, duplicate := c.rkmDeliveredDeregistrationStatus[result.routingContext]; duplicate {
+			continue
+		}
+		return fmt.Errorf("unexpected Deregistration Result Routing Context %d", result.routingContext)
 	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	filteredResponse := messages.NewDeregistrationResponse(filtered...)
 	select {
-	case c.rkmResponseChan <- message:
+	case c.rkmResponseChan <- filteredResponse:
+		for routingContext, status := range pendingStatus {
+			delete(c.rkmPendingDeregistrationRCs, routingContext)
+			c.rkmDeliveredDeregistrationStatus[routingContext] = status
+		}
 		return nil
 	default:
 		return NewUnexpectedMessageError(message)
@@ -454,13 +513,50 @@ func (c *Association) beginRegistrationResponseCorrelation(pending map[uint32]in
 	return c.rkmResponseChan
 }
 
-func (c *Association) beginRKMResponseCorrelation(expected uint32, capacity int) chan messages.M3UA {
+func (c *Association) beginDeregistrationResponseCorrelation(pending map[uint32]int) (chan messages.M3UA, error) {
 	c.rkmCorrelationMu.Lock()
 	defer c.rkmCorrelationMu.Unlock()
-	c.rkmResponseChan = make(chan messages.M3UA, capacity)
+	for routingContext := range pending {
+		if _, unresolved := c.rkmUnresolvedDeregistrationRCs[routingContext]; unresolved {
+			return nil, fmt.Errorf("routing context %d: %w", routingContext, ErrDeregistrationOutcomeUnknown)
+		}
+	}
+	c.rkmResponseChan = make(chan messages.M3UA, len(pending))
 	c.rkmPendingLocalIDs = nil
-	c.rkmAwaiting = expected
-	return c.rkmResponseChan
+	c.rkmPendingDeregistrationRCs = make(map[uint32]struct{}, len(pending))
+	for routingContext := range pending {
+		c.rkmPendingDeregistrationRCs[routingContext] = struct{}{}
+	}
+	c.rkmDeliveredDeregistrationStatus = make(map[uint32]DeregistrationStatus, len(pending))
+	c.rkmAwaiting = rkmAwaitingDeregistrationResponse
+	return c.rkmResponseChan, nil
+}
+
+func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) {
+	c.rkmCorrelationMu.Lock()
+	successful := make([]uint32, 0, len(c.rkmDeliveredDeregistrationStatus))
+	for routingContext, status := range c.rkmDeliveredDeregistrationStatus {
+		if status == DeregistrationSuccessfullyDeregistered {
+			successful = append(successful, routingContext)
+		}
+	}
+	if requestWritten && len(c.rkmPendingDeregistrationRCs) > 0 {
+		if c.rkmUnresolvedDeregistrationRCs == nil {
+			c.rkmUnresolvedDeregistrationRCs = make(map[uint32]struct{}, len(c.rkmPendingDeregistrationRCs))
+		}
+		for routingContext := range c.rkmPendingDeregistrationRCs {
+			c.rkmUnresolvedDeregistrationRCs[routingContext] = struct{}{}
+		}
+	}
+	c.rkmAwaiting = rkmAwaitingNone
+	c.rkmPendingDeregistrationRCs = nil
+	c.rkmDeliveredDeregistrationStatus = nil
+	c.rkmResponseChan = nil
+	c.rkmCorrelationMu.Unlock()
+
+	for _, routingContext := range successful {
+		c.removeDynamicASKey(routingContext, c.isIPSPDoubleExchange())
+	}
 }
 
 func (c *Association) endRKMResponseCorrelation() {
@@ -468,6 +564,8 @@ func (c *Association) endRKMResponseCorrelation() {
 	defer c.rkmCorrelationMu.Unlock()
 	c.rkmAwaiting = rkmAwaitingNone
 	c.rkmPendingLocalIDs = nil
+	c.rkmPendingDeregistrationRCs = nil
+	c.rkmDeliveredDeregistrationStatus = nil
 	c.rkmResponseChan = nil
 }
 

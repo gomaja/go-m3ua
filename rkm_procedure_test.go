@@ -199,6 +199,71 @@ func TestRKMRegistrationDoesNotActivateNewApplicationServer(t *testing.T) {
 	}
 }
 
+func TestRKMRegistrationAfterUnscopedActivationRequiresNewASPActive(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.NetworkAppearance = params.NewNetworkAppearance(10)
+	association := newAssociation(RoleSGP, config)
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	responses := make(chan *messages.RegistrationResponse, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if registrationResponse, ok := message.(*messages.RegistrationResponse); ok {
+			responses <- registrationResponse
+		}
+		return message.MarshalLen(), nil
+	}
+	association.muState.Lock()
+	association.state = StateASPActive
+	association.muState.Unlock()
+	association.noteRoutingContextsActive(nil)
+	endpoint.as.aspStateChanged(association, StateASPActive)
+
+	contextlessKey := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true}
+	if !association.activeForASKey(contextlessKey) {
+		t.Fatal("contextless Application Server was not active before Registration")
+	}
+	parameter, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+	})
+	if err != nil {
+		t.Fatalf("routingKeyParameter: %v", err)
+	}
+	if err := association.handleRegistrationRequest(messages.NewRegistrationRequest(parameter)); err != nil {
+		t.Fatalf("handleRegistrationRequest: %v", err)
+	}
+	response := <-responses
+	result, err := response.RegistrationResults[0].RegistrationResult()
+	if err != nil {
+		t.Fatalf("RegistrationResult: %v", err)
+	}
+	routingContext := result.RoutingContext.RoutingContext()
+	if association.activeForRoutingContext(routingContext) {
+		t.Fatalf("new Routing Context %d became active without ASP Active", routingContext)
+	}
+	if !association.activeForASKey(contextlessKey) {
+		t.Fatal("Registration inactivated the previously active contextless Application Server")
+	}
+	deregistration := endpoint.routingKeys.deregister(association, []uint32{routingContext})
+	if len(deregistration) != 1 || deregistration[0].Status != DeregistrationSuccessfullyDeregistered {
+		t.Fatalf("inactive new Routing Context Deregistration = %+v, want success", deregistration)
+	}
+}
+
 func TestRKMAllocatorAvoidsConfiguredApplicationServerRoutingContexts(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -894,6 +959,10 @@ func TestRKMResponseChannelPublicationIsRaceSafe(t *testing.T) {
 		<-written
 		cancel()
 		<-requestDone
+		// Cancellation can leave the response outcome unresolved. Deliver one
+		// final response after the requester returns so the same Routing Context
+		// is safe to use in the next publication-race iteration.
+		_ = association.handleDeregistrationResponse(response)
 	}
 	close(stop)
 	<-responderDone
@@ -1101,6 +1170,233 @@ func TestRKMRequesterIgnoresStaleRegistrationResponseAfterCancellation(t *testin
 	}
 }
 
+func TestRKMRequesterIgnoresStaleDeregistrationResponseAfterCancellation(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan uint32, 2)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request := message.(*messages.DeregistrationRequest)
+		written <- request.RoutingContext.RoutingContext()
+		return message.MarshalLen(), nil
+	}
+
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := association.DeregisterRoutingContexts(firstContext, 100)
+		firstDone <- err
+	}()
+	if got := <-written; got != 100 {
+		t.Fatalf("first Deregistration Request Routing Context = %d, want 100", got)
+	}
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first DeregisterRoutingContexts error = %v, want context.Canceled", err)
+	}
+
+	type deregistrationAnswer struct {
+		results []RoutingKeyDeregistrationResult
+		err     error
+	}
+	secondDone := make(chan deregistrationAnswer, 1)
+	go func() {
+		results, err := association.DeregisterRoutingContexts(context.Background(), 200)
+		secondDone <- deregistrationAnswer{results: results, err: err}
+	}()
+	if got := <-written; got != 200 {
+		t.Fatalf("second Deregistration Request Routing Context = %d, want 200", got)
+	}
+
+	stale := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(100),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		),
+	))
+	if err := association.handleDeregistrationResponse(stale); err != nil {
+		t.Fatalf("deliver stale Deregistration Response: %v", err)
+	}
+	select {
+	case answer := <-secondDone:
+		t.Fatalf("second Deregistration completed from stale response: results=%+v error=%v", answer.results, answer.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	current := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(200),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		),
+	))
+	if err := association.handleDeregistrationResponse(current); err != nil {
+		t.Fatalf("deliver current Deregistration Response: %v", err)
+	}
+	answer := <-secondDone
+	if answer.err != nil || len(answer.results) != 1 || answer.results[0].RoutingContext != 200 {
+		t.Fatalf("second Deregistration result = %+v, error = %v", answer.results, answer.err)
+	}
+}
+
+func TestRKMRequesterRejectsAmbiguousDeregistrationRetryAfterCancellation(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan struct{}, 2)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		written <- struct{}{}
+		return message.MarshalLen(), nil
+	}
+
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := association.DeregisterRoutingContexts(firstContext, 100)
+		firstDone <- err
+	}()
+	<-written
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first DeregisterRoutingContexts error = %v, want context.Canceled", err)
+	}
+
+	retryContext, cancelRetry := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelRetry()
+	_, err := association.DeregisterRoutingContexts(retryContext, 100)
+	if !errors.Is(err, ErrDeregistrationOutcomeUnknown) {
+		t.Fatalf("ambiguous retry error = %v, want ErrDeregistrationOutcomeUnknown", err)
+	}
+	select {
+	case <-written:
+		t.Fatal("ambiguous Deregistration retry was written")
+	default:
+	}
+
+	stale := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(100),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		),
+	))
+	if err := association.handleDeregistrationResponse(stale); err != nil {
+		t.Fatalf("deliver stale Deregistration Response: %v", err)
+	}
+
+	retryDone := make(chan error, 1)
+	go func() {
+		_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+		retryDone <- err
+	}()
+	<-written
+	if err := association.handleDeregistrationResponse(stale); err != nil {
+		t.Fatalf("deliver retried Deregistration Response: %v", err)
+	}
+	if err := <-retryDone; err != nil {
+		t.Fatalf("retry after resolving the stale result: %v", err)
+	}
+}
+
+func TestRKMDeregistrationWriteFailureDoesNotMakeOutcomeUnknown(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	writeErr := errors.New("write failed before transmission")
+	association.signalWriter = func(messages.M3UA) (int, error) {
+		return 0, writeErr
+	}
+
+	for attempt := range 2 {
+		_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+		if !errors.Is(err, writeErr) {
+			t.Fatalf("attempt %d error = %v, want write failure", attempt+1, err)
+		}
+		if errors.Is(err, ErrDeregistrationOutcomeUnknown) {
+			t.Fatalf("attempt %d treated an unwritten request as unresolved", attempt+1)
+		}
+	}
+}
+
+func TestRKMCanceledDeregistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.addDynamicASKey(ASKey{
+		RoutingContext:    100,
+		RoutingContextSet: true,
+	}, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+	pending := map[uint32]int{100: 0}
+	if _, err := association.beginDeregistrationResponseCorrelation(pending); err != nil {
+		t.Fatalf("beginDeregistrationResponseCorrelation: %v", err)
+	}
+	response := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(100),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		),
+	))
+	if err := association.deliverDeregistrationResponse(response); err != nil {
+		t.Fatalf("deliverDeregistrationResponse: %v", err)
+	}
+
+	association.endDeregistrationResponseCorrelation(true)
+	if _, exists := association.dynamicASKey(100, false); exists {
+		t.Fatal("known successful Deregistration remained configured after cancellation")
+	}
+}
+
+func TestRKMRequesterIgnoresDuplicateDeregistrationResults(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan struct{}, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		written <- struct{}{}
+		return message.MarshalLen(), nil
+	}
+
+	type deregistrationAnswer struct {
+		results []RoutingKeyDeregistrationResult
+		err     error
+	}
+	done := make(chan deregistrationAnswer, 1)
+	go func() {
+		results, err := association.DeregisterRoutingContexts(context.Background(), 100, 200)
+		done <- deregistrationAnswer{results: results, err: err}
+	}()
+	<-written
+
+	resultFor := func(routingContext uint32) *params.Param {
+		return params.NewDeregistrationResult(params.NewDeregResultPayload(
+			params.NewRoutingContext(routingContext),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		))
+	}
+	if err := association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+		resultFor(100), resultFor(100),
+	)); err != nil {
+		t.Fatalf("deliver duplicate Deregistration Results: %v", err)
+	}
+	select {
+	case answer := <-done:
+		t.Fatalf("Deregistration completed before Routing Context 200: results=%+v error=%v", answer.results, answer.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+		resultFor(200),
+	)); err != nil {
+		t.Fatalf("deliver remaining Deregistration Result: %v", err)
+	}
+	answer := <-done
+	if answer.err != nil {
+		t.Fatalf("DeregisterRoutingContexts: %v", answer.err)
+	}
+	if len(answer.results) != 2 || answer.results[0].RoutingContext != 100 || answer.results[1].RoutingContext != 200 {
+		t.Fatalf("Deregistration results = %+v, want Routing Contexts 100 and 200", answer.results)
+	}
+}
+
 func TestRKMRequesterDropsStaleRegistrationResponseBeforeQueueing(t *testing.T) {
 	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
 	association.muState.Lock()
@@ -1261,6 +1557,7 @@ func TestDynamicRoutingKeyNetworkAppearanceScopesMultiContextSSNM(t *testing.T) 
 	association.muState.Lock()
 	association.state = StateASPActive
 	association.muState.Unlock()
+	association.noteRoutingContextsActive([]uint32{9, 10})
 	for _, routingContext := range []uint32{9, 10} {
 		key, _ := association.dynamicASKey(routingContext, false)
 		association.as.get(key).setASPState(association, StateASPActive, time.Hour)

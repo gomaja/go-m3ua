@@ -413,12 +413,12 @@ func (r *applicationServers) registerDynamicASP(association *Association, key AS
 		r.mu.Unlock()
 		return
 	}
-	applicationServer, created := r.getOrCreateLocked(key)
-	registration := r.registrationForLocked(key, applicationServer, created)
-	registration.persistent = true
-	if created {
-		registration.removable = true
+	applicationServer, _ := r.getOrCreateLocked(key)
+	registration := r.registrations[key]
+	if registration == nil || registration.applicationServer != applicationServer {
+		registration = r.registrationForLocked(key, applicationServer, true)
 	}
+	registration.persistent = true
 	recovery := r.recoveryTimer
 	r.mu.Unlock()
 	// RFC 4666 Sections 4.3.1 and 4.3.4.3 maintain ASP state per AS and make

@@ -351,7 +351,11 @@ that Association.
 
 RFC 4666 defines no RKM acknowledgement timer. Caller context cancellation
 bounds a local wait; peer retransmissions are handled idempotently rather than
-by inventing an RKM T(ack).
+by inventing an RKM T(ack). If cancellation occurs after a DEREG REQ is written,
+the same Routing Context cannot be retried until its delayed DEREG RSP arrives:
+`DeregisterRoutingContexts` returns `ErrDeregistrationOutcomeUnknown` because
+RFC 4666 Sections 3.6.4 and 4.4.2 provide no transaction identifier that could
+distinguish the old response from the retry.
 
 ## Supported Features
 

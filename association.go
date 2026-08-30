@@ -236,6 +236,10 @@ type Association struct {
 	// activeRCsScoped distinguishes "activated for everything" from "activated
 	// for nothing", since both leave activeRCs empty.
 	activeRCsScoped bool
+	// inactiveDynamicRCs excludes Routing Contexts registered after an unscoped
+	// ASP Active. RFC 4666 Section 4.3.4.3 requires a subsequent ASP Active
+	// procedure before the new Application Server becomes active.
+	inactiveDynamicRCs map[uint32]struct{}
 
 	// nif is the SGP's view of its nodal interworking function. It is nil for
 	// an ASP role.
@@ -374,11 +378,14 @@ type Association struct {
 	rkmRequestMu sync.Mutex
 	// rkmCorrelationMu guards Registration response correlation state shared by
 	// the requesting goroutine and the association monitor.
-	rkmCorrelationMu   sync.Mutex
-	rkmPendingLocalIDs map[uint32]struct{}
-	rkmAwaiting        uint32
-	rkmNextLocalID     uint32
-	rkmResponseChan    chan messages.M3UA
+	rkmCorrelationMu                 sync.Mutex
+	rkmPendingLocalIDs               map[uint32]struct{}
+	rkmPendingDeregistrationRCs      map[uint32]struct{}
+	rkmDeliveredDeregistrationStatus map[uint32]DeregistrationStatus
+	rkmUnresolvedDeregistrationRCs   map[uint32]struct{}
+	rkmAwaiting                      uint32
+	rkmNextLocalID                   uint32
+	rkmResponseChan                  chan messages.M3UA
 }
 
 var netMap = map[string]string{
@@ -1679,6 +1686,7 @@ func (c *Association) closeWith(cause error) error {
 			c.ackedRCsScoped = true
 			c.activeRCs = nil
 			c.activeRCsScoped = true
+			c.inactiveDynamicRCs = nil
 			c.overriddenRCs = nil
 			c.muAckedRCs.Unlock()
 		}
@@ -1952,6 +1960,24 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 	if c == nil || !key.RoutingContextSet {
 		return
 	}
+	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
+		c.muAckedRCs.Lock()
+		c.muDynamicASKeys.Lock()
+		_, existed := c.dynamicPeerASKeys[key.RoutingContext]
+		if !existed && !c.activeRCsScoped {
+			if c.inactiveDynamicRCs == nil {
+				c.inactiveDynamicRCs = make(map[uint32]struct{})
+			}
+			c.inactiveDynamicRCs[key.RoutingContext] = struct{}{}
+		}
+		c.dynamicPeerASKeys[key.RoutingContext] = key
+		if routingKey.TrafficModeSet {
+			c.dynamicPeerTrafficModes[key.RoutingContext] = routingKey.TrafficMode
+		}
+		c.muDynamicASKeys.Unlock()
+		c.muAckedRCs.Unlock()
+		return
+	}
 	c.muDynamicASKeys.Lock()
 	if local {
 		c.dynamicLocalASKeys[key.RoutingContext] = key
@@ -1969,6 +1995,16 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 
 func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 	if c == nil {
+		return
+	}
+	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
+		c.muAckedRCs.Lock()
+		c.muDynamicASKeys.Lock()
+		delete(c.dynamicPeerASKeys, routingContext)
+		delete(c.dynamicPeerTrafficModes, routingContext)
+		delete(c.inactiveDynamicRCs, routingContext)
+		c.muDynamicASKeys.Unlock()
+		c.muAckedRCs.Unlock()
 		return
 	}
 	c.muDynamicASKeys.Lock()
@@ -2559,9 +2595,13 @@ func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 		if !c.activeRCsScoped {
 			c.activeRCs = make(map[uint32]struct{})
 			for _, rc := range c.configuredRoutingContexts() {
+				if _, inactive := c.inactiveDynamicRCs[rc]; inactive {
+					continue
+				}
 				c.activeRCs[rc] = struct{}{}
 			}
 			c.activeRCsScoped = true
+			c.inactiveDynamicRCs = nil
 		}
 		for _, rc := range rcs {
 			delete(c.activeRCs, rc)
@@ -2596,6 +2636,7 @@ func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 
 	if len(rcs) == 0 {
 		c.activeRCs, c.activeRCsScoped = nil, false
+		c.inactiveDynamicRCs = nil
 		if !c.isIPSPDoubleExchange() {
 			c.overriddenRCs = nil
 		}
@@ -2607,6 +2648,7 @@ func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 	c.activeRCsScoped = true
 	for _, rc := range rcs {
 		c.activeRCs[rc] = struct{}{}
+		delete(c.inactiveDynamicRCs, rc)
 		if !c.isIPSPDoubleExchange() {
 			delete(c.overriddenRCs, rc)
 		}
@@ -2621,6 +2663,7 @@ func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
 
 	if len(rcs) == 0 {
 		c.activeRCs, c.activeRCsScoped = nil, true
+		c.inactiveDynamicRCs = nil
 		return
 	}
 	if c.activeRCs == nil {
@@ -2628,10 +2671,14 @@ func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
 		// from, so start from what the association carries.
 		c.activeRCs = make(map[uint32]struct{})
 		for _, rc := range c.configuredRoutingContexts() {
+			if _, inactive := c.inactiveDynamicRCs[rc]; inactive {
+				continue
+			}
 			c.activeRCs[rc] = struct{}{}
 		}
 	}
 	c.activeRCsScoped = true
+	c.inactiveDynamicRCs = nil
 	for _, rc := range rcs {
 		delete(c.activeRCs, rc)
 	}
@@ -2642,6 +2689,7 @@ func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
 func (c *Association) forgetActiveRoutingContexts() {
 	c.muAckedRCs.Lock()
 	c.activeRCs, c.activeRCsScoped = nil, false
+	c.inactiveDynamicRCs = nil
 	c.muAckedRCs.Unlock()
 }
 
@@ -2653,7 +2701,8 @@ func (c *Association) activeForRoutingContext(rtCtx uint32) bool {
 	defer c.muAckedRCs.RUnlock()
 
 	if !c.activeRCsScoped {
-		return true
+		_, inactive := c.inactiveDynamicRCs[rtCtx]
+		return !inactive
 	}
 	_, ok := c.activeRCs[rtCtx]
 	return ok

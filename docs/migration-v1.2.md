@@ -222,6 +222,11 @@ registered on that Association, per RFC 4666 Section 3.6.1.
 
 The request context bounds a local REG/DEREG wait. RFC 4666 defines no RKM
 T(ack); duplicate peer requests are answered from deterministic replay state.
+After a written DEREG REQ is canceled, retrying the same Routing Context returns
+`ErrDeregistrationOutcomeUnknown` until the delayed DEREG RSP arrives. RFC 4666
+Sections 3.6.4 and 4.4.2 correlate the response only by Routing Context, so the
+Association cannot safely guess whether a response belongs to the old request
+or its retry.
 
 ## Renamed API
 

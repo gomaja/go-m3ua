@@ -85,6 +85,23 @@ func TestApplicationServerReservationPreservesExistingAndCommittedScopes(t *test
 	})
 }
 
+func TestDynamicApplicationServerCreatedByStateLookupRemainsRemovable(t *testing.T) {
+	registry := newApplicationServers(time.Hour)
+	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
+	association, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
+
+	registry.get(key)
+	registry.registerDynamicASP(association, key)
+	if keys := registry.staticallyConfiguredKeys(); len(keys) != 0 {
+		t.Fatalf("dynamic Application Server classified as static: %v", keys)
+	}
+
+	registry.deregisterDynamicASP(association, key, true)
+	if _, exists := registry.lookup(key); exists {
+		t.Fatal("unused dynamic Application Server was not removed")
+	}
+}
+
 // TestASStateFollowsItsASPs covers the AS state machine of RFC 4666 Section
 // 4.3.2, which had no implementation at all: there was no AS type, no
 // AS-ACTIVE/INACTIVE/PENDING, and NewNotify was never called outside tests.
