@@ -1514,6 +1514,30 @@ func TestRoutingKeyRegistryNormalizesInvalidAuthorizationResults(t *testing.T) {
 	}
 }
 
+func TestRoutingKeyRegistryRejectsWideOriginatingPointCodeMask(t *testing.T) {
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			t.Fatal("authorization was called for an invalid Routing Key")
+			return RegistrationSuccessfullyRegistered
+		},
+		AllowDynamicRoutingKeys: true,
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	key := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	key.Groups[0].OriginatingPointCodes = []PointCodeRange{{PointCode: 0x123456, Mask: 25}}
+
+	result := registry.register(association, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                key,
+	}})[0]
+	if result.Status != RegistrationInvalidRoutingKey || result.RoutingContext != 0 {
+		t.Fatalf("registration result = %+v, want Invalid Routing Key with Routing Context 0", result)
+	}
+}
+
 func testRoutingKey(networkAppearance, destinationPointCode uint32, serviceIndicators ...uint8) RoutingKey {
 	return RoutingKey{
 		NetworkAppearance:    networkAppearance,

@@ -214,13 +214,18 @@ func canonicalizeRoutingKey(key RoutingKey) (canonicalRoutingKey, error) {
 			if pointCode.PointCode > 0x00ffffff {
 				return canonicalRoutingKey{}, fmt.Errorf("originating point code %#x exceeds 24 bits", pointCode.PointCode)
 			}
-			mask := pointCode.Mask
-			if mask > 24 {
-				mask = 24
+			// RFC 4666 Section 3.6.1 encodes each OPC as an 8-bit Mask and a
+			// 24-bit point code. A mask wider than the point-code field cannot
+			// identify a valid selector and must not be clamped into a broader key.
+			if pointCode.Mask > 24 {
+				return canonicalRoutingKey{}, fmt.Errorf(
+					"originating point code mask %d exceeds 24-bit point code width",
+					pointCode.Mask,
+				)
 			}
 			originatingPointCodes = append(originatingPointCodes, canonicalPointCodeRange{
-				pointCode: canonicalPointCode(pointCode.PointCode, mask),
-				mask:      mask,
+				pointCode: canonicalPointCode(pointCode.PointCode, pointCode.Mask),
+				mask:      pointCode.Mask,
 			})
 		}
 		sort.Slice(originatingPointCodes, func(i, j int) bool {
@@ -526,8 +531,5 @@ func routingKeyFromPayload(payload *params.RoutingKeyPayload) (RoutingKeyRegistr
 		request.RoutingKey.Groups = append(request.RoutingKey.Groups, decoded)
 	}
 	request.unsupportedParameterField = len(payload.Others) != 0
-	if _, err := canonicalizeRoutingKey(request.RoutingKey); err != nil {
-		return RoutingKeyRegistrationRequest{}, err
-	}
 	return request, nil
 }

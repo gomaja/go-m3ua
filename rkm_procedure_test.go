@@ -4006,3 +4006,85 @@ func TestRKMResponderRejectsUnsupportedRoutingKeyParameterFields(t *testing.T) {
 		t.Fatalf("dynamic Routing Keys = %d, want only the supported Routing Key", dynamic)
 	}
 }
+
+func TestRKMResponderReportsWideOriginatingPointCodeMaskAsInvalidRoutingKey(t *testing.T) {
+	authorizations := 0
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				authorizations++
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	responses := make(chan *messages.RegistrationResponse, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if response, ok := message.(*messages.RegistrationResponse); ok {
+			responses <- response
+		}
+		return message.MarshalLen(), nil
+	}
+	key := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	key.Groups[0].OriginatingPointCodes = []PointCodeRange{{PointCode: 0x123456, Mask: 25}}
+	parameter, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                key,
+	})
+	if err != nil {
+		t.Fatalf("routingKeyParameter: %v", err)
+	}
+	supported, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+		LocalRoutingKeyIdentifier: 2,
+		RoutingKey:                testRoutingKey(20, 200, params.ServiceIndISUP),
+	})
+	if err != nil {
+		t.Fatalf("supported routingKeyParameter: %v", err)
+	}
+
+	if err := association.handleRegistrationRequest(messages.NewRegistrationRequest(parameter, supported)); err != nil {
+		t.Fatalf("handleRegistrationRequest: %v", err)
+	}
+	response := <-responses
+	if len(response.RegistrationResults) != 2 {
+		t.Fatalf("Registration Results = %d, want 2", len(response.RegistrationResults))
+	}
+	result, err := response.RegistrationResults[0].RegistrationResult()
+	if err != nil {
+		t.Fatalf("Registration Result: %v", err)
+	}
+	if status := result.RegistrationStatus.RegistrationStatus(); status != params.InvalidRoutingKey {
+		t.Fatalf("Registration Status = %d, want Invalid Routing Key", status)
+	}
+	if routingContext := result.RoutingContext.RoutingContext(); routingContext != 0 {
+		t.Fatalf("Registration Routing Context = %d, want 0", routingContext)
+	}
+	supportedResult, err := response.RegistrationResults[1].RegistrationResult()
+	if err != nil {
+		t.Fatalf("supported Registration Result: %v", err)
+	}
+	if status := supportedResult.RegistrationStatus.RegistrationStatus(); status != params.SuccessfullyRegistered {
+		t.Fatalf("supported Registration Status = %d, want success", status)
+	}
+	if routingContext := supportedResult.RoutingContext.RoutingContext(); routingContext == 0 {
+		t.Fatal("supported Registration Routing Context = 0")
+	}
+	if authorizations != 1 {
+		t.Fatalf("authorization calls = %d, want only the supported Routing Key", authorizations)
+	}
+	if dynamic := endpoint.routingKeys.dynamicCount(); dynamic != 1 {
+		t.Fatalf("dynamic Routing Keys = %d, want only the supported Routing Key", dynamic)
+	}
+}

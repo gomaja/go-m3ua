@@ -54,26 +54,52 @@ func TestCanonicalRoutingKeysIgnoreSetOrdering(t *testing.T) {
 	}
 }
 
-func TestCanonicalRoutingKeyMaskAtLeastPointCodeWidthMatchesAllPointCodes(t *testing.T) {
-	for _, mask := range []uint8{24, 25, 255} {
+func TestCanonicalRoutingKeyMaskAtPointCodeWidthMatchesAllPointCodes(t *testing.T) {
+	key := RoutingKey{Groups: []RoutingKeyGroup{{
+		DestinationPointCode:  100,
+		OriginatingPointCodes: []PointCodeRange{{PointCode: 0x123456, Mask: 24}},
+	}}}
+	canonical, err := canonicalizeRoutingKey(key)
+	if err != nil {
+		t.Fatalf("canonicalizeRoutingKey: %v", err)
+	}
+	ranges := canonical.groups[0].originatingPointCodes
+	if len(ranges) != 1 || ranges[0].mask != 24 {
+		t.Fatalf("canonical ranges = %+v, want one mask-24 range", ranges)
+	}
+	lower, upper := ranges[0].bounds()
+	if lower != 0 || upper != 0x00ffffff {
+		t.Fatalf("range bounds = %#x-%#x, want all 24-bit point codes", lower, upper)
+	}
+}
+
+func TestCanonicalRoutingKeyRejectsMaskWiderThanPointCode(t *testing.T) {
+	for _, mask := range []uint8{25, 255} {
 		t.Run(fmt.Sprintf("mask %d", mask), func(t *testing.T) {
 			key := RoutingKey{Groups: []RoutingKeyGroup{{
 				DestinationPointCode:  100,
 				OriginatingPointCodes: []PointCodeRange{{PointCode: 0x123456, Mask: mask}},
 			}}}
-			canonical, err := canonicalizeRoutingKey(key)
-			if err != nil {
-				t.Fatalf("canonicalizeRoutingKey: %v", err)
-			}
-			ranges := canonical.groups[0].originatingPointCodes
-			if len(ranges) != 1 || ranges[0].mask != 24 {
-				t.Fatalf("canonical ranges = %+v, want one mask-24 range", ranges)
-			}
-			lower, upper := ranges[0].bounds()
-			if lower != 0 || upper != 0x00ffffff {
-				t.Fatalf("range bounds = %#x-%#x, want all 24-bit point codes", lower, upper)
+			if _, err := canonicalizeRoutingKey(key); err == nil {
+				t.Fatalf("canonicalizeRoutingKey accepted mask %d", mask)
 			}
 		})
+	}
+}
+
+func TestRoutingKeyManagementConfigRejectsWideOriginatingPointCodeMask(t *testing.T) {
+	key := RoutingKey{Groups: []RoutingKeyGroup{{
+		DestinationPointCode:  100,
+		OriginatingPointCodes: []PointCodeRange{{PointCode: 0x123456, Mask: 25}},
+	}}}
+	_, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: key}},
+	})
+	if err == nil {
+		t.Fatal("newRoutingKeyRegistry accepted a provisioned mask wider than 24 bits")
 	}
 }
 
