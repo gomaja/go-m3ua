@@ -353,7 +353,7 @@ func (c *Association) handleDeregistrationRequest(message *messages.Deregistrati
 	registry.deregistrationResponseWritten(c, results)
 	for _, deregistration := range successful {
 		c.removeDynamicASKey(deregistration.key.RoutingContext, false)
-		if c.as != nil {
+		if c.as != nil && !c.hasStaticApplicationServerMembership(deregistration.key) {
 			c.as.deregisterDynamicASP(c, deregistration.key, deregistration.removeAS)
 		}
 	}
@@ -680,7 +680,7 @@ func (c *Association) removeRequesterRoutingKey(routingContext uint32) {
 	local := c.isIPSPDoubleExchange()
 	key, registered := c.dynamicASKey(routingContext, local)
 	c.removeDynamicASKey(routingContext, local)
-	if !local && registered && c.as != nil {
+	if !local && registered && c.as != nil && !c.hasStaticApplicationServerMembership(key) {
 		c.as.deregisterDynamicASP(c, key, true)
 	}
 }

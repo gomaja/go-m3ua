@@ -112,6 +112,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		inUse          []uint32
 	}
 	allocations := make([]allocationDecision, len(requests))
+	forcedASPIdentifierConflicts := make(map[ASKey]struct{})
 
 	for {
 		if associationEnded(association) {
@@ -174,10 +175,18 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
 				case !registrationTrafficModeCompatible(entry.routingKey, request.RoutingKey):
 					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
+				case association.hasStaticApplicationServerMembership(entry.asKey()):
+					// RFC 4666 Section 4.4.1 classifies an exact static or
+					// dynamic registration as Routing Key Already Registered.
+					entry.adoptTrafficMode(request.RoutingKey)
+					entry.members[association] = struct{}{}
+					clearDeregistrationReplayState(deregistrationReplays, entry.routingContext)
+					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, entry.routingContext)
 				case entry.hasMember(association):
 					entry.adoptTrafficMode(request.RoutingKey)
 					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, entry.routingContext)
-				case entry.hasASPIdentifierConflict(association):
+				case entry.hasASPIdentifierConflict(association) ||
+					containsASKeySet(forcedASPIdentifierConflicts, entry.asKey()):
 					results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
 				default:
 					status := authorize()
@@ -200,10 +209,18 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationCannotSupportUniqueRouting, 0)
 			case exact != nil && !registrationTrafficModeCompatible(exact.routingKey, request.RoutingKey):
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationUnsupportedTrafficHandlingMode, 0)
+			case exact != nil && association.hasStaticApplicationServerMembership(exact.asKey()):
+				// RFC 4666 Section 4.4.1 classifies an exact static or
+				// dynamic registration as Routing Key Already Registered.
+				exact.adoptTrafficMode(request.RoutingKey)
+				exact.members[association] = struct{}{}
+				clearDeregistrationReplayState(deregistrationReplays, exact.routingContext)
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, exact.routingContext)
 			case exact != nil && exact.hasMember(association):
 				exact.adoptTrafficMode(request.RoutingKey)
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, exact.routingContext)
-			case exact != nil && exact.hasASPIdentifierConflict(association):
+			case exact != nil && (exact.hasASPIdentifierConflict(association) ||
+				containsASKeySet(forcedASPIdentifierConflicts, exact.asKey())):
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
 			case exact != nil:
 				status := authorize()
@@ -263,14 +280,39 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		if associationEnded(association) {
 			return make([]RoutingKeyRegistrationResult, len(requests))
 		}
+		applicationServers := associationApplicationServers(association)
+		if applicationServers != nil {
+			applicationServers.mu.Lock()
+		}
 		registry.mu.Lock()
 		if registry.revision != revision {
 			registry.mu.Unlock()
+			if applicationServers != nil {
+				applicationServers.mu.Unlock()
+			}
 			continue
 		}
 		if associationEnded(association) {
 			registry.mu.Unlock()
+			if applicationServers != nil {
+				applicationServers.mu.Unlock()
+			}
 			return make([]RoutingKeyRegistrationResult, len(requests))
+		}
+		identifierConflicts := registrationASPIdentifierConflictsLocked(
+			applicationServers,
+			association,
+			registry.entries,
+			entries,
+			results,
+		)
+		if len(identifierConflicts) > 0 {
+			registry.mu.Unlock()
+			applicationServers.mu.Unlock()
+			for _, key := range identifierConflicts {
+				forcedASPIdentifierConflicts[key] = struct{}{}
+			}
+			continue
 		}
 		registry.entries = entries
 		registry.dynamic = dynamicCount
@@ -278,8 +320,53 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		registry.deregReplays[association] = deregistrationReplays
 		registry.revision++
 		registry.mu.Unlock()
+		if applicationServers != nil {
+			applicationServers.mu.Unlock()
+		}
 		return results
 	}
+}
+
+func associationApplicationServers(association *Association) *applicationServers {
+	if association == nil {
+		return nil
+	}
+	return association.as
+}
+
+func registrationASPIdentifierConflictsLocked(
+	applicationServers *applicationServers,
+	association *Association,
+	currentEntries map[uint32]*routingKeyEntry,
+	nextEntries map[uint32]*routingKeyEntry,
+	results []RoutingKeyRegistrationResult,
+) []ASKey {
+	if applicationServers == nil || association == nil {
+		return nil
+	}
+	identifier, identifierSet := association.PeerASPIdentifier()
+	if !identifierSet {
+		return nil
+	}
+	conflicts := make([]ASKey, 0)
+	for _, result := range results {
+		if result.Status != RegistrationSuccessfullyRegistered {
+			continue
+		}
+		if current := currentEntries[result.RoutingContext]; current != nil && current.hasMember(association) {
+			continue
+		}
+		entry := nextEntries[result.RoutingContext]
+		if entry != nil && applicationServers.hasASPIdentifierConflictLocked(association, entry.asKey(), identifier) {
+			conflicts = append(conflicts, entry.asKey())
+		}
+	}
+	return conflicts
+}
+
+func containsASKeySet(keys map[ASKey]struct{}, candidate ASKey) bool {
+	_, ok := keys[candidate]
+	return ok
 }
 
 func registrationTrafficModeCompatible(existing, requested RoutingKey) bool {
@@ -729,6 +816,36 @@ func (entry *routingKeyEntry) hasASPIdentifierConflict(association *Association)
 			// RFC 4666 Section 3.5.1 defines the ASP Identifier as unique among
 			// the ASPs supporting an AS. RKM can make previously disjoint ASPs
 			// converge on one AS, so the invariant must be rechecked here.
+			return true
+		}
+	}
+	return false
+}
+
+func (registry *routingKeyRegistry) associationsShareRoutingKey(first, second *Association) bool {
+	if registry == nil || first == nil || second == nil {
+		return false
+	}
+	firstKeys := first.configuredASKeys()
+	secondKeys := second.configuredASKeys()
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	for _, entry := range registry.entries {
+		_, firstMember := entry.members[first]
+		_, secondMember := entry.members[second]
+		if firstMember && (secondMember || containsASKey(secondKeys, entry.asKey())) {
+			return true
+		}
+		if secondMember && containsASKey(firstKeys, entry.asKey()) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsASKey(keys []ASKey, candidate ASKey) bool {
+	for _, key := range keys {
+		if key == candidate {
 			return true
 		}
 	}

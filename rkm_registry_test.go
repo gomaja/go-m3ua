@@ -54,6 +54,45 @@ func TestRoutingKeyRegistryRegistrationStatusesAndReplay(t *testing.T) {
 	}
 }
 
+func TestRoutingKeyRegistryReportsStaticMembershipAlreadyRegistered(t *testing.T) {
+	for _, requestedRoutingContext := range []bool{false, true} {
+		t.Run(fmt.Sprintf("requested Routing Context %t", requestedRoutingContext), func(t *testing.T) {
+			provisionedKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+			registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+				AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+					t.Fatal("authorization was called for an already registered static Routing Key")
+					return RegistrationPermissionDenied
+				},
+				ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisionedKey}},
+			})
+			if err != nil {
+				t.Fatalf("newRoutingKeyRegistry: %v", err)
+			}
+			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			config.NetworkAppearance = params.NewNetworkAppearance(10)
+			config.RoutingContexts = params.NewRoutingContext(7)
+			association := newAssociation(RoleSGP, config)
+			applicationServers := newApplicationServers(time.Hour)
+			association.as = applicationServers
+			applicationServers.register(association.staticallyConfiguredASKeys())
+			applicationServers.aspStateChanged(association, StateASPInactive)
+
+			result := registry.register(association, []RoutingKeyRegistrationRequest{{
+				LocalRoutingKeyIdentifier: 1,
+				RoutingKey:                provisionedKey,
+				RequestedRoutingContext:   7,
+				RoutingContextRequested:   requestedRoutingContext,
+			}})[0]
+			if result.Status != RegistrationRoutingKeyAlreadyRegistered || result.RoutingContext != 7 {
+				t.Fatalf("static registration = %+v, want Routing Key Already Registered for Routing Context 7", result)
+			}
+			if status := registry.deregister(association, []uint32{7})[0].Status; status != DeregistrationSuccessfullyDeregistered {
+				t.Fatalf("static registration Deregistration Status = %d, want success", status)
+			}
+		})
+	}
+}
+
 func TestRoutingKeyRegistryIgnoresUnsetNetworkAppearanceValue(t *testing.T) {
 	provisionedKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
 	provisionedKey.NetworkAppearanceSet = false
@@ -611,6 +650,136 @@ func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierWhenScopesConverge(t *te
 		t.Fatalf("distinct ASP Identifier registration = %+v, want success in Routing Context %d",
 			distinct, firstResult.RoutingContext)
 	}
+}
+
+func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierFromStaticApplicationServerMember(t *testing.T) {
+	applicationServers := newApplicationServers(time.Hour)
+	newStaticPeer := func(routingContext, identifier uint32) *Association {
+		association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.as = applicationServers
+		association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+		association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
+		association.savePeerASPIdentifier(params.NewAspIdentifier(identifier))
+		applicationServers.register(association.staticallyConfiguredASKeys())
+		applicationServers.aspStateChanged(association, StateASPInactive)
+		if !applicationServers.claimASPIdentifier(association, identifier) {
+			t.Fatalf("initial ASP Identifier %d claim for Routing Context %d failed", identifier, routingContext)
+		}
+		return association
+	}
+	staticAssociation := newStaticPeer(7, 9)
+	requestingAssociation := newStaticPeer(2, 9)
+	provisionedKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisionedKey}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+
+	result := registry.register(requestingAssociation, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                provisionedKey,
+	}})[0]
+	if result.Status != RegistrationPermissionDenied || result.RoutingContext != 0 {
+		t.Fatalf("duplicate static ASP Identifier registration = %+v, want Permission Denied", result)
+	}
+	if status := registry.deregister(requestingAssociation, []uint32{7})[0].Status; status != DeregistrationNotRegistered {
+		t.Fatalf("rejected ASP membership status = %d, want Not Registered", status)
+	}
+	if identifier, ok := staticAssociation.PeerASPIdentifier(); !ok || identifier != 9 {
+		t.Fatalf("static ASP Identifier = %d, %v, want 9, true", identifier, ok)
+	}
+}
+
+func TestRoutingKeyRegistrySerializesASPIdentifierClaimsWithRegistration(t *testing.T) {
+	newFixture := func(t *testing.T, authorize RoutingKeyRegistrationAuthorizer) (*applicationServers, *routingKeyRegistry, *Association, *Association, RoutingKey) {
+		t.Helper()
+		applicationServers := newApplicationServers(time.Hour)
+		provisionedKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+		registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+			AuthorizeRegistration:  authorize,
+			ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: provisionedKey}},
+		})
+		if err != nil {
+			t.Fatalf("newRoutingKeyRegistry: %v", err)
+		}
+		endpoint := &Endpoint{as: applicationServers, routingKeys: registry}
+		newPeer := func(routingContext uint32) *Association {
+			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association.endpoint = endpoint
+			association.as = applicationServers
+			association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+			association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
+			applicationServers.register(association.staticallyConfiguredASKeys())
+			applicationServers.aspStateChanged(association, StateASPInactive)
+			return association
+		}
+		requestingAssociation := newPeer(2)
+		requestingAssociation.savePeerASPIdentifier(params.NewAspIdentifier(9))
+		if !applicationServers.claimASPIdentifier(requestingAssociation, 9) {
+			t.Fatal("initial requesting ASP Identifier claim failed")
+		}
+		return applicationServers, registry, requestingAssociation, newPeer(7), provisionedKey
+	}
+
+	t.Run("claim commits before registration", func(t *testing.T) {
+		authorizationEntered := make(chan struct{})
+		releaseAuthorization := make(chan struct{})
+		applicationServers, registry, requestingAssociation, staticAssociation, provisionedKey := newFixture(t,
+			func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				close(authorizationEntered)
+				<-releaseAuthorization
+				return RegistrationSuccessfullyRegistered
+			})
+
+		result := make(chan RoutingKeyRegistrationResult, 1)
+		go func() {
+			result <- registry.register(requestingAssociation, []RoutingKeyRegistrationRequest{{
+				LocalRoutingKeyIdentifier: 1,
+				RoutingKey:                provisionedKey,
+			}})[0]
+		}()
+		select {
+		case <-authorizationEntered:
+		case <-time.After(time.Second):
+			t.Fatal("Registration authorization was not called")
+		}
+		if !applicationServers.claimASPIdentifier(staticAssociation, 9) {
+			t.Fatal("static ASP Identifier claim should win while Registration authorization is pending")
+		}
+		staticAssociation.savePeerASPIdentifier(params.NewAspIdentifier(9))
+		close(releaseAuthorization)
+
+		select {
+		case registered := <-result:
+			if registered.Status != RegistrationPermissionDenied || registered.RoutingContext != 0 {
+				t.Fatalf("concurrent Registration = %+v, want Permission Denied", registered)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Registration did not finish")
+		}
+	})
+
+	t.Run("registration commits before claim", func(t *testing.T) {
+		applicationServers, registry, requestingAssociation, staticAssociation, provisionedKey := newFixture(t,
+			func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			})
+		registered := registry.register(requestingAssociation, []RoutingKeyRegistrationRequest{{
+			LocalRoutingKeyIdentifier: 1,
+			RoutingKey:                provisionedKey,
+		}})[0]
+		if registered.Status != RegistrationSuccessfullyRegistered || registered.RoutingContext != 7 {
+			t.Fatalf("Registration = %+v, want successful Routing Context 7", registered)
+		}
+		if applicationServers.claimASPIdentifier(staticAssociation, 9) {
+			t.Fatal("static ASP Identifier claim converged with an RKM member using the same identifier")
+		}
+	})
 }
 
 func TestRoutingKeyRegistryDeregistrationAuthorization(t *testing.T) {

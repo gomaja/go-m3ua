@@ -332,6 +332,30 @@ func (r *applicationServers) claimASPIdentifier(association *Association, identi
 	return true
 }
 
+func (r *applicationServers) hasASPIdentifierConflictLocked(
+	association *Association,
+	key ASKey,
+	identifier uint32,
+) bool {
+	if r.closed {
+		return true
+	}
+	for peer, peerIdentifier := range r.aspIdentifiers {
+		if peer == association || peerIdentifier != identifier {
+			continue
+		}
+		for _, peerKey := range peer.configuredASKeys() {
+			if peerKey == key {
+				// RFC 4666 Section 3.5.1 requires the ASP Identifier to be
+				// unique among every ASP supporting the same AS, whether the
+				// membership was provisioned or created through RKM.
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func associationsShareApplicationServer(first, second *Association) bool {
 	if first == nil || second == nil {
 		return true
@@ -349,6 +373,10 @@ func associationsShareApplicationServer(first, second *Association) bool {
 		if _, ok := set[key]; ok {
 			return true
 		}
+	}
+	registry := first.routingKeyRegistry()
+	if registry != nil && registry == second.routingKeyRegistry() && registry.associationsShareRoutingKey(first, second) {
+		return true
 	}
 	return false
 }

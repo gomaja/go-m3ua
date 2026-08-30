@@ -1947,6 +1947,24 @@ func (c *Association) staticallyConfiguredASKeys() []ASKey {
 	return keys
 }
 
+func (c *Association) hasStaticallyConfiguredASKey(candidate ASKey) bool {
+	return containsASKey(c.staticallyConfiguredASKeys(), candidate)
+}
+
+func (c *Association) hasStaticApplicationServerMembership(candidate ASKey) bool {
+	if c == nil || c.as == nil || !c.hasStaticallyConfiguredASKey(candidate) {
+		return false
+	}
+	applicationServer, ok := c.as.lookup(candidate)
+	if !ok {
+		return false
+	}
+	applicationServer.mu.Lock()
+	_, member := applicationServer.asps[c]
+	applicationServer.mu.Unlock()
+	return member
+}
+
 func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey {
 	if c == nil {
 		return nil

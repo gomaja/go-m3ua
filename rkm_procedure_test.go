@@ -3507,6 +3507,91 @@ func TestRKMResponderProvisionedDeregistrationReplayCompletesLocalCleanup(t *tes
 	}
 }
 
+func TestRKMResponderDeregistrationPreservesStaticApplicationServerMembership(t *testing.T) {
+	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: routingKey}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.NetworkAppearance = params.NewNetworkAppearance(10)
+	config.RoutingContexts = params.NewRoutingContext(7)
+	association := newAssociation(RoleSGP, config)
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		return message.MarshalLen(), nil
+	}
+	endpoint.as.register(association.staticallyConfiguredASKeys())
+	endpoint.as.aspStateChanged(association, StateASPInactive)
+
+	if err := association.handleRegistrationRequest(registrationRequestMessage(t)); err != nil {
+		t.Fatalf("Registration: %v", err)
+	}
+	key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 7, RoutingContextSet: true}
+	applicationServer, ok := endpoint.as.lookup(key)
+	if !ok {
+		t.Fatal("provisioned Application Server not registered")
+	}
+	if _, ok := association.dynamicASKey(7, false); !ok {
+		t.Fatal("Association Routing Key scope not registered")
+	}
+
+	if err := association.handleDeregistrationRequest(messages.NewDeregistrationRequest(params.NewRoutingContext(7))); err != nil {
+		t.Fatalf("Deregistration: %v", err)
+	}
+	if _, ok := association.dynamicASKey(7, false); ok {
+		t.Fatal("Deregistration retained the dynamic Routing Key scope")
+	}
+	applicationServer.mu.Lock()
+	state, member := applicationServer.asps[association]
+	applicationServer.mu.Unlock()
+	if !member || state != StateASPInactive {
+		t.Fatalf("static Application Server membership = %v, %v, want ASP-INACTIVE, true", state, member)
+	}
+}
+
+func TestRKMRequesterDeregistrationPreservesStaticApplicationServerMembership(t *testing.T) {
+	applicationServers := newApplicationServers(time.Hour)
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.NetworkAppearance = params.NewNetworkAppearance(10)
+	config.RoutingContexts = params.NewRoutingContext(7)
+	association := newAssociation(RoleASP, config)
+	association.as = applicationServers
+	key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 7, RoutingContextSet: true}
+	applicationServers.register(association.staticallyConfiguredASKeys())
+	applicationServers.aspStateChanged(association, StateASPInactive)
+	association.addDynamicASKey(key, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
+	applicationServers.registerDynamicASP(association, key)
+
+	association.removeRequesterRoutingKey(7)
+	if _, ok := association.dynamicASKey(7, false); ok {
+		t.Fatal("Deregistration retained the dynamic Routing Key scope")
+	}
+	applicationServer, ok := applicationServers.lookup(key)
+	if !ok {
+		t.Fatal("static Application Server was removed")
+	}
+	applicationServer.mu.Lock()
+	state, member := applicationServer.asps[association]
+	applicationServer.mu.Unlock()
+	if !member || state != StateASPInactive {
+		t.Fatalf("static Application Server membership = %v, %v, want ASP-INACTIVE, true", state, member)
+	}
+}
+
 func TestRKMResponderRejectsDuplicateBatchCorrelationValues(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleSGP,
