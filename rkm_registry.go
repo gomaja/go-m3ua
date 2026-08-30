@@ -151,6 +151,8 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 			case entry.hasMember(association):
 				entry.adoptTrafficMode(request.RoutingKey)
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, entry.routingContext)
+			case entry.hasASPIdentifierConflict(association):
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
 			default:
 				status := registry.authorize(request)
 				if status == RegistrationSuccessfullyRegistered {
@@ -175,6 +177,8 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		case exact != nil && exact.hasMember(association):
 			exact.adoptTrafficMode(request.RoutingKey)
 			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationRoutingKeyAlreadyRegistered, exact.routingContext)
+		case exact != nil && exact.hasASPIdentifierConflict(association):
+			results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationPermissionDenied, 0)
 		case exact != nil:
 			status := registry.authorize(request)
 			if status == RegistrationSuccessfullyRegistered {
@@ -257,37 +261,37 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 			results[index] = previous
 			continue
 		}
-		entry := entries[routingContext]
 		result := RoutingKeyDeregistrationResult{RoutingContext: routingContext}
-		switch {
-		case entry == nil:
-			if replay, ok := deregistrationReplays.byRoutingContext[routingContext]; ok {
-				result = replay
-			} else {
+		if replay, ok := deregistrationReplays.byRoutingContext[routingContext]; ok {
+			result = replay
+		} else {
+			entry := entries[routingContext]
+			switch {
+			case entry == nil:
 				result.Status = DeregistrationInvalidRoutingContext
-			}
-		case !entry.hasMember(association):
-			result.Status = DeregistrationNotRegistered
-		case association != nil && association.State() == StateASPActive && association.activeForASKey(entry.asKey()):
-			result.Status = DeregistrationASPActiveForRoutingContext
-		case registry.config.AuthorizeDeregistration != nil && !registry.config.AuthorizeDeregistration(RoutingKeyDeregistrationRequest{
-			Peer:           peer,
-			RoutingContext: routingContext,
-			RoutingKey:     snapshotRoutingKey(entry.routingKey),
-			Provisioned:    entry.provisioned,
-		}):
-			result.Status = DeregistrationPermissionDenied
-		default:
-			delete(entry.members, association)
-			result.Status = DeregistrationSuccessfullyDeregistered
-			result.asKey = entry.asKey()
-			storeDeregistrationReplay(deregistrationReplays, result)
-			purgeRegistrationReplayState(registrationReplays, routingContext)
-			if !entry.provisioned && len(entry.members) == 0 && registry.config.RemoveUnusedRoutingKeys {
-				result.removeAS = true
+			case !entry.hasMember(association):
+				result.Status = DeregistrationNotRegistered
+			case association != nil && association.State() == StateASPActive && association.activeForASKey(entry.asKey()):
+				result.Status = DeregistrationASPActiveForRoutingContext
+			case registry.config.AuthorizeDeregistration != nil && !registry.config.AuthorizeDeregistration(RoutingKeyDeregistrationRequest{
+				Peer:           peer,
+				RoutingContext: routingContext,
+				RoutingKey:     snapshotRoutingKey(entry.routingKey),
+				Provisioned:    entry.provisioned,
+			}):
+				result.Status = DeregistrationPermissionDenied
+			default:
+				delete(entry.members, association)
+				result.Status = DeregistrationSuccessfullyDeregistered
+				result.asKey = entry.asKey()
 				storeDeregistrationReplay(deregistrationReplays, result)
-				delete(entries, routingContext)
-				dynamicCount--
+				purgeRegistrationReplayState(registrationReplays, routingContext)
+				if !entry.provisioned && len(entry.members) == 0 && registry.config.RemoveUnusedRoutingKeys {
+					result.removeAS = true
+					storeDeregistrationReplay(deregistrationReplays, result)
+					delete(entries, routingContext)
+					dynamicCount--
+				}
 			}
 		}
 		results[index] = result
@@ -573,6 +577,29 @@ func (entry *routingKeyEntry) hasMember(association *Association) bool {
 	}
 	_, member := entry.members[association]
 	return member
+}
+
+func (entry *routingKeyEntry) hasASPIdentifierConflict(association *Association) bool {
+	if entry == nil || association == nil {
+		return false
+	}
+	identifier, identifierSet := association.PeerASPIdentifier()
+	if !identifierSet {
+		return false
+	}
+	for member := range entry.members {
+		if member == association {
+			continue
+		}
+		memberIdentifier, memberIdentifierSet := member.PeerASPIdentifier()
+		if memberIdentifierSet && memberIdentifier == identifier {
+			// RFC 4666 Section 3.5.1 defines the ASP Identifier as unique among
+			// the ASPs supporting an AS. RKM can make previously disjoint ASPs
+			// converge on one AS, so the invariant must be rechecked here.
+			return true
+		}
+	}
+	return false
 }
 
 func (entry *routingKeyEntry) adoptTrafficMode(requested RoutingKey) {

@@ -1950,6 +1950,90 @@ func TestRKMResponderReplayCompletesASMutationAfterResponseWriteFailure(t *testi
 	}
 }
 
+func TestRKMResponderProvisionedDeregistrationReplayCompletesLocalCleanup(t *testing.T) {
+	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			ProvisionedRoutingKeys: []ProvisionedRoutingKey{{RoutingContext: 7, RoutingKey: routingKey}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	writeErr := errors.New("response write failed")
+	var writerMu sync.Mutex
+	failDeregistrationResponse := false
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		writerMu.Lock()
+		fail := failDeregistrationResponse
+		writerMu.Unlock()
+		if _, deregistration := message.(*messages.DeregistrationResponse); deregistration && fail {
+			return 0, writeErr
+		}
+		return message.MarshalLen(), nil
+	}
+	setFailDeregistrationResponse := func(fail bool) {
+		writerMu.Lock()
+		failDeregistrationResponse = fail
+		writerMu.Unlock()
+	}
+
+	if err := association.handleRegistrationRequest(registrationRequestMessage(t)); err != nil {
+		t.Fatalf("Registration: %v", err)
+	}
+	key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 7, RoutingContextSet: true}
+	applicationServer, ok := endpoint.as.lookup(key)
+	if !ok {
+		t.Fatal("provisioned Application Server not registered")
+	}
+	if _, ok := association.dynamicASKey(7, false); !ok {
+		t.Fatal("Association Routing Key scope not registered")
+	}
+
+	deregistration := messages.NewDeregistrationRequest(params.NewRoutingContext(7))
+	setFailDeregistrationResponse(true)
+	if err := association.handleDeregistrationRequest(deregistration); !errors.Is(err, writeErr) {
+		t.Fatalf("first Deregistration error = %v, want write failure", err)
+	}
+	applicationServer.mu.Lock()
+	_, memberBeforeReplay := applicationServer.asps[association]
+	applicationServer.mu.Unlock()
+	if !memberBeforeReplay {
+		t.Fatal("provisioned AS membership removed before DEREG RSP was written")
+	}
+	if _, ok := association.dynamicASKey(7, false); !ok {
+		t.Fatal("Association Routing Key scope removed before DEREG RSP was written")
+	}
+
+	setFailDeregistrationResponse(false)
+	if err := association.handleDeregistrationRequest(deregistration); err != nil {
+		t.Fatalf("Deregistration replay: %v", err)
+	}
+	applicationServer.mu.Lock()
+	_, memberAfterReplay := applicationServer.asps[association]
+	applicationServer.mu.Unlock()
+	if memberAfterReplay {
+		t.Fatal("Deregistration replay retained provisioned AS membership")
+	}
+	if _, ok := association.dynamicASKey(7, false); ok {
+		t.Fatal("Deregistration replay retained Association Routing Key scope")
+	}
+	if _, ok := endpoint.as.lookup(key); !ok {
+		t.Fatal("Deregistration removed the provisioned Application Server")
+	}
+}
+
 func TestRKMResponderRejectsDuplicateBatchCorrelationValues(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleSGP,
