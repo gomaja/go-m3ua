@@ -3,6 +3,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"testing"
@@ -2136,6 +2137,115 @@ func TestIPSPSingleExchangeRKMUsesSharedRoutingKeyScope(t *testing.T) {
 	}
 }
 
+func TestIPSPSingleExchangeRequesterCleansDynamicApplicationServer(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	association := newAssociation(RoleIPSP, config)
+	association.as = endpoint.as
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("trackAssociation returned false")
+	}
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	const routingContext = 77
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		switch request := message.(type) {
+		case *messages.RegistrationRequest:
+			payload, err := request.RoutingKeys[0].RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			return request.MarshalLen(), association.handleRegistrationResponse(
+				messages.NewRegistrationResponse(params.NewRegistrationResult(
+					params.NewRegistrationResultPayload(
+						payload.LocalRoutingKeyIdentifier.Copy(),
+						params.NewRegistrationStatus(params.SuccessfullyRegistered),
+						params.NewRoutingContext(routingContext),
+					),
+				)),
+			)
+		case *messages.DeregistrationRequest:
+			return request.MarshalLen(), association.handleDeregistrationResponse(
+				messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+					params.NewDeregResultPayload(
+						params.NewRoutingContext(routingContext),
+						params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+					),
+				)),
+			)
+		case *messages.Notify:
+			return message.MarshalLen(), nil
+		default:
+			return 0, fmt.Errorf("unexpected message %T", message)
+		}
+	}
+
+	registrations, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+		RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+	})
+	if err != nil {
+		t.Fatalf("RegisterRoutingKeys: %v", err)
+	}
+	if len(registrations) != 1 || registrations[0].Status != RegistrationSuccessfullyRegistered ||
+		registrations[0].RoutingContext != routingContext {
+		t.Fatalf("Registration results = %+v, want successful Routing Context %d", registrations, routingContext)
+	}
+	key := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+	}
+	if _, err := endpoint.as.agreeTrafficModeForAssociation(association, []uint32{routingContext}, nil); err != nil {
+		t.Fatalf("agreeTrafficModeForAssociation: %v", err)
+	}
+	association.noteRoutingContextsActive([]uint32{routingContext})
+	association.commitState(StateASPActive)
+	endpoint.as.aspStateChanged(association, StateASPActive)
+	applicationServer, ok := endpoint.as.lookup(key)
+	if !ok || len(applicationServer.activeASPs()) != 1 {
+		t.Fatalf("dynamic Application Server = %v, %t; want one active IPSP", applicationServer, ok)
+	}
+	association.noteRoutingContextsInactive([]uint32{routingContext})
+	association.commitState(StateASPInactive)
+	endpoint.as.aspStateChanged(association, StateASPInactive)
+
+	deregistrations, err := association.DeregisterRoutingContexts(context.Background(), routingContext)
+	if err != nil {
+		t.Fatalf("DeregisterRoutingContexts: %v", err)
+	}
+	if len(deregistrations) != 1 || deregistrations[0].Status != DeregistrationSuccessfullyDeregistered {
+		t.Fatalf("Deregistration results = %+v, want success", deregistrations)
+	}
+	if _, ok := endpoint.as.lookup(key); ok {
+		t.Fatal("successful Deregistration retained the requester-created Application Server")
+	}
+
+	registrations, err = association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+		RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+	})
+	if err != nil {
+		t.Fatalf("second RegisterRoutingKeys: %v", err)
+	}
+	if len(registrations) != 1 || registrations[0].Status != RegistrationSuccessfullyRegistered ||
+		registrations[0].RoutingContext != routingContext {
+		t.Fatalf("second Registration results = %+v, want successful Routing Context %d", registrations, routingContext)
+	}
+	if _, ok := endpoint.as.lookup(key); !ok {
+		t.Fatal("second Registration did not recreate the dynamic Application Server")
+	}
+	_ = association.Close()
+	if _, ok := endpoint.as.lookup(key); ok {
+		t.Fatal("Association close retained the requester-created Application Server")
+	}
+}
+
 func TestRKMResponderReplayCompletesASMutationAfterResponseWriteFailure(t *testing.T) {
 	endpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleSGP,
@@ -2567,6 +2677,88 @@ func TestRKMRegistrationCloseRaceDoesNotRecreateMembership(t *testing.T) {
 	}
 	if _, ok := endpoint.routingKeys.routingKey(routingContext); ok {
 		t.Fatal("Registration retained Routing Key registry membership after close")
+	}
+	if _, ok := endpoint.as.lookup(key); ok {
+		t.Fatal("Registration recreated Application Server membership after close")
+	}
+}
+
+func TestRKMRequesterRegistrationCloseRaceDoesNotRecreateMembership(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	association := newAssociation(RoleIPSP, config)
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("trackAssociation returned false")
+	}
+
+	const routingContext = 77
+	responseDelivered := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request, ok := message.(*messages.RegistrationRequest)
+		if !ok {
+			return message.MarshalLen(), nil
+		}
+		payload, err := request.RoutingKeys[0].RoutingKey()
+		if err != nil {
+			return 0, err
+		}
+		if err := association.handleRegistrationResponse(messages.NewRegistrationResponse(
+			params.NewRegistrationResult(params.NewRegistrationResultPayload(
+				payload.LocalRoutingKeyIdentifier.Copy(),
+				params.NewRegistrationStatus(params.SuccessfullyRegistered),
+				params.NewRoutingContext(routingContext),
+			)),
+		)); err != nil {
+			return 0, err
+		}
+		close(responseDelivered)
+		<-releaseWrite
+		return message.MarshalLen(), nil
+	}
+
+	type registrationAnswer struct {
+		results []RoutingKeyRegistrationResult
+		err     error
+	}
+	registerDone := make(chan registrationAnswer, 1)
+	go func() {
+		results, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		registerDone <- registrationAnswer{results: results, err: err}
+	}()
+	select {
+	case <-responseDelivered:
+	case <-time.After(time.Second):
+		t.Fatal("Registration Response was not delivered")
+	}
+	if err := association.Close(); err != nil {
+		t.Fatalf("Association.Close: %v", err)
+	}
+	close(releaseWrite)
+	answer := <-registerDone
+	if answer.err != nil && !errors.Is(answer.err, ErrAssociationClosed) && !errors.Is(answer.err, ErrNotEstablished) {
+		t.Fatalf("RegisterRoutingKeys error = %v, results = %+v", answer.err, answer.results)
+	}
+
+	key := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+	}
+	if _, ok := association.dynamicASKey(routingContext, false); ok {
+		t.Fatal("Registration recreated Association Routing Key scope after close")
 	}
 	if _, ok := endpoint.as.lookup(key); ok {
 		t.Fatal("Registration recreated Application Server membership after close")

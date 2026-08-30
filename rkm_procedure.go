@@ -635,8 +635,13 @@ func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) 
 	c.rkmResponseChan = nil
 	c.rkmCorrelationMu.Unlock()
 
+	local := c.isIPSPDoubleExchange()
 	for _, routingContext := range successful {
-		c.removeDynamicASKey(routingContext, c.isIPSPDoubleExchange())
+		key, registered := c.dynamicASKey(routingContext, local)
+		c.removeDynamicASKey(routingContext, local)
+		if !local && registered && c.as != nil {
+			c.as.deregisterDynamicASP(c, key, true)
+		}
 	}
 }
 
@@ -682,13 +687,23 @@ func (c *Association) applyRegistrationResult(
 	if result.Status != RegistrationSuccessfullyRegistered && result.Status != RegistrationRoutingKeyAlreadyRegistered {
 		return
 	}
+	c.rkmLifecycleMu.Lock()
+	defer c.rkmLifecycleMu.Unlock()
+	if associationEnded(c) {
+		return
+	}
 	effectiveRoutingKey, _ := routingKeyWithImpliedNetworkAppearance(request.RoutingKey, c.localNetworkAppearance())
-	c.addDynamicASKey(ASKey{
+	key := ASKey{
 		NetworkAppearance:    effectiveRoutingKey.NetworkAppearance,
 		NetworkAppearanceSet: effectiveRoutingKey.NetworkAppearanceSet,
 		RoutingContext:       result.RoutingContext,
 		RoutingContextSet:    true,
-	}, effectiveRoutingKey, c.isIPSPDoubleExchange())
+	}
+	local := c.isIPSPDoubleExchange()
+	c.addDynamicASKey(key, effectiveRoutingKey, local)
+	if !local && c.as != nil {
+		c.as.registerDynamicASP(c, key)
+	}
 }
 
 func (c *Association) routingKeyRegistry() *routingKeyRegistry {

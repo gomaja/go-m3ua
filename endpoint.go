@@ -213,10 +213,16 @@ func (e *Endpoint) forgetAssociation(association *Association) {
 	if aspRoutes != nil {
 		aspRoutes.detach(association)
 	}
+	sharedDynamicKeys := make([]ASKey, 0)
+	for _, routingContext := range association.dynamicRoutingContexts(false) {
+		if key, ok := association.dynamicASKey(routingContext, false); ok {
+			sharedDynamicKeys = append(sharedDynamicKeys, key)
+		}
+	}
 	removedDynamicKeys := routingKeys.forgetAssociation(association)
 	if applicationServers != nil {
 		applicationServers.forget(association)
-		for _, key := range removedDynamicKeys {
+		for _, key := range uniqueASKeys(append(removedDynamicKeys, sharedDynamicKeys...)) {
 			applicationServers.deregisterDynamicASP(association, key, true)
 		}
 	}
