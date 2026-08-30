@@ -97,8 +97,9 @@ type RoutingKeyRegistrationRequest struct {
 	// NetworkAppearanceImplied reports that the wire Routing Key omitted
 	// Network Appearance and the Association's single configured appearance
 	// supplied the RFC 4666 Section 3.6.1 implied value.
-	NetworkAppearanceImplied bool
-	RoutingKey               RoutingKey
+	NetworkAppearanceImplied  bool
+	RoutingKey                RoutingKey
+	unsupportedParameterField bool
 }
 
 // RoutingKeyRegistrationAuthorizer decides whether a peer may register a
@@ -524,6 +525,7 @@ func routingKeyFromPayload(payload *params.RoutingKeyPayload) (RoutingKeyRegistr
 		}
 		request.RoutingKey.Groups = append(request.RoutingKey.Groups, decoded)
 	}
+	request.unsupportedParameterField = len(payload.Others) != 0
 	if _, err := canonicalizeRoutingKey(request.RoutingKey); err != nil {
 		return RoutingKeyRegistrationRequest{}, err
 	}

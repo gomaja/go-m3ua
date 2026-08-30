@@ -144,6 +144,18 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 				storeRegistrationReplay(replayState, request, results[index])
 				continue
 			}
+			if request.unsupportedParameterField {
+				// RFC 4666 Section 4.4.1 requires a per-Routing-Key status when
+				// one or more nested parameter fields are unsupported. Do not
+				// discard an unknown field and authorize the broader known key.
+				results[index] = registrationResult(
+					request.LocalRoutingKeyIdentifier,
+					RegistrationUnsupportedRoutingKeyParameterField,
+					0,
+				)
+				storeRegistrationReplay(replayState, request, results[index])
+				continue
+			}
 
 			canonical, err := canonicalizeRoutingKey(request.RoutingKey)
 			if err != nil {
@@ -1017,6 +1029,7 @@ func routingKeyRegistrationRequestsEqual(first, second RoutingKeyRegistrationReq
 	if first.LocalRoutingKeyIdentifier != second.LocalRoutingKeyIdentifier ||
 		first.RequestedRoutingContext != second.RequestedRoutingContext ||
 		first.RoutingContextRequested != second.RoutingContextRequested ||
+		first.unsupportedParameterField != second.unsupportedParameterField ||
 		first.RoutingKey.TrafficMode != second.RoutingKey.TrafficMode ||
 		first.RoutingKey.TrafficModeSet != second.RoutingKey.TrafficModeSet {
 		return false

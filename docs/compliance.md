@@ -57,6 +57,10 @@ SGP, and IPSP Endpoints:
   rejection, resource bounds, and inactive-only deregistration atomically.
 - Registration batches return one independent result per Routing Key. REG RSP
   and DEREG RSP may be split across messages as RFC 4666 permits.
+- An unsupported nested Routing Key field produces Registration Status 9 for
+  that key instead of silently widening its traffic selector. Identical result
+  replay is tolerated, while contradictory REG RSP or DEREG RSP results for
+  one correlation value are rejected without applying that response.
 - Routing Keys with an omitted Network Appearance use the Association's single
   configured appearance when available. Otherwise the key applies to all
   Network Appearances and is enforced as the only key registered on that

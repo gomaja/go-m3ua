@@ -390,12 +390,15 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 
 	awaiting := c.rkmAwaiting == rkmAwaitingDeregistrationResponse && c.rkmResponseChan != nil
 	filtered := make([]*params.Param, 0, len(results))
-	seenPending := make(map[uint32]struct{}, len(results))
 	pendingStatus := make(map[uint32]DeregistrationStatus, len(results))
 	staleStatus := make(map[uint32]DeregistrationStatus, len(results))
 	for _, result := range results {
 		if _, stale := c.rkmUnresolvedDeregistrationRCs[result.routingContext]; stale {
-			if _, duplicate := staleStatus[result.routingContext]; duplicate {
+			if previous, duplicate := staleStatus[result.routingContext]; duplicate {
+				if previous != result.status {
+					c.rkmCorrelationMu.Unlock()
+					return conflictingDeregistrationResultError(result.routingContext)
+				}
 				continue
 			}
 			staleStatus[result.routingContext] = result.status
@@ -406,15 +409,22 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 			return NewUnexpectedMessageError(message)
 		}
 		if _, expected := c.rkmPendingDeregistrationRCs[result.routingContext]; expected {
-			if _, duplicate := seenPending[result.routingContext]; duplicate {
+			if previous, duplicate := pendingStatus[result.routingContext]; duplicate {
+				if previous != result.status {
+					c.rkmCorrelationMu.Unlock()
+					return conflictingDeregistrationResultError(result.routingContext)
+				}
 				continue
 			}
-			seenPending[result.routingContext] = struct{}{}
 			pendingStatus[result.routingContext] = result.status
 			filtered = append(filtered, result.parameter.Copy())
 			continue
 		}
-		if _, duplicate := c.rkmDeliveredDeregistrationStatus[result.routingContext]; duplicate {
+		if previous, duplicate := c.rkmDeliveredDeregistrationStatus[result.routingContext]; duplicate {
+			if previous != result.status {
+				c.rkmCorrelationMu.Unlock()
+				return conflictingDeregistrationResultError(result.routingContext)
+			}
 			continue
 		}
 		c.rkmCorrelationMu.Unlock()
@@ -480,17 +490,34 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	for _, decoded := range results {
 		identifier := decoded.result.LocalRoutingKeyIdentifier
 		if request, late := c.rkmUnresolvedRegistrations[identifier]; late {
-			if _, duplicate := lateResults[identifier]; !duplicate {
-				lateResults[identifier] = decoded.result
-				lateRequests[identifier] = request
+			if previous, duplicate := lateResults[identifier]; duplicate {
+				if previous != decoded.result {
+					c.rkmCorrelationMu.Unlock()
+					return conflictingRegistrationResultError(identifier)
+				}
+				continue
 			}
+			lateResults[identifier] = decoded.result
+			lateRequests[identifier] = request
 			continue
 		}
 		if awaiting {
 			if _, pending := c.rkmPendingLocalIDs[identifier]; pending {
-				if _, duplicate := pendingResults[identifier]; !duplicate {
-					pendingResults[identifier] = decoded.result
-					filtered = append(filtered, decoded.parameter.Copy())
+				if previous, duplicate := pendingResults[identifier]; duplicate {
+					if previous != decoded.result {
+						c.rkmCorrelationMu.Unlock()
+						return conflictingRegistrationResultError(identifier)
+					}
+					continue
+				}
+				pendingResults[identifier] = decoded.result
+				filtered = append(filtered, decoded.parameter.Copy())
+				continue
+			}
+			if previous, duplicate := c.rkmDeliveredRegistrationResults[identifier]; duplicate {
+				if previous != decoded.result {
+					c.rkmCorrelationMu.Unlock()
+					return conflictingRegistrationResultError(identifier)
 				}
 				continue
 			}
@@ -527,6 +554,27 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 		})
 	}
 	return c.applyRegistrationResults(applications)
+}
+
+func conflictingRegistrationResultError(identifier uint32) error {
+	// RFC 4666 Section 3.6.2 says one Local RK Identifier SHOULD occur in
+	// only one REG RSP. Identical replay is harmless; contradictory outcomes
+	// cannot be correlated safely and are an invalid parameter value.
+	return fmt.Errorf(
+		"%w: conflicting Registration Results for Local RK Identifier %d",
+		ErrInvalidParameterValue,
+		identifier,
+	)
+}
+
+func conflictingDeregistrationResultError(routingContext uint32) error {
+	// RFC 4666 Section 3.6.4 gives the same one-result rule to each Routing
+	// Context in DEREG RSP, so contradictory duplicate statuses are invalid.
+	return fmt.Errorf(
+		"%w: conflicting Deregistration Results for Routing Context %d",
+		ErrInvalidParameterValue,
+		routingContext,
+	)
 }
 
 func (c *Association) waitForRKMResponse(

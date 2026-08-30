@@ -1448,6 +1448,168 @@ func TestRKMRequesterRejectsConflictingRegistrationResultScopesAtomically(t *tes
 	}
 }
 
+func TestRKMRequesterClassifiesDuplicateRegistrationResults(t *testing.T) {
+	newResult := func(identifier, status, routingContext uint32) *params.Param {
+		return params.NewRegistrationResult(params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(identifier),
+			params.NewRegistrationStatus(status),
+			params.NewRoutingContext(routingContext),
+		))
+	}
+
+	t.Run("identical pending", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			request := message.(*messages.RegistrationRequest)
+			payload, err := request.RoutingKeys[0].RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			identifier := payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+			response := messages.NewRegistrationResponse(
+				newResult(identifier, params.SuccessfullyRegistered, 77),
+				newResult(identifier, params.SuccessfullyRegistered, 77),
+			)
+			return message.MarshalLen(), association.handleRegistrationResponse(response)
+		}
+
+		results, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		if err != nil {
+			t.Fatalf("RegisterRoutingKeys: %v", err)
+		}
+		if len(results) != 1 || results[0].Status != RegistrationSuccessfullyRegistered || results[0].RoutingContext != 77 {
+			t.Fatalf("Registration Results = %+v, want one success for Routing Context 77", results)
+		}
+		if key, ok := association.dynamicASKey(77, false); !ok || key.RoutingContext != 77 {
+			t.Fatalf("dynamic ASKey = %+v, %t; want Routing Context 77", key, ok)
+		}
+	})
+
+	t.Run("contradictory pending", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			request := message.(*messages.RegistrationRequest)
+			payload, err := request.RoutingKeys[0].RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			identifier := payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+			response := messages.NewRegistrationResponse(
+				newResult(identifier, params.SuccessfullyRegistered, 77),
+				newResult(identifier, params.PermissionDenied, 0),
+			)
+			return message.MarshalLen(), association.handleRegistrationResponse(response)
+		}
+
+		_, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		if !errors.Is(err, ErrInvalidParameterValue) {
+			t.Fatalf("RegisterRoutingKeys error = %v, want ErrInvalidParameterValue", err)
+		}
+		if contexts := association.dynamicRoutingContexts(false); len(contexts) != 0 {
+			t.Fatalf("contradictory Registration Results installed Routing Contexts %v", contexts)
+		}
+	})
+
+	t.Run("contradictory late", func(t *testing.T) {
+		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association.muState.Lock()
+		association.state = StateASPInactive
+		association.muState.Unlock()
+		written := make(chan uint32, 1)
+		association.signalWriter = func(message messages.M3UA) (int, error) {
+			request := message.(*messages.RegistrationRequest)
+			payload, err := request.RoutingKeys[0].RoutingKey()
+			if err != nil {
+				return 0, err
+			}
+			written <- payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+			return message.MarshalLen(), nil
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := association.RegisterRoutingKeys(ctx, RoutingKeyRegistration{
+				RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+			})
+			done <- err
+		}()
+		identifier := <-written
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RegisterRoutingKeys error = %v, want context.Canceled", err)
+		}
+
+		response := messages.NewRegistrationResponse(
+			newResult(identifier, params.SuccessfullyRegistered, 77),
+			newResult(identifier, params.PermissionDenied, 0),
+		)
+		if err := association.handleRegistrationResponse(response); !errors.Is(err, ErrInvalidParameterValue) {
+			t.Fatalf("late Registration Response error = %v, want ErrInvalidParameterValue", err)
+		}
+		if contexts := association.dynamicRoutingContexts(false); len(contexts) != 0 {
+			t.Fatalf("late contradictory Registration Results installed Routing Contexts %v", contexts)
+		}
+		association.rkmCorrelationMu.Lock()
+		_, unresolved := association.rkmUnresolvedRegistrations[identifier]
+		association.rkmCorrelationMu.Unlock()
+		if !unresolved {
+			t.Fatal("late contradictory Registration Results cleared the unresolved outcome")
+		}
+	})
+}
+
+func TestRKMRequesterRejectsContradictoryPreviouslyDeliveredRegistrationResult(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	requests := map[uint32]RoutingKeyRegistrationRequest{
+		1: {LocalRoutingKeyIdentifier: 1, RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP)},
+		2: {LocalRoutingKeyIdentifier: 2, RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP)},
+	}
+	responses, err := association.beginRegistrationResponseCorrelation(map[uint32]int{1: 0, 2: 1}, requests)
+	if err != nil {
+		t.Fatalf("beginRegistrationResponseCorrelation: %v", err)
+	}
+	t.Cleanup(func() { association.endRegistrationResponseCorrelation(false, true) })
+	result := func(identifier, status, routingContext uint32) *params.Param {
+		return params.NewRegistrationResult(params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(identifier),
+			params.NewRegistrationStatus(status),
+			params.NewRoutingContext(routingContext),
+		))
+	}
+	if err := association.deliverRegistrationResponse(messages.NewRegistrationResponse(
+		result(1, params.SuccessfullyRegistered, 77),
+	)); err != nil {
+		t.Fatalf("deliver first Registration Result: %v", err)
+	}
+	<-responses
+	if err := association.deliverRegistrationResponse(messages.NewRegistrationResponse(
+		result(1, params.PermissionDenied, 0),
+	)); !errors.Is(err, ErrInvalidParameterValue) {
+		t.Fatalf("contradictory delivered Registration Result error = %v, want ErrInvalidParameterValue", err)
+	}
+	association.rkmCorrelationMu.Lock()
+	delivered := association.rkmDeliveredRegistrationResults[1]
+	_, secondPending := association.rkmPendingLocalIDs[2]
+	association.rkmCorrelationMu.Unlock()
+	if delivered.Status != RegistrationSuccessfullyRegistered || delivered.RoutingContext != 77 {
+		t.Fatalf("first delivered Registration Result changed to %+v", delivered)
+	}
+	if !secondPending {
+		t.Fatal("contradictory delivered Registration Result cleared another pending identifier")
+	}
+}
+
 func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingScope(t *testing.T) {
 	t.Run("Static", func(t *testing.T) {
 		config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
@@ -2284,6 +2446,21 @@ func TestRKMLateDeregistrationResponseIsAppliedAtomically(t *testing.T) {
 			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
 		))
 	}
+	denied := params.NewDeregistrationResult(params.NewDeregResultPayload(
+		params.NewRoutingContext(100),
+		params.NewDeregistrationStatus(params.DeregPermissionDenied),
+	))
+	if err := association.handleDeregistrationResponse(
+		messages.NewDeregistrationResponse(result(100), denied),
+	); !errors.Is(err, ErrInvalidParameterValue) {
+		t.Fatalf("conflicting late Deregistration Response error = %v, want ErrInvalidParameterValue", err)
+	}
+	if _, ok := association.dynamicASKey(100, false); !ok {
+		t.Fatal("conflicting late response removed the dynamic ASKey")
+	}
+	if _, err := association.beginDeregistrationResponseCorrelation(map[uint32]int{100: 0}); !errors.Is(err, ErrDeregistrationOutcomeUnknown) {
+		t.Fatalf("conflicting late response cleared unresolved outcome: %v", err)
+	}
 	if err := association.handleDeregistrationResponse(
 		messages.NewDeregistrationResponse(result(100), result(999)),
 	); err == nil {
@@ -2395,6 +2572,96 @@ func TestRKMRequesterIgnoresDuplicateDeregistrationResults(t *testing.T) {
 		resultFor(200),
 	)); err != nil {
 		t.Fatalf("deliver remaining Deregistration Result: %v", err)
+	}
+	answer := <-done
+	if answer.err != nil {
+		t.Fatalf("DeregisterRoutingContexts: %v", answer.err)
+	}
+	if len(answer.results) != 2 || answer.results[0].RoutingContext != 100 || answer.results[1].RoutingContext != 200 {
+		t.Fatalf("Deregistration results = %+v, want Routing Contexts 100 and 200", answer.results)
+	}
+}
+
+func TestRKMRequesterRejectsContradictoryPreviouslyDeliveredDeregistrationResult(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	responses, err := association.beginDeregistrationResponseCorrelation(map[uint32]int{100: 0, 200: 1})
+	if err != nil {
+		t.Fatalf("beginDeregistrationResponseCorrelation: %v", err)
+	}
+	t.Cleanup(func() { association.endDeregistrationResponseCorrelation(false) })
+	result := func(routingContext, status uint32) *params.Param {
+		return params.NewDeregistrationResult(params.NewDeregResultPayload(
+			params.NewRoutingContext(routingContext),
+			params.NewDeregistrationStatus(status),
+		))
+	}
+	if err := association.deliverDeregistrationResponse(messages.NewDeregistrationResponse(
+		result(100, params.SuccessfullyDeregistered),
+	)); err != nil {
+		t.Fatalf("deliver first Deregistration Result: %v", err)
+	}
+	<-responses
+	if err := association.deliverDeregistrationResponse(messages.NewDeregistrationResponse(
+		result(100, params.DeregPermissionDenied),
+	)); !errors.Is(err, ErrInvalidParameterValue) {
+		t.Fatalf("contradictory delivered Deregistration Result error = %v, want ErrInvalidParameterValue", err)
+	}
+	association.rkmCorrelationMu.Lock()
+	delivered := association.rkmDeliveredDeregistrationStatus[100]
+	_, secondPending := association.rkmPendingDeregistrationRCs[200]
+	association.rkmCorrelationMu.Unlock()
+	if delivered != DeregistrationSuccessfullyDeregistered {
+		t.Fatalf("first delivered Deregistration Status changed to %d", delivered)
+	}
+	if !secondPending {
+		t.Fatal("contradictory delivered Deregistration Result cleared another pending Routing Context")
+	}
+}
+
+func TestRKMRequesterRejectsContradictoryDeregistrationResults(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan struct{}, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		written <- struct{}{}
+		return message.MarshalLen(), nil
+	}
+
+	type deregistrationAnswer struct {
+		results []RoutingKeyDeregistrationResult
+		err     error
+	}
+	done := make(chan deregistrationAnswer, 1)
+	go func() {
+		results, err := association.DeregisterRoutingContexts(context.Background(), 100, 200)
+		done <- deregistrationAnswer{results: results, err: err}
+	}()
+	<-written
+
+	resultFor := func(routingContext, status uint32) *params.Param {
+		return params.NewDeregistrationResult(params.NewDeregResultPayload(
+			params.NewRoutingContext(routingContext),
+			params.NewDeregistrationStatus(status),
+		))
+	}
+	if err := association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+		resultFor(100, params.SuccessfullyDeregistered),
+		resultFor(100, params.DeregPermissionDenied),
+	)); !errors.Is(err, ErrInvalidParameterValue) {
+		t.Fatalf("conflicting Deregistration Response error = %v, want ErrInvalidParameterValue", err)
+	}
+	select {
+	case answer := <-done:
+		t.Fatalf("Deregistration completed after conflicting results: results=%+v error=%v", answer.results, answer.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+		resultFor(100, params.SuccessfullyDeregistered),
+		resultFor(200, params.SuccessfullyDeregistered),
+	)); err != nil {
+		t.Fatalf("deliver valid Deregistration Results: %v", err)
 	}
 	answer := <-done
 	if answer.err != nil {
@@ -3649,5 +3916,93 @@ func TestRKMResponderRejectsDuplicateBatchCorrelationValues(t *testing.T) {
 	}
 	if writes != 0 {
 		t.Fatalf("duplicate Deregistration Routing Context wrote %d responses, want none", writes)
+	}
+}
+
+func TestRKMResponderRejectsUnsupportedRoutingKeyParameterFields(t *testing.T) {
+	authorizations := 0
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				authorizations++
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	responses := make(chan *messages.RegistrationResponse, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if response, ok := message.(*messages.RegistrationResponse); ok {
+			responses <- response
+		}
+		return message.MarshalLen(), nil
+	}
+
+	unsupported, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+	})
+	if err != nil {
+		t.Fatalf("unsupported routingKeyParameter: %v", err)
+	}
+	unsupportedPayload, err := unsupported.RoutingKey()
+	if err != nil {
+		t.Fatalf("unsupported RoutingKey: %v", err)
+	}
+	unsupportedPayload.Others = append(unsupportedPayload.Others, params.NewParam(0x7ffe, []byte{0xaa}))
+	unsupported = params.NewRoutingKey(unsupportedPayload)
+
+	supported, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+		LocalRoutingKeyIdentifier: 2,
+		RoutingKey:                testRoutingKey(20, 200, params.ServiceIndISUP),
+	})
+	if err != nil {
+		t.Fatalf("supported routingKeyParameter: %v", err)
+	}
+	if err := association.handleRegistrationRequest(messages.NewRegistrationRequest(unsupported, supported)); err != nil {
+		t.Fatalf("handleRegistrationRequest: %v", err)
+	}
+
+	response := <-responses
+	if len(response.RegistrationResults) != 2 {
+		t.Fatalf("Registration Results = %d, want 2", len(response.RegistrationResults))
+	}
+	first, err := response.RegistrationResults[0].RegistrationResult()
+	if err != nil {
+		t.Fatalf("unsupported Registration Result: %v", err)
+	}
+	if status := first.RegistrationStatus.RegistrationStatus(); status != params.UnsupportedRKparameterField {
+		t.Fatalf("unsupported Registration Status = %d, want %d", status, params.UnsupportedRKparameterField)
+	}
+	if routingContext := first.RoutingContext.RoutingContext(); routingContext != 0 {
+		t.Fatalf("unsupported Registration Routing Context = %d, want 0", routingContext)
+	}
+	second, err := response.RegistrationResults[1].RegistrationResult()
+	if err != nil {
+		t.Fatalf("supported Registration Result: %v", err)
+	}
+	if status := second.RegistrationStatus.RegistrationStatus(); status != params.SuccessfullyRegistered {
+		t.Fatalf("supported Registration Status = %d, want success", status)
+	}
+	if routingContext := second.RoutingContext.RoutingContext(); routingContext == 0 {
+		t.Fatal("supported Registration Routing Context = 0")
+	}
+	if authorizations != 1 {
+		t.Fatalf("authorization calls = %d, want only the supported Routing Key", authorizations)
+	}
+	if dynamic := endpoint.routingKeys.dynamicCount(); dynamic != 1 {
+		t.Fatalf("dynamic Routing Keys = %d, want only the supported Routing Key", dynamic)
 	}
 }
