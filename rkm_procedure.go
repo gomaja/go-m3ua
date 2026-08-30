@@ -446,7 +446,10 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 		// response therefore has to repair the local dynamic scope before the
 		// Routing Context becomes eligible for another procedure.
 		if status == DeregistrationSuccessfullyDeregistered {
-			c.removeRequesterRoutingKey(routingContext)
+			c.removeRequesterRoutingKeyVersion(
+				routingContext,
+				c.rkmUnresolvedDeregistrationRCs[routingContext],
+			)
 		}
 		delete(c.rkmUnresolvedDeregistrationRCs, routingContext)
 	}
@@ -685,8 +688,11 @@ func (c *Association) beginDeregistrationResponseCorrelation(pending map[uint32]
 	c.rkmResponseChan = make(chan messages.M3UA, len(pending))
 	c.rkmPendingLocalIDs = nil
 	c.rkmPendingDeregistrationRCs = make(map[uint32]struct{}, len(pending))
+	c.rkmPendingDeregistrationVersions = make(map[uint32]uint64, len(pending))
+	local := c.isIPSPDoubleExchange()
 	for routingContext := range pending {
 		c.rkmPendingDeregistrationRCs[routingContext] = struct{}{}
+		c.rkmPendingDeregistrationVersions[routingContext] = c.dynamicASKeyVersionFor(routingContext, local)
 	}
 	c.rkmDeliveredDeregistrationStatus = make(map[uint32]DeregistrationStatus, len(pending))
 	c.rkmAwaiting = rkmAwaitingDeregistrationResponse
@@ -699,36 +705,46 @@ func (c *Association) unresolvedRKMOutcomeCountLocked() int {
 
 func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) {
 	c.rkmCorrelationMu.Lock()
-	successful := make([]uint32, 0, len(c.rkmDeliveredDeregistrationStatus))
+	type successfulDeregistration struct {
+		routingContext uint32
+		version        uint64
+	}
+	successful := make([]successfulDeregistration, 0, len(c.rkmDeliveredDeregistrationStatus))
 	for routingContext, status := range c.rkmDeliveredDeregistrationStatus {
 		if status == DeregistrationSuccessfullyDeregistered {
-			successful = append(successful, routingContext)
+			successful = append(successful, successfulDeregistration{
+				routingContext: routingContext,
+				version:        c.rkmPendingDeregistrationVersions[routingContext],
+			})
 		}
 	}
 	if requestWritten && len(c.rkmPendingDeregistrationRCs) > 0 {
 		if c.rkmUnresolvedDeregistrationRCs == nil {
-			c.rkmUnresolvedDeregistrationRCs = make(map[uint32]struct{}, len(c.rkmPendingDeregistrationRCs))
+			c.rkmUnresolvedDeregistrationRCs = make(map[uint32]uint64, len(c.rkmPendingDeregistrationRCs))
 		}
 		for routingContext := range c.rkmPendingDeregistrationRCs {
-			c.rkmUnresolvedDeregistrationRCs[routingContext] = struct{}{}
+			c.rkmUnresolvedDeregistrationRCs[routingContext] =
+				c.rkmPendingDeregistrationVersions[routingContext]
 		}
 	}
 	c.rkmAwaiting = rkmAwaitingNone
 	c.rkmPendingDeregistrationRCs = nil
+	c.rkmPendingDeregistrationVersions = nil
 	c.rkmDeliveredDeregistrationStatus = nil
 	c.rkmResponseChan = nil
 	c.rkmCorrelationMu.Unlock()
 
-	for _, routingContext := range successful {
-		c.removeRequesterRoutingKey(routingContext)
+	for _, deregistration := range successful {
+		c.removeRequesterRoutingKeyVersion(deregistration.routingContext, deregistration.version)
 	}
 }
 
-func (c *Association) removeRequesterRoutingKey(routingContext uint32) {
+func (c *Association) removeRequesterRoutingKeyVersion(routingContext uint32, version uint64) {
+	c.rkmLifecycleMu.Lock()
+	defer c.rkmLifecycleMu.Unlock()
 	local := c.isIPSPDoubleExchange()
-	key, registered := c.dynamicASKey(routingContext, local)
-	c.removeDynamicASKey(routingContext, local)
-	if !local && registered && c.as != nil && !c.hasStaticApplicationServerMembership(key) {
+	key, removed := c.removeDynamicASKeyVersion(routingContext, local, version)
+	if !local && removed && c.as != nil && !c.hasStaticApplicationServerMembership(key) {
 		c.as.deregisterDynamicASP(c, key, true)
 	}
 }
@@ -756,6 +772,7 @@ func (c *Association) endRegistrationResponseCorrelation(requestWritten, complet
 	c.rkmRegistrationRequests = nil
 	c.rkmDeliveredRegistrationResults = nil
 	c.rkmPendingDeregistrationRCs = nil
+	c.rkmPendingDeregistrationVersions = nil
 	c.rkmDeliveredDeregistrationStatus = nil
 	c.rkmResponseChan = nil
 	c.rkmCorrelationMu.Unlock()

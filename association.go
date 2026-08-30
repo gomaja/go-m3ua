@@ -151,11 +151,14 @@ type Association struct {
 	peerIPSPTrafficModes  trafficModeSnapshot
 	// Dynamic Routing Keys are keyed by Routing Context because one
 	// Association may coordinate keys in several Network Appearances.
-	muDynamicASKeys          sync.RWMutex
-	dynamicPeerASKeys        map[uint32]ASKey
-	dynamicLocalASKeys       map[uint32]ASKey
-	dynamicPeerTrafficModes  map[uint32]uint32
-	dynamicLocalTrafficModes map[uint32]uint32
+	muDynamicASKeys           sync.RWMutex
+	dynamicPeerASKeys         map[uint32]ASKey
+	dynamicLocalASKeys        map[uint32]ASKey
+	dynamicPeerASKeyVersions  map[uint32]uint64
+	dynamicLocalASKeyVersions map[uint32]uint64
+	dynamicASKeyVersion       uint64
+	dynamicPeerTrafficModes   map[uint32]uint32
+	dynamicLocalTrafficModes  map[uint32]uint32
 	// peerASPIdentifier is the identifier an ASP supplied in ASP Up. It is
 	// distinct from cfg.ASPIdentifier, which is this endpoint's own optional
 	// identifier and is shared by every association a Listener accepts.
@@ -396,8 +399,9 @@ type Association struct {
 	rkmDeliveredRegistrationResults  map[uint32]RoutingKeyRegistrationResult
 	rkmUnresolvedRegistrations       map[uint32]RoutingKeyRegistrationRequest
 	rkmPendingDeregistrationRCs      map[uint32]struct{}
+	rkmPendingDeregistrationVersions map[uint32]uint64
 	rkmDeliveredDeregistrationStatus map[uint32]DeregistrationStatus
-	rkmUnresolvedDeregistrationRCs   map[uint32]struct{}
+	rkmUnresolvedDeregistrationRCs   map[uint32]uint64
 	rkmAwaiting                      uint32
 	rkmNextLocalID                   uint32
 	rkmResponseChan                  chan messages.M3UA
@@ -453,15 +457,17 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		stateEventChan: make(chan State, 16),
 		// A peer under stress can emit Notifies steadily, so this is sized like
 		// statusChan rather than like the state channel.
-		mgmtChan:                 make(chan *ManagementIndication, 64),
-		notificationQueue:        make(chan mandatoryControl, defaultNotificationQueueSize),
-		cfg:                      cfg,
-		sctpInfo:                 &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
-		dynamicPeerASKeys:        make(map[uint32]ASKey),
-		dynamicLocalASKeys:       make(map[uint32]ASKey),
-		dynamicPeerTrafficModes:  make(map[uint32]uint32),
-		dynamicLocalTrafficModes: make(map[uint32]uint32),
-		rkmRequestGate:           make(chan struct{}, 1),
+		mgmtChan:                  make(chan *ManagementIndication, 64),
+		notificationQueue:         make(chan mandatoryControl, defaultNotificationQueueSize),
+		cfg:                       cfg,
+		sctpInfo:                  &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
+		dynamicPeerASKeys:         make(map[uint32]ASKey),
+		dynamicLocalASKeys:        make(map[uint32]ASKey),
+		dynamicPeerASKeyVersions:  make(map[uint32]uint64),
+		dynamicLocalASKeyVersions: make(map[uint32]uint64),
+		dynamicPeerTrafficModes:   make(map[uint32]uint32),
+		dynamicLocalTrafficModes:  make(map[uint32]uint32),
+		rkmRequestGate:            make(chan struct{}, 1),
 		// A dialing ASP wants to carry traffic; Dial does not return until
 		// it does.
 		resumeTo: StateASPActive,
@@ -2034,6 +2040,7 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 			c.inactiveDynamicRCs[key.RoutingContext] = struct{}{}
 		}
 		c.dynamicPeerASKeys[key.RoutingContext] = key
+		c.dynamicPeerASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
 		if routingKey.TrafficModeSet {
 			c.dynamicPeerTrafficModes[key.RoutingContext] = routingKey.TrafficMode
 		}
@@ -2044,11 +2051,13 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 	c.muDynamicASKeys.Lock()
 	if local {
 		c.dynamicLocalASKeys[key.RoutingContext] = key
+		c.dynamicLocalASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
 		if routingKey.TrafficModeSet {
 			c.dynamicLocalTrafficModes[key.RoutingContext] = routingKey.TrafficMode
 		}
 	} else {
 		c.dynamicPeerASKeys[key.RoutingContext] = key
+		c.dynamicPeerASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
 		if routingKey.TrafficModeSet {
 			c.dynamicPeerTrafficModes[key.RoutingContext] = routingKey.TrafficMode
 		}
@@ -2064,6 +2073,7 @@ func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 		c.muAckedRCs.Lock()
 		c.muDynamicASKeys.Lock()
 		delete(c.dynamicPeerASKeys, routingContext)
+		delete(c.dynamicPeerASKeyVersions, routingContext)
 		delete(c.dynamicPeerTrafficModes, routingContext)
 		delete(c.inactiveDynamicRCs, routingContext)
 		c.muDynamicASKeys.Unlock()
@@ -2073,12 +2083,74 @@ func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 	c.muDynamicASKeys.Lock()
 	if local {
 		delete(c.dynamicLocalASKeys, routingContext)
+		delete(c.dynamicLocalASKeyVersions, routingContext)
 		delete(c.dynamicLocalTrafficModes, routingContext)
 	} else {
 		delete(c.dynamicPeerASKeys, routingContext)
+		delete(c.dynamicPeerASKeyVersions, routingContext)
 		delete(c.dynamicPeerTrafficModes, routingContext)
 	}
 	c.muDynamicASKeys.Unlock()
+}
+
+func (c *Association) nextDynamicASKeyVersionLocked() uint64 {
+	c.dynamicASKeyVersion++
+	if c.dynamicASKeyVersion == 0 {
+		c.dynamicASKeyVersion++
+	}
+	return c.dynamicASKeyVersion
+}
+
+func (c *Association) dynamicASKeyVersionFor(routingContext uint32, local bool) uint64 {
+	if c == nil {
+		return 0
+	}
+	c.muDynamicASKeys.RLock()
+	versions := c.dynamicPeerASKeyVersions
+	if local {
+		versions = c.dynamicLocalASKeyVersions
+	}
+	version := versions[routingContext]
+	c.muDynamicASKeys.RUnlock()
+	return version
+}
+
+func (c *Association) removeDynamicASKeyVersion(
+	routingContext uint32,
+	local bool,
+	expectedVersion uint64,
+) (ASKey, bool) {
+	if c == nil {
+		return ASKey{}, false
+	}
+	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
+		c.muAckedRCs.Lock()
+		defer c.muAckedRCs.Unlock()
+	}
+	c.muDynamicASKeys.Lock()
+	defer c.muDynamicASKeys.Unlock()
+	keys := c.dynamicPeerASKeys
+	versions := c.dynamicPeerASKeyVersions
+	trafficModes := c.dynamicPeerTrafficModes
+	if local {
+		keys = c.dynamicLocalASKeys
+		versions = c.dynamicLocalASKeyVersions
+		trafficModes = c.dynamicLocalTrafficModes
+	}
+	if versions[routingContext] != expectedVersion {
+		return ASKey{}, false
+	}
+	key, exists := keys[routingContext]
+	if !exists {
+		return ASKey{}, false
+	}
+	delete(keys, routingContext)
+	delete(versions, routingContext)
+	delete(trafficModes, routingContext)
+	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
+		delete(c.inactiveDynamicRCs, routingContext)
+	}
+	return key, true
 }
 
 func (c *Association) dynamicASKey(routingContext uint32, local bool) (ASKey, bool) {

@@ -2001,14 +2001,14 @@ func TestRKMRequesterBoundsUnresolvedDeregistrationOutcomes(t *testing.T) {
 func TestRKMRequesterSharesUnresolvedOutcomeBudget(t *testing.T) {
 	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
 	association.rkmUnresolvedRegistrations = make(map[uint32]RoutingKeyRegistrationRequest, rkmUnresolvedOutcomeLimit/2)
-	association.rkmUnresolvedDeregistrationRCs = make(map[uint32]struct{}, rkmUnresolvedOutcomeLimit/2)
+	association.rkmUnresolvedDeregistrationRCs = make(map[uint32]uint64, rkmUnresolvedOutcomeLimit/2)
 	for index := 0; index < rkmUnresolvedOutcomeLimit/2; index++ {
 		identifier := uint32(index + 1)
 		association.rkmUnresolvedRegistrations[identifier] = RoutingKeyRegistrationRequest{
 			LocalRoutingKeyIdentifier: identifier,
 			RoutingKey:                testRoutingKey(10, uint32(index+1), params.ServiceIndSCCP),
 		}
-		association.rkmUnresolvedDeregistrationRCs[uint32(index+1)] = struct{}{}
+		association.rkmUnresolvedDeregistrationRCs[uint32(index+1)] = 1
 	}
 	if _, err := association.beginRegistrationResponseCorrelation(
 		map[uint32]int{rkmUnresolvedOutcomeLimit + 1: 0},
@@ -2290,6 +2290,182 @@ func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
 	}
 	if _, ok := endpoint.as.lookup(key); ok {
 		t.Fatal("late successful Deregistration Response retained the requester-created Application Server")
+	}
+}
+
+func TestRKMLateSuccessfulDeregistrationPreservesReregisteredDynamicKey(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.notificationWriter = func(message messages.M3UA) (int, error) {
+		return message.MarshalLen(), nil
+	}
+	association.as = newApplicationServers(time.Hour)
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	key := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       100,
+		RoutingContextSet:    true,
+	}
+	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	association.addDynamicASKey(key, routingKey, false)
+	association.as.registerDynamicASP(association, key)
+
+	deregistrationWritten := make(chan struct{}, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if _, ok := message.(*messages.DeregistrationRequest); ok {
+			deregistrationWritten <- struct{}{}
+		}
+		return message.MarshalLen(), nil
+	}
+	deregistrationDone := make(chan error, 1)
+	go func() {
+		_, err := association.DeregisterRoutingContexts(ctx, 100)
+		deregistrationDone <- err
+	}()
+	<-deregistrationWritten
+	cancel()
+	if err := <-deregistrationDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeregisterRoutingContexts error = %v, want context.Canceled", err)
+	}
+
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request, ok := message.(*messages.RegistrationRequest)
+		if !ok {
+			return message.MarshalLen(), nil
+		}
+		payload, err := request.RoutingKeys[0].RoutingKey()
+		if err != nil {
+			return 0, err
+		}
+		identifier := payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+		return message.MarshalLen(), association.handleRegistrationResponse(messages.NewRegistrationResponse(
+			params.NewRegistrationResult(params.NewRegistrationResultPayload(
+				params.NewLocalRoutingKeyIdentifier(identifier),
+				params.NewRegistrationStatus(params.SuccessfullyRegistered),
+				params.NewRoutingContext(100),
+			)),
+		))
+	}
+	if _, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{RoutingKey: routingKey}); err != nil {
+		t.Fatalf("RegisterRoutingKeys: %v", err)
+	}
+
+	late := messages.NewDeregistrationResponse(params.NewDeregistrationResult(
+		params.NewDeregResultPayload(
+			params.NewRoutingContext(100),
+			params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+		),
+	))
+	if err := association.handleDeregistrationResponse(late); err != nil {
+		t.Fatalf("late Deregistration Response: %v", err)
+	}
+	if current, ok := association.dynamicASKey(100, false); !ok || current != key {
+		t.Fatalf("re-registered dynamic ASKey = %+v, %v; want %+v, true", current, ok, key)
+	}
+	applicationServer, ok := association.as.lookup(key)
+	if !ok {
+		t.Fatal("late Deregistration Response removed the re-registered Application Server")
+	}
+	applicationServer.mu.Lock()
+	_, member := applicationServer.asps[association]
+	applicationServer.mu.Unlock()
+	if !member {
+		t.Fatal("late Deregistration Response removed the re-registered ASP membership")
+	}
+}
+
+func TestRKMLateDeregistrationCleanupSerializesWithRegistrationPublication(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.notificationWriter = func(message messages.M3UA) (int, error) {
+		return message.MarshalLen(), nil
+	}
+	association.as = newApplicationServers(time.Hour)
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	key := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       100,
+		RoutingContextSet:    true,
+	}
+	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
+	association.addDynamicASKey(key, routingKey, false)
+	association.as.registerDynamicASP(association, key)
+	version := association.dynamicASKeyVersionFor(100, false)
+	association.rkmUnresolvedDeregistrationRCs = map[uint32]uint64{100: version}
+	applicationServer, ok := association.as.lookup(key)
+	if !ok {
+		t.Fatal("dynamic Application Server was not created")
+	}
+	applicationServer.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			applicationServer.mu.Unlock()
+		}
+	}()
+
+	lateDone := make(chan error, 1)
+	go func() {
+		lateDone <- association.handleDeregistrationResponse(messages.NewDeregistrationResponse(
+			params.NewDeregistrationResult(params.NewDeregResultPayload(
+				params.NewRoutingContext(100),
+				params.NewDeregistrationStatus(params.SuccessfullyDeregistered),
+			)),
+		))
+	}()
+	if !waitFor(func() bool {
+		_, exists := association.dynamicASKey(100, false)
+		return !exists
+	}, time.Second) {
+		t.Fatal("late Deregistration Response did not begin cleanup")
+	}
+	if associationEnded(association) {
+		t.Fatal("association ended while stale cleanup was blocked")
+	}
+
+	registrationDone := make(chan error, 1)
+	go func() {
+		registrationDone <- association.applyRegistrationResults([]registrationResultApplication{{
+			request: RoutingKeyRegistrationRequest{RoutingKey: routingKey},
+			result: RoutingKeyRegistrationResult{
+				Status:         RegistrationSuccessfullyRegistered,
+				RoutingContext: 100,
+			},
+		}})
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if current, exists := association.dynamicASKey(100, false); exists {
+		t.Fatalf("registration published during stale cleanup: %+v", current)
+	}
+
+	applicationServer.mu.Unlock()
+	locked = false
+	if err := <-lateDone; err != nil {
+		t.Fatalf("late Deregistration Response: %v", err)
+	}
+	if associationEnded(association) {
+		t.Fatal("association ended during stale cleanup")
+	}
+	if err := <-registrationDone; err != nil {
+		t.Fatalf("applyRegistrationResults: %v", err)
+	}
+	if current, exists := association.dynamicASKey(100, false); !exists || current != key {
+		t.Fatalf("registered dynamic ASKey = %+v, %v; want %+v, true", current, exists, key)
+	}
+	currentApplicationServer, ok := association.as.lookup(key)
+	if !ok {
+		t.Fatal("registration publication did not recreate the Application Server")
+	}
+	currentApplicationServer.mu.Lock()
+	_, member := currentApplicationServer.asps[association]
+	currentApplicationServer.mu.Unlock()
+	if !member {
+		t.Fatal("registration publication did not restore ASP membership")
 	}
 }
 
@@ -3843,7 +4019,7 @@ func TestRKMRequesterDeregistrationPreservesStaticApplicationServerMembership(t 
 	association.addDynamicASKey(key, testRoutingKey(10, 100, params.ServiceIndSCCP), false)
 	applicationServers.registerDynamicASP(association, key)
 
-	association.removeRequesterRoutingKey(7)
+	association.removeRequesterRoutingKeyVersion(7, association.dynamicASKeyVersionFor(7, false))
 	if _, ok := association.dynamicASKey(7, false); ok {
 		t.Fatal("Deregistration retained the dynamic Routing Key scope")
 	}
