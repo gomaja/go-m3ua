@@ -163,6 +163,10 @@ var (
 	// Gateway, Signalling Gateway Process, or route inventory.
 	ErrInvalidASPConfig = errors.New("invalid ASP routing configuration")
 
+	// ErrInvalidApplicationServerConfig reports invalid shared Application
+	// Server state or activation policy.
+	ErrInvalidApplicationServerConfig = errors.New("invalid Application Server configuration")
+
 	// ErrInvalidMTPTransfer reports an invalid MTP-TRANSFER request primitive.
 	ErrInvalidMTPTransfer = errors.New("invalid MTP-TRANSFER request")
 	// ErrUnknownMTPRoute reports an explicit MTP Route not provisioned at

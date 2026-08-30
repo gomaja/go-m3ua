@@ -164,10 +164,9 @@ func TestAssociationAndListenerShareTheSGsDestinationView(t *testing.T) {
 // The listener's setter has to work before any association exists — an operator
 // knows the SS7 network's state at startup, not only once an ASP turns up.
 func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
-	// With a Config, as Listen always builds it: registry() reads RecoveryTimer
-	// through the embedded *Config and dereferences nil without one. The setter
-	// under test needs no Config at all, which is the point — it is usable
-	// before anything has been accepted.
+	// With an AssociationConfig, as Listen always builds it. The setter under
+	// test needs no accepted Association at all, which is the point — it is
+	// usable before anything has been accepted.
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
 		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
 		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)

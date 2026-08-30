@@ -102,6 +102,9 @@ const DefaultRecoveryTimer = 2 * time.Second
 type applicationServer struct {
 	// key is the Network Appearance plus Routing Context scope this AS serves.
 	key ASKey
+	// activationPolicy is the immutable n+k threshold selected for key when the
+	// AS is created.
+	activationPolicy ASActivationPolicy
 
 	// overrideMu serializes an Override winner change through the displaced
 	// associations' local state, traffic barriers, and Notify. mu alone protects
@@ -124,11 +127,16 @@ type applicationServer struct {
 	// state is the AS state last computed from asps.
 	state  ASState
 	closed bool
-	// notifications records every AS transition in state order. Each event is
+	// notifications records every AS notification in state order. Each event is
 	// released only after its related Ack; a later transition can become ready
 	// without overtaking an earlier Ack-gated event.
-	notifications      []*asStateNotification
+	notifications      []*asNotification
 	notificationWorker bool
+	// resourcesInsufficient records an active Loadshare or Broadcast AS whose
+	// active ASP count is below n. insufficientNotified prevents duplicate
+	// advisory messages during one continuous shortage.
+	resourcesInsufficient bool
+	insufficientNotified  map[*Association]struct{}
 	// trafficMode is the mode in force, which decides how many ASPs must be
 	// active and whether a new one overrides the rest.
 	trafficMode uint32
@@ -236,8 +244,8 @@ type queuedData struct {
 	broadcastMarker     bool
 }
 
-type asStateNotification struct {
-	state         ASState
+type asNotification struct {
+	status        uint32
 	targets       []*Association
 	key           ASKey
 	aspIdentifier *params.Param
@@ -259,6 +267,10 @@ type applicationServers struct {
 	aspIdentifiers map[*Association]uint32
 	// recoveryTimer is T(r); zero means DefaultRecoveryTimer.
 	recoveryTimer time.Duration
+	// Activation policy is immutable after construction. Exact ASKey entries
+	// take precedence over the default.
+	defaultActivationPolicy ASActivationPolicy
+	activationPolicies      map[ASKey]ASActivationPolicy
 	// distribution is immutable after construction, so DistributeData never
 	// races an application mutating its SGPConfig after the Endpoint starts.
 	distribution distributionPolicy
@@ -291,24 +303,41 @@ type activeSSNMTarget struct {
 }
 
 func newApplicationServers(recovery time.Duration) *applicationServers {
-	return newApplicationServersForSGP(&SGPConfig{RecoveryTimer: recovery})
+	return newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: recovery})
 }
 
-func newApplicationServersForSGP(config *SGPConfig) *applicationServers {
-	if config == nil {
-		config = &SGPConfig{}
+func newApplicationServersForSGP(applicationServerConfig *ApplicationServerConfig, config *SGPConfig) *applicationServers {
+	return newApplicationServersForEndpoint(applicationServerConfig, config)
+}
+
+func newApplicationServersForIPSP(config *ApplicationServerConfig) *applicationServers {
+	return newApplicationServersForEndpoint(config, nil)
+}
+
+func newApplicationServersForEndpoint(applicationServerConfig *ApplicationServerConfig, sgpConfig *SGPConfig) *applicationServers {
+	if applicationServerConfig == nil {
+		applicationServerConfig = &ApplicationServerConfig{}
 	}
-	recovery := config.RecoveryTimer
+	if sgpConfig == nil {
+		sgpConfig = &SGPConfig{}
+	}
+	recovery := applicationServerConfig.RecoveryTimer
 	if recovery <= 0 {
 		recovery = DefaultRecoveryTimer
 	}
+	activationPolicies := make(map[ASKey]ASActivationPolicy, len(applicationServerConfig.ActivationPolicies))
+	for key, policy := range applicationServerConfig.ActivationPolicies {
+		activationPolicies[key] = policy
+	}
 	return &applicationServers{
-		as:             make(map[ASKey]*applicationServer),
-		registrations:  make(map[ASKey]*applicationServerRegistration),
-		aspIdentifiers: make(map[*Association]uint32),
-		recoveryTimer:  recovery,
-		distribution:   newSGPDistributionPolicy(config),
-		recoveryBudget: newSGPRecoveryBudget(config),
+		as:                      make(map[ASKey]*applicationServer),
+		registrations:           make(map[ASKey]*applicationServerRegistration),
+		aspIdentifiers:          make(map[*Association]uint32),
+		recoveryTimer:           recovery,
+		defaultActivationPolicy: applicationServerConfig.DefaultActivationPolicy,
+		activationPolicies:      activationPolicies,
+		distribution:            newSGPDistributionPolicy(sgpConfig),
+		recoveryBudget:          newSGPRecoveryBudget(sgpConfig),
 	}
 }
 
@@ -539,12 +568,20 @@ func (r *applicationServers) getOrCreateLocked(key ASKey) (*applicationServer, b
 	}
 	asEntry = &applicationServer{
 		key:                key,
+		activationPolicy:   r.activationPolicyFor(key),
 		asps:               make(map[*Association]State),
 		broadcastFlowLimit: r.distribution.broadcastFlowCacheEntries,
 		recoveryBudget:     r.recoveryBudget,
 	}
 	r.as[key] = asEntry
 	return asEntry, true
+}
+
+func (r *applicationServers) activationPolicyFor(key ASKey) ASActivationPolicy {
+	if configured, ok := r.activationPolicies[key]; ok {
+		return configured
+	}
+	return r.defaultActivationPolicy
 }
 
 func (r *applicationServers) registrationForLocked(key ASKey, applicationServer *applicationServer, removable bool) *applicationServerRegistration {
@@ -1095,6 +1132,9 @@ func (r *applicationServers) agreeTrafficModeForKeys(keys []ASKey, trafficModes 
 		if applicationServer.trafficMode != 0 && desired != 0 && applicationServer.trafficMode != desired {
 			return nil, ErrUnsupportedTrafficMode
 		}
+		if desired == params.TrafficModeOverride && applicationServer.requiredActive() != 1 {
+			return nil, ErrUnsupportedTrafficMode
+		}
 		agreedModes[index] = desired
 	}
 	for index, applicationServer := range servers {
@@ -1256,8 +1296,13 @@ func (as *applicationServer) markASPsInactive(associations []*Association, recov
 		return func() {}
 	}
 	changed := false
+	currentStateTargets := make([]*Association, 0, len(associations))
 	for _, association := range associations {
-		if current, ok := as.asps[association]; !ok || current != StateASPInactive {
+		current, known := as.asps[association]
+		if !known || current == StateASPDown {
+			currentStateTargets = append(currentStateTargets, association)
+		}
+		if !known || current != StateASPInactive {
 			as.asps[association] = StateASPInactive
 			changed = true
 		}
@@ -1265,7 +1310,7 @@ func (as *applicationServer) markASPsInactive(associations []*Association, recov
 	if !changed {
 		return func() {}
 	}
-	return as.recomputeLocked(recovery, nil)
+	return as.recomputeLockedFor(recovery, nil, currentStateTargets)
 }
 
 func (as *applicationServer) close() {
@@ -1444,6 +1489,9 @@ func (as *applicationServer) setTrafficMode(mode uint32) {
 }
 
 func (as *applicationServer) setTrafficModeLocked(mode uint32) {
+	if mode == params.TrafficModeOverride && as.requiredActive() != 1 {
+		return
+	}
 	if as.trafficMode == 0 {
 		as.trafficMode = mode
 		if mode == params.TrafficModeBroadcast && as.hasActiveASPLocked() {
@@ -1466,7 +1514,9 @@ func (as *applicationServer) TrafficMode() uint32 {
 // The same section permits one for the other modes too: "When one ASP is
 // considered enough to handle traffic (smooth start), the AS in AS-INACTIVE MAY
 // reach the AS-ACTIVE as soon as the first ASP moves to the ASP-ACTIVE state."
-func (as *applicationServer) requiredActive() int { return 1 }
+func (as *applicationServer) requiredActive() int {
+	return as.activationPolicy.requiredActive()
+}
 
 // recomputeLocked derives the AS state from its ASPs and returns a closure that
 // emits the resulting Notify messages.
@@ -1475,6 +1525,15 @@ func (as *applicationServer) requiredActive() int { return 1 }
 // and holding the AS lock across a socket write would stall every other
 // association in the same Application Server.
 func (as *applicationServer) recomputeLocked(recovery time.Duration, aspIdentifier *params.Param) func() {
+	return as.recomputeLockedFor(recovery, aspIdentifier, nil)
+}
+
+func (as *applicationServer) recomputeLockedFor(
+	recovery time.Duration,
+	aspIdentifier *params.Param,
+	currentStateTargets []*Association,
+) func() {
+	notificationQueueWasEmpty := len(as.notifications) == 0
 	as.rebuildActiveLocked()
 	active, inactive := 0, 0
 	for _, st := range as.asps {
@@ -1492,6 +1551,14 @@ func (as *applicationServer) recomputeLocked(recovery time.Duration, aspIdentifi
 	switch {
 	case active >= as.requiredActive():
 		next = ASActive
+	case active > 0 && (previous == ASActive || previous == ASPending || as.activationPolicy.SmoothStart):
+		next = ASActive
+	case active > 0:
+		// RFC 4666 Sections 4.3.2 and 4.3.4.3 keep strict startup in
+		// AS-INACTIVE until n ASPs are active. This also applies when no
+		// additional ASP has connected yet; the under-threshold active ASP
+		// does not make the configured AS disappear into AS-DOWN.
+		next = ASInactive
 	case previous == ASActive:
 		// "An active ASP has transitioned to ASP-INACTIVE or ASP DOWN and it
 		// was the last remaining active ASP in the AS.  A recovery timer T(r)
@@ -1506,19 +1573,69 @@ func (as *applicationServer) recomputeLocked(recovery time.Duration, aspIdentifi
 		next = ASDown
 	}
 
-	if next == previous {
-		return func() {}
-	}
-	as.state = next
-	as.stopRecoveryLocked()
-	if next == ASPending {
-		as.startRecoveryLocked(recovery)
-	}
-	if next != ASActive {
-		as.stopDrainRetryLocked()
+	var releases []func()
+	stateChanged := next != previous
+	if stateChanged {
+		as.state = next
+		as.stopRecoveryLocked()
+		if next == ASPending {
+			as.startRecoveryLocked(recovery)
+		}
+		if next != ASActive {
+			as.stopDrainRetryLocked()
+		}
+		releases = append(releases,
+			as.enqueueStateNotificationLocked(next, as.notifyTargetsLocked(), aspIdentifier))
+	} else if len(currentStateTargets) > 0 {
+		// RFC 4666 Section 4.3.4.5 recommends telling an ASP that just moved
+		// from ASP-DOWN to ASP-INACTIVE the current AS state after ASP Up Ack,
+		// even when that individual transition did not change the AS state.
+		releases = append(releases,
+			as.enqueueStateNotificationLocked(next, currentStateTargets, nil))
 	}
 
-	return as.enqueueStateNotificationLocked(next, as.notifyTargetsLocked(), aspIdentifier)
+	// RFC 4666 Sections 3.8.2 and 5.2.3 restrict the insufficient-resource
+	// advisory to inactive ASPs in an active Loadshare or Broadcast AS, and
+	// restore AS-ACTIVE notification when the active count returns to n.
+	insufficient := next == ASActive && active < as.requiredActive() &&
+		(as.trafficMode == params.TrafficModeLoadshare || as.trafficMode == params.TrafficModeBroadcast)
+	wasInsufficient := as.resourcesInsufficient
+	if insufficient {
+		newlyInactive := make([]*Association, 0, inactive)
+		notified := make(map[*Association]struct{}, inactive)
+		for association, state := range as.asps {
+			if state != StateASPInactive {
+				continue
+			}
+			if _, alreadyNotified := as.insufficientNotified[association]; alreadyNotified {
+				notified[association] = struct{}{}
+				continue
+			}
+			notified[association] = struct{}{}
+			newlyInactive = append(newlyInactive, association)
+		}
+		as.insufficientNotified = notified
+		if len(newlyInactive) > 0 {
+			releases = append(releases, as.enqueueStatusNotificationLocked(
+				params.InsufficientAspResources, newlyInactive, nil,
+			))
+		}
+	} else {
+		as.insufficientNotified = nil
+		if wasInsufficient && next == ASActive && !stateChanged {
+			releases = append(releases,
+				as.enqueueStateNotificationLocked(ASActive, as.notifyTargetsLocked(), nil))
+		}
+	}
+	as.resourcesInsufficient = insufficient
+	if notificationQueueWasEmpty && len(as.notifications) > 0 {
+		// When one transition creates several ordered notifications, the caller
+		// that releases the head also waits for the complete transition batch.
+		// A transition queued behind another Ack-gated event remains nonblocking.
+		as.notifications[len(as.notifications)-1].waitOnRelease = true
+	}
+
+	return combineNotificationReleases(releases)
 }
 
 // enqueueStateNotificationLocked appends one mandatory AS-state event while mu
@@ -1527,8 +1644,16 @@ func (as *applicationServer) recomputeLocked(recovery time.Duration, aspIdentifi
 // ordering; an event queued behind a gated predecessor merely becomes ready, so
 // an unrelated association is never blocked on that predecessor's DATA barrier.
 func (as *applicationServer) enqueueStateNotificationLocked(state ASState, targets []*Association, aspIdentifier *params.Param) func() {
-	event := &asStateNotification{
-		state:         state,
+	status, ok := state.statusInformation()
+	if !ok {
+		return func() {}
+	}
+	return as.enqueueStatusNotificationLocked(status, targets, aspIdentifier)
+}
+
+func (as *applicationServer) enqueueStatusNotificationLocked(status uint32, targets []*Association, aspIdentifier *params.Param) func() {
+	event := &asNotification{
+		status:        status,
 		targets:       append([]*Association(nil), targets...),
 		key:           as.key,
 		aspIdentifier: aspIdentifier.Copy(),
@@ -1539,7 +1664,7 @@ func (as *applicationServer) enqueueStateNotificationLocked(state ASState, targe
 	as.notifications = append(as.notifications, event)
 	if !as.notificationWorker {
 		as.notificationWorker = true
-		go as.deliverStateNotifications()
+		go as.deliverNotifications()
 	}
 	return func() {
 		event.releaseOnce.Do(func() { close(event.ready) })
@@ -1549,7 +1674,15 @@ func (as *applicationServer) enqueueStateNotificationLocked(state ASState, targe
 	}
 }
 
-func (as *applicationServer) deliverStateNotifications() {
+func combineNotificationReleases(releases []func()) func() {
+	return func() {
+		for _, release := range releases {
+			release()
+		}
+	}
+}
+
+func (as *applicationServer) deliverNotifications() {
 	for {
 		as.mu.Lock()
 		if len(as.notifications) == 0 {
@@ -1565,7 +1698,7 @@ func (as *applicationServer) deliverStateNotifications() {
 		closed := as.closed
 		as.mu.Unlock()
 		if !closed {
-			notifyASState(event.targets, event.state, event.key, event.aspIdentifier)
+			notifyASStatus(event.targets, event.status, event.key, event.aspIdentifier)
 		}
 
 		as.mu.Lock()
@@ -1658,21 +1791,13 @@ func (as *applicationServer) State() ASState {
 	return as.state
 }
 
-// notifyASState sends an AS-State_Change Notify to each target.
-//
-// RFC 4666 Section 3.8.2 fixes the Status Type: "1  Application Server State
-// Change (AS-State_Change)", with the new state in Status Information.
-func notifyASState(targets []*Association, state ASState, key ASKey, aspIdentifier *params.Param) {
-	info, ok := state.statusInformation()
-	if !ok {
-		return
-	}
-
+// notifyASStatus sends one RFC 4666 Section 3.8.2 status to each target.
+func notifyASStatus(targets []*Association, status uint32, key ASKey, aspIdentifier *params.Param) {
 	for _, c := range targets {
 		// Best effort: a peer that cannot be told is a problem for that
 		// association, not for the Application Server or its other members.
 		c.enqueueNotifyToAvailablePeer(messages.NewNotify(
-			params.NewStatus(info),
+			params.NewStatus(status),
 			aspIdentifier.Copy(),
 			routingContextParamForASKey(key),
 			nil,
@@ -1713,8 +1838,10 @@ func notifyAlternateASPActive(target *Association, key ASKey, overriding *params
 	))
 }
 
-// activeASPs returns the associations currently ASP-ACTIVE in the AS, in a
-// stable order so a load-sharing choice is repeatable for the same key.
+// activeASPs returns the associations currently ASP-ACTIVE in an AS-ACTIVE AS,
+// in a stable order so a load-sharing choice is repeatable for the same key.
+// RFC 4666 Section 4.3.4.3 permits an SGP to withhold traffic until n ASPs are
+// active, so ASP-ACTIVE membership alone does not make an Association eligible.
 //
 // The order is by ASP Identifier where one is configured, falling back to the
 // pointer as a tiebreak. Repeatability is what makes SLS-based load-sharing
@@ -1724,6 +1851,9 @@ func notifyAlternateASPActive(target *Association, key ASKey, overriding *params
 func (as *applicationServer) activeASPs() []*Association {
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	if as.state != ASActive {
+		return nil
+	}
 
 	return as.activeASPsLocked()
 }

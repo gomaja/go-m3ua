@@ -4,6 +4,8 @@ import (
 	"slices"
 	"sort"
 	"sync"
+
+	"github.com/gomaja/go-m3ua/messages/params"
 )
 
 const (
@@ -341,6 +343,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 			continue
 		}
 		trafficModeConflicts := registrationTrafficModeConflictsLocked(
+			applicationServers,
 			lockedApplicationServers,
 			requests,
 			entries,
@@ -419,14 +422,15 @@ func unlockRegistrationApplicationServers(locked []lockedRegistrationApplication
 }
 
 func registrationTrafficModeConflictsLocked(
+	registry *applicationServers,
 	locked []lockedRegistrationApplicationServer,
 	requests []RoutingKeyRegistrationRequest,
 	entries map[uint32]*routingKeyEntry,
 	results []RoutingKeyRegistrationResult,
 ) []int {
-	applicationServers := make(map[ASKey]*applicationServer, len(locked))
+	serversByKey := make(map[ASKey]*applicationServer, len(locked))
 	for _, entry := range locked {
-		applicationServers[entry.key] = entry.applicationServer
+		serversByKey[entry.key] = entry.applicationServer
 	}
 	var conflicts []int
 	for index, result := range results {
@@ -434,14 +438,20 @@ func registrationTrafficModeConflictsLocked(
 			result.Status != RegistrationRoutingKeyAlreadyRegistered {
 			continue
 		}
+		entry := entries[result.RoutingContext]
+		if entry == nil || !entry.routingKey.TrafficModeSet {
+			continue
+		}
+		applicationServer := serversByKey[entry.asKey()]
+		key := entry.asKey()
+		if entry.routingKey.TrafficMode == params.TrafficModeOverride &&
+			applicationServersRegistryRequiresSeveralActive(registry, key) {
+			conflicts = append(conflicts, index)
+			continue
+		}
 		if !requests[index].RoutingKey.TrafficModeSet {
 			continue
 		}
-		entry := entries[result.RoutingContext]
-		if entry == nil {
-			continue
-		}
-		applicationServer := applicationServers[entry.asKey()]
 		// RFC 4666 Section 4.4.1 requires a requested Traffic Mode to match
 		// the existing Routing Key. The live AS mode is part of that existing
 		// traffic identity even when the provisioned Routing Key omitted it.
@@ -451,6 +461,10 @@ func registrationTrafficModeConflictsLocked(
 		}
 	}
 	return conflicts
+}
+
+func applicationServersRegistryRequiresSeveralActive(registry *applicationServers, key ASKey) bool {
+	return registry != nil && registry.activationPolicyFor(key).requiredActive() != 1
 }
 
 func adoptRegistrationTrafficModesLocked(

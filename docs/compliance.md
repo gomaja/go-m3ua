@@ -1,6 +1,6 @@
 # go-m3ua compliance and ecosystem audit
 
-Audit date: 2026-08-29.
+Audit date: 2026-08-30.
 
 ## Specification baseline
 
@@ -14,6 +14,24 @@ current SCTP base specification. The standards contract also records the
 obsolete security protocol references embedded in current RFC 3788 and keeps
 library conformance separate from deployment-provided peer authentication,
 integrity, confidentiality, and replay protection.
+
+## Application Server n+k activation
+
+SGP and IPSP Endpoints implement the n+k Application Server model described by
+RFC 4666 Sections 1.4.4.1, 3.8.2, 4.3.2, 4.3.4.3, 4.3.4.5, 5.1.4, and 5.2.3:
+
+- immutable default and exact-ASKey activation policies preserve Network
+  Appearance and contextless-AS identity;
+- strict startup withholds DATA and SSNM until n ASPs are ASP-ACTIVE, while an
+  explicit smooth-start option enables the RFC exception;
+- an already active AS remains active while at least one ASP is active, and
+  pending recovery resumes with any active ASP;
+- Loadshare and Broadcast shortages notify only ASP-INACTIVE members, without
+  duplicate advisories during one continuous shortage;
+- restoration to n notifies all non-DOWN members that the AS is AS-ACTIVE;
+- related ASP procedure acknowledgements precede ordered Notify delivery; and
+- Override is rejected unless the effective activation threshold is one,
+  including provisioned and dynamically registered Routing Keys.
 
 ## ASP multi-SG routing
 
