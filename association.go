@@ -371,10 +371,14 @@ type Association struct {
 	notificationWriter func(messages.M3UA) (int, error)
 	// rkmRequestMu serializes local RFC 4666 Registration and Deregistration
 	// procedures; RKM responses have no association-wide transaction identifier.
-	rkmRequestMu    sync.Mutex
-	rkmAwaiting     atomic.Uint32
-	rkmNextLocalID  uint32
-	rkmResponseChan chan messages.M3UA
+	rkmRequestMu sync.Mutex
+	// rkmCorrelationMu guards Registration response correlation state shared by
+	// the requesting goroutine and the association monitor.
+	rkmCorrelationMu   sync.Mutex
+	rkmPendingLocalIDs map[uint32]struct{}
+	rkmAwaiting        atomic.Uint32
+	rkmNextLocalID     uint32
+	rkmResponseChan    chan messages.M3UA
 }
 
 var netMap = map[string]string{
@@ -1231,10 +1235,14 @@ func (c *Association) lockOutboundDataScope(raw []byte) (func(), error) {
 	// In RFC 4666 Section 5.6.2 Double Exchange, this DATA belongs to the
 	// peer-directed traffic flow. Its Network Appearance is independent of the
 	// local-directed flow used by outbound SCON.
+	configuredNetworkAppearance, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(data.RoutingContext, false)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateOutboundNetworkAppearanceAgainst(
 		data.NetworkAppearance,
-		c.networkAppearanceForRoutingContext(data.RoutingContext, false),
-		c.allNetworkAppearancesForRoutingContext(data.RoutingContext, false),
+		configuredNetworkAppearance,
+		allNetworkAppearances,
 	); err != nil {
 		return nil, err
 	}
@@ -1332,10 +1340,15 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	}
 	// RFC 4666 Section 5.6.2 defines SCON as flowing opposite DATA between
 	// IPSPs, so Double Exchange validates it against the local-directed flow.
+	localScope := c.isIPSPDoubleExchange()
+	configuredNetworkAppearance, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(routingContext, localScope)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateOutboundNetworkAppearanceAgainst(
 		ssnmNetworkAppearance(decoded),
-		c.networkAppearanceForRoutingContext(routingContext, true),
-		c.allNetworkAppearancesForRoutingContext(routingContext, true),
+		configuredNetworkAppearance,
+		allNetworkAppearances,
 	); err != nil {
 		return nil, err
 	}
@@ -2005,62 +2018,66 @@ func (c *Association) dynamicRoutingContexts(local bool) []uint32 {
 }
 
 func (c *Association) networkAppearanceForRoutingContext(routingContext *params.Param, local bool) *params.Param {
+	networkAppearance, _, _ := c.resolveNetworkAppearanceScope(routingContext, local)
+	return networkAppearance
+}
+
+func (c *Association) resolveNetworkAppearanceScope(
+	routingContext *params.Param,
+	local bool,
+) (*params.Param, bool, error) {
 	configured := c.outboundNetworkAppearance()
 	if local {
 		configured = c.localNetworkAppearance()
 	}
-	var value uint32
-	valueSet := false
+	var contexts []uint32
 	if routingContext != nil {
-		contexts := routingContext.RoutingContexts()
-		if len(contexts) == 1 {
-			value, valueSet = contexts[0], true
-		}
+		contexts = routingContext.RoutingContexts()
 	} else {
-		contexts := c.configuredRoutingContexts()
+		contexts = c.configuredRoutingContexts()
 		if local && c.isIPSPDoubleExchange() {
 			contexts = c.configuredLocalRoutingContexts()
 		}
-		if len(contexts) == 1 {
-			value, valueSet = contexts[0], true
-		}
 	}
-	if valueSet {
-		if key, ok := c.dynamicASKey(value, local); ok {
-			if !key.NetworkAppearanceSet {
-				return nil
-			}
-			return params.NewNetworkAppearance(key.NetworkAppearance)
-		}
+	if len(contexts) == 0 {
+		return configured, false, nil
 	}
-	return configured
-}
 
-func (c *Association) allNetworkAppearancesForRoutingContext(routingContext *params.Param, local bool) bool {
-	if c == nil {
-		return false
-	}
-	var routingContextValue uint32
-	var routingContextSet bool
-	if routingContext != nil {
-		contexts := routingContext.RoutingContexts()
-		if len(contexts) == 1 {
-			routingContextValue, routingContextSet = contexts[0], true
+	configuredValue, configuredSet := appearanceOf(configured)
+	var resolvedValue uint32
+	var resolvedSet bool
+	var allNetworkAppearances bool
+	resolved := false
+	for _, routingContextValue := range contexts {
+		value := configuredValue
+		valueSet := configuredSet
+		all := false
+		if key, ok := c.dynamicASKey(routingContextValue, local); ok {
+			value = key.NetworkAppearance
+			valueSet = key.NetworkAppearanceSet
+			all = !key.NetworkAppearanceSet
 		}
-	} else {
-		contexts := c.configuredRoutingContexts()
-		if local && c.isIPSPDoubleExchange() {
-			contexts = c.configuredLocalRoutingContexts()
+		if !resolved {
+			resolvedValue = value
+			resolvedSet = valueSet
+			allNetworkAppearances = all
+			resolved = true
+			continue
 		}
-		if len(contexts) == 1 {
-			routingContextValue, routingContextSet = contexts[0], true
+		if allNetworkAppearances != all || resolvedSet != valueSet || resolvedSet && resolvedValue != value {
+			// RFC 4666 Section 3.4 gives one Network Appearance parameter to
+			// an SSNM message. Every Routing Context named by that message must
+			// therefore resolve to the same appearance scope.
+			return nil, false, ErrInvalidNetworkAppearance
 		}
 	}
-	if !routingContextSet {
-		return false
+	if allNetworkAppearances {
+		return nil, true, nil
 	}
-	key, ok := c.dynamicASKey(routingContextValue, local)
-	return ok && !key.NetworkAppearanceSet
+	if !resolvedSet {
+		return nil, false, nil
+	}
+	return params.NewNetworkAppearance(resolvedValue), false, nil
 }
 
 func (c *Association) applicationServerNetworkAppearance() *params.Param {

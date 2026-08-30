@@ -173,19 +173,19 @@ func (c *Association) receivedDataRoutingContext(peer *params.Param) (uint32, bo
 }
 
 func (c *Association) validateDataNetworkAppearance(peer, routingContext *params.Param) error {
-	return c.validateNetworkAppearanceAgainst(
-		peer,
-		c.networkAppearanceForRoutingContext(routingContext, c.isIPSPDoubleExchange()),
-		c.allNetworkAppearancesForRoutingContext(routingContext, c.isIPSPDoubleExchange()),
-	)
+	configured, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(routingContext, c.isIPSPDoubleExchange())
+	if err != nil {
+		return err
+	}
+	return c.validateNetworkAppearanceAgainst(peer, configured, allNetworkAppearances)
 }
 
 func (c *Association) validateSSNMNetworkAppearance(peer, routingContext *params.Param) error {
-	return c.validateNetworkAppearanceAgainst(
-		peer,
-		c.networkAppearanceForRoutingContext(routingContext, false),
-		c.allNetworkAppearancesForRoutingContext(routingContext, false),
-	)
+	configured, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(routingContext, false)
+	if err != nil {
+		return err
+	}
+	return c.validateNetworkAppearanceAgainst(peer, configured, allNetworkAppearances)
 }
 
 func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.Param, allNetworkAppearances bool) error {

@@ -108,6 +108,10 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 	dynamicCount := registry.dynamic
 	replayState := cloneRegistrationReplayState(registry.replays[association])
 	registry.mu.Unlock()
+	var configuredRoutingContexts []uint32
+	if association != nil && association.as != nil {
+		configuredRoutingContexts = association.as.routingContexts()
+	}
 
 	for index, originalRequest := range requests {
 		request := snapshotRoutingKeyRegistrationRequest(originalRequest)
@@ -189,7 +193,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInsufficientResources, 0)
 				break
 			}
-			routingContext, ok := registry.allocateRoutingContext(request, entries)
+			routingContext, ok := registry.allocateRoutingContext(request, entries, configuredRoutingContexts)
 			if !ok {
 				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, RegistrationInsufficientResources, 0)
 				break
@@ -314,9 +318,20 @@ func (registry *routingKeyRegistry) authorize(request RoutingKeyRegistrationRequ
 	return status
 }
 
-func (registry *routingKeyRegistry) allocateRoutingContext(request RoutingKeyRegistrationRequest, entries map[uint32]*routingKeyEntry) (uint32, bool) {
-	used := make([]uint32, 0, len(entries))
+func (registry *routingKeyRegistry) allocateRoutingContext(
+	request RoutingKeyRegistrationRequest,
+	entries map[uint32]*routingKeyEntry,
+	configuredRoutingContexts []uint32,
+) (uint32, bool) {
+	usedSet := make(map[uint32]struct{}, len(entries)+len(configuredRoutingContexts))
 	for routingContext := range entries {
+		usedSet[routingContext] = struct{}{}
+	}
+	for _, routingContext := range configuredRoutingContexts {
+		usedSet[routingContext] = struct{}{}
+	}
+	used := make([]uint32, 0, len(usedSet))
+	for routingContext := range usedSet {
 		used = append(used, routingContext)
 	}
 	sort.Slice(used, func(i, j int) bool { return used[i] < used[j] })
@@ -325,7 +340,8 @@ func (registry *routingKeyRegistry) allocateRoutingContext(request RoutingKeyReg
 			Registration:         snapshotRoutingKeyRegistrationRequest(request),
 			InUseRoutingContexts: append([]uint32(nil), used...),
 		})
-		if err != nil || routingContext == 0 || entries[routingContext] != nil {
+		_, inUse := usedSet[routingContext]
+		if err != nil || routingContext == 0 || inUse {
 			return 0, false
 		}
 		return routingContext, true

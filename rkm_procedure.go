@@ -69,8 +69,8 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		pending[identifier] = index
 	}
 
-	c.rkmAwaiting.Store(rkmAwaitingRegistrationResponse)
-	defer c.rkmAwaiting.Store(rkmAwaitingNone)
+	c.beginRegistrationResponseCorrelation(pending)
+	defer c.endRegistrationResponseCorrelation()
 	if _, err := c.WriteSignal(messages.NewRegistrationRequest(parameters...)); err != nil {
 		return nil, err
 	}
@@ -90,6 +90,12 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 			identifier := payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
 			index, expected := pending[identifier]
 			if !expected {
+				// RFC 4666 Sections 3.6.1 and 4.4.1 use Local-RK-Identifier
+				// to correlate a REG RSP with its REG REQ. A delayed result from
+				// an earlier canceled procedure does not belong to this one.
+				if c.localRoutingKeyIdentifierWasIssued(identifier) {
+					continue
+				}
 				return nil, fmt.Errorf("unexpected Registration Result Local RK Identifier %d", identifier)
 			}
 			result := RoutingKeyRegistrationResult{
@@ -264,7 +270,7 @@ func (c *Association) handleRegistrationResponse(message *messages.RegistrationR
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(message)
 	}
-	return c.deliverRKMResponse(message, rkmAwaitingRegistrationResponse)
+	return c.deliverRegistrationResponse(message)
 }
 
 func (c *Association) handleDeregistrationRequest(message *messages.DeregistrationRequest) error {
@@ -339,6 +345,48 @@ func (c *Association) deliverRKMResponse(message messages.M3UA, expected uint32)
 	}
 }
 
+func (c *Association) deliverRegistrationResponse(message *messages.RegistrationResponse) error {
+	identifiers := make([]uint32, len(message.RegistrationResults))
+	for index, parameter := range message.RegistrationResults {
+		payload, err := parameter.RegistrationResult()
+		if err != nil {
+			return err
+		}
+		identifiers[index] = payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+	}
+
+	c.rkmCorrelationMu.Lock()
+	defer c.rkmCorrelationMu.Unlock()
+
+	pending := make([]uint32, 0, len(identifiers))
+	awaiting := c.rkmAwaiting.Load() == rkmAwaitingRegistrationResponse
+	for _, identifier := range identifiers {
+		if awaiting {
+			if _, ok := c.rkmPendingLocalIDs[identifier]; ok {
+				pending = append(pending, identifier)
+				continue
+			}
+		}
+		if c.localRoutingKeyIdentifierWasIssuedLocked(identifier) {
+			continue
+		}
+		return fmt.Errorf("unexpected Registration Result Local RK Identifier %d", identifier)
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	select {
+	case c.rkmResponseChan <- message:
+		for _, identifier := range pending {
+			delete(c.rkmPendingLocalIDs, identifier)
+		}
+		return nil
+	default:
+		return NewUnexpectedMessageError(message)
+	}
+}
+
 func (c *Association) waitForRKMResponse(ctx context.Context, expected uint32) (messages.M3UA, error) {
 	select {
 	case response := <-c.rkmResponseChan:
@@ -364,11 +412,45 @@ func (c *Association) waitForRKMResponse(ctx context.Context, expected uint32) (
 }
 
 func (c *Association) nextLocalRoutingKeyIdentifier() uint32 {
+	c.rkmCorrelationMu.Lock()
+	defer c.rkmCorrelationMu.Unlock()
 	c.rkmNextLocalID++
 	if c.rkmNextLocalID == 0 {
 		c.rkmNextLocalID++
 	}
 	return c.rkmNextLocalID
+}
+
+func (c *Association) localRoutingKeyIdentifierWasIssued(identifier uint32) bool {
+	c.rkmCorrelationMu.Lock()
+	defer c.rkmCorrelationMu.Unlock()
+	return c.localRoutingKeyIdentifierWasIssuedLocked(identifier)
+}
+
+func (c *Association) localRoutingKeyIdentifierWasIssuedLocked(identifier uint32) bool {
+	if identifier == 0 {
+		return false
+	}
+	// Serial-number arithmetic keeps the classification correct across the
+	// uint32 wrap without retaining an unbounded history for the Association.
+	return c.rkmNextLocalID-identifier < 1<<31
+}
+
+func (c *Association) beginRegistrationResponseCorrelation(pending map[uint32]int) {
+	c.rkmCorrelationMu.Lock()
+	defer c.rkmCorrelationMu.Unlock()
+	c.rkmPendingLocalIDs = make(map[uint32]struct{}, len(pending))
+	for identifier := range pending {
+		c.rkmPendingLocalIDs[identifier] = struct{}{}
+	}
+	c.rkmAwaiting.Store(rkmAwaitingRegistrationResponse)
+}
+
+func (c *Association) endRegistrationResponseCorrelation() {
+	c.rkmCorrelationMu.Lock()
+	defer c.rkmCorrelationMu.Unlock()
+	c.rkmAwaiting.Store(rkmAwaitingNone)
+	c.rkmPendingLocalIDs = nil
 }
 
 func (c *Association) routingKeyRegistry() *routingKeyRegistry {

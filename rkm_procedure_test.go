@@ -121,6 +121,151 @@ func TestSGPRegistrationAndDeregistrationProcedures(t *testing.T) {
 	}
 }
 
+func TestRKMRegistrationDoesNotActivateNewApplicationServer(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config.NetworkAppearance = params.NewNetworkAppearance(10)
+	config.RoutingContexts = params.NewRoutingContext(5000)
+	association := newAssociation(RoleSGP, config)
+	association.endpoint = endpoint
+	association.as = endpoint.as
+	var response *messages.RegistrationResponse
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		if registrationResponse, ok := message.(*messages.RegistrationResponse); ok {
+			response = registrationResponse
+		}
+		return message.MarshalLen(), nil
+	}
+	association.muState.Lock()
+	association.state = StateASPActive
+	association.muState.Unlock()
+	endpoint.as.aspStateChanged(association, StateASPActive)
+
+	request := func(identifier uint32) *messages.RegistrationRequest {
+		parameter, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+			LocalRoutingKeyIdentifier: identifier,
+			RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		if err != nil {
+			t.Fatalf("routingKeyParameter: %v", err)
+		}
+		return messages.NewRegistrationRequest(parameter)
+	}
+
+	if err := association.handleRegistrationRequest(request(1)); err != nil {
+		t.Fatalf("first Registration Request: %v", err)
+	}
+	result, err := response.RegistrationResults[0].RegistrationResult()
+	if err != nil {
+		t.Fatalf("RegistrationResult: %v", err)
+	}
+	key := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       result.RoutingContext.RoutingContext(),
+		RoutingContextSet:    true,
+	}
+	applicationServer, ok := endpoint.as.lookup(key)
+	if !ok {
+		t.Fatal("newly registered Application Server is absent")
+	}
+	if active := applicationServer.activeASPs(); len(active) != 0 {
+		t.Fatalf("newly registered Application Server has active ASPs %v before ASP Active", active)
+	}
+	if got := applicationServer.State(); got != ASInactive {
+		t.Fatalf("newly registered Application Server state = %v, want AS-INACTIVE", got)
+	}
+
+	applicationServer.setASPState(association, StateASPActive, time.Hour)
+	if err := association.handleRegistrationRequest(request(2)); err != nil {
+		t.Fatalf("replayed Registration Request: %v", err)
+	}
+	if active := applicationServer.activeASPs(); len(active) != 1 || active[0] != association {
+		t.Fatalf("replayed Registration changed existing active membership: %v", active)
+	}
+}
+
+func TestRKMAllocatorAvoidsConfiguredApplicationServerRoutingContexts(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		allocator RoutingContextAllocator
+	}{
+		{name: "default allocator"},
+		{name: "custom allocator", allocator: func(request RoutingContextAllocationRequest) (uint32, error) {
+			if len(request.InUseRoutingContexts) != 1 || request.InUseRoutingContexts[0] != 1 {
+				return 0, errors.New("configured Routing Context 1 was not reported in use")
+			}
+			return 2, nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint, err := NewEndpoint(EndpointConfig{
+				Role: RoleSGP,
+				RoutingKeyManagement: &RoutingKeyManagementConfig{
+					AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+						return RegistrationSuccessfullyRegistered
+					},
+					AllocateRoutingContext:  test.allocator,
+					AllowDynamicRoutingKeys: true,
+				},
+			})
+			if err != nil {
+				t.Fatalf("NewEndpoint: %v", err)
+			}
+			defer func() { _ = endpoint.Close() }()
+
+			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			config.NetworkAppearance = params.NewNetworkAppearance(10)
+			config.RoutingContexts = params.NewRoutingContext(1)
+			association := newAssociation(RoleSGP, config)
+			association.endpoint = endpoint
+			association.as = endpoint.as
+			var response *messages.RegistrationResponse
+			association.signalWriter = func(message messages.M3UA) (int, error) {
+				if registrationResponse, ok := message.(*messages.RegistrationResponse); ok {
+					response = registrationResponse
+				}
+				return message.MarshalLen(), nil
+			}
+			association.muState.Lock()
+			association.state = StateASPInactive
+			association.muState.Unlock()
+			endpoint.as.aspStateChanged(association, StateASPInactive)
+
+			parameter, err := routingKeyParameter(RoutingKeyRegistrationRequest{
+				LocalRoutingKeyIdentifier: 1,
+				RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+			})
+			if err != nil {
+				t.Fatalf("routingKeyParameter: %v", err)
+			}
+			if err := association.handleRegistrationRequest(messages.NewRegistrationRequest(parameter)); err != nil {
+				t.Fatalf("handleRegistrationRequest: %v", err)
+			}
+			result, err := response.RegistrationResults[0].RegistrationResult()
+			if err != nil {
+				t.Fatalf("RegistrationResult: %v", err)
+			}
+			if got := result.RoutingContext.RoutingContext(); got != 2 {
+				t.Fatalf("allocated Routing Context = %d, want 2 after configured Routing Context 1", got)
+			}
+		})
+	}
+}
+
 func TestAssociationRegistrationAndDeregistrationAPI(t *testing.T) {
 	sgpEndpoint, err := NewEndpoint(EndpointConfig{
 		Role: RoleSGP,
@@ -831,6 +976,195 @@ func TestRKMRequesterWaitStopsOnContextAndAssociationClose(t *testing.T) {
 	})
 }
 
+func TestRKMRequesterIgnoresStaleRegistrationResponseAfterCancellation(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan uint32, 2)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request := message.(*messages.RegistrationRequest)
+		payload, err := request.RoutingKeys[0].RoutingKey()
+		if err != nil {
+			return 0, err
+		}
+		written <- payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+		return message.MarshalLen(), nil
+	}
+
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := association.RegisterRoutingKeys(firstContext, RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		firstDone <- err
+	}()
+	firstIdentifier := <-written
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first RegisterRoutingKeys error = %v, want context.Canceled", err)
+	}
+
+	type registrationAnswer struct {
+		results []RoutingKeyRegistrationResult
+		err     error
+	}
+	secondDone := make(chan registrationAnswer, 1)
+	go func() {
+		results, err := association.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+		})
+		secondDone <- registrationAnswer{results: results, err: err}
+	}()
+	secondIdentifier := <-written
+	if secondIdentifier == firstIdentifier {
+		t.Fatalf("Registration procedures reused Local RK Identifier %d", secondIdentifier)
+	}
+
+	stale := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(firstIdentifier),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(100),
+		),
+	))
+	if err := association.handleRegistrationResponse(stale); err != nil {
+		t.Fatalf("deliver stale Registration Response: %v", err)
+	}
+	select {
+	case answer := <-secondDone:
+		t.Fatalf("second Registration completed from stale response: results=%+v error=%v", answer.results, answer.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	current := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(secondIdentifier),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(200),
+		),
+	))
+	if err := association.handleRegistrationResponse(current); err != nil {
+		t.Fatalf("deliver current Registration Response: %v", err)
+	}
+	answer := <-secondDone
+	if answer.err != nil || len(answer.results) != 1 || answer.results[0].RoutingContext != 200 {
+		t.Fatalf("second Registration result = %+v, error = %v", answer.results, answer.err)
+	}
+}
+
+func TestRKMRequesterDropsStaleRegistrationResponseBeforeQueueing(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan uint32, 2)
+	releaseSecondWrite := make(chan struct{})
+	writeCount := 0
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request := message.(*messages.RegistrationRequest)
+		payload, err := request.RoutingKeys[0].RoutingKey()
+		if err != nil {
+			return 0, err
+		}
+		writeCount++
+		written <- payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+		if writeCount == 2 {
+			<-releaseSecondWrite
+		}
+		return message.MarshalLen(), nil
+	}
+
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := association.RegisterRoutingKeys(firstContext, RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		firstDone <- err
+	}()
+	firstIdentifier := <-written
+	cancelFirst()
+	if err := <-firstDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first RegisterRoutingKeys error = %v, want context.Canceled", err)
+	}
+
+	secondContext, cancelSecond := context.WithCancel(context.Background())
+	defer cancelSecond()
+	type registrationAnswer struct {
+		results []RoutingKeyRegistrationResult
+		err     error
+	}
+	secondDone := make(chan registrationAnswer, 1)
+	go func() {
+		results, err := association.RegisterRoutingKeys(secondContext, RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP),
+		})
+		secondDone <- registrationAnswer{results: results, err: err}
+	}()
+	secondIdentifier := <-written
+
+	stale := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(firstIdentifier),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(100),
+		),
+	))
+	staleErr := association.handleRegistrationResponse(stale)
+	current := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(secondIdentifier),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(200),
+		),
+	))
+	currentErr := association.handleRegistrationResponse(current)
+	close(releaseSecondWrite)
+
+	if staleErr != nil {
+		t.Fatalf("deliver stale Registration Response: %v", staleErr)
+	}
+	if currentErr != nil {
+		t.Fatalf("deliver current Registration Response: %v", currentErr)
+	}
+	answer := <-secondDone
+	if answer.err != nil || len(answer.results) != 1 || answer.results[0].RoutingContext != 200 {
+		t.Fatalf("second Registration result = %+v, error = %v", answer.results, answer.err)
+	}
+}
+
+func TestLocalRoutingKeyIdentifierIssuedClassificationWraps(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.rkmCorrelationMu.Lock()
+	association.rkmNextLocalID = 2
+	association.rkmCorrelationMu.Unlock()
+	for _, test := range []struct {
+		identifier uint32
+		want       bool
+	}{
+		{identifier: 0, want: false},
+		{identifier: 1, want: true},
+		{identifier: 2, want: true},
+		{identifier: 999, want: false},
+	} {
+		if got := association.localRoutingKeyIdentifierWasIssued(test.identifier); got != test.want {
+			t.Fatalf("identifier %d issued = %t, want %t", test.identifier, got, test.want)
+		}
+	}
+
+	association.rkmCorrelationMu.Lock()
+	association.rkmNextLocalID = 1
+	association.rkmCorrelationMu.Unlock()
+	if !association.localRoutingKeyIdentifierWasIssued(^uint32(0)) {
+		t.Fatal("identifier immediately before uint32 wrap was not classified as issued")
+	}
+	if association.localRoutingKeyIdentifierWasIssued(2) {
+		t.Fatal("identifier immediately after current sequence was classified as issued")
+	}
+}
+
 func TestDynamicRoutingKeyNetworkAppearanceScopesInboundSSNM(t *testing.T) {
 	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
 	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
@@ -851,6 +1185,60 @@ func TestDynamicRoutingKeyNetworkAppearanceScopesInboundSSNM(t *testing.T) {
 		params.NewNetworkAppearance(7), params.NewRoutingContext(9),
 	); !errors.Is(err, ErrInvalidNetworkAppearance) {
 		t.Fatalf("static Network Appearance for dynamic Routing Context error = %v, want ErrInvalidNetworkAppearance", err)
+	}
+}
+
+func TestDynamicRoutingKeyNetworkAppearanceScopesMultiContextSSNM(t *testing.T) {
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	for _, routingContext := range []uint32{9, 10} {
+		association.addDynamicASKey(ASKey{
+			NetworkAppearance:    10,
+			NetworkAppearanceSet: true,
+			RoutingContext:       routingContext,
+			RoutingContextSet:    true,
+		}, testRoutingKey(10, routingContext+100, params.ServiceIndSCCP), false)
+	}
+
+	contexts := params.NewRoutingContext(9, 10)
+	if err := association.validateSSNMNetworkAppearance(params.NewNetworkAppearance(10), contexts); err != nil {
+		t.Fatalf("matching multi-context dynamic Network Appearance error = %v", err)
+	}
+	if err := association.validateSSNMNetworkAppearance(params.NewNetworkAppearance(7), contexts); !errors.Is(err, ErrInvalidNetworkAppearance) {
+		t.Fatalf("static Network Appearance for multi-context dynamic Routing Keys error = %v, want ErrInvalidNetworkAppearance", err)
+	}
+	association.as = newApplicationServers(time.Hour)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		return message.MarshalLen(), nil
+	}
+	association.muState.Lock()
+	association.state = StateASPActive
+	association.muState.Unlock()
+	for _, routingContext := range []uint32{9, 10} {
+		key, _ := association.dynamicASKey(routingContext, false)
+		association.as.get(key).setASPState(association, StateASPActive, time.Hour)
+	}
+	if _, err := association.WriteSignal(messages.NewSignallingCongestion(
+		params.NewNetworkAppearance(10),
+		contexts,
+		params.NewAffectedPointCode(100),
+		nil,
+		nil,
+		nil,
+	)); err != nil {
+		t.Fatalf("outbound multi-context SCON: %v", err)
+	}
+
+	association.addDynamicASKey(ASKey{
+		NetworkAppearance:    20,
+		NetworkAppearanceSet: true,
+		RoutingContext:       11,
+		RoutingContextSet:    true,
+	}, testRoutingKey(20, 211, params.ServiceIndSCCP), false)
+	if err := association.validateSSNMNetworkAppearance(
+		params.NewNetworkAppearance(10), params.NewRoutingContext(9, 11),
+	); !errors.Is(err, ErrInvalidNetworkAppearance) {
+		t.Fatalf("mixed dynamic Network Appearances error = %v, want ErrInvalidNetworkAppearance", err)
 	}
 }
 

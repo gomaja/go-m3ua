@@ -421,7 +421,10 @@ func (r *applicationServers) registerDynamicASP(association *Association, key AS
 	}
 	recovery := r.recoveryTimer
 	r.mu.Unlock()
-	applicationServer.setASPState(association, association.State(), recovery)
+	// RFC 4666 Sections 4.3.1 and 4.3.4.3 maintain ASP state per AS and make
+	// ASP Active, not Registration, the procedure that activates a new traffic
+	// scope. A replay for an existing membership must preserve its current state.
+	applicationServer.setASPStateIfAbsent(association, StateASPInactive, recovery)
 }
 
 // deregisterDynamicASP removes one dynamically registered Association
@@ -637,6 +640,28 @@ func (r *applicationServers) lookup(scope any) (*applicationServer, bool) {
 	}
 	as, ok := r.as[key]
 	return as, ok
+}
+
+func (r *applicationServers) routingContexts() []uint32 {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	contexts := make([]uint32, 0, len(r.as))
+	seen := make(map[uint32]struct{}, len(r.as))
+	for key := range r.as {
+		if !key.RoutingContextSet {
+			continue
+		}
+		if _, duplicate := seen[key.RoutingContext]; duplicate {
+			continue
+		}
+		seen[key.RoutingContext] = struct{}{}
+		contexts = append(contexts, key.RoutingContext)
+	}
+	r.mu.Unlock()
+	sort.Slice(contexts, func(i, j int) bool { return contexts[i] < contexts[j] })
+	return contexts
 }
 
 func legacyRoutingContextScope(scope any) (uint32, bool) {
@@ -1282,14 +1307,25 @@ func (as *applicationServer) remove(c *Association, recovery time.Duration) {
 
 // setASPState records an ASP's state and recomputes the AS state.
 func (as *applicationServer) setASPState(c *Association, st State, recovery time.Duration) {
-	as.setASPStateGuarded(c, st, recovery, 0, false)
+	as.setASPStateGuarded(c, st, recovery, 0, false, false)
 }
 
 func (as *applicationServer) setASPStateIfAssociationState(c *Association, associationState, st State, recovery time.Duration) {
-	as.setASPStateGuarded(c, st, recovery, associationState, true)
+	as.setASPStateGuarded(c, st, recovery, associationState, true, false)
 }
 
-func (as *applicationServer) setASPStateGuarded(c *Association, st State, recovery time.Duration, associationState State, guard bool) {
+func (as *applicationServer) setASPStateIfAbsent(c *Association, st State, recovery time.Duration) {
+	as.setASPStateGuarded(c, st, recovery, 0, false, true)
+}
+
+func (as *applicationServer) setASPStateGuarded(
+	c *Association,
+	st State,
+	recovery time.Duration,
+	associationState State,
+	guard bool,
+	ifAbsent bool,
+) {
 	if c == nil {
 		return
 	}
@@ -1310,7 +1346,7 @@ func (as *applicationServer) setASPStateGuarded(c *Association, st State, recove
 		return
 	}
 	current, known := as.asps[c]
-	if known && current == st {
+	if known && (ifAbsent || current == st) {
 		as.mu.Unlock()
 		if guard {
 			c.muState.Unlock()
