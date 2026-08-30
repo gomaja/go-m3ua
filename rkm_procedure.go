@@ -47,6 +47,7 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 	requests := make([]RoutingKeyRegistrationRequest, len(registrations))
 	parameters := make([]*params.Param, len(registrations))
 	pending := make(map[uint32]int, len(registrations))
+	requestsByIdentifier := make(map[uint32]RoutingKeyRegistrationRequest, len(registrations))
 	for index, registration := range registrations {
 		if _, err := canonicalizeRoutingKey(registration.RoutingKey); err != nil {
 			return nil, fmt.Errorf("routing key %d: %w", index, err)
@@ -65,13 +66,17 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		requests[index] = request
 		parameters[index] = parameter
 		pending[identifier] = index
+		requestsByIdentifier[identifier] = request
 	}
 
-	responses := c.beginRegistrationResponseCorrelation(pending)
-	defer c.endRKMResponseCorrelation()
+	responses := c.beginRegistrationResponseCorrelation(pending, requestsByIdentifier)
+	requestWritten := false
+	completed := false
+	defer func() { c.endRegistrationResponseCorrelation(requestWritten, completed) }()
 	if _, err := c.WriteSignal(messages.NewRegistrationRequest(parameters...)); err != nil {
 		return nil, err
 	}
+	requestWritten = true
 
 	results := make([]RoutingKeyRegistrationResult, len(registrations))
 	for len(pending) > 0 {
@@ -106,18 +111,9 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		}
 	}
 	for index, result := range results {
-		if result.Status != RegistrationSuccessfullyRegistered && result.Status != RegistrationRoutingKeyAlreadyRegistered {
-			continue
-		}
-		key := ASKey{
-			RoutingContext:    result.RoutingContext,
-			RoutingContextSet: true,
-		}
-		effectiveRoutingKey, _ := routingKeyWithImpliedNetworkAppearance(requests[index].RoutingKey, c.localNetworkAppearance())
-		key.NetworkAppearance = effectiveRoutingKey.NetworkAppearance
-		key.NetworkAppearanceSet = effectiveRoutingKey.NetworkAppearanceSet
-		c.addDynamicASKey(key, effectiveRoutingKey, c.isIPSPDoubleExchange())
+		c.applyRegistrationResult(requests[index], result)
 	}
+	completed = true
 	return results, nil
 }
 
@@ -435,48 +431,78 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 }
 
 func (c *Association) deliverRegistrationResponse(message *messages.RegistrationResponse) error {
-	identifiers := make([]uint32, len(message.RegistrationResults))
+	type registrationResult struct {
+		result    RoutingKeyRegistrationResult
+		parameter *params.Param
+	}
+	results := make([]registrationResult, len(message.RegistrationResults))
 	for index, parameter := range message.RegistrationResults {
 		payload, err := parameter.RegistrationResult()
 		if err != nil {
 			return err
 		}
-		identifiers[index] = payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+		results[index] = registrationResult{
+			result: RoutingKeyRegistrationResult{
+				LocalRoutingKeyIdentifier: payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier(),
+				Status:                    RegistrationStatus(payload.RegistrationStatus.RegistrationStatus()),
+				RoutingContext:            payload.RoutingContext.RoutingContext(),
+			},
+			parameter: parameter,
+		}
 	}
 
 	c.rkmCorrelationMu.Lock()
-	defer c.rkmCorrelationMu.Unlock()
-
-	pending := make([]uint32, 0, len(identifiers))
-	awaiting := c.rkmAwaiting == rkmAwaitingRegistrationResponse
-	for _, identifier := range identifiers {
+	awaiting := c.rkmAwaiting == rkmAwaitingRegistrationResponse && c.rkmResponseChan != nil
+	filtered := make([]*params.Param, 0, len(results))
+	pendingResults := make(map[uint32]RoutingKeyRegistrationResult, len(results))
+	lateResults := make(map[uint32]RoutingKeyRegistrationResult, len(results))
+	lateRequests := make(map[uint32]RoutingKeyRegistrationRequest, len(results))
+	for _, decoded := range results {
+		identifier := decoded.result.LocalRoutingKeyIdentifier
+		if request, late := c.rkmUnresolvedRegistrations[identifier]; late {
+			if _, duplicate := lateResults[identifier]; !duplicate {
+				lateResults[identifier] = decoded.result
+				lateRequests[identifier] = request
+			}
+			continue
+		}
 		if awaiting {
-			if _, ok := c.rkmPendingLocalIDs[identifier]; ok {
-				pending = append(pending, identifier)
+			if _, pending := c.rkmPendingLocalIDs[identifier]; pending {
+				if _, duplicate := pendingResults[identifier]; !duplicate {
+					pendingResults[identifier] = decoded.result
+					filtered = append(filtered, decoded.parameter.Copy())
+				}
 				continue
 			}
 		}
 		if c.localRoutingKeyIdentifierWasIssuedLocked(identifier) {
 			continue
 		}
+		c.rkmCorrelationMu.Unlock()
 		return fmt.Errorf("unexpected Registration Result Local RK Identifier %d", identifier)
 	}
-	if len(pending) == 0 {
-		return nil
-	}
-	if c.rkmResponseChan == nil {
-		return NewUnexpectedMessageError(message)
-	}
-
-	select {
-	case c.rkmResponseChan <- message:
-		for _, identifier := range pending {
-			delete(c.rkmPendingLocalIDs, identifier)
+	if len(filtered) > 0 {
+		filteredResponse := messages.NewRegistrationResponse(filtered...)
+		select {
+		case c.rkmResponseChan <- filteredResponse:
+			for identifier, result := range pendingResults {
+				delete(c.rkmPendingLocalIDs, identifier)
+				c.rkmDeliveredRegistrationResults[identifier] = result
+			}
+		default:
+			c.rkmCorrelationMu.Unlock()
+			return NewUnexpectedMessageError(message)
 		}
-		return nil
-	default:
-		return NewUnexpectedMessageError(message)
 	}
+	for identifier := range lateResults {
+		delete(c.rkmUnresolvedRegistrations, identifier)
+	}
+	c.rkmCorrelationMu.Unlock()
+
+	for identifier, result := range lateResults {
+		c.applyRegistrationResult(lateRequests[identifier], result)
+	}
+	return nil
 }
 
 func (c *Association) waitForRKMResponse(
@@ -532,13 +558,21 @@ func (c *Association) localRoutingKeyIdentifierWasIssuedLocked(identifier uint32
 	return c.rkmNextLocalID-identifier < 1<<31
 }
 
-func (c *Association) beginRegistrationResponseCorrelation(pending map[uint32]int) chan messages.M3UA {
+func (c *Association) beginRegistrationResponseCorrelation(
+	pending map[uint32]int,
+	requests map[uint32]RoutingKeyRegistrationRequest,
+) chan messages.M3UA {
 	c.rkmCorrelationMu.Lock()
 	defer c.rkmCorrelationMu.Unlock()
 	c.rkmResponseChan = make(chan messages.M3UA, len(pending))
 	c.rkmPendingLocalIDs = make(map[uint32]struct{}, len(pending))
+	c.rkmRegistrationRequests = make(map[uint32]RoutingKeyRegistrationRequest, len(requests))
+	c.rkmDeliveredRegistrationResults = make(map[uint32]RoutingKeyRegistrationResult, len(requests))
 	for identifier := range pending {
 		c.rkmPendingLocalIDs[identifier] = struct{}{}
+	}
+	for identifier, request := range requests {
+		c.rkmRegistrationRequests[identifier] = snapshotRoutingKeyRegistrationRequest(request)
 	}
 	c.rkmAwaiting = rkmAwaitingRegistrationResponse
 	return c.rkmResponseChan
@@ -590,14 +624,55 @@ func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) 
 	}
 }
 
-func (c *Association) endRKMResponseCorrelation() {
+func (c *Association) endRegistrationResponseCorrelation(requestWritten, completed bool) {
 	c.rkmCorrelationMu.Lock()
-	defer c.rkmCorrelationMu.Unlock()
+	delivered := make(map[uint32]RoutingKeyRegistrationResult, len(c.rkmDeliveredRegistrationResults))
+	requests := make(map[uint32]RoutingKeyRegistrationRequest, len(c.rkmRegistrationRequests))
+	for identifier, result := range c.rkmDeliveredRegistrationResults {
+		delivered[identifier] = result
+	}
+	for identifier, request := range c.rkmRegistrationRequests {
+		requests[identifier] = request
+	}
+	if requestWritten && !completed && len(c.rkmPendingLocalIDs) > 0 {
+		if c.rkmUnresolvedRegistrations == nil {
+			c.rkmUnresolvedRegistrations = make(map[uint32]RoutingKeyRegistrationRequest, len(c.rkmPendingLocalIDs))
+		}
+		for identifier := range c.rkmPendingLocalIDs {
+			c.rkmUnresolvedRegistrations[identifier] = requests[identifier]
+		}
+	}
 	c.rkmAwaiting = rkmAwaitingNone
 	c.rkmPendingLocalIDs = nil
+	c.rkmRegistrationRequests = nil
+	c.rkmDeliveredRegistrationResults = nil
 	c.rkmPendingDeregistrationRCs = nil
 	c.rkmDeliveredDeregistrationStatus = nil
 	c.rkmResponseChan = nil
+	c.rkmCorrelationMu.Unlock()
+
+	if completed {
+		return
+	}
+	for identifier, result := range delivered {
+		c.applyRegistrationResult(requests[identifier], result)
+	}
+}
+
+func (c *Association) applyRegistrationResult(
+	request RoutingKeyRegistrationRequest,
+	result RoutingKeyRegistrationResult,
+) {
+	if result.Status != RegistrationSuccessfullyRegistered && result.Status != RegistrationRoutingKeyAlreadyRegistered {
+		return
+	}
+	effectiveRoutingKey, _ := routingKeyWithImpliedNetworkAppearance(request.RoutingKey, c.localNetworkAppearance())
+	c.addDynamicASKey(ASKey{
+		NetworkAppearance:    effectiveRoutingKey.NetworkAppearance,
+		NetworkAppearanceSet: effectiveRoutingKey.NetworkAppearanceSet,
+		RoutingContext:       result.RoutingContext,
+		RoutingContextSet:    true,
+	}, effectiveRoutingKey, c.isIPSPDoubleExchange())
 }
 
 func (c *Association) routingKeyRegistry() *routingKeyRegistry {

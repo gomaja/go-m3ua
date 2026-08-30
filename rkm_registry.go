@@ -1,6 +1,7 @@
 package m3ua
 
 import (
+	"slices"
 	"sort"
 	"sync"
 )
@@ -106,6 +107,7 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 		set            bool
 		routingContext uint32
 		err            error
+		inUse          []uint32
 	}
 	allocations := make([]allocationDecision, len(requests))
 
@@ -229,8 +231,9 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 				allocator := registry.config.AllocateRoutingContext
 				if allocator != nil {
 					allocator = func(allocation RoutingContextAllocationRequest) (uint32, error) {
-						if !allocations[index].set {
+						if !allocations[index].set || !slices.Equal(allocations[index].inUse, allocation.InUseRoutingContexts) {
 							allocations[index].routingContext, allocations[index].err = registry.config.AllocateRoutingContext(allocation)
+							allocations[index].inUse = append(allocations[index].inUse[:0], allocation.InUseRoutingContexts...)
 							allocations[index].set = true
 						}
 						return allocations[index].routingContext, allocations[index].err
@@ -297,7 +300,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 	authorizations := make([]authorizationDecision, len(routingContexts))
 	for {
 		if associationEnded(association) {
-			return make([]RoutingKeyDeregistrationResult, len(routingContexts))
+			return unknownDeregistrationResults(routingContexts)
 		}
 		registry.mu.Lock()
 		revision := registry.revision
@@ -366,7 +369,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 		}
 
 		if associationEnded(association) {
-			return make([]RoutingKeyDeregistrationResult, len(routingContexts))
+			return unknownDeregistrationResults(routingContexts)
 		}
 		registry.mu.Lock()
 		if registry.revision != revision {
@@ -375,7 +378,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 		}
 		if associationEnded(association) {
 			registry.mu.Unlock()
-			return make([]RoutingKeyDeregistrationResult, len(routingContexts))
+			return unknownDeregistrationResults(routingContexts)
 		}
 		registry.entries = entries
 		registry.dynamic = dynamicCount
@@ -385,6 +388,17 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 		registry.mu.Unlock()
 		return results
 	}
+}
+
+func unknownDeregistrationResults(routingContexts []uint32) []RoutingKeyDeregistrationResult {
+	results := make([]RoutingKeyDeregistrationResult, len(routingContexts))
+	for index, routingContext := range routingContexts {
+		results[index] = RoutingKeyDeregistrationResult{
+			RoutingContext: routingContext,
+			Status:         DeregistrationStatusUnknown,
+		}
+	}
+	return results
 }
 
 func (registry *routingKeyRegistry) authorize(request RoutingKeyRegistrationRequest) RegistrationStatus {

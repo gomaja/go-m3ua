@@ -1342,6 +1342,84 @@ func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
 	}
 }
 
+func TestRKMLateSuccessfulRegistrationAddsDynamicKey(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	written := make(chan uint32, 1)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		request := message.(*messages.RegistrationRequest)
+		payload, err := request.RoutingKeys[0].RoutingKey()
+		if err != nil {
+			return 0, err
+		}
+		written <- payload.LocalRoutingKeyIdentifier.LocalRoutingKeyIdentifier()
+		return message.MarshalLen(), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := association.RegisterRoutingKeys(ctx, RoutingKeyRegistration{
+			RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
+		})
+		done <- err
+	}()
+	identifier := <-written
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("RegisterRoutingKeys error = %v, want context.Canceled", err)
+	}
+
+	response := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(identifier),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(77),
+		),
+	))
+	if err := association.handleRegistrationResponse(response); err != nil {
+		t.Fatalf("deliver late Registration Response: %v", err)
+	}
+	want := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       77,
+		RoutingContextSet:    true,
+	}
+	if key, ok := association.dynamicASKey(77, false); !ok || key != want {
+		t.Fatalf("late Registration dynamic ASKey = %+v, %t; want %+v", key, ok, want)
+	}
+}
+
+func TestRKMCanceledRegistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	request := RoutingKeyRegistrationRequest{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
+	}
+	association.beginRegistrationResponseCorrelation(
+		map[uint32]int{1: 0},
+		map[uint32]RoutingKeyRegistrationRequest{1: request},
+	)
+	response := messages.NewRegistrationResponse(params.NewRegistrationResult(
+		params.NewRegistrationResultPayload(
+			params.NewLocalRoutingKeyIdentifier(1),
+			params.NewRegistrationStatus(params.SuccessfullyRegistered),
+			params.NewRoutingContext(77),
+		),
+	))
+	if err := association.deliverRegistrationResponse(response); err != nil {
+		t.Fatalf("deliverRegistrationResponse: %v", err)
+	}
+
+	association.endRegistrationResponseCorrelation(true, false)
+	if key, ok := association.dynamicASKey(77, false); !ok || key.RoutingContext != 77 {
+		t.Fatalf("known successful Registration dynamic ASKey = %+v, %t; want Routing Context 77", key, ok)
+	}
+}
+
 func TestRKMLateDeregistrationResponseIsAppliedAtomically(t *testing.T) {
 	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
 	association.muState.Lock()

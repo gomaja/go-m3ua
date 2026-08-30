@@ -384,6 +384,9 @@ type Association struct {
 	// the requesting goroutine and the association monitor.
 	rkmCorrelationMu                 sync.Mutex
 	rkmPendingLocalIDs               map[uint32]struct{}
+	rkmRegistrationRequests          map[uint32]RoutingKeyRegistrationRequest
+	rkmDeliveredRegistrationResults  map[uint32]RoutingKeyRegistrationResult
+	rkmUnresolvedRegistrations       map[uint32]RoutingKeyRegistrationRequest
 	rkmPendingDeregistrationRCs      map[uint32]struct{}
 	rkmDeliveredDeregistrationStatus map[uint32]DeregistrationStatus
 	rkmUnresolvedDeregistrationRCs   map[uint32]struct{}

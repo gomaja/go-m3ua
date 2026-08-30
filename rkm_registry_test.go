@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -732,13 +733,17 @@ func TestRoutingKeyRegistryDeregistrationPolicyCanCloseAssociation(t *testing.T)
 		t.Fatalf("Registration = %+v, want success", registration)
 	}
 
-	done := make(chan struct{})
+	done := make(chan []RoutingKeyDeregistrationResult, 1)
 	go func() {
-		defer close(done)
-		endpoint.routingKeys.deregister(association, []uint32{registration.RoutingContext})
+		done <- endpoint.routingKeys.deregister(association, []uint32{registration.RoutingContext, 999})
 	}()
 	select {
-	case <-done:
+	case results := <-done:
+		for index, routingContext := range []uint32{registration.RoutingContext, 999} {
+			if results[index].RoutingContext != routingContext || results[index].Status != DeregistrationStatusUnknown {
+				t.Errorf("Deregistration result %d = %+v, want Routing Context %d with unknown status", index, results[index], routingContext)
+			}
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Deregistration policy deadlocked while closing the association")
 	}
@@ -787,7 +792,7 @@ func TestRoutingKeyRegistryRegistrationAuthorizationIsNotRepeatedAfterConcurrent
 	}
 }
 
-func TestRoutingKeyRegistryAllocatorIsNotRepeatedAfterConcurrentTeardown(t *testing.T) {
+func TestRoutingKeyRegistryAllocatorReevaluatesAfterConcurrentTeardown(t *testing.T) {
 	var victim *Association
 	allocatorCalls := 0
 	triggerTeardown := false
@@ -819,8 +824,8 @@ func TestRoutingKeyRegistryAllocatorIsNotRepeatedAfterConcurrentTeardown(t *test
 
 	triggerTeardown = true
 	result := registerRoutingKeyForTest(t, endpoint.routingKeys, target, 2, testRoutingKey(10, 200, params.ServiceIndSCCP))
-	if allocatorCalls != 1 {
-		t.Fatalf("Routing Context allocator calls = %d, want 1", allocatorCalls)
+	if allocatorCalls != 2 {
+		t.Fatalf("Routing Context allocator calls = %d, want 2 snapshots", allocatorCalls)
 	}
 	if result.RoutingContext != 9 {
 		t.Fatalf("allocated Routing Context = %d, want 9", result.RoutingContext)
@@ -944,6 +949,59 @@ func TestRoutingKeyRegistrySerializesConcurrentRegistrations(t *testing.T) {
 	}
 	if len(seenRoutingContexts) != registrations || registry.dynamicCount() != registrations {
 		t.Fatalf("Routing Context count = %d, dynamic count = %d, want %d", len(seenRoutingContexts), registry.dynamicCount(), registrations)
+	}
+}
+
+func TestRoutingKeyRegistryReallocatesAfterConcurrentCommit(t *testing.T) {
+	var allocatorCalls atomic.Int32
+	var initialCalls sync.WaitGroup
+	initialCalls.Add(2)
+	releaseInitial := make(chan struct{})
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		AllocateRoutingContext: func(request RoutingContextAllocationRequest) (uint32, error) {
+			if allocatorCalls.Add(1) <= 2 {
+				initialCalls.Done()
+				<-releaseInitial
+			}
+			candidate := uint32(1)
+			for _, inUse := range request.InUseRoutingContexts {
+				if inUse == candidate {
+					candidate++
+				}
+			}
+			return candidate, nil
+		},
+		AllowDynamicRoutingKeys: true,
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+
+	results := make(chan RoutingKeyRegistrationResult, 2)
+	for index := range 2 {
+		go func(index int) {
+			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			results <- registry.register(association, []RoutingKeyRegistrationRequest{{
+				LocalRoutingKeyIdentifier: uint32(index + 1),
+				RoutingKey:                testRoutingKey(10, uint32(100+index), params.ServiceIndSCCP),
+			}})[0]
+		}(index)
+	}
+	initialCalls.Wait()
+	close(releaseInitial)
+	first := <-results
+	second := <-results
+	if first.Status != RegistrationSuccessfullyRegistered || second.Status != RegistrationSuccessfullyRegistered {
+		t.Fatalf("concurrent custom-allocation results = %+v, %+v; want both successful", first, second)
+	}
+	if first.RoutingContext == second.RoutingContext {
+		t.Fatalf("concurrent custom allocator reused Routing Context %d", first.RoutingContext)
+	}
+	if allocatorCalls.Load() < 3 {
+		t.Fatalf("custom allocator calls = %d, want a retry with the updated in-use snapshot", allocatorCalls.Load())
 	}
 }
 
