@@ -855,6 +855,64 @@ func TestRoutingKeyRegistrationRejectsOverrideWhenNExceedsOne(t *testing.T) {
 	}
 }
 
+func TestRoutingKeyRegistrationPublishesShortageAfterAdoptingTrafficMode(t *testing.T) {
+	applicationServers := applicationServerRegistryForActivationTest(t, ASActivationPolicy{RequiredActiveASPs: 2})
+	applicationServer := applicationServers.get(1)
+	first, firstSent := asTestConn(t, applicationServers, StateASPInactive, 1)
+	second, secondSent := asTestConn(t, applicationServers, StateASPInactive, 1)
+	applicationServers.aspStateChanged(first, StateASPActive)
+	applicationServers.aspStateChanged(second, StateASPActive)
+	applicationServers.aspStateChanged(second, StateASPInactive)
+	if got := applicationServer.State(); got != ASActive {
+		t.Fatalf("state below n before Traffic Mode adoption = %v, want %v", got, ASActive)
+	}
+	if got := applicationServer.TrafficMode(); got != 0 {
+		t.Fatalf("Traffic Mode before Registration = %d, want unknown", got)
+	}
+	firstBefore := len(*firstSent)
+	secondBefore := len(*secondSent)
+
+	routingKey := testRoutingKey(0, 100, params.ServiceIndSCCP)
+	routingKey.NetworkAppearance = 0
+	routingKey.NetworkAppearanceSet = false
+	routingKey.TrafficMode = params.TrafficModeLoadshare
+	routingKey.TrafficModeSet = true
+	registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
+		AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+			return RegistrationSuccessfullyRegistered
+		},
+		ProvisionedRoutingKeys: []ProvisionedRoutingKey{{
+			RoutingContext: 1,
+			RoutingKey:     routingKey,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("newRoutingKeyRegistry: %v", err)
+	}
+	result := registry.register(first, []RoutingKeyRegistrationRequest{{
+		LocalRoutingKeyIdentifier: 1,
+		RoutingKey:                routingKey,
+	}})[0]
+	if result.Status != RegistrationRoutingKeyAlreadyRegistered || result.RoutingContext != 1 {
+		t.Fatalf("registration result = %+v, want Routing Key Already Registered for Routing Context 1", result)
+	}
+	if got := applicationServer.TrafficMode(); got != params.TrafficModeLoadshare {
+		t.Fatalf("Traffic Mode after Registration = %d, want Loadshare", got)
+	}
+	assertNoNotifyStatus(t, (*firstSent)[firstBefore:], params.InsufficientAspResources)
+	assertNoNotifyStatus(t, (*secondSent)[secondBefore:], params.InsufficientAspResources)
+
+	// The responder invokes this only after writing REG RSP. Learning the mode
+	// must now publish the shortage even though this static AS membership already
+	// existed and its ASP state must remain unchanged.
+	applicationServers.registerDynamicASP(first, ASKey{RoutingContext: 1, RoutingContextSet: true})
+	assertNoNotifyStatus(t, (*firstSent)[firstBefore:], params.InsufficientAspResources)
+	assertNotifyStatus(t, (*secondSent)[secondBefore:], params.InsufficientAspResources)
+	if got := applicationServer.State(); got != ASActive {
+		t.Fatalf("state after post-response shortage publication = %v, want %v", got, ASActive)
+	}
+}
+
 func applicationServerRegistryForActivationTest(t *testing.T, policy ASActivationPolicy) *applicationServers {
 	t.Helper()
 	endpoint, err := NewEndpoint(EndpointConfig{

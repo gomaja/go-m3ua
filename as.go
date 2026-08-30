@@ -1448,17 +1448,22 @@ func (as *applicationServer) setASPStateGuarded(
 		return
 	}
 	current, known := as.asps[c]
-	if known && (ifAbsent || current == st) {
+	if known && !ifAbsent && current == st {
 		as.mu.Unlock()
 		if guard {
 			c.muState.Unlock()
 		}
 		return
 	}
-	as.asps[c] = st
-	if st == StateASPActive && (!known || current != StateASPActive) {
-		as.noteBroadcastActivationLocked()
+	if !known || !ifAbsent {
+		as.asps[c] = st
+		if st == StateASPActive && (!known || current != StateASPActive) {
+			as.noteBroadcastActivationLocked()
+		}
 	}
+	// An existing static membership reaches this path after REG RSP. RKM may
+	// have just supplied the previously unknown Traffic Mode, so recompute the
+	// derived shortage advisory without overwriting the ASP's current state.
 	notify := as.recomputeLocked(recovery, nil)
 	startDrain := as.state == ASActive && len(as.recoveryQueue) > 0 && !as.draining && !as.activeSending
 	if startDrain {
