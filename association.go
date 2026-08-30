@@ -376,6 +376,10 @@ type Association struct {
 	// rkmRequestMu serializes local RFC 4666 Registration and Deregistration
 	// procedures; RKM responses have no association-wide transaction identifier.
 	rkmRequestMu sync.Mutex
+	// rkmLifecycleMu serializes responder-side RKM state publication with
+	// association teardown so an in-flight REG RSP cannot recreate membership
+	// after the Endpoint has forgotten the association.
+	rkmLifecycleMu sync.Mutex
 	// rkmCorrelationMu guards Registration response correlation state shared by
 	// the requesting goroutine and the association monitor.
 	rkmCorrelationMu                 sync.Mutex

@@ -202,6 +202,8 @@ func (e *Endpoint) forgetAssociation(association *Association) {
 	if e == nil || association == nil {
 		return
 	}
+	association.rkmLifecycleMu.Lock()
+	defer association.rkmLifecycleMu.Unlock()
 	e.mu.Lock()
 	delete(e.associations, association)
 	applicationServers := e.as

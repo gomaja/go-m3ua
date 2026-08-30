@@ -231,6 +231,16 @@ func (c *Association) handleRegistrationRequest(message *messages.RegistrationRe
 		requests[index] = request
 	}
 	results := registry.register(c, requests)
+	c.rkmLifecycleMu.Lock()
+	defer c.rkmLifecycleMu.Unlock()
+	select {
+	case <-c.done:
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ErrAssociationClosed
+	default:
+	}
 	parameters := make([]*params.Param, len(results))
 	type successfulRegistration struct {
 		key        ASKey
@@ -256,6 +266,14 @@ func (c *Association) handleRegistrationRequest(message *messages.RegistrationRe
 	}
 	if _, err := c.WriteSignal(messages.NewRegistrationResponse(parameters...)); err != nil {
 		return err
+	}
+	select {
+	case <-c.done:
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ErrAssociationClosed
+	default:
 	}
 	for _, registration := range successful {
 		c.addDynamicASKey(registration.key, registration.routingKey, false)

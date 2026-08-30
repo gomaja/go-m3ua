@@ -1950,6 +1950,97 @@ func TestRKMResponderReplayCompletesASMutationAfterResponseWriteFailure(t *testi
 	}
 }
 
+func TestRKMRegistrationCloseRaceDoesNotRecreateMembership(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		RoutingKeyManagement: &RoutingKeyManagementConfig{
+			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
+				return RegistrationSuccessfullyRegistered
+			},
+			AllowDynamicRoutingKeys: true,
+			RemoveUnusedRoutingKeys: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	defer func() { _ = endpoint.Close() }()
+
+	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.as = endpoint.as
+	association.muState.Lock()
+	association.state = StateASPInactive
+	association.muState.Unlock()
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("trackAssociation returned false")
+	}
+
+	responseStarted := make(chan uint32, 1)
+	releaseResponse := make(chan struct{})
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		response, ok := message.(*messages.RegistrationResponse)
+		if !ok {
+			return message.MarshalLen(), nil
+		}
+		result, resultErr := response.RegistrationResults[0].RegistrationResult()
+		if resultErr != nil {
+			return 0, resultErr
+		}
+		responseStarted <- result.RoutingContext.RoutingContext()
+		<-releaseResponse
+		return message.MarshalLen(), nil
+	}
+
+	request := registrationRequestMessage(t)
+	handleDone := make(chan error, 1)
+	go func() {
+		handleDone <- association.handleRegistrationRequest(request)
+	}()
+	routingContext := <-responseStarted
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- association.Close() }()
+	<-association.Done()
+
+	closeCompletedBeforeResponse := false
+	select {
+	case err := <-closeDone:
+		closeCompletedBeforeResponse = true
+		if err != nil {
+			t.Errorf("Association.Close: %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+	}
+	close(releaseResponse)
+	if err := <-handleDone; err != nil && !errors.Is(err, ErrNotEstablished) && !errors.Is(err, ErrAssociationClosed) {
+		t.Errorf("handleRegistrationRequest: %v", err)
+	}
+	if !closeCompletedBeforeResponse {
+		if err := <-closeDone; err != nil {
+			t.Errorf("Association.Close: %v", err)
+		}
+	}
+	if closeCompletedBeforeResponse {
+		t.Error("Association.Close completed before the in-flight Registration response")
+	}
+
+	key := ASKey{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+	}
+	if _, ok := association.dynamicASKey(routingContext, false); ok {
+		t.Fatal("Registration recreated Association Routing Key scope after close")
+	}
+	if _, ok := endpoint.routingKeys.routingKey(routingContext); ok {
+		t.Fatal("Registration retained Routing Key registry membership after close")
+	}
+	if _, ok := endpoint.as.lookup(key); ok {
+		t.Fatal("Registration recreated Application Server membership after close")
+	}
+}
+
 func TestRKMResponderProvisionedDeregistrationReplayCompletesLocalCleanup(t *testing.T) {
 	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
 	endpoint, err := NewEndpoint(EndpointConfig{
