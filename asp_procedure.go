@@ -172,7 +172,7 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 		return err
 	}
 	defer release()
-	if !c.localASPProcedureDirectionAvailable() {
+	if !c.localASPTMProcedureDirectionAvailable() {
 		return ErrNoConfiguredAS
 	}
 	switch c.localASPProcedureState() {
@@ -204,7 +204,7 @@ func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error
 		return err
 	}
 	defer release()
-	if !c.localASPProcedureDirectionAvailable() {
+	if !c.localASPTMProcedureDirectionAvailable() {
 		return ErrNoConfiguredAS
 	}
 	if c.localASPProcedureState() != StateASPActive {
@@ -290,6 +290,19 @@ func (c *Association) localASPProcedureDirectionAvailable() bool {
 		return true
 	}
 	return c.hasLocalIPSPTrafficDirection() || c.usesSingleASPSMExchange()
+}
+
+func (c *Association) localASPTMProcedureDirectionAvailable() bool {
+	if c == nil || c.role == RoleSGP {
+		return false
+	}
+	if !c.isIPSPDoubleExchange() {
+		return true
+	}
+	// RFC 4666 Section 5.6.2 permits one shared ASPSM exchange while still
+	// keeping two independent ASPTM traffic directions. A shared ASP Up/Down
+	// procedure therefore cannot create a missing TrafficToLocal direction.
+	return c.hasLocalIPSPTrafficDirection()
 }
 
 func (c *Association) localASPProcedureState() State {

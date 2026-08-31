@@ -454,6 +454,56 @@ func TestAssociationASPTMExplicitOperationsRejectBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestIPSPDoubleExchangeASPTMRequiresLocalTrafficDirection(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		state State
+		call  func(context.Context, *Association) error
+	}{
+		{
+			name:  "ASP Active",
+			state: StateASPInactive,
+			call: func(ctx context.Context, association *Association) error {
+				return association.ASPActive(ctx)
+			},
+		},
+		{
+			name:  "ASP Inactive",
+			state: StateASPActive,
+			call: func(ctx context.Context, association *Association) error {
+				return association.ASPInactive(ctx)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := newDoubleExchangeAssociationConfigForTest()
+			config.IPSP.TrafficToLocal = nil
+			config.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
+			config.IPSP.InitiateASPTM = false
+			association, sent := newDoubleExchangeIPSPWithConfigForTest(t, config)
+			association.setIPSPState(IPSPState{
+				TrafficToLocal: test.state,
+				TrafficToPeer:  StateASPInactive,
+			})
+			if !association.localASPProcedureDirectionAvailable() {
+				t.Fatal("single ASPSM exchange lost its shared ASP Up/Down direction")
+			}
+			if association.localASPTMProcedureDirectionAvailable() {
+				t.Fatal("single ASPSM exchange invented a TrafficToLocal ASPTM direction")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			if err := test.call(ctx, association); !errors.Is(err, ErrNoConfiguredAS) {
+				t.Fatalf("error = %v, want ErrNoConfiguredAS", err)
+			}
+			if len(*sent) != 0 {
+				t.Fatalf("ASPTM without TrafficToLocal wrote %d messages", len(*sent))
+			}
+		})
+	}
+}
+
 func TestAssociationReadinessFollowsASPProcedurePolicy(t *testing.T) {
 	t.Run("nil policy IPSP Double Exchange preserves directional readiness", func(t *testing.T) {
 		tests := []struct {
