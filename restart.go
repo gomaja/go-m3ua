@@ -160,10 +160,10 @@ func (c *Association) initiatesASPSM() bool {
 		return false
 	}
 	if c.role == RoleASP {
-		return true
+		return c.aspProcedureMode(aspProcedureUp) == ASPProcedureAutomatic
 	}
 	return c.role == RoleIPSP && c.cfg != nil && c.cfg.IPSP != nil &&
-		c.cfg.IPSP.InitiateASPSM
+		c.aspProcedureMode(aspProcedureUp) == ASPProcedureAutomatic
 }
 
 // subscribeRestart asks the kernel for SCTP_ASSOC_CHANGE on this association.

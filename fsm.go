@@ -134,13 +134,12 @@ func (c *Association) handleStateUpdateFrom(current State, published bool) error
 			c.as.aspStateChanged(c, current)
 		}
 	}
-	// Dial and Accept expose an ASP-ACTIVE Association to the caller. Publish
-	// its per-AS state first because direct DATA and SSNM writes enforce the
-	// RFC 4666 Sections 4.3.1 and 4.3.2 Application Server state immediately.
-	// Signalling earlier creates a window where the returned Association says
-	// ASP-ACTIVE but its Application Server still rejects traffic as inactive.
+	// Publish per-AS state before signalling policy-selected readiness. An
+	// automatically managed Association still returns at ASP-ACTIVE; explicit
+	// Layer Management may intentionally receive it at ASP-DOWN or
+	// ASP-INACTIVE and drive the remaining RFC 4666 procedures itself.
+	c.notifyReady()
 	if current == StateASPActive && c.State() == StateASPActive {
-		c.notifyEstablished()
 		c.allowHeartbeat()
 	}
 
@@ -243,7 +242,8 @@ func (c *Association) handleStateUpdateAsIPSPDoubleExchange(current State, enter
 		if entering {
 			c.forgetActiveRoutingContexts()
 		}
-		if !entering || c.terminating.Load() || !c.cfg.IPSP.InitiateASPSM ||
+		if !entering || c.terminating.Load() ||
+			c.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic ||
 			c.localIPSPState != StateASPDown {
 			return nil
 		}
@@ -272,7 +272,8 @@ func (c *Association) handleStateUpdateAsIPSPSingleExchange(current, previous St
 		if entering {
 			c.forgetActiveRoutingContexts()
 		}
-		if !entering || c.terminating.Load() || !c.cfg.IPSP.InitiateASPSM {
+		if !entering || c.terminating.Load() ||
+			c.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic {
 			return nil
 		}
 		// RFC 4666 Sections 4.3 and 4.3.4.1.2: either IPSP may initiate the
@@ -282,7 +283,8 @@ func (c *Association) handleStateUpdateAsIPSPSingleExchange(current, previous St
 		if entering {
 			c.forgetActiveRoutingContexts()
 		}
-		if !entering || previous != StateASPDown || !c.cfg.IPSP.InitiateASPTM {
+		if !entering || previous != StateASPDown ||
+			c.aspProcedureMode(aspProcedureActive) != ASPProcedureAutomatic {
 			return nil
 		}
 		// RFC 4666 Sections 4.3 and 4.3.4.3.1 permit either IPSP to initiate
@@ -306,7 +308,8 @@ func (c *Association) handleStateUpdateAsASP(current, previous State, entering b
 		// considered deregistered".
 		c.forgetAckedRoutingContextsWithoutTransferBarrier()
 		// RFC 4666 Section 4.3.4.1: the ASP is always the initiator of ASP Up.
-		if !entering || c.terminating.Load() {
+		if !entering || c.terminating.Load() ||
+			c.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic {
 			return nil
 		}
 		return c.initiateASPSM()
@@ -342,6 +345,9 @@ func (c *Association) handleStateUpdateAsASP(current, previous State, entering b
 		// itself to its previous state" — which, if that state was only
 		// ASP-INACTIVE, stops here rather than taking traffic it never had.
 		if c.resumeTo == StateASPInactive {
+			return nil
+		}
+		if c.aspProcedureMode(aspProcedureActive) != ASPProcedureAutomatic {
 			return nil
 		}
 		return c.initiateASPTM()
@@ -382,17 +388,50 @@ func (c *Association) handleStateUpdateAsSGP(current State, entering bool) error
 	}
 }
 
-// notifyEstablished signals Dial/Accept that the association reached
-// ASP-ACTIVE. established is a one-shot, capacity-1 signal that is read exactly
-// once at setup, so the send must never block: an association that returns to
-// ASP-ACTIVE (for example after RFC 4666 Section 4.3.4.1 drops it to
-// ASP-INACTIVE on a received ASP Up) would otherwise wedge handleStateUpdate
-// while it holds muState, blocking every State() caller with SCTP still up.
+// notifyEstablished signals Dial/Accept that the association reached its
+// policy-selected management readiness state. established is a one-shot,
+// capacity-1 signal read exactly once at setup, so the send must never block.
 func (c *Association) notifyEstablished() {
 	select {
 	case c.established <- struct{}{}:
 	default:
 	}
+}
+
+func (c *Association) notifyReady() {
+	if c == nil || c.readinessState() != c.currentReadinessState() {
+		return
+	}
+	c.notifyEstablished()
+}
+
+func (c *Association) readinessState() State {
+	if c == nil || c.role == RoleSGP {
+		return StateASPActive
+	}
+	if c.cfg == nil || c.cfg.ASPProcedures == nil {
+		return StateASPActive
+	}
+	if c.isIPSPDoubleExchange() && !c.localASPProcedureDirectionAvailable() {
+		return StateASPActive
+	}
+	if c.aspProcedureMode(aspProcedureUp) == ASPProcedureExplicit {
+		return StateASPDown
+	}
+	if c.aspProcedureMode(aspProcedureActive) == ASPProcedureExplicit {
+		return StateASPInactive
+	}
+	return StateASPActive
+}
+
+func (c *Association) currentReadinessState() State {
+	if c != nil && c.isIPSPDoubleExchange() && c.localASPProcedureDirectionAvailable() {
+		return c.localIPSPStateValue()
+	}
+	if c == nil {
+		return StateASPDown
+	}
+	return c.State()
 }
 
 func (c *Association) allowHeartbeat() {

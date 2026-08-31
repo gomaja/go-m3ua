@@ -641,8 +641,8 @@ func (c *Association) commitLocalIPSPState(state State) bool {
 	if changed {
 		c.notifyASPRouteStateChanged()
 	}
+	c.notifyReady()
 	if state == StateASPActive {
-		c.notifyEstablished()
 		c.allowHeartbeat()
 	}
 	return true
@@ -653,7 +653,9 @@ func (c *Association) enterLocalIPSPState(state State) error {
 	if !c.commitLocalIPSPState(state) {
 		return nil
 	}
-	if state == StateASPInactive && previous == StateASPDown && c.cfg.IPSP.InitiateASPTM && !c.terminating.Load() {
+	if state == StateASPInactive && previous == StateASPDown &&
+		c.aspProcedureMode(aspProcedureActive) == ASPProcedureAutomatic &&
+		!c.terminating.Load() {
 		return c.initiateASPTM()
 	}
 	return nil
@@ -3018,7 +3020,8 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	if c.isIPSPDoubleExchange() {
 		state = c.localIPSPStateValue()
 	}
-	if state == StateASPActive {
+	if state == StateASPActive &&
+		c.aspProcedureMode(aspProcedureInactive) == ASPProcedureAutomatic {
 		routingContext := c.cfg.RoutingContexts
 		if c.isIPSPDoubleExchange() {
 			routingContext = c.configuredLocalRoutingContextParam()
@@ -3032,7 +3035,8 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		}
 	}
 
-	if state == StateASPActive || state == StateASPInactive {
+	if (state == StateASPActive || state == StateASPInactive) &&
+		c.aspProcedureMode(aspProcedureDown) == ASPProcedureAutomatic {
 		request, err := c.initiateASPDown()
 		if err == nil {
 			err = c.waitTAck(ctx, request)

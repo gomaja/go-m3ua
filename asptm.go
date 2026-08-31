@@ -21,9 +21,14 @@ func (c *Association) initiateASPTM() error {
 }
 
 func (c *Association) initiateASPActive(routingContext *params.Param) error {
+	_, err := c.beginASPActive(routingContext)
+	return err
+}
+
+func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRequest, error) {
 	requests, err := c.aspActiveRequests(routingContext)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pending := make([]*pendingRequest, 0, len(requests))
 	for _, activeRequest := range requests {
@@ -36,10 +41,10 @@ func (c *Association) initiateASPActive(routingContext *params.Param) error {
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return pending, nil
 }
 
 type aspActiveRequest struct {
