@@ -137,9 +137,7 @@ handling rather than exposing a reusable implementation.
 | Original upstream PR #61 | Optional SCTP SACK timer control | `AssociationConfig.SetSCTPSACK` and `Association.SetSCTPSACK` validate and apply the per-Association policy, including the RFC 9260 500 ms ceiling, with Linux socket tests. |
 | Original upstream #62 | M3UA BEAT confused with SCTP HEARTBEAT | Public documentation and `ErrHeartbeatExpired` identify RFC 4666 M3UA T(beat); SCTP HEARTBEAT remains kernel transport path management and is configured separately. |
 | Original upstream PR #63 | SCTP dependency PPID handling | `M3UAPPID == 3`, host-order send metadata, acceptance of PPID `0` or `3`, and discard of every other PPID are covered by `ppid_test.go`. |
-
-Original upstream issue #36 is unrelated to M3UA and creates no protocol or API
-disposition for this repository.
+| Original upstream #36 | Unrelated request | The issue contains no M3UA protocol, API, interoperability, security, or implementation change to reproduce or adopt. |
 
 ## Current validation commands
 

@@ -39,8 +39,9 @@ traffic identity explicit:
 - ASP procedures, RKM, Layer Management, MTP3-User, routing, and SSNM operations
   have typed APIs with role and scope validation.
 
-Every removed v1.1.1 declaration and its replacement is listed in
-[Migrating to v1.2](migration-v1.2.md#complete-v111-symbol-disposition).
+Every incompatible v1.1.1 declaration and public field across the module is
+listed in
+[Migrating to v1.2](migration-v1.2.md#complete-v111-api-disposition).
 
 ## Validation
 
