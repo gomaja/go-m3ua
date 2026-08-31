@@ -186,16 +186,45 @@ const DefaultTAckRetries = 5
 // must return a stable identifier for equivalent flows.
 type BroadcastFlowIdentifier func(*params.ProtocolDataPayload) (string, error)
 
-// SGPConfig configures protocol state shared by every Association owned by one
-// Signalling Gateway Process Endpoint.
+// ASActivationPolicy configures the n+k activation threshold of one
+// Application Server.
 //
-// RFC 4666 Sections 4.3.2, 4.3.4.3, and 4.6 define recovery, distribution,
-// and restart procedures in terms of an SGP and its Application Servers, not
-// in terms of one SCTP association or the peer that initiated it.
-type SGPConfig struct {
+// RFC 4666 Sections 1.4.4.1 and 4.3.2 define RequiredActiveASPs as n. Zero
+// selects one. SmoothStart enables the Section 4.3.2 exception that permits
+// the first active ASP to start traffic before n ASPs are active.
+type ASActivationPolicy struct {
+	RequiredActiveASPs int
+	SmoothStart        bool
+}
+
+func (p ASActivationPolicy) requiredActive() int {
+	if p.RequiredActiveASPs == 0 {
+		return 1
+	}
+	return p.RequiredActiveASPs
+}
+
+// ApplicationServerConfig configures Application Server state shared by all
+// Associations owned by one SGP or IPSP Endpoint.
+type ApplicationServerConfig struct {
 	// RecoveryTimer is T(r), the AS-PENDING recovery timer of RFC 4666
 	// Section 4.3.2. Zero selects DefaultRecoveryTimer.
 	RecoveryTimer time.Duration
+	// DefaultActivationPolicy applies when ActivationPolicies has no exact
+	// ASKey entry.
+	DefaultActivationPolicy ASActivationPolicy
+	// ActivationPolicies configures n and smooth start for exact Application
+	// Server traffic identities. The map is deeply copied by NewEndpoint.
+	ActivationPolicies map[ASKey]ASActivationPolicy
+}
+
+// SGPConfig configures protocol state shared by every Association owned by one
+// Signalling Gateway Process Endpoint.
+//
+// RFC 4666 Sections 4.3.2, 4.3.4.3, and 4.6 define recovery queuing,
+// distribution, and restart procedures in terms of an SGP and its Application
+// Servers, not in terms of one SCTP association or the peer that initiated it.
+type SGPConfig struct {
 	// RecoveryQueueMessages and RecoveryQueueBytes bound DATA retained for one
 	// AS while T(r) runs. Values less than or equal to zero select defaults.
 	RecoveryQueueMessages int
@@ -283,7 +312,85 @@ type EndpointConfig struct {
 	Role                 Role
 	ASP                  *ASPConfig
 	SGP                  *SGPConfig
+	ApplicationServers   *ApplicationServerConfig
 	RoutingKeyManagement *RoutingKeyManagementConfig
+}
+
+func validateApplicationServerConfig(config *ApplicationServerConfig) error {
+	if config == nil {
+		return nil
+	}
+	if config.RecoveryTimer < 0 {
+		return fmt.Errorf("%w: negative RecoveryTimer", ErrInvalidApplicationServerConfig)
+	}
+	if config.DefaultActivationPolicy.RequiredActiveASPs < 0 {
+		return fmt.Errorf("%w: negative default RequiredActiveASPs", ErrInvalidApplicationServerConfig)
+	}
+	for key, policy := range config.ActivationPolicies {
+		if !key.NetworkAppearanceSet && key.NetworkAppearance != 0 {
+			return fmt.Errorf("%w: Network Appearance %d is present without NetworkAppearanceSet",
+				ErrInvalidApplicationServerConfig, key.NetworkAppearance)
+		}
+		if !key.RoutingContextSet && key.RoutingContext != 0 {
+			return fmt.Errorf("%w: Routing Context %d is present without RoutingContextSet",
+				ErrInvalidApplicationServerConfig, key.RoutingContext)
+		}
+		if policy.RequiredActiveASPs < 0 {
+			return fmt.Errorf("%w: negative RequiredActiveASPs for %+v",
+				ErrInvalidApplicationServerConfig, key)
+		}
+	}
+	return nil
+}
+
+func snapshotApplicationServerConfig(config *ApplicationServerConfig) *ApplicationServerConfig {
+	if config == nil {
+		return &ApplicationServerConfig{}
+	}
+	snapshot := *config
+	if config.ActivationPolicies != nil {
+		snapshot.ActivationPolicies = make(map[ASKey]ASActivationPolicy, len(config.ActivationPolicies))
+		for key, policy := range config.ActivationPolicies {
+			snapshot.ActivationPolicies[key] = policy
+		}
+	}
+	return &snapshot
+}
+
+func applicationServerActivationPolicy(config *ApplicationServerConfig, key ASKey) ASActivationPolicy {
+	if config == nil {
+		return ASActivationPolicy{}
+	}
+	if policy, ok := config.ActivationPolicies[key]; ok {
+		return policy
+	}
+	return config.DefaultActivationPolicy
+}
+
+func validateApplicationServerRoutingKeyPolicies(
+	applicationServers *ApplicationServerConfig,
+	routingKeys *RoutingKeyManagementConfig,
+) error {
+	if routingKeys == nil {
+		return nil
+	}
+	for _, provisioned := range routingKeys.ProvisionedRoutingKeys {
+		if !provisioned.RoutingKey.TrafficModeSet ||
+			provisioned.RoutingKey.TrafficMode != params.TrafficModeOverride {
+			continue
+		}
+		key := ASKey{
+			NetworkAppearance:    provisioned.RoutingKey.NetworkAppearance,
+			NetworkAppearanceSet: provisioned.RoutingKey.NetworkAppearanceSet,
+			RoutingContext:       provisioned.RoutingContext,
+			RoutingContextSet:    true,
+		}
+		if applicationServerActivationPolicy(applicationServers, key).requiredActive() != 1 {
+			return fmt.Errorf("%w: Override requires one active ASP for %+v",
+				ErrInvalidApplicationServerConfig, key)
+		}
+	}
+	return nil
 }
 
 func snapshotSGPConfig(config *SGPConfig) *SGPConfig {

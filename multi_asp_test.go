@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -16,6 +17,67 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-sctp"
 )
+
+func TestApplicationServerWaitsForConfiguredActiveASPThreshold(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role: RoleSGP,
+		ApplicationServers: &ApplicationServerConfig{
+			DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	const port = 3300
+	listener, err := endpoint.Listen("m3ua", mcAddr(port, "127.0.0.1"), NewListenerConfig(mcSGPConfig()))
+	if err != nil {
+		if isSCTPUnsupported(err) {
+			t.Skipf("skipping socket-backed test: %v", err)
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	key := associationConfigASKey(listener.AssociationConfig, 1)
+
+	first := mcConnect(t, ctx, listener, mcAddr(port, "127.0.0.1"), []string{"127.0.0.2"}, port)
+	if got := first[0].asp.State(); got != StateASPActive {
+		t.Fatalf("first ASP state = %v, want %v after ASP Active Ack", got, StateASPActive)
+	}
+	applicationServer, ok := endpoint.as.lookup(key)
+	if !ok {
+		t.Fatalf("first ASP did not register Application Server %+v", key)
+	}
+	if !waitFor(func() bool { return applicationServer.State() == ASInactive }, 2*time.Second) {
+		t.Fatalf("AS state with one of two required ASPs = %v, want %v",
+			applicationServer.State(), ASInactive)
+	}
+	if result, err := listener.DistributeData(distributionData(1, 1, "below-threshold")); !errors.Is(err, ErrNoActiveASP) || result != (TrafficDistribution{}) {
+		t.Fatalf("distribution below n = (%+v, %v), want zero result and %v",
+			result, err, ErrNoActiveASP)
+	}
+
+	second := mcConnectWithASPIdentifierBase(
+		t, ctx, listener, mcAddr(port, "127.0.0.1"), []string{"127.0.0.3"}, port+10, 0xAB000000,
+	)
+	if got := second[0].asp.State(); got != StateASPActive {
+		t.Fatalf("second ASP state = %v, want %v after ASP Active Ack", got, StateASPActive)
+	}
+	if !waitFor(func() bool { return applicationServer.State() == ASActive }, 2*time.Second) {
+		t.Fatalf("AS state with two active ASPs = %v, want %v", applicationServer.State(), ASActive)
+	}
+	result, err := listener.DistributeData(distributionData(1, 1, "at-threshold"))
+	if err != nil {
+		t.Fatalf("distribution at n: %v", err)
+	}
+	if result.Delivered != 1 || result.Queued {
+		t.Fatalf("distribution at n = %+v, want one delivered message", result)
+	}
+}
 
 // One SGP listener serving several ASPs at once is the ordinary production
 // deployment: a single M3UA port fronting many remote ASPs, each with its own
@@ -86,6 +148,19 @@ type mcASP struct {
 // connection order.
 func mcConnect(t *testing.T, ctx context.Context, ln *Listener, raddr *sctp.SCTPAddr, aspIPs []string, port int) []mcASP {
 	t.Helper()
+	return mcConnectWithASPIdentifierBase(t, ctx, ln, raddr, aspIPs, port, 0xAA000000)
+}
+
+func mcConnectWithASPIdentifierBase(
+	t *testing.T,
+	ctx context.Context,
+	ln *Listener,
+	raddr *sctp.SCTPAddr,
+	aspIPs []string,
+	port int,
+	identifierBase uint32,
+) []mcASP {
+	t.Helper()
 
 	type accepted struct {
 		association *Association
@@ -136,7 +211,7 @@ func mcConnect(t *testing.T, ctx context.Context, ln *Listener, raddr *sctp.SCTP
 
 	asps := make([]mcASP, 0, len(aspIPs))
 	for i, ip := range aspIPs {
-		asp, err := dialASP(ctx, "m3ua", mcAddr(port+1+i, ip), raddr, mcASPConfig(0xAA000000+uint32(i)))
+		asp, err := dialASP(ctx, "m3ua", mcAddr(port+1+i, ip), raddr, mcASPConfig(identifierBase+uint32(i)))
 		if err != nil {
 			t.Fatalf("ASP #%d failed to establish: %v", i+1, err)
 		}

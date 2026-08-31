@@ -411,7 +411,7 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 		if served != nil {
 			servedContexts = served.RoutingContexts()
 		}
-		c.noteRoutingContextsActive(servedContexts)
+		c.commitPeerRoutingContextsActive(servedContexts)
 
 		// Override, after the Ack and only after it. Section 4.3.4.3: "In the
 		// case of an Override mode AS, receipt of an ASP Active message at an SGP
@@ -555,7 +555,7 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 			}
 		}
 		acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
-		c.noteRoutingContextsActive(routingContexts)
+		c.commitPeerRoutingContextsActive(routingContexts)
 		c.overrideOtherASPs(routingContexts)
 		acknowledgement.complete()
 	} else {
@@ -1145,12 +1145,11 @@ func (c *Association) overrideOtherASPs(activated []uint32) {
 		// A challenger that waited here may meanwhile have been displaced by the
 		// preceding winner, so reassert this scope and the derived association
 		// state inside the serialized transition before changing the shared AS.
+		var activatedRoutingContexts []uint32
 		if key.RoutingContextSet {
-			c.noteRoutingContextsActive([]uint32{key.RoutingContext})
-		} else {
-			c.noteRoutingContextsActive(nil)
+			activatedRoutingContexts = []uint32{key.RoutingContext}
 		}
-		if !c.commitState(c.stateForActiveRoutingContexts()) {
+		if !c.commitPeerRoutingContextsActive(activatedRoutingContexts) {
 			as.overrideMu.Unlock()
 			continue
 		}

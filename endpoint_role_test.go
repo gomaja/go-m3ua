@@ -29,7 +29,6 @@ func TestNewEndpointRejectsInvalidRole(t *testing.T) {
 
 func TestNewEndpointSnapshotsSGPPolicy(t *testing.T) {
 	policy := &SGPConfig{
-		RecoveryTimer:                3 * time.Second,
 		RecoveryQueueMessages:        7,
 		RecoveryQueueBytes:           11,
 		RecoveryQueueTotalMessages:   13,
@@ -37,11 +36,16 @@ func TestNewEndpointSnapshotsSGPPolicy(t *testing.T) {
 		BroadcastFlowCacheEntries:    19,
 		BroadcastFlowIdentifierBytes: 23,
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, SGP: policy})
+	applicationServers := &ApplicationServerConfig{RecoveryTimer: 3 * time.Second}
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role:               RoleSGP,
+		SGP:                policy,
+		ApplicationServers: applicationServers,
+	})
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
-	policy.RecoveryTimer = time.Hour
+	applicationServers.RecoveryTimer = time.Hour
 	policy.RecoveryQueueMessages = 100
 	policy.RecoveryQueueBytes = 100
 	policy.RecoveryQueueTotalMessages = 100

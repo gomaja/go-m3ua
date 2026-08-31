@@ -111,6 +111,7 @@ func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.
 	if !listener.promoteAcceptedAssociation(asp) {
 		t.Fatal("failed to attach Association")
 	}
+	listener.as.aspStateChanged(asp, StateASPActive)
 
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})

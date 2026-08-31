@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/gomaja/go-m3ua/messages/params"
 )
 
 // Role identifies the M3UA protocol role of an Endpoint.
@@ -71,11 +73,22 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		if config.Role != RoleSGP && config.SGP != nil {
 			return nil, ErrInvalidRoleConfiguration
 		}
+		if config.Role == RoleASP && config.ApplicationServers != nil {
+			return nil, fmt.Errorf("%w: Application Server policy applies only to an SGP or IPSP", ErrInvalidRoleConfiguration)
+		}
+		if err := validateApplicationServerConfig(config.ApplicationServers); err != nil {
+			return nil, err
+		}
 		if config.Role == RoleASP && config.RoutingKeyManagement != nil {
 			return nil, fmt.Errorf("%w: Routing Key Management responder policy applies only to an SGP or IPSP", ErrInvalidRoleConfiguration)
 		}
 		if err := validateRoutingKeyManagementConfig(config.RoutingKeyManagement); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidRoleConfiguration, err)
+		}
+		if err := validateApplicationServerRoutingKeyPolicies(
+			config.ApplicationServers, config.RoutingKeyManagement,
+		); err != nil {
+			return nil, err
 		}
 		var routes *aspRoutes
 		if config.Role == RoleASP {
@@ -107,7 +120,10 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		}
 		switch config.Role {
 		case RoleSGP:
-			endpoint.as = newApplicationServersForSGP(snapshotSGPConfig(config.SGP))
+			endpoint.as = newApplicationServersForSGP(
+				snapshotApplicationServerConfig(config.ApplicationServers),
+				snapshotSGPConfig(config.SGP),
+			)
 			endpoint.nif = &nifAvailability{}
 			endpoint.destinations = newDestinations()
 		case RoleIPSP:
@@ -115,7 +131,9 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 			// layer to maintain each remote IPSP's per-AS state, including
 			// Override across all IPSPs serving the same AS. The registry is
 			// therefore Endpoint state, not Association state.
-			endpoint.as = newApplicationServers(DefaultRecoveryTimer)
+			endpoint.as = newApplicationServersForIPSP(
+				snapshotApplicationServerConfig(config.ApplicationServers),
+			)
 		}
 		return endpoint, nil
 	default:
@@ -435,6 +453,54 @@ func (e *Endpoint) validateAssociationConfig(config *AssociationConfig) error {
 	}
 	if e.role == RoleASP && e.aspRoutes != nil {
 		return e.aspRoutes.validateAssociationConfig(config)
+	}
+	return e.validateAssociationActivationPolicy(config)
+}
+
+func (e *Endpoint) validateAssociationActivationPolicy(config *AssociationConfig) error {
+	if e.as == nil || config == nil {
+		return nil
+	}
+	if e.role == RoleSGP && config.AuthorizeASP != nil {
+		// The ASP Identifier that selects the peer's immutable AS subset is only
+		// available in ASP Up. RFC 4666 Section 4.3.4.3 applies Traffic Mode
+		// agreement per AS, so validating the listener-wide inventory here would
+		// reject modes belonging only to ASes this peer will not be authorized for.
+		return nil
+	}
+
+	keys := associationConfigASKeys(config)
+	policy := newTrafficModePolicy(config)
+	if e.role == RoleIPSP && config.IPSP != nil && config.IPSP.ExchangeModel == IPSPExchangeDouble {
+		peer := config.IPSP.TrafficToPeer
+		if peer == nil {
+			return nil
+		}
+		keys = associationConfigASKeys(&AssociationConfig{
+			NetworkAppearance: peer.NetworkAppearance,
+			RoutingContexts:   peer.RoutingContexts,
+		})
+		policy = newIPSPTrafficModePolicy(peer)
+	}
+
+	return validateActivationPolicyTrafficModes(e.as, keys, policy)
+}
+
+func validateActivationPolicyTrafficModes(
+	applicationServers *applicationServers,
+	keys []ASKey,
+	policy trafficModePolicy,
+) error {
+	if applicationServers == nil {
+		return nil
+	}
+	for _, key := range keys {
+		mode, configured := policy.configuredForASKey(key)
+		if configured && mode == params.TrafficModeOverride &&
+			applicationServers.activationPolicyFor(key).requiredActive() != 1 {
+			return fmt.Errorf("%w: Override requires one active ASP for %+v",
+				ErrInvalidApplicationServerConfig, key)
+		}
 	}
 	return nil
 }

@@ -14,14 +14,20 @@ asp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP})
 sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
 ```
 
-Configure SGP-wide recovery and distribution policy on the Endpoint rather
-than on any one Association:
+Configure Application Server state and SGP distribution policy on the Endpoint
+rather than on any one Association:
 
 ```go
 sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
     Role: m3ua.RoleSGP,
-    SGP: &m3ua.SGPConfig{
+    ApplicationServers: &m3ua.ApplicationServerConfig{
         RecoveryTimer: 2 * time.Second,
+        DefaultActivationPolicy: m3ua.ASActivationPolicy{
+            RequiredActiveASPs: 2,
+        },
+    },
+    SGP: &m3ua.SGPConfig{
+        RecoveryQueueMessages: 1_024,
     },
 })
 ```
@@ -232,6 +238,46 @@ Unresolved REG/DEREG outcomes share a 1,024-result Association budget. A call
 that could exceed it returns `ErrRKMOutcomeLimit` without writing a new request;
 late responses release capacity.
 
+## Application Server activation
+
+`EndpointConfig.ApplicationServers` configures immutable Application Server
+state for an SGP or IPSP Endpoint. `RequiredActiveASPs` is n from RFC 4666
+Sections 1.4.4.1 and 4.3.2. Zero selects one. An exact `ASKey` entry overrides
+the default:
+
+```go
+sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Role: m3ua.RoleSGP,
+    ApplicationServers: &m3ua.ApplicationServerConfig{
+        DefaultActivationPolicy: m3ua.ASActivationPolicy{
+            RequiredActiveASPs: 2,
+        },
+        ActivationPolicies: map[m3ua.ASKey]m3ua.ASActivationPolicy{
+            {
+                NetworkAppearance:    10,
+                NetworkAppearanceSet: true,
+                RoutingContext:       20,
+                RoutingContextSet:    true,
+            }: {
+                RequiredActiveASPs: 3,
+            },
+        },
+    },
+})
+```
+
+Strict startup is the default: the AS does not carry DATA or SSNM until n ASPs
+are ASP-ACTIVE. Set `SmoothStart` only when the deployment deliberately uses
+the RFC 4666 Section 4.3.2 exception that permits traffic after the first ASP
+becomes active. Once an AS is active, it remains active while at least one ASP
+is active; Loadshare and Broadcast peers receive the Section 3.8.2 insufficient
+resources advisory while the active count is below n.
+
+Override Traffic Mode requires an effective `RequiredActiveASPs` of one.
+Invalid provisioned or dynamically registered Override combinations are
+rejected before they change live AS policy. Locally configured Association
+policy is rejected before SCTP setup.
+
 ## Renamed API
 
 | Before v1.2 | v1.2 |
@@ -256,7 +302,8 @@ late responses release capacity.
 | `SetSackConfig`, `SetSctpSackConfig` | `SetSCTPSACK` |
 | `SetNoDelayConfig`, `SetSctpNoDelayConfig` | `SetSCTPNoDelay` |
 | `SignalingLinkSelection` | `SignallingLinkSelection` |
-| `AssociationConfig.Recovery*`, `AssociationConfig.BroadcastFlow*` | `EndpointConfig.SGP` |
+| `AssociationConfig.RecoveryTimer` | `EndpointConfig.ApplicationServers` |
+| `AssociationConfig.RecoveryQueue*`, `AssociationConfig.BroadcastFlow*` | `EndpointConfig.SGP` |
 
 No compatibility aliases remain. This makes role and association ownership
 visible at every call site and prevents transport orientation from selecting
@@ -269,6 +316,9 @@ one role are validated before association processing:
 
 - `ASPIdentifier` is local ASP policy and is rejected on an SGP endpoint.
 - `AuthorizeASP` is SGP Association policy and is rejected on an ASP endpoint.
+- Application Server recovery and activation policy belongs to
+  `ApplicationServerConfig`; supplying `EndpointConfig.ApplicationServers` for
+  an ASP returns `ErrInvalidRoleConfiguration`.
 - Recovery queues and Broadcast distribution policy belong to `SGPConfig`;
   supplying `EndpointConfig.SGP` for an ASP or IPSP returns
   `ErrInvalidRoleConfiguration`.

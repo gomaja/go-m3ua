@@ -1154,6 +1154,7 @@ func distributionFixtureConfigured(t *testing.T, trafficMode uint32, configure f
 type distributionFixtureConfig struct {
 	*AssociationConfig
 	*SGPConfig
+	*ApplicationServerConfig
 }
 
 func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingContexts []uint32, configure func(*distributionFixtureConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
@@ -1163,11 +1164,20 @@ func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingCon
 		routingContexts, params.ServiceIndSCCP, 0, 0, 1,
 	)
 	config.CorrelationID = nil
-	sgpConfig := &SGPConfig{RecoveryTimer: time.Hour}
+	sgpConfig := &SGPConfig{}
+	applicationServerConfig := &ApplicationServerConfig{RecoveryTimer: time.Hour}
 	if configure != nil {
-		configure(&distributionFixtureConfig{AssociationConfig: config, SGPConfig: sgpConfig})
+		configure(&distributionFixtureConfig{
+			AssociationConfig:       config,
+			SGPConfig:               sgpConfig,
+			ApplicationServerConfig: applicationServerConfig,
+		})
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, SGP: sgpConfig})
+	endpoint, err := NewEndpoint(EndpointConfig{
+		Role:               RoleSGP,
+		SGP:                sgpConfig,
+		ApplicationServers: applicationServerConfig,
+	})
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}

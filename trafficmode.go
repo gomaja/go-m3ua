@@ -60,6 +60,13 @@ func (p trafficModePolicy) configured(routingContext uint32) (uint32, bool) {
 	return p.defaultMode, p.defaultModeSet
 }
 
+func (p trafficModePolicy) configuredForASKey(key ASKey) (uint32, bool) {
+	if !key.RoutingContextSet {
+		return p.defaultMode, p.defaultModeSet
+	}
+	return p.configured(key.RoutingContext)
+}
+
 func (p trafficModePolicy) defaultParam() *params.Param {
 	if !p.defaultModeSet {
 		return nil

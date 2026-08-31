@@ -4,6 +4,8 @@ import (
 	"slices"
 	"sort"
 	"sync"
+
+	"github.com/gomaja/go-m3ua/messages/params"
 )
 
 const (
@@ -341,8 +343,11 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 			continue
 		}
 		trafficModeConflicts := registrationTrafficModeConflictsLocked(
+			applicationServers,
+			association,
 			lockedApplicationServers,
 			requests,
+			registry.entries,
 			entries,
 			results,
 		)
@@ -419,38 +424,81 @@ func unlockRegistrationApplicationServers(locked []lockedRegistrationApplication
 }
 
 func registrationTrafficModeConflictsLocked(
+	registry *applicationServers,
+	association *Association,
 	locked []lockedRegistrationApplicationServer,
 	requests []RoutingKeyRegistrationRequest,
+	committedEntries map[uint32]*routingKeyEntry,
 	entries map[uint32]*routingKeyEntry,
 	results []RoutingKeyRegistrationResult,
 ) []int {
-	applicationServers := make(map[ASKey]*applicationServer, len(locked))
+	serversByKey := make(map[ASKey]*applicationServer, len(locked))
 	for _, entry := range locked {
-		applicationServers[entry.key] = entry.applicationServer
+		serversByKey[entry.key] = entry.applicationServer
 	}
+	type effectiveTrafficMode struct {
+		mode uint32
+		set  bool
+	}
+	effectiveModes := make(map[ASKey]effectiveTrafficMode)
 	var conflicts []int
 	for index, result := range results {
 		if result.Status != RegistrationSuccessfullyRegistered &&
 			result.Status != RegistrationRoutingKeyAlreadyRegistered {
 			continue
 		}
-		if !requests[index].RoutingKey.TrafficModeSet {
-			continue
-		}
 		entry := entries[result.RoutingContext]
 		if entry == nil {
 			continue
 		}
-		applicationServer := applicationServers[entry.asKey()]
+		key := entry.asKey()
+		effective, initialized := effectiveModes[key]
+		if !initialized {
+			if committed := committedEntries[result.RoutingContext]; committed != nil &&
+				committed.routingKey.TrafficModeSet {
+				effective.mode = committed.routingKey.TrafficMode
+				effective.set = true
+			} else if association != nil {
+				effective.mode, effective.set = association.trafficModePolicy().configuredForASKey(key)
+			}
+			effectiveModes[key] = effective
+		}
+		requestedMode := requests[index].RoutingKey.TrafficMode
+		requestedModeSet := requests[index].RoutingKey.TrafficModeSet
+		candidate := effective
+		if requestedModeSet {
+			candidate = effectiveTrafficMode{mode: requestedMode, set: true}
+		}
+		// RFC 4666 Sections 3.6.1 and 4.4.1 make Traffic Mode optional in
+		// REG REQ. When it is omitted, the Association policy remains the
+		// effective mode for the allocated Routing Context. Evaluate each
+		// Registration Result in message order and publish an explicit mode only
+		// after that request is accepted, so a rejected duplicate cannot alter a
+		// sibling request's effective mode.
+		if candidate.set && candidate.mode == params.TrafficModeOverride &&
+			applicationServersRegistryRequiresSeveralActive(registry, key) {
+			conflicts = append(conflicts, index)
+			continue
+		}
+		if !requestedModeSet {
+			continue
+		}
 		// RFC 4666 Section 4.4.1 requires a requested Traffic Mode to match
 		// the existing Routing Key. The live AS mode is part of that existing
 		// traffic identity even when the provisioned Routing Key omitted it.
+		applicationServer := serversByKey[key]
 		if applicationServer != nil && applicationServer.trafficMode != 0 &&
-			applicationServer.trafficMode != requests[index].RoutingKey.TrafficMode {
+			applicationServer.trafficMode != requestedMode {
 			conflicts = append(conflicts, index)
+			continue
 		}
+		effectiveModes[key] = candidate
 	}
 	return conflicts
+}
+
+func applicationServersRegistryRequiresSeveralActive(registry *applicationServers, key ASKey) bool {
+	return registry != nil && registry.activationPolicyFor(key).requiredActive() != 1
 }
 
 func adoptRegistrationTrafficModesLocked(
