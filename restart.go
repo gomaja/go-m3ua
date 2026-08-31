@@ -144,7 +144,8 @@ func (c *Association) handleSCTPRestart() {
 	c.pauseDestinations()
 	c.sendState(StateASPDown)
 	c.notifyManagement(&ManagementIndication{
-		Kind: ManagementSCTPRestart,
+		Kind:   ManagementSCTPRestart,
+		ASKeys: endpointASPStatusKeys(c),
 		Description: "the peer restarted the SCTP association; " +
 			"the remote ASP/IPSP state moved to ASP-DOWN and recovery state was cleared",
 	})

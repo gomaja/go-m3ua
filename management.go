@@ -55,8 +55,12 @@ func (c *Association) handleError(e *messages.Error) error {
 	ind.RoutingContext, ind.RoutingContextSet = firstRoutingContext(e.RoutingContext)
 	ind.NetworkAppearance, ind.NetworkAppearanceSet = uint32ParamOf(
 		e.NetworkAppearance, params.NetworkAppearance, (*params.Param).NetworkAppearance)
+	ind.ASKeys = c.managementASKeys(e.NetworkAppearance, e.RoutingContext)
 	if e.AffectedPointCode != nil {
 		ind.AffectedPointCodes = e.AffectedPointCode.AffectedPointCodes()
+		ind.AffectedDestinations = managementAffectedDestinations(
+			e.NetworkAppearance, e.RoutingContext, e.AffectedPointCode,
+		)
 	}
 	c.notifyManagement(ind)
 
@@ -210,12 +214,95 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 	if n.RoutingContext == nil {
 		ind.RoutingContexts = append([]uint32(nil), configured...)
 	}
+	ind.ASKeys = c.managementASKeys(c.localNetworkAppearance(), n.RoutingContext)
 	ind.RoutingContext, ind.RoutingContextSet = firstRoutingContext(n.RoutingContext)
 	ind.ASPIdentifier, ind.ASPIdentifierSet = uint32ParamOf(
 		n.AspIdentifier, params.AspIdentifier, (*params.Param).AspIdentifier)
 	c.notifyManagement(ind)
 
 	return nil
+}
+
+func (c *Association) managementASKeys(
+	networkAppearance,
+	routingContext *params.Param,
+) []ASKey {
+	appearance, appearanceSet := appearanceOf(networkAppearance)
+	routingContexts := routingContextsOf(routingContext)
+	if len(routingContexts) == 0 {
+		if routingContext == nil {
+			configured := c.configuredLocalASKeysForStatus()
+			if len(configured) > 0 {
+				return configured
+			}
+		}
+		if appearanceSet {
+			return []ASKey{{
+				NetworkAppearance: appearance, NetworkAppearanceSet: true,
+			}}
+		}
+		return nil
+	}
+
+	configured := c.configuredLocalASKeysForStatus()
+	keys := make([]ASKey, 0, len(routingContexts))
+	for _, routingContext := range routingContexts {
+		if appearanceSet {
+			keys = append(keys, ASKey{
+				NetworkAppearance: appearance, NetworkAppearanceSet: true,
+				RoutingContext: routingContext, RoutingContextSet: true,
+			})
+			continue
+		}
+		matched := false
+		for _, key := range configured {
+			if key.RoutingContextSet && key.RoutingContext == routingContext {
+				keys = append(keys, key)
+				matched = true
+			}
+		}
+		if !matched {
+			keys = append(keys, ASKey{
+				RoutingContext: routingContext, RoutingContextSet: true,
+			})
+		}
+	}
+	return uniqueASKeys(keys)
+}
+
+func managementAffectedDestinations(
+	networkAppearance,
+	routingContext,
+	affectedPointCode *params.Param,
+) []AffectedDestination {
+	if affectedPointCode == nil {
+		return nil
+	}
+	pointCodes := affectedPointCode.AffectedPointCodes()
+	masks := affectedPointCode.AffectedPointCodeMasks()
+	if len(pointCodes) == 0 || len(pointCodes) != len(masks) {
+		return nil
+	}
+	appearance, appearanceSet := appearanceOf(networkAppearance)
+	routingContexts := routingContextsOf(routingContext)
+	destinations := make([]AffectedDestination, 0, len(pointCodes)*max(1, len(routingContexts)))
+	for index, pointCode := range pointCodes {
+		if len(routingContexts) == 0 {
+			destinations = append(destinations, AffectedDestination{
+				NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet,
+				PointCode: pointCode, Mask: masks[index],
+			})
+			continue
+		}
+		for _, routingContext := range routingContexts {
+			destinations = append(destinations, AffectedDestination{
+				NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet,
+				RoutingContext: routingContext, RoutingContextSet: true,
+				PointCode: pointCode, Mask: masks[index],
+			})
+		}
+	}
+	return destinations
 }
 
 // notifyStatusName renders a Status as the name RFC 4666 Section 3.8.2 gives it.

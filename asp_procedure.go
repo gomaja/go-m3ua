@@ -107,7 +107,8 @@ func (c *Association) aspProcedureMode(procedure aspProcedure) ASPProcedureMode 
 // ASPUp initiates the RFC 4666 Section 4.3.4.1 ASP Up procedure and waits for
 // ASP Up Ack. It is valid for an ASP and for the locally initiated direction of
 // an IPSP exchange.
-func (c *Association) ASPUp(ctx context.Context) error {
+func (c *Association) ASPUp(ctx context.Context) (err error) {
+	defer func() { c.notifyASPProcedureFailure("ASP Up", nil, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -126,7 +127,8 @@ func (c *Association) ASPUp(ctx context.Context) error {
 
 // ASPDown initiates the RFC 4666 Section 4.3.4.2 ASP Down procedure and waits
 // for ASP Down Ack.
-func (c *Association) ASPDown(ctx context.Context) error {
+func (c *Association) ASPDown(ctx context.Context) (err error) {
+	defer func() { c.notifyASPProcedureFailure("ASP Down", nil, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -148,7 +150,8 @@ func (c *Association) ASPDown(ctx context.Context) error {
 // ASPActive initiates the RFC 4666 Section 4.3.4.3 ASP Active procedure for
 // the exact Application Servers and waits for every ASP Active Ack. With no
 // keys it requests every configured local AS.
-func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) error {
+func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) {
+	defer func() { c.notifyASPProcedureFailure("ASP Active", keys, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -174,7 +177,8 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) error {
 // ASPInactive initiates the RFC 4666 Section 4.3.4.4 ASP Inactive procedure
 // for the exact Application Servers and waits for ASP Inactive Ack. With no
 // keys it requests every configured local AS.
-func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) error {
+func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error) {
+	defer func() { c.notifyASPProcedureFailure("ASP Inactive", keys, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -217,6 +221,26 @@ func (c *Association) validateExplicitASPProcedure(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+func (c *Association) notifyASPProcedureFailure(
+	operation string,
+	keys []ASKey,
+	cause error,
+) {
+	if c == nil || cause == nil {
+		return
+	}
+	scope := uniqueASKeys(keys)
+	if len(keys) == 0 {
+		scope = c.configuredLocalASKeysForStatus()
+	}
+	c.notifyManagement(&ManagementIndication{
+		Kind:        ManagementError,
+		ASKeys:      scope,
+		Cause:       cause,
+		Description: fmt.Sprintf("%s failed: %v", operation, cause),
+	})
 }
 
 func (c *Association) localASPProcedureDirectionAvailable() bool {

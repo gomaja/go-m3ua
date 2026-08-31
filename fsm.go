@@ -550,6 +550,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 	if m3.Version() != 1 {
 		c.notifyManagement(&ManagementIndication{
 			Kind:        ManagementError,
+			ASKeys:      endpointASPStatusKeys(c),
 			ErrorCode:   params.InvalidVersionError,
 			Description: errorCodeName(params.InvalidVersionError),
 		})

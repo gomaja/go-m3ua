@@ -1755,6 +1755,8 @@ func (c *Association) closeWith(cause error) error {
 		c.closeStateChanges()
 		c.notifyManagement(&ManagementIndication{
 			Kind:        ManagementSCTPRelease,
+			ASKeys:      endpointASPStatusKeys(c),
+			Cause:       cause,
 			Description: causeDescription(cause),
 		})
 		// Ends any range over ManagementIndications().
@@ -3285,6 +3287,15 @@ func causeDescription(cause error) string {
 // logged without a lookup table.
 type ManagementIndication struct {
 	Kind ManagementIndicationKind
+	// Association is the stable Endpoint-local identity of the Association that
+	// produced this indication. Zero means the Association was not owned by an
+	// Endpoint.
+	Association AssociationID
+
+	// ASKeys is the complete exact Application Server scope, including Network
+	// Appearance and contextless-AS presence. The slice is owned by the
+	// indication.
+	ASKeys []ASKey
 
 	// StatusType and StatusInfo are the two halves of the Status parameter of
 	// a received Notify (RFC 4666 Section 3.8.2). Set for ManagementNotify.
@@ -3338,6 +3349,15 @@ type ManagementIndication struct {
 	// or unauthorized Point Code(s) MUST be included along with the Network
 	// Appearance and/or Routing Context associated with the Point Code(s)."
 	AffectedPointCodes []uint32
+
+	// AffectedDestinations preserves every Affected Point Code mask and its
+	// exact Network Appearance and Routing Context scope. The legacy
+	// AffectedPointCodes projection remains available above.
+	AffectedDestinations []AffectedDestination
+
+	// Cause is the local failure reported by M-ERROR or M-SCTP_RELEASE. A peer
+	// Error message has ErrorCode instead and leaves Cause nil.
+	Cause error
 
 	// Description names the status or the error code in the RFC's own words.
 	Description string
@@ -3406,6 +3426,18 @@ func (c *Association) ManagementIndications() <-chan *ManagementIndication {
 // notifyManagement delivers an indication without blocking, and cannot send on
 // a channel that Close has already closed.
 func (c *Association) notifyManagement(ind *ManagementIndication) {
+	if ind == nil {
+		return
+	}
+	snapshot := *ind
+	snapshot.Association = c.ID()
+	snapshot.ASKeys = append([]ASKey(nil), ind.ASKeys...)
+	snapshot.RoutingContexts = append([]uint32(nil), ind.RoutingContexts...)
+	snapshot.AffectedPointCodes = append([]uint32(nil), ind.AffectedPointCodes...)
+	snapshot.AffectedDestinations = append(
+		[]AffectedDestination(nil), ind.AffectedDestinations...,
+	)
+
 	c.muMgmt.Lock()
 	defer c.muMgmt.Unlock()
 
@@ -3414,7 +3446,7 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 	}
 
 	select {
-	case c.mgmtChan <- ind:
+	case c.mgmtChan <- &snapshot:
 	default:
 		c.closeForIndicationOverflow()
 	}
