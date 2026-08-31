@@ -215,6 +215,55 @@ func TestEndpointASPStatusesPreserveDirectionAndExactASKey(t *testing.T) {
 	})
 }
 
+func TestEndpointASPStatusReportsPartialOverridePerApplicationServer(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+	association.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
+	association.noteRoutingContextsOverridden([]uint32{2})
+	if got := association.State(); got != StateASPActive {
+		t.Fatalf("Association state = %v, want ASP-ACTIVE for remaining Routing Context 1", got)
+	}
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("track Association")
+	}
+
+	for _, test := range []struct {
+		routingContext uint32
+		want           State
+	}{
+		{routingContext: 1, want: StateASPActive},
+		{routingContext: 2, want: StateASPInactive},
+	} {
+		key := ASPStatusKey{
+			Association: association.ID(),
+			AS: ASKey{
+				RoutingContext:    test.routingContext,
+				RoutingContextSet: true,
+			},
+		}
+		status, ok := endpoint.ASPStatus(key)
+		if !ok {
+			t.Fatalf("ASPStatus did not find Routing Context %d", test.routingContext)
+		}
+		if !status.LocalStateSet || status.LocalState != test.want {
+			t.Errorf("Routing Context %d status = %+v, want local %v",
+				test.routingContext, status, test.want)
+		}
+	}
+
+	statuses := endpoint.ASPStatuses()
+	if len(statuses) != 2 ||
+		statuses[0].Key.AS.RoutingContext != 1 || statuses[0].LocalState != StateASPActive ||
+		statuses[1].Key.AS.RoutingContext != 2 || statuses[1].LocalState != StateASPInactive {
+		t.Fatalf("ASPStatuses = %+v, want RC 1 ASP-ACTIVE and RC 2 ASP-INACTIVE", statuses)
+	}
+}
+
 func TestEndpointASPStatusKeysAreDeterministic(t *testing.T) {
 	association, _ := newTestConn(t, StateASPActive, RoleASP)
 	want := []ASKey{
