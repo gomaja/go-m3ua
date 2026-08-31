@@ -112,6 +112,44 @@ func TestManagementErrorAffectedDestinationsUseResolvedAssociationScope(t *testi
 	}
 }
 
+func TestManagementErrorWithAppearanceAndNoContextStaysInThatAppearance(t *testing.T) {
+	_, association := trackedManagementAssociation(t, StateASPActive, 10, 1)
+	association.dynamicPeerASKeys = make(map[uint32]ASKey)
+	association.dynamicPeerASKeyVersions = make(map[uint32]uint64)
+	association.dynamicPeerTrafficModes = make(map[uint32]uint32)
+	association.addDynamicASKey(ASKey{
+		NetworkAppearance: 20, NetworkAppearanceSet: true,
+		RoutingContext: 2, RoutingContextSet: true,
+	}, testRoutingKey(20, 0x654321, params.ServiceIndSCCP), false)
+
+	if err := association.handleError(messages.NewError(
+		params.NewErrorCode(params.ErrDestinationStatusUnknown),
+		nil,
+		params.NewNetworkAppearance(20),
+		params.NewAffectedPointCode(0x123456),
+		nil,
+	)); err != nil {
+		t.Fatalf("handleError: %v", err)
+	}
+	indication := <-association.ManagementIndications()
+	wantKey := ASKey{
+		NetworkAppearance: 20, NetworkAppearanceSet: true,
+		RoutingContext: 2, RoutingContextSet: true,
+	}
+	if !reflect.DeepEqual(indication.ASKeys, []ASKey{wantKey}) {
+		t.Fatalf("ASKeys = %+v, want [%+v]", indication.ASKeys, wantKey)
+	}
+	wantDestinations := []AffectedDestination{{
+		NetworkAppearance: 20, NetworkAppearanceSet: true,
+		RoutingContext: 2, RoutingContextSet: true,
+		PointCode: 0x123456,
+	}}
+	if !reflect.DeepEqual(indication.AffectedDestinations, wantDestinations) {
+		t.Fatalf("AffectedDestinations = %+v, want %+v",
+			indication.AffectedDestinations, wantDestinations)
+	}
+}
+
 func TestManagementIndicationOwnsAllSlices(t *testing.T) {
 	_, association := trackedManagementAssociation(t, StateASPActive, 10, 1)
 	indication := &ManagementIndication{

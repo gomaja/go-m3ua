@@ -230,8 +230,19 @@ func (c *Association) managementASKeys(
 	if len(routingContexts) == 0 {
 		if routingContext == nil {
 			configured := c.configuredLocalASKeysForStatus()
-			if len(configured) > 0 {
+			if len(configured) > 0 && !appearanceSet {
 				return configured
+			}
+			if appearanceSet {
+				matching := make([]ASKey, 0, len(configured))
+				for _, key := range configured {
+					if key.NetworkAppearanceSet && key.NetworkAppearance == appearance {
+						matching = append(matching, key)
+					}
+				}
+				if len(matching) > 0 {
+					return uniqueASKeys(matching)
+				}
 			}
 		}
 		if appearanceSet {
