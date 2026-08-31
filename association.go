@@ -359,6 +359,11 @@ type Association struct {
 	// indicationOverflow ensures one state or management queue overflow starts
 	// one asynchronous association teardown.
 	indicationOverflow atomic.Bool
+	// managementID is the Endpoint-local stable identity used by Layer
+	// Management status and indication APIs. It is separate from assocID,
+	// which is the kernel SCTP association identifier and can change after an
+	// SCTP restart.
+	managementID atomic.Uint64
 	// assocID is the kernel's ID for this association, recorded at setup so a
 	// notification handler shared across a Listener's associations can route an
 	// event to the Association it concerns. Atomic: written on the goroutine that set
@@ -1849,6 +1854,18 @@ func (c *Association) State() State {
 	c.muState.RLock()
 	defer c.muState.RUnlock()
 	return c.state
+}
+
+// ID returns the immutable identity assigned by the owning Endpoint.
+//
+// Zero means the Association has not been admitted to an Endpoint. The value
+// is local to one Endpoint lifetime and is unrelated to the kernel SCTP
+// association identifier.
+func (c *Association) ID() AssociationID {
+	if c == nil {
+		return 0
+	}
+	return AssociationID(c.managementID.Load())
 }
 
 // StreamID returns the outbound SCTP stream template. Association writes copy

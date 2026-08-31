@@ -45,21 +45,23 @@ func (r Role) String() string {
 type Endpoint struct {
 	role Role
 
-	mu           sync.Mutex
-	closed       bool
-	closeErr     error
-	listeners    map[*Listener]struct{}
-	associations map[*Association]struct{}
-	done         chan struct{}
-	ctx          context.Context
-	cancel       context.CancelCauseFunc
-	operations   sync.WaitGroup
-	as           *applicationServers
-	aspRoutes    *aspRoutes
-	nif          *nifAvailability
-	destinations *destinations
-	mtp3Restarts *mtp3RestartRegistry
-	routingKeys  *routingKeyRegistry
+	mu                sync.Mutex
+	closed            bool
+	closeErr          error
+	listeners         map[*Listener]struct{}
+	associations      map[*Association]struct{}
+	associationsByID  map[AssociationID]*Association
+	nextAssociationID AssociationID
+	done              chan struct{}
+	ctx               context.Context
+	cancel            context.CancelCauseFunc
+	operations        sync.WaitGroup
+	as                *applicationServers
+	aspRoutes         *aspRoutes
+	nif               *nifAvailability
+	destinations      *destinations
+	mtp3Restarts      *mtp3RestartRegistry
+	routingKeys       *routingKeyRegistry
 }
 
 // NewEndpoint creates an M3UA endpoint with an immutable protocol role and
@@ -108,15 +110,16 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		endpoint := &Endpoint{
-			role:         config.Role,
-			listeners:    make(map[*Listener]struct{}),
-			associations: make(map[*Association]struct{}),
-			done:         make(chan struct{}),
-			ctx:          ctx,
-			cancel:       cancel,
-			mtp3Restarts: &mtp3RestartRegistry{},
-			aspRoutes:    routes,
-			routingKeys:  routingKeys,
+			role:             config.Role,
+			listeners:        make(map[*Listener]struct{}),
+			associations:     make(map[*Association]struct{}),
+			associationsByID: make(map[AssociationID]*Association),
+			done:             make(chan struct{}),
+			ctx:              ctx,
+			cancel:           cancel,
+			mtp3Restarts:     &mtp3RestartRegistry{},
+			aspRoutes:        routes,
+			routingKeys:      routingKeys,
 		}
 		switch config.Role {
 		case RoleSGP:
@@ -208,11 +211,20 @@ func (e *Endpoint) trackAssociation(association *Association) bool {
 	if e.closed {
 		return false
 	}
+	if association.endpoint != nil && association.endpoint != e {
+		return false
+	}
+	if _, tracked := e.associations[association]; tracked {
+		return true
+	}
 	if e.aspRoutes != nil && !e.aspRoutes.attach(association) {
 		return false
 	}
+	e.nextAssociationID++
+	association.managementID.Store(uint64(e.nextAssociationID))
 	association.endpoint = e
 	e.associations[association] = struct{}{}
+	e.associationsByID[e.nextAssociationID] = association
 	return true
 }
 
@@ -224,6 +236,7 @@ func (e *Endpoint) forgetAssociation(association *Association) {
 	defer association.rkmLifecycleMu.Unlock()
 	e.mu.Lock()
 	delete(e.associations, association)
+	delete(e.associationsByID, association.ID())
 	applicationServers := e.as
 	routingKeys := e.routingKeys
 	aspRoutes := e.aspRoutes

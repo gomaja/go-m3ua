@@ -127,6 +127,12 @@ type DestinationRange struct {
 	Mask uint8
 	// State is the availability installed by this update.
 	State DestinationState
+	// CongestionLevel is the RFC 4666 Section 3.4.4 congestion level retained
+	// for a locally originated SCON, valid only when CongestionLevelSet is true.
+	CongestionLevel uint8
+	// CongestionLevelSet distinguishes an omitted Congestion Indications
+	// parameter from explicit level zero, which reports congestion abatement.
+	CongestionLevelSet bool
 }
 
 type destinationKey struct {
@@ -386,6 +392,23 @@ func (d *destinations) lookupRange(scope destinationKey, pointCode uint32, mask 
 }
 
 func (d *destinations) lookupRangeLocked(scope destinationKey, pointCode uint32, mask uint8) (DestinationState, bool) {
+	record, known := d.lookupRecordLocked(scope, pointCode, mask)
+	if known {
+		return record.rangeValue.State, true
+	}
+	return DestinationAvailable, false
+}
+
+func (d *destinations) lookupRecord(scope destinationKey, pointCode uint32, mask uint8) (destinationRecord, bool) {
+	if d == nil {
+		return destinationRecord{}, false
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lookupRecordLocked(scope, pointCode, mask)
+}
+
+func (d *destinations) lookupRecordLocked(scope destinationKey, pointCode uint32, mask uint8) (destinationRecord, bool) {
 	var newest destinationRecord
 	known := false
 	for _, record := range d.state {
@@ -398,10 +421,7 @@ func (d *destinations) lookupRangeLocked(scope destinationKey, pointCode uint32,
 			known = true
 		}
 	}
-	if known {
-		return newest.rangeValue.State, true
-	}
-	return DestinationAvailable, false
+	return newest, known
 }
 
 func (d *destinations) snapshotForScope(scope destinationKey) map[uint32]DestinationState {
