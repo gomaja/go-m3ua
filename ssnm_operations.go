@@ -582,7 +582,7 @@ func fanoutEndpointSSNM(
 		go func() {
 			defer waitGroup.Done()
 			results[index] = deliveries[index].association.writeMandatoryControls(
-				deliveries[index].messages, false, true,
+				deliveries[index].messages, true, true,
 			)
 		}()
 	}

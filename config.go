@@ -295,10 +295,12 @@ type IPSPConfig struct {
 	ASPSMExchange IPSPASPSMExchangeModel
 	// InitiateASPSM starts this IPSP's ASP Up procedure independently of SCTP
 	// association initiation. Normal Double Exchange requires TrafficToLocal;
-	// the agreed single-ASPSM simplification may establish both directions.
+	// the agreed single-ASPSM simplification may establish both directions. A
+	// non-nil AssociationConfig.ASPProcedures policy supersedes this flag.
 	InitiateASPSM bool
 	// InitiateASPTM starts this IPSP's ASP Active procedure after its local
-	// ASPSM direction becomes ASP-INACTIVE.
+	// ASPSM direction becomes ASP-INACTIVE. A non-nil
+	// AssociationConfig.ASPProcedures policy supersedes this flag.
 	InitiateASPTM bool
 	// TrafficToLocal configures DATA the peer sends to this IPSP.
 	TrafficToLocal *IPSPTrafficConfig
@@ -463,7 +465,8 @@ type AssociationConfig struct {
 	Compatibility CompatibilityPolicy
 	// ASPProcedures selects automatic or explicit Layer Management initiation
 	// for ASP Up, ASP Down, ASP Active, and ASP Inactive. A nil policy preserves
-	// the historical role-specific lifecycle.
+	// the historical role-specific lifecycle. A non-nil policy fully supersedes
+	// IPSPConfig.InitiateASPSM and IPSPConfig.InitiateASPTM.
 	ASPProcedures *ASPProcedurePolicy
 	// PeerSGP identifies the remote Signalling Gateway Process for an
 	// Association owned by an ASP Endpoint. It is invalid for an SGP Endpoint.

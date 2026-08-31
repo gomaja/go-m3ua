@@ -195,7 +195,9 @@ func endpointASPStatusKeys(association *Association) []ASKey {
 	if association.role == RoleASP || association.isIPSPDoubleExchange() {
 		keys = append(keys, association.configuredLocalASKeysForStatus()...)
 	}
-	return uniqueASKeys(keys)
+	keys = uniqueASKeys(keys)
+	sort.Slice(keys, func(i, j int) bool { return compareASKey(keys[i], keys[j]) < 0 })
+	return keys
 }
 
 func (e *Endpoint) aspStatusForAssociation(association *Association, key ASKey) (ASPStatus, bool) {

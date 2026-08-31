@@ -391,6 +391,12 @@ type Association struct {
 	// A channel gate lets a queued caller stop on context cancellation or
 	// Association closure instead of blocking indefinitely behind another peer.
 	rkmRequestGate chan struct{}
+	// aspProcedureGate serializes explicit Layer Management ASP procedures.
+	// ASPSM and ASPTM acknowledgements have no transaction identifier, so a
+	// second caller must not supersede a request whose first caller still owns
+	// the result. A channel gate keeps the wait context-aware.
+	aspProcedureGateOnce sync.Once
+	aspProcedureGate     chan struct{}
 	// rkmLifecycleMu serializes responder-side RKM state publication with
 	// association teardown so an in-flight REG RSP cannot recreate membership
 	// after the Endpoint has forgotten the association.

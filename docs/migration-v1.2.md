@@ -349,8 +349,9 @@ if err := association.DestinationStateAudit(m3ua.DestinationStateAuditRequest{
 }
 ```
 
-An SGP originates SCON or DUPU through Endpoint so the message reaches every
-concerned active ASP without application-side Association iteration:
+An SGP originates SCON or DUPU through Endpoint. The Endpoint attempts
+delivery to every concerned active ASP and reports failed Association IDs
+without application-side Association iteration:
 
 ```go
 err := endpoint.SignallingCongestion(m3ua.SignallingCongestionRequest{

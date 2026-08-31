@@ -710,6 +710,101 @@ func TestSSNMOperationConcurrentAssociationCloseReturnsTypedFailure(t *testing.T
 	close(writeRelease)
 }
 
+func TestSSNMOperationRevalidatesActiveScopeAfterFanoutSelection(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
+	association.as.register(association.configuredASKeys())
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("trackAssociation")
+	}
+	association.noteRoutingContextsActive([]uint32{1})
+	key := ASKey{
+		NetworkAppearance: 7, NetworkAppearanceSet: true,
+		RoutingContext: 1, RoutingContextSet: true,
+	}
+	applicationServer := endpoint.as.get(key)
+	applicationServer.setTrafficMode(params.TrafficModeLoadshare)
+	applicationServer.setASPState(association, StateASPActive, time.Hour)
+
+	firstWriteEntered := make(chan struct{})
+	releaseFirstWrite := make(chan struct{})
+	secondWrite := make(chan messages.M3UA, 1)
+	writes := 0
+	association.notificationQueue = make(chan mandatoryControl, 2)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		writes++
+		if writes == 1 {
+			close(firstWriteEntered)
+			<-releaseFirstWrite
+		} else {
+			secondWrite <- message
+		}
+		return message.MarshalLen(), nil
+	}
+	if err := association.writeMandatoryControls(
+		[]messages.M3UA{messages.NewNotify(params.NewStatus(params.AsStateActive), nil, nil, nil)},
+		false,
+		false,
+	); err != nil {
+		t.Fatalf("queue blocking control: %v", err)
+	}
+	select {
+	case <-firstWriteEntered:
+	case <-time.After(time.Second):
+		t.Fatal("blocking control did not enter the writer")
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		result <- endpoint.SignallingCongestion(SignallingCongestionRequest{
+			Scope: SSNMScope{
+				NetworkAppearance: 7, NetworkAppearanceSet: true,
+				RoutingContexts: []uint32{1}, RoutingContextSet: true,
+			},
+			Destinations: []PointCodeRange{{PointCode: 1}},
+		})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(association.notificationQueue) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(association.notificationQueue) == 0 {
+		close(releaseFirstWrite)
+		t.Fatal("SSNM control was not queued after target selection")
+	}
+
+	association.noteRoutingContextsInactive([]uint32{1})
+	applicationServer.setASPState(association, StateASPInactive, time.Hour)
+	close(releaseFirstWrite)
+
+	select {
+	case err := <-result:
+		var deliveryError *SSNMDeliveryError
+		if !errors.As(err, &deliveryError) {
+			t.Fatalf("fan-out error = %v, want *SSNMDeliveryError", err)
+		}
+		if len(deliveryError.Failed) != 1 ||
+			deliveryError.Failed[0].Association != association.ID() ||
+			!errors.Is(deliveryError.Failed[0].Cause, ErrRoutingContextNotActive) {
+			t.Fatalf("deactivated delivery failure = %+v", deliveryError.Failed)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Endpoint SCON did not finish after the blocking write was released")
+	}
+	select {
+	case message := <-secondWrite:
+		t.Fatalf("deactivated Association received %T after fan-out selection", message)
+	default:
+	}
+}
+
 func TestSSNMOperationDAUDRetainsCongestionLevel(t *testing.T) {
 	endpoint, first, firstSent, _, _ := multiAssociationDialedSGPFixture(t)
 	request := SignallingCongestionRequest{

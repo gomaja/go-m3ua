@@ -2,6 +2,7 @@ package m3ua
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -212,6 +213,28 @@ func TestEndpointASPStatusesPreserveDirectionAndExactASKey(t *testing.T) {
 				status.PeerASPIdentifier, status.PeerASPIdentifierSet)
 		}
 	})
+}
+
+func TestEndpointASPStatusKeysAreDeterministic(t *testing.T) {
+	association, _ := newTestConn(t, StateASPActive, RoleASP)
+	want := []ASKey{
+		{RoutingContext: 1, RoutingContextSet: true},
+		{RoutingContext: 2, RoutingContextSet: true},
+		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
+		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 2, RoutingContextSet: true},
+		{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
+	}
+	association.dynamicLocalASKeys = map[uint32]ASKey{
+		1: want[4],
+		2: want[2],
+		3: want[3],
+	}
+
+	for iteration := 0; iteration < 100; iteration++ {
+		if got := endpointASPStatusKeys(association); !reflect.DeepEqual(got, want) {
+			t.Fatalf("endpointASPStatusKeys iteration %d = %v, want %v", iteration, got, want)
+		}
+	}
 }
 
 func TestEndpointMTPRouteStatusIsKeyedAndCallerOwned(t *testing.T) {

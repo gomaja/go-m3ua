@@ -252,6 +252,44 @@ func TestAssociationASPUpReportsTAckExpiry(t *testing.T) {
 	}
 }
 
+func TestAssociationExplicitASPProceduresSerializeWithoutSuperseding(t *testing.T) {
+	association, _ := newTestConn(t, StateASPDown, RoleASP)
+	writes := make(chan messages.M3UA, 2)
+	association.signalWriter = func(message messages.M3UA) (int, error) {
+		writes <- message
+		return message.MarshalLen(), nil
+	}
+
+	firstResult := make(chan error, 1)
+	go func() { firstResult <- association.ASPUp(context.Background()) }()
+	select {
+	case message := <-writes:
+		if _, ok := message.(*messages.AspUp); !ok {
+			t.Fatalf("first explicit procedure wrote %T, want *messages.AspUp", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first explicit ASP Up did not write")
+	}
+
+	secondContext, cancelSecond := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelSecond()
+	if err := association.ASPUp(secondContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("overlapping ASPUp error = %v, want context deadline exceeded", err)
+	}
+	select {
+	case message := <-writes:
+		t.Fatalf("overlapping ASPUp wrote %T before the first procedure completed", message)
+	default:
+	}
+
+	if err := association.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
+		t.Fatalf("handleAspUpAck: %v", err)
+	}
+	if err := <-firstResult; err != nil {
+		t.Fatalf("first ASPUp was superseded: %v", err)
+	}
+}
+
 func TestAssociationASPActiveAndInactiveWaitForExactAcknowledgement(t *testing.T) {
 	key := ASKey{
 		NetworkAppearance:    10,
@@ -350,10 +388,10 @@ func TestAssociationASPActiveGroupsTrafficModesAndWaitsForEveryAck(t *testing.T)
 	}
 
 	if err := association.handleAspActiveAck(messages.NewAspActiveAck(
-		params.NewTrafficModeType(params.TrafficModeLoadshare),
-		params.NewRoutingContext(7), nil,
+		params.NewTrafficModeType(params.TrafficModeBroadcast),
+		params.NewRoutingContext(8), nil,
 	)); err != nil {
-		t.Fatalf("first ASP Active Ack: %v", err)
+		t.Fatalf("out-of-order ASP Active Ack: %v", err)
 	}
 	select {
 	case err := <-result:
@@ -361,10 +399,10 @@ func TestAssociationASPActiveGroupsTrafficModesAndWaitsForEveryAck(t *testing.T)
 	default:
 	}
 	if err := association.handleAspActiveAck(messages.NewAspActiveAck(
-		params.NewTrafficModeType(params.TrafficModeBroadcast),
-		params.NewRoutingContext(8), nil,
+		params.NewTrafficModeType(params.TrafficModeLoadshare),
+		params.NewRoutingContext(7), nil,
 	)); err != nil {
-		t.Fatalf("second ASP Active Ack: %v", err)
+		t.Fatalf("final ASP Active Ack: %v", err)
 	}
 	if err := <-result; err != nil {
 		t.Fatalf("ASPActive: %v", err)

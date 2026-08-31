@@ -23,6 +23,8 @@ const (
 
 // ASPProcedurePolicy configures RFC 4666 Sections 4.3.4.1 through 4.3.4.4
 // procedure initiation independently from SCTP association initiation.
+// Explicit procedure calls are serialized per Association; a queued caller can
+// stop waiting through its context without superseding the in-flight request.
 type ASPProcedurePolicy struct {
 	ASPUp       ASPProcedureMode
 	ASPDown     ASPProcedureMode
@@ -112,6 +114,11 @@ func (c *Association) ASPUp(ctx context.Context) (err error) {
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
+	release, err := c.acquireExplicitASPProcedure(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !c.localASPProcedureDirectionAvailable() {
 		return ErrNoConfiguredAS
 	}
@@ -132,6 +139,11 @@ func (c *Association) ASPDown(ctx context.Context) (err error) {
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
+	release, err := c.acquireExplicitASPProcedure(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !c.localASPProcedureDirectionAvailable() {
 		return ErrNoConfiguredAS
 	}
@@ -155,6 +167,11 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
+	release, err := c.acquireExplicitASPProcedure(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !c.localASPProcedureDirectionAvailable() {
 		return ErrNoConfiguredAS
 	}
@@ -182,6 +199,11 @@ func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
+	release, err := c.acquireExplicitASPProcedure(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if !c.localASPProcedureDirectionAvailable() {
 		return ErrNoConfiguredAS
 	}
@@ -220,6 +242,23 @@ func (c *Association) validateExplicitASPProcedure(ctx context.Context) error {
 		return ErrAssociationClosed
 	default:
 		return nil
+	}
+}
+
+func (c *Association) acquireExplicitASPProcedure(ctx context.Context) (func(), error) {
+	c.aspProcedureGateOnce.Do(func() {
+		c.aspProcedureGate = make(chan struct{}, 1)
+	})
+	select {
+	case c.aspProcedureGate <- struct{}{}:
+		return func() { <-c.aspProcedureGate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.done:
+		if err := c.Err(); err != nil {
+			return nil, err
+		}
+		return nil, ErrAssociationClosed
 	}
 }
 
