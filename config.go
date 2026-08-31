@@ -295,10 +295,12 @@ type IPSPConfig struct {
 	ASPSMExchange IPSPASPSMExchangeModel
 	// InitiateASPSM starts this IPSP's ASP Up procedure independently of SCTP
 	// association initiation. Normal Double Exchange requires TrafficToLocal;
-	// the agreed single-ASPSM simplification may establish both directions.
+	// the agreed single-ASPSM simplification may establish both directions. A
+	// non-nil AssociationConfig.ASPProcedures policy supersedes this flag.
 	InitiateASPSM bool
 	// InitiateASPTM starts this IPSP's ASP Active procedure after its local
-	// ASPSM direction becomes ASP-INACTIVE.
+	// ASPSM direction becomes ASP-INACTIVE. A non-nil
+	// AssociationConfig.ASPProcedures policy supersedes this flag.
 	InitiateASPTM bool
 	// TrafficToLocal configures DATA the peer sends to this IPSP.
 	TrafficToLocal *IPSPTrafficConfig
@@ -461,6 +463,11 @@ type AssociationConfig struct {
 	// Compatibility configures explicit receive-side tolerance for known peer
 	// protocol violations. The zero value keeps RFC-strict behaviour.
 	Compatibility CompatibilityPolicy
+	// ASPProcedures selects automatic or explicit Layer Management initiation
+	// for ASP Up, ASP Down, ASP Active, and ASP Inactive. A nil policy preserves
+	// the historical role-specific lifecycle. A non-nil policy fully supersedes
+	// IPSPConfig.InitiateASPSM and IPSPConfig.InitiateASPTM.
+	ASPProcedures *ASPProcedurePolicy
 	// PeerSGP identifies the remote Signalling Gateway Process for an
 	// Association owned by an ASP Endpoint. It is invalid for an SGP Endpoint.
 	PeerSGP *SGPIdentity
@@ -561,6 +568,10 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
 	snapshot.RoutingContexts = config.RoutingContexts.Copy()
 	snapshot.CorrelationID = config.CorrelationID.Copy()
+	if config.ASPProcedures != nil {
+		procedures := *config.ASPProcedures
+		snapshot.ASPProcedures = &procedures
+	}
 	if config.PeerSGP != nil {
 		peerSGP := *config.PeerSGP
 		snapshot.PeerSGP = &peerSGP
@@ -583,6 +594,9 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 func validateAssociationConfigForRole(role Role, config *AssociationConfig) error {
 	if config == nil {
 		return ErrNilAssociationConfig
+	}
+	if err := validateASPProcedurePolicy(role, config.ASPProcedures); err != nil {
+		return err
 	}
 	switch role {
 	case RoleASP:
@@ -626,12 +640,18 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 			if config.IPSP.TrafficToLocal == nil && config.IPSP.TrafficToPeer == nil {
 				return fmt.Errorf("%w: IPSP Double Exchange requires at least one traffic direction", ErrInvalidRoleConfiguration)
 			}
+			automaticASPSM := config.IPSP.InitiateASPSM
+			automaticASPTM := config.IPSP.InitiateASPTM
+			if config.ASPProcedures != nil {
+				automaticASPSM = config.ASPProcedures.ASPUp == ASPProcedureAutomatic
+				automaticASPTM = config.ASPProcedures.ASPActive == ASPProcedureAutomatic
+			}
 			if config.IPSP.ASPSMExchange == IPSPASPSMExchangeDouble &&
-				config.IPSP.InitiateASPSM && config.IPSP.TrafficToLocal == nil {
+				automaticASPSM && config.IPSP.TrafficToLocal == nil {
 				return fmt.Errorf("%w: normal Double Exchange ASPSM initiation requires TrafficToLocal", ErrInvalidRoleConfiguration)
 			}
-			if config.IPSP.InitiateASPTM && config.IPSP.TrafficToLocal == nil {
-				return fmt.Errorf("%w: InitiateASPTM requires TrafficToLocal", ErrInvalidRoleConfiguration)
+			if automaticASPTM && config.IPSP.TrafficToLocal == nil {
+				return fmt.Errorf("%w: automatic ASP Active requires TrafficToLocal", ErrInvalidRoleConfiguration)
 			}
 			if config.RoutingContexts != nil || config.NetworkAppearance != nil ||
 				config.TrafficModeType != nil || len(config.TrafficModes) != 0 {

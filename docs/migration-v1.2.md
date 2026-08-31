@@ -278,6 +278,130 @@ Invalid provisioned or dynamically registered Override combinations are
 rejected before they change live AS policy. Locally configured Association
 policy is rejected before SCTP setup.
 
+## Layer Management status and ASP procedures
+
+Endpoint owns the RFC 4666 Sections 1.6.3 and 4.2 status boundary. Every
+Association tracked by an Endpoint has a stable Endpoint-local `AssociationID`.
+Use exact `ASKey` values for ASP and Application Server queries; a bare Routing
+Context is not a unique AS identity when Network Appearances differ.
+
+```go
+associations := endpoint.AssociationStatuses()
+asps := endpoint.ASPStatuses()
+applicationServers := endpoint.ApplicationServerStatuses()
+routes := endpoint.MTPRouteStatuses()
+destinations := endpoint.DestinationStatuses()
+```
+
+Every returned slice and SCTP address is caller-owned. `AssociationSnapshot`
+reports a concurrent SCTP close through `SCTPError` instead of silently omitting
+the Association.
+
+ASP Up, ASP Down, ASP Active, and ASP Inactive can be automatic or explicitly
+requested by Layer Management. A non-nil policy must set all four modes:
+
+```go
+associationConfig.ASPProcedures = &m3ua.ASPProcedurePolicy{
+    ASPUp:       m3ua.ASPProcedureExplicit,
+    ASPDown:     m3ua.ASPProcedureExplicit,
+    ASPActive:   m3ua.ASPProcedureExplicit,
+    ASPInactive: m3ua.ASPProcedureExplicit,
+}
+
+if err := association.ASPUp(ctx); err != nil {
+    return err
+}
+if err := association.ASPActive(ctx, asKey); err != nil {
+    return err
+}
+```
+
+`Dial` or `Accept` returns at the readiness point selected by the policy:
+ASP-DOWN when ASP Up is explicit, ASP-INACTIVE when ASP Up is automatic and ASP
+Active is explicit, or ASP-ACTIVE when both are automatic. Explicit methods
+validate role, state, and exact AS scope before writing, then wait for the
+matching acknowledgement within the caller context. In IPSP Double Exchange,
+they manage `TrafficToLocal`, the direction established by the local IPSP's ASP
+procedures.
+
+`ShutdownContext` performs only procedures configured as automatic. An
+explicitly managed application must request its chosen ASP Inactive and ASP
+Down procedures before shutdown when graceful withdrawal is required.
+
+## Typed SSNM operations
+
+An active ASP originates RFC 4666 DAUD and optional ASP-to-SGP SCON on the
+Association that carries the concerned AS:
+
+```go
+scope := m3ua.SSNMScope{
+    NetworkAppearance: 10,
+    NetworkAppearanceSet: true,
+    RoutingContexts: []uint32{20},
+    RoutingContextSet: true,
+}
+destination := m3ua.PointCodeRange{PointCode: 0x123456}
+
+if err := association.DestinationStateAudit(m3ua.DestinationStateAuditRequest{
+    Scope: scope, Destinations: []m3ua.PointCodeRange{destination},
+}); err != nil {
+    return err
+}
+```
+
+An SGP originates SCON or DUPU through Endpoint. The Endpoint attempts
+delivery to every concerned active ASP and reports failed Association IDs
+without application-side Association iteration:
+
+```go
+err := endpoint.SignallingCongestion(m3ua.SignallingCongestionRequest{
+    Scope: scope,
+    Destinations: []m3ua.PointCodeRange{destination},
+    CongestionLevel: 2,
+    CongestionLevelSet: true,
+})
+if err != nil {
+    var delivery *m3ua.SSNMDeliveryError
+    if errors.As(err, &delivery) {
+        log.Printf("delivered to %v; failed for %v", delivery.Successful, delivery.Failed)
+    }
+    return err
+}
+```
+
+`CongestionLevelSet` distinguishes an omitted level from explicit level zero;
+zero is congestion abatement. `ConcernedDestination` is accepted only for the
+optional ASP-to-SGP SCON direction. DUPU accepts one unmasked destination and a
+valid RFC User/Cause combination. Role-invalid and malformed requests fail
+before any write.
+
+## Management indications
+
+`Association.ManagementIndications` reports M-NOTIFY, M-ERROR,
+M-SCTP_RELEASE, and M-SCTP_RESTART with complete scope:
+
+```go
+for indication := range association.ManagementIndications() {
+    log.Printf("association=%d kind=%s AS=%v destinations=%v cause=%v",
+        indication.Association,
+        indication.Kind,
+        indication.ASKeys,
+        indication.AffectedDestinations,
+        indication.Cause,
+    )
+}
+```
+
+`ASKeys` retains Network Appearance and contextless-AS presence.
+`AffectedDestinations` retains point-code masks and exact AS scope. `Cause` is
+set only for local failures; a received Error uses `ErrorCode`. The indication
+owns all slices, so the application may retain or modify them.
+
+The channel is bounded and never silently drops a mandatory event. If the
+consumer falls behind, the Association closes with `ErrIndicationQueueFull`.
+After that failure, rebuild current state from Endpoint status snapshots rather
+than treating the last indication as authoritative.
+
 ## Renamed API
 
 | Before v1.2 | v1.2 |

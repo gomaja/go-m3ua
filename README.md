@@ -362,6 +362,47 @@ request that could exceed that bound returns `ErrRKMOutcomeLimit` before writing
 to the Association. A delayed response releases capacity, so the application
 can retry without reconnecting once the peer resolves an older outcome.
 
+## Layer Management and SSNM operations
+
+Endpoint exposes keyed RFC 4666 Layer Management snapshots for Associations,
+ASPs, Application Servers, MTP Routes, and destinations. Exact `ASKey` values
+retain Network Appearance and contextless-AS identity:
+
+```go
+associationStatuses := endpoint.AssociationStatuses()
+aspStatuses := endpoint.ASPStatuses()
+applicationServerStatuses := endpoint.ApplicationServerStatuses()
+```
+
+`AssociationConfig.ASPProcedures` selects automatic or explicit ASP Up, ASP
+Down, ASP Active, and ASP Inactive behavior independently from SCTP initiation.
+Explicit methods wait for the matching acknowledgement within the supplied
+context:
+
+```go
+if err := association.ASPUp(ctx); err != nil {
+    return err
+}
+if err := association.ASPActive(ctx, asKey); err != nil {
+    return err
+}
+```
+
+An active ASP uses `Association.DestinationStateAudit` and optional
+`Association.SignallingCongestion`. An SGP uses
+`Endpoint.SignallingCongestion` and `Endpoint.DestinationUserPartUnavailable`
+to update shared state and fan out to the concerned active ASPs. Partial fan-out
+returns `*SSNMDeliveryError` with stable successful and failed Association IDs.
+
+`Association.ManagementIndications` reports M-NOTIFY, M-ERROR,
+M-SCTP_RELEASE, and M-SCTP_RESTART. Each indication owns its slices and carries
+its `AssociationID`, exact `ASKeys`, affected destination masks and scope, and
+local cause where applicable. A full bounded queue closes the Association with
+`ErrIndicationQueueFull` rather than silently losing a mandatory event.
+
+See the [Endpoint management and SSNM design](./docs/design/endpoint-management-and-ssnm.md)
+and [v1.2 migration guide](./docs/migration-v1.2.md).
+
 ## Supported Features
 
 ### Messages

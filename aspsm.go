@@ -10,6 +10,11 @@ import (
 )
 
 func (c *Association) initiateASPSM() error {
+	_, err := c.beginASPSM()
+	return err
+}
+
+func (c *Association) beginASPSM() (*pendingRequest, error) {
 	// RFC 4666 Section 4.3.4.1: "When the ASP sends an ASP Up message, it
 	// starts timer T(ack)", and resends until the Ack arrives. Without that, an
 	// ASP Up lost in transit strands the association: we wait for an Ack that
@@ -18,10 +23,10 @@ func (c *Association) initiateASPSM() error {
 	request := c.startTAck(aspUp, requestAspUp)
 	if _, err := c.WriteSignal(aspUp); err != nil {
 		c.cancelTAckRequest(request)
-		return err
+		return nil, err
 	}
 
-	return nil
+	return request, nil
 }
 
 // handleAspUp handles an incoming ASP Up.
@@ -125,7 +130,8 @@ func (c *Association) handleAspUpDoubleExchange(previousState State, aspUp *mess
 		c.commitLocalIPSPState(StateASPInactive)
 		c.quiesceLocalIPSPSSNMTraffic()
 		startLocalASPTM = previousLocalState == StateASPDown &&
-			c.cfg.IPSP.InitiateASPTM && !c.terminating.Load()
+			c.aspProcedureMode(aspProcedureActive) == ASPProcedureAutomatic &&
+			!c.terminating.Load()
 	}
 	c.commitState(StateASPInactive)
 	c.noteRoutingContextsInactive(nil)
@@ -215,7 +221,9 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 			c.noteNoRoutingContextsAcked()
 			c.commitLocalIPSPState(StateASPInactive)
 			c.quiesceLocalIPSPSSNMTraffic()
-			if previousLocalState == StateASPDown && c.cfg.IPSP.InitiateASPTM && !c.terminating.Load() {
+			if previousLocalState == StateASPDown &&
+				c.aspProcedureMode(aspProcedureActive) == ASPProcedureAutomatic &&
+				!c.terminating.Load() {
 				return c.initiateASPTM()
 			}
 			return nil

@@ -144,7 +144,8 @@ func (c *Association) handleSCTPRestart() {
 	c.pauseDestinations()
 	c.sendState(StateASPDown)
 	c.notifyManagement(&ManagementIndication{
-		Kind: ManagementSCTPRestart,
+		Kind:   ManagementSCTPRestart,
+		ASKeys: endpointASPStatusKeys(c),
 		Description: "the peer restarted the SCTP association; " +
 			"the remote ASP/IPSP state moved to ASP-DOWN and recovery state was cleared",
 	})
@@ -160,10 +161,10 @@ func (c *Association) initiatesASPSM() bool {
 		return false
 	}
 	if c.role == RoleASP {
-		return true
+		return c.aspProcedureMode(aspProcedureUp) == ASPProcedureAutomatic
 	}
 	return c.role == RoleIPSP && c.cfg != nil && c.cfg.IPSP != nil &&
-		c.cfg.IPSP.InitiateASPSM
+		c.aspProcedureMode(aspProcedureUp) == ASPProcedureAutomatic
 }
 
 // subscribeRestart asks the kernel for SCTP_ASSOC_CHANGE on this association.

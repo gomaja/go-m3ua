@@ -535,14 +535,18 @@ func publishDestinationRanges(registry *applicationServers, ranges []Destination
 				indices[target.association] = index
 				batches = append(batches, batch{association: target.association})
 			}
-			batches[index].contexts = append([]uint32(nil), target.routingContexts...)
-			if abateCongestion {
+			batches[index].contexts = appendRoutingContexts(
+				batches[index].contexts, target.routingContexts,
+			)
+			for _, routingContexts := range ssnmTargetRoutingContextScopes(target) {
+				if abateCongestion {
+					batches[index].messages = append(batches[index].messages,
+						destinationCongestionAbatementSSNM(rangeValue, routingContexts),
+					)
+				}
 				batches[index].messages = append(batches[index].messages,
-					destinationCongestionAbatementSSNM(rangeValue, target.routingContexts),
-				)
+					destinationStateSSNMs(rangeValue, routingContexts, rangeValue.State, completion)...)
 			}
-			batches[index].messages = append(batches[index].messages,
-				destinationStateSSNMs(rangeValue, target.routingContexts, rangeValue.State, completion)...)
 		}
 	}
 
@@ -568,6 +572,17 @@ func publishDestinationRanges(registry *applicationServers, ranges []Destination
 		}
 	}
 	return errors.Join(writeErrors...)
+}
+
+func ssnmTargetRoutingContextScopes(target activeSSNMTarget) [][]uint32 {
+	scopes := make([][]uint32, 0, 2)
+	if target.contextless {
+		scopes = append(scopes, nil)
+	}
+	if len(target.routingContexts) > 0 {
+		scopes = append(scopes, append([]uint32(nil), target.routingContexts...))
+	}
+	return scopes
 }
 
 func destinationCongestionAbatementSSNM(rangeValue DestinationRange, routingContexts []uint32) messages.M3UA {
@@ -612,8 +627,12 @@ func destinationStateSSNMs(rangeValue DestinationRange, routingContexts []uint32
 			networkAppearance, routingContext, affectedPointCode, nil,
 		)}
 	case DestinationCongested:
+		var congestionIndications *params.Param
+		if rangeValue.CongestionLevelSet {
+			congestionIndications = params.NewCongestionIndications(rangeValue.CongestionLevel)
+		}
 		congestion := messages.NewSignallingCongestion(
-			networkAppearance, routingContext, affectedPointCode, nil, nil, nil,
+			networkAppearance, routingContext, affectedPointCode, nil, congestionIndications, nil,
 		)
 		if !confirmReachability {
 			return []messages.M3UA{congestion}

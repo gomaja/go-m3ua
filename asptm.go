@@ -21,9 +21,14 @@ func (c *Association) initiateASPTM() error {
 }
 
 func (c *Association) initiateASPActive(routingContext *params.Param) error {
+	_, err := c.beginASPActive(routingContext)
+	return err
+}
+
+func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRequest, error) {
 	requests, err := c.aspActiveRequests(routingContext)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pending := make([]*pendingRequest, 0, len(requests))
 	for _, activeRequest := range requests {
@@ -36,10 +41,10 @@ func (c *Association) initiateASPActive(routingContext *params.Param) error {
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return pending, nil
 }
 
 type aspActiveRequest struct {
@@ -984,6 +989,8 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 // configured AS; a named parameter affects only that subset.
 func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 	rcs := c.configuredLocalRoutingContexts()
+	contextlessInactive := inactive == nil
+	contextlessConfigured := c.hasConfiguredLocalContextlessAS()
 	if inactive != nil {
 		rcs = inactive.RoutingContexts()
 	}
@@ -999,8 +1006,12 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 		for _, rc := range c.configuredLocalRoutingContexts() {
 			c.ackedRCs[rc] = struct{}{}
 		}
+		c.ackedContextlessAS = contextlessConfigured
 	}
 	c.ackedRCsScoped = true
+	if contextlessInactive {
+		c.ackedContextlessAS = false
+	}
 	for _, rc := range rcs {
 		delete(c.ackedRCs, rc)
 	}
@@ -1014,6 +1025,7 @@ func (c *Association) noteNoRoutingContextsAcked() {
 	c.muAckedRCs.Lock()
 	c.ackedRCs = make(map[uint32]struct{})
 	c.ackedRCsScoped = true
+	c.ackedContextlessAS = false
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
 	c.notifyASPRouteStateChanged()
@@ -1028,6 +1040,9 @@ func (c *Association) stateForAcknowledgedRoutingContexts() State {
 	defer c.muAckedRCs.RUnlock()
 	if !c.ackedRCsScoped {
 		return current
+	}
+	if c.ackedContextlessAS {
+		return StateASPActive
 	}
 	for routingContext := range c.ackedRCs {
 		if _, overridden := c.overriddenRCs[routingContext]; !overridden {

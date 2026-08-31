@@ -127,6 +127,12 @@ type DestinationRange struct {
 	Mask uint8
 	// State is the availability installed by this update.
 	State DestinationState
+	// CongestionLevel is the RFC 4666 Section 3.4.4 congestion level retained
+	// for a locally originated SCON, valid only when CongestionLevelSet is true.
+	CongestionLevel uint8
+	// CongestionLevelSet distinguishes an omitted Congestion Indications
+	// parameter from explicit level zero, which reports congestion abatement.
+	CongestionLevelSet bool
 }
 
 type destinationKey struct {
@@ -386,6 +392,23 @@ func (d *destinations) lookupRange(scope destinationKey, pointCode uint32, mask 
 }
 
 func (d *destinations) lookupRangeLocked(scope destinationKey, pointCode uint32, mask uint8) (DestinationState, bool) {
+	record, known := d.lookupRecordLocked(scope, pointCode, mask)
+	if known {
+		return record.rangeValue.State, true
+	}
+	return DestinationAvailable, false
+}
+
+func (d *destinations) lookupRecord(scope destinationKey, pointCode uint32, mask uint8) (destinationRecord, bool) {
+	if d == nil {
+		return destinationRecord{}, false
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lookupRecordLocked(scope, pointCode, mask)
+}
+
+func (d *destinations) lookupRecordLocked(scope destinationKey, pointCode uint32, mask uint8) (destinationRecord, bool) {
 	var newest destinationRecord
 	known := false
 	for _, record := range d.state {
@@ -398,10 +421,7 @@ func (d *destinations) lookupRangeLocked(scope destinationKey, pointCode uint32,
 			known = true
 		}
 	}
-	if known {
-		return newest.rangeValue.State, true
-	}
-	return DestinationAvailable, false
+	return newest, known
 }
 
 func (d *destinations) snapshotForScope(scope destinationKey) map[uint32]DestinationState {
@@ -1267,34 +1287,55 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 					routingContext:       rtCtx,
 					routingContextSet:    true,
 				}
-				state, known := c.destinations.lookupRange(scope, pc, masks[index])
+				record, known := c.destinations.lookupRecord(scope, pc, masks[index])
+				state := DestinationUnavailable
+				var congestionLevel uint8
+				var congestionLevelSet bool
+				if known {
+					state = record.rangeValue.State
+					congestionLevel = record.rangeValue.CongestionLevel
+					congestionLevelSet = record.rangeValue.CongestionLevelSet
+				}
 				if restartForcesUnavailable(c.mtp3Restarts, scope, pc, masks[index]) {
-					state, known = DestinationUnavailable, true
-				}
-				if !known {
 					state = DestinationUnavailable
+					congestionLevel = 0
+					congestionLevelSet = false
 				}
-				groups = appendDestinationAuditGroup(groups, state, rtCtx)
+				groups = appendDestinationAuditGroup(
+					groups, state, congestionLevel, congestionLevelSet, rtCtx,
+				)
 			}
 		} else {
 			scope := destinationKey{
 				networkAppearance:    appearance.networkAppearance,
 				networkAppearanceSet: appearance.networkAppearanceSet,
 			}
-			state, known := c.destinations.lookupRange(scope, pc, masks[index])
+			record, known := c.destinations.lookupRecord(scope, pc, masks[index])
+			state := DestinationUnavailable
+			var congestionLevel uint8
+			var congestionLevelSet bool
+			if known {
+				state = record.rangeValue.State
+				congestionLevel = record.rangeValue.CongestionLevel
+				congestionLevelSet = record.rangeValue.CongestionLevelSet
+			}
 			if restartForcesUnavailable(c.mtp3Restarts, scope, pc, masks[index]) {
-				state, known = DestinationUnavailable, true
-			}
-			if !known {
 				state = DestinationUnavailable
+				congestionLevel = 0
+				congestionLevelSet = false
 			}
-			groups = append(groups, destinationAuditGroup{state: state})
+			groups = append(groups, destinationAuditGroup{
+				state:              state,
+				congestionLevel:    congestionLevel,
+				congestionLevelSet: congestionLevelSet,
+			})
 		}
 
 		for _, group := range groups {
 			if err := c.writeDestinationAuditReply(
 				d.NetworkAppearance, d.RoutingContext != nil, group.routingContexts,
 				pc, masks[index], group.state,
+				group.congestionLevel, group.congestionLevelSet,
 			); err != nil {
 				return err
 			}
@@ -1305,20 +1346,32 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 }
 
 type destinationAuditGroup struct {
-	state           DestinationState
-	routingContexts []uint32
+	state              DestinationState
+	congestionLevel    uint8
+	congestionLevelSet bool
+	routingContexts    []uint32
 }
 
-func appendDestinationAuditGroup(groups []destinationAuditGroup, state DestinationState, routingContext uint32) []destinationAuditGroup {
+func appendDestinationAuditGroup(
+	groups []destinationAuditGroup,
+	state DestinationState,
+	congestionLevel uint8,
+	congestionLevelSet bool,
+	routingContext uint32,
+) []destinationAuditGroup {
 	for index := range groups {
-		if groups[index].state == state {
+		if groups[index].state == state &&
+			groups[index].congestionLevel == congestionLevel &&
+			groups[index].congestionLevelSet == congestionLevelSet {
 			groups[index].routingContexts = append(groups[index].routingContexts, routingContext)
 			return groups
 		}
 	}
 	return append(groups, destinationAuditGroup{
-		state:           state,
-		routingContexts: []uint32{routingContext},
+		state:              state,
+		congestionLevel:    congestionLevel,
+		congestionLevelSet: congestionLevelSet,
+		routingContexts:    []uint32{routingContext},
 	})
 }
 
@@ -1329,6 +1382,8 @@ func (c *Association) writeDestinationAuditReply(
 	pointCode uint32,
 	mask uint8,
 	state DestinationState,
+	congestionLevel uint8,
+	congestionLevelSet bool,
 ) error {
 	routingContext := func() *params.Param {
 		if !routingContextPresent {
@@ -1349,8 +1404,12 @@ func (c *Association) writeDestinationAuditReply(
 		reply = messages.NewDestinationRestricted(
 			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
 	case DestinationCongested:
+		var congestion *params.Param
+		if congestionLevelSet {
+			congestion = params.NewCongestionIndications(congestionLevel)
+		}
 		if _, err := c.WriteSignal(messages.NewSignallingCongestion(
-			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil, nil, nil,
+			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil, congestion, nil,
 		)); err != nil {
 			return err
 		}

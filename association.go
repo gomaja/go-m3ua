@@ -216,6 +216,12 @@ type Association struct {
 	// the compatibility fallback for an association placed directly into
 	// ASP-ACTIVE while the latter follows an ASP Inactive Ack covering every AS.
 	ackedRCsScoped bool
+	// ackedContextlessAS records whether an ASP Active Ack covered the
+	// statically configured AS whose traffic has no Routing Context. RFC 4666
+	// Sections 4.3.1 and 4.3.4.3 keep ASP state per AS, so it is independent of
+	// ackedRCs: a later dynamically registered AS can be activated without
+	// activating that original contextless AS.
+	ackedContextlessAS bool
 	// overriddenRCs are the Routing Contexts an alternate ASP has taken over.
 	// For IPSP Double Exchange they belong only to TrafficToLocal, alongside
 	// ackedRCs; the independent TrafficToPeer inventory remains in activeRCs.
@@ -359,6 +365,11 @@ type Association struct {
 	// indicationOverflow ensures one state or management queue overflow starts
 	// one asynchronous association teardown.
 	indicationOverflow atomic.Bool
+	// managementID is the Endpoint-local stable identity used by Layer
+	// Management status and indication APIs. It is separate from assocID,
+	// which is the kernel SCTP association identifier and can change after an
+	// SCTP restart.
+	managementID atomic.Uint64
 	// assocID is the kernel's ID for this association, recorded at setup so a
 	// notification handler shared across a Listener's associations can route an
 	// event to the Association it concerns. Atomic: written on the goroutine that set
@@ -386,6 +397,12 @@ type Association struct {
 	// A channel gate lets a queued caller stop on context cancellation or
 	// Association closure instead of blocking indefinitely behind another peer.
 	rkmRequestGate chan struct{}
+	// aspProcedureGate serializes explicit Layer Management ASP procedures.
+	// ASPSM and ASPTM acknowledgements have no transaction identifier, so a
+	// second caller must not supersede a request whose first caller still owns
+	// the result. A channel gate keeps the wait context-aware.
+	aspProcedureGateOnce sync.Once
+	aspProcedureGate     chan struct{}
 	// rkmLifecycleMu serializes responder-side RKM state publication with
 	// association teardown so an in-flight REG RSP cannot recreate membership
 	// after the Endpoint has forgotten the association.
@@ -636,8 +653,8 @@ func (c *Association) commitLocalIPSPState(state State) bool {
 	if changed {
 		c.notifyASPRouteStateChanged()
 	}
+	c.notifyReady()
 	if state == StateASPActive {
-		c.notifyEstablished()
 		c.allowHeartbeat()
 	}
 	return true
@@ -648,7 +665,9 @@ func (c *Association) enterLocalIPSPState(state State) error {
 	if !c.commitLocalIPSPState(state) {
 		return nil
 	}
-	if state == StateASPInactive && previous == StateASPDown && c.cfg.IPSP.InitiateASPTM && !c.terminating.Load() {
+	if state == StateASPInactive && previous == StateASPDown &&
+		c.aspProcedureMode(aspProcedureActive) == ASPProcedureAutomatic &&
+		!c.terminating.Load() {
 		return c.initiateASPTM()
 	}
 	return nil
@@ -1726,6 +1745,7 @@ func (c *Association) closeWith(cause error) error {
 			c.muAckedRCs.Lock()
 			c.ackedRCs = nil
 			c.ackedRCsScoped = true
+			c.ackedContextlessAS = false
 			c.activeRCs = nil
 			c.activeRCsScoped = true
 			c.activeScopeInitialized = true
@@ -1748,6 +1768,8 @@ func (c *Association) closeWith(cause error) error {
 		c.closeStateChanges()
 		c.notifyManagement(&ManagementIndication{
 			Kind:        ManagementSCTPRelease,
+			ASKeys:      endpointASPStatusKeys(c),
+			Cause:       cause,
 			Description: causeDescription(cause),
 		})
 		// Ends any range over ManagementIndications().
@@ -1851,6 +1873,18 @@ func (c *Association) State() State {
 	return c.state
 }
 
+// ID returns the immutable identity assigned by the owning Endpoint.
+//
+// Zero means the Association has not been admitted to an Endpoint. The value
+// is local to one Endpoint lifetime and is unrelated to the kernel SCTP
+// association identifier.
+func (c *Association) ID() AssociationID {
+	if c == nil {
+		return 0
+	}
+	return AssociationID(c.managementID.Load())
+}
+
 // StreamID returns the outbound SCTP stream template. Association writes copy
 // this template before selecting a message-specific stream; received stream
 // identifiers are validated internally and are not exposed by this method.
@@ -1944,7 +1978,18 @@ func (c *Association) configuredASKeys() []ASKey {
 	if c.isIPSPDoubleExchange() && !c.hasPeerIPSPTrafficDirection() {
 		return nil
 	}
-	return c.asKeysForRoutingContexts(c.configuredRoutingContexts())
+	routingContexts := c.configuredRoutingContexts()
+	keys := c.asKeysForRoutingContexts(routingContexts)
+	if len(routingContexts) > 0 && c.hasStaticallyConfiguredContextlessAS() {
+		// RFC 4666 Sections 4.4.1 and 4.3.4.3 add the dynamically registered
+		// AS to this Association; they do not replace its configured AS.
+		appearance, appearanceSet := appearanceOf(c.applicationServerNetworkAppearance())
+		keys = append([]ASKey{{
+			NetworkAppearance:    appearance,
+			NetworkAppearanceSet: appearanceSet,
+		}}, keys...)
+	}
+	return uniqueASKeys(keys)
 }
 
 func (c *Association) staticallyConfiguredASKeys() []ASKey {
@@ -2672,6 +2717,7 @@ func (c *Association) clearResumeAfterStrayAck() {
 // the association carries, so every configured context is marked.
 func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 	rcs := c.configuredLocalRoutingContexts()
+	contextlessAcked := acked == nil && c.hasConfiguredLocalContextlessAS()
 	if acked != nil {
 		if named := acked.RoutingContexts(); len(named) > 0 {
 			rcs = named
@@ -2685,6 +2731,12 @@ func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 		c.ackedRCs = make(map[uint32]struct{})
 	}
 	c.ackedRCsScoped = true
+	if contextlessAcked && !c.ackedContextlessAS {
+		changed = true
+	}
+	if contextlessAcked {
+		c.ackedContextlessAS = true
+	}
 	for _, rc := range rcs {
 		if _, exists := c.ackedRCs[rc]; !exists {
 			changed = true
@@ -2715,6 +2767,12 @@ func (c *Association) routingContextAcked(rc uint32) bool {
 	return ok
 }
 
+func (c *Association) contextlessASAcked() bool {
+	c.muAckedRCs.RLock()
+	defer c.muAckedRCs.RUnlock()
+	return !c.ackedRCsScoped || c.ackedContextlessAS
+}
+
 // forgetAckedRoutingContexts drops the acknowledged set, so a new activation
 // starts from nothing. An override recorded against the old activation goes with
 // it: the next ASP Active decides afresh which contexts this ASP may carry.
@@ -2729,6 +2787,7 @@ func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 	c.muAckedRCs.Lock()
 	c.ackedRCs = nil
 	c.ackedRCsScoped = false
+	c.ackedContextlessAS = false
 	c.overriddenRCs = nil
 	c.muAckedRCs.Unlock()
 }
@@ -2910,6 +2969,19 @@ func (c *Association) hasStaticallyConfiguredContextlessAS() bool {
 	return len(c.staticallyConfiguredRoutingContexts()) == 0
 }
 
+func (c *Association) hasConfiguredLocalContextlessAS() bool {
+	if c == nil {
+		return false
+	}
+	if !c.isIPSPDoubleExchange() {
+		return c.hasStaticallyConfiguredContextlessAS()
+	}
+	if !c.hasLocalIPSPTrafficDirection() {
+		return false
+	}
+	return len(routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal)) == 0
+}
+
 // activeForRoutingContext reports whether this ASP is ASP-ACTIVE in the
 // Application Server serving rtCtx. With nothing recorded it is active in all of
 // them, which is the answer for an ASP Active that named no context.
@@ -3001,7 +3073,8 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	if c.isIPSPDoubleExchange() {
 		state = c.localIPSPStateValue()
 	}
-	if state == StateASPActive {
+	if state == StateASPActive &&
+		c.aspProcedureMode(aspProcedureInactive) == ASPProcedureAutomatic {
 		routingContext := c.cfg.RoutingContexts
 		if c.isIPSPDoubleExchange() {
 			routingContext = c.configuredLocalRoutingContextParam()
@@ -3015,7 +3088,8 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		}
 	}
 
-	if state == StateASPActive || state == StateASPInactive {
+	if (state == StateASPActive || state == StateASPInactive) &&
+		c.aspProcedureMode(aspProcedureDown) == ASPProcedureAutomatic {
 		request, err := c.initiateASPDown()
 		if err == nil {
 			err = c.waitTAck(ctx, request)
@@ -3264,6 +3338,15 @@ func causeDescription(cause error) string {
 // logged without a lookup table.
 type ManagementIndication struct {
 	Kind ManagementIndicationKind
+	// Association is the stable Endpoint-local identity of the Association that
+	// produced this indication. Zero means the Association was not owned by an
+	// Endpoint.
+	Association AssociationID
+
+	// ASKeys is the complete exact Application Server scope, including Network
+	// Appearance and contextless-AS presence. The slice is owned by the
+	// indication.
+	ASKeys []ASKey
 
 	// StatusType and StatusInfo are the two halves of the Status parameter of
 	// a received Notify (RFC 4666 Section 3.8.2). Set for ManagementNotify.
@@ -3317,6 +3400,15 @@ type ManagementIndication struct {
 	// or unauthorized Point Code(s) MUST be included along with the Network
 	// Appearance and/or Routing Context associated with the Point Code(s)."
 	AffectedPointCodes []uint32
+
+	// AffectedDestinations preserves every Affected Point Code mask and its
+	// exact Network Appearance and Routing Context scope. The legacy
+	// AffectedPointCodes projection remains available above.
+	AffectedDestinations []AffectedDestination
+
+	// Cause is the local failure reported by M-ERROR or M-SCTP_RELEASE. A peer
+	// Error message has ErrorCode instead and leaves Cause nil.
+	Cause error
 
 	// Description names the status or the error code in the RFC's own words.
 	Description string
@@ -3385,6 +3477,18 @@ func (c *Association) ManagementIndications() <-chan *ManagementIndication {
 // notifyManagement delivers an indication without blocking, and cannot send on
 // a channel that Close has already closed.
 func (c *Association) notifyManagement(ind *ManagementIndication) {
+	if ind == nil {
+		return
+	}
+	snapshot := *ind
+	snapshot.Association = c.ID()
+	snapshot.ASKeys = append([]ASKey(nil), ind.ASKeys...)
+	snapshot.RoutingContexts = append([]uint32(nil), ind.RoutingContexts...)
+	snapshot.AffectedPointCodes = append([]uint32(nil), ind.AffectedPointCodes...)
+	snapshot.AffectedDestinations = append(
+		[]AffectedDestination(nil), ind.AffectedDestinations...,
+	)
+
 	c.muMgmt.Lock()
 	defer c.muMgmt.Unlock()
 
@@ -3393,7 +3497,7 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 	}
 
 	select {
-	case c.mgmtChan <- ind:
+	case c.mgmtChan <- &snapshot:
 	default:
 		c.closeForIndicationOverflow()
 	}

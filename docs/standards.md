@@ -1,6 +1,6 @@
 # M3UA standards and security contract
 
-Audit date: 2026-08-30.
+Audit date: 2026-08-31.
 
 This document defines which authorities govern go-m3ua v1.2.0 and where the
 library boundary ends. The implementation status for each RFC 4666 area is in

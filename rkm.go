@@ -42,9 +42,10 @@ const (
 	DeregistrationASPActiveForRoutingContext
 )
 
-// PointCodeRange is one Originating Point Code List entry in an RFC 4666
-// Routing Key. Mask is the number of low-order PointCode bits that are not
-// significant; zero identifies one exact point code.
+// PointCodeRange identifies an SS7 point code or range. RFC 4666 Sections
+// 3.4.1 and 3.6.1 use the same 24-bit point-code plus low-order wildcard-mask
+// representation for SSNM Affected Point Codes and Routing Key Originating
+// Point Code Lists. A zero mask identifies one exact point code.
 type PointCodeRange struct {
 	PointCode uint32
 	Mask      uint8

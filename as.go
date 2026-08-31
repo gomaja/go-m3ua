@@ -300,6 +300,7 @@ type applicationServerReservation struct {
 type activeSSNMTarget struct {
 	association     *Association
 	routingContexts []uint32
+	contextless     bool
 }
 
 func newApplicationServers(recovery time.Duration) *applicationServers {
@@ -911,9 +912,14 @@ func (r *applicationServers) activeSSNMTargets(scope destinationKey) []activeSSN
 				targets[index].routingContexts = append(
 					targets[index].routingContexts, scoped.key.RoutingContext,
 				)
+				continue
 			}
+			targets[index].contextless = true
 		}
 	}
+	sort.Slice(targets, func(i, j int) bool {
+		return targets[i].association.ID() < targets[j].association.ID()
+	})
 	return targets
 }
 
