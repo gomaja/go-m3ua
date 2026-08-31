@@ -560,6 +560,23 @@ func TestSSNMIsDispatchedNotRejectedAsUnsupported(t *testing.T) {
 	}
 }
 
+// RFC 4666 Section 3.2.1 defines Parameter Length as a 16-bit field that
+// includes the four-octet Parameter Tag and Parameter Length header.
+const maxM3UAParameterValueLength = int(^uint16(0)) - 4
+
+func m3uaParameterValueFitsOnWire(value []byte) bool {
+	return len(value) <= maxM3UAParameterValueLength
+}
+
+func TestM3UAParameterValueFitsOnWire(t *testing.T) {
+	if !m3uaParameterValueFitsOnWire(make([]byte, maxM3UAParameterValueLength)) {
+		t.Fatal("maximum parameter value length was rejected")
+	}
+	if m3uaParameterValueFitsOnWire(make([]byte, maxM3UAParameterValueLength+1)) {
+		t.Fatal("parameter value longer than the 16-bit wire length was accepted")
+	}
+}
+
 // SSNM handlers act on peer-controlled point code lists, so they run against
 // the fuzzer as well as the table tests above. Nothing a peer can put in an
 // Affected Point Code may panic a handler or corrupt the destination table:
@@ -586,6 +603,10 @@ func FuzzSSNMHandlers(f *testing.F) {
 	sgpAssociation := newFuzzConn(f, RoleSGP)
 
 	f.Fuzz(func(t *testing.T, apcData []byte) {
+		if !m3uaParameterValueFitsOnWire(apcData) {
+			return
+		}
+
 		// An Affected Point Code carrying arbitrary bytes, as a hostile peer
 		// would send, rather than one the library constructed itself.
 		raw := params.NewParam(int(params.AffectedPointCode), apcData)
@@ -641,16 +662,29 @@ func FuzzSSNMHandlers(f *testing.F) {
 
 			// Drain the lossy status channel so a long fuzz run does not simply
 			// fill it and stop exercising notifyStatus.
-			for {
-				select {
-				case <-tt.conn.SignallingStatus():
-					continue
-				default:
-				}
-				break
-			}
+			drainSignallingStatuses(tt.conn.SignallingStatus())
 		}
 	})
+}
+
+func TestDrainSignallingStatusesReturnsWhenClosed(t *testing.T) {
+	statuses := make(chan *DestinationStatus)
+	close(statuses)
+
+	drainSignallingStatuses(statuses)
+}
+
+func drainSignallingStatuses(statuses <-chan *DestinationStatus) {
+	for {
+		select {
+		case _, open := <-statuses:
+			if !open {
+				return
+			}
+		default:
+			return
+		}
+	}
 }
 
 // newFuzzConn builds a minimal ASP-ACTIVE Association without the per-test

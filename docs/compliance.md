@@ -153,7 +153,8 @@ handling rather than exposing a reusable implementation.
 CI runs the test matrix on Go 1.23, 1.24, and 1.25, plus Go 1.25 race and
 fuzz-smoke jobs and pinned golangci-lint v2. The fuzz runner discovers every
 exported `Fuzz*` target in every package, so adding a target automatically adds
-it to the gate.
+it to the gate. Each newly interesting input receives a bounded minimization
+budget so corpus reduction cannot overrun the smoke job's execution budget.
 
 ## Release-candidate validation evidence
 

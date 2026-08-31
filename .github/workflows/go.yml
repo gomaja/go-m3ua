@@ -153,6 +153,7 @@ jobs:
       - name: Fuzz smoke
         env:
           FUZZTIME: 2s
+          FUZZMINIMIZETIME: 1x
           FUZZ_PARALLEL: 1
         run: scripts/fuzz-smoke.sh
 

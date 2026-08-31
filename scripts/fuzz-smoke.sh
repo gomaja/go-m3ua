@@ -2,6 +2,7 @@
 set -euo pipefail
 
 fuzztime="${FUZZTIME:-2s}"
+minimizetime="${FUZZMINIMIZETIME:-1x}"
 parallel="${FUZZ_PARALLEL:-1}"
 
 packages="$(go list ./...)"
@@ -13,7 +14,8 @@ while IFS= read -r package; do
 		Fuzz*)
 			printf '== %s %s ==\n' "$package" "$target"
 			go test "$package" -run '^$' -fuzz "^${target}$" \
-				-fuzztime "$fuzztime" -parallel "$parallel"
+				-fuzztime "$fuzztime" -fuzzminimizetime "$minimizetime" \
+				-parallel "$parallel"
 			;;
 		esac
 	done <<<"$targets"
