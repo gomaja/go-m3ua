@@ -452,6 +452,45 @@ func TestIPSPDoubleExchangeInactiveAndDownDoNotChangeTheOtherDirection(t *testin
 	}
 }
 
+func TestIPSPDoubleExchangePeerActivationSupersedesQueuedInactivePublication(t *testing.T) {
+	association, _ := newDoubleExchangeIPSPForTest(t)
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPInactive,
+		TrafficToPeer:  StateASPInactive,
+	})
+	association.muState.Lock()
+	association.appliedState = StateASPDown
+	association.stateEntered = true
+	association.muState.Unlock()
+
+	if err := association.handleAspActive(messages.NewAspActive(
+		params.NewTrafficModeType(params.TrafficModeLoadshare),
+		params.NewRoutingContext(22),
+		nil,
+	)); err != nil {
+		t.Fatalf("handle peer ASP Active: %v", err)
+	}
+
+	// The dispatch goroutine has accepted and acknowledged ASP Active, but an
+	// older ASP-INACTIVE publication may already be waiting in monitor. RFC 4666
+	// Sections 4.3.1 and 4.3.4.3 require the newly activated per-AS state to win.
+	applied, err := association.applyPublishedStateUpdate(StateASPInactive)
+	if err != nil {
+		t.Fatalf("apply queued ASP-INACTIVE publication: %v", err)
+	}
+	association.sendState(StateASPActive)
+
+	if applied {
+		t.Fatal("queued ASP-INACTIVE publication applied after peer activation")
+	}
+	if got := association.State(); got != StateASPActive {
+		t.Fatalf("peer state = %v, want %v", got, StateASPActive)
+	}
+	if !association.activeForRoutingContext(22) {
+		t.Fatal("Routing Context 22 is inactive after its ASP Active was acknowledged")
+	}
+}
+
 func TestIPSPDoubleExchangeShutdownIgnoresDuplicateInactiveAck(t *testing.T) {
 	association, _ := newDoubleExchangeIPSPForTest(t)
 	association.setIPSPState(IPSPState{

@@ -2791,7 +2791,10 @@ func (c *Association) notifyASPRouteStateChanged() {
 func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 	c.muAckedRCs.Lock()
 	defer c.muAckedRCs.Unlock()
+	c.noteRoutingContextsActiveLocked(rcs)
+}
 
+func (c *Association) noteRoutingContextsActiveLocked(rcs []uint32) {
 	if len(rcs) == 0 {
 		c.activeRCs, c.activeRCsScoped = nil, false
 		c.activeScopeInitialized = true
@@ -2817,6 +2820,31 @@ func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 			delete(c.overriddenRCs, rc)
 		}
 	}
+}
+
+// commitPeerRoutingContextsActive records the peer's per-AS activation and
+// the corresponding association-wide compatibility state as one decision.
+// RFC 4666 Sections 4.3.1 and 4.3.4.3 require the successfully acknowledged
+// Application Servers to be ASP-ACTIVE; an older queued ASP-INACTIVE entry
+// action must not erase that newer scope before StateASPActive is committed.
+func (c *Association) commitPeerRoutingContextsActive(rcs []uint32) bool {
+	c.muState.Lock()
+	select {
+	case <-c.done:
+		c.muState.Unlock()
+		return false
+	default:
+	}
+	c.muAckedRCs.Lock()
+	c.noteRoutingContextsActiveLocked(rcs)
+	c.muAckedRCs.Unlock()
+	stateChanged := c.state != StateASPActive
+	c.state = StateASPActive
+	c.muState.Unlock()
+	if stateChanged {
+		c.notifyASPRouteStateChanged()
+	}
+	return true
 }
 
 // noteRoutingContextsInactive records that this ASP has stood down in these
