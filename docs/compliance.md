@@ -144,7 +144,7 @@ handling rather than exposing a reusable implementation.
 - `go build ./...`
 - `go test ./... -count=1`
 - `go test ./... -count=1 -race`
-- `FUZZTIME=2s scripts/fuzz-smoke.sh`
+- `FUZZTIME=10000x scripts/fuzz-smoke.sh`
 - `go vet ./...`
 - `staticcheck ./...`
 - `golangci-lint run ./...`
@@ -160,7 +160,7 @@ budget so corpus reduction cannot overrun the smoke job's execution budget.
 
 The v1.2.0 readiness branch passed the complete host gate with Go 1.25.10:
 formatting, `gopls check`, build, unit and integration tests, vet, staticcheck,
-golangci-lint, the race detector, two seconds of fuzzing per target, module
+golangci-lint, the race detector, 10,000 generated inputs per fuzz target, module
 tidiness, actionlint, govulncheck, and gitleaks. The fuzz gate discovered and
 executed all 20 exported targets.
 
@@ -169,7 +169,7 @@ then passed:
 
 - `go test ./... -count=1 -timeout=900s`;
 - `go test ./... -race -count=1 -timeout=900s`;
-- `FUZZTIME=1s FUZZ_PARALLEL=1 scripts/fuzz-smoke.sh`; and
+- `FUZZTIME=10000x FUZZ_PARALLEL=1 scripts/fuzz-smoke.sh`; and
 - focused live SCTP tests for multihomed address retention, bidirectional DATA,
   several ASPs on one multihomed Listener, concurrent Accept, SCTP restart,
   one-shot INIT timeout, prompt context cancellation, and repeated-cancellation

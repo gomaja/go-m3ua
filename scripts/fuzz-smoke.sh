@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-fuzztime="${FUZZTIME:-2s}"
+fuzztime="${FUZZTIME:-10000x}"
 minimizetime="${FUZZMINIMIZETIME:-1x}"
 parallel="${FUZZ_PARALLEL:-1}"
 
