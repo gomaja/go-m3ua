@@ -107,3 +107,11 @@ The matrix contains no known missing RFC 4666 procedure. Issue
 evidence only: authoritative standards revalidation, ecosystem regression
 disposition, migration completeness, and exact-head validation. It does not
 stand in for an unimplemented protocol capability.
+
+The local release-candidate gate passed host build, test, race, vet, gopls,
+staticcheck, golangci-lint, deterministic fuzz, workflow, vulnerability, and
+secret checks. A privileged Linux SCTP environment separately passed the full
+test and race suites, all exported fuzz targets, and focused multi-homing,
+multi-Association, concurrent Accept, restart, timeout, cancellation, and
+resource-release scenarios. The pull-request exact head remains the final CI
+and review authority before merge.

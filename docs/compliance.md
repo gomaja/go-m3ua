@@ -156,3 +156,26 @@ CI runs the test matrix on Go 1.23, 1.24, and 1.25, plus Go 1.25 race and
 fuzz-smoke jobs and pinned golangci-lint v2. The fuzz runner discovers every
 exported `Fuzz*` target in every package, so adding a target automatically adds
 it to the gate.
+
+## Release-candidate validation evidence
+
+The v1.2.0 readiness branch passed the complete host gate with Go 1.25.10:
+formatting, `gopls check`, build, unit and integration tests, vet, staticcheck,
+golangci-lint, the race detector, two seconds of fuzzing per target, module
+tidiness, actionlint, govulncheck, and gitleaks. The fuzz gate discovered and
+executed all 20 exported targets.
+
+A privileged Linux/arm64 container with kernel SCTP support and go-sctp v1.0.2
+then passed:
+
+- `go test ./... -count=1 -timeout=900s`;
+- `go test ./... -race -count=1 -timeout=900s`;
+- `FUZZTIME=1s FUZZ_PARALLEL=1 scripts/fuzz-smoke.sh`; and
+- focused live SCTP tests for multihomed address retention, bidirectional DATA,
+  several ASPs on one multihomed Listener, concurrent Accept, SCTP restart,
+  one-shot INIT timeout, prompt context cancellation, and repeated-cancellation
+  resource release.
+
+The TEST-NET-1 timeout target was routed through an isolated Linux test
+interface so Docker transport translation could not reject SCTP before the
+kernel exercised the intended silent-peer timeout path.
