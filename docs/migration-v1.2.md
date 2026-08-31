@@ -433,6 +433,38 @@ No compatibility aliases remain. This makes role and association ownership
 visible at every call site and prevents transport orientation from selecting
 M3UA procedures accidentally.
 
+## Complete v1.1.1 symbol disposition
+
+The table below is generated from the exported declaration difference between
+tag `v1.1.1` and v1.2.0. It lists every removed declaration, including methods
+whose operation is unchanged but whose receiver type changed.
+
+| v1.1.1 declarations | v1.2.0 disposition |
+| --- | --- |
+| `Config`, `ConnConfig` | Replaced by `AssociationConfig`; the alias and the transport-oriented name are removed. |
+| `ConnConfigSelector` | Replaced by `AssociationConfigSelector`. The selector remains immutable inside `ListenerConfig` and runs before M3UA parsing. |
+| `Conn` | Replaced by `Association`. There is no alias. |
+| `SctpNoDelayInfo`, `SctpSackInfo` | Replaced by `SCTPNoDelayInfo` and `SCTPSACKInfo`. |
+| `Dial`, `Listen` | Replaced by `Endpoint.Dial` and `Endpoint.Listen`; M3UA role is fixed by the owning `Endpoint`, not by SCTP initiation. |
+| `NewConfig`, `NewClientConfig`, `NewServerConfig` | Replace with `NewEndpoint(EndpointConfig{Role: ...})`, `NewAssociationConfig(...)`, and explicit association setters. The removed constructors no longer infer an M3UA role from transport orientation. |
+| `NewListenerConfig` | Retained with a new signature: it accepts `*AssociationConfig`, and the result is passed to `Endpoint.Listen`. |
+| `Config.EnableHeartbeat`, `Config.SetCorrelationID`, `Config.SetNetworkAppearance`, `Config.SetRoutingContexts`, `Config.SetTrafficModeType` | Same operations on `AssociationConfig`. |
+| `Config.SetAspIdentifier` | Replaced by `AssociationConfig.SetASPIdentifier`. |
+| `Config.SetNoDelayConfig`, `Config.SetSackConfig` | Replaced by `AssociationConfig.SetSCTPNoDelay` and `AssociationConfig.SetSCTPSACK`. |
+| `Conn.ActivateRoutingContexts`, `Conn.DeactivateRoutingContexts`, `Conn.SelectRoutingContext` | Same operations on `Association`; explicit context-aware `ASPActive` and `ASPInactive` procedures are also available. |
+| `Conn.AssociationStatus`, `Conn.Close`, `Conn.Done`, `Conn.Err`, `Conn.LocalAddr`, `Conn.RemoteAddr`, `Conn.Shutdown`, `Conn.ShutdownContext`, `Conn.State`, `Conn.StateChanges` | Same operations on `Association`. Endpoint-wide status and ownership are additionally available from `Endpoint`. |
+| `Conn.ManagementIndications`, `Conn.SignallingStatus`, `Conn.MaxMessageStreamID`, `Conn.PeerASPIdentifier`, `Conn.PeerCongestionLevel`, `Conn.StreamID` | Same operations on `Association`. Typed Endpoint status and MTP3-User indications provide the new multi-Association view. |
+| `Conn.SetDeadline`, `Conn.SetReadDeadline`, `Conn.SetWriteDeadline` | Same operations on `Association`. |
+| `Conn.DestinationRanges`, `Conn.DestinationRangesForNetwork`, `Conn.DestinationRangesForNetworkAndRoutingContext`, `Conn.DestinationState`, `Conn.DestinationStateForNetwork`, `Conn.DestinationStateForNetworkAndRoutingContext`, `Conn.DestinationStates`, `Conn.DestinationStatesForNetwork` | Same compatibility queries on `Association`; new work should prefer keyed Endpoint route and destination snapshots when several SGs or Network Appearances exist. |
+| `Conn.SetDestinationRange`, `Conn.SetDestinationRangeForNetwork`, `Conn.SetDestinationRangeForNetworkAndRoutingContext`, `Conn.SetDestinationState`, `Conn.SetDestinationStateForNetwork`, `Conn.SetDestinationStateForNetworkAndRoutingContext` | Same local destination-state operations on `Association`; SGP applications can also use Endpoint SSNM operations. |
+| `Conn.ReportDestinationRange`, `Conn.ReportDestinationRangeForNetwork`, `Conn.ReportDestinationRangeForNetworkAndRoutingContext`, `Conn.ReportDestinationState`, `Conn.ReportDestinationStateForNetwork`, `Conn.ReportDestinationStateForNetworkAndRoutingContext` | Same peer-reporting operations on `Association`; typed `SignallingCongestion` and `DestinationUserPartUnavailable` operations cover the remaining SSNM forms. |
+| `Conn.Read`, `Conn.ReadData`, `Conn.ReadPD` | Same operations on `Association`. |
+| `Conn.Write`, `Conn.WritePD`, `Conn.WritePDToStream`, `Conn.WritePDToStreamWithRoutingContext`, `Conn.WritePDWithRoutingContext`, `Conn.WriteSignal`, `Conn.WriteToStream`, `Conn.WriteToStreamWithRoutingContext`, `Conn.WriteWithRoutingContext` | Same direct-Association operations on `Association`. ASP applications with multiple SGs should use `Endpoint.MTPTransfer` for route and Association selection. |
+| `Conn.SetSctpNoDelayConfig`, `Conn.SetSctpSackConfig` | Replaced by `Association.SetSCTPNoDelay` and `Association.SetSCTPSACK`. |
+| `Listener.Accept` | Returns `*Association` instead of `*Conn`; selection still occurs before parsing. |
+| `Listener.ActiveASPs`, `Listener.ActiveASPsForAS`, `Listener.ASPsForTraffic`, `Listener.ASPsForTrafficForAS` | Return `[]*Association` instead of `[]*Conn`. RC-only forms fail closed when Network Appearance or contextless identity would be ambiguous. |
+| `Listener.SetNIFAvailable`, `Listener.SetASAvailable`, `Listener.SetASAvailableForAS` | Retained with an `error` result so unsupported roles and invalid or ambiguous scope cannot be ignored. Equivalent Association-level and Endpoint-owned operations are available where the ownership model requires them. |
+
 ## Configuration validation
 
 `AssociationConfig` is role-neutral, but fields that have meaning for only
