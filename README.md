@@ -472,6 +472,9 @@ The v1.2 API intentionally uses RFC entity and primitive names. See the
 [v1.2 migration guide](docs/migration-v1.2.md) for the breaking role,
 configuration, and ASP routing changes.
 
+- [Migrating to v1.2](docs/migration-v1.2.md)
+- [v1.2.0 release notes](docs/release-v1.2.0.md)
+
 ## LICENSE
 
 [MIT](https://github.com/gomaja/go-m3ua/blob/main/LICENSE)

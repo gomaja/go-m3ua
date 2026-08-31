@@ -426,12 +426,62 @@ than treating the last indication as authoritative.
 | `SetSackConfig`, `SetSctpSackConfig` | `SetSCTPSACK` |
 | `SetNoDelayConfig`, `SetSctpNoDelayConfig` | `SetSCTPNoDelay` |
 | `SignalingLinkSelection` | `SignallingLinkSelection` |
-| `AssociationConfig.RecoveryTimer` | `EndpointConfig.ApplicationServers` |
-| `AssociationConfig.RecoveryQueue*`, `AssociationConfig.BroadcastFlow*` | `EndpointConfig.SGP` |
+| `ConnConfig.RecoveryTimer` | `EndpointConfig.ApplicationServers.RecoveryTimer` |
+| `ConnConfig.RecoveryQueue*`, `ConnConfig.BroadcastFlow*` | `EndpointConfig.SGP` |
 
 No compatibility aliases remain. This makes role and association ownership
 visible at every call site and prevents transport orientation from selecting
 M3UA procedures accidentally.
+
+## Complete v1.1.1 API disposition
+
+The table below is checked against a module-wide `apidiff` export of tag
+`v1.1.1` and v1.2.0. It covers incompatible declarations and fields in the root
+package and every public subpackage, including methods whose operation is
+unchanged but whose receiver type changed.
+
+| v1.1.1 declarations | v1.2.0 disposition |
+| --- | --- |
+| `Config`, `ConnConfig` | Replaced by `AssociationConfig`; the alias and the transport-oriented name are removed. |
+| `ConnConfigSelector` | Replaced by `AssociationConfigSelector`. The selector remains immutable inside `ListenerConfig` and runs before M3UA parsing. |
+| `Conn` | Replaced by `Association`. There is no alias. |
+| `SctpNoDelayInfo`, `SctpSackInfo` | Replaced by `SCTPNoDelayInfo` and `SCTPSACKInfo`. |
+| `Dial`, `Listen` | Replaced by `Endpoint.Dial` and `Endpoint.Listen`; M3UA role is fixed by the owning `Endpoint`, not by SCTP initiation. |
+| `NewConfig`, `NewClientConfig`, `NewServerConfig` | Replace with `NewEndpoint(EndpointConfig{Role: ...})`, `NewAssociationConfig(...)`, and explicit association setters. The removed constructors no longer infer an M3UA role from transport orientation. |
+| `NewListenerConfig` | Retained with a new signature: it accepts `*AssociationConfig`, and the result is passed to `Endpoint.Listen`. |
+| `Config.EnableHeartbeat`, `Config.SetCorrelationID`, `Config.SetNetworkAppearance`, `Config.SetRoutingContexts`, `Config.SetTrafficModeType` | Same operations on `AssociationConfig`. |
+| `Config.SetAspIdentifier` | Replaced by `AssociationConfig.SetASPIdentifier`. |
+| `Config.SetNoDelayConfig`, `Config.SetSackConfig` | Replaced by `AssociationConfig.SetSCTPNoDelay` and `AssociationConfig.SetSCTPSACK`. |
+| Promoted `Listener.SetAspIdentifier`, `Listener.SetNoDelayConfig`, `Listener.SetSackConfig` methods inherited from `Config` | Removed. Configure the immutable `AssociationConfig` before `Endpoint.Listen`, or return it from `SelectAssociationConfig`; a live Listener is not a mutable configuration object. |
+| `Conn.ActivateRoutingContexts`, `Conn.DeactivateRoutingContexts`, `Conn.SelectRoutingContext` | Same operations on `Association`; explicit context-aware `ASPActive` and `ASPInactive` procedures are also available. |
+| `Conn.AssociationStatus`, `Conn.Close`, `Conn.Done`, `Conn.Err`, `Conn.LocalAddr`, `Conn.RemoteAddr`, `Conn.Shutdown`, `Conn.ShutdownContext`, `Conn.State`, `Conn.StateChanges` | Same operations on `Association`. Endpoint-wide status and ownership are additionally available from `Endpoint`. |
+| `Conn.ManagementIndications`, `Conn.SignallingStatus`, `Conn.MaxMessageStreamID`, `Conn.PeerASPIdentifier`, `Conn.PeerCongestionLevel`, `Conn.StreamID` | Same operations on `Association`. Typed Endpoint status and MTP3-User indications provide the new multi-Association view. |
+| `Conn.SetDeadline`, `Conn.SetReadDeadline`, `Conn.SetWriteDeadline` | Same operations on `Association`. |
+| `Conn.DestinationRanges`, `Conn.DestinationRangesForNetwork`, `Conn.DestinationRangesForNetworkAndRoutingContext`, `Conn.DestinationState`, `Conn.DestinationStateForNetwork`, `Conn.DestinationStateForNetworkAndRoutingContext`, `Conn.DestinationStates`, `Conn.DestinationStatesForNetwork` | Same compatibility queries on `Association`; new work should prefer keyed Endpoint route and destination snapshots when several SGs or Network Appearances exist. |
+| `Conn.SetDestinationRange`, `Conn.SetDestinationRangeForNetwork`, `Conn.SetDestinationRangeForNetworkAndRoutingContext`, `Conn.SetDestinationState`, `Conn.SetDestinationStateForNetwork`, `Conn.SetDestinationStateForNetworkAndRoutingContext` | Same local destination-state operations on `Association`; SGP applications can also use Endpoint SSNM operations. |
+| `Conn.ReportDestinationRange`, `Conn.ReportDestinationRangeForNetwork`, `Conn.ReportDestinationRangeForNetworkAndRoutingContext`, `Conn.ReportDestinationState`, `Conn.ReportDestinationStateForNetwork`, `Conn.ReportDestinationStateForNetworkAndRoutingContext` | Same peer-reporting operations on `Association`; typed `SignallingCongestion` and `DestinationUserPartUnavailable` operations cover the remaining SSNM forms. |
+| `Conn.Read`, `Conn.ReadData`, `Conn.ReadPD` | Same operations on `Association`. |
+| `Conn.Write`, `Conn.WritePD`, `Conn.WritePDToStream`, `Conn.WritePDToStreamWithRoutingContext`, `Conn.WritePDWithRoutingContext`, `Conn.WriteSignal`, `Conn.WriteToStream`, `Conn.WriteToStreamWithRoutingContext`, `Conn.WriteWithRoutingContext` | Same direct-Association operations on `Association`. ASP applications with multiple SGs should use `Endpoint.MTPTransfer` for route and Association selection. |
+| `Conn.SetSctpNoDelayConfig`, `Conn.SetSctpSackConfig` | Replaced by `Association.SetSCTPNoDelay` and `Association.SetSCTPSACK`. |
+| `Listener.Accept` | Returns `*Association` instead of `*Conn`; selection still occurs before parsing. |
+| `Listener.ActiveASPs`, `Listener.ActiveASPsForAS`, `Listener.ASPsForTraffic`, `Listener.ASPsForTrafficForAS` | Return `[]*Association` instead of `[]*Conn`. RC-only forms fail closed when Network Appearance or contextless identity would be ambiguous. |
+| `Listener.SetNIFAvailable`, `Listener.SetASAvailable`, `Listener.SetASAvailableForAS` | Retained with an `error` result so unsupported roles and invalid or ambiguous scope cannot be ignored. Equivalent Association-level and Endpoint-owned operations are available where the ownership model requires them. |
+| `ConnConfig.AspIdentifier` | Replaced by `AssociationConfig.ASPIdentifier`. |
+| `ConnConfig.SignalingLinkSelection` | Replaced by `AssociationConfig.SignallingLinkSelection`. |
+| `ConnConfig.SctpNoDelayInfo`, `ConnConfig.SctpSackInfo` | Replaced by `AssociationConfig.SCTPNoDelayInfo` and `AssociationConfig.SCTPSACKInfo`. |
+| `ConnConfig.RecoveryTimer` | Moved to `EndpointConfig.ApplicationServers.RecoveryTimer` because T(r) is shared AS state. |
+| `ConnConfig.RecoveryQueueMessages`, `ConnConfig.RecoveryQueueBytes`, `ConnConfig.RecoveryQueueTotalMessages`, `ConnConfig.RecoveryQueueTotalBytes`, `ConnConfig.BroadcastFlowIdentifier`, `ConnConfig.BroadcastFlowCacheEntries`, `ConnConfig.BroadcastFlowIdentifierBytes` | Moved to `EndpointConfig.SGP`; these are SGP-wide distribution and recovery limits rather than per-Association policy. |
+| `Listener.Config` | Replaced by the embedded `Listener.AssociationConfig` snapshot. Shared role and AS state is owned by `Endpoint`. |
+| `Listener.AspIdentifier`, `Listener.SignalingLinkSelection`, `Listener.SctpNoDelayInfo`, `Listener.SctpSackInfo` | Replaced by `Listener.ASPIdentifier`, `Listener.SignallingLinkSelection`, `Listener.SCTPNoDelayInfo`, and `Listener.SCTPSACKInfo`. |
+| `Listener.RecoveryTimer`, `Listener.RecoveryQueueMessages`, `Listener.RecoveryQueueBytes`, `Listener.RecoveryQueueTotalMessages`, `Listener.RecoveryQueueTotalBytes`, `Listener.BroadcastFlowIdentifier`, `Listener.BroadcastFlowCacheEntries`, `Listener.BroadcastFlowIdentifierBytes` | Removed from Listener promotion; configure `EndpointConfig.ApplicationServers` and `EndpointConfig.SGP` before creating the Endpoint. |
+| `ListenerConfig.DefaultConnConfig`, `ListenerConfig.SelectConnConfig` | Replaced by `ListenerConfig.DefaultAssociationConfig` and `ListenerConfig.SelectAssociationConfig`. |
+| `SCTPConfig.SctpNoDelayInfo`, `SCTPConfig.SctpSackInfo` | Replaced by `SCTPConfig.SCTPNoDelayInfo` and `SCTPConfig.SCTPSACKInfo`. |
+| `ManagementIndication.AspIdentifier`, `ManagementIndication.AspIdentifierSet` | Replaced by `ManagementIndication.ASPIdentifier` and `ManagementIndication.ASPIdentifierSet`; indications also carry stable Association and exact ASKey scope. |
+| `ErrAspIDRequired`, `ErrConnClosed`, `ErrInvalidAspIdentifier`, `ErrUnsupportedMode` | Replaced by `ErrASPIdentifierRequired`, `ErrAssociationClosed`, `ErrInvalidASPIdentifier`, and `ErrUnsupportedRole`. |
+| `StateAspDown`, `StateAspInactive`, `StateAspActive` | Replaced by `StateASPDown`, `StateASPInactive`, and `StateASPActive`. |
+| `MTP3Restart` value comparison | No longer supported. The opaque handle now contains Endpoint-owned callbacks and synchronization state and is intentionally non-comparable; retain and use the returned pointer and its methods instead of comparing dereferenced values. |
+| `messages/params.ProtocolDataPayload.SignalingLinkSelection` | Replaced by `messages/params.ProtocolDataPayload.SignallingLinkSelection`. |
+| `examples/client`, `examples/server` | Replaced by `examples/asp` and `examples/sgp` so example names describe RFC roles rather than SCTP initiation. |
 
 ## Configuration validation
 

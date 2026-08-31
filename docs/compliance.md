@@ -1,6 +1,6 @@
 # go-m3ua compliance and ecosystem audit
 
-Audit date: 2026-08-30.
+Audit date: 2026-08-31.
 
 ## Specification baseline
 
@@ -100,34 +100,81 @@ SGP, and IPSP Endpoints:
 
 | Repository | Scope | Issue/PR surface | Result |
 | --- | --- | --- | --- |
-| Original Go M3UA library ancestor | Main Go M3UA library ancestor | 5 open issues, 40+ PRs inspected | This repository is ahead of it for RFC/error handling, concurrency, PPID, SACK, routing context, Network Appearance, SSNM, MTP3 restart, and test coverage. |
-| `github.com/vazir/m3ua-go` | Old fork/library | No issues or PRs found | No stronger behavior found; it predates many fixes already present here. |
+| Original upstream | Reusable Go M3UA library ancestor | 18 issues, including 5 open, and 44 pull requests inspected | Every behaviorally relevant issue and proposal has the disposition below. Counts and repository metadata were refreshed through the GitHub API on the audit date. |
+| [`github.com/vazir/m3ua-go`](https://github.com/vazir/m3ua-go) | Stale reusable library | No issues or pull requests | No behavior absent here was found. Its last repository update predates the current parser, lifecycle, routing, and role work in this project. |
+| [`github.com/wspdev-go/m3ua-client`](https://github.com/wspdev-go/m3ua-client) | Application scaffold | No issues or pull requests | Not a reusable M3UA stack and therefore not an implementation baseline. |
+| [`github.com/rumalg123/telco-signalling-lab`](https://github.com/rumalg123/telco-signalling-lab) | Application-specific signalling lab | No issues or pull requests | Its narrow in-application implementation is not adopted as a library design. In particular, go-m3ua permits pre-ASP-Active-Ack DUNA, DRST, and SCON only in the RFC 4666 Section 4.5.1 activation window; it does not generalize that exception to DAVA. |
 
-Application/plugin hits from GitHub code search were not treated as competing libraries: they either import an M3UA library, embed narrow app-specific handling, or implement probes rather than a reusable protocol stack.
+Other application and probe hits from GitHub code search were not treated as
+competing libraries because they import a stack or embed task-specific protocol
+handling rather than exposing a reusable implementation.
 
 ## Upstream issue/PR mapping
 
 | Upstream item | Risk | Local status |
 | --- | --- | --- |
-| Original upstream #62 | M3UA BEAT naming confused with SCTP heartbeat | Behavior is unaffected; docs distinguish M3UA BEAT from SCTP transport controls. |
-| Original upstream #51 | Association data races and shared parameter mutation | Covered by parameter copying, atomics/mutexes, queue isolation, and `go test ./... -race`. |
-| Original upstream #47 / PR #48 | Receive buffer reuse overwrote earlier SCTP messages | Covered by inbound copy handling and regression tests for received octets. |
-| Original upstream #28 / PR #27 | Broken SCTP connections did not close correctly | Covered by close/reconnect/read-deadline tests. |
-| Original upstream #25 / PR #26 | M3UA BEAT started before ASP Up and dropped connections | Covered by state-gated heartbeat tests and echo validation. |
-| Original upstream #17 / PR #18 | M3UA length calculation errors | Covered by codec invariant and wire length tests. |
-| Original upstream #3 | RKM not implemented | Full strict codecs, registration/deregistration procedures, policy, allocation, collision handling, and race coverage are implemented. |
-| Original upstream #59 / PR #60 | ASP Down handling from SGP to ASP | Covered by ASP Down state/quiescence tests. |
-| Original upstream PR #61 | Optional SCTP SACK timer control | Implemented through `AssociationConfig.SetSCTPSACK` / `Association.SetSCTPSACK`, with RFC 9260 500 ms validation. |
-| Original upstream PR #63 | SCTP dependency PPID handling | Implemented and tested with exported `M3UAPPID == 3` and inbound PPID filtering. |
+| Original upstream #1 / PR #16 / issue #38 | Parser robustness and native Go fuzzing | `messages.TestParseNeverMisreportsClassOrType`, `messages.TestParseMalformed`, `messages.FuzzParse`, `messages.FuzzParseParams`, message-specific fuzz targets, and `scripts/fuzz-smoke.sh` cover the untrusted input boundary. |
+| Original upstream #2 / PR #14 | Missing SSNM codecs and procedures | Strict DUNA, DAVA, DAUD, SCON, DUPU, and DRST codecs plus `TestSSNMIsDispatchedNotRejectedAsUnsupported`, `FuzzSSNMHandlers`, typed operations, scope, route-state, and Linux round-trip tests cover both codec and procedure behavior. |
+| Original upstream #3 / PR #53 | RKM absent or incomplete | REG REQ/RSP and DEREG REQ/RSP codecs, authorization, allocation, replay, collision, Network Appearance, contextless AS, concurrency, and operation APIs are covered by the `rkm_*_test.go` suites. The closed proposal is not used as a substitute for those tests. |
+| Original upstream #4 / #5 | Point-code helpers and point-code routing | `AffectedPointCode` validation, masked route-prefix state, `MTPRoute`, ASP multi-SG routing, and SGP distribution implement protocol-aware point-code handling rather than a detached utility API. |
+| Original upstream #17 / PR #18 | Encoded length calculation | `messages.TestHeaderMarshalUsesCurrentPayloadLength`, parameter boundary tests, codec invariants, and `TestWriteOfLargePayloadReportsItsOwnLength` verify header, TLV, message, and user-payload lengths. |
+| Original upstream #25 / PR #26 | M3UA BEAT started before ASP Up and caused Association loss | `TestHeartbeatObservesASPActiveBeforeItStarts`, `TestAssociationConfigWithoutHeartbeatInfoDials`, state-gated BEAT handling, exact echo tests, and expiry lifecycle tests keep T(beat) independent from SCTP path heartbeat. |
+| Original upstream #28 / PR #27 | Transport interruption did not close the M3UA object | `TestCloseIsIdempotentAndConcurrencySafe`, `TestMonitorExitsOnDirectClose`, Listener/Endpoint shutdown tests, read-error handling, and `Done`/`Err` tests cover prompt, observable resource release. |
+| Original upstream #31 | Read API returned transport-sized or ambiguous results | `Read`, `ReadPD`, `ReadData`, typed `DataMessage`, MTP3-User indications, and `TestWriteReturnsThePayloadLength` preserve application payload semantics while exposing message metadata explicitly. This is an API-design disposition, not an RFC defect. |
+| Original upstream #33 | SCTP multihoming support | `TestMultihomedAssociationKeepsEveryAddress`, `TestMultihomedAssociationCarriesPayloadBothWays`, and `TestMultihomedListenerServesSeveralASPs` exercise owned SCTP address sets and live Linux Associations. |
+| Original upstream PR #10 | Notify Status cardinality | Typed Notify validation requires Status and covers malformed, scoped, and state-transition cases; no optional-Status compatibility path is exposed. |
+| Original upstream PR #11 | Lock leaks and deadlocks | Association, Listener, Endpoint, RKM, activation, and distribution concurrency tests run under `go test ./... -race`; dedicated shutdown tests cover blocked Accept, deregistration, and concurrent close paths. |
+| Original upstream PR #41 | Unknown messages disrupted receive state | `TestUnparseableOrUnknownEventsDoNotFailTheRead`, `TestUnknownParameterDoesNotDiscardTheMessage`, and unsupported class/type Error tests preserve state while applying RFC 4666 extension rules. |
+| Original upstream PR #42 | Error-interface panic | Typed error conversion, `TestHeartbeatAckWithoutDataDoesNotPanic`, malformed-message Error generation, and Error diagnostic ownership tests cover nil and unexpected error shapes without panics. |
+| Original upstream PR #43 / #44 / #46 / #55 / #57 | Stream selection, explicit writes, and stream-ID races | `TestDataIsNeverSentOnStreamZero`, `TestOutboundSignalStreamUsesProtocolDataSLS`, `TestDataOnOneStreamIsDeliveredInOrder`, and concurrent traffic tests use negotiated streams and stable SLS mapping. |
+| Original upstream #47 / PR #48 | Receive-buffer reuse overwrote an earlier message | Every received message owns its bytes; `TestDiagnosticInformationSurvivesTheNextReceivedMessage`, `TestDiagnosticErrorsOwnTheirReceivedBytes`, and multi-message read tests prevent later reads from changing retained data. |
+| Original upstream #50 | Unsupported-platform installation failure | The portability workflow cross-compiles tests for Darwin, FreeBSD, Windows, and Linux architectures while socket-backed SCTP tests remain Linux-only. Unsupported hosts compile without pretending they can create SCTP Associations. |
+| Original upstream #51 / PR #54 | Association state and parameter data races | State, configuration snapshots, parameters, queues, routing tables, and procedure outcomes are isolated or synchronized. `TestConcurrentTrafficOnTwoASPsIsRaceFree`, `TestConcurrentAcceptsAreIndependent`, and the full race gate cover the public concurrency contract. |
+| Original upstream #39 / PR #52 | Functional options and upper-layer API proposals | v1.2 intentionally uses immutable typed `EndpointConfig`, `ListenerConfig`, and `AssociationConfig`, plus typed MTP3-User and Layer Management operations. These are API proposals, not protocol defects, and no compatibility alias is retained. |
+| Original upstream PR #56 | Dynamic Protocol Data writes | `WritePD`, `WriteSignal`, and `Endpoint.MTPTransfer` accept per-message Protocol Data; `TestConcurrentFlowsOnOneAssociationKeepTheirRoutingContexts` and SLS-stream tests keep concurrent message scope independent. |
+| Original upstream PR #58 | Exact negotiated stream limit | `TestStreamSelectionHandlesEveryNegotiatedCount`, `TestCheckDataStreamEnforcesNegotiatedBounds`, and the zero-stream refusal test use the Association's negotiated outbound stream count. |
+| Original upstream #59 / PR #60 | ASP Down sent from the SGP to an ASP | ASP, SGP, IPSP Single Exchange, and IPSP Double Exchange procedures cover peer-initiated ASP Down, acknowledgement, directional quiescence, state reset, and shutdown ordering. |
+| Original upstream PR #61 | Optional SCTP SACK timer control | `AssociationConfig.SetSCTPSACK` and `Association.SetSCTPSACK` validate and apply the per-Association policy, including the RFC 9260 500 ms ceiling, with Linux socket tests. |
+| Original upstream #62 | M3UA BEAT confused with SCTP HEARTBEAT | Public documentation and `ErrHeartbeatExpired` identify RFC 4666 M3UA T(beat); SCTP HEARTBEAT remains kernel transport path management and is configured separately. |
+| Original upstream PR #63 | SCTP dependency PPID handling | `M3UAPPID == 3`, host-order send metadata, acceptance of PPID `0` or `3`, and discard of every other PPID are covered by `ppid_test.go`. |
+| Original upstream #36 | Unrelated request | The issue contains no M3UA protocol, API, interoperability, security, or implementation change to reproduce or adopt. |
 
 ## Current validation commands
 
 - `go build ./...`
 - `go test ./... -count=1`
 - `go test ./... -count=1 -race`
+- `FUZZTIME=10000x scripts/fuzz-smoke.sh`
 - `go vet ./...`
 - `staticcheck ./...`
 - `golangci-lint run ./...`
 - `go run github.com/rhysd/actionlint/cmd/actionlint@latest`
 
-CI runs the test matrix on Go 1.23, 1.24, and 1.25, plus a Go 1.25 race job and pinned golangci-lint v2.
+CI runs the test matrix on Go 1.23, 1.24, and 1.25, plus Go 1.25 race and
+fuzz-smoke jobs and pinned golangci-lint v2. The fuzz runner discovers every
+exported `Fuzz*` target in every package, so adding a target automatically adds
+it to the gate. Each newly interesting input receives a bounded minimization
+budget so corpus reduction cannot overrun the smoke job's execution budget.
+
+## Release-candidate validation evidence
+
+The v1.2.0 readiness branch passed the complete host gate with Go 1.25.10:
+formatting, `gopls check`, build, unit and integration tests, vet, staticcheck,
+golangci-lint, the race detector, 10,000 generated inputs per fuzz target, module
+tidiness, actionlint, govulncheck, and gitleaks. The fuzz gate discovered and
+executed all 20 exported targets.
+
+A privileged Linux/arm64 container with kernel SCTP support and go-sctp v1.0.2
+then passed:
+
+- `go test ./... -count=1 -timeout=900s`;
+- `go test ./... -race -count=1 -timeout=900s`;
+- `FUZZTIME=10000x FUZZ_PARALLEL=1 scripts/fuzz-smoke.sh`; and
+- focused live SCTP tests for multihomed address retention, bidirectional DATA,
+  several ASPs on one multihomed Listener, concurrent Accept, SCTP restart,
+  one-shot INIT timeout, prompt context cancellation, and repeated-cancellation
+  resource release.
+
+The TEST-NET-1 timeout target was routed through an isolated Linux test
+interface so Docker transport translation could not reject SCTP before the
+kernel exercised the intended silent-peer timeout path.

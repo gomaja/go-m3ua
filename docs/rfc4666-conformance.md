@@ -11,9 +11,6 @@ errata, IANA, and security decisions are defined in the
 
 - **Implemented**: the public behavior and negative cases are present and
   covered by repository tests.
-- **Partial**: a conforming subset exists, but the linked v1.2.0 issue owns a
-  remaining mandatory, recommended, or project-required capability.
-- **Not implemented**: the capability is absent and the linked issue owns it.
 - **Deployment**: the requirement cannot be satisfied by this library alone.
 - **Informative**: architecture, examples, or IANA process text does not create
   an independently testable protocol requirement.
@@ -103,8 +100,18 @@ Section 4 below.
 | [7 IANA considerations](https://www.rfc-editor.org/rfc/rfc4666.html#section-7) | Mandatory/Recommended | Implemented | PPID `3` is sent, PPID `0` is accepted, other PPIDs are discarded, port configuration is not hard-coded, and unknown class/type/parameter behavior is covered. |
 | [Appendix A architecture and redundancy](https://www.rfc-editor.org/rfc/rfc4666.html#appendix-A) | Informative | Implemented | AS and SG redundancy models include per-AS configurable n+k activation and Network-Appearance-aware AS identity. |
 
-## Remaining v1.2.0 work
+## Release evidence gate
 
-| Issue | Normative scope |
-| --- | --- |
-| [#20 Release conformance evidence](https://github.com/gomaja/go-m3ua/issues/20) | Re-audits every authority and closes all unexplained matrix gaps at the exact v1.2.0 release commit. |
+The matrix contains no known missing RFC 4666 procedure. Issue
+[#20](https://github.com/gomaja/go-m3ua/issues/20) owns release-candidate
+evidence only: authoritative standards revalidation, ecosystem regression
+disposition, migration completeness, and exact-head validation. It does not
+stand in for an unimplemented protocol capability.
+
+The local release-candidate gate passed host build, test, race, vet, gopls,
+staticcheck, golangci-lint, deterministic fuzz, workflow, vulnerability, and
+secret checks. A privileged Linux SCTP environment separately passed the full
+test and race suites, all exported fuzz targets, and focused multi-homing,
+multi-Association, concurrent Accept, restart, timeout, cancellation, and
+resource-release scenarios. The pull-request exact head remains the final CI
+and review authority before merge.

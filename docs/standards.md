@@ -55,8 +55,8 @@ Datatracker API result as evidence that no relationship exists.
 The [SIGTRAN working group](https://datatracker.ietf.org/wg/sigtran/documents/)
 is concluded and has no active M3UA Internet-Draft. The active
 [TSVWG documents](https://datatracker.ietf.org/wg/tsvwg/documents/) include
-`draft-ietf-tsvwg-sctp-dtls-chunk` and
-`draft-ietf-tsvwg-dtls-chunk-key-management`. They may change future SCTP
+`draft-ietf-tsvwg-sctp-dtls-chunk-04` and
+`draft-ietf-tsvwg-dtls-chunk-key-management-01`. They may change future SCTP
 security choices but are not normative for v1.2.0. The expired
 `draft-ietf-tsvwg-dtls-over-sctp-bis` and
 `draft-ietf-tsvwg-rfc4895-bis` are historical context only.
@@ -131,6 +131,12 @@ uses the M3UA values assigned there and preserves unknown extensions according
 to RFC 4666 [Section 3.1.2](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.1.2),
 [Section 3.2](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.2), and
 [Section 7.3](https://www.rfc-editor.org/rfc/rfc4666.html#section-7.3).
+
+The registry labels SSNM message type `5` as `DPU`, while RFC 4666
+[Section 3.4.5](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.4.5)
+names that message `DUPU` (Destination User Part Unavailable). The assigned
+numeric value is identical. go-m3ua uses the RFC message name and the registered
+wire value; this is a wording discrepancy, not a protocol divergence.
 
 The remaining transport assignments are:
 
