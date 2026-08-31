@@ -220,14 +220,14 @@ func TestEndpointASPStatusKeysAreDeterministic(t *testing.T) {
 	want := []ASKey{
 		{RoutingContext: 1, RoutingContextSet: true},
 		{RoutingContext: 2, RoutingContextSet: true},
-		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
-		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 2, RoutingContextSet: true},
-		{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true},
+		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 3, RoutingContextSet: true},
+		{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 5, RoutingContextSet: true},
+		{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 4, RoutingContextSet: true},
 	}
-	association.dynamicLocalASKeys = map[uint32]ASKey{
-		1: want[4],
-		2: want[2],
-		3: want[3],
+	association.dynamicPeerASKeys = map[uint32]ASKey{
+		3: want[2],
+		4: want[4],
+		5: want[3],
 	}
 
 	for iteration := 0; iteration < 100; iteration++ {

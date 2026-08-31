@@ -247,13 +247,10 @@ func (c *Association) configuredLocalASKeysForStatus() []ASKey {
 		return nil
 	}
 	if !c.isIPSPDoubleExchange() {
-		keys := c.asKeysForRoutingContexts(c.staticallyConfiguredRoutingContexts())
-		c.muDynamicASKeys.RLock()
-		for _, key := range c.dynamicLocalASKeys {
-			keys = append(keys, key)
-		}
-		c.muDynamicASKeys.RUnlock()
-		return uniqueASKeys(keys)
+		// RFC 4666 Sections 4.4.1 and 4.3.4.3 make the Routing Context
+		// assigned by successful registration part of the requester's AS
+		// membership and available to its subsequent ASPTM procedures.
+		return c.configuredASKeys()
 	}
 	if !c.hasLocalIPSPTrafficDirection() {
 		return nil
