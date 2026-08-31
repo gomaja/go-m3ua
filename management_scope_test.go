@@ -83,6 +83,35 @@ func TestManagementErrorCarriesExactDestinations(t *testing.T) {
 	}
 }
 
+func TestManagementErrorAffectedDestinationsUseResolvedAssociationScope(t *testing.T) {
+	_, association := trackedManagementAssociation(t, StateASPActive, 10, 1, 2)
+	if err := association.handleError(messages.NewError(
+		params.NewErrorCode(params.ErrDestinationStatusUnknown),
+		nil,
+		nil,
+		params.NewAffectedPointCode(uint32(4)<<24|0x123456),
+		nil,
+	)); err != nil {
+		t.Fatalf("handleError: %v", err)
+	}
+	indication := <-association.ManagementIndications()
+	want := []AffectedDestination{
+		{
+			NetworkAppearance: 10, NetworkAppearanceSet: true,
+			RoutingContext: 1, RoutingContextSet: true,
+			PointCode: 0x123456, Mask: 4,
+		},
+		{
+			NetworkAppearance: 10, NetworkAppearanceSet: true,
+			RoutingContext: 2, RoutingContextSet: true,
+			PointCode: 0x123456, Mask: 4,
+		},
+	}
+	if !reflect.DeepEqual(indication.AffectedDestinations, want) {
+		t.Fatalf("AffectedDestinations = %+v, want %+v", indication.AffectedDestinations, want)
+	}
+}
+
 func TestManagementIndicationOwnsAllSlices(t *testing.T) {
 	_, association := trackedManagementAssociation(t, StateASPActive, 10, 1)
 	indication := &ManagementIndication{

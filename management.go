@@ -58,9 +58,7 @@ func (c *Association) handleError(e *messages.Error) error {
 	ind.ASKeys = c.managementASKeys(e.NetworkAppearance, e.RoutingContext)
 	if e.AffectedPointCode != nil {
 		ind.AffectedPointCodes = e.AffectedPointCode.AffectedPointCodes()
-		ind.AffectedDestinations = managementAffectedDestinations(
-			e.NetworkAppearance, e.RoutingContext, e.AffectedPointCode,
-		)
+		ind.AffectedDestinations = managementAffectedDestinations(ind.ASKeys, e.AffectedPointCode)
 	}
 	c.notifyManagement(ind)
 
@@ -271,8 +269,7 @@ func (c *Association) managementASKeys(
 }
 
 func managementAffectedDestinations(
-	networkAppearance,
-	routingContext,
+	keys []ASKey,
 	affectedPointCode *params.Param,
 ) []AffectedDestination {
 	if affectedPointCode == nil {
@@ -283,22 +280,19 @@ func managementAffectedDestinations(
 	if len(pointCodes) == 0 || len(pointCodes) != len(masks) {
 		return nil
 	}
-	appearance, appearanceSet := appearanceOf(networkAppearance)
-	routingContexts := routingContextsOf(routingContext)
-	destinations := make([]AffectedDestination, 0, len(pointCodes)*max(1, len(routingContexts)))
+	if len(keys) == 0 {
+		keys = []ASKey{{}}
+	}
+	destinations := make([]AffectedDestination, 0, len(pointCodes)*len(keys))
 	for index, pointCode := range pointCodes {
-		if len(routingContexts) == 0 {
+		for _, key := range keys {
 			destinations = append(destinations, AffectedDestination{
-				NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet,
-				PointCode: pointCode, Mask: masks[index],
-			})
-			continue
-		}
-		for _, routingContext := range routingContexts {
-			destinations = append(destinations, AffectedDestination{
-				NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet,
-				RoutingContext: routingContext, RoutingContextSet: true,
-				PointCode: pointCode, Mask: masks[index],
+				NetworkAppearance:    key.NetworkAppearance,
+				NetworkAppearanceSet: key.NetworkAppearanceSet,
+				RoutingContext:       key.RoutingContext,
+				RoutingContextSet:    key.RoutingContextSet,
+				PointCode:            pointCode,
+				Mask:                 masks[index],
 			})
 		}
 	}

@@ -335,6 +335,47 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 	}
 }
 
+func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	rangeValue := DestinationRange{
+		NetworkAppearance:    10,
+		NetworkAppearanceSet: true,
+		PointCode:            0x123456,
+		Mask:                 4,
+		State:                DestinationUnavailable,
+	}
+	endpoint.destinations.setScopedRanges([]uint32{1, 2}, []DestinationRange{rangeValue})
+	rangeValue.State = DestinationAvailable
+	endpoint.destinations.setScopedRanges([]uint32{1}, []DestinationRange{rangeValue})
+
+	want := []DestinationStatusSnapshot{
+		{
+			Key: DestinationStatusKey{
+				NetworkAppearance: 10, NetworkAppearanceSet: true,
+				RoutingContext: 1, RoutingContextSet: true,
+				PointCode: 0x123456, Mask: 4,
+			},
+			State: DestinationAvailable,
+		},
+		{
+			Key: DestinationStatusKey{
+				NetworkAppearance: 10, NetworkAppearanceSet: true,
+				RoutingContext: 2, RoutingContextSet: true,
+				PointCode: 0x123456, Mask: 4,
+			},
+			State: DestinationUnavailable,
+		},
+	}
+	if got := endpoint.DestinationStatuses(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DestinationStatuses = %+v, want %+v", got, want)
+	}
+}
+
 func TestEndpointRoleInvalidStatusQueriesReturnNoResult(t *testing.T) {
 	asp, err := NewEndpoint(EndpointConfig{Role: RoleASP})
 	if err != nil {

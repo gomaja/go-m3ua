@@ -431,18 +431,33 @@ func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot {
 	}
 	e.destinations.mu.RUnlock()
 
-	statuses := make([]DestinationStatusSnapshot, 0, len(records))
+	type sequencedStatus struct {
+		status   DestinationStatusSnapshot
+		sequence uint64
+	}
+	latest := make(map[DestinationStatusKey]sequencedStatus, len(records))
+	keepNewest := func(rangeValue DestinationRange, sequence uint64) {
+		status := destinationSnapshotFromRange(rangeValue)
+		current, exists := latest[status.Key]
+		if !exists || sequence > current.sequence {
+			latest[status.Key] = sequencedStatus{status: status, sequence: sequence}
+		}
+	}
 	for _, record := range records {
 		if len(record.routingContexts) == 0 {
-			statuses = append(statuses, destinationSnapshotFromRange(record.rangeValue))
+			keepNewest(record.rangeValue, record.sequence)
 			continue
 		}
 		for _, routingContext := range record.routingContexts {
 			rangeValue := record.rangeValue
 			rangeValue.RoutingContext = routingContext
 			rangeValue.RoutingContextSet = true
-			statuses = append(statuses, destinationSnapshotFromRange(rangeValue))
+			keepNewest(rangeValue, record.sequence)
 		}
+	}
+	statuses := make([]DestinationStatusSnapshot, 0, len(latest))
+	for _, retained := range latest {
+		statuses = append(statuses, retained.status)
 	}
 	sort.Slice(statuses, func(i, j int) bool {
 		return compareDestinationStatusKey(statuses[i].Key, statuses[j].Key) < 0
