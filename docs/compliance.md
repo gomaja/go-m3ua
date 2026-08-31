@@ -125,9 +125,13 @@ Application/plugin hits from GitHub code search were not treated as competing li
 - `go build ./...`
 - `go test ./... -count=1`
 - `go test ./... -count=1 -race`
+- `FUZZTIME=2s scripts/fuzz-smoke.sh`
 - `go vet ./...`
 - `staticcheck ./...`
 - `golangci-lint run ./...`
 - `go run github.com/rhysd/actionlint/cmd/actionlint@latest`
 
-CI runs the test matrix on Go 1.23, 1.24, and 1.25, plus a Go 1.25 race job and pinned golangci-lint v2.
+CI runs the test matrix on Go 1.23, 1.24, and 1.25, plus Go 1.25 race and
+fuzz-smoke jobs and pinned golangci-lint v2. The fuzz runner discovers every
+exported `Fuzz*` target in every package, so adding a target automatically adds
+it to the gate.
