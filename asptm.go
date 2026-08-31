@@ -989,6 +989,8 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 // configured AS; a named parameter affects only that subset.
 func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 	rcs := c.configuredLocalRoutingContexts()
+	contextlessInactive := inactive == nil
+	contextlessConfigured := c.hasConfiguredLocalContextlessAS()
 	if inactive != nil {
 		rcs = inactive.RoutingContexts()
 	}
@@ -1004,8 +1006,12 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 		for _, rc := range c.configuredLocalRoutingContexts() {
 			c.ackedRCs[rc] = struct{}{}
 		}
+		c.ackedContextlessAS = contextlessConfigured
 	}
 	c.ackedRCsScoped = true
+	if contextlessInactive {
+		c.ackedContextlessAS = false
+	}
 	for _, rc := range rcs {
 		delete(c.ackedRCs, rc)
 	}
@@ -1019,6 +1025,7 @@ func (c *Association) noteNoRoutingContextsAcked() {
 	c.muAckedRCs.Lock()
 	c.ackedRCs = make(map[uint32]struct{})
 	c.ackedRCsScoped = true
+	c.ackedContextlessAS = false
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
 	c.notifyASPRouteStateChanged()
@@ -1033,6 +1040,9 @@ func (c *Association) stateForAcknowledgedRoutingContexts() State {
 	defer c.muAckedRCs.RUnlock()
 	if !c.ackedRCsScoped {
 		return current
+	}
+	if c.ackedContextlessAS {
+		return StateASPActive
 	}
 	for routingContext := range c.ackedRCs {
 		if _, overridden := c.overriddenRCs[routingContext]; !overridden {

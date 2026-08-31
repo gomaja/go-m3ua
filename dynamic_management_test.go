@@ -29,8 +29,9 @@ func TestDynamicallyRegisteredASAvailableToASPManagement(t *testing.T) {
 					t.Fatalf("local ASP status = %+v, want ASP-INACTIVE", status)
 				}
 				statuses := endpoint.ASPStatuses()
-				if len(statuses) != 1 || statuses[0].Key.AS != key {
-					t.Fatalf("ASPStatuses = %+v, want dynamic ASKey %+v", statuses, key)
+				if len(statuses) != 2 || statuses[0].Key.AS != (ASKey{}) || statuses[1].Key.AS != key {
+					t.Fatalf("ASPStatuses = %+v, want retained contextless AS and dynamic ASKey %+v",
+						statuses, key)
 				}
 			})
 
@@ -98,6 +99,135 @@ func TestDynamicallyRegisteredASAvailableToASPManagement(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestDynamicRegistrationPreservesContextlessASPManagementScope(t *testing.T) {
+	endpoint, association, dynamicKey, writes := newDynamicallyRegisteredASPManagementFixture(
+		t, RoleASP, StateASPInactive,
+	)
+	contextlessKey := ASKey{}
+
+	statuses := endpoint.ASPStatuses()
+	if len(statuses) != 2 || statuses[0].Key.AS != contextlessKey || statuses[1].Key.AS != dynamicKey {
+		t.Fatalf("ASPStatuses = %+v, want contextless %+v and dynamic %+v",
+			statuses, contextlessKey, dynamicKey)
+	}
+	if _, ok := endpoint.ASPStatus(ASPStatusKey{
+		Association: association.ID(),
+		AS:          contextlessKey,
+	}); !ok {
+		t.Fatal("ASPStatus did not retain the contextless Application Server")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	activeResult := make(chan error, 1)
+	go func() { activeResult <- association.ASPActive(ctx, contextlessKey) }()
+	active, ok := (<-writes).(*messages.AspActive)
+	if !ok {
+		t.Fatal("ASPActive wrote an unexpected message")
+	}
+	if active.RoutingContext != nil {
+		t.Fatalf("contextless ASP Active carried Routing Context %v",
+			active.RoutingContext.RoutingContexts())
+	}
+	if err := association.handleAspActiveAck(messages.NewAspActiveAck(nil, nil, nil)); err != nil {
+		t.Fatalf("handleAspActiveAck: %v", err)
+	}
+	if err := <-activeResult; err != nil {
+		t.Fatalf("ASPActive contextless AS: %v", err)
+	}
+	association.setState(StateASPActive)
+
+	inactiveResult := make(chan error, 1)
+	go func() { inactiveResult <- association.ASPInactive(ctx, contextlessKey) }()
+	inactive, ok := (<-writes).(*messages.AspInactive)
+	if !ok {
+		t.Fatal("ASPInactive wrote an unexpected message")
+	}
+	if inactive.RoutingContext != nil {
+		t.Fatalf("contextless ASP Inactive carried Routing Context %v",
+			inactive.RoutingContext.RoutingContexts())
+	}
+	if err := association.handleAspInactiveAck(messages.NewAspInactiveAck(nil, nil)); err != nil {
+		t.Fatalf("handleAspInactiveAck: %v", err)
+	}
+	if err := <-inactiveResult; err != nil {
+		t.Fatalf("ASPInactive contextless AS: %v", err)
+	}
+}
+
+func TestScopedASPActiveLeavesUnacknowledgedContextlessASInactive(t *testing.T) {
+	endpoint, association, dynamicKey, writes := newDynamicallyRegisteredASPManagementFixture(
+		t, RoleASP, StateASPInactive,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- association.ASPActive(ctx, dynamicKey) }()
+
+	active, ok := (<-writes).(*messages.AspActive)
+	if !ok {
+		t.Fatal("ASPActive wrote an unexpected message")
+	}
+	if active.RoutingContext == nil || active.RoutingContext.RoutingContext() != dynamicKey.RoutingContext {
+		t.Fatalf("ASP Active Routing Context = %v, want %d",
+			active.RoutingContext, dynamicKey.RoutingContext)
+	}
+	if err := association.handleAspActiveAck(messages.NewAspActiveAck(
+		nil, params.NewRoutingContext(dynamicKey.RoutingContext), nil,
+	)); err != nil {
+		t.Fatalf("handleAspActiveAck: %v", err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("ASPActive: %v", err)
+	}
+	association.setState(StateASPActive)
+
+	contextlessStatus, ok := endpoint.ASPStatus(ASPStatusKey{
+		Association: association.ID(),
+		AS:          ASKey{},
+	})
+	if !ok {
+		t.Fatal("ASPStatus did not retain the contextless Application Server")
+	}
+	if !contextlessStatus.LocalStateSet || contextlessStatus.LocalState != StateASPInactive {
+		t.Fatalf("contextless ASP status = %+v, want ASP-INACTIVE", contextlessStatus)
+	}
+	dynamicStatus, ok := endpoint.ASPStatus(ASPStatusKey{
+		Association: association.ID(),
+		AS:          dynamicKey,
+	})
+	if !ok || !dynamicStatus.LocalStateSet || dynamicStatus.LocalState != StateASPActive {
+		t.Fatalf("dynamic ASP status = %+v, %t; want ASP-ACTIVE", dynamicStatus, ok)
+	}
+}
+
+func TestScopedASPInactivePreservesAcknowledgedContextlessAS(t *testing.T) {
+	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association.noteRoutingContextsAcked(nil)
+	association.setState(StateASPActive)
+	dynamicKey := ASKey{
+		NetworkAppearance: 10, NetworkAppearanceSet: true,
+		RoutingContext: 100, RoutingContextSet: true,
+	}
+	association.addDynamicASKey(
+		dynamicKey,
+		testRoutingKey(10, 0x654321, params.ServiceIndSCCP),
+		false,
+	)
+	association.noteRoutingContextsAcked(params.NewRoutingContext(dynamicKey.RoutingContext))
+	association.noteRoutingContextsUnacked(params.NewRoutingContext(dynamicKey.RoutingContext))
+
+	if state := association.stateForAcknowledgedRoutingContexts(); state != StateASPActive {
+		t.Fatalf("Association state = %v, want ASP-ACTIVE for acknowledged contextless AS", state)
+	}
+	if state := association.localASPStateForStatus(ASKey{}); state != StateASPActive {
+		t.Fatalf("contextless ASP status = %v, want ASP-ACTIVE", state)
+	}
+	if state := association.localASPStateForStatus(dynamicKey); state != StateASPInactive {
+		t.Fatalf("dynamic ASP status = %v, want ASP-INACTIVE", state)
 	}
 }
 

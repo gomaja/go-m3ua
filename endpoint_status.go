@@ -289,8 +289,13 @@ func (c *Association) localASPStateForStatus(key ASKey) State {
 	if state != StateASPActive {
 		return state
 	}
-	if !key.RoutingContextSet ||
-		(c.routingContextAcked(key.RoutingContext) && !c.routingContextOverridden(key.RoutingContext)) {
+	if !key.RoutingContextSet {
+		if c.contextlessASAcked() {
+			return StateASPActive
+		}
+		return StateASPInactive
+	}
+	if c.routingContextAcked(key.RoutingContext) && !c.routingContextOverridden(key.RoutingContext) {
 		return StateASPActive
 	}
 	return StateASPInactive

@@ -216,6 +216,12 @@ type Association struct {
 	// the compatibility fallback for an association placed directly into
 	// ASP-ACTIVE while the latter follows an ASP Inactive Ack covering every AS.
 	ackedRCsScoped bool
+	// ackedContextlessAS records whether an ASP Active Ack covered the
+	// statically configured AS whose traffic has no Routing Context. RFC 4666
+	// Sections 4.3.1 and 4.3.4.3 keep ASP state per AS, so it is independent of
+	// ackedRCs: a later dynamically registered AS can be activated without
+	// activating that original contextless AS.
+	ackedContextlessAS bool
 	// overriddenRCs are the Routing Contexts an alternate ASP has taken over.
 	// For IPSP Double Exchange they belong only to TrafficToLocal, alongside
 	// ackedRCs; the independent TrafficToPeer inventory remains in activeRCs.
@@ -1739,6 +1745,7 @@ func (c *Association) closeWith(cause error) error {
 			c.muAckedRCs.Lock()
 			c.ackedRCs = nil
 			c.ackedRCsScoped = true
+			c.ackedContextlessAS = false
 			c.activeRCs = nil
 			c.activeRCsScoped = true
 			c.activeScopeInitialized = true
@@ -1971,7 +1978,18 @@ func (c *Association) configuredASKeys() []ASKey {
 	if c.isIPSPDoubleExchange() && !c.hasPeerIPSPTrafficDirection() {
 		return nil
 	}
-	return c.asKeysForRoutingContexts(c.configuredRoutingContexts())
+	routingContexts := c.configuredRoutingContexts()
+	keys := c.asKeysForRoutingContexts(routingContexts)
+	if len(routingContexts) > 0 && c.hasStaticallyConfiguredContextlessAS() {
+		// RFC 4666 Sections 4.4.1 and 4.3.4.3 add the dynamically registered
+		// AS to this Association; they do not replace its configured AS.
+		appearance, appearanceSet := appearanceOf(c.applicationServerNetworkAppearance())
+		keys = append([]ASKey{{
+			NetworkAppearance:    appearance,
+			NetworkAppearanceSet: appearanceSet,
+		}}, keys...)
+	}
+	return uniqueASKeys(keys)
 }
 
 func (c *Association) staticallyConfiguredASKeys() []ASKey {
@@ -2699,6 +2717,7 @@ func (c *Association) clearResumeAfterStrayAck() {
 // the association carries, so every configured context is marked.
 func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 	rcs := c.configuredLocalRoutingContexts()
+	contextlessAcked := acked == nil && c.hasConfiguredLocalContextlessAS()
 	if acked != nil {
 		if named := acked.RoutingContexts(); len(named) > 0 {
 			rcs = named
@@ -2712,6 +2731,12 @@ func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 		c.ackedRCs = make(map[uint32]struct{})
 	}
 	c.ackedRCsScoped = true
+	if contextlessAcked && !c.ackedContextlessAS {
+		changed = true
+	}
+	if contextlessAcked {
+		c.ackedContextlessAS = true
+	}
 	for _, rc := range rcs {
 		if _, exists := c.ackedRCs[rc]; !exists {
 			changed = true
@@ -2742,6 +2767,12 @@ func (c *Association) routingContextAcked(rc uint32) bool {
 	return ok
 }
 
+func (c *Association) contextlessASAcked() bool {
+	c.muAckedRCs.RLock()
+	defer c.muAckedRCs.RUnlock()
+	return !c.ackedRCsScoped || c.ackedContextlessAS
+}
+
 // forgetAckedRoutingContexts drops the acknowledged set, so a new activation
 // starts from nothing. An override recorded against the old activation goes with
 // it: the next ASP Active decides afresh which contexts this ASP may carry.
@@ -2756,6 +2787,7 @@ func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 	c.muAckedRCs.Lock()
 	c.ackedRCs = nil
 	c.ackedRCsScoped = false
+	c.ackedContextlessAS = false
 	c.overriddenRCs = nil
 	c.muAckedRCs.Unlock()
 }
@@ -2935,6 +2967,19 @@ func (c *Association) hasStaticallyConfiguredContextlessAS() bool {
 		return false
 	}
 	return len(c.staticallyConfiguredRoutingContexts()) == 0
+}
+
+func (c *Association) hasConfiguredLocalContextlessAS() bool {
+	if c == nil {
+		return false
+	}
+	if !c.isIPSPDoubleExchange() {
+		return c.hasStaticallyConfiguredContextlessAS()
+	}
+	if !c.hasLocalIPSPTrafficDirection() {
+		return false
+	}
+	return len(routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal)) == 0
 }
 
 // activeForRoutingContext reports whether this ASP is ASP-ACTIVE in the
