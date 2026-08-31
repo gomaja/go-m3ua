@@ -2,6 +2,7 @@ package m3ua
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func TestDynamicallyRegisteredASAvailableToASPManagement(t *testing.T) {
 }
 
 func TestDynamicRegistrationPreservesContextlessASPManagementScope(t *testing.T) {
-	endpoint, association, dynamicKey, writes := newDynamicallyRegisteredASPManagementFixture(
+	endpoint, association, dynamicKey, _ := newDynamicallyRegisteredASPManagementFixture(
 		t, RoleASP, StateASPInactive,
 	)
 	contextlessKey := ASKey{}
@@ -119,16 +120,23 @@ func TestDynamicRegistrationPreservesContextlessASPManagementScope(t *testing.T)
 	}); !ok {
 		t.Fatal("ASPStatus did not retain the contextless Application Server")
 	}
+}
 
+func TestUnkeyedASPManagementIncludesContextlessAndDynamicAS(t *testing.T) {
+	_, association, _, writes := newDynamicallyRegisteredASPManagementFixture(
+		t, RoleASP, StateASPInactive,
+	)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	activeResult := make(chan error, 1)
-	go func() { activeResult <- association.ASPActive(ctx, contextlessKey) }()
+	go func() { activeResult <- association.ASPActive(ctx) }()
 	active, ok := (<-writes).(*messages.AspActive)
 	if !ok {
 		t.Fatal("ASPActive wrote an unexpected message")
 	}
 	if active.RoutingContext != nil {
+		cancel()
+		<-activeResult
 		t.Fatalf("contextless ASP Active carried Routing Context %v",
 			active.RoutingContext.RoutingContexts())
 	}
@@ -141,7 +149,7 @@ func TestDynamicRegistrationPreservesContextlessASPManagementScope(t *testing.T)
 	association.setState(StateASPActive)
 
 	inactiveResult := make(chan error, 1)
-	go func() { inactiveResult <- association.ASPInactive(ctx, contextlessKey) }()
+	go func() { inactiveResult <- association.ASPInactive(ctx) }()
 	inactive, ok := (<-writes).(*messages.AspInactive)
 	if !ok {
 		t.Fatal("ASPInactive wrote an unexpected message")
@@ -155,6 +163,46 @@ func TestDynamicRegistrationPreservesContextlessASPManagementScope(t *testing.T)
 	}
 	if err := <-inactiveResult; err != nil {
 		t.Fatalf("ASPInactive contextless AS: %v", err)
+	}
+}
+
+func TestContextlessASPManagementRejectsUnrepresentableExactScope(t *testing.T) {
+	contextlessKey := ASKey{}
+	for _, test := range []struct {
+		name  string
+		state State
+		call  func(context.Context, *Association) error
+	}{
+		{
+			name:  "ASP Active",
+			state: StateASPInactive,
+			call: func(ctx context.Context, association *Association) error {
+				return association.ASPActive(ctx, contextlessKey)
+			},
+		},
+		{
+			name:  "ASP Inactive",
+			state: StateASPActive,
+			call: func(ctx context.Context, association *Association) error {
+				return association.ASPInactive(ctx, contextlessKey)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, association, _, writes := newDynamicallyRegisteredASPManagementFixture(
+				t, RoleASP, test.state,
+			)
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			if err := test.call(ctx, association); !errors.Is(err, ErrInvalidParameterValue) {
+				t.Fatalf("error = %v, want ErrInvalidParameterValue", err)
+			}
+			select {
+			case message := <-writes:
+				t.Fatalf("unrepresentable exact scope wrote %T", message)
+			default:
+			}
+		})
 	}
 }
 

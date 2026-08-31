@@ -304,6 +304,13 @@ func (c *Association) localASPProcedureState() State {
 
 func (c *Association) routingContextParamForASPProcedure(keys []ASKey) (*params.Param, error) {
 	if len(keys) == 0 {
+		// RFC 4666 Sections 4.3.4.3 and 4.3.4.4 make an omitted Routing
+		// Context apply to every AS the ASP is configured to serve. When one
+		// of those ASes is contextless, omission is the only representation
+		// that includes it.
+		if c.hasConfiguredLocalContextlessAS() {
+			return nil, nil
+		}
 		return c.configuredLocalRoutingContextParam(), nil
 	}
 	configured := c.configuredLocalASKeysForStatus()
@@ -338,6 +345,10 @@ func (c *Association) routingContextParamForASPProcedure(keys []ASKey) (*params.
 	if contextless {
 		if len(keys) != 1 {
 			return nil, fmt.Errorf("%w: contextless AS cannot share one ASPTM request",
+				ErrInvalidParameterValue)
+		}
+		if len(configured) != 1 {
+			return nil, fmt.Errorf("%w: contextless AS cannot be addressed separately",
 				ErrInvalidParameterValue)
 		}
 		return nil, nil
