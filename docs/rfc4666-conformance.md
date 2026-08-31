@@ -1,6 +1,6 @@
 # RFC 4666 conformance matrix
 
-Audit date: 2026-08-30.
+Audit date: 2026-08-31.
 
 This matrix tracks the go-m3ua v1.2.0 conformance program against the current
 [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html). The governing document,
@@ -28,8 +28,8 @@ model or show examples without creating a separate implementation requirement.
 | --- | --- | --- | --- |
 | [1.1-1.3.1 Scope, terminology, architecture](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.1) | Descriptive | Implemented | Public APIs use `RoleASP`, `RoleSGP`, `RoleIPSP`, `Association`, AS, SG, and SGP. SCTP initiation is independent from M3UA role. |
 | [1.3.2.1 MTP3-User transport](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.2.1) | Mandatory | Implemented | DATA transfer and delivery are implemented for ASP, SGP, and both IPSP exchange models, including independent directional Routing Context and Network Appearance scope. |
-| [1.3.2.2 Native management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.2.2) | Mandatory | Partial | Automatic procedures and management indications exist. Complete typed Endpoint operations and status queries are tracked by [#19](https://github.com/gomaja/go-m3ua/issues/19). |
-| [1.3.2.3 MTP3 network management interworking](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.2.3) | Mandatory | Partial | DUNA, DAVA, DAUD, SCON, DUPU, DRST, MTP-PAUSE, MTP-RESUME, and MTP-STATUS behavior exists. The remaining typed SSNM operations belong to [#19](https://github.com/gomaja/go-m3ua/issues/19). |
+| [1.3.2.2 Native management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.2.2) | Mandatory | Implemented | Endpoint exposes keyed M-SCTP_STATUS, M-ASP_STATUS, M-AS_STATUS, MTP Route, and destination snapshots. ASP procedures support explicit or automatic policy, and association-scoped management indications retain exact scope and local causes. |
+| [1.3.2.3 MTP3 network management interworking](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.2.3) | Mandatory | Implemented | DUNA, DAVA, DAUD, SCON, DUPU, DRST, MTP-PAUSE, MTP-RESUME, and MTP-STATUS behavior and typed application operations are implemented with exact Network Appearance, Routing Context, and destination scope. |
 | [1.3.2.4 SCTP Association management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.2.4) | Mandatory | Implemented | Establishment, loss, restart, shutdown, management indications, timers, and concurrent lifecycle behavior are covered. |
 | [1.3.2.5 Multiple SGPs](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.2.5) | Recommended | Implemented | An ASP Endpoint owns per-SG route state, derives destination status, and selects SG, SGP, Association, and SCTP stream. |
 | [1.4.1 Signalling Point Code representation](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.1) | Mandatory | Implemented | Protocol Data OPC and DPC retain the RFC's 32-bit, Network-Appearance-dependent representation. Affected Point Code and route-prefix APIs validate their defined mask and 24-bit point-code components. |
@@ -41,11 +41,11 @@ model or show examples without creating a separate implementation requirement.
 | [1.4.3.4 IPSP considerations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.3.4) | Mandatory when IPSP is used | Implemented | `RoleIPSP` requires an explicit Association-level exchange model. Single Exchange and Double Exchange are implemented independently from SCTP association initiation. |
 | [1.4.4 Redundancy models](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.4) | Optional models | Implemented | Override, Loadshare, Broadcast, configurable n+k activation, explicit smooth start, recovery, shortage notification, restoration, and failover are implemented per exact ASKey. |
 | [1.4.5 Flow control](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.5) | Optional | Implemented | Association traffic can be stopped through the ASP Inactive and ASP Down procedures; bounded queues and explicit overflow prevent silent mandatory-event loss. |
-| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Mandatory/Optional | Partial | Inbound congestion state, level handling, route preference, and Message Priority policy exist. Complete explicit SCON operations are tracked by [#19](https://github.com/gomaja/go-m3ua/issues/19). |
+| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Mandatory/Optional | Implemented | Inbound state, explicit level zero abatement, omitted and level 1-3 handling, route preference, Message Priority policy, ASP-to-SGP reporting, and SGP fan-out are implemented. |
 | [1.4.7 SCTP stream mapping](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.7) | Mandatory/Recommended | Implemented | Management and SSNM use stream 0; DATA uses an SLS-derived nonzero stream while preserving same-flow order. |
 | [1.4.8 SCTP initiation model](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.8) | Recommended | Implemented | ASP and SGP Endpoints can each initiate or accept SCTP Associations. `Dial`, `Listen`, and `Accept` never select the M3UA role. |
 | [1.5 Sample configurations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.5) | Descriptive | Informative | ASP/SGP examples exist, and IPSP Single and Double Exchange configurations and bidirectional transfer matrices are covered. |
-| [1.6 M3UA boundaries](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.6) | Descriptive primitives | Partial | DATA, management indications, and destination state APIs exist. Consolidated typed M3UA-User and Layer Management operations are tracked by [#19](https://github.com/gomaja/go-m3ua/issues/19). |
+| [1.6 M3UA boundaries](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.6) | Descriptive primitives | Implemented | Typed MTP-TRANSFER, destination indications, Layer Management status queries and indications, ASP procedures, and SSNM operations expose the RFC boundaries without requiring raw message construction. |
 
 ## Message formats
 
@@ -69,11 +69,11 @@ Section 4 below.
 
 | RFC 4666 area | Strength | Status | Evidence and remaining work |
 | --- | --- | --- | --- |
-| [4.1 M3UA-User primitives](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.1) | Mandatory | Partial | MTP-TRANSFER and destination indications exist; the complete typed operation surface is #19. |
-| [4.2 Layer Management primitives](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.2) | Mandatory | Partial | Automatic state management and bounded indications exist; explicit keyed operations and queries are #19. |
+| [4.1 M3UA-User primitives](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.1) | Mandatory | Implemented | Endpoint MTP-TRANSFER and bounded MTP-PAUSE, MTP-RESUME, and MTP-STATUS indications expose a resynchronizable MTP3-User boundary. |
+| [4.2 Layer Management primitives](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.2) | Mandatory | Implemented | Keyed local status queries, explicit ASP procedures, and bounded M-NOTIFY, M-ERROR, M-SCTP_RELEASE, and M-SCTP_RESTART indications retain Association, ASKey, destination, and cause scope. |
 | [4.3.1 ASP/IPSP states](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.1) | Mandatory | Implemented | ASP state is implemented per Association and per ASKey. IPSP Double Exchange maintains independent `TrafficToLocal` and `TrafficToPeer` state, including partial Routing Context activation. |
 | [4.3.2 AS states](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.2) | Mandatory | Implemented | AS-DOWN, AS-INACTIVE, AS-ACTIVE, AS-PENDING, configurable n+k thresholds, strict startup, explicit smooth start, T(r), recovery below n, and traffic gating are implemented. |
-| [4.3.3 Management procedures](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.3) | Mandatory | Partial | SCTP establishment/loss/restart and automatic ASP procedures are implemented. Explicit policy selection is #19. |
+| [4.3.3 Management procedures](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.3) | Mandatory | Implemented | SCTP establishment/loss/restart, per-procedure automatic or explicit ASP policy, context-bounded acknowledgement waits, local failure indications, and policy-aware shutdown are implemented independently from SCTP initiation. |
 | [4.3.4.1 ASP Up](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.4.1) | Mandatory | Implemented | ASP/SGP and both IPSP exchange models cover version, identifier, independent and simplified ASPSM, duplicates, simultaneous messages, retry, timeout, and restart. |
 | [4.3.4.2 ASP Down](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.4.2) | Mandatory | Implemented | ASP/SGP and both IPSP exchange models cover directional quiescence, acknowledgement, timeout, restart, repeated procedures, and shutdown ordering. |
 | [4.3.4.3 ASP Active](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.4.3) | Mandatory | Implemented | ASKey authorization, omitted RC rules, traffic mode, state, retry, partial acknowledgements, configurable n+k activation, strict traffic withholding, explicit smooth start, and independent IPSP Double Exchange activation are covered. |
@@ -81,9 +81,9 @@ Section 4 below.
 | [4.3.4.5 Notify](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.4.5) | Mandatory | Implemented | ASP/SGP and both IPSP exchange models cover AS state, Other, Alternate ASP Active, ASP Failure, identifier, and Routing Context scope. Related acknowledgements precede ordered Notify delivery, and a newly ASP-INACTIVE peer receives current AS state. Held Errata 2065 is explicitly classified. |
 | [4.3.4.6 Heartbeat](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.4.6) | Optional procedure | Implemented | M3UA BEAT is state-gated, echoes Heartbeat Data exactly, and is independent from SCTP HEARTBEAT path management. |
 | [4.4 RKM procedures](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.4) | Optional | Implemented | ASP, SGP, IPSP Single Exchange, and IPSP Double Exchange cover registration, deregistration, authorization, deterministic allocation/replay, static/dynamic coexistence, requested changes, collisions, permissions, bounded unresolved outcomes, partial/split results, active-AS rejection, cancellation, and Association loss. RFC 4666 defines no RKM T(ack), so local waits use caller contexts and responder retransmissions are idempotent. |
-| [4.5.1 SSNM at an SGP](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.1) | Mandatory | Partial | SS7-side state, scoped distribution, DUNA/DAVA/SCON/DRST/DUPU, and DAUD answers exist. Complete typed operations are #19. |
+| [4.5.1 SSNM at an SGP](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.1) | Mandatory | Implemented | SS7-side state, scoped distribution, DUNA/DAVA/SCON/DRST/DUPU, DAUD answers, typed SCON and DUPU operations, concerned-ASP fan-out, and partial-delivery reporting are implemented. |
 | [4.5.2 SSNM at an ASP](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.2) | Mandatory | Implemented | Single- and multiple-SG route derivation, loss, restriction, congestion, and MTP3-User indications are implemented. |
-| [4.5.3 ASP auditing](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.3) | Recommended | Partial | DAUD receive and response behavior is implemented. An explicit Endpoint DAUD operation is #19. |
+| [4.5.3 ASP auditing](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.3) | Recommended | Implemented | An active ASP can originate typed DAUD on an Association; the SGP answers available, restricted, congested, unavailable, and unknown destination state with retained congestion level. |
 | [4.6 MTP3 restart](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.6) | Mandatory | Implemented | Local and peer restart, SCTP_RESTART, state reset, ordered recovery, and affected destination behavior are covered. |
 | [4.7 NIF not available](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.7) | Mandatory | Implemented | Endpoint-wide and per-AS NIF availability, ASP Inactive, Notify, partial failure, and recovery are covered. |
 | [4.8 Version control](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.8) | Mandatory | Implemented | Version `1`, ASP Up negotiation, unsupported version Error, and state preservation are covered. |
@@ -97,7 +97,7 @@ Section 4 below.
 | [5.2 Traffic failover examples](https://www.rfc-editor.org/rfc/rfc4666.html#section-5.2) | Descriptive | Implemented | Withdrawal, insufficient-resource advisory, restoration at n, failover, failback, pending recovery, recovery queue, and flow stability are covered. |
 | [5.3 Normal ASP withdrawal](https://www.rfc-editor.org/rfc/rfc4666.html#section-5.3) | Descriptive | Implemented | ASP Inactive and ASP Down withdrawal, acknowledgement, state, and traffic quiescence are covered. |
 | [5.4 Auditing examples](https://www.rfc-editor.org/rfc/rfc4666.html#section-5.4) | Descriptive | Implemented | Available, congested, unknown, and unavailable DAUD results are covered. |
-| [5.5 M3UA/MTP3-User boundary examples](https://www.rfc-editor.org/rfc/rfc4666.html#section-5.5) | Descriptive | Partial | Transfer and destination state primitives exist; the consolidated typed boundary is #19. |
+| [5.5 M3UA/MTP3-User boundary examples](https://www.rfc-editor.org/rfc/rfc4666.html#section-5.5) | Descriptive | Implemented | Typed transfer, destination, congestion, user-part unavailability, and Layer Management operations cover the M3UA/MTP3-User boundary. |
 | [5.6 IPSP examples](https://www.rfc-editor.org/rfc/rfc4666.html#section-5.6) | Descriptive | Implemented | Section 5.6.1 Single Exchange and Section 5.6.2 Double Exchange are covered across both SCTP initiation orientations, independent ASPSM/ASPTM initiators, one-way traffic, contextless AS, and directional withdrawal. |
 | [6 Security](https://www.rfc-editor.org/rfc/rfc4666.html#section-6) | Mandatory node requirement | Deployment | The [standards contract](standards.md#library-and-deployment-boundary) defines library controls and the operator's RFC 3788 responsibility. go-m3ua alone is not an RFC 3788 deployment. |
 | [7 IANA considerations](https://www.rfc-editor.org/rfc/rfc4666.html#section-7) | Mandatory/Recommended | Implemented | PPID `3` is sent, PPID `0` is accepted, other PPIDs are discarded, port configuration is not hard-coded, and unknown class/type/parameter behavior is covered. |
@@ -107,5 +107,4 @@ Section 4 below.
 
 | Issue | Normative scope |
 | --- | --- |
-| [#19 Endpoint management and SSNM operations](https://github.com/gomaja/go-m3ua/issues/19) | Required to complete the RFC 4666 M3UA-User and Layer Management boundary contract. |
 | [#20 Release conformance evidence](https://github.com/gomaja/go-m3ua/issues/20) | Re-audits every authority and closes all unexplained matrix gaps at the exact v1.2.0 release commit. |

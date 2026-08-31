@@ -399,7 +399,20 @@ func (c *Association) notifyEstablished() {
 }
 
 func (c *Association) notifyReady() {
-	if c == nil || c.readinessState() != c.currentReadinessState() {
+	if c == nil {
+		return
+	}
+	if (c.cfg == nil || c.cfg.ASPProcedures == nil) && c.isIPSPDoubleExchange() {
+		state := c.IPSPState()
+		// RFC 4666 Sections 4.3 and 5.6.2 permit one-way Double Exchange.
+		// Preserve the nil policy's historical readiness once either independent
+		// traffic direction has completed its automatic ASP procedures.
+		if state.TrafficToLocal == StateASPActive || state.TrafficToPeer == StateASPActive {
+			c.notifyEstablished()
+		}
+		return
+	}
+	if c.readinessState() != c.currentReadinessState() {
 		return
 	}
 	c.notifyEstablished()

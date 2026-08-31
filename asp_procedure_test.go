@@ -417,6 +417,31 @@ func TestAssociationASPTMExplicitOperationsRejectBeforeWrite(t *testing.T) {
 }
 
 func TestAssociationReadinessFollowsASPProcedurePolicy(t *testing.T) {
+	t.Run("nil policy IPSP Double Exchange preserves directional readiness", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			state IPSPState
+		}{
+			{"local direction", IPSPState{
+				TrafficToLocal: StateASPActive,
+				TrafficToPeer:  StateASPDown,
+			}},
+			{"peer direction", IPSPState{
+				TrafficToLocal: StateASPDown,
+				TrafficToPeer:  StateASPActive,
+			}},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				association, _ := newDoubleExchangeIPSPForTest(t)
+				association.setIPSPState(test.state)
+
+				association.notifyReady()
+				requireAssociationReady(t, association)
+			})
+		}
+	})
+
 	t.Run("explicit ASP Up returns at ASP-DOWN", func(t *testing.T) {
 		association, _ := newTestConn(t, StateASPDown, RoleASP)
 		association.cfg.ASPProcedures = explicitASPProcedurePolicy()
