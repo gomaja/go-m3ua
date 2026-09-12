@@ -134,8 +134,12 @@ Payload identity is `(cohort, association, flow, sequence)`. Thirty-two logical
 flows map stably to the configured associations and to 16 SLS values. The
 receiver validates deterministic payload bytes plus per-flow OPC, DPC, SCCP or
 ISUP SI, NI, priority, SLS, Routing Context, and Network Appearance. Duplicate
-tracking uses a fixed 8,192-sequence bitmap per flow; payloads outside the
-scheduled identity space are invalid and cannot hide a missing delivery.
+tracking uses a fixed rolling 8,192-sequence bitmap per flow. A missing
+submission does not invalidate later correctly ordered deliveries or count
+them as reordered. An arrival older than the retained window is unclassifiable
+and earns no unique-delivery credit; it increments the fixture-invalid count.
+Payloads outside the scheduled identity space are also invalid and cannot hide
+a missing delivery.
 
 Allocation and CPU fields are explicitly labelled whole-process observations:
 they include fixture generation, validation, HTTP control, and library work.

@@ -20,6 +20,8 @@ const (
 	receiverStopped   receiverPhase = "stopped"
 )
 
+var errInvalidRunSpec = errors.New("invalid run specification")
+
 type readyResult struct {
 	Ready                     bool   `json:"ready"`
 	Phase                     string `json:"phase"`
@@ -119,6 +121,9 @@ func (control *receiverControl) ready() readyResult {
 func (control *receiverControl) reset(specification runSpec) error {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
+	if specification.Associations < 1 || specification.Associations > maxAssociations {
+		return fmt.Errorf("%w: associations must be between 1 and %d", errInvalidRunSpec, maxAssociations)
+	}
 	if control.phase == receiverMeasuring {
 		return errors.New("cannot reset an active measurement")
 	}
@@ -133,7 +138,7 @@ func (control *receiverControl) reset(specification runSpec) error {
 		specification.Expected == 0 || specification.Duration <= 0 || specification.Duration > maxRunWindow ||
 		specification.Payload.size(0) == 0 || specification.Rate > maxOfferedRate ||
 		expectedErr != nil || expected != specification.Expected {
-		return errors.New("invalid run specification")
+		return errInvalidRunSpec
 	}
 	control.spec = specification
 	control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
@@ -380,7 +385,11 @@ func (control *receiverControl) handler() http.Handler {
 			return
 		}
 		if err := control.reset(specification); err != nil {
-			http.Error(writer, err.Error(), http.StatusConflict)
+			status := http.StatusConflict
+			if errors.Is(err, errInvalidRunSpec) {
+				status = http.StatusBadRequest
+			}
+			http.Error(writer, err.Error(), status)
 			return
 		}
 		writer.WriteHeader(http.StatusNoContent)
