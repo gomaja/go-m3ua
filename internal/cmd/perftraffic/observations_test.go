@@ -16,6 +16,28 @@ func TestParseCPUStat(testContext *testing.T) {
 	}
 }
 
+func TestParseCPUStatAcceptsStandardWhitespace(testContext *testing.T) {
+	statistics, err := parseCPUStat(strings.NewReader("usage_usec\r 123\r\nnr_throttled\t0\r\n"))
+	if err != nil {
+		testContext.Fatalf("parseCPUStat: %v", err)
+	}
+	if statistics["usage_usec"] != 123 || statistics["nr_throttled"] != 0 {
+		testContext.Fatalf("statistics = %#v", statistics)
+	}
+}
+
+func TestParseCPUStatRejectsMalformedLines(testContext *testing.T) {
+	for _, contents := range []string{
+		"usage_usec 1 extra\nnr_throttled 0\n",
+		"usage_usec nope\nnr_throttled 0\n",
+		"usage_usec 1\n",
+	} {
+		if _, err := parseCPUStat(strings.NewReader(contents)); err == nil {
+			testContext.Fatalf("parseCPUStat(%q) unexpectedly succeeded", contents)
+		}
+	}
+}
+
 func TestBoundedHistogramPercentiles(testContext *testing.T) {
 	histogram := newDurationHistogram()
 	for _, duration := range []time.Duration{time.Microsecond, 10 * time.Microsecond, 100 * time.Microsecond, time.Millisecond} {

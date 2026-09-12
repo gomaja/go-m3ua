@@ -8,6 +8,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -131,7 +132,7 @@ func parseCPUStat(reader io.Reader) (map[string]uint64, error) {
 	statistics := make(map[string]uint64)
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
-		fields := splitFields(scanner.Text())
+		fields := strings.Fields(scanner.Text())
 		if len(fields) != 2 {
 			return nil, fmt.Errorf("invalid cpu.stat line %q", scanner.Text())
 		}
@@ -150,24 +151,6 @@ func parseCPUStat(reader io.Reader) (map[string]uint64, error) {
 		}
 	}
 	return statistics, nil
-}
-
-func splitFields(line string) []string {
-	fields := make([]string, 0, 2)
-	start := -1
-	for index := 0; index <= len(line); index++ {
-		if index < len(line) && line[index] != ' ' && line[index] != '\t' {
-			if start == -1 {
-				start = index
-			}
-			continue
-		}
-		if start != -1 {
-			fields = append(fields, line[start:index])
-			start = -1
-		}
-	}
-	return fields
 }
 
 func readCPUStat(path string) (map[string]uint64, error) {

@@ -37,6 +37,33 @@ func TestReceiverControlRequiresResetBeforeStartAndStopAfterStart(testContext *t
 	requireHTTPStatus(testContext, http.MethodPost, server.URL+"/stop", nil, http.StatusNoContent)
 }
 
+func TestReceiverControlRejectsUnboundedAssociationCountsAtHTTPBoundary(testContext *testing.T) {
+	control := newReceiverControl(1, 16)
+	control.setAssociationReady(0, 15)
+	server := httptest.NewServer(control.handler())
+	defer server.Close()
+
+	for _, associations := range []int{0, maxAssociations + 1, int(^uint(0) >> 1)} {
+		specification := runSpec{
+			Cohort:       "malicious",
+			Seed:         1,
+			Associations: associations,
+			Expected:     1,
+			Duration:     time.Second,
+			Rate:         1,
+			Payload:      workload128,
+		}
+		body, err := json.Marshal(specification)
+		if err != nil {
+			testContext.Fatalf("Marshal: %v", err)
+		}
+		requireHTTPStatus(testContext, http.MethodPost, server.URL+"/reset", body, http.StatusBadRequest)
+		if control.ledger != nil {
+			testContext.Fatal("invalid association count allocated a receive ledger")
+		}
+	}
+}
+
 func TestReceiverControlSeparatesMeasurementAndDrainDeliveries(testContext *testing.T) {
 	now := time.Unix(100, 0)
 	control := newReceiverControl(1, 16)

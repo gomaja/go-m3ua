@@ -9,8 +9,10 @@ type ledgerSnapshot struct {
 }
 
 type flowLedger struct {
-	base uint64
-	seen []uint64
+	base        uint64
+	highestSeen uint64
+	seenAny     bool
+	seen        []uint64
 }
 
 type receiveLedger struct {
@@ -48,12 +50,11 @@ func (ledger *receiveLedger) record(identity messageIdentity) ledgerRecordStatus
 	}
 	flow := &ledger.flows[identity.Flow]
 	if identity.Sequence < flow.base {
-		ledger.snapshotData.Duplicate++
-		return ledgerDuplicate
-	}
-	if identity.Sequence-flow.base >= ledger.window {
 		ledger.snapshotData.Invalid++
 		return ledgerInvalid
+	}
+	if identity.Sequence-flow.base >= ledger.window {
+		ledger.advanceWindow(flow, identity.Sequence-ledger.window+1)
 	}
 	wordIndex, bitIndex := ledger.bitLocation(identity.Sequence)
 	mask := uint64(1) << bitIndex
@@ -63,19 +64,26 @@ func (ledger *receiveLedger) record(identity messageIdentity) ledgerRecordStatus
 	}
 	flow.seen[wordIndex] |= mask
 	ledger.snapshotData.Unique++
-	if identity.Sequence > flow.base {
+	if flow.seenAny && identity.Sequence < flow.highestSeen {
 		ledger.snapshotData.Reordered++
 	}
-	for {
-		wordIndex, bitIndex = ledger.bitLocation(flow.base)
-		mask = uint64(1) << bitIndex
-		if flow.seen[wordIndex]&mask == 0 {
-			break
-		}
-		flow.seen[wordIndex] &^= mask
-		flow.base++
+	if !flow.seenAny || identity.Sequence > flow.highestSeen {
+		flow.highestSeen = identity.Sequence
 	}
+	flow.seenAny = true
 	return ledgerUnique
+}
+
+func (ledger *receiveLedger) advanceWindow(flow *flowLedger, nextBase uint64) {
+	if nextBase-flow.base >= ledger.window {
+		clear(flow.seen)
+	} else {
+		for sequence := flow.base; sequence < nextBase; sequence++ {
+			wordIndex, bitIndex := ledger.bitLocation(sequence)
+			flow.seen[wordIndex] &^= uint64(1) << bitIndex
+		}
+	}
+	flow.base = nextBase
 }
 
 func (ledger *receiveLedger) bitLocation(sequence uint64) (int, uint) {
