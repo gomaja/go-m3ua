@@ -77,6 +77,9 @@ type runRecord struct {
 	BacklogAssessment         string                `json:"backlog_assessment,omitempty"`
 	WindowAlignment           string                `json:"window_alignment"`
 	ValidatedPerSecond        float64               `json:"validated_per_second"`
+	ProgressObservations      []progressObservation `json:"progress_observations,omitempty"`
+	SenderWindow              *windowAccounting     `json:"sender_window,omitempty"`
+	OutstandingScope          string                `json:"outstanding_scope"`
 }
 
 type fixtureManifest struct {
@@ -101,6 +104,9 @@ func (record *runRecord) evaluate() {
 	record.IndependentPeer = false
 	if record.WindowAlignment == "" {
 		record.WindowAlignment = "receiver window begins on first cohort arrival; sender and receiver monotonic clocks are not treated as synchronized"
+	}
+	if record.OutstandingScope == "" {
+		record.OutstandingScope = "legacy local counters only; not end-to-end boundary observations"
 	}
 	if record.UnsupportedModes == nil {
 		record.UnsupportedModes = map[string]string{

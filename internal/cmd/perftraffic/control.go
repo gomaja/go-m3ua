@@ -373,6 +373,9 @@ func sampleReceiver(ctx context.Context, control *receiverControl) {
 
 func (control *receiverControl) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /progress", func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, http.StatusOK, control.progress())
+	})
 	mux.HandleFunc("GET /ready", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, control.ready())
 	})
