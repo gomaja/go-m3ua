@@ -161,7 +161,8 @@ not a dependency API limitation.
 `fixture_verdict: pass` requires every scheduled DATA message to be submitted
 and uniquely validated before the single absolute drain deadline, with no caps,
 send failures, invalid scope/payload, duplicates, reordering, fatal read error,
-sustained application-backlog growth, or final application outstanding work.
+or final application outstanding work. A `growing` backlog is an inconclusive
+capacity diagnostic, not a fixture-validity failure.
 Missing or regressed cgroup counters, CPU throttling, too few series samples, or
 unavailable capacity observability produce an overall `inconclusive` result;
 protocol/data failures produce `invalid`. No field is named or treated as

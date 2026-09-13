@@ -1,7 +1,7 @@
 package main
 
 import (
-	"flag"
+	"os"
 	"testing"
 	"time"
 )
@@ -74,8 +74,35 @@ func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T)
 }
 
 func TestParseConfigDoesNotWriteUsageToProcessOutput(testContext *testing.T) {
-	commandLine := flag.NewFlagSet("test", flag.ContinueOnError)
-	if _, err := parseConfigWithFlagSet(commandLine, []string{"-associations=0"}); err == nil {
-		testContext.Fatal("parseConfigWithFlagSet unexpectedly succeeded")
+	for _, argument := range []string{"-unknown-flag", "-associations=not-a-number"} {
+		testContext.Run(argument, func(testContext *testing.T) {
+			stdout, err := os.CreateTemp(testContext.TempDir(), "stdout")
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			defer func() { _ = stdout.Close() }()
+			stderr, err := os.CreateTemp(testContext.TempDir(), "stderr")
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			defer func() { _ = stderr.Close() }()
+			originalStdout, originalStderr := os.Stdout, os.Stderr
+			defer func() { os.Stdout, os.Stderr = originalStdout, originalStderr }()
+			os.Stdout, os.Stderr = stdout, stderr
+			_, parseErr := parseConfig([]string{argument})
+			os.Stdout, os.Stderr = originalStdout, originalStderr
+			if parseErr == nil {
+				testContext.Fatal("parseConfig unexpectedly succeeded")
+			}
+			for _, capture := range []*os.File{stdout, stderr} {
+				contents, readErr := os.ReadFile(capture.Name())
+				if readErr != nil {
+					testContext.Fatal(readErr)
+				}
+				if len(contents) != 0 {
+					testContext.Errorf("unexpected process output: %q", contents)
+				}
+			}
+		})
 	}
 }

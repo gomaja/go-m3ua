@@ -13,14 +13,20 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
+const (
+	sctpNoDelay       = true
+	sctpSACKDelay     = uint32(0)
+	sctpSACKFrequency = uint32(1)
+)
+
 func associationConfig(role string) *m3ua.AssociationConfig {
 	routingContexts := make([]uint32, flowCount)
 	for index := range routingContexts {
 		routingContexts[index] = 100 + uint32(index)
 	}
 	config := m3ua.NewAssociationConfig(0, 0, 0, 0, 0, 0)
-	config.SetSCTPNoDelay(true).
-		SetSCTPSACK(0, 1).
+	config.SetSCTPNoDelay(sctpNoDelay).
+		SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).
 		SetTrafficModeType(params.TrafficModeLoadshare).
 		SetNetworkAppearance(testNetworkAppearance).
 		SetRoutingContexts(routingContexts...)
