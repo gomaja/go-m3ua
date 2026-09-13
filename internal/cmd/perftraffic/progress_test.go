@@ -81,6 +81,64 @@ func TestWorkerWaitDoesNotRetainCanceledWindowDeadline(testContext *testing.T) {
 	}
 }
 
+func TestProgressSamplerPreservesRequestCancellationAndTimeout(testContext *testing.T) {
+	for _, cancelCaller := range []bool{false, true} {
+		testContext.Run(fmt.Sprintf("caller-cancel-%t", cancelCaller), func(testContext *testing.T) {
+			entered := make(chan struct{}, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+				entered <- struct{}{}
+				<-request.Context().Done()
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			started := time.Now()
+			done := sampleProgress(ctx, started, 500*time.Millisecond, server.URL)
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				testContext.Fatal("sampler request did not start")
+			}
+			if cancelCaller {
+				cancel()
+			}
+			select {
+			case observations := <-done:
+				if len(observations) != 1 || observations[0].Error == "" || observations[0].Snapshot != nil {
+					testContext.Fatalf("failed request was not preserved: %+v", observations)
+				}
+				if !cancelCaller && observations[0].After-observations[0].Before < time.Second {
+					testContext.Fatalf("request timeout was shortened: %+v", observations[0])
+				}
+			case <-time.After(2 * time.Second):
+				testContext.Fatal("sampler ignored cancellation or request timeout")
+			}
+			select {
+			case <-entered:
+				testContext.Fatal("sampler issued another request after the boundary")
+			default:
+			}
+		})
+	}
+}
+
+func TestProgressSamplerDoesNotStartAfterWindow(testContext *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writeJSON(writer, http.StatusOK, receiverProgress{})
+	}))
+	defer server.Close()
+	select {
+	case observations := <-sampleProgress(context.Background(), time.Now().Add(-time.Second), 500*time.Millisecond, server.URL):
+		if len(observations) != 0 || requests.Load() != 0 {
+			testContext.Fatalf("expired window started requests: %+v", observations)
+		}
+	case <-time.After(2 * time.Second):
+		testContext.Fatal("expired sampler did not terminate")
+	}
+}
+
 func TestProgressOffsetsIncludePreBoundaryObservation(testContext *testing.T) {
 	for _, duration := range []time.Duration{time.Nanosecond, time.Millisecond, time.Second, time.Second + time.Millisecond, 2010 * time.Millisecond, maxRunWindow} {
 		offsets := progressOffsets(duration)

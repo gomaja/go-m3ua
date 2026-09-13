@@ -123,6 +123,13 @@ No serialized receiver clock is treated as synchronized with the sender. Timing
 uses the same-process monotonic subtraction described by the
 [Go time package](https://pkg.go.dev/time#hdr-Monotonic_Clocks).
 
+The measurement boundary stops new periodic requests without canceling one
+already in flight. An active request retains its one-second timeout and caller
+cancellation, following the [Go context contract](https://pkg.go.dev/context).
+The sender joins the sampler before taking subsequent snapshots; this wait does
+not extend the measurement window or the absolute drain deadline. A request
+crossing the boundary remains recorded but cannot narrow the delivery bounds.
+
 At the snapshot instant between offsets `before` and `after`, cumulative unique
 delivery `U` bounds all scheduled-but-not-yet-validated work by
 `max(0, offered(before)-U)` through `offered(after)-U`. The offered schedule is
