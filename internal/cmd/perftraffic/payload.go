@@ -98,6 +98,9 @@ func buildPayload(identity messageIdentity, size int) []byte {
 
 func fillDeterministic(destination []byte, identity messageIdentity) {
 	state := identity.Seed ^ identity.Sequence ^ uint64(identity.Association)<<40 ^ uint64(identity.Flow)<<32
+	if state == 0 {
+		state = 0x9e3779b97f4a7c15
+	}
 	for index := range destination {
 		state ^= state << 13
 		state ^= state >> 7

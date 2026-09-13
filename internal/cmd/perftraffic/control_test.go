@@ -107,7 +107,7 @@ func TestReceiverControlBindsLogicalAssociationToOneTransport(testContext *testi
 	control := newReceiverControl(2, 16)
 	control.setAssociationReady(0, 15)
 	control.setAssociationReady(1, 15)
-	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 2, Expected: 2, Duration: time.Second, Payload: workload128, Rate: 2}); err != nil {
+	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 2, Expected: 64, Duration: time.Second, Payload: workload128, Rate: 64}); err != nil {
 		testContext.Fatalf("reset: %v", err)
 	}
 	if err := control.start(); err != nil {
@@ -116,8 +116,8 @@ func TestReceiverControlBindsLogicalAssociationToOneTransport(testContext *testi
 	control.record(0, validReceivedMessage("cohort-a", 7, 0, 0, 0, 128))
 	control.record(1, validReceivedMessage("cohort-a", 7, 0, 0, 1, 128))
 	result := control.result()
-	if result.Delivery.Invalid != 1 {
-		testContext.Fatalf("invalid = %d, want 1", result.Delivery.Invalid)
+	if result.Delivery.Unique != 1 || result.Delivery.Invalid != 1 {
+		testContext.Fatalf("delivery = %+v, want unique 1 and invalid 1", result.Delivery)
 	}
 }
 

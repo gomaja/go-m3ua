@@ -1,8 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"testing"
 )
+
+func TestDeterministicBodyRejectsZeroingForZeroDerivedState(testContext *testing.T) {
+	for _, seed := range []uint64{0, 1, 7, ^uint64(0) / flowCount} {
+		message := validReceivedMessage("zero-state", seed, 0, 0, seed, 128)
+		if _, err := validateMessage(message, "zero-state", seed, 1, workload128); err != nil {
+			testContext.Fatalf("valid message with seed %d: %v", seed, err)
+		}
+		clear(message.ProtocolData.Data[payloadHeaderSize:])
+		if _, err := validateMessage(message, "zero-state", seed, 1, workload128); err == nil {
+			testContext.Errorf("zeroed body accepted for seed %d", seed)
+		}
+	}
+}
+
+func TestDeterministicBodyPreservesNonzeroState(testContext *testing.T) {
+	body := make([]byte, 8)
+	fillDeterministic(body, messageIdentity{Seed: 1})
+	want := []byte{65, 65, 41, 37, 101, 1, 113, 13}
+	if !bytes.Equal(body, want) {
+		testContext.Fatalf("body = %x, want %x", body, want)
+	}
+}
 
 func TestWorkloadSizeDeterministicMix(testContext *testing.T) {
 	counts := map[int]int{}
