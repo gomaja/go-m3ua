@@ -166,7 +166,20 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		return runRecord{}, runRecord{}, fmt.Errorf("start receiver: %w", err)
 	}
 
+	initialBefore := time.Now()
+	initialProgress, err := getReceiverProgress(ctx, config.PeerControl)
+	initialObservation := progressObservation{Before: 0, After: time.Since(initialBefore), Snapshot: &initialProgress}
+	if err != nil {
+		initialObservation.Snapshot = nil
+		initialObservation.Error = err.Error()
+		return stopFailedProgress(config.PeerControl, specification, initialObservation, fmt.Errorf("read initial receiver progress: %w", err))
+	}
+	if initialProgress.Spec != specification || initialProgress.Generation == 0 || initialProgress.Phase != receiverMeasuring || initialProgress.Delivery.Unique != 0 || initialProgress.Delivery.Missing != expected || initialProgress.Delivery.Invalid != 0 || initialProgress.Delivery.Duplicate != 0 || initialProgress.Delivery.Reordered != 0 || initialProgress.FatalError != "" {
+		return stopFailedProgress(config.PeerControl, specification, initialObservation, errors.New("receiver progress is not an empty active cohort"))
+	}
 	started := time.Now()
+	initialObservation.Before = initialBefore.Sub(started)
+	initialObservation.After = 0
 	for _, association := range associations {
 		if deadlineErr := association.SetWriteDeadline(started.Add(duration + config.Drain)); deadlineErr != nil {
 			_ = postJSON(ctx, config.PeerControl+"/stop", nil)
@@ -177,24 +190,37 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	queues, workersDone := startSendWorkers(associations, config, counters)
 	sampleDone := make(chan struct{})
 	go sampleSender(started, counters, sampleDone)
+	samplingContext, cancelSampling := context.WithDeadline(ctx, started.Add(duration))
+	defer cancelSampling()
+	progressDone := sampleProgress(samplingContext, started, duration, config.PeerControl)
 	dispatchScheduled(ctx, config, cohort, duration, started, expected, queues, counters)
 	outstandingAtEnd := counters.outstandingCount()
 	close(sampleDone)
+	cancelSampling()
+	observations := append([]progressObservation{initialObservation}, (<-progressDone)...)
 	for _, queue := range queues {
 		close(queue)
 	}
 	drainStarted := time.Now()
 	drainDeadline := started.Add(duration + config.Drain)
-	drained := waitWorkers(workersDone, remainingUntil(drainDeadline))
+	boundaryContext, cancelBoundary := context.WithDeadline(ctx, drainDeadline)
+	observations = append(observations, observeProgress(boundaryContext, started, config.PeerControl))
+	cancelBoundary()
+	drained := waitWorkersContext(ctx, workersDone, remainingUntil(drainDeadline))
 	if !drained {
-		counters.setFatal("sender workers exceeded the drain deadline")
+		if ctx.Err() != nil {
+			counters.setFatal(ctx.Err().Error())
+		} else {
+			counters.setFatal("sender workers exceeded the drain deadline")
+		}
 		for _, association := range associations {
 			_ = association.Close()
 		}
 		<-workersDone
 	}
-	drainContext, cancelDrain := context.WithDeadline(context.Background(), drainDeadline)
+	drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
 	receiver, pollErr := waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
+	observations = append(observations, observeProgress(drainContext, started, config.PeerControl))
 	cancelDrain()
 	if pollErr != nil {
 		counters.setFatal(pollErr.Error())
@@ -225,9 +251,13 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		sender.NegotiatedOutboundStreams[index] = int(association.MaxMessageStreamID()) + 1
 	}
 	sender.Manifest = currentManifest(config.Outstanding)
-	if sender.MeasurementDuration > 0 {
-		sender.ValidatedPerSecond = float64(sender.Delivery.UniqueMeasurement) / sender.MeasurementDuration.Seconds()
-	}
+	sender.ProgressObservations = observations
+	accounting := analyzeProgress(specification, observations)
+	sender.SenderWindow = &accounting
+	sender.ValidatedPerSecond = accounting.RateLower
+	sender.BacklogAssessment = "paired interval diagnostics only; sustained-backlog acceptance is not determined"
+	sender.WindowAlignment = "sender monotonic measurement window; rate is a conservative lower bound from bracketed receiver snapshots, not the receiver first-arrival diagnostic"
+	sender.OutstandingScope = "legacy counters measure sender worker queues only; sender_window bounds include all scheduled but not yet validated deliveries"
 	sender.evaluate()
 	var cohortErrors []error
 	if pollErr != nil {
@@ -419,7 +449,7 @@ func sampleSender(started time.Time, counters *senderCounters, done <-chan struc
 	}
 }
 
-func waitWorkers(done <-chan struct{}, timeout time.Duration) bool {
+func waitWorkersContext(ctx context.Context, done <-chan struct{}, timeout time.Duration) bool {
 	if timeout <= 0 {
 		select {
 		case <-done:
@@ -433,6 +463,8 @@ func waitWorkers(done <-chan struct{}, timeout time.Duration) bool {
 	select {
 	case <-done:
 		return true
+	case <-ctx.Done():
+		return false
 	case <-timer.C:
 		return false
 	}

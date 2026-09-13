@@ -111,6 +111,50 @@ change are invalid rather than credited to the new cohort.
 
 ## Result contract
 
+### Sender-aligned boundary accounting
+
+`sender.sender_window` brackets validated delivery in the sender's actual
+monotonic measurement interval. Before traffic begins, an atomic `/progress`
+snapshot verifies an empty active cohort. One-second periodic snapshots, an
+additional probe targeted 10 ms before the end, and post-window
+observations retain the sender's request-start and response-completion offsets,
+the full cohort specification, generation, phase and cumulative delivery counters.
+No serialized receiver clock is treated as synchronized with the sender. Timing
+uses the same-process monotonic subtraction described by the
+[Go time package](https://pkg.go.dev/time#hdr-Monotonic_Clocks).
+
+At the snapshot instant between offsets `before` and `after`, cumulative unique
+delivery `U` bounds all scheduled-but-not-yet-validated work by
+`max(0, offered(before)-U)` through `offered(after)-U`. The offered schedule is
+ideal open-loop demand, not actual dispatcher progress or completed local writes.
+These bounds include scheduler, library, transport and receive-side waiting;
+they do not identify which queue holds the work. The legacy scalar outstanding
+fields are local counters only, as identified by `outstanding_scope`.
+
+For the fixed sender end boundary, snapshots completed before that boundary
+provide lower delivery bounds; snapshots begun after it provide upper bounds.
+A snapshot straddling the boundary does not narrow either side. Drain completion
+never raises the lower measurement-window count. `sender.validated_per_second`
+is now the conservative lower rate bound; use `sender_window.status` before
+interpreting it. Failed, inconsistent or incomplete observations yield
+`inconclusive`, not a measured zero or a passing result. Raw observations remain
+in `sender.progress_observations` even when analysis cannot use them.
+
+The receiver's first-arrival-based `delivery.unique_measurement` and
+`validated_per_second` remain explicitly receiver-window diagnostics, not
+sender-aligned acceptance measurements. Older fixture results must not be mixed
+with these bounds as if the measurement definitions were identical.
+
+The paired `backlog_change` reports first-to-last-quarter mean change bounds
+using only observations strictly within the measurement window and at least
+eight samples. Its `increase-demonstrated`, `nonincrease-demonstrated` and
+`unresolved` statuses describe those sampled quarters only. They are not a
+statistical stationarity test, proof of no intervening backlog, or a capacity
+acceptance rule. Uncertainty is not resolved by adding a percentage allowance.
+Capacity remains unavailable until the sustained-growth decision rule and full
+campaign are established. HTTP observation overhead remains in whole-process
+CPU/allocation accounting; it is not silently subtracted.
+
 Sender stdout is one JSON object containing the active `phase`, top-level
 `sender`, `receiver`, `verdict`, an optional `error`, and retained `warmup` and
 `measurement` phase records. A warm-up failure returns both raw warm-up records
