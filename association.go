@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -2631,22 +2632,81 @@ func (c *Association) resolveRoutingContext(rtCtx *uint32) (*params.Param, error
 // Nothing is read from the Association's own selection, which is what makes it safe to
 // call concurrently for different flows on one association.
 func (c *Association) routingContextFor(rtCtx uint32) (*params.Param, error) {
-	for _, rc := range c.configuredRoutingContexts() {
-		if rc != rtCtx {
-			continue
-		}
-		// Activation is per Routing Context (Section 4.3.4.3). At an ASP the SGP
-		// must have acknowledged the context and no alternate may have taken it;
-		// at an SGP this particular ASP must still be active in that AS.
-		if !c.outboundRoutingContextActive(rtCtx) {
-			return nil, ErrRoutingContextNotActive
-		}
-		return params.NewRoutingContext(rtCtx), nil
+	if !c.routingContextConfigured(rtCtx) {
+		// Including the case where no Routing Key was coordinated at all: naming a
+		// flow the association never agreed to carry is not the same as omitting
+		// the parameter, and must not be silently downgraded to it.
+		return nil, NewInvalidRoutingContextError(rtCtx)
 	}
-	// Including the case where no Routing Key was coordinated at all: naming a
-	// flow the association never agreed to carry is not the same as omitting
-	// the parameter, and must not be silently downgraded to it.
-	return nil, NewInvalidRoutingContextError(rtCtx)
+	// Activation is per Routing Context (Section 4.3.4.3). At an ASP the SGP
+	// must have acknowledged the context and no alternate may have taken it;
+	// at an SGP this particular ASP must still be active in that AS.
+	if !c.outboundRoutingContextActive(rtCtx) {
+		return nil, ErrRoutingContextNotActive
+	}
+	return params.NewRoutingContext(rtCtx), nil
+}
+
+// routingContextConfigured reports whether rtCtx is one of the traffic flows
+// this association is configured to carry — the membership question
+// configuredRoutingContexts answers, asked without building the slice, since
+// every outbound DATA asks it.
+func (c *Association) routingContextConfigured(rtCtx uint32) bool {
+	if c.staticRoutingContextConfigured(rtCtx) {
+		return true
+	}
+	c.muDynamicASKeys.RLock()
+	_, ok := c.dynamicPeerASKeys[rtCtx]
+	c.muDynamicASKeys.RUnlock()
+	return ok
+}
+
+// staticRoutingContextConfigured is the statically configured half of
+// routingContextConfigured, mirroring staticallyConfiguredRoutingContexts.
+func (c *Association) staticRoutingContextConfigured(rtCtx uint32) bool {
+	if c == nil {
+		return false
+	}
+	if c.role == RoleSGP {
+		c.muAuthorizedRCs.RLock()
+		if c.authorizationResolved {
+			authorized := false
+			for _, rc := range c.authorizedRCs {
+				if rc == rtCtx {
+					authorized = true
+					break
+				}
+			}
+			c.muAuthorizedRCs.RUnlock()
+			return authorized
+		}
+		c.muAuthorizedRCs.RUnlock()
+	}
+	if c.isIPSPDoubleExchange() {
+		if c.cfg.IPSP.TrafficToPeer == nil {
+			return false
+		}
+		return routingContextParamCarries(c.cfg.IPSP.TrafficToPeer.RoutingContexts, rtCtx)
+	}
+	if c.cfg == nil || c.cfg.RoutingContexts == nil {
+		return false
+	}
+	return routingContextParamCarries(c.cfg.RoutingContexts, rtCtx)
+}
+
+// routingContextParamCarries reports whether a Routing Context parameter names
+// rtCtx, scanning the serialized value directly: decoding it into a slice with
+// RoutingContexts only to answer membership would allocate on every send.
+func routingContextParamCarries(p *params.Param, rtCtx uint32) bool {
+	if p == nil || p.Tag != params.RoutingContext || len(p.Data)%4 != 0 {
+		return false
+	}
+	for offset := 0; offset+4 <= len(p.Data); offset += 4 {
+		if binary.BigEndian.Uint32(p.Data[offset:offset+4]) == rtCtx {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Association) outboundRoutingContextActive(rtCtx uint32) bool {
