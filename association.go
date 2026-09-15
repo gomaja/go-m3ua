@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -926,9 +927,11 @@ func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, 
 	if err := c.checkDataStream(streamID); err != nil {
 		return 0, err
 	}
-	// The AssociationConfig Params are copied because NewData calls SetLength on each one,
-	// which writes to the caller's Param: two goroutines sending concurrently
-	// would otherwise write to the same shared config Param.
+	// NewData calls SetLength on each Param it is given, which writes to it, so
+	// no shared config Param may be handed over: the Network Appearance and
+	// Correlation ID are copies (resolveNetworkAppearanceScope returns an owned
+	// Param), and two goroutines sending concurrently never write to the same
+	// shared config Param.
 	rc, err := c.resolveRoutingContext(rtCtx)
 	if err != nil {
 		return 0, err
@@ -939,7 +942,7 @@ func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, 
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.networkAppearanceForRoutingContext(rc, false).Copy(), rc, params.NewProtocolData(
+		c.networkAppearanceForRoutingContext(rc, false), rc, params.NewProtocolData(
 			c.cfg.OriginatingPointCode, c.cfg.DestinationPointCode,
 			c.cfg.ServiceIndicator, c.cfg.NetworkIndicator,
 			c.cfg.MessagePriority, c.cfg.SignallingLinkSelection, b,
@@ -973,14 +976,14 @@ func (c *Association) WritePD(protocolData *params.Param) (n int, err error) {
 		return 0, ErrNotEstablished
 	}
 
-	pd, err := protocolData.ProtocolData()
+	sls, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
 	// The routing label travels with the message here rather than coming from
 	// AssociationConfig, so the stream follows this message's own SLS.
-	return c.writePD(protocolData, pd, c.streamFor(pd.SignallingLinkSelection), nil)
+	return c.writePD(protocolData, userOctets, c.streamFor(sls), nil)
 }
 
 // WritePDWithRoutingContext writes data with a specific mtp3 protocol data,
@@ -994,12 +997,12 @@ func (c *Association) WritePDWithRoutingContext(protocolData *params.Param, rtCt
 		return 0, ErrNotEstablished
 	}
 
-	pd, err := protocolData.ProtocolData()
+	sls, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
-	return c.writePD(protocolData, pd, c.streamFor(pd.SignallingLinkSelection), &rtCtx)
+	return c.writePD(protocolData, userOctets, c.streamFor(sls), &rtCtx)
 }
 
 // WritePDToStream writes data with a specific mtp3 protocol data to the
@@ -1016,12 +1019,12 @@ func (c *Association) WritePDToStream(protocolData *params.Param, streamID uint1
 	// Peeled before the send so a Protocol Data that marshals but cannot be
 	// parsed back is refused rather than put on the wire, and so the reported
 	// count is the SS7 user octets carried.
-	pd, err := protocolData.ProtocolData()
+	_, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
-	return c.writePD(protocolData, pd, streamID, nil)
+	return c.writePD(protocolData, userOctets, streamID, nil)
 }
 
 // WritePDToStreamWithRoutingContext writes data with a specific mtp3 protocol
@@ -1034,25 +1037,43 @@ func (c *Association) WritePDToStreamWithRoutingContext(protocolData *params.Par
 		return 0, ErrNotEstablished
 	}
 
-	pd, err := protocolData.ProtocolData()
+	_, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
-	return c.writePD(protocolData, pd, streamID, &rtCtx)
+	return c.writePD(protocolData, userOctets, streamID, &rtCtx)
+}
+
+// peelProtocolData validates an outbound Protocol Data parameter and reports
+// the two things the send path needs from it: the Signalling Link Selection
+// that chooses the stream and the number of SS7 user octets it carries. Both
+// sit at fixed offsets in the serialized parameter, so reading them directly
+// spares decoding a ProtocolDataPayload — one allocation per message — that
+// the message construction itself never uses.
+func peelProtocolData(protocolData *params.Param) (sls uint8, userOctets int, err error) {
+	if protocolData.Tag != params.ProtocolData {
+		return 0, 0, params.ErrInvalidType
+	}
+	if len(protocolData.Data) < 12 {
+		return 0, 0, params.ErrTooShortToParse
+	}
+	return protocolData.Data[11], len(protocolData.Data) - 12, nil
 }
 
 // writePD is the shared body of the Protocol Data writes, taking the already
-// peeled payload so none of them has to parse it twice. rtCtx names the traffic
-// flow for this one message, or is nil to fall back to the association-wide
-// selection.
-func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDataPayload, streamID uint16, rtCtx *uint32) (int, error) {
+// peeled user octet count so none of them has to parse it twice. rtCtx names
+// the traffic flow for this one message, or is nil to fall back to the
+// association-wide selection.
+func (c *Association) writePD(protocolData *params.Param, userOctets int, streamID uint16, rtCtx *uint32) (int, error) {
 	if err := c.checkDataStream(streamID); err != nil {
 		return 0, err
 	}
 
-	// Copied for the same reason as in writeData: NewData writes to every
-	// Param it is given, and these are shared across every send on this Association.
+	// Owned for the same reason as in writeData: NewData writes to every
+	// Param it is given, and the configuration's are shared across every send
+	// on this Association, so resolveNetworkAppearanceScope returns a Param
+	// the caller owns and the Correlation ID is copied.
 	rc, err := c.resolveRoutingContext(rtCtx)
 	if err != nil {
 		return 0, err
@@ -1063,7 +1084,7 @@ func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDat
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.networkAppearanceForRoutingContext(rc, false).Copy(),
+		c.networkAppearanceForRoutingContext(rc, false),
 		rc,           // the one context identifying this traffic flow
 		protocolData, // custom mtp3 protocol data OPC, DPC, SI, NI, MP, and SLS, flexible on active connections
 		c.cfg.CorrelationID.Copy(),
@@ -1079,7 +1100,7 @@ func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDat
 		return 0, err
 	}
 
-	return len(pd.Data), nil
+	return userOctets, nil
 }
 
 func (c *Association) writeSCTPData(data []byte, info *sctp.SndRcvInfo) (int, error) {
@@ -2257,6 +2278,11 @@ func (c *Association) networkAppearanceForRoutingContext(routingContext *params.
 	return networkAppearance
 }
 
+// resolveNetworkAppearanceScope resolves the Network Appearance outbound
+// traffic for the given Routing Contexts must carry. The returned Param is
+// owned by the caller — freshly built or copied, never the shared
+// configuration's — so it can be handed to a message constructor without a
+// further copy.
 func (c *Association) resolveNetworkAppearanceScope(
 	routingContext *params.Param,
 	local bool,
@@ -2275,7 +2301,7 @@ func (c *Association) resolveNetworkAppearanceScope(
 		}
 	}
 	if len(contexts) == 0 {
-		return configured, false, nil
+		return configured.Copy(), false, nil
 	}
 
 	configuredValue, configuredSet := appearanceOf(configured)
@@ -2624,22 +2650,81 @@ func (c *Association) resolveRoutingContext(rtCtx *uint32) (*params.Param, error
 // Nothing is read from the Association's own selection, which is what makes it safe to
 // call concurrently for different flows on one association.
 func (c *Association) routingContextFor(rtCtx uint32) (*params.Param, error) {
-	for _, rc := range c.configuredRoutingContexts() {
-		if rc != rtCtx {
-			continue
-		}
-		// Activation is per Routing Context (Section 4.3.4.3). At an ASP the SGP
-		// must have acknowledged the context and no alternate may have taken it;
-		// at an SGP this particular ASP must still be active in that AS.
-		if !c.outboundRoutingContextActive(rtCtx) {
-			return nil, ErrRoutingContextNotActive
-		}
-		return params.NewRoutingContext(rtCtx), nil
+	if !c.routingContextConfigured(rtCtx) {
+		// Including the case where no Routing Key was coordinated at all: naming a
+		// flow the association never agreed to carry is not the same as omitting
+		// the parameter, and must not be silently downgraded to it.
+		return nil, NewInvalidRoutingContextError(rtCtx)
 	}
-	// Including the case where no Routing Key was coordinated at all: naming a
-	// flow the association never agreed to carry is not the same as omitting
-	// the parameter, and must not be silently downgraded to it.
-	return nil, NewInvalidRoutingContextError(rtCtx)
+	// Activation is per Routing Context (Section 4.3.4.3). At an ASP the SGP
+	// must have acknowledged the context and no alternate may have taken it;
+	// at an SGP this particular ASP must still be active in that AS.
+	if !c.outboundRoutingContextActive(rtCtx) {
+		return nil, ErrRoutingContextNotActive
+	}
+	return params.NewRoutingContext(rtCtx), nil
+}
+
+// routingContextConfigured reports whether rtCtx is one of the traffic flows
+// this association is configured to carry — the membership question
+// configuredRoutingContexts answers, asked without building the slice, since
+// every outbound DATA asks it.
+func (c *Association) routingContextConfigured(rtCtx uint32) bool {
+	if c.staticRoutingContextConfigured(rtCtx) {
+		return true
+	}
+	c.muDynamicASKeys.RLock()
+	_, ok := c.dynamicPeerASKeys[rtCtx]
+	c.muDynamicASKeys.RUnlock()
+	return ok
+}
+
+// staticRoutingContextConfigured is the statically configured half of
+// routingContextConfigured, mirroring staticallyConfiguredRoutingContexts.
+func (c *Association) staticRoutingContextConfigured(rtCtx uint32) bool {
+	if c == nil {
+		return false
+	}
+	if c.role == RoleSGP {
+		c.muAuthorizedRCs.RLock()
+		if c.authorizationResolved {
+			authorized := false
+			for _, rc := range c.authorizedRCs {
+				if rc == rtCtx {
+					authorized = true
+					break
+				}
+			}
+			c.muAuthorizedRCs.RUnlock()
+			return authorized
+		}
+		c.muAuthorizedRCs.RUnlock()
+	}
+	if c.isIPSPDoubleExchange() {
+		if c.cfg.IPSP.TrafficToPeer == nil {
+			return false
+		}
+		return routingContextParamCarries(c.cfg.IPSP.TrafficToPeer.RoutingContexts, rtCtx)
+	}
+	if c.cfg == nil || c.cfg.RoutingContexts == nil {
+		return false
+	}
+	return routingContextParamCarries(c.cfg.RoutingContexts, rtCtx)
+}
+
+// routingContextParamCarries reports whether a Routing Context parameter names
+// rtCtx, scanning the serialized value directly: decoding it into a slice with
+// RoutingContexts only to answer membership would allocate on every send.
+func routingContextParamCarries(p *params.Param, rtCtx uint32) bool {
+	if p == nil || p.Tag != params.RoutingContext || len(p.Data)%4 != 0 {
+		return false
+	}
+	for offset := 0; offset+4 <= len(p.Data); offset += 4 {
+		if binary.BigEndian.Uint32(p.Data[offset:offset+4]) == rtCtx {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Association) outboundRoutingContextActive(rtCtx uint32) bool {
