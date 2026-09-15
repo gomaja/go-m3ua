@@ -976,14 +976,14 @@ func (c *Association) WritePD(protocolData *params.Param) (n int, err error) {
 		return 0, ErrNotEstablished
 	}
 
-	pd, err := protocolData.ProtocolData()
+	sls, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
 	// The routing label travels with the message here rather than coming from
 	// AssociationConfig, so the stream follows this message's own SLS.
-	return c.writePD(protocolData, pd, c.streamFor(pd.SignallingLinkSelection), nil)
+	return c.writePD(protocolData, userOctets, c.streamFor(sls), nil)
 }
 
 // WritePDWithRoutingContext writes data with a specific mtp3 protocol data,
@@ -997,12 +997,12 @@ func (c *Association) WritePDWithRoutingContext(protocolData *params.Param, rtCt
 		return 0, ErrNotEstablished
 	}
 
-	pd, err := protocolData.ProtocolData()
+	sls, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
-	return c.writePD(protocolData, pd, c.streamFor(pd.SignallingLinkSelection), &rtCtx)
+	return c.writePD(protocolData, userOctets, c.streamFor(sls), &rtCtx)
 }
 
 // WritePDToStream writes data with a specific mtp3 protocol data to the
@@ -1019,12 +1019,12 @@ func (c *Association) WritePDToStream(protocolData *params.Param, streamID uint1
 	// Peeled before the send so a Protocol Data that marshals but cannot be
 	// parsed back is refused rather than put on the wire, and so the reported
 	// count is the SS7 user octets carried.
-	pd, err := protocolData.ProtocolData()
+	_, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
-	return c.writePD(protocolData, pd, streamID, nil)
+	return c.writePD(protocolData, userOctets, streamID, nil)
 }
 
 // WritePDToStreamWithRoutingContext writes data with a specific mtp3 protocol
@@ -1037,25 +1037,43 @@ func (c *Association) WritePDToStreamWithRoutingContext(protocolData *params.Par
 		return 0, ErrNotEstablished
 	}
 
-	pd, err := protocolData.ProtocolData()
+	_, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
 	}
 
-	return c.writePD(protocolData, pd, streamID, &rtCtx)
+	return c.writePD(protocolData, userOctets, streamID, &rtCtx)
+}
+
+// peelProtocolData validates an outbound Protocol Data parameter and reports
+// the two things the send path needs from it: the Signalling Link Selection
+// that chooses the stream and the number of SS7 user octets it carries. Both
+// sit at fixed offsets in the serialized parameter, so reading them directly
+// spares decoding a ProtocolDataPayload — one allocation per message — that
+// the message construction itself never uses.
+func peelProtocolData(protocolData *params.Param) (sls uint8, userOctets int, err error) {
+	if protocolData.Tag != params.ProtocolData {
+		return 0, 0, params.ErrInvalidType
+	}
+	if len(protocolData.Data) < 12 {
+		return 0, 0, params.ErrTooShortToParse
+	}
+	return protocolData.Data[11], len(protocolData.Data) - 12, nil
 }
 
 // writePD is the shared body of the Protocol Data writes, taking the already
-// peeled payload so none of them has to parse it twice. rtCtx names the traffic
-// flow for this one message, or is nil to fall back to the association-wide
-// selection.
-func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDataPayload, streamID uint16, rtCtx *uint32) (int, error) {
+// peeled user octet count so none of them has to parse it twice. rtCtx names
+// the traffic flow for this one message, or is nil to fall back to the
+// association-wide selection.
+func (c *Association) writePD(protocolData *params.Param, userOctets int, streamID uint16, rtCtx *uint32) (int, error) {
 	if err := c.checkDataStream(streamID); err != nil {
 		return 0, err
 	}
 
-	// Copied for the same reason as in writeData: NewData writes to every
-	// Param it is given, and these are shared across every send on this Association.
+	// Owned for the same reason as in writeData: NewData writes to every
+	// Param it is given, and the configuration's are shared across every send
+	// on this Association, so resolveNetworkAppearanceScope returns a Param
+	// the caller owns and the Correlation ID is copied.
 	rc, err := c.resolveRoutingContext(rtCtx)
 	if err != nil {
 		return 0, err
@@ -1082,7 +1100,7 @@ func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDat
 		return 0, err
 	}
 
-	return len(pd.Data), nil
+	return userOctets, nil
 }
 
 func (c *Association) writeSCTPData(data []byte, info *sctp.SndRcvInfo) (int, error) {
