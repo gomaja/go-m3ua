@@ -104,7 +104,6 @@ func (d *Data) MarshalTo(b []byte) error {
 		if err := param.MarshalTo(payload[offset:]); err != nil {
 			return err
 		}
-		offset += param.MarshalLen()
 	}
 
 	d.Header.Payload = payload
