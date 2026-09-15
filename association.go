@@ -926,9 +926,11 @@ func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, 
 	if err := c.checkDataStream(streamID); err != nil {
 		return 0, err
 	}
-	// The AssociationConfig Params are copied because NewData calls SetLength on each one,
-	// which writes to the caller's Param: two goroutines sending concurrently
-	// would otherwise write to the same shared config Param.
+	// NewData calls SetLength on each Param it is given, which writes to it, so
+	// no shared config Param may be handed over: the Network Appearance and
+	// Correlation ID are copies (resolveNetworkAppearanceScope returns an owned
+	// Param), and two goroutines sending concurrently never write to the same
+	// shared config Param.
 	rc, err := c.resolveRoutingContext(rtCtx)
 	if err != nil {
 		return 0, err
@@ -939,7 +941,7 @@ func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, 
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.networkAppearanceForRoutingContext(rc, false).Copy(), rc, params.NewProtocolData(
+		c.networkAppearanceForRoutingContext(rc, false), rc, params.NewProtocolData(
 			c.cfg.OriginatingPointCode, c.cfg.DestinationPointCode,
 			c.cfg.ServiceIndicator, c.cfg.NetworkIndicator,
 			c.cfg.MessagePriority, c.cfg.SignallingLinkSelection, b,
@@ -1063,7 +1065,7 @@ func (c *Association) writePD(protocolData *params.Param, pd *params.ProtocolDat
 	}
 	defer release()
 	d, err := messages.NewData(
-		c.networkAppearanceForRoutingContext(rc, false).Copy(),
+		c.networkAppearanceForRoutingContext(rc, false),
 		rc,           // the one context identifying this traffic flow
 		protocolData, // custom mtp3 protocol data OPC, DPC, SI, NI, MP, and SLS, flexible on active connections
 		c.cfg.CorrelationID.Copy(),
@@ -2257,6 +2259,11 @@ func (c *Association) networkAppearanceForRoutingContext(routingContext *params.
 	return networkAppearance
 }
 
+// resolveNetworkAppearanceScope resolves the Network Appearance outbound
+// traffic for the given Routing Contexts must carry. The returned Param is
+// owned by the caller — freshly built or copied, never the shared
+// configuration's — so it can be handed to a message constructor without a
+// further copy.
 func (c *Association) resolveNetworkAppearanceScope(
 	routingContext *params.Param,
 	local bool,
@@ -2275,7 +2282,7 @@ func (c *Association) resolveNetworkAppearanceScope(
 		}
 	}
 	if len(contexts) == 0 {
-		return configured, false, nil
+		return configured.Copy(), false, nil
 	}
 
 	configuredValue, configuredSet := appearanceOf(configured)
