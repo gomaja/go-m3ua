@@ -24,3 +24,29 @@ A passing result covers only this numerical comparison. It does not establish
 that runs were independent, that log ratios met the interval's distributional
 assumption, that measurements were environmentally valid, or that every
 absolute performance and correctness gate passed.
+
+## Predeclared sustained-backlog decision method
+
+`backlog.go` fixes the sustained-backlog decision method **before** any
+capacity campaign run, as required by the approved budgets. The rule is pure
+interval arithmetic over the sender-window backlog-change interval
+`[lower, upper]` (first versus last measurement-quarter means, computed by the
+traffic fixture) and admits no numeric tolerance:
+
+- `not-growing` iff `upper <= 0`;
+- `growing` iff `lower > 0`;
+- otherwise `indeterminate`, including NaN, infinite or reversed bounds and
+  missing evidence.
+
+A capacity or throughput run may pass only with `not-growing`, zero counted
+failures (missing, duplicate, invalid, reordered, late-after-stop, capped,
+send errors, echo deadline failures) and a fixture-valid run. A growing
+interval or any counted failure is a failure; everything else is
+inconclusive. The rule is fixed in advance and must not be relaxed after
+observing results: no repeat-until-pass, no percentage allowance for boundary
+uncertainty. An interval that straddles zero stays inconclusive rather than
+being interpreted as stability.
+
+A passing run decision covers only this rule. It does not establish that the
+underlying fixture run was environmentally valid, that its latency or CPU
+gates passed, or that any campaign-level repetition requirement was met.
