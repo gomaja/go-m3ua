@@ -97,7 +97,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	var workloadValue string
 	flagSet.StringVar(&config.Role, "role", "sgp", "M3UA endpoint role: asp or sgp")
 	flagSet.StringVar(&config.Transport, "transport", "listen", "SCTP initiation: listen or dial")
-	flagSet.StringVar(&config.Mode, "mode", "throughput", "measurement mode")
+	flagSet.StringVar(&config.Mode, "mode", "throughput", "measurement mode: throughput, echo, or bidirectional")
 	flagSet.StringVar(&config.SCTPAddress, "sctp-address", "0.0.0.0:2905", "listen address or remote dial address")
 	flagSet.StringVar(&config.LocalAddress, "local-address", "", "optional local SCTP dial address")
 	flagSet.StringVar(&config.ControlAddress, "control-address", "0.0.0.0:8080", "receiver HTTP control address")
