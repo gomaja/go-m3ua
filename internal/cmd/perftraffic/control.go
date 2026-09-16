@@ -82,6 +82,18 @@ func (driver *reverseDriver) addAssociation(association *m3ua.Association) {
 	driver.associations = append(driver.associations, association)
 }
 
+// registerReverseAssociation tracks an association for the bidirectional
+// reverse cohort. A control without a reverse driver — throughput and echo
+// receivers, the ASP's local control, and test-constructed controls — has no
+// reverse cohort to feed, so registration is a deliberate no-op there rather
+// than a nil dereference.
+func (control *receiverControl) registerReverseAssociation(association *m3ua.Association) {
+	if control.driver == nil {
+		return
+	}
+	control.driver.addAssociation(association)
+}
+
 func newReceiverControl(expectedAssociations, window int) *receiverControl {
 	return &receiverControl{
 		now:                  time.Now,

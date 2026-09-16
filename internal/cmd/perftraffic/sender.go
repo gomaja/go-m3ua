@@ -274,6 +274,12 @@ func failedCohortResult(phase string, sender, receiver runRecord, err error) com
 }
 
 func runSenderCohort(ctx context.Context, config commandConfig, associations []*m3ua.Association, registry *echoRegistry, cohort string, duration time.Duration) (runRecord, runRecord, error) {
+	// runSender creates the reply registry exactly when the mode is echo;
+	// every other caller (throughput, the bidirectional reverse driver, tests)
+	// passes nil. Name a mismatched call instead of dereferencing nil.
+	if config.Mode == modeEcho && registry == nil {
+		return runRecord{}, runRecord{}, errors.New("echo mode requires an echo reply registry")
+	}
 	expected, err := scheduledMessages(config.Rate, duration)
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("calculate scheduled messages: %w", err)
