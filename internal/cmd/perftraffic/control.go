@@ -88,7 +88,15 @@ func (driver *reverseDriver) addAssociation(association *m3ua.Association) {
 // receivers, the ASP's local control, and test-constructed controls — has no
 // reverse cohort to feed, so registration is a deliberate no-op there rather
 // than a nil dereference.
+//
+// Registration takes the control mutex and must run BEFORE
+// setAssociationReady: a /reset that observes full readiness under that
+// mutex can lead to /start spawning the reverse cohort, which reads
+// driver.associations. Registering first makes the mutex unlock in
+// setAssociationReady publish the append to every later reader.
 func (control *receiverControl) registerReverseAssociation(association *m3ua.Association) {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
 	if control.driver == nil {
 		return
 	}
@@ -387,6 +395,15 @@ func (control *receiverControl) recordEchoReplyDropped() {
 	control.mutex.Lock()
 	control.echoRepliesDropped++
 	control.mutex.Unlock()
+}
+
+// echoCounts returns the reply counters atomically. The reply writer
+// goroutine mutates them under the same mutex, so every reader — result
+// collection, tests, diagnostics — must take it too.
+func (control *receiverControl) echoCounts() (replies, replyErrors, dropped uint64) {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return control.echoReplies, control.echoReplyErrors, control.echoRepliesDropped
 }
 
 // echoReplyContext reports, atomically, whether the active cohort accepts

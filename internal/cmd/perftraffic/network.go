@@ -128,8 +128,8 @@ func dialAndRead(ctx context.Context, endpoint *m3ua.Endpoint, config commandCon
 			_ = association.Close()
 			return fmt.Errorf("dial association %d: %w", index, err)
 		}
-		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		control.registerReverseAssociation(association)
+		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		go readAssociation(ctx, index, association, control, fatal)
 	}
 	return nil
@@ -142,8 +142,8 @@ func acceptAndRead(ctx context.Context, listener *m3ua.Listener, associations in
 			nonblockingError(fatal, fmt.Errorf("accept association %d: %w", index, err))
 			return
 		}
-		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		control.registerReverseAssociation(association)
+		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		go readAssociation(ctx, index, association, control, fatal)
 	}
 }

@@ -62,17 +62,20 @@ func TestBlockedReplyWriterNeverStallsOffersAndDropsAreCounted(testContext *test
 	for sequence := uint64(3); sequence < 6; sequence++ {
 		offerEchoReply(queue, replyJob(sequence), control)
 	}
-	if control.echoRepliesDropped != 3 {
-		testContext.Fatalf("dropped = %d, want 3", control.echoRepliesDropped)
+	if _, _, dropped := control.echoCounts(); dropped != 3 {
+		testContext.Fatalf("dropped = %d, want 3", dropped)
 	}
 	close(release)
 	close(queue)
 	deadline := time.Now().Add(2 * time.Second)
-	for control.echoReplies != 3 && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		if replies, _, _ := control.echoCounts(); replies == 3 {
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
-	if control.echoReplies != 3 {
-		testContext.Fatalf("replies = %d, want 3 after the writer unblocked", control.echoReplies)
+	if replies, _, _ := control.echoCounts(); replies != 3 {
+		testContext.Fatalf("replies = %d, want 3 after the writer unblocked", replies)
 	}
 }
 
@@ -112,7 +115,10 @@ func TestReplyWriterDropsAfterCohortEndsAndCountsWriteErrors(testContext *testin
 	offerEchoReply(queue, replyJob(0), control)
 	offerEchoReply(queue, replyJob(1), control)
 	deadline := time.Now().Add(2 * time.Second)
-	for control.echoReplies+control.echoReplyErrors != 2 && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		if replies, replyErrors, _ := control.echoCounts(); replies+replyErrors == 2 {
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
 	if err := control.stop(); err != nil {
@@ -121,12 +127,15 @@ func TestReplyWriterDropsAfterCohortEndsAndCountsWriteErrors(testContext *testin
 	offerEchoReply(queue, replyJob(2), control)
 	close(queue)
 	deadline = time.Now().Add(2 * time.Second)
-	for control.echoRepliesDropped != 1 && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		if _, _, dropped := control.echoCounts(); dropped == 1 {
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
-	if control.echoReplyErrors != 1 || control.echoReplies != 1 || control.echoRepliesDropped != 1 {
-		testContext.Fatalf("errors=%d replies=%d dropped=%d, want 1/1/1",
-			control.echoReplyErrors, control.echoReplies, control.echoRepliesDropped)
+	replies, replyErrors, dropped := control.echoCounts()
+	if replyErrors != 1 || replies != 1 || dropped != 1 {
+		testContext.Fatalf("errors=%d replies=%d dropped=%d, want 1/1/1", replyErrors, replies, dropped)
 	}
 	record := control.result()
 	if record.ReceiverEcho == nil || record.ReceiverEcho.RepliesDropped != 1 || record.ReceiverEcho.ReplyErrors != 1 {
