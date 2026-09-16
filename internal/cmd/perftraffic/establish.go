@@ -36,6 +36,10 @@ var (
 	// check makes the fixture's readiness contract explicit rather than
 	// assumed.
 	errAssociationNotActive = errors.New("association did not reach AS-ACTIVE before serving traffic")
+
+	// errAcceptTimeout names the bounded accept wait expiring before the peer
+	// connected.
+	errAcceptTimeout = errors.New("peer did not connect within the accept window")
 )
 
 // associationAcceptor is the accept side of an M3UA listener, abstracted so
@@ -86,7 +90,7 @@ func establishSenderAssociations(ctx context.Context, config commandConfig, conn
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen for M3UA associations: %w", err)
 	}
-	associations, err := acceptAssociations(ctx, listener, config.Associations)
+	associations, err := acceptAssociations(ctx, listener, config.Associations, associationAcceptTimeout)
 	if err != nil {
 		_ = listener.Close()
 		return nil, nil, err
@@ -100,18 +104,55 @@ func establishSenderAssociations(ctx context.Context, config commandConfig, conn
 // policy-selected readiness state (AS-ACTIVE for the ASP role), so a peer
 // that never activates surfaces as a bounded accept error, not traffic on an
 // unestablished association.
-func acceptAssociations(ctx context.Context, listener associationAcceptor, count int) ([]*m3ua.Association, error) {
-	acceptContext, cancelAccept := context.WithTimeout(ctx, associationAcceptTimeout)
-	defer cancelAccept()
+//
+// The caller's ctx is passed to Accept untouched: the library runs every
+// accepted association's monitor on the Accept context for the association's
+// whole lifetime, so deriving and later cancelling a shorter context — or
+// letting a timeout context's timer fire — tears down every accepted
+// association. The wait is bounded externally instead; see acceptOne.
+func acceptAssociations(ctx context.Context, listener associationAcceptorCloser, count int, window time.Duration) ([]*m3ua.Association, error) {
+	deadline := time.Now().Add(window)
 	associations := make([]*m3ua.Association, 0, count)
 	for index := 0; index < count; index++ {
-		association, err := listener.Accept(acceptContext)
+		association, err := acceptOne(ctx, listener, deadline, index)
 		if err != nil {
-			return nil, fmt.Errorf("accept association %d: %w", index, err)
+			return nil, err
 		}
 		associations = append(associations, association)
 	}
 	return associations, nil
+}
+
+type acceptResult struct {
+	association *m3ua.Association
+	err         error
+}
+
+// acceptOne accepts one association with an externally bounded wait. On
+// timeout or caller cancellation the listener is closed, which is the
+// documented way to interrupt a blocked Accept; a successful Accept keeps
+// the caller's context alive for the association's whole lifetime.
+func acceptOne(ctx context.Context, listener associationAcceptorCloser, deadline time.Time, index int) (*m3ua.Association, error) {
+	result := make(chan acceptResult, 1)
+	go func() {
+		association, err := listener.Accept(ctx)
+		result <- acceptResult{association, err}
+	}()
+	timer := time.NewTimer(max(time.Until(deadline), 0))
+	defer timer.Stop()
+	select {
+	case accepted := <-result:
+		if accepted.err != nil {
+			return nil, fmt.Errorf("accept association %d: %w", index, accepted.err)
+		}
+		return accepted.association, nil
+	case <-timer.C:
+		_ = listener.Close()
+		return nil, fmt.Errorf("accept association %d: %w", index, errAcceptTimeout)
+	case <-ctx.Done():
+		_ = listener.Close()
+		return nil, ctx.Err()
+	}
 }
 
 // dialSenderAssociations is the ASP-dial acquisition path. Its behavior is

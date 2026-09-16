@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gomaja/go-m3ua"
@@ -41,7 +44,7 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 	control.driver = &reverseDriver{ctx: ctx, cpuStatPath: config.CPUStatPath}
 	httpListener, err := net.Listen("tcp", config.ControlAddress)
 	if err != nil {
-		return runRecord{}, fmt.Errorf("listen for receiver control: %w", err)
+		return runRecord{}, fmt.Errorf("startup control-bind: %w", err)
 	}
 	defer func() { _ = httpListener.Close() }()
 	httpServer := &http.Server{Handler: control.handler(), ReadHeaderTimeout: 5 * time.Second}
@@ -55,23 +58,23 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
 	if err != nil {
-		return runRecord{}, fmt.Errorf("create SGP endpoint: %w", err)
+		return runRecord{}, fmt.Errorf("startup endpoint: %w", err)
 	}
 	defer func() { _ = endpoint.Close() }()
 
 	fatal := make(chan error, 1)
 	if config.Transport == "dial" {
 		if err := dialAndRead(ctx, endpoint, config, control, fatal); err != nil {
-			return runRecord{}, err
+			return runRecord{}, fmt.Errorf("startup dial: %w", err)
 		}
 	} else {
 		localAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
 		if err != nil {
-			return runRecord{}, fmt.Errorf("resolve SGP listen address: %w", err)
+			return runRecord{}, fmt.Errorf("startup resolve-listen-address: %w", err)
 		}
 		listener, err := endpoint.Listen("m3ua", localAddress, m3ua.NewListenerConfig(associationConfig("sgp")))
 		if err != nil {
-			return runRecord{}, fmt.Errorf("listen for M3UA associations: %w", err)
+			return runRecord{}, fmt.Errorf("startup listen: %w", err)
 		}
 		defer func() { _ = listener.Close() }()
 		go acceptAndRead(ctx, listener, config.Associations, control, fatal)
@@ -153,7 +156,13 @@ func readAssociation(ctx context.Context, transportIndex int, association *m3ua.
 			if ctx.Err() != nil || control.isStopped() && errors.Is(err, m3ua.ErrNotEstablished) {
 				return
 			}
-			nonblockingError(fatal, fmt.Errorf("association %d ReadData: %w", transportIndex, err))
+			// One teardown closes every association, so all read loops fail
+			// together and only the chan winner reaches the record. Emit one
+			// diagnostic line per failure so the FIRST cause stays visible in
+			// process output even when the record carries a cascade sibling.
+			phase := control.phaseName()
+			writeStartupDiagnostic("read-fatal", transportIndex, phase, err)
+			nonblockingError(fatal, readFatalError(transportIndex, phase, err))
 			return
 		}
 		identity, outcome := control.record(transportIndex, receivedMessage{
@@ -216,6 +225,41 @@ func (control *receiverControl) isStopped() bool {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	return control.phase == receiverStopped
+}
+
+// phaseName names the receiver phase for diagnostics, distinguishing a
+// startup read failure (idle/armed, before any cohort) from a mid-cohort
+// one.
+func (control *receiverControl) phaseName() string {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return string(control.phase)
+}
+
+// readFatalError names the association, the receiver phase and the cause so
+// the record distinguishes a startup failure (idle/armed phase) from a
+// mid-cohort one.
+func readFatalError(transportIndex int, phase string, err error) error {
+	return fmt.Errorf("association %d ReadData in receiver phase %s: %w", transportIndex, phase, err)
+}
+
+// startupDiagnosticWriter receives one structured line per startup-relevant
+// failure. It is a variable so tests can capture it; production writes to
+// stderr because a process that dies during startup may have no cohort
+// record worth reading.
+var startupDiagnosticWriter io.Writer = os.Stderr
+
+// writeStartupDiagnostic emits one JSON line per startup-relevant failure.
+// The record's fatal_error keeps only the first failure reported to the
+// control endpoint; these lines preserve every failure in order, which is
+// what separates a first cause from a teardown cascade.
+func writeStartupDiagnostic(event string, association int, phase string, err error) {
+	_ = json.NewEncoder(startupDiagnosticWriter).Encode(map[string]any{
+		"startup_diagnostic": event,
+		"association":        association,
+		"receiver_phase":     phase,
+		"error":              err.Error(),
+	})
 }
 
 func nonblockingError(destination chan<- error, err error) {

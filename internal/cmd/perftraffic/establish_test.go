@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -14,17 +15,40 @@ import (
 
 // fakeAcceptor records Accept calls and Close calls without SCTP sockets.
 // Returning nil associations is sufficient: the acquisition seams under test
-// only carry them through.
+// only carry them through. It captures every Accept context so tests can
+// assert the caller never cancels it, and its Close unblocks a blocked Accept
+// exactly like the real listener.
 type fakeAcceptor struct {
-	acceptErr  error
-	failAtCall int
-	accepts    int
-	closes     int
+	acceptErr   error
+	failAtCall  int
+	block       bool
+	accepts     int
+	closes      int
+	unblock     chan struct{}
+	unblockOnce sync.Once
+	mutex       sync.Mutex
+	acceptCtxs  []context.Context
 }
 
-func (fake *fakeAcceptor) Accept(context.Context) (*m3ua.Association, error) {
+func newFakeAcceptor() *fakeAcceptor {
+	return &fakeAcceptor{unblock: make(chan struct{})}
+}
+
+func (fake *fakeAcceptor) Accept(ctx context.Context) (*m3ua.Association, error) {
+	fake.mutex.Lock()
 	fake.accepts++
-	if fake.failAtCall > 0 && fake.accepts >= fake.failAtCall {
+	fake.acceptCtxs = append(fake.acceptCtxs, ctx)
+	accepts := fake.accepts
+	fake.mutex.Unlock()
+	if fake.block {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-fake.unblock:
+			return nil, errors.New("listener closed")
+		}
+	}
+	if fake.failAtCall > 0 && accepts >= fake.failAtCall {
 		return nil, fake.acceptErr
 	}
 	return nil, nil
@@ -32,7 +56,14 @@ func (fake *fakeAcceptor) Accept(context.Context) (*m3ua.Association, error) {
 
 func (fake *fakeAcceptor) Close() error {
 	fake.closes++
+	fake.unblockOnce.Do(func() { close(fake.unblock) })
 	return nil
+}
+
+func (fake *fakeAcceptor) capturedContexts() []context.Context {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	return append([]context.Context(nil), fake.acceptCtxs...)
 }
 
 type fakeConnector struct {
@@ -59,7 +90,7 @@ func listenConfig() commandConfig {
 // exactly the teardown that killed the SGP-dial smoke run. The caller owns
 // the close through the returned release function, at the end of the run.
 func TestEstablishSenderAssociationsKeepsListenerOpenUntilRelease(testContext *testing.T) {
-	listener := &fakeAcceptor{}
+	listener := newFakeAcceptor()
 	connector := &fakeConnector{listener: listener}
 	associations, release, err := establishSenderAssociations(context.Background(), listenConfig(), connector)
 	if err != nil {
@@ -77,8 +108,70 @@ func TestEstablishSenderAssociationsKeepsListenerOpenUntilRelease(testContext *t
 	}
 }
 
+// The library runs every accepted association's monitor on the Accept
+// context for the association's whole lifetime (listener.go starts
+// monitor(ctx), and monitor closes the association when ctx ends). Cancelling
+// the acquisition context — including a timeout context whose timer simply
+// fires later — therefore tears down every accepted association. This is the
+// regression that killed the SGP-dial re-smoke after the listener-lifetime
+// fix: acquisition must pass its own context through untouched.
+func TestAcceptAssociationsNeverCancelsTheAcceptContext(testContext *testing.T) {
+	listener := newFakeAcceptor()
+	associations, err := acceptAssociations(context.Background(), listener, 4, time.Second)
+	if err != nil {
+		testContext.Fatalf("acceptAssociations: %v", err)
+	}
+	if len(associations) != 4 {
+		testContext.Fatalf("accepted %d associations, want 4", len(associations))
+	}
+	captured := listener.capturedContexts()
+	if len(captured) != 4 {
+		testContext.Fatalf("captured %d Accept contexts, want 4", len(captured))
+	}
+	for index, ctx := range captured {
+		if ctx.Err() != nil {
+			testContext.Fatalf("Accept context %d was cancelled after acquisition (%v); that cancels the association monitor", index, ctx.Err())
+		}
+	}
+}
+
+func TestAcceptAssociationsTimesOutWithANamedErrorAndUnblocksAccept(testContext *testing.T) {
+	listener := newFakeAcceptor()
+	listener.block = true
+	started := time.Now()
+	_, err := acceptAssociations(context.Background(), listener, 2, 30*time.Millisecond)
+	if !errors.Is(err, errAcceptTimeout) {
+		testContext.Fatalf("acceptAssociations error = %v, want errAcceptTimeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		testContext.Fatalf("accept wait was not bounded: %s", elapsed)
+	}
+	if listener.closes != 1 {
+		testContext.Fatalf("listener closed %d times, want exactly 1 to unblock the parked Accept", listener.closes)
+	}
+}
+
+func TestAcceptAssociationsCancellationClosesTheListener(testContext *testing.T) {
+	listener := newFakeAcceptor()
+	listener.block = true
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	_, err := acceptAssociations(ctx, listener, 2, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		testContext.Fatalf("acceptAssociations error = %v, want context.Canceled", err)
+	}
+	if listener.closes != 1 {
+		testContext.Fatalf("listener closed %d times, want exactly 1", listener.closes)
+	}
+}
+
 func TestEstablishSenderAssociationsAcceptFailureClosesListenerImmediately(testContext *testing.T) {
-	listener := &fakeAcceptor{acceptErr: errors.New("peer vanished"), failAtCall: 2}
+	listener := newFakeAcceptor()
+	listener.acceptErr = errors.New("peer vanished")
+	listener.failAtCall = 2
 	connector := &fakeConnector{listener: listener}
 	if _, _, err := establishSenderAssociations(context.Background(), listenConfig(), connector); err == nil {
 		testContext.Fatal("establishSenderAssociations unexpectedly succeeded after an accept failure")
@@ -89,7 +182,7 @@ func TestEstablishSenderAssociationsAcceptFailureClosesListenerImmediately(testC
 }
 
 func TestEstablishSenderAssociationsDialPathNeverListens(testContext *testing.T) {
-	connector := &fakeConnector{listener: &fakeAcceptor{}}
+	connector := &fakeConnector{listener: newFakeAcceptor()}
 	config := listenConfig()
 	config.Transport = "dial"
 	associations, release, err := establishSenderAssociations(context.Background(), config, connector)

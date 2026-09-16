@@ -37,7 +37,23 @@ refused SCTP dial while the ASP listener is still coming up is retried for a
 bounded 30-second window and then fails with the named
 `peer did not accept SCTP dials within the retry window` error rather than a
 generic fatal. The ASP listener stays open for the whole run: closing it
-closes every association it accepted.
+closes every association it accepted. The accept wait is bounded externally
+and the run's root context is passed to Accept untouched, because the library
+runs every accepted association's monitor on the Accept context for the
+association's whole lifetime — cancelling a derived context, or letting a
+derived timeout fire, tears every accepted association down.
+
+Startup failures are phase-labelled in the record's `fatal_error`
+(`startup control-bind`, `startup endpoint`, `startup listen`,
+`startup dial`) and read failures name the receiver phase (`idle`, `armed`,
+`measuring`, `stopped`). Because one teardown fails every association's read
+loop at once and the record keeps only the first reported error, each
+read-loop failure also emits one JSON line to stderr
+(`startup_diagnostic: "read-fatal"` with the association index and receiver
+phase), preserving the failure order that separates a first cause from a
+teardown cascade. The receiver's cgroup `cpu` observation on a process that
+died before any cohort is expected to report missing counters; it is not a
+startup abort cause.
 
 ## Bidirectional mode
 
