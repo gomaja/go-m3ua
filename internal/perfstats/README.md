@@ -50,3 +50,25 @@ being interpreted as stability.
 A passing run decision covers only this rule. It does not establish that the
 underlying fixture run was environmentally valid, that its latency or CPU
 gates passed, or that any campaign-level repetition requirement was met.
+
+## Bounded capacity search
+
+`capacity.go` mirrors the predeclared bounded search of the local
+`capacity.py` probe driver: integer message-per-second rates, a pass/fail
+bracket refined to within five percent (`100*upper <= 105*lower`), downward
+and upward halving/doubling between bounds, no probe retries after an
+inconclusive outcome, and a fixed probe budget. Probes must be recorded in
+execution order at exactly the selected rate. Only a refined bracket proceeds
+to validation: exactly five full repetitions at the lower passing rate must
+all pass, and that lower rate is the result. `lower-bound-only`,
+`integer-resolution-limit` and `probe-budget-exhausted` are inconclusive,
+never widened into a pass; `no-passing-rate` is a failure.
+
+The CLI at `internal/cmd/perfcapacity` reads one strict JSON request with the
+search parameters, per-run fixture sender records in execution order, and the
+validation repetitions. Each run is decided by the predeclared backlog rule
+above; a missing or unbounded sender window, an insufficient-sample backlog
+change or absent interval bounds is missing evidence and stays inconclusive.
+Exit statuses are 0 pass, 1 fail, 2 inconclusive, 3 invalid input. A pass
+covers only the search and repetition rules; it does not establish
+environmental validity, latency or CPU budgets, or independent-peer behavior.
