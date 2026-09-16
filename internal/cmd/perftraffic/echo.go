@@ -3,6 +3,8 @@ package main
 import (
 	"sync"
 	"time"
+
+	"github.com/gomaja/go-m3ua"
 )
 
 // echoRequestDeadline is the approved two-second per-request deadline.
@@ -30,11 +32,14 @@ type echoResult struct {
 }
 
 // receiverEchoResult is the receiver-side echo reply report. Replies are not
-// useful deliveries and never add to the offered-load count.
+// useful deliveries and never add to the offered-load count. RepliesDropped
+// counts validated requests whose reply was never written — reply queue full
+// or the cohort ended first; drops are losses and fail fixture validity.
 type receiverEchoResult struct {
-	Scope       string `json:"scope"`
-	Replies     uint64 `json:"replies"`
-	ReplyErrors uint64 `json:"reply_errors"`
+	Scope          string `json:"scope"`
+	Replies        uint64 `json:"replies"`
+	ReplyErrors    uint64 `json:"reply_errors"`
+	RepliesDropped uint64 `json:"replies_dropped"`
 }
 
 const (
@@ -214,4 +219,65 @@ func (registry *echoRegistry) fatalError() string {
 	registry.mutex.Lock()
 	defer registry.mutex.Unlock()
 	return registry.fatal
+}
+
+// echoReplyJob is one validated echo request awaiting its reply. The payload
+// is built by the writer, not at enqueue, so a full queue costs only the
+// identity and size per entry.
+type echoReplyJob struct {
+	identity messageIdentity
+	size     int
+}
+
+// offerEchoReply hands a reply job to the writer without ever blocking the
+// read loop. A full queue drops the job and counts the drop; the matching
+// request then dies on its deadline at the sender, which is the honest
+// accounting for a reply the association could not carry.
+func offerEchoReply(queue chan<- echoReplyJob, job echoReplyJob, control *receiverControl) {
+	select {
+	case queue <- job:
+	default:
+		control.recordEchoReplyDropped()
+	}
+}
+
+// startEchoReplyWriter runs one dedicated reply writer per association fed
+// by a bounded queue, so reply-write backpressure can never stall the read
+// loop or starve the control endpoint. The writer drains the queue when it
+// is closed at read-loop exit.
+func startEchoReplyWriter(association *m3ua.Association, control *receiverControl, capacity int) chan<- echoReplyJob {
+	queue := make(chan echoReplyJob, max(capacity, 1))
+	go runEchoReplyWriter(queue, control, newAssociationReplyWriter(association))
+	return queue
+}
+
+// runEchoReplyWriter writes queued replies until the queue is closed and
+// empty. Replies for a cohort that is no longer measuring are dropped and
+// counted; write failures are counted through recordEchoReply.
+func runEchoReplyWriter(queue <-chan echoReplyJob, control *receiverControl, write func(job echoReplyJob, deadline time.Time, generation uint64) error) {
+	for job := range queue {
+		active, generation, deadline := control.echoReplyContext()
+		if !active {
+			control.recordEchoReplyDropped()
+			continue
+		}
+		control.recordEchoReply(write(job, deadline, generation))
+	}
+}
+
+// newAssociationReplyWriter builds the per-association write closure. The
+// SCTP write deadline is refreshed once per cohort generation, not per
+// message; a write that outlives it fails and is counted, so a wedged peer
+// costs one blocked writer goroutine, never the read loop or the process.
+func newAssociationReplyWriter(association *m3ua.Association) func(job echoReplyJob, deadline time.Time, generation uint64) error {
+	deadlineGeneration := uint64(0)
+	return func(job echoReplyJob, deadline time.Time, generation uint64) error {
+		if generation != deadlineGeneration {
+			if err := association.SetWriteDeadline(deadline); err != nil {
+				return err
+			}
+			deadlineGeneration = generation
+		}
+		return writeEchoReply(association, job.identity, job.size)
+	}
 }

@@ -53,6 +53,7 @@ type receiverControl struct {
 	lateAfterStop        uint64
 	echoReplies          uint64
 	echoReplyErrors      uint64
+	echoRepliesDropped   uint64
 	fatal                string
 	cpuStatPath          string
 	cpuBefore            map[string]uint64
@@ -205,6 +206,7 @@ func (control *receiverControl) reset(specification runSpec) error {
 	control.lateAfterStop = 0
 	control.echoReplies = 0
 	control.echoReplyErrors = 0
+	control.echoRepliesDropped = 0
 	control.reverseSender = nil
 	control.reverseReceiver = nil
 	control.reverseError = ""
@@ -368,16 +370,6 @@ func (control *receiverControl) echoMode() bool {
 	return control.phase == receiverMeasuring && control.spec.Mode == modeEcho
 }
 
-// echoReplyDeadline bounds echo reply writes. Replies get the full cohort
-// window plus drain plus one extra request deadline of slack so a reply for
-// a late-arriving request is not cut off before the sender stops accepting
-// it.
-func (control *receiverControl) echoReplyDeadline() time.Time {
-	control.mutex.Lock()
-	defer control.mutex.Unlock()
-	return control.started.Add(control.spec.Duration + control.spec.Drain + echoRequestDeadline)
-}
-
 func (control *receiverControl) recordEchoReply(err error) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
@@ -386,6 +378,27 @@ func (control *receiverControl) recordEchoReply(err error) {
 		return
 	}
 	control.echoReplies++
+}
+
+// recordEchoReplyDropped counts a validated request whose reply was never
+// written — queue full or the cohort ended first. Drops are losses and are
+// always counted, never silent.
+func (control *receiverControl) recordEchoReplyDropped() {
+	control.mutex.Lock()
+	control.echoRepliesDropped++
+	control.mutex.Unlock()
+}
+
+// echoReplyContext reports, atomically, whether the active cohort accepts
+// echo replies, its generation, and the reply write deadline. The reply
+// writer uses the generation to refresh the association write deadline once
+// per cohort rather than per message.
+func (control *receiverControl) echoReplyContext() (active bool, generation uint64, deadline time.Time) {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return control.phase == receiverMeasuring && control.spec.Mode == modeEcho,
+		control.generation,
+		control.started.Add(control.spec.Duration + control.spec.Drain + echoRequestDeadline)
 }
 
 func (control *receiverControl) result() runRecord {
@@ -419,9 +432,10 @@ func (control *receiverControl) result() runRecord {
 	}
 	if control.spec.Mode == modeEcho {
 		record.ReceiverEcho = &receiverEchoResult{
-			Scope:       echoReceiverScope,
-			Replies:     control.echoReplies,
-			ReplyErrors: control.echoReplyErrors,
+			Scope:          echoReceiverScope,
+			Replies:        control.echoReplies,
+			ReplyErrors:    control.echoReplyErrors,
+			RepliesDropped: control.echoRepliesDropped,
 		}
 	}
 	record.Reverse = control.reverseSender

@@ -152,7 +152,7 @@ func (record *runRecord) evaluate() {
 			invalid("echo requests were not all answered loss-free within the deadline")
 		}
 	}
-	if record.ReceiverEcho != nil && record.ReceiverEcho.ReplyErrors != 0 {
+	if record.ReceiverEcho != nil && (record.ReceiverEcho.ReplyErrors != 0 || record.ReceiverEcho.RepliesDropped != 0) {
 		invalid("echo replies were not submitted loss-free")
 	}
 	if record.Verdict == verdictInvalid {

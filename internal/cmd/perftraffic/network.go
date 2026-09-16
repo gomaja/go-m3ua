@@ -149,7 +149,16 @@ func acceptAndRead(ctx context.Context, listener *m3ua.Listener, associations in
 }
 
 func readAssociation(ctx context.Context, transportIndex int, association *m3ua.Association, control *receiverControl, fatal chan<- error) {
-	replyDeadlineSet := false
+	// The echo reply writer is created lazily on the first echo request so
+	// non-echo cohorts pay nothing. Its bounded queue is the entire coupling
+	// between the read loop and reply-write backpressure: the read loop never
+	// writes to the association itself.
+	var replyQueue chan<- echoReplyJob
+	defer func() {
+		if replyQueue != nil {
+			close(replyQueue)
+		}
+	}()
 	for {
 		message, err := association.ReadData()
 		if err != nil {
@@ -175,14 +184,10 @@ func readAssociation(ctx context.Context, transportIndex int, association *m3ua.
 		if outcome != recordUnique || !control.echoMode() {
 			continue
 		}
-		if !replyDeadlineSet {
-			if err := association.SetWriteDeadline(control.echoReplyDeadline()); err != nil {
-				nonblockingError(fatal, fmt.Errorf("association %d SetWriteDeadline: %w", transportIndex, err))
-				return
-			}
-			replyDeadlineSet = true
+		if replyQueue == nil {
+			replyQueue = startEchoReplyWriter(association, control, maxOutstanding/control.expectedAssociations)
 		}
-		control.recordEchoReply(writeEchoReply(association, identity, len(message.ProtocolData.Data)))
+		offerEchoReply(replyQueue, echoReplyJob{identity: identity, size: len(message.ProtocolData.Data)}, control)
 	}
 }
 

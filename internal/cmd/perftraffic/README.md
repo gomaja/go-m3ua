@@ -99,6 +99,20 @@ is never divided by two. A passing echo run requires every scheduled request
 to be delivered and answered loss-free within the deadline; the percentiles
 are measurements, not proof that the approved latency budgets were met.
 
+The receiver never writes replies from its read loop. Each association gets a
+dedicated reply writer fed by a bounded queue (the outstanding bound shared
+across associations, so at most 8,192 replies are queued in total); the read
+loop only enqueues the validated identity and size, and the writer builds the
+payload and performs the SCTP write with one write deadline per cohort
+generation. A full queue drops the job and counts `replies_dropped`; write
+failures count `reply_errors`; both fail fixture validity. This keeps
+reply-write backpressure from stalling request validation, the control HTTP
+endpoint or drain: a wedged peer costs one blocked writer goroutine per
+association, and the dropped replies die on their two-second deadline at the
+sender as counted `deadline_exceeded` failures. The sender's outstanding map
+is likewise bounded by the cap and emptied by the deadline sweep even when
+the peer never answers, so neither side amplifies a wedge.
+
 Throughput mode does not use echo traffic.
 
 ## Protocol basis
