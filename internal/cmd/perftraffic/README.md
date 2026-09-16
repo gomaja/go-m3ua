@@ -6,14 +6,27 @@ routing. The ASP Endpoint is constructed with a nil `ASP` configuration and
 each DATA call uses a newly constructed Protocol Data parameter plus
 `WritePDWithRoutingContext`; the SGP validates messages returned by `ReadData`.
 
-The fixture currently implements ASP-dial to SGP-listen with three modes:
-one-way `throughput` (the default), `echo` for round-trip latency, and
-`bidirectional` for simultaneous two-way DATA. SGP-dial/ASP-listen initiation,
-router/state workloads, and independent-peer interoperability are reported as
-unavailable; they are never emitted as zero-valued successful measurements.
-Both processes run this binary, so `fixture_verdict: pass` establishes
-loss-free fixture validity only, not independent-peer, sustainable-capacity,
-or candidate acceptance.
+The fixture currently implements three modes: one-way `throughput` (the
+default), `echo` for round-trip latency, and `bidirectional` for simultaneous
+two-way DATA. Both SCTP initiation directions are supported: ASP-dial to
+SGP-listen (the default) and SGP-dial to ASP-listen. Router/state workloads
+and independent-peer interoperability are reported as unavailable; they are
+never emitted as zero-valued successful measurements. Both processes run this
+binary, so `fixture_verdict: pass` establishes loss-free fixture validity
+only, not independent-peer, sustainable-capacity, or candidate acceptance.
+
+## Initiation direction
+
+`-role` selects the M3UA endpoint role and `-transport` the SCTP initiation
+side; the traffic roles are unchanged (the ASP always drives the offered
+load, the SGP always hosts the control endpoint). For SGP-dial runs the SGP
+passes `-transport=dial` with `-sctp-address` naming the ASP, and the ASP
+passes `-transport=listen` with `-sctp-address` as its listen address. The
+run specification and manifest record the direction as `initiation`:
+`asp-dial` or `sgp-dial`, following RFC 4666 Section 1.4.8's separation of
+SCTP initiation from the client/server role. Performance role repetitions
+under both initiation directions use the same mixed-payload row; the fixture
+reports them as separate runs and never merges their results.
 
 ## Bidirectional mode
 

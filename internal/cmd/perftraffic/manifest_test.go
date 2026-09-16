@@ -3,7 +3,10 @@ package main
 import "testing"
 
 func TestManifestMatchesAssociationSocketSettings(testContext *testing.T) {
-	manifest := currentManifest(maxOutstanding)
+	manifest := currentManifest(maxOutstanding, initiationASPDial)
+	if manifest.Initiation != initiationASPDial {
+		testContext.Fatalf("manifest initiation = %q, want %q", manifest.Initiation, initiationASPDial)
+	}
 	for _, role := range []string{"asp", "sgp"} {
 		config := associationConfig(role)
 		if !config.SCTPNoDelayInfo.Enabled || !config.SCTPSACKInfo.Enabled ||

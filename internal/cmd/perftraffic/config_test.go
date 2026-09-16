@@ -75,6 +75,37 @@ func TestParseConfigAcceptsEchoModeWithSameBounds(testContext *testing.T) {
 	}
 }
 
+func TestParseConfigDerivesInitiationDirection(testContext *testing.T) {
+	tests := []struct {
+		role       string
+		transport  string
+		initiation string
+	}{
+		{role: "asp", transport: "dial", initiation: initiationASPDial},
+		{role: "sgp", transport: "listen", initiation: initiationASPDial},
+		{role: "sgp", transport: "dial", initiation: initiationSGPDial},
+		{role: "asp", transport: "listen", initiation: initiationSGPDial},
+	}
+	for _, test := range tests {
+		testContext.Run(test.role+"/"+test.transport, func(testContext *testing.T) {
+			args := []string{
+				"-role=" + test.role, "-transport=" + test.transport,
+				"-sctp-address=10.0.0.2:2905",
+			}
+			if test.role == "asp" {
+				args = append(args, "-peer-control=http://10.0.0.2:8080", "-cohort=cohort-01")
+			}
+			config, err := parseConfig(args)
+			if err != nil {
+				testContext.Fatalf("parseConfig: %v", err)
+			}
+			if config.Initiation != test.initiation {
+				testContext.Fatalf("initiation = %q, want %q", config.Initiation, test.initiation)
+			}
+		})
+	}
+}
+
 func TestParseConfigAcceptsBidirectionalWithAdvertisedControlURL(testContext *testing.T) {
 	config, err := parseConfig([]string{
 		"-role=asp", "-transport=dial", "-mode=bidirectional",
@@ -100,7 +131,7 @@ func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T)
 		{name: "zero rate", args: []string{"-rate=0"}},
 		{name: "runtime over ten minutes", args: []string{"-warmup=5m", "-duration=5m", "-drain=1ns"}},
 		{name: "outstanding over bound", args: []string{"-outstanding=8193"}},
-		{name: "reverse initiation not implemented", args: []string{"-role=sgp", "-transport=dial"}},
+		{name: "unknown transport", args: []string{"-role=sgp", "-transport=accept"}},
 		{name: "bidirectional ASP without advertised control URL", args: []string{"-mode=bidirectional", "-role=asp", "-transport=dial", "-peer-control=http://10.0.0.2:8080", "-cohort=bidi-01"}},
 		{name: "unknown workload", args: []string{"-payload=129"}},
 	}

@@ -53,23 +53,29 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 		}
 	}()
 
-	localAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
-	if err != nil {
-		return runRecord{}, fmt.Errorf("resolve SGP listen address: %w", err)
-	}
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
 	if err != nil {
 		return runRecord{}, fmt.Errorf("create SGP endpoint: %w", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	listener, err := endpoint.Listen("m3ua", localAddress, m3ua.NewListenerConfig(associationConfig("sgp")))
-	if err != nil {
-		return runRecord{}, fmt.Errorf("listen for M3UA associations: %w", err)
-	}
-	defer func() { _ = listener.Close() }()
 
 	fatal := make(chan error, 1)
-	go acceptAndRead(ctx, listener, config.Associations, control, fatal)
+	if config.Transport == "dial" {
+		if err := dialAndRead(ctx, endpoint, config, control, fatal); err != nil {
+			return runRecord{}, err
+		}
+	} else {
+		localAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+		if err != nil {
+			return runRecord{}, fmt.Errorf("resolve SGP listen address: %w", err)
+		}
+		listener, err := endpoint.Listen("m3ua", localAddress, m3ua.NewListenerConfig(associationConfig("sgp")))
+		if err != nil {
+			return runRecord{}, fmt.Errorf("listen for M3UA associations: %w", err)
+		}
+		defer func() { _ = listener.Close() }()
+		go acceptAndRead(ctx, listener, config.Associations, control, fatal)
+	}
 	go sampleReceiver(ctx, control)
 	select {
 	case <-ctx.Done():
@@ -82,11 +88,38 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 	defer cancelShutdown()
 	_ = httpServer.Shutdown(shutdownContext)
 	record := control.result()
-	record.Manifest = currentManifest(config.Outstanding)
+	record.Manifest = currentManifest(config.Outstanding, config.Initiation)
 	if err != nil {
 		return record, err
 	}
 	return record, nil
+}
+
+// dialAndRead initiates every association from the SGP side before the
+// receiver reports ready, mirroring the accept path with the SCTP initiation
+// direction reversed.
+func dialAndRead(ctx context.Context, endpoint *m3ua.Endpoint, config commandConfig, control *receiverControl, fatal chan<- error) error {
+	remoteAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+	if err != nil {
+		return fmt.Errorf("resolve ASP address: %w", err)
+	}
+	var localAddress *sctp.SCTPAddr
+	if config.LocalAddress != "" {
+		localAddress, err = sctp.ResolveSCTPAddr("sctp", config.LocalAddress)
+		if err != nil {
+			return fmt.Errorf("resolve SGP local address: %w", err)
+		}
+	}
+	for index := 0; index < config.Associations; index++ {
+		association, err := endpoint.Dial(ctx, "m3ua", localAddress, remoteAddress, associationConfig("sgp"))
+		if err != nil {
+			return fmt.Errorf("dial association %d: %w", index, err)
+		}
+		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
+		control.driver.addAssociation(association)
+		go readAssociation(ctx, index, association, control, fatal)
+	}
+	return nil
 }
 
 func acceptAndRead(ctx context.Context, listener *m3ua.Listener, associations int, control *receiverControl, fatal chan<- error) {

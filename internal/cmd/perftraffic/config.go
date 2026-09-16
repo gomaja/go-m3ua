@@ -129,13 +129,18 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 		return commandConfig{}, fmt.Errorf("mode %q is unavailable; throughput, echo and bidirectional are implemented", config.Mode)
 	}
 	config.Direction = directionASPToSGP
-	config.Initiation = initiationASPDial
 	if config.Role != "asp" && config.Role != "sgp" {
 		return commandConfig{}, fmt.Errorf("unsupported M3UA role %q", config.Role)
 	}
-	if (config.Role != "asp" || config.Transport != "dial") &&
-		(config.Role != "sgp" || config.Transport != "listen") {
-		return commandConfig{}, errors.New("only ASP dial to SGP listen is implemented")
+	if config.Transport != "dial" && config.Transport != "listen" {
+		return commandConfig{}, fmt.Errorf("unsupported SCTP initiation %q", config.Transport)
+	}
+	// SCTP initiation is recorded separately from the M3UA role: the run is
+	// asp-dial when the ASP process dials, sgp-dial when the SGP process
+	// dials. Each process derives it from its own role and transport.
+	config.Initiation = initiationASPDial
+	if (config.Role == "sgp") == (config.Transport == "dial") {
+		config.Initiation = initiationSGPDial
 	}
 	if config.Associations < 1 || config.Associations > maxAssociations {
 		return commandConfig{}, fmt.Errorf("associations must be between 1 and %d", maxAssociations)

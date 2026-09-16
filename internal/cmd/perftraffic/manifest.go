@@ -5,7 +5,7 @@ import (
 	"runtime/debug"
 )
 
-func currentManifest(outstandingLimit int) fixtureManifest {
+func currentManifest(outstandingLimit int, initiation string) fixtureManifest {
 	manifest := fixtureManifest{
 		GoVersion:         runtime.Version(),
 		GoOS:              runtime.GOOS,
@@ -17,6 +17,7 @@ func currentManifest(outstandingLimit int) fixtureManifest {
 		SCTPSACKFrequency: sctpSACKFrequency,
 		FlowCount:         flowCount,
 		OutstandingLimit:  outstandingLimit,
+		Initiation:        initiation,
 		AccountingScope:   wholeProcessScope,
 	}
 	if build, ok := debug.ReadBuildInfo(); ok {

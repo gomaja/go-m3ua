@@ -106,6 +106,7 @@ type fixtureManifest struct {
 	SCTPSACKFrequency uint32 `json:"sctp_sack_frequency"`
 	FlowCount         int    `json:"flow_count"`
 	OutstandingLimit  int    `json:"outstanding_limit"`
+	Initiation        string `json:"initiation,omitempty"`
 	AccountingScope   string `json:"accounting_scope"`
 }
 
@@ -120,7 +121,6 @@ func (record *runRecord) evaluate() {
 	}
 	if record.UnsupportedModes == nil {
 		record.UnsupportedModes = map[string]string{
-			"sgp_dial_or_asp_listen":      "not implemented",
 			"router_or_ssnm_workload":     "unavailable: requires future routing and state APIs",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}

@@ -73,29 +73,52 @@ func newSenderCounters(limit int) *senderCounters {
 }
 
 func runSender(ctx context.Context, config commandConfig) (combinedResult, error) {
-	remoteAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
-	if err != nil {
-		return combinedResult{}, fmt.Errorf("resolve SGP address: %w", err)
-	}
-	var localAddress *sctp.SCTPAddr
-	if config.LocalAddress != "" {
-		localAddress, err = sctp.ResolveSCTPAddr("sctp", config.LocalAddress)
-		if err != nil {
-			return combinedResult{}, fmt.Errorf("resolve ASP local address: %w", err)
-		}
-	}
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: nil})
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("create standalone ASP endpoint: %w", err)
 	}
 	defer func() { _ = endpoint.Close() }()
 	associations := make([]*m3ua.Association, 0, config.Associations)
-	for index := 0; index < config.Associations; index++ {
-		association, dialErr := endpoint.Dial(ctx, "m3ua", localAddress, remoteAddress, associationConfig("asp"))
-		if dialErr != nil {
-			return combinedResult{}, fmt.Errorf("dial association %d: %w", index, dialErr)
+	if config.Transport == "listen" {
+		listenAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+		if err != nil {
+			return combinedResult{}, fmt.Errorf("resolve ASP listen address: %w", err)
 		}
-		associations = append(associations, association)
+		listener, err := endpoint.Listen("m3ua", listenAddress, m3ua.NewListenerConfig(associationConfig("asp")))
+		if err != nil {
+			return combinedResult{}, fmt.Errorf("listen for M3UA associations: %w", err)
+		}
+		acceptContext, cancelAccept := context.WithTimeout(ctx, 30*time.Second)
+		for index := 0; index < config.Associations; index++ {
+			association, acceptErr := listener.Accept(acceptContext)
+			if acceptErr != nil {
+				cancelAccept()
+				_ = listener.Close()
+				return combinedResult{}, fmt.Errorf("accept association %d: %w", index, acceptErr)
+			}
+			associations = append(associations, association)
+		}
+		cancelAccept()
+		_ = listener.Close()
+	} else {
+		remoteAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+		if err != nil {
+			return combinedResult{}, fmt.Errorf("resolve SGP address: %w", err)
+		}
+		var localAddress *sctp.SCTPAddr
+		if config.LocalAddress != "" {
+			localAddress, err = sctp.ResolveSCTPAddr("sctp", config.LocalAddress)
+			if err != nil {
+				return combinedResult{}, fmt.Errorf("resolve ASP local address: %w", err)
+			}
+		}
+		for index := 0; index < config.Associations; index++ {
+			association, dialErr := endpoint.Dial(ctx, "m3ua", localAddress, remoteAddress, associationConfig("asp"))
+			if dialErr != nil {
+				return combinedResult{}, fmt.Errorf("dial association %d: %w", index, dialErr)
+			}
+			associations = append(associations, association)
+		}
 	}
 	if err := waitForReady(ctx, config.PeerControl, config.Associations); err != nil {
 		return combinedResult{}, err
@@ -418,7 +441,7 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	for index, association := range associations {
 		sender.NegotiatedOutboundStreams[index] = int(association.MaxMessageStreamID()) + 1
 	}
-	sender.Manifest = currentManifest(config.Outstanding)
+	sender.Manifest = currentManifest(config.Outstanding, config.Initiation)
 	sender.ProgressObservations = observations
 	accounting := analyzeProgress(specification, observations)
 	sender.SenderWindow = &accounting
