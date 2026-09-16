@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -31,11 +32,13 @@ type combinedResult struct {
 }
 
 type cohortResult struct {
-	Phase    string    `json:"phase"`
-	Sender   runRecord `json:"sender"`
-	Receiver runRecord `json:"receiver"`
-	Verdict  string    `json:"verdict"`
-	Error    string    `json:"error,omitempty"`
+	Phase           string     `json:"phase"`
+	Sender          runRecord  `json:"sender"`
+	Receiver        runRecord  `json:"receiver"`
+	ReverseSender   *runRecord `json:"reverse_sender,omitempty"`
+	ReverseReceiver *runRecord `json:"reverse_receiver,omitempty"`
+	Verdict         string     `json:"verdict"`
+	Error           string     `json:"error,omitempty"`
 }
 
 type sendJob struct {
@@ -104,32 +107,153 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 			go readEchoReplies(ctx, index, association, registry)
 		}
 	}
+	var localFatal chan error
+	if config.Mode == modeBidirectional {
+		var shutdown func()
+		var err error
+		shutdown, localFatal, err = startLocalReceiver(ctx, config, associations)
+		if err != nil {
+			return combinedResult{}, err
+		}
+		defer shutdown()
+	}
+	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
+		sender, receiver, err := runSenderCohort(ctx, cohortConfig, associations, registry, cohort, duration)
+		result := newCohortResult(phase, sender, receiver, err)
+		if config.Mode == modeBidirectional {
+			collectReverse(ctx, cohortConfig, &result)
+		}
+		return result, err
+	}
 	var warmup *cohortResult
 	if config.Warmup > 0 {
 		warmupConfig := config
 		warmupConfig.Cohort += "-warmup"
-		warmupSender, warmupReceiver, warmupErr := runSenderCohort(ctx, warmupConfig, associations, registry, warmupConfig.Cohort, config.Warmup)
-		warmupResult := newCohortResult("warmup", warmupSender, warmupReceiver, warmupErr)
+		warmupResult, warmupErr := runCohort(warmupConfig, "warmup", warmupConfig.Cohort, config.Warmup)
 		warmup = &warmupResult
-		if warmupErr != nil || warmupSender.Verdict == verdictInvalid || warmupReceiver.Verdict == verdictInvalid {
+		if warmupErr != nil || warmupResult.Verdict == verdictInvalid {
 			if warmupErr == nil {
 				warmupErr = errors.New("warmup cohort is invalid")
 			}
-			return failedCohortResult("warmup", warmupSender, warmupReceiver, fmt.Errorf("warmup did not drain cleanly: %w", warmupErr)), warmupErr
+			return failedCohortResult("warmup", warmupResult.Sender, warmupResult.Receiver, fmt.Errorf("warmup did not drain cleanly: %w", warmupErr)), warmupErr
 		}
 	}
-	sender, receiver, err := runSenderCohort(ctx, config, associations, registry, config.Cohort, config.Duration)
-	measurement := newCohortResult("measurement", sender, receiver, err)
+	measurement, err := runCohort(config, "measurement", config.Cohort, config.Duration)
+	if config.Mode == modeBidirectional {
+		select {
+		case readErr := <-localFatal:
+			if measurement.Error == "" {
+				measurement.Error = readErr.Error()
+			}
+			measurement.Verdict = verdictInvalid
+		default:
+		}
+	}
 	result := combinedResult{
 		Phase:       "measurement",
 		Warmup:      warmup,
 		Measurement: &measurement,
-		Sender:      sender,
-		Receiver:    receiver,
+		Sender:      measurement.Sender,
+		Receiver:    measurement.Receiver,
 		Verdict:     measurement.Verdict,
 		Error:       measurement.Error,
 	}
 	return result, err
+}
+
+// startLocalReceiver runs the ASP's own control endpoint and read loop for
+// the reverse direction of a bidirectional run. The SGP reverse driver owns
+// the cohort lifecycle against it exactly as the ASP owns the forward cohort
+// against the SGP.
+func startLocalReceiver(ctx context.Context, config commandConfig, associations []*m3ua.Association) (func(), chan error, error) {
+	control := newReceiverControl(config.Associations, maxOutstanding)
+	control.cpuStatPath = config.CPUStatPath
+	httpListener, err := net.Listen("tcp", config.ControlAddress)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen for local receiver control: %w", err)
+	}
+	httpServer := &http.Server{Handler: control.handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		_ = httpServer.Serve(httpListener)
+	}()
+	fatal := make(chan error, 1)
+	for index, association := range associations {
+		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
+		go readAssociation(ctx, index, association, control, fatal)
+	}
+	shutdown := func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownContext)
+	}
+	return shutdown, fatal, nil
+}
+
+// collectReverse waits for the SGP reverse driver to finish the matching
+// reverse cohort and folds both reverse records into the cohort verdict.
+// The wait is bounded; a missing reverse cohort is an error, never a silent
+// pass.
+func collectReverse(ctx context.Context, config commandConfig, result *cohortResult) {
+	// The reverse cohort ends with the forward one; only control round-trips
+	// separate them, so a short margin past the drain is ample. A missing
+	// reverse cohort after that is a failure, never a silent pass.
+	deadline := time.Now().Add(config.Drain + 5*time.Second)
+	for {
+		receiver, err := getReceiverResult(ctx, config.PeerControl)
+		if err == nil {
+			switch {
+			case receiver.ReverseError != "":
+				result.ReverseSender = receiver.Reverse
+				result.ReverseReceiver = receiver.ReverseReceiver
+				result.Verdict = verdictInvalid
+				result.Error = joinErrorText(result.Error, "reverse cohort: "+receiver.ReverseError)
+				return
+			case receiver.Reverse != nil:
+				result.ReverseSender = receiver.Reverse
+				result.ReverseReceiver = receiver.ReverseReceiver
+				result.Verdict = combineVerdicts(result.Verdict, receiver.Reverse.Verdict)
+				if receiver.ReverseReceiver != nil {
+					result.Verdict = combineVerdicts(result.Verdict, receiver.ReverseReceiver.Verdict)
+				}
+				return
+			case receiver.FatalError != "":
+				result.Verdict = verdictInvalid
+				result.Error = joinErrorText(result.Error, "reverse cohort receiver: "+receiver.FatalError)
+				return
+			}
+		}
+		if !time.Now().Before(deadline) {
+			result.Verdict = verdictInvalid
+			result.Error = joinErrorText(result.Error, "reverse cohort did not complete before the collection deadline")
+			return
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			result.Verdict = verdictInvalid
+			result.Error = joinErrorText(result.Error, ctx.Err().Error())
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func combineVerdicts(first, second string) string {
+	if first == verdictInvalid || second == verdictInvalid {
+		return verdictInvalid
+	}
+	if first == verdictInconclusive || second == verdictInconclusive {
+		return verdictInconclusive
+	}
+	return first
+}
+
+func joinErrorText(existing, addition string) string {
+	if existing == "" {
+		return addition
+	}
+	return existing + "; " + addition
 }
 
 func newCohortResult(phase string, sender, receiver runRecord, err error) cohortResult {
@@ -177,10 +301,14 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	specification := runSpec{
 		Cohort: cohort, Seed: config.Seed, Associations: len(associations), Expected: expected,
 		Duration: duration, Drain: effectiveDrain, Rate: config.Rate, Payload: config.Workload,
-		Mode: config.Mode, Direction: directionASPToSGP, Initiation: initiationASPDial,
+		Mode: config.Mode, Direction: config.Direction, Initiation: config.Initiation,
+		PeerControl: config.ControlURL,
 	}
-	if config.Mode == "" {
+	if specification.Mode == "" {
 		specification.Mode = modeThroughput
+	}
+	if specification.Direction == "" {
+		specification.Direction = directionASPToSGP
 	}
 	if err := postJSON(ctx, config.PeerControl+"/reset", specification); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("reset receiver: %w", err)

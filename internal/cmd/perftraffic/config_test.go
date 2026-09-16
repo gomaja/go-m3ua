@@ -75,6 +75,21 @@ func TestParseConfigAcceptsEchoModeWithSameBounds(testContext *testing.T) {
 	}
 }
 
+func TestParseConfigAcceptsBidirectionalWithAdvertisedControlURL(testContext *testing.T) {
+	config, err := parseConfig([]string{
+		"-role=asp", "-transport=dial", "-mode=bidirectional",
+		"-sctp-address=10.0.0.2:2905", "-peer-control=http://10.0.0.2:8080",
+		"-control-address=0.0.0.0:8080", "-control-url=http://10.0.0.3:8080",
+		"-associations=8", "-rate=20000", "-cohort=bidi-8-01",
+	})
+	if err != nil {
+		testContext.Fatalf("parseConfig: %v", err)
+	}
+	if config.Mode != modeBidirectional || config.ControlURL != "http://10.0.0.3:8080" {
+		testContext.Fatalf("unexpected bidirectional config: %+v", config)
+	}
+}
+
 func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T) {
 	testCases := []struct {
 		name string
@@ -85,8 +100,8 @@ func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T)
 		{name: "zero rate", args: []string{"-rate=0"}},
 		{name: "runtime over ten minutes", args: []string{"-warmup=5m", "-duration=5m", "-drain=1ns"}},
 		{name: "outstanding over bound", args: []string{"-outstanding=8193"}},
-		{name: "bidirectional not implemented", args: []string{"-mode=bidirectional"}},
 		{name: "reverse initiation not implemented", args: []string{"-role=sgp", "-transport=dial"}},
+		{name: "bidirectional ASP without advertised control URL", args: []string{"-mode=bidirectional", "-role=asp", "-transport=dial", "-peer-control=http://10.0.0.2:8080", "-cohort=bidi-01"}},
 		{name: "unknown workload", args: []string{"-payload=129"}},
 	}
 	for _, testCase := range testCases {

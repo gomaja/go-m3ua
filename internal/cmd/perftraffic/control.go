@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/gomaja/go-m3ua"
 )
 
 type receiverPhase string
@@ -60,6 +62,24 @@ type receiverControl struct {
 	allocAfter           runtimeCounters
 	series               []seriesPoint
 	generation           uint64
+	driver               *reverseDriver
+	reverseSender        *runRecord
+	reverseReceiver      *runRecord
+	reverseError         string
+}
+
+// reverseDriver lets the bidirectional SGP run the reverse (SGP-to-ASP)
+// cohort against the ASP's own control endpoint. The reverse cohort reuses
+// the exact sender-side measurement path; only the direction, cohort name
+// and peer differ.
+type reverseDriver struct {
+	ctx          context.Context
+	associations []*m3ua.Association
+	cpuStatPath  string
+}
+
+func (driver *reverseDriver) addAssociation(association *m3ua.Association) {
+	driver.associations = append(driver.associations, association)
 }
 
 func newReceiverControl(expectedAssociations, window int) *receiverControl {
@@ -158,6 +178,9 @@ func (control *receiverControl) reset(specification runSpec) error {
 	default:
 		return errInvalidRunSpec
 	}
+	if specification.Mode == modeBidirectional && specification.PeerControl == "" {
+		return fmt.Errorf("%w: bidirectional runs require the peer control URL", errInvalidRunSpec)
+	}
 	control.spec = specification
 	control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
 	control.transportToLogical = filledInts(specification.Associations, -1)
@@ -170,6 +193,9 @@ func (control *receiverControl) reset(specification runSpec) error {
 	control.lateAfterStop = 0
 	control.echoReplies = 0
 	control.echoReplyErrors = 0
+	control.reverseSender = nil
+	control.reverseReceiver = nil
+	control.reverseError = ""
 	control.cpuBefore = nil
 	control.cpuAfter = nil
 	control.cpuError = ""
@@ -181,8 +207,8 @@ func (control *receiverControl) reset(specification runSpec) error {
 
 func (control *receiverControl) start() error {
 	control.mutex.Lock()
-	defer control.mutex.Unlock()
 	if control.phase != receiverArmed {
+		control.mutex.Unlock()
 		return errors.New("receiver is not armed")
 	}
 	control.started = control.now()
@@ -193,7 +219,41 @@ func (control *receiverControl) start() error {
 		control.cpuError = err.Error()
 	}
 	control.phase = receiverMeasuring
+	specification := control.spec
+	driver := control.driver
+	control.mutex.Unlock()
+	if specification.Mode == modeBidirectional && driver != nil {
+		go control.runReverseCohort(driver, specification)
+	}
 	return nil
+}
+
+// runReverseCohort drives the SGP-to-ASP direction of a bidirectional cohort
+// against the ASP's control endpoint with the same sender-side measurement
+// path as the forward direction. Its records are reported under reverse and
+// reverse_receiver in this receiver's results; its errors never replace the
+// forward records.
+func (control *receiverControl) runReverseCohort(driver *reverseDriver, specification runSpec) {
+	reverseConfig := commandConfig{
+		Mode:        modeThroughput,
+		Direction:   directionSGPToASP,
+		Initiation:  specification.Initiation,
+		Rate:        specification.Rate,
+		Workload:    specification.Payload,
+		Seed:        specification.Seed,
+		Outstanding: maxOutstanding,
+		Drain:       specification.Drain,
+		PeerControl: specification.PeerControl,
+		CPUStatPath: driver.cpuStatPath,
+	}
+	sender, receiver, err := runSenderCohort(driver.ctx, reverseConfig, driver.associations, nil, specification.Cohort+"-reverse", specification.Duration)
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	control.reverseSender = &sender
+	control.reverseReceiver = &receiver
+	if err != nil {
+		control.reverseError = err.Error()
+	}
 }
 
 func (control *receiverControl) stop() error {
@@ -352,6 +412,9 @@ func (control *receiverControl) result() runRecord {
 			ReplyErrors: control.echoReplyErrors,
 		}
 	}
+	record.Reverse = control.reverseSender
+	record.ReverseReceiver = control.reverseReceiver
+	record.ReverseError = control.reverseError
 	if !control.started.IsZero() && !control.stopped.IsZero() {
 		measurementEnd := control.firstArrival.Add(control.spec.Duration)
 		if control.firstArrival.IsZero() {

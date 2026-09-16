@@ -6,13 +6,36 @@ routing. The ASP Endpoint is constructed with a nil `ASP` configuration and
 each DATA call uses a newly constructed Protocol Data parameter plus
 `WritePDWithRoutingContext`; the SGP validates messages returned by `ReadData`.
 
-The fixture currently implements ASP-dial to SGP-listen with two modes:
-one-way `throughput` (the default) and `echo` for round-trip latency.
-Bidirectional traffic, SGP-dial/ASP-listen initiation, router/state workloads,
-and independent-peer interoperability are reported as unavailable; they are
-never emitted as zero-valued successful measurements. Both processes run this
-binary, so `fixture_verdict: pass` establishes loss-free fixture validity
-only, not independent-peer, sustainable-capacity, or candidate acceptance.
+The fixture currently implements ASP-dial to SGP-listen with three modes:
+one-way `throughput` (the default), `echo` for round-trip latency, and
+`bidirectional` for simultaneous two-way DATA. SGP-dial/ASP-listen initiation,
+router/state workloads, and independent-peer interoperability are reported as
+unavailable; they are never emitted as zero-valued successful measurements.
+Both processes run this binary, so `fixture_verdict: pass` establishes
+loss-free fixture validity only, not independent-peer, sustainable-capacity,
+or candidate acceptance.
+
+## Bidirectional mode
+
+`-mode=bidirectional` drives `-rate` messages per second in each direction
+simultaneously over the same associations, so the aggregate offered load is
+twice the flag value (the approved 40,000/s aggregate row uses
+`-associations=8 -rate=20000`). The ASP drives the forward cohort exactly as
+in throughput mode and additionally serves its own control endpoint
+(`-control-address`, advertised to the peer with `-control-url`). On each
+cohort start the SGP drives the reverse cohort against that endpoint with the
+identical sender-side measurement path, the cohort name suffixed `-reverse`,
+and reversed point codes; both sides validate everything they receive.
+
+The cohort result carries per-direction records: `sender`/`receiver` cover
+ASP-to-SGP and `reverse_sender`/`reverse_receiver` cover SGP-to-ASP, each
+with its own counters, series, sender-window bounds and backlog interval. The
+cohort passes only when all four records are loss-free and fixture-valid.
+Each direction's measurement window is anchored by its own driving side; the
+two windows start within one control round-trip of each other and are not
+claimed to be identical. The reverse sender record's CPU and allocation
+observations cover the same whole process as the SGP's forward receiver
+record, not a separate allowance.
 
 ## Echo mode
 

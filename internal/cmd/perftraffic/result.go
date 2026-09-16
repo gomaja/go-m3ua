@@ -21,6 +21,7 @@ type runSpec struct {
 	Mode         string        `json:"mode,omitempty"`
 	Direction    string        `json:"direction,omitempty"`
 	Initiation   string        `json:"initiation,omitempty"`
+	PeerControl  string        `json:"peer_control,omitempty"`
 }
 
 type deliveryResult struct {
@@ -86,6 +87,9 @@ type runRecord struct {
 	OutstandingScope          string                `json:"outstanding_scope"`
 	Echo                      *echoResult           `json:"echo,omitempty"`
 	ReceiverEcho              *receiverEchoResult   `json:"receiver_echo,omitempty"`
+	Reverse                   *runRecord            `json:"reverse,omitempty"`
+	ReverseReceiver           *runRecord            `json:"reverse_receiver,omitempty"`
+	ReverseError              string                `json:"reverse_error,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -116,7 +120,6 @@ func (record *runRecord) evaluate() {
 	}
 	if record.UnsupportedModes == nil {
 		record.UnsupportedModes = map[string]string{
-			"bidirectional":               "not implemented",
 			"sgp_dial_or_asp_listen":      "not implemented",
 			"router_or_ssnm_workload":     "unavailable: requires future routing and state APIs",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",

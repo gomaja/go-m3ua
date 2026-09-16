@@ -68,9 +68,11 @@ type commandConfig struct {
 	Transport      string
 	Mode           string
 	Direction      string
+	Initiation     string
 	SCTPAddress    string
 	LocalAddress   string
 	ControlAddress string
+	ControlURL     string
 	PeerControl    string
 	Associations   int
 	Workload       workload
@@ -99,6 +101,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	flagSet.StringVar(&config.SCTPAddress, "sctp-address", "0.0.0.0:2905", "listen address or remote dial address")
 	flagSet.StringVar(&config.LocalAddress, "local-address", "", "optional local SCTP dial address")
 	flagSet.StringVar(&config.ControlAddress, "control-address", "0.0.0.0:8080", "receiver HTTP control address")
+	flagSet.StringVar(&config.ControlURL, "control-url", "", "advertised HTTP control base URL for the peer (required for the bidirectional ASP)")
 	flagSet.StringVar(&config.PeerControl, "peer-control", "", "receiver HTTP control base URL")
 	flagSet.IntVar(&config.Associations, "associations", 1, "number of SCTP associations")
 	flagSet.StringVar(&workloadValue, "payload", string(workload128), "payload workload: 128, 512, 4096, or mix")
@@ -121,11 +124,12 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	config.Mode = strings.ToLower(config.Mode)
 	config.Workload = workload(workloadValue)
 	switch config.Mode {
-	case modeThroughput, modeEcho:
+	case modeThroughput, modeEcho, modeBidirectional:
 	default:
-		return commandConfig{}, fmt.Errorf("mode %q is unavailable; throughput and echo are implemented", config.Mode)
+		return commandConfig{}, fmt.Errorf("mode %q is unavailable; throughput, echo and bidirectional are implemented", config.Mode)
 	}
 	config.Direction = directionASPToSGP
+	config.Initiation = initiationASPDial
 	if config.Role != "asp" && config.Role != "sgp" {
 		return commandConfig{}, fmt.Errorf("unsupported M3UA role %q", config.Role)
 	}
@@ -164,6 +168,9 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 		}
 		if config.Cohort == "" {
 			return commandConfig{}, errors.New("cohort is required for the ASP sender")
+		}
+		if config.Mode == modeBidirectional && config.ControlURL == "" {
+			return commandConfig{}, errors.New("control-url is required for the bidirectional ASP so the peer can drive the reverse cohort")
 		}
 	}
 	if config.Role == "sgp" && config.ControlAddress == "" {

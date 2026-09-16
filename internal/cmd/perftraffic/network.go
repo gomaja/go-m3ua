@@ -38,6 +38,7 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 	control := newReceiverControl(config.Associations, maxOutstanding)
 	control.cpuStatPath = config.CPUStatPath
+	control.driver = &reverseDriver{ctx: ctx, cpuStatPath: config.CPUStatPath}
 	httpListener, err := net.Listen("tcp", config.ControlAddress)
 	if err != nil {
 		return runRecord{}, fmt.Errorf("listen for receiver control: %w", err)
@@ -96,6 +97,7 @@ func acceptAndRead(ctx context.Context, listener *m3ua.Listener, associations in
 			return
 		}
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
+		control.driver.addAssociation(association)
 		go readAssociation(ctx, index, association, control, fatal)
 	}
 }
