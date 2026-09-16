@@ -50,6 +50,31 @@ func TestParseConfigAcceptsCoreReceiver(testContext *testing.T) {
 	}
 }
 
+func TestParseConfigAcceptsEchoModeWithSameBounds(testContext *testing.T) {
+	config, err := parseConfig([]string{
+		"-role=asp", "-transport=dial", "-mode=echo",
+		"-sctp-address=10.0.0.2:2905", "-peer-control=http://10.0.0.2:8080",
+		"-cohort=latency-echo-01", "-rate=17500",
+	})
+	if err != nil {
+		testContext.Fatalf("parseConfig: %v", err)
+	}
+	if config.Mode != modeEcho || config.Direction != directionASPToSGP {
+		testContext.Fatalf("mode/direction = %q/%q, want echo/asp-to-sgp", config.Mode, config.Direction)
+	}
+	for _, args := range [][]string{
+		{"-mode=echo", "-rate=0"},
+		{"-mode=echo", "-rate=1000001"},
+		{"-mode=echo", "-associations=33"},
+		{"-mode=echo", "-outstanding=8193"},
+		{"-mode=echo", "-duration=11m"},
+	} {
+		if _, err := parseConfig(args); err == nil {
+			testContext.Fatalf("parseConfig(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
 func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T) {
 	testCases := []struct {
 		name string
@@ -60,7 +85,7 @@ func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T)
 		{name: "zero rate", args: []string{"-rate=0"}},
 		{name: "runtime over ten minutes", args: []string{"-warmup=5m", "-duration=5m", "-drain=1ns"}},
 		{name: "outstanding over bound", args: []string{"-outstanding=8193"}},
-		{name: "echo not implemented", args: []string{"-mode=echo"}},
+		{name: "bidirectional not implemented", args: []string{"-mode=bidirectional"}},
 		{name: "reverse initiation not implemented", args: []string{"-role=sgp", "-transport=dial"}},
 		{name: "unknown workload", args: []string{"-payload=129"}},
 	}

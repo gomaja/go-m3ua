@@ -101,6 +101,7 @@ func acceptAndRead(ctx context.Context, listener *m3ua.Listener, associations in
 }
 
 func readAssociation(ctx context.Context, transportIndex int, association *m3ua.Association, control *receiverControl, fatal chan<- error) {
+	replyDeadlineSet := false
 	for {
 		message, err := association.ReadData()
 		if err != nil {
@@ -110,14 +111,45 @@ func readAssociation(ctx context.Context, transportIndex int, association *m3ua.
 			nonblockingError(fatal, fmt.Errorf("association %d ReadData: %w", transportIndex, err))
 			return
 		}
-		control.record(transportIndex, receivedMessage{
+		identity, outcome := control.record(transportIndex, receivedMessage{
 			ProtocolData:         protocolDataFromM3UA(message.ProtocolData),
 			NetworkAppearance:    message.NetworkAppearance,
 			NetworkAppearanceSet: message.NetworkAppearanceSet,
 			RoutingContext:       message.RoutingContext,
 			RoutingContextSet:    message.RoutingContextSet,
 		})
+		if outcome != recordUnique || !control.echoMode() {
+			continue
+		}
+		if !replyDeadlineSet {
+			if err := association.SetWriteDeadline(control.echoReplyDeadline()); err != nil {
+				nonblockingError(fatal, fmt.Errorf("association %d SetWriteDeadline: %w", transportIndex, err))
+				return
+			}
+			replyDeadlineSet = true
+		}
+		control.recordEchoReply(writeEchoReply(association, identity, len(message.ProtocolData.Data)))
 	}
+}
+
+// writeEchoReply answers one validated echo request with a same-size,
+// deterministic reply carrying the request identity with reversed point
+// codes. The reply is RTT evidence for the sender only; it is not a useful
+// delivery in the offered-load count.
+func writeEchoReply(association *m3ua.Association, identity messageIdentity, size int) error {
+	identity.Kind = kindEchoReply
+	payload := buildPayload(identity, size)
+	tuple := reverseTuple(tupleFor(identity.Flow, identity.Association))
+	protocolDataParam := params.NewProtocolData(tuple.OriginatingPointCode, tuple.DestinationPointCode,
+		tuple.ServiceIndicator, tuple.NetworkIndicator, tuple.MessagePriority, tuple.SignallingLinkSelection, payload)
+	written, err := association.WritePDWithRoutingContext(protocolDataParam, tuple.RoutingContext)
+	if err != nil {
+		return err
+	}
+	if written != size {
+		return fmt.Errorf("echo reply wrote %d bytes, want %d", written, size)
+	}
+	return nil
 }
 
 func protocolDataFromM3UA(payload *params.ProtocolDataPayload) protocolData {

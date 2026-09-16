@@ -49,6 +49,8 @@ type receiverControl struct {
 	uniqueMeasurement    uint64
 	uniqueDrain          uint64
 	lateAfterStop        uint64
+	echoReplies          uint64
+	echoReplyErrors      uint64
 	fatal                string
 	cpuStatPath          string
 	cpuBefore            map[string]uint64
@@ -137,7 +139,23 @@ func (control *receiverControl) reset(specification runSpec) error {
 	if specification.Cohort == "" || specification.Associations != control.expectedAssociations ||
 		specification.Expected == 0 || specification.Duration <= 0 || specification.Duration > maxRunWindow ||
 		specification.Payload.size(0) == 0 || specification.Rate > maxOfferedRate ||
+		specification.Drain < 0 || specification.Drain > maxRunWindow ||
 		expectedErr != nil || expected != specification.Expected {
+		return errInvalidRunSpec
+	}
+	switch specification.Mode {
+	case "", modeThroughput, modeEcho, modeBidirectional:
+	default:
+		return errInvalidRunSpec
+	}
+	switch specification.Direction {
+	case "", directionASPToSGP, directionSGPToASP:
+	default:
+		return errInvalidRunSpec
+	}
+	switch specification.Initiation {
+	case "", initiationASPDial, initiationSGPDial:
+	default:
 		return errInvalidRunSpec
 	}
 	control.spec = specification
@@ -150,6 +168,8 @@ func (control *receiverControl) reset(specification runSpec) error {
 	control.uniqueMeasurement = 0
 	control.uniqueDrain = 0
 	control.lateAfterStop = 0
+	control.echoReplies = 0
+	control.echoReplyErrors = 0
 	control.cpuBefore = nil
 	control.cpuAfter = nil
 	control.cpuError = ""
@@ -193,22 +213,38 @@ func (control *receiverControl) stop() error {
 	return nil
 }
 
-func (control *receiverControl) record(transportIndex int, message receivedMessage) {
+// recordOutcome classifies one arrival so the echo reply path can distinguish
+// a newly validated delivery from ignored, duplicate or invalid traffic.
+type recordOutcome uint8
+
+const (
+	recordIgnored recordOutcome = iota
+	recordInvalid
+	recordNotUnique
+	recordUnique
+)
+
+func (control *receiverControl) record(transportIndex int, message receivedMessage) (messageIdentity, recordOutcome) {
 	control.mutex.Lock()
 	if control.phase == receiverStopped {
 		control.lateAfterStop++
 		control.mutex.Unlock()
-		return
+		return messageIdentity{}, recordIgnored
 	}
 	if control.phase != receiverMeasuring || control.ledger == nil {
 		control.mutex.Unlock()
-		return
+		return messageIdentity{}, recordIgnored
 	}
 	specification := control.spec
 	generation := control.generation
 	control.mutex.Unlock()
 
-	identity, err := validateMessage(message, specification.Cohort, specification.Seed, specification.Associations, specification.Payload)
+	expectedKind := kindData
+	if specification.Mode == modeEcho {
+		expectedKind = kindEchoRequest
+	}
+	identity, err := validateMessage(message, specification.Cohort, specification.Seed,
+		specification.Associations, specification.Payload, expectedKind, specification.Direction == directionSGPToASP)
 	arrival := control.now()
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
@@ -216,24 +252,26 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 		if control.ledger != nil {
 			control.ledger.snapshotData.Invalid++
 		}
-		return
+		return messageIdentity{}, recordIgnored
 	}
 	if err != nil || !control.bindAssociation(transportIndex, int(identity.Association)) {
 		control.ledger.snapshotData.Invalid++
-		return
+		return identity, recordInvalid
 	}
+	identity.Cohort = specification.Cohort
 	if control.firstArrival.IsZero() {
 		control.firstArrival = arrival
 	}
 	status := control.ledger.record(identity)
 	if status != ledgerUnique {
-		return
+		return identity, recordNotUnique
 	}
 	if arrival.Before(control.firstArrival.Add(control.spec.Duration)) {
 		control.uniqueMeasurement++
 	} else {
 		control.uniqueDrain++
 	}
+	return identity, recordUnique
 }
 
 func (control *receiverControl) bindAssociation(transportIndex, logicalIndex int) bool {
@@ -249,6 +287,33 @@ func (control *receiverControl) bindAssociation(transportIndex, logicalIndex int
 		return true
 	}
 	return boundLogical == logicalIndex && boundTransport == transportIndex
+}
+
+// echoMode reports whether the active cohort expects echo requests.
+func (control *receiverControl) echoMode() bool {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return control.phase == receiverMeasuring && control.spec.Mode == modeEcho
+}
+
+// echoReplyDeadline bounds echo reply writes. Replies get the full cohort
+// window plus drain plus one extra request deadline of slack so a reply for
+// a late-arriving request is not cut off before the sender stops accepting
+// it.
+func (control *receiverControl) echoReplyDeadline() time.Time {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return control.started.Add(control.spec.Duration + control.spec.Drain + echoRequestDeadline)
+}
+
+func (control *receiverControl) recordEchoReply(err error) {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	if err != nil {
+		control.echoReplyErrors++
+		return
+	}
+	control.echoReplies++
 }
 
 func (control *receiverControl) result() runRecord {
@@ -278,6 +343,13 @@ func (control *receiverControl) result() runRecord {
 			Invalid:           snapshot.Invalid,
 			Reordered:         snapshot.Reordered,
 			LateAfterStop:     control.lateAfterStop,
+		}
+	}
+	if control.spec.Mode == modeEcho {
+		record.ReceiverEcho = &receiverEchoResult{
+			Scope:       echoReceiverScope,
+			Replies:     control.echoReplies,
+			ReplyErrors: control.echoReplyErrors,
 		}
 	}
 	if !control.started.IsZero() && !control.stopped.IsZero() {

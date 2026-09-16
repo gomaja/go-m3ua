@@ -15,6 +15,15 @@ const (
 	payloadVersion        = byte(1)
 )
 
+// Payload kinds occupy header byte 7. Throughput DATA and echo requests are
+// useful offered load validated by the receiver; echo replies travel back to
+// the sender for RTT measurement and are never counted as useful deliveries.
+const (
+	kindData        = byte(0)
+	kindEchoRequest = byte(1)
+	kindEchoReply   = byte(2)
+)
+
 var payloadMagic = [4]byte{'M', '3', 'P', 'F'}
 
 type messageIdentity struct {
@@ -24,6 +33,7 @@ type messageIdentity struct {
 	Association uint8
 	Flow        uint8
 	Sequence    uint64
+	Kind        byte
 }
 
 type messageTuple struct {
@@ -71,6 +81,14 @@ func tupleFor(flow uint8, association uint8) messageTuple {
 	}
 }
 
+// reverseTuple swaps the point codes for SGP-to-ASP traffic (echo replies and
+// the reverse direction of a bidirectional run). Service, network, priority,
+// link selection and routing context stay unchanged.
+func reverseTuple(tuple messageTuple) messageTuple {
+	tuple.OriginatingPointCode, tuple.DestinationPointCode = tuple.DestinationPointCode, tuple.OriginatingPointCode
+	return tuple
+}
+
 func cohortHash(cohort string) [16]byte {
 	digest := sha256.Sum256([]byte(cohort))
 	var short [16]byte
@@ -87,6 +105,7 @@ func buildPayload(identity messageIdentity, size int) []byte {
 	payload[4] = payloadVersion
 	payload[5] = identity.Association
 	payload[6] = identity.Flow
+	payload[7] = identity.Kind
 	digest := cohortHash(identity.Cohort)
 	copy(payload[8:24], digest[:])
 	binary.BigEndian.PutUint64(payload[24:32], identity.Seed)
@@ -119,8 +138,8 @@ func parsePayload(payload []byte) (messageIdentity, error) {
 	if payload[4] != payloadVersion {
 		return messageIdentity{}, fmt.Errorf("payload version %d is unsupported", payload[4])
 	}
-	if payload[7] != 0 || binary.BigEndian.Uint32(payload[44:48]) != 0 {
-		return messageIdentity{}, errors.New("payload reserved fields are non-zero")
+	if payload[7] > kindEchoReply || binary.BigEndian.Uint32(payload[44:48]) != 0 {
+		return messageIdentity{}, errors.New("payload reserved fields are non-zero or the kind is unknown")
 	}
 	if int(binary.BigEndian.Uint32(payload[40:44])) != len(payload) {
 		return messageIdentity{}, errors.New("payload length marker mismatch")
@@ -128,6 +147,7 @@ func parsePayload(payload []byte) (messageIdentity, error) {
 	identity := messageIdentity{
 		Association: payload[5],
 		Flow:        payload[6],
+		Kind:        payload[7],
 		Seed:        binary.BigEndian.Uint64(payload[24:32]),
 		Sequence:    binary.BigEndian.Uint64(payload[32:40]),
 	}
@@ -135,10 +155,13 @@ func parsePayload(payload []byte) (messageIdentity, error) {
 	return identity, nil
 }
 
-func validateMessage(message receivedMessage, cohort string, seed uint64, associations int, workload workload) (messageIdentity, error) {
+func validateMessage(message receivedMessage, cohort string, seed uint64, associations int, workload workload, kind byte, reverse bool) (messageIdentity, error) {
 	identity, err := parsePayload(message.ProtocolData.Data)
 	if err != nil {
 		return messageIdentity{}, err
+	}
+	if identity.Kind != kind {
+		return messageIdentity{}, errors.New("payload kind mismatch")
 	}
 	if identity.CohortHash != cohortHash(cohort) {
 		return messageIdentity{}, errors.New("cohort mismatch")
@@ -161,6 +184,9 @@ func validateMessage(message receivedMessage, cohort string, seed uint64, associ
 		return messageIdentity{}, errors.New("association assignment mismatch")
 	}
 	tuple := tupleFor(identity.Flow, identity.Association)
+	if reverse {
+		tuple = reverseTuple(tuple)
+	}
 	if message.ProtocolData.OriginatingPointCode != tuple.OriginatingPointCode ||
 		message.ProtocolData.DestinationPointCode != tuple.DestinationPointCode ||
 		message.ProtocolData.ServiceIndicator != tuple.ServiceIndicator ||
@@ -181,6 +207,7 @@ func validateMessage(message receivedMessage, cohort string, seed uint64, associ
 		Association: identity.Association,
 		Flow:        identity.Flow,
 		Sequence:    identity.Sequence,
+		Kind:        identity.Kind,
 	}, expectedSize)
 	if !bytes.Equal(message.ProtocolData.Data, expected) {
 		return messageIdentity{}, errors.New("deterministic payload mismatch")

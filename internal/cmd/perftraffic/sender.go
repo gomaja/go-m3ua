@@ -42,6 +42,13 @@ type sendJob struct {
 	identity  messageIdentity
 	scheduled time.Time
 	size      int
+	reverse   bool
+}
+
+// globalIndex is the unique schedule position of a message identity inside
+// its cohort, matching the receiver ledger's identity arithmetic.
+func globalIndex(identity messageIdentity) uint64 {
+	return identity.Sequence*uint64(flowCount) + uint64(identity.Flow)
 }
 
 type senderCounters struct {
@@ -90,11 +97,18 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 	if err := waitForReady(ctx, config.PeerControl, config.Associations); err != nil {
 		return combinedResult{}, err
 	}
+	var registry *echoRegistry
+	if config.Mode == modeEcho {
+		registry = newEchoRegistry()
+		for index, association := range associations {
+			go readEchoReplies(ctx, index, association, registry)
+		}
+	}
 	var warmup *cohortResult
 	if config.Warmup > 0 {
 		warmupConfig := config
 		warmupConfig.Cohort += "-warmup"
-		warmupSender, warmupReceiver, warmupErr := runSenderCohort(ctx, warmupConfig, associations, warmupConfig.Cohort, config.Warmup)
+		warmupSender, warmupReceiver, warmupErr := runSenderCohort(ctx, warmupConfig, associations, registry, warmupConfig.Cohort, config.Warmup)
 		warmupResult := newCohortResult("warmup", warmupSender, warmupReceiver, warmupErr)
 		warmup = &warmupResult
 		if warmupErr != nil || warmupSender.Verdict == verdictInvalid || warmupReceiver.Verdict == verdictInvalid {
@@ -104,7 +118,7 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 			return failedCohortResult("warmup", warmupSender, warmupReceiver, fmt.Errorf("warmup did not drain cleanly: %w", warmupErr)), warmupErr
 		}
 	}
-	sender, receiver, err := runSenderCohort(ctx, config, associations, config.Cohort, config.Duration)
+	sender, receiver, err := runSenderCohort(ctx, config, associations, registry, config.Cohort, config.Duration)
 	measurement := newCohortResult("measurement", sender, receiver, err)
 	result := combinedResult{
 		Phase:       "measurement",
@@ -148,7 +162,7 @@ func failedCohortResult(phase string, sender, receiver runRecord, err error) com
 	return result
 }
 
-func runSenderCohort(ctx context.Context, config commandConfig, associations []*m3ua.Association, cohort string, duration time.Duration) (runRecord, runRecord, error) {
+func runSenderCohort(ctx context.Context, config commandConfig, associations []*m3ua.Association, registry *echoRegistry, cohort string, duration time.Duration) (runRecord, runRecord, error) {
 	expected, err := scheduledMessages(config.Rate, duration)
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("calculate scheduled messages: %w", err)
@@ -156,7 +170,18 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	if expected == 0 {
 		return runRecord{}, runRecord{}, errors.New("cohort schedules no messages")
 	}
-	specification := runSpec{Cohort: cohort, Seed: config.Seed, Associations: len(associations), Expected: expected, Duration: duration, Rate: config.Rate, Payload: config.Workload}
+	effectiveDrain := config.Drain
+	if config.Mode == modeEcho && effectiveDrain < echoRequestDeadline {
+		effectiveDrain = echoRequestDeadline
+	}
+	specification := runSpec{
+		Cohort: cohort, Seed: config.Seed, Associations: len(associations), Expected: expected,
+		Duration: duration, Drain: effectiveDrain, Rate: config.Rate, Payload: config.Workload,
+		Mode: config.Mode, Direction: directionASPToSGP, Initiation: initiationASPDial,
+	}
+	if config.Mode == "" {
+		specification.Mode = modeThroughput
+	}
 	if err := postJSON(ctx, config.PeerControl+"/reset", specification); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("reset receiver: %w", err)
 	}
@@ -181,17 +206,24 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	initialObservation.Before = initialBefore.Sub(started)
 	initialObservation.After = 0
 	for _, association := range associations {
-		if deadlineErr := association.SetWriteDeadline(started.Add(duration + config.Drain)); deadlineErr != nil {
+		if deadlineErr := association.SetWriteDeadline(started.Add(duration + effectiveDrain)); deadlineErr != nil {
 			_ = postJSON(ctx, config.PeerControl+"/stop", nil)
 			return runRecord{}, runRecord{}, fmt.Errorf("set association write deadline: %w", deadlineErr)
 		}
 	}
+	var tracker *echoTracker
+	sweepDone := make(chan struct{})
+	if specification.Mode == modeEcho {
+		tracker = newEchoTracker(cohort, config.Seed, len(associations), config.Workload, config.Outstanding, echoRequestDeadline)
+		registry.register(tracker)
+		go sweepEchoRequests(tracker, sweepDone)
+	}
 	counters := newSenderCounters(config.Outstanding)
-	queues, workersDone := startSendWorkers(associations, config, counters)
+	queues, workersDone := startSendWorkers(associations, config, counters, tracker)
 	sampleDone := make(chan struct{})
 	go sampleSender(started, counters, sampleDone)
 	progressDone := sampleProgress(ctx, started, duration, config.PeerControl)
-	dispatchScheduled(ctx, config, cohort, duration, started, expected, queues, counters)
+	dispatchScheduled(ctx, config, cohort, duration, started, expected, queues, counters, tracker)
 	outstandingAtEnd := counters.outstandingCount()
 	close(sampleDone)
 	observations := append([]progressObservation{initialObservation}, (<-progressDone)...)
@@ -199,11 +231,15 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		close(queue)
 	}
 	drainStarted := time.Now()
-	drainDeadline := started.Add(duration + config.Drain)
+	drainDeadline := started.Add(duration + effectiveDrain)
 	boundaryContext, cancelBoundary := context.WithDeadline(ctx, drainDeadline)
 	observations = append(observations, observeProgress(boundaryContext, started, config.PeerControl))
 	cancelBoundary()
 	drained := waitWorkersContext(ctx, workersDone, remainingUntil(drainDeadline))
+	if tracker != nil {
+		waitEchoDrain(ctx, tracker, drainDeadline)
+		close(sweepDone)
+	}
 	if !drained {
 		if ctx.Err() != nil {
 			counters.setFatal(ctx.Err().Error())
@@ -240,6 +276,13 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	cpuAfter, cpuAfterErr := readCPUStat(config.CPUStatPath)
 	allocAfter := readRuntimeCounters()
 	sender := counters.result(specification, duration, drainDuration, outstandingAtEnd)
+	if tracker != nil {
+		echo := tracker.result(counters.submittedCount())
+		sender.Echo = &echo
+		if fatal := registry.fatalError(); fatal != "" && sender.FatalError == "" {
+			sender.FatalError = fatal
+		}
+	}
 	sender.CPU = newCPUObservation(cpuBefore, cpuAfter, cpuBeforeErr, cpuAfterErr, receiver.Delivery.Unique)
 	sender.Allocations = AllocationObservation{Scope: wholeProcessScope, Before: allocBefore, After: allocAfter, Delta: runtimeDelta(allocBefore, allocAfter)}
 	sender.Delivery = receiver.Delivery
@@ -269,7 +312,7 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	return sender, receiver, errors.Join(cohortErrors...)
 }
 
-func startSendWorkers(associations []*m3ua.Association, config commandConfig, counters *senderCounters) ([]chan sendJob, <-chan struct{}) {
+func startSendWorkers(associations []*m3ua.Association, config commandConfig, counters *senderCounters, tracker *echoTracker) ([]chan sendJob, <-chan struct{}) {
 	capacities := queueCapacities(len(associations), config.Outstanding)
 	queues := make([]chan sendJob, len(associations))
 	var workers sync.WaitGroup
@@ -282,11 +325,17 @@ func startSendWorkers(associations []*m3ua.Association, config commandConfig, co
 				dispatchTime := time.Now()
 				payload := buildPayload(job.identity, job.size)
 				tuple := tupleFor(job.identity.Flow, job.identity.Association)
+				if job.reverse {
+					tuple = reverseTuple(tuple)
+				}
 				protocolDataParam := params.NewProtocolData(tuple.OriginatingPointCode, tuple.DestinationPointCode, tuple.ServiceIndicator, tuple.NetworkIndicator, tuple.MessagePriority, tuple.SignallingLinkSelection, payload)
 				sendStarted := time.Now()
 				written, sendErr := connection.WritePDWithRoutingContext(protocolDataParam, tuple.RoutingContext)
 				if sendErr == nil && written != job.size {
 					sendErr = fmt.Errorf("WritePDWithRoutingContext wrote %d bytes, want %d", written, job.size)
+				}
+				if sendErr != nil && tracker != nil {
+					tracker.fail(globalIndex(job.identity))
 				}
 				counters.complete(sendErr, dispatchTime.Sub(job.scheduled), time.Since(sendStarted))
 			}
@@ -300,7 +349,7 @@ func startSendWorkers(associations []*m3ua.Association, config commandConfig, co
 	return queues, done
 }
 
-func dispatchScheduled(ctx context.Context, config commandConfig, cohort string, duration time.Duration, started time.Time, expected uint64, queues []chan sendJob, counters *senderCounters) {
+func dispatchScheduled(ctx context.Context, config commandConfig, cohort string, duration time.Duration, started time.Time, expected uint64, queues []chan sendJob, counters *senderCounters, tracker *echoTracker) {
 	for index := uint64(0); index < expected; {
 		if err := ctx.Err(); err != nil {
 			counters.abort(expected-index, err)
@@ -334,14 +383,30 @@ func dispatchScheduled(ctx context.Context, config commandConfig, cohort string,
 			}
 			offset := time.Duration(index * uint64(time.Second) / config.Rate)
 			identity := planMessage(cohort, config.Seed, index, len(queues))
-			job := sendJob{identity: identity, scheduled: started.Add(offset), size: config.Workload.size(index)}
+			if tracker != nil {
+				identity.Kind = kindEchoRequest
+			}
+			job := sendJob{
+				identity: identity, scheduled: started.Add(offset),
+				size: config.Workload.size(index), reverse: config.Direction == directionSGPToASP,
+			}
 			counters.schedule()
+			if tracker != nil && !tracker.admit(index, job.scheduled) {
+				counters.capOne()
+				index++
+				continue
+			}
 			if counters.reserve() {
 				select {
 				case queues[identity.Association] <- job:
 				default:
 					counters.rejectReservation()
+					if tracker != nil {
+						tracker.fail(index)
+					}
 				}
+			} else if tracker != nil {
+				tracker.fail(index)
 			}
 			index++
 		}
@@ -372,6 +437,12 @@ func (counters *senderCounters) reserve() bool {
 	}
 	counters.outstanding++
 	return true
+}
+
+func (counters *senderCounters) capOne() {
+	counters.mutex.Lock()
+	counters.capped++
+	counters.mutex.Unlock()
 }
 
 func (counters *senderCounters) rejectReservation() {
@@ -639,4 +710,79 @@ func remainingUntil(deadline time.Time) time.Duration {
 		return 0
 	}
 	return remaining
+}
+
+// readEchoReplies validates echo replies against the cohort tracker that owns
+// their identity and completes the outstanding request. Replies are RTT
+// evidence only; they are never counted as useful deliveries. A reply that
+// parses but matches no registered cohort is counted on the active cohort; a
+// read failure before shutdown is a fatal fixture error.
+func readEchoReplies(ctx context.Context, transportIndex int, association *m3ua.Association, registry *echoRegistry) {
+	for {
+		message, err := association.ReadData()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			registry.setFatal(fmt.Sprintf("association %d echo reply ReadData: %v", transportIndex, err))
+			return
+		}
+		received := receivedMessage{
+			ProtocolData:         protocolDataFromM3UA(message.ProtocolData),
+			NetworkAppearance:    message.NetworkAppearance,
+			NetworkAppearanceSet: message.NetworkAppearanceSet,
+			RoutingContext:       message.RoutingContext,
+			RoutingContextSet:    message.RoutingContextSet,
+		}
+		identity, err := parsePayload(received.ProtocolData.Data)
+		if err != nil {
+			registry.unattributed()
+			continue
+		}
+		tracker := registry.trackerFor(identity.CohortHash)
+		if tracker == nil {
+			registry.unattributed()
+			continue
+		}
+		validated, err := validateMessage(received, tracker.cohort, tracker.seed, tracker.associations, tracker.workload, kindEchoReply, true)
+		if err != nil {
+			tracker.countInvalid()
+			continue
+		}
+		tracker.complete(globalIndex(validated), time.Now())
+	}
+}
+
+func sweepEchoRequests(tracker *echoTracker, done <-chan struct{}) {
+	ticker := time.NewTicker(echoSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			tracker.sweep(now)
+		case <-done:
+			return
+		}
+	}
+}
+
+// waitEchoDrain waits until every outstanding request is answered or swept,
+// bounded by the same absolute drain deadline as the rest of the cohort. A
+// final sweep at the deadline counts every remaining request as a deadline
+// failure instead of omitting it.
+func waitEchoDrain(ctx context.Context, tracker *echoTracker, deadline time.Time) {
+	for tracker.outstandingCount() > 0 {
+		if !time.Now().Before(deadline) {
+			break
+		}
+		timer := time.NewTimer(min(10*time.Millisecond, remainingUntil(deadline)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			tracker.sweep(time.Now())
+			return
+		case <-timer.C:
+		}
+	}
+	tracker.sweep(time.Now())
 }

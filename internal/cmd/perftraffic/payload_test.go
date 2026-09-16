@@ -8,11 +8,11 @@ import (
 func TestDeterministicBodyRejectsZeroingForZeroDerivedState(testContext *testing.T) {
 	for _, seed := range []uint64{0, 1, 7, ^uint64(0) / flowCount} {
 		message := validReceivedMessage("zero-state", seed, 0, 0, seed, 128)
-		if _, err := validateMessage(message, "zero-state", seed, 1, workload128); err != nil {
+		if _, err := validateMessage(message, "zero-state", seed, 1, workload128, kindData, false); err != nil {
 			testContext.Fatalf("valid message with seed %d: %v", seed, err)
 		}
 		clear(message.ProtocolData.Data[payloadHeaderSize:])
-		if _, err := validateMessage(message, "zero-state", seed, 1, workload128); err == nil {
+		if _, err := validateMessage(message, "zero-state", seed, 1, workload128, kindData, false); err == nil {
 			testContext.Errorf("zeroed body accepted for seed %d", seed)
 		}
 	}
@@ -61,7 +61,7 @@ func TestBuildAndValidateMessage(testContext *testing.T) {
 		NetworkAppearanceSet: true,
 		RoutingContext:       tuple.RoutingContext,
 		RoutingContextSet:    true,
-	}, "cohort-a", 1234, 8, workload512)
+	}, "cohort-a", 1234, 8, workload512, kindData, false)
 	if err != nil {
 		testContext.Fatalf("validateMessage: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestValidateMessageRejectsEveryScopedFieldAndPayloadCorruption(testContext 
 		testContext.Run(testCase.name, func(testContext *testing.T) {
 			message := valid.clone()
 			testCase.mutate(&message)
-			if _, err := validateMessage(message, identity.Cohort, identity.Seed, 8, workload128); err == nil {
+			if _, err := validateMessage(message, identity.Cohort, identity.Seed, 8, workload128, kindData, false); err == nil {
 				testContext.Fatal("validateMessage unexpectedly succeeded")
 			}
 		})
@@ -117,14 +117,14 @@ func TestValidateMessageRejectsEveryScopedFieldAndPayloadCorruption(testContext 
 
 func TestValidateMessageRejectsWrongFixedWorkloadSize(testContext *testing.T) {
 	message := validReceivedMessage("cohort-a", 7, 0, 0, 0, 128)
-	if _, err := validateMessage(message, "cohort-a", 7, 1, workload4096); err == nil {
+	if _, err := validateMessage(message, "cohort-a", 7, 1, workload4096, kindData, false); err == nil {
 		testContext.Fatal("validateMessage unexpectedly accepted 128 bytes for the 4096-byte workload")
 	}
 }
 
 func TestValidateMessageRejectsWrongMixPositionSize(testContext *testing.T) {
 	message := validReceivedMessage("cohort-a", 7, 0, 3, 3, 128)
-	if _, err := validateMessage(message, "cohort-a", 7, 1, workloadMix); err == nil {
+	if _, err := validateMessage(message, "cohort-a", 7, 1, workloadMix, kindData, false); err == nil {
 		testContext.Fatal("validateMessage unexpectedly accepted 128 bytes at mixed-workload global position 99")
 	}
 }

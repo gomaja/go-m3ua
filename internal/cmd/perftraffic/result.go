@@ -15,8 +15,12 @@ type runSpec struct {
 	Associations int           `json:"associations"`
 	Expected     uint64        `json:"expected"`
 	Duration     time.Duration `json:"duration_ns"`
+	Drain        time.Duration `json:"drain_ns,omitempty"`
 	Rate         uint64        `json:"rate,omitempty"`
 	Payload      workload      `json:"payload,omitempty"`
+	Mode         string        `json:"mode,omitempty"`
+	Direction    string        `json:"direction,omitempty"`
+	Initiation   string        `json:"initiation,omitempty"`
 }
 
 type deliveryResult struct {
@@ -80,6 +84,8 @@ type runRecord struct {
 	ProgressObservations      []progressObservation `json:"progress_observations,omitempty"`
 	SenderWindow              *windowAccounting     `json:"sender_window,omitempty"`
 	OutstandingScope          string                `json:"outstanding_scope"`
+	Echo                      *echoResult           `json:"echo,omitempty"`
+	ReceiverEcho              *receiverEchoResult   `json:"receiver_echo,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -110,8 +116,9 @@ func (record *runRecord) evaluate() {
 	}
 	if record.UnsupportedModes == nil {
 		record.UnsupportedModes = map[string]string{
-			"echo_rtt":                    "not implemented",
+			"bidirectional":               "not implemented",
 			"sgp_dial_or_asp_listen":      "not implemented",
+			"router_or_ssnm_workload":     "unavailable: requires future routing and state APIs",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}
 	}
@@ -135,6 +142,15 @@ func (record *runRecord) evaluate() {
 	}
 	if record.OutstandingAtWindowStart != 0 || record.OutstandingAfterDrain != 0 {
 		invalid("outstanding work crossed the start boundary or survived the drain")
+	}
+	if record.Echo != nil {
+		if record.Echo.Validated != record.Expected || record.Echo.Capped != 0 ||
+			record.Echo.DeadlineExceeded != 0 || record.Echo.Invalid != 0 || record.Echo.OutstandingAfterDrain != 0 {
+			invalid("echo requests were not all answered loss-free within the deadline")
+		}
+	}
+	if record.ReceiverEcho != nil && record.ReceiverEcho.ReplyErrors != 0 {
+		invalid("echo replies were not submitted loss-free")
 	}
 	if record.Verdict == verdictInvalid {
 		return

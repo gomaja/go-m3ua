@@ -6,13 +6,37 @@ routing. The ASP Endpoint is constructed with a nil `ASP` configuration and
 each DATA call uses a newly constructed Protocol Data parameter plus
 `WritePDWithRoutingContext`; the SGP validates messages returned by `ReadData`.
 
-The fixture currently implements only ASP-dial to SGP-listen, one-way
-throughput. SGP-dial, ASP-listen, bidirectional traffic, echo RTT, router/state
-workloads, and independent-peer interoperability are reported as unavailable;
-they are never emitted as zero-valued successful measurements. Both processes
-run this binary, so `fixture_verdict: pass` establishes loss-free fixture
-validity only, not independent-peer, sustainable-capacity, or candidate
-acceptance.
+The fixture currently implements ASP-dial to SGP-listen with two modes:
+one-way `throughput` (the default) and `echo` for round-trip latency.
+Bidirectional traffic, SGP-dial/ASP-listen initiation, router/state workloads,
+and independent-peer interoperability are reported as unavailable; they are
+never emitted as zero-valued successful measurements. Both processes run this
+binary, so `fixture_verdict: pass` establishes loss-free fixture validity
+only, not independent-peer, sustainable-capacity, or candidate acceptance.
+
+## Echo mode
+
+`-mode=echo` measures scheduled-request to validated-echo-reply round-trip
+time on the sender's own monotonic clock. Arrivals are open-loop on the same
+100 microsecond scheduler as throughput mode, and waiting from the scheduled
+dispatch time is included in every RTT, so overload shows up as latency
+rather than being hidden. Outstanding requests are capped by `-outstanding`
+(at most 8,192) and each request carries a fixed two-second deadline; cap
+refusals and deadline expirations are counted failures, never omitted from
+the report and never credited to the RTT percentiles.
+
+Echo requests are ordinary validated DATA deliveries and appear in the
+receiver's offered-load counters. Echo replies are built from the request
+identity with reversed point codes and the same deterministic size; they are
+RTT evidence only and are never counted as useful deliveries on either side.
+A reply that arrives after its request was swept, matches no cohort, or fails
+deterministic validation is counted invalid. `sender.echo.rtt` reports
+p50/p95/p99/max over validated replies only. RTT is never one-way latency and
+is never divided by two. A passing echo run requires every scheduled request
+to be delivered and answered loss-free within the deadline; the percentiles
+are measurements, not proof that the approved latency budgets were met.
+
+Throughput mode does not use echo traffic.
 
 ## Protocol basis
 
@@ -173,7 +197,9 @@ configuration and observations:
 - receiver `unique`, `unique_measurement`, `unique_drain`, `missing`,
   `duplicate`, `invalid`, `reordered`, and `late_after_stop` counts;
 - bounded one-second series and bounded histogram-derived send-duration and
-  scheduled-to-worker dispatch-lag percentiles;
+  scheduled-to-worker dispatch-lag percentiles (p50/p95/p99/max), where each
+  percentile is the upper bound of its power-of-two bucket: a conservative
+  over-estimate within a factor of two of the true value;
 - raw cgroup v2 `cpu.stat` maps, `usage_usec` delta, and CPU seconds per final
   unique validated delivery;
 - runtime allocation counters spanning the cohort through drain, including

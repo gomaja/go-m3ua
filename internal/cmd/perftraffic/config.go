@@ -16,6 +16,22 @@ const (
 	maxOfferedRate  = 1_000_000
 )
 
+const (
+	modeThroughput    = "throughput"
+	modeEcho          = "echo"
+	modeBidirectional = "bidirectional"
+)
+
+const (
+	directionASPToSGP = "asp-to-sgp"
+	directionSGPToASP = "sgp-to-asp"
+)
+
+const (
+	initiationASPDial = "asp-dial"
+	initiationSGPDial = "sgp-dial"
+)
+
 type workload string
 
 const (
@@ -51,6 +67,7 @@ type commandConfig struct {
 	Role           string
 	Transport      string
 	Mode           string
+	Direction      string
 	SCTPAddress    string
 	LocalAddress   string
 	ControlAddress string
@@ -103,9 +120,12 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	config.Transport = strings.ToLower(config.Transport)
 	config.Mode = strings.ToLower(config.Mode)
 	config.Workload = workload(workloadValue)
-	if config.Mode != "throughput" {
-		return commandConfig{}, fmt.Errorf("mode %q is unavailable; only throughput is implemented", config.Mode)
+	switch config.Mode {
+	case modeThroughput, modeEcho:
+	default:
+		return commandConfig{}, fmt.Errorf("mode %q is unavailable; throughput and echo are implemented", config.Mode)
 	}
+	config.Direction = directionASPToSGP
 	if config.Role != "asp" && config.Role != "sgp" {
 		return commandConfig{}, fmt.Errorf("unsupported M3UA role %q", config.Role)
 	}

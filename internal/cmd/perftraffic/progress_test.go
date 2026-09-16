@@ -181,7 +181,7 @@ func TestInitialProgressFailureStopsReceiverAndRetainsEvidence(testContext *test
 			}))
 			defer server.Close()
 			config := commandConfig{Rate: 1, Workload: workload128, PeerControl: server.URL}
-			sender, receiver, err := runSenderCohort(context.Background(), config, nil, "failed-progress", time.Second)
+			sender, receiver, err := runSenderCohort(context.Background(), config, nil, nil, "failed-progress", time.Second)
 			if err == nil || active.Load() || sender.Expected != 1 || sender.FatalError == "" || len(sender.ProgressObservations) != 1 || receiver.Expected != 1 {
 				testContext.Fatalf("failure lost evidence or left receiver active: active=%v sender=%+v receiver=%+v err=%v", active.Load(), sender, receiver, err)
 			}
