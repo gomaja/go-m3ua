@@ -97,7 +97,11 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 
 // dialAndRead initiates every association from the SGP side before the
 // receiver reports ready, mirroring the accept path with the SCTP initiation
-// direction reversed.
+// direction reversed. A refused dial is retried within a bounded window
+// while the ASP listener comes up; the library's Dial then waits for the
+// association to reach AS-ACTIVE, and requireStateActive verifies that
+// readiness contract explicitly before the association serves readiness or
+// ReadData.
 func dialAndRead(ctx context.Context, endpoint *m3ua.Endpoint, config commandConfig, control *receiverControl, fatal chan<- error) error {
 	remoteAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
 	if err != nil {
@@ -111,8 +115,14 @@ func dialAndRead(ctx context.Context, endpoint *m3ua.Endpoint, config commandCon
 		}
 	}
 	for index := 0; index < config.Associations; index++ {
-		association, err := endpoint.Dial(ctx, "m3ua", localAddress, remoteAddress, associationConfig("sgp"))
+		association, err := dialWithRetry(ctx, dialRetryWindow, dialRetryInterval, func() (*m3ua.Association, error) {
+			return endpoint.Dial(ctx, "m3ua", localAddress, remoteAddress, associationConfig("sgp"))
+		})
 		if err != nil {
+			return fmt.Errorf("dial association %d: %w", index, err)
+		}
+		if err := requireStateActive(association.State()); err != nil {
+			_ = association.Close()
 			return fmt.Errorf("dial association %d: %w", index, err)
 		}
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))

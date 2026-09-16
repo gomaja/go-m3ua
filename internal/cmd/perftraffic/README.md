@@ -28,6 +28,17 @@ SCTP initiation from the client/server role. Performance role repetitions
 under both initiation directions use the same mixed-payload row; the fixture
 reports them as separate runs and never merges their results.
 
+Startup is readiness-gated in both directions: an association serves traffic,
+readiness reporting, or `ReadData` only after it reaches AS-ACTIVE (the
+library's Accept/Dial wait for that policy-selected readiness state; the
+SGP-dial side additionally verifies it explicitly and fails with
+`association did not reach AS-ACTIVE before serving traffic` otherwise). A
+refused SCTP dial while the ASP listener is still coming up is retried for a
+bounded 30-second window and then fails with the named
+`peer did not accept SCTP dials within the retry window` error rather than a
+generic fatal. The ASP listener stays open for the whole run: closing it
+closes every association it accepted.
+
 ## Bidirectional mode
 
 `-mode=bidirectional` drives `-rate` messages per second in each direction
