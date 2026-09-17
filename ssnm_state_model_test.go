@@ -167,6 +167,95 @@ func TestInboundSCONRetainsCongestionLevelInRetainedRanges(t *testing.T) {
 	}
 }
 
+// The Congestion Indications parameter is optional (RFC 4666 Section 3.4.4),
+// and level 0 is "No Congestion or Undefined". Without a presence bit, a status
+// carrying an explicit level 0, a status carrying no level at all, and a DAVA
+// were three different reports that arrived on SignallingStatus looking the
+// same, so an MTP3-User could not tell congestion abatement from a destination
+// coming back.
+func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		send      func(*Association) error
+		wantState DestinationState
+		wantLevel uint8
+		wantSet   bool
+	}{
+		{
+			name: "DAVA",
+			send: func(c *Association) error {
+				return c.handleDestinationAvailable(
+					messages.NewDestinationAvailable(nil, nil, apc(0x1234), nil))
+			},
+			wantState: DestinationAvailable,
+		},
+		{
+			name: "SCON with explicit level zero",
+			send: func(c *Association) error {
+				return c.handleSignallingCongestion(messages.NewSignallingCongestion(
+					nil, nil, apc(0x1234), nil, params.NewCongestionIndications(0), nil))
+			},
+			wantState: DestinationAvailable,
+			wantSet:   true,
+		},
+		{
+			name: "SCON without a level",
+			send: func(c *Association) error {
+				return c.handleSignallingCongestion(messages.NewSignallingCongestion(
+					nil, nil, apc(0x1234), nil, nil, nil))
+			},
+			wantState: DestinationCongested,
+		},
+		{
+			name: "SCON with an explicit level",
+			send: func(c *Association) error {
+				return c.handleSignallingCongestion(messages.NewSignallingCongestion(
+					nil, nil, apc(0x1234), nil, params.NewCongestionIndications(3), nil))
+			},
+			wantState: DestinationCongested,
+			wantLevel: 3,
+			wantSet:   true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, _ := ssnmConn(t)
+			if err := tt.send(conn); err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			status := nextStatus(t, conn)
+			if status.State != tt.wantState {
+				t.Errorf("status.State = %v, want %v", status.State, tt.wantState)
+			}
+			if status.CongestionLevelSet != tt.wantSet {
+				t.Errorf("status.CongestionLevelSet = %v, want %v",
+					status.CongestionLevelSet, tt.wantSet)
+			}
+			if status.CongestionLevel != tt.wantLevel {
+				t.Errorf("status.CongestionLevel = %d, want %d",
+					status.CongestionLevel, tt.wantLevel)
+			}
+		})
+	}
+}
+
+// An SGP passes an ASP's own SCON on without recording it, and the same
+// presence distinction applies to that report.
+func TestPeerReportedCongestionCarriesLevelPresence(t *testing.T) {
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleSGP)
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, nil, apc(0x222222), nil, params.NewCongestionIndications(0), nil)); err != nil {
+		t.Fatalf("SCON from an ASP was rejected at an SGP: %v", err)
+	}
+	status := nextStatus(t, conn)
+	if !status.PeerReported {
+		t.Fatalf("status.PeerReported = false, want true")
+	}
+	if !status.CongestionLevelSet || status.CongestionLevel != 0 {
+		t.Errorf("status congestion = %d/%v, want an explicit zero",
+			status.CongestionLevel, status.CongestionLevelSet)
+	}
+}
+
 // duna reports one destination unavailable over the SSNM receive path.
 func duna(c *Association, pointCode uint32) error {
 	return c.handleDestinationUnavailable(

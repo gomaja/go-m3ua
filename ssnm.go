@@ -84,6 +84,13 @@ type DestinationStatus struct {
 	// CongestionLevel is the congestion level reported by SCON, if the peer
 	// included the Congestion Indications parameter. Zero otherwise.
 	CongestionLevel uint8
+	// CongestionLevelSet reports whether the peer included the Congestion
+	// Indications parameter, which RFC 4666 Section 3.4.4 makes optional. The
+	// same section makes level 0 "No Congestion or Undefined", so an explicit
+	// zero reports congestion abatement while an absent parameter reports
+	// congestion without a level; without this flag the two, and a DAVA, all
+	// arrive as a level of zero.
+	CongestionLevelSet bool
 	// UserCause carries the MTP3-User identity and unavailability cause from
 	// DUPU, which reports that a user part — not the destination itself — is
 	// unavailable. Zero for other messages.
@@ -1483,8 +1490,9 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	// congestion levels, where the message itself is the congestion report, so
 	// only an explicit 0 clears.
 	level := uint8(0)
+	levelSet := s.CongestionIndications != nil
 	congested := true
-	if s.CongestionIndications != nil {
+	if levelSet {
 		congestionLevel := s.CongestionIndications.CongestionLevel()
 		if congestionLevel > 3 {
 			return ErrInvalidParameterValue
@@ -1503,6 +1511,7 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 		c.peerCongestion.Store(uint32(level))
 		return c.reportSSNM(s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, func(st *DestinationStatus) {
 			st.CongestionLevel = level
+			st.CongestionLevelSet = levelSet
 			st.PeerReported = true
 			if s.ConcernedDestination != nil {
 				st.ConcernedDestination = s.ConcernedDestination.ConcernedDestination()
@@ -1526,9 +1535,10 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 		kind:               aspRouteCongestionUpdate,
 		congested:          congested,
 		congestionLevel:    level,
-		congestionLevelSet: s.CongestionIndications != nil,
+		congestionLevelSet: levelSet,
 	}, func(st *DestinationStatus) {
 		st.CongestionLevel = level
+		st.CongestionLevelSet = levelSet
 	})
 }
 
