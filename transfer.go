@@ -192,6 +192,10 @@ func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.
 	if peer == nil {
 		return nil
 	}
+	// No octets to pass: these faults are found after the message has decoded,
+	// and the dispatcher keeps the received octets only for the messages it
+	// could not parse. RFC 4666 Section 3.8.1 makes Diagnostic Information
+	// Conditional, so handleErrors omits it rather than quoting nothing.
 	if peer.Tag != params.NetworkAppearance {
 		return NewParameterFaultErrorFor(nil, params.ErrInvalidType)
 	}

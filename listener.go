@@ -407,7 +407,12 @@ func (l *Listener) applyDestinationRange(rangeValue DestinationRange, wait bool)
 	previous, known := destinations.lookupRange(
 		destinationRangeKey(prepared), prepared.PointCode, prepared.Mask,
 	)
-	destinations.setRanges([]DestinationRange{prepared})
+	// An SG that cannot retain the state must not announce it either: the audit
+	// it owes the ASP afterwards would contradict the report it just sent. The
+	// dialed-SGP path applies the same rule.
+	if err := destinations.setRangesWithinBudget([]DestinationRange{prepared}); err != nil {
+		return err
+	}
 	abateCongestion := known && previous == DestinationCongested && prepared.State != DestinationCongested
 	return l.publishDestinationRanges([]DestinationRange{prepared}, false, abateCongestion, wait)
 }

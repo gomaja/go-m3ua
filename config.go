@@ -242,6 +242,11 @@ type SGPConfig struct {
 	// BroadcastFlowIdentifierBytes bounds an application-defined flow
 	// identifier. Values less than or equal to zero select the default.
 	BroadcastFlowIdentifierBytes int
+	// MaxSSNMDestinationRecords bounds the destination records retained by the
+	// SGP Endpoint and by each Listener it owns. A peer cannot drive this store,
+	// but a large provisioned network can, so it is configurable. Values less
+	// than or equal to zero select DefaultMaxSSNMDestinationRecords.
+	MaxSSNMDestinationRecords int
 }
 
 // IPSPExchangeModel identifies the peer-to-peer exchange model used by one

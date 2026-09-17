@@ -22,6 +22,11 @@ const (
 	// DefaultMaxSSNMStateRecords bounds retained SSNM route state at one ASP
 	// Endpoint.
 	DefaultMaxSSNMStateRecords = 16384
+	// DefaultMaxSSNMDestinationRecords bounds the destination records one SSNM
+	// state store retains. It counts every Affected Point Code a peer reports,
+	// including the ones outside every provisioned MTP Route, which the
+	// route-state limits above never see.
+	DefaultMaxSSNMDestinationRecords = 16384
 )
 
 // SignallingGatewayID is the local identity of an RFC 4666 Signalling Gateway.
@@ -128,6 +133,12 @@ type ASPConfig struct {
 	// MaxSSNMStateRecords bounds those retained route records across the ASP
 	// Endpoint.
 	MaxSSNMStateRecords int
+	// MaxSSNMDestinationRecords bounds the destination records retained by the
+	// SSNM state store of one Association. The limits above count only records
+	// that intersect a provisioned MTP Route; this one counts every Affected
+	// Point Code the peer reports, so a peer cannot grow retained state without
+	// bound by naming destinations this ASP has no route to.
+	MaxSSNMDestinationRecords int
 }
 
 type aspMTPRoute struct {
@@ -167,6 +178,7 @@ type aspRoutingConfig struct {
 	maxSSNMStateRecordsPerRoute             int
 	maxSSNMStateRecordsPerSignallingGateway int
 	maxSSNMStateRecords                     int
+	maxSSNMDestinationRecords               int
 }
 
 func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
@@ -200,6 +212,9 @@ func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
 	if config.MaxSSNMStateRecords < 0 {
 		return aspRoutingConfig{}, invalidASPConfig("negative SSNM state records %d", config.MaxSSNMStateRecords)
 	}
+	if config.MaxSSNMDestinationRecords < 0 {
+		return aspRoutingConfig{}, invalidASPConfig("negative SSNM destination records %d", config.MaxSSNMDestinationRecords)
+	}
 
 	snapshot := aspRoutingConfig{
 		signallingGatewaySelection:              config.SignallingGatewaySelection,
@@ -214,6 +229,7 @@ func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
 		maxSSNMStateRecordsPerRoute:             config.MaxSSNMStateRecordsPerRoute,
 		maxSSNMStateRecordsPerSignallingGateway: config.MaxSSNMStateRecordsPerSignallingGateway,
 		maxSSNMStateRecords:                     config.MaxSSNMStateRecords,
+		maxSSNMDestinationRecords:               config.MaxSSNMDestinationRecords,
 	}
 	if snapshot.transferFlowCacheEntries == 0 {
 		snapshot.transferFlowCacheEntries = DefaultTransferFlowCacheEntries
@@ -229,6 +245,9 @@ func snapshotASPConfig(config *ASPConfig) (aspRoutingConfig, error) {
 	}
 	if snapshot.maxSSNMStateRecords == 0 {
 		snapshot.maxSSNMStateRecords = DefaultMaxSSNMStateRecords
+	}
+	if snapshot.maxSSNMDestinationRecords == 0 {
+		snapshot.maxSSNMDestinationRecords = DefaultMaxSSNMDestinationRecords
 	}
 	if snapshot.maxSSNMStateRecords < len(config.SignallingGateways) {
 		return aspRoutingConfig{}, invalidASPConfig(
