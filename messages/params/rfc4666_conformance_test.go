@@ -205,8 +205,8 @@ func TestUnavailabilityCauseValues(t *testing.T) {
 // Routing Key and must decode.
 func TestRoutingKeyAcceptsOnlyItsMandatorySubParameters(t *testing.T) {
 	rk := NewRoutingKey(NewRoutingKeyPayload(
-		NewLocalRoutingKeyIdentifier(1), nil, nil,
-		NewDestinationPointCode(0x1234), nil, nil, nil,
+		NewLocalRoutingKeyIdentifier(1), nil, nil, nil,
+		NewRoutingKeyGroup(NewDestinationPointCode(0x1234), nil, nil),
 	))
 	b, err := rk.MarshalBinary()
 	if err != nil {
@@ -223,7 +223,7 @@ func TestRoutingKeyAcceptsOnlyItsMandatorySubParameters(t *testing.T) {
 	if got.LocalRoutingKeyIdentifier == nil {
 		t.Error("Local-RK-Identifier was dropped")
 	}
-	if got.DestinationPointCode == nil {
+	if len(got.Groups) != 1 || got.Groups[0].DestinationPointCode == nil {
 		t.Error("Destination Point Code was dropped")
 	}
 }

@@ -120,10 +120,8 @@ func TestRKMMessageMarshalRejectsInvalidNestedPayloads(t *testing.T) {
 				nil,
 				nil,
 				nil,
-				params.NewDestinationPointCode(101),
 				nil,
-				nil,
-				nil,
+				params.NewRoutingKeyGroup(params.NewDestinationPointCode(101), nil, nil),
 			))),
 		},
 		{
@@ -270,10 +268,8 @@ func TestRoutingKeyRejectsReservedAndNotUsedM3UAParameterTags(t *testing.T) {
 				params.NewLocalRoutingKeyIdentifier(1),
 				nil,
 				nil,
-				params.NewDestinationPointCode(101),
 				nil,
-				nil,
-				nil,
+				params.NewRoutingKeyGroup(params.NewDestinationPointCode(101), nil, nil),
 			)
 			payload.Others = []*params.Param{params.NewParam(int(tag), []byte{0, 0, 0, 0})}
 			if _, err := params.NewRoutingKey(payload).MarshalBinary(); !errors.Is(err, params.ErrInvalidValue) {
@@ -329,10 +325,12 @@ func validRoutingKeyParam(identifier, routingContext uint32) *params.Param {
 		params.NewLocalRoutingKeyIdentifier(identifier),
 		params.NewRoutingContext(routingContext),
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
-		params.NewDestinationPointCode(1),
 		params.NewNetworkAppearance(10),
-		params.NewServiceIndicators(3),
-		params.NewOriginatingPointCodeList(2),
+		params.NewRoutingKeyGroup(
+			params.NewDestinationPointCode(1),
+			params.NewServiceIndicators(3),
+			params.NewOriginatingPointCodeList(2),
+		),
 	))
 }
 

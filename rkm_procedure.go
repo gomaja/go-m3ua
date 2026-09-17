@@ -982,7 +982,7 @@ func routingKeyParameter(request RoutingKeyRegistrationRequest) (*params.Param, 
 	if request.RoutingKey.NetworkAppearanceSet {
 		networkAppearance = params.NewNetworkAppearance(request.RoutingKey.NetworkAppearance)
 	}
-	parameter := params.NewRoutingKey(params.NewRoutingKeyPayloadWithGroups(
+	parameter := params.NewRoutingKey(params.NewRoutingKeyPayload(
 		params.NewLocalRoutingKeyIdentifier(request.LocalRoutingKeyIdentifier),
 		routingContext,
 		trafficMode,
