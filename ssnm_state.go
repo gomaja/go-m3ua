@@ -581,8 +581,12 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 			return fmt.Errorf("%w: %d bytes retained, limit %d",
 				ErrSSNMStateLimit, s.bytes, s.limits.MaxBytes)
 		}
+		// A partition exists only while something binds it, so creating one
+		// is exactly where a binding generation begins.
+		s.epochs++
 		state = &ssnmPartitionState{
 			partition:    partition,
+			epoch:        s.epochs,
 			bindings:     make(map[AssociationID]bool),
 			availability: make(map[ssnmDestinationKey]SSNMAvailability),
 			congestion:   make(map[ssnmDestinationKey]SSNMCongestion),
@@ -590,10 +594,6 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 		}
 		s.partitions[partition] = state
 		s.bytes += ssnmPartitionBaseBytes
-	}
-	if len(state.bindings) == 0 {
-		s.epochs++
-		state.epoch = s.epochs
 	}
 	previous, bound := state.bindings[association]
 	if bound && previous == pending {

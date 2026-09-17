@@ -114,33 +114,47 @@ func TestSubscribeSSNMLosesNoReportToAConcurrentReporter(t *testing.T) {
 		SignallingGatewayProcess: "sgp-a1",
 	}, 7, 1)
 
+	// The reporters drive the store directly so they are contending for its
+	// lock rather than for the whole receive path. A window between the
+	// snapshot and the registration is only a few instructions wide, and a
+	// reporter that spends most of its time elsewhere will not find it.
+	report := SSNMReport{
+		Kind:      SSNMDestinationUnavailableReport,
+		Source:    SSNMPeerReport,
+		Partition: canonicalSSNMPartition("sg-a", "as-core"),
+		Scope: WireScope{
+			NetworkAppearance:    7,
+			NetworkAppearanceSet: true,
+			RoutingContexts:      []uint32{1},
+			RoutingContextSet:    true,
+		},
+		Association:  association.ID(),
+		Destinations: []PointCodeRange{{PointCode: 0x700000}},
+	}
 	stop := make(chan struct{})
-	var reporter sync.WaitGroup
-	reporter.Add(1)
-	go func() {
-		defer reporter.Done()
-		for index := 0; ; index++ {
-			select {
-			case <-stop:
-				return
-			default:
+	var reporters sync.WaitGroup
+	for range 4 {
+		reporters.Add(1)
+		go func() {
+			defer reporters.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if err := endpoint.ssnm.apply(report); err != nil {
+					return
+				}
 			}
-			if err := association.handleDestinationUnavailable(messages.NewDestinationUnavailable(
-				params.NewNetworkAppearance(7),
-				params.NewRoutingContext(1),
-				params.NewAffectedPointCode(0x700000+uint32(index%64)),
-				nil,
-			)); err != nil {
-				return
-			}
-		}
-	}()
+		}()
+	}
 	defer func() {
 		close(stop)
-		reporter.Wait()
+		reporters.Wait()
 	}()
 
-	for round := range 300 {
+	for round := range 500 {
 		snapshot, subscription, err := endpoint.SubscribeSSNM()
 		if err != nil {
 			t.Fatalf("round %d: SubscribeSSNM: %v", round, err)
