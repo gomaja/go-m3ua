@@ -4,7 +4,7 @@
 DATA throughput. It measures the current association API without using Endpoint
 routing. The ASP Endpoint is constructed with a nil `ASP` configuration and
 each DATA call uses a newly constructed Protocol Data parameter plus
-`WritePDWithRoutingContext`; the SGP validates messages returned by `ReadData`.
+`WriteData`; the SGP validates messages returned by `ReadData`.
 
 The fixture currently implements three modes: one-way `throughput` (the
 default), `echo` for round-trip latency, and `bidirectional` for simultaneous
