@@ -5,8 +5,18 @@ import (
 	"runtime/debug"
 )
 
+// assessedBaselineRevision is the baseline commit the performance campaign is
+// assessed against, as issue #36 requires. It is fixed here rather than read
+// from the build: the fixture binary is built from the candidate head, so the
+// build stamp records the candidate and can never name the baseline. The two
+// revisions are reported as separate, separately labelled manifest fields for
+// that reason.
+const assessedBaselineRevision = "d097e191d879efc95e36c0254814933f01aa9aee"
+
 func currentManifest(outstandingLimit int, initiation string) fixtureManifest {
 	manifest := fixtureManifest{
+		AssessedBaselineRevision: assessedBaselineRevision,
+
 		GoVersion:         runtime.Version(),
 		GoOS:              runtime.GOOS,
 		GoArch:            runtime.GOARCH,

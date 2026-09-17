@@ -98,21 +98,29 @@ type runRecord struct {
 }
 
 type fixtureManifest struct {
-	GoVersion         string `json:"go_version"`
-	GoOS              string `json:"go_os"`
-	GoArch            string `json:"go_arch"`
-	VCSRevision       string `json:"vcs_revision,omitempty"`
-	VCSModified       bool   `json:"vcs_modified"`
-	SCTPModule        string `json:"sctp_module"`
-	SCTPVersion       string `json:"sctp_version"`
-	GOMAXPROCS        int    `json:"gomaxprocs"`
-	SCTPNoDelay       bool   `json:"sctp_nodelay"`
-	SCTPSACKDelay     uint32 `json:"sctp_sack_delay_ms"`
-	SCTPSACKFrequency uint32 `json:"sctp_sack_frequency"`
-	FlowCount         int    `json:"flow_count"`
-	OutstandingLimit  int    `json:"outstanding_limit"`
-	Initiation        string `json:"initiation,omitempty"`
-	AccountingScope   string `json:"accounting_scope"`
+	GoVersion string `json:"go_version"`
+	GoOS      string `json:"go_os"`
+	GoArch    string `json:"go_arch"`
+	// VCSRevision is the fixture binary's own head, stamped by the build. It
+	// identifies the candidate this run measured.
+	VCSRevision string `json:"vcs_revision,omitempty"`
+	VCSModified bool   `json:"vcs_modified"`
+	// AssessedBaselineRevision is the baseline commit this campaign is
+	// assessed against, required by issue #36. It is a different commit from
+	// VCSRevision above and the two are never interchangeable: the fixture is
+	// built from the candidate, so nothing in the build stamp can name the
+	// baseline.
+	AssessedBaselineRevision string `json:"assessed_baseline_revision"`
+	SCTPModule               string `json:"sctp_module"`
+	SCTPVersion              string `json:"sctp_version"`
+	GOMAXPROCS               int    `json:"gomaxprocs"`
+	SCTPNoDelay              bool   `json:"sctp_nodelay"`
+	SCTPSACKDelay            uint32 `json:"sctp_sack_delay_ms"`
+	SCTPSACKFrequency        uint32 `json:"sctp_sack_frequency"`
+	FlowCount                int    `json:"flow_count"`
+	OutstandingLimit         int    `json:"outstanding_limit"`
+	Initiation               string `json:"initiation,omitempty"`
+	AccountingScope          string `json:"accounting_scope"`
 }
 
 func (record *runRecord) evaluate() {

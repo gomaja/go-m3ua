@@ -286,7 +286,12 @@ configuration and observations:
 - runtime allocation counters spanning the cohort through drain, including
   asynchronous work;
 - toolchain, revision when available, dependency version, fixed socket options,
-  flow count, queue cap, and negotiated outbound stream counts.
+  flow count, queue cap, and negotiated outbound stream counts;
+- `assessed_baseline_revision`, the baseline commit the campaign is assessed
+  against (issue #36). It is fixed in the fixture source, not read from the
+  build stamp: the binary is built from the candidate head, so `vcs_revision`
+  records the candidate and can never name the baseline. The two are separate,
+  separately labelled fields and are never interchangeable.
 
 Payload identity is `(cohort, association, flow, sequence)`. Thirty-two logical
 flows map stably to the configured associations and to 16 SLS values. The
