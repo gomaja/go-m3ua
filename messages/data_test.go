@@ -5,6 +5,7 @@
 package messages
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -209,6 +210,56 @@ func TestDataRejectsMalformedNetworkAppearanceLength(t *testing.T) {
 
 			if _, err := ParseData(raw); !errors.Is(err, params.ErrInvalidLength) {
 				t.Errorf("ParseData with %d-byte Network Appearance = %v, want params.ErrInvalidLength", size, err)
+			}
+		})
+	}
+}
+
+// The no-staging MarshalTo fast path writes parameters straight into the
+// caller's destination, so the on-wire padding bytes come from each
+// parameter's own zeroing, not from the destination. Marshal into a dirty
+// buffer and require exactly the bytes a clean buffer produces: uninitialized
+// destination content must never leak onto the wire.
+func TestDataMarshalToDirtyDestination(t *testing.T) {
+	newPayloadData := func() *Data {
+		return NewData(
+			params.NewNetworkAppearance(7),
+			params.NewRoutingContext(100),
+			params.NewProtocolData(
+				1, 2, params.ServiceIndSCCP, 0, 0, 1,
+				[]byte{0xde, 0xad, 0xbe, 0xef, 0x01}, // 17-octet value: 3 padding octets
+			),
+			params.NewCorrelationID(42),
+		)
+	}
+	withExtension := func() *Data {
+		d := newPayloadData()
+		d.Others = []*params.Param{params.NewParam(0xeffe, []byte{0x01, 0x02, 0x03})}
+		d.SetLength()
+		return d
+	}
+
+	for name, data := range map[string]*Data{"fast-path": newPayloadData(), "staged": withExtension()} {
+		t.Run(name, func(t *testing.T) {
+			clean := make([]byte, data.MarshalLen())
+			if err := data.MarshalTo(clean); err != nil {
+				t.Fatalf("MarshalTo into clean destination: %v", err)
+			}
+
+			dirty := make([]byte, data.MarshalLen())
+			for i := range dirty {
+				dirty[i] = 0xaa
+			}
+			data2 := newPayloadData()
+			if name == "staged" {
+				data2 = withExtension()
+			}
+			if err := data2.MarshalTo(dirty); err != nil {
+				t.Fatalf("MarshalTo into dirty destination: %v", err)
+			}
+
+			if !bytes.Equal(dirty, clean) {
+				t.Fatalf("dirty destination leaked into the wire bytes\n got: %x\nwant: %x", dirty, clean)
 			}
 		})
 	}

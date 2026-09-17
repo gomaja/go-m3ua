@@ -969,6 +969,10 @@ func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, 
 //
 // A successful call reports the number of SS7 user octets carried inside
 // protocolData, so the count means the same thing as Write's.
+//
+// Marshalling the message writes the parameter's own length field, so one
+// *params.Param must not be shared by concurrent writes; build one per
+// goroutine (or per message) instead.
 func (c *Association) WritePD(protocolData *params.Param) (n int, err error) {
 	// As in Write: refuse before choosing a stream, since an unestablished
 	// Association has no negotiated stream count to choose from.
@@ -991,7 +995,8 @@ func (c *Association) WritePD(protocolData *params.Param) (n int, err error) {
 //
 // See WriteWithRoutingContext for why the flow belongs on the message. This is
 // the form to use when one association carries several Routing Contexts and
-// more than one goroutine writes to it.
+// more than one goroutine writes to it. As with WritePD, each goroutine needs
+// its own *params.Param: marshalling writes the parameter's length field.
 func (c *Association) WritePDWithRoutingContext(protocolData *params.Param, rtCtx uint32) (n int, err error) {
 	if c.State() != StateASPActive {
 		return 0, ErrNotEstablished
@@ -1016,9 +1021,10 @@ func (c *Association) WritePDToStream(protocolData *params.Param, streamID uint1
 		return 0, ErrNotEstablished
 	}
 
-	// Peeled before the send so a Protocol Data that marshals but cannot be
-	// parsed back is refused rather than put on the wire, and so the reported
-	// count is the SS7 user octets carried.
+	// Peeled before the send so a Protocol Data with the wrong tag or a
+	// truncated value is refused rather than put on the wire, and so the
+	// reported count is the SS7 user octets carried. The stream is the
+	// caller's explicit choice here, so only the count is taken from the peel.
 	_, userOctets, err := peelProtocolData(protocolData)
 	if err != nil {
 		return 0, fmt.Errorf("invalid protocol data: %w", err)
@@ -2282,7 +2288,9 @@ func (c *Association) networkAppearanceForRoutingContext(routingContext *params.
 // traffic for the given Routing Contexts must carry. The returned Param is
 // owned by the caller — freshly built or copied, never the shared
 // configuration's — so it can be handed to a message constructor without a
-// further copy.
+// further copy. The uniform owned return costs one copy on the read-only
+// receive validation path, which discards the Param; that is the price of
+// keeping every caller free of shared-configuration aliasing.
 func (c *Association) resolveNetworkAppearanceScope(
 	routingContext *params.Param,
 	local bool,
@@ -2682,9 +2690,6 @@ func (c *Association) routingContextConfigured(rtCtx uint32) bool {
 // staticRoutingContextConfigured is the statically configured half of
 // routingContextConfigured, mirroring staticallyConfiguredRoutingContexts.
 func (c *Association) staticRoutingContextConfigured(rtCtx uint32) bool {
-	if c == nil {
-		return false
-	}
 	if c.role == RoleSGP {
 		c.muAuthorizedRCs.RLock()
 		if c.authorizationResolved {

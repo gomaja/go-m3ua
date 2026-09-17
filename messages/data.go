@@ -59,6 +59,18 @@ func (d *Data) MarshalBinary() ([]byte, error) {
 }
 
 // MarshalTo puts the byte sequence in the byte array given as b.
+//
+// Parameter validation runs before any byte is written, so a validation
+// failure leaves b untouched. A parameter value longer than the maximum
+// encodable length is only detected while marshalling, after earlier
+// parameters were already written to b; on such an error b may be partially
+// written (a Data carrying extension parameters keeps the old staged
+// behaviour and leaves b untouched on any error).
+//
+// After a successful return d.Header.Payload aliases b: it shares the
+// destination's storage rather than owning a copy. A caller that retains the
+// Data must not modify or recycle b (for example into a pool) while it keeps
+// the Data.
 func (d *Data) MarshalTo(b []byte) error {
 	if err := d.validateParameters(); err != nil {
 		return err
@@ -74,8 +86,8 @@ func (d *Data) MarshalTo(b []byte) error {
 	// The named parameters marshal straight into the destination: staging
 	// them in a private payload buffer first would allocate a second
 	// message-sized buffer per DATA only to copy it into b. Header.Payload
-	// still names the serialized parameters afterwards, sharing b's storage
-	// the way it shares the input's after an UnmarshalBinary.
+	// still names the serialized parameters afterwards, aliasing b (see the
+	// MarshalTo doc comment for what that means for b's lifetime).
 	payload := b[8:d.MarshalLen()]
 
 	var offset = 0
