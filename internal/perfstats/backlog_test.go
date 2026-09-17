@@ -30,6 +30,8 @@ func TestBacklogIntervalVerdictBoundaries(testContext *testing.T) {
 		{name: "upper NaN", lower: -1, upper: math.NaN(), want: BacklogIndeterminate},
 		{name: "lower negative infinity", lower: math.Inf(-1), upper: 0, want: BacklogIndeterminate},
 		{name: "upper positive infinity", lower: -1, upper: math.Inf(1), want: BacklogIndeterminate},
+		{name: "positive lower with infinite upper", lower: 1, upper: math.Inf(1), want: BacklogIndeterminate},
+		{name: "negative infinite lower with positive upper", lower: math.Inf(-1), upper: 1, want: BacklogIndeterminate},
 		{name: "reversed", lower: 1, upper: -1, want: BacklogIndeterminate},
 	}
 	for _, test := range tests {
@@ -135,4 +137,43 @@ func FuzzBacklogIntervalNeverPassesOnInvalidEvidence(fuzzContext *testing.F) {
 			testContext.Fatalf("unknown decision %q", decision.Decision)
 		}
 	})
+}
+
+// Total is a sum of eight independent uint64 counters. Unsigned addition
+// wraps silently in Go, so a saturating sum is the only way a lossy run
+// cannot present itself as loss-free.
+func TestRunCountersTotalSaturatesInsteadOfWrapping(testContext *testing.T) {
+	tests := []struct {
+		name     string
+		counters RunCounters
+	}{
+		{name: "missing wraps with a duplicate", counters: RunCounters{Missing: math.MaxUint64, Duplicate: 1}},
+		{name: "two counters at the limit", counters: RunCounters{Missing: math.MaxUint64, DeadlineExceeded: math.MaxUint64}},
+		{name: "every counter at the limit", counters: RunCounters{
+			Missing: math.MaxUint64, Duplicate: math.MaxUint64, Invalid: math.MaxUint64, Reordered: math.MaxUint64,
+			LateAfterStop: math.MaxUint64, Capped: math.MaxUint64, SendErrors: math.MaxUint64, DeadlineExceeded: math.MaxUint64,
+		}},
+		{name: "last counter completes the wrap", counters: RunCounters{Missing: math.MaxUint64, DeadlineExceeded: 1}},
+	}
+	for _, test := range tests {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			if total := test.counters.Total(); total != math.MaxUint64 {
+				testContext.Fatalf("Total() = %d for %+v, want a saturated %d", total, test.counters, uint64(math.MaxUint64))
+			}
+		})
+	}
+}
+
+// A wrapping Total lets DecideRun read a lossy run as loss-free and return
+// Pass. The counters below are unreachable in a real fixture run, but the
+// decision must not depend on that.
+func TestDecideRunNeverPassesALossyRunWhoseCountersWrap(testContext *testing.T) {
+	decision := DecideRun(RunEvidence{
+		FixtureValid: true,
+		Interval:     interval(-1, 0),
+		Counters:     RunCounters{Missing: math.MaxUint64, Duplicate: 1},
+	})
+	if decision.Decision != Fail || decision.Reason != DeliveryFailuresReason {
+		testContext.Fatalf("DecideRun() = %+v, want Fail with %q", decision, DeliveryFailuresReason)
+	}
 }

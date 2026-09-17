@@ -80,9 +80,22 @@ type RunCounters struct {
 }
 
 // Total is the number of counted failures; a loss-free run has Total() == 0.
+// The eight counters are independent uint64 values, and unsigned addition
+// wraps silently in Go, so the sum saturates at math.MaxUint64 instead: a run
+// whose counters would overflow is still a lossy run, and must never be able
+// to present a zero total to DecideRun.
 func (counters RunCounters) Total() uint64 {
-	return counters.Missing + counters.Duplicate + counters.Invalid + counters.Reordered +
-		counters.LateAfterStop + counters.Capped + counters.SendErrors + counters.DeadlineExceeded
+	total := uint64(0)
+	for _, counter := range [...]uint64{
+		counters.Missing, counters.Duplicate, counters.Invalid, counters.Reordered,
+		counters.LateAfterStop, counters.Capped, counters.SendErrors, counters.DeadlineExceeded,
+	} {
+		if counter > math.MaxUint64-total {
+			return math.MaxUint64
+		}
+		total += counter
+	}
+	return total
 }
 
 // RunEvidence is one full run's evidence for the sustained-rate decision.
