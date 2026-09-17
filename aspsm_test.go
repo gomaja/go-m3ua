@@ -326,8 +326,8 @@ func minimallyValidMessage(class, messageType uint8) messages.M3UA {
 		return messages.NewNotify(params.NewStatus(params.AsStateActive), nil, nil, nil)
 	case uint16(messages.MsgClassRKM)<<8 | uint16(messages.MsgTypeRegistrationRequest):
 		return messages.NewRegistrationRequest(params.NewRoutingKey(params.NewRoutingKeyPayload(
-			params.NewLocalRoutingKeyIdentifier(1), nil, nil,
-			params.NewDestinationPointCode(1), nil, nil, nil,
+			params.NewLocalRoutingKeyIdentifier(1), nil, nil, nil,
+			params.NewRoutingKeyGroup(params.NewDestinationPointCode(1), nil, nil),
 		)))
 	case uint16(messages.MsgClassRKM)<<8 | uint16(messages.MsgTypeRegistrationResponse):
 		return messages.NewRegistrationResponse(params.NewRegistrationResult(

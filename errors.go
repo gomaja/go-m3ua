@@ -184,6 +184,9 @@ var (
 	// ErrNoMTPRoute reports that no active, reachable, policy-permitted SGP
 	// Association can carry an MTP-TRANSFER request.
 	ErrNoMTPRoute = errors.New("no eligible MTP route")
+	// ErrRoutingNotConfigured reports a library-managed routing request to an
+	// ASP Endpoint whose ASPConfig selected application-managed routing.
+	ErrRoutingNotConfigured = errors.New("ASP Endpoint has no outbound route inventory")
 	// ErrMissingSGPIdentity reports an ASP Association without the provisioned
 	// remote SGP identity required for Endpoint route selection.
 	ErrMissingSGPIdentity = errors.New("ASP Association has no SGP identity")
@@ -193,6 +196,18 @@ var (
 	// ErrSGPRouteScopeMismatch reports Network Appearance or Routing Context
 	// configuration that is not a provisioned route of the named SGP.
 	ErrSGPRouteScopeMismatch = errors.New("ASP Association scope is not provisioned for its SGP")
+	// ErrUnknownRemoteAS reports a Routing Key registration naming an
+	// Application Server the Association's provisioned SGP does not bind
+	// dynamically.
+	ErrUnknownRemoteAS = errors.New("unknown remote Application Server")
+	// ErrUnknownApplicationServerScope reports a Routing Key deregistration
+	// naming a wire scope that is not a binding this Association confirmed.
+	ErrUnknownApplicationServerScope = errors.New("scope is not a confirmed Application Server binding")
+	// ErrContextlessApplicationServer reports a Routing Key deregistration
+	// naming an Application Server with no Routing Context. RFC 4666 Section
+	// 3.6.3 makes Routing Context the mandatory content of DEREG REQ, so such a
+	// request names nothing the peer can act on.
+	ErrContextlessApplicationServer = errors.New("named Application Server has no Routing Context")
 	// ErrASPRouteStateLimit reports that a peer SSNM message would exceed the
 	// configured ASP route-state work or retention budget.
 	ErrASPRouteStateLimit = errors.New("ASP SSNM route-state limit exceeded")

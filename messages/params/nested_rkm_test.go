@@ -40,10 +40,8 @@ func TestNestedConstructorsSurfaceChildErrorsAndAreNilSafe(t *testing.T) {
 					NewLocalRoutingKeyIdentifier(1),
 					nil,
 					NewTrafficModeType(0),
-					NewDestinationPointCode(0x1234),
 					nil,
-					nil,
-					nil,
+					NewRoutingKeyGroup(NewDestinationPointCode(0x1234), nil, nil),
 				))
 			},
 			want: ErrInvalidValue,
@@ -76,10 +74,8 @@ func TestNestedConstructorsSurfaceChildErrorsAndAreNilSafe(t *testing.T) {
 					NewLocalRoutingKeyIdentifier(1),
 					NewRoutingContext(),
 					nil,
-					NewDestinationPointCode(1),
 					nil,
-					nil,
-					nil,
+					NewRoutingKeyGroup(NewDestinationPointCode(1), nil, nil),
 				))
 			},
 			want: ErrInvalidLength,
@@ -308,7 +304,7 @@ func TestRoutingKeyRejectsDuplicateAndUngroupedKnownParameters(t *testing.T) {
 	}
 }
 
-func TestRoutingKeyLegacyFieldsDescribeFirstRepeatedGroup(t *testing.T) {
+func TestRoutingKeyRepeatedGroupsKeepTheirOwnMembers(t *testing.T) {
 	value := joinNestedParams(t,
 		NewLocalRoutingKeyIdentifier(1),
 		NewDestinationPointCode(0x1111),
@@ -323,14 +319,26 @@ func TestRoutingKeyLegacyFieldsDescribeFirstRepeatedGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRoutingKeyPayload() error = %v", err)
 	}
-	if got := decoded.DestinationPointCode.DestinationPointCode(); got != 0x1111 {
-		t.Errorf("legacy DestinationPointCode = %#x, want first group %#x", got, 0x1111)
+	if len(decoded.Groups) != 2 {
+		t.Fatalf("decoded %d groups, want 2", len(decoded.Groups))
 	}
-	if got := decoded.ServiceIndicators.ServiceIndicators(); !bytes.Equal(got, []byte{ServiceIndSCCP}) {
-		t.Errorf("legacy ServiceIndicators = %v, want first group [%d]", got, ServiceIndSCCP)
+	if got := decoded.Groups[0].DestinationPointCode.DestinationPointCode(); got != 0x1111 {
+		t.Errorf("first group DestinationPointCode = %#x, want %#x", got, 0x1111)
 	}
-	if got := decoded.OriginatingPointCodeList.OriginatingPointCodeList(); len(got) != 1 || got[0] != 0x01001111 {
-		t.Errorf("legacy OriginatingPointCodeList = %v, want first group [0x01001111]", got)
+	if got := decoded.Groups[0].ServiceIndicators.ServiceIndicators(); !bytes.Equal(got, []byte{ServiceIndSCCP}) {
+		t.Errorf("first group ServiceIndicators = %v, want [%d]", got, ServiceIndSCCP)
+	}
+	if got := decoded.Groups[0].OriginatingPointCodeList.OriginatingPointCodeList(); len(got) != 1 || got[0] != 0x01001111 {
+		t.Errorf("first group OriginatingPointCodeList = %v, want [0x01001111]", got)
+	}
+	if got := decoded.Groups[1].DestinationPointCode.DestinationPointCode(); got != 0x2222 {
+		t.Errorf("second group DestinationPointCode = %#x, want %#x", got, 0x2222)
+	}
+	if got := decoded.Groups[1].ServiceIndicators.ServiceIndicators(); !bytes.Equal(got, []byte{ServiceIndISUP}) {
+		t.Errorf("second group ServiceIndicators = %v, want [%d]", got, ServiceIndISUP)
+	}
+	if got := decoded.Groups[1].OriginatingPointCodeList.OriginatingPointCodeList(); len(got) != 1 || got[0] != 0x02002222 {
+		t.Errorf("second group OriginatingPointCodeList = %v, want [0x02002222]", got)
 	}
 }
 
@@ -347,7 +355,7 @@ func TestRoutingKeyRepeatedGroupsRoundTrip(t *testing.T) {
 	)
 	firstExtension := NewParam(0x7ffe, []byte{0xaa})
 	secondExtension := NewParam(0x7ffe, []byte{0xbb, 0xcc})
-	payload := NewRoutingKeyPayloadWithGroups(
+	payload := NewRoutingKeyPayload(
 		NewLocalRoutingKeyIdentifier(1),
 		NewRoutingContext(2),
 		NewTrafficModeType(TrafficModeLoadshare),
@@ -403,9 +411,6 @@ func TestRoutingKeyRepeatedGroupsRoundTrip(t *testing.T) {
 	if got := decoded.Groups[1].OriginatingPointCodeList.OriginatingPointCodeList(); len(got) != 2 || got[0] != 0x02002222 || got[1] != 0x03002222 {
 		t.Errorf("second group OPC List = %v", got)
 	}
-	if decoded.DestinationPointCode != decoded.Groups[0].DestinationPointCode || decoded.ServiceIndicators != decoded.Groups[0].ServiceIndicators || decoded.OriginatingPointCodeList != decoded.Groups[0].OriginatingPointCodeList {
-		t.Error("legacy fields do not alias the first repeated group")
-	}
 	if len(decoded.Others) != 2 || decoded.Others[0].Tag != 0x7ffe || decoded.Others[1].Tag != 0x7ffe {
 		t.Fatalf("decoded extensions = %+v, want both repeated unknown parameters", decoded.Others)
 	}
@@ -436,7 +441,7 @@ func TestRoutingKeyConstructorRejectsEveryGroupWithoutDPC(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			payload := NewRoutingKeyPayloadWithGroups(
+			payload := NewRoutingKeyPayload(
 				NewLocalRoutingKeyIdentifier(1),
 				nil,
 				nil,
@@ -450,27 +455,30 @@ func TestRoutingKeyConstructorRejectsEveryGroupWithoutDPC(t *testing.T) {
 	}
 }
 
-func TestRoutingKeyLegacyConstructorWireCompatibility(t *testing.T) {
+func TestRoutingKeySingleGroupWireOrder(t *testing.T) {
+	group := NewRoutingKeyGroup(
+		NewDestinationPointCode(3),
+		NewServiceIndicators(ServiceIndSCCP),
+		NewOriginatingPointCodeList(5),
+	)
 	payload := NewRoutingKeyPayload(
 		NewLocalRoutingKeyIdentifier(1),
 		NewRoutingContext(2),
 		NewTrafficModeType(TrafficModeBroadcast),
-		NewDestinationPointCode(3),
 		NewNetworkAppearance(4),
-		NewServiceIndicators(ServiceIndSCCP),
-		NewOriginatingPointCodeList(5),
+		group,
 	)
 	want := joinNestedParams(t,
 		payload.LocalRoutingKeyIdentifier,
 		payload.RoutingContext,
 		payload.TrafficModeType,
-		payload.DestinationPointCode,
+		group.DestinationPointCode,
 		payload.NetworkAppearance,
-		payload.ServiceIndicators,
-		payload.OriginatingPointCodeList,
+		group.ServiceIndicators,
+		group.OriginatingPointCodeList,
 	)
 	if got := NewRoutingKey(payload).Data; !bytes.Equal(got, want) {
-		t.Fatalf("legacy constructor value = %x, want %x", got, want)
+		t.Fatalf("single group value = %x, want %x", got, want)
 	}
 }
 
@@ -564,12 +572,11 @@ func TestRoutingKeyReceiverResetOnFailureAndReuse(t *testing.T) {
 		LocalRoutingKeyIdentifier: NewLocalRoutingKeyIdentifier(99),
 		RoutingContext:            NewRoutingContext(99),
 		TrafficModeType:           NewTrafficModeType(TrafficModeBroadcast),
-		DestinationPointCode:      NewDestinationPointCode(99),
 		NetworkAppearance:         NewNetworkAppearance(99),
-		ServiceIndicators:         NewServiceIndicators(ServiceIndISUP),
-		OriginatingPointCodeList:  NewOriginatingPointCodeList(99),
 		Groups: []RoutingKeyGroup{{
-			DestinationPointCode: NewDestinationPointCode(99),
+			DestinationPointCode:     NewDestinationPointCode(99),
+			ServiceIndicators:        NewServiceIndicators(ServiceIndISUP),
+			OriginatingPointCodeList: NewOriginatingPointCodeList(99),
 		}},
 		Others: []*Param{NewParam(0x7ffe, []byte{1})},
 	}
@@ -597,8 +604,12 @@ func TestRoutingKeyReceiverResetOnFailureAndReuse(t *testing.T) {
 	if err := receiver.UnmarshalBinary(minimal); err != nil {
 		t.Fatalf("minimal UnmarshalBinary() error = %v", err)
 	}
-	if receiver.RoutingContext != nil || receiver.TrafficModeType != nil || receiver.NetworkAppearance != nil || receiver.ServiceIndicators != nil || receiver.OriginatingPointCodeList != nil {
-		t.Fatalf("minimal decode retained absent optional fields: %+v", receiver)
+	if receiver.RoutingContext != nil || receiver.TrafficModeType != nil || receiver.NetworkAppearance != nil {
+		t.Fatalf("minimal decode retained absent optional singletons: %+v", receiver)
+	}
+	if len(receiver.Groups) != 1 ||
+		receiver.Groups[0].ServiceIndicators != nil || receiver.Groups[0].OriginatingPointCodeList != nil {
+		t.Fatalf("minimal decode retained absent optional group fields: %+v", receiver.Groups)
 	}
 }
 
@@ -943,7 +954,7 @@ func joinNestedParams(t testing.TB, params ...*Param) []byte {
 
 func assertRoutingKeyPayloadZero(t *testing.T, payload *RoutingKeyPayload) {
 	t.Helper()
-	if payload.LocalRoutingKeyIdentifier != nil || payload.RoutingContext != nil || payload.TrafficModeType != nil || payload.DestinationPointCode != nil || payload.NetworkAppearance != nil || payload.ServiceIndicators != nil || payload.OriginatingPointCodeList != nil || payload.Groups != nil || payload.Others != nil {
+	if payload.LocalRoutingKeyIdentifier != nil || payload.RoutingContext != nil || payload.TrafficModeType != nil || payload.NetworkAppearance != nil || payload.Groups != nil || payload.Others != nil {
 		t.Fatalf("failed decode retained receiver state: %+v", payload)
 	}
 }

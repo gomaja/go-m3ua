@@ -174,9 +174,13 @@ config.Compatibility = m3ua.CompatibilityPolicy{
 }
 ```
 
-Create an ASP Endpoint with its local MTP Route and provisioned SG/SGP route. The
-Routing Context and Network Appearance are peer-specific `ASKey` values; they
-are not global route identifiers:
+Create an ASP Endpoint. `ASPConfig.SignallingGateways` provisions the peers and
+the Application Servers each SGP serves; `ASPConfig.Routing` is the optional
+outbound route inventory, and leaving it nil hands outbound candidate selection
+to the application. An Application Server's name is local to its Signalling
+Gateway, while the Routing Context and Network Appearance that label it are
+peer-specific `ASKey` values bound per SGP; neither is a global route
+identifier:
 
 ```go
 peer := m3ua.SGPIdentity{
@@ -190,21 +194,35 @@ asKey := m3ua.ASKey{
 endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
     Role: m3ua.RoleASP,
     ASP: &m3ua.ASPConfig{
-        SignallingGatewaySelection: m3ua.RouteSelectionPrimaryBackup,
-        MTPRoutes: []m3ua.MTPRouteConfig{{
-            ID: "sccp",
-            DestinationPointCode: 0x220000,
-            Mask: 16,
-            ServiceIndicators: []uint8{params.ServiceIndSCCP},
-        }},
         SignallingGateways: []m3ua.SignallingGatewayConfig{{
             ID: peer.SignallingGateway,
-            SGPSelection: m3ua.RouteSelectionPrimaryBackup,
             SGPs: []m3ua.SignallingGatewayProcessConfig{{
                 ID: peer.SignallingGatewayProcess,
-                Routes: []m3ua.SGPRoute{{MTPRoute: "sccp", AS: asKey}},
+                ApplicationServers: []m3ua.RemoteASConfig{{
+                    ID: "as-core",
+                    ASKey: &asKey,
+                }},
             }},
         }},
+        Routing: &m3ua.ASPRoutingConfig{
+            SignallingGatewaySelection: m3ua.RouteSelectionPrimaryBackup,
+            SignallingGatewayProcessSelection: map[m3ua.SignallingGatewayID]m3ua.RouteSelectionMode{
+                peer.SignallingGateway: m3ua.RouteSelectionPrimaryBackup,
+            },
+            MTPRoutes: []m3ua.MTPRouteConfig{{
+                ID: "sccp",
+                DestinationPointCode: 0x220000,
+                Mask: 16,
+                ServiceIndicators: []uint8{params.ServiceIndSCCP},
+            }},
+            Routes: []m3ua.MTPRouteBinding{{
+                MTPRoute: "sccp",
+                AS: m3ua.SGASKey{
+                    SignallingGateway: peer.SignallingGateway,
+                    ApplicationServer: "as-core",
+                },
+            }},
+        },
     },
 })
 if err != nil {
@@ -319,6 +337,7 @@ Association:
 
 ```go
 results, err := association.RegisterRoutingKeys(ctx, m3ua.RoutingKeyRegistration{
+    RemoteAS: "as-core",
     RoutingKey: m3ua.RoutingKey{
         NetworkAppearance: 10,
         NetworkAppearanceSet: true,
@@ -338,8 +357,14 @@ if err != nil {
     log.Fatal(err)
 }
 
-_, err = association.DeregisterRoutingContexts(ctx, results[0].RoutingContext)
+_, err = association.DeregisterApplicationServers(ctx, results[0].ASKey)
 ```
+
+A successful result reports both the canonical Application Server it bound,
+`results[0].RemoteAS`, and the exact wire scope the peer assigned it,
+`results[0].ASKey`. Deregistration names that scope, so a request that would
+contradict the binding the Association holds, or that names no Routing Context
+at all, is refused before it reaches the transport.
 
 The responder handles each Routing Key in a batch independently, preserves
 deterministic results for duplicate requests, rejects ambiguous overlaps, and
@@ -353,7 +378,7 @@ RFC 4666 defines no RKM acknowledgement timer. Caller context cancellation
 bounds a local wait; peer retransmissions are handled idempotently rather than
 by inventing an RKM T(ack). If cancellation occurs after a DEREG REQ is written,
 the same Routing Context cannot be retried until its delayed DEREG RSP arrives:
-`DeregisterRoutingContexts` returns `ErrDeregistrationOutcomeUnknown` because
+`DeregisterApplicationServers` returns `ErrDeregistrationOutcomeUnknown` because
 RFC 4666 Sections 3.6.4 and 4.4.2 provide no transaction identifier that could
 distinguish the old response from the retry.
 

@@ -75,25 +75,38 @@ func main() {
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
 		ASP: &m3ua.ASPConfig{
-			SignallingGatewaySelection: m3ua.RouteSelectionPrimaryBackup,
-			MTPRoutes: []m3ua.MTPRouteConfig{
-				{
-					ID:                    "sccp",
-					DestinationPointCode:  0x222222,
-					ServiceIndicators:     []uint8{params.ServiceIndSCCP},
-					OriginatingPointCodes: []uint32{0x111111},
-				},
-			},
 			SignallingGateways: []m3ua.SignallingGatewayConfig{
 				{
-					ID:           peer.SignallingGateway,
-					SGPSelection: m3ua.RouteSelectionPrimaryBackup,
+					ID: peer.SignallingGateway,
 					SGPs: []m3ua.SignallingGatewayProcessConfig{
 						{
 							ID: peer.SignallingGatewayProcess,
-							Routes: []m3ua.SGPRoute{
-								{MTPRoute: "sccp", AS: asKey},
+							ApplicationServers: []m3ua.RemoteASConfig{
+								{ID: "as-core", ASKey: &asKey},
 							},
+						},
+					},
+				},
+			},
+			Routing: &m3ua.ASPRoutingConfig{
+				SignallingGatewaySelection: m3ua.RouteSelectionPrimaryBackup,
+				SignallingGatewayProcessSelection: map[m3ua.SignallingGatewayID]m3ua.RouteSelectionMode{
+					peer.SignallingGateway: m3ua.RouteSelectionPrimaryBackup,
+				},
+				MTPRoutes: []m3ua.MTPRouteConfig{
+					{
+						ID:                    "sccp",
+						DestinationPointCode:  0x222222,
+						ServiceIndicators:     []uint8{params.ServiceIndSCCP},
+						OriginatingPointCodes: []uint32{0x111111},
+					},
+				},
+				Routes: []m3ua.MTPRouteBinding{
+					{
+						MTPRoute: "sccp",
+						AS: m3ua.SGASKey{
+							SignallingGateway: peer.SignallingGateway,
+							ApplicationServer: "as-core",
 						},
 					},
 				},

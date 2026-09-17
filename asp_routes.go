@@ -166,22 +166,35 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 	return routes, nil
 }
 
+// routingConfigured reports whether this ASP Endpoint owns an outbound route
+// inventory. Without one the application selects its own outbound candidates
+// and the Endpoint keeps only peer, Application Server and procedure state.
+func (r *aspRoutes) routingConfigured() bool {
+	return r != nil && r.config.routingConfigured
+}
+
+// peerInventoryConfigured reports whether this ASP Endpoint provisions peers.
+// Without one its Associations are standalone and need no SGP identity.
+func (r *aspRoutes) peerInventoryConfigured() bool {
+	return r != nil && len(r.config.sgpByIdentity) > 0
+}
+
 func (r *aspRoutes) attach(association *Association) bool {
 	if r == nil || association == nil {
 		return false
 	}
-	// An ASP Endpoint without routing policy remains usable for the existing
-	// single-Association APIs. It owns no Endpoint-level route state.
-	if len(r.config.sgpByIdentity) == 0 {
+	// An ASP Endpoint that provisions no peer remains usable for the existing
+	// standalone single-Association APIs. It owns no Endpoint-level state.
+	if !r.peerInventoryConfigured() {
 		return true
 	}
-	if association.cfg == nil || association.cfg.PeerSGP == nil {
+	// A provisioned Endpoint authorizes only what it provisioned. A failed
+	// lookup is a rejection, never a fall back to the permissive standalone
+	// path above.
+	if err := r.validateAssociationConfig(association.cfg); err != nil {
 		return false
 	}
 	identity := *association.cfg.PeerSGP
-	if _, exists := r.config.sgpByIdentity[identity]; !exists {
-		return false
-	}
 
 	r.mu.Lock()
 	r.associations[association] = identity
@@ -603,7 +616,7 @@ func (r *aspRoutes) mtpRoute(id MTPRouteID) (aspMTPRoute, bool) {
 }
 
 func (r *aspRoutes) validateAssociationConfig(config *AssociationConfig) error {
-	if r == nil || len(r.config.sgpByIdentity) == 0 {
+	if !r.peerInventoryConfigured() {
 		return nil
 	}
 	if config == nil || config.PeerSGP == nil {
@@ -618,18 +631,28 @@ func (r *aspRoutes) validateAssociationConfig(config *AssociationConfig) error {
 		return ErrSGPRouteScopeMismatch
 	}
 	for _, configuredKey := range configuredKeys {
-		matched := false
-		for _, route := range sgp.routes {
-			if route.as == configuredKey {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		if !sgp.servesASKey(configuredKey) {
 			return ErrSGPRouteScopeMismatch
 		}
 	}
 	return nil
+}
+
+// servesASKey reports whether one provisioned Application Server of this SGP
+// answers to the wire scope an Association configures.
+func (sgp aspSGPConfig) servesASKey(key ASKey) bool {
+	for _, applicationServer := range sgp.applicationServers {
+		if applicationServer.asKeyStatic && applicationServer.asKey == key {
+			return true
+		}
+		// An Application Server bound by RFC 4666 Section 4.4.1 registration
+		// carries no Routing Context until the SGP assigns one, so an
+		// Association that has not registered yet configures none.
+		if applicationServer.routingKeySet && !key.RoutingContextSet {
+			return true
+		}
+	}
+	return false
 }
 
 func associationConfigASKeys(config *AssociationConfig) []ASKey {

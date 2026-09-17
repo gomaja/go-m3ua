@@ -113,6 +113,11 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return MTPTransferResult{}, ErrUnsupportedRole
 	}
+	if !e.aspRoutes.routingConfigured() {
+		// Application-managed routing owns outbound candidate selection, so
+		// naming no route is a configuration answer, not an empty inventory.
+		return MTPTransferResult{}, ErrRoutingNotConfigured
+	}
 	if request.ProtocolData == nil {
 		return MTPTransferResult{}, ErrMissingProtocolData
 	}

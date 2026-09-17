@@ -6,29 +6,50 @@ package m3ua
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
 func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 	config := validASPConfig()
+	config.SignallingGateways[0].SGPs[0].ApplicationServers = append(
+		config.SignallingGateways[0].SGPs[0].ApplicationServers,
+		RemoteASConfig{ID: "as-dynamic", RoutingKey: &RoutingKey{
+			Groups: []RoutingKeyGroup{{
+				DestinationPointCode: 0x330000,
+				ServiceIndicators:    []uint8{3},
+			}},
+		}},
+	)
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
+	t.Cleanup(func() { _ = endpoint.Close() })
 
-	config.SignallingGatewaySelection = RouteSelectionBroadcast
-	config.MTPRoutes[0].ID = "changed"
-	config.MTPRoutes[0].ServiceIndicators[0] = 0xff
-	config.MTPRoutes[0].OriginatingPointCodes[0] = 0xffffff
+	// Every reachable part of the caller's configuration is mutated after the
+	// Endpoint exists, including the memory its pointers and maps reach.
+	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
+	config.Routing.SignallingGatewayProcessSelection["sg-a"] = RouteSelectionBroadcast
+	config.Routing.MTPRoutes[0].ID = "changed"
+	config.Routing.MTPRoutes[0].ServiceIndicators[0] = 0xff
+	config.Routing.MTPRoutes[0].OriginatingPointCodes[0] = 0xffffff
+	config.Routing.Routes[0].MTPRoute = "changed"
+	config.Routing.Routes[0].AS.ApplicationServer = "changed"
 	config.SignallingGateways[0].ID = "changed"
-	config.SignallingGateways[0].SGPSelection = RouteSelectionBroadcast
 	config.SignallingGateways[0].SGPs[0].ID = "changed"
-	config.SignallingGateways[0].SGPs[0].Routes[0].MTPRoute = "changed"
-	config.SignallingGateways[0].SGPs[0].Routes[0].AS = ASKey{}
+	config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ID = "changed"
+	*config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ASKey = ASKey{}
+	config.SignallingGateways[0].SGPs[0].ApplicationServers[1].RoutingKey.Groups[0].DestinationPointCode = 0xffffff
+	config.SignallingGateways[0].SGPs[0].ApplicationServers[1].RoutingKey.Groups[0].ServiceIndicators[0] = 0xff
 
 	snapshot := endpoint.aspRoutes.config
+	if !snapshot.routingConfigured {
+		t.Fatal("routing inventory was not recorded")
+	}
 	if snapshot.signallingGatewaySelection != RouteSelectionLoadshare {
 		t.Fatalf("SignallingGatewaySelection = %v, want loadshare", snapshot.signallingGatewaySelection)
 	}
@@ -57,19 +78,30 @@ func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 		t.Fatalf("Signalling Gateway ID = %q, want sg-a", got)
 	}
 	if got := snapshot.signallingGateways[0].sgpSelection; got != RouteSelectionPrimaryBackup {
-		t.Fatalf("SGPSelection = %v, want primary/backup", got)
+		t.Fatalf("SGP selection = %v, want primary/backup", got)
 	}
 	if got := snapshot.signallingGateways[0].sgps[0].id; got != "sgp-a1" {
 		t.Fatalf("SGP ID = %q, want sgp-a1", got)
 	}
-	route := snapshot.signallingGateways[0].sgps[0].routes[0]
-	if route.mtpRoute != "sccp-a" || route.as != (ASKey{
-		NetworkAppearance:    7,
-		NetworkAppearanceSet: true,
-		RoutingContext:       1,
-		RoutingContextSet:    true,
-	}) {
-		t.Fatalf("SGP route = %#v", route)
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	key, resolved := snapshot.staticASKeyFor(identity, "as-core")
+	if !resolved || key != *staticASKey(7, 1) {
+		t.Fatalf("as-core binding = %+v resolved=%v", key, resolved)
+	}
+	dynamic, served := snapshot.remoteASFor(identity, "as-dynamic")
+	if !served || !dynamic.routingKeySet {
+		t.Fatalf("as-dynamic binding = %+v served=%v", dynamic, served)
+	}
+	if got := dynamic.routingKey.Groups[0].DestinationPointCode; got != 0x330000 {
+		t.Fatalf("dynamic Destination Point Code = %#x, want %#x", got, 0x330000)
+	}
+	if got := dynamic.routingKey.Groups[0].ServiceIndicators[0]; got != 3 {
+		t.Fatalf("dynamic Service Indicator = %d, want 3", got)
+	}
+	sgp := snapshot.sgpByIdentity[identity]
+	route, routed := aspSGPRouteForMTPRoute(sgp, "sccp-a")
+	if !routed || route.applicationServer != "as-core" || route.as != *staticASKey(7, 1) {
+		t.Fatalf("SGP route = %#v routed=%v", route, routed)
 	}
 }
 
@@ -81,62 +113,62 @@ func TestASPConfigValidation(t *testing.T) {
 		{
 			name: "invalid Signalling Gateway selection",
 			mutate: func(config *ASPConfig) {
-				config.SignallingGatewaySelection = RouteSelectionMode(0xff)
+				config.Routing.SignallingGatewaySelection = RouteSelectionMode(0xff)
 			},
 		},
 		{
 			name: "no MTP Routes",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes = nil
+				config.Routing.MTPRoutes = nil
 			},
 		},
 		{
 			name: "empty MTP Route ID",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes[0].ID = ""
+				config.Routing.MTPRoutes[0].ID = ""
 			},
 		},
 		{
 			name: "duplicate MTP Route ID",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes = append(config.MTPRoutes, config.MTPRoutes[0])
+				config.Routing.MTPRoutes = append(config.Routing.MTPRoutes, config.Routing.MTPRoutes[0])
 			},
 		},
 		{
 			name: "MTP Route point code above 24 bits",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes[0].DestinationPointCode = 0x1000000
+				config.Routing.MTPRoutes[0].DestinationPointCode = 0x1000000
 			},
 		},
 		{
 			name: "MTP Route mask above 24 bits",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes[0].Mask = 25
+				config.Routing.MTPRoutes[0].Mask = 25
 			},
 		},
 		{
 			name: "MTP Route point code is not aligned to mask",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes[0].DestinationPointCode = 0x123456
-				config.MTPRoutes[0].Mask = 8
+				config.Routing.MTPRoutes[0].DestinationPointCode = 0x123456
+				config.Routing.MTPRoutes[0].Mask = 8
 			},
 		},
 		{
 			name: "MTP Route OPC above 24 bits",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes[0].OriginatingPointCodes[0] = 0x1000000
+				config.Routing.MTPRoutes[0].OriginatingPointCodes[0] = 0x1000000
 			},
 		},
 		{
 			name: "duplicate MTP Route SI",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes[0].ServiceIndicators = []uint8{3, 3}
+				config.Routing.MTPRoutes[0].ServiceIndicators = []uint8{3, 3}
 			},
 		},
 		{
 			name: "duplicate MTP Route OPC",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes[0].OriginatingPointCodes = []uint32{1, 1}
+				config.Routing.MTPRoutes[0].OriginatingPointCodes = []uint32{1, 1}
 			},
 		},
 		{
@@ -160,7 +192,7 @@ func TestASPConfigValidation(t *testing.T) {
 		{
 			name: "invalid SGP selection",
 			mutate: func(config *ASPConfig) {
-				config.SignallingGateways[0].SGPSelection = RouteSelectionMode(0xff)
+				config.Routing.SignallingGatewayProcessSelection["sg-a"] = RouteSelectionMode(0xff)
 			},
 		},
 		{
@@ -185,42 +217,39 @@ func TestASPConfigValidation(t *testing.T) {
 			},
 		},
 		{
-			name: "SGP without routes",
+			name: "SGP without Application Servers",
 			mutate: func(config *ASPConfig) {
-				config.SignallingGateways[0].SGPs[0].Routes = nil
+				config.SignallingGateways[0].SGPs[0].ApplicationServers = nil
 			},
 		},
 		{
-			name: "SGP route references unknown MTP Route",
+			name: "route binding references unknown MTP Route",
 			mutate: func(config *ASPConfig) {
-				config.SignallingGateways[0].SGPs[0].Routes[0].MTPRoute = "unknown"
+				config.Routing.Routes[0].MTPRoute = "unknown"
 			},
 		},
 		{
-			name: "duplicate SGP route",
+			name: "duplicate route binding",
 			mutate: func(config *ASPConfig) {
-				config.SignallingGateways[0].SGPs[0].Routes = append(
-					config.SignallingGateways[0].SGPs[0].Routes,
-					config.SignallingGateways[0].SGPs[0].Routes[0],
-				)
+				config.Routing.Routes = append(config.Routing.Routes, config.Routing.Routes[0])
 			},
 		},
 		{
-			name: "SGP route has absent Network Appearance with a value",
+			name: "Application Server has absent Network Appearance with a value",
 			mutate: func(config *ASPConfig) {
-				config.SignallingGateways[0].SGPs[0].Routes[0].AS.NetworkAppearanceSet = false
+				config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ASKey.NetworkAppearanceSet = false
 			},
 		},
 		{
-			name: "SGP route has absent Routing Context with a value",
+			name: "Application Server has absent Routing Context with a value",
 			mutate: func(config *ASPConfig) {
-				config.SignallingGateways[0].SGPs[0].Routes[0].AS.RoutingContextSet = false
+				config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ASKey.RoutingContextSet = false
 			},
 		},
 		{
-			name: "MTP Route without any SGP mapping",
+			name: "MTP Route without any Application Server binding",
 			mutate: func(config *ASPConfig) {
-				config.MTPRoutes = append(config.MTPRoutes, MTPRouteConfig{
+				config.Routing.MTPRoutes = append(config.Routing.MTPRoutes, MTPRouteConfig{
 					ID:                   "orphan",
 					DestinationPointCode: 0x230000,
 					Mask:                 16,
@@ -230,7 +259,7 @@ func TestASPConfigValidation(t *testing.T) {
 		{
 			name: "negative transfer flow cache entries",
 			mutate: func(config *ASPConfig) {
-				config.TransferFlowCacheEntries = -1
+				config.Routing.TransferFlowCacheEntries = -1
 			},
 		},
 		{
@@ -375,57 +404,190 @@ func TestASPEndpointValidatesAssociationSGPIdentityAndScope(t *testing.T) {
 
 func validASPConfig() *ASPConfig {
 	return &ASPConfig{
-		SignallingGatewaySelection: RouteSelectionLoadshare,
-		MTPRoutes: []MTPRouteConfig{
-			{
-				ID:                    "sccp-a",
-				DestinationPointCode:  0x120000,
-				Mask:                  16,
-				ServiceIndicators:     []uint8{3},
-				OriginatingPointCodes: []uint32{0x111111},
-			},
-		},
 		SignallingGateways: []SignallingGatewayConfig{
 			{
-				ID:           "sg-a",
-				SGPSelection: RouteSelectionPrimaryBackup,
+				ID: "sg-a",
 				SGPs: []SignallingGatewayProcessConfig{
 					{
 						ID: "sgp-a1",
-						Routes: []SGPRoute{
-							{
-								MTPRoute: "sccp-a",
-								AS: ASKey{
-									NetworkAppearance:    7,
-									NetworkAppearanceSet: true,
-									RoutingContext:       1,
-									RoutingContextSet:    true,
-								},
-							},
+						ApplicationServers: []RemoteASConfig{
+							{ID: "as-core", ASKey: staticASKey(7, 1)},
 						},
 					},
 				},
 			},
 			{
-				ID:           "sg-b",
-				SGPSelection: RouteSelectionLoadshare,
+				ID: "sg-b",
 				SGPs: []SignallingGatewayProcessConfig{
 					{
 						ID: "sgp-b1",
-						Routes: []SGPRoute{
-							{
-								MTPRoute: "sccp-a",
-								AS: ASKey{
-									NetworkAppearance:    9,
-									NetworkAppearanceSet: true,
-									RoutingContext:       42,
-									RoutingContextSet:    true,
-								},
-							},
+						ApplicationServers: []RemoteASConfig{
+							{ID: "as-core", ASKey: staticASKey(9, 42)},
 						},
 					},
 				},
 			},
 		},
+		Routing: &ASPRoutingConfig{
+			SignallingGatewaySelection: RouteSelectionLoadshare,
+			SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
+				"sg-a": RouteSelectionPrimaryBackup,
+				"sg-b": RouteSelectionLoadshare,
+			},
+			MTPRoutes: []MTPRouteConfig{
+				{
+					ID:                    "sccp-a",
+					DestinationPointCode:  0x120000,
+					Mask:                  16,
+					ServiceIndicators:     []uint8{3},
+					OriginatingPointCodes: []uint32{0x111111},
+				},
+			},
+			Routes: []MTPRouteBinding{
+				{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
+				{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-b", ApplicationServer: "as-core"}},
+			},
+		},
+	}
+}
+
+// useSignallingGateways narrows the fixture to the named Signalling Gateways,
+// dropping the route bindings and SGP selection modes of the others.
+func useSignallingGateways(config *ASPConfig, ids ...SignallingGatewayID) {
+	keep := make(map[SignallingGatewayID]struct{}, len(ids))
+	for _, id := range ids {
+		keep[id] = struct{}{}
+	}
+	gateways := make([]SignallingGatewayConfig, 0, len(ids))
+	for _, gateway := range config.SignallingGateways {
+		if _, wanted := keep[gateway.ID]; wanted {
+			gateways = append(gateways, gateway)
+		}
+	}
+	config.SignallingGateways = gateways
+	if config.Routing == nil {
+		return
+	}
+	routes := make([]MTPRouteBinding, 0, len(config.Routing.Routes))
+	for _, binding := range config.Routing.Routes {
+		if _, wanted := keep[binding.AS.SignallingGateway]; wanted {
+			routes = append(routes, binding)
+		}
+	}
+	config.Routing.Routes = routes
+	for id := range config.Routing.SignallingGatewayProcessSelection {
+		if _, wanted := keep[id]; !wanted {
+			delete(config.Routing.SignallingGatewayProcessSelection, id)
+		}
+	}
+}
+
+// setSGPSelection sets the SGP selection mode of the named Signalling
+// Gateways, or of every provisioned one when none is named.
+func setSGPSelection(config *ASPConfig, mode RouteSelectionMode, ids ...SignallingGatewayID) {
+	if len(ids) == 0 {
+		for _, gateway := range config.SignallingGateways {
+			ids = append(ids, gateway.ID)
+		}
+	}
+	for _, id := range ids {
+		config.Routing.SignallingGatewayProcessSelection[id] = mode
+	}
+}
+
+// bindMTPRouteToEveryGateway carries one MTP Route over the as-core
+// Application Server of every provisioned Signalling Gateway.
+func bindMTPRouteToEveryGateway(config *ASPConfig, mtpRoute MTPRouteID) {
+	for _, gateway := range config.SignallingGateways {
+		config.Routing.Routes = append(config.Routing.Routes, MTPRouteBinding{
+			MTPRoute: mtpRoute,
+			AS:       SGASKey{SignallingGateway: gateway.ID, ApplicationServer: "as-core"},
+		})
+	}
+}
+
+// The congestion policy is the one callback an application hands to the ASP
+// inventory. NewEndpoint takes the function value it was given and nothing
+// else: the Endpoint neither reads the caller's ASPRoutingConfig again at
+// transfer time, nor calls the policy while holding the route state it
+// protects, so a policy may ask the Endpoint what it knows before answering.
+func TestEndpointOwnsTheASPCongestionPolicyItWasGiven(t *testing.T) {
+	config := validASPConfig()
+	useSignallingGateways(config, "sg-a")
+
+	var endpoint *Endpoint
+	var provided, replaced, reentrant atomic.Int64
+	config.Routing.CongestionPolicy = func(uint8, uint8, bool) bool {
+		provided.Add(1)
+		// RFC 4666 Appendix A.2.2 route selection is the Endpoint's, so a
+		// policy that consults the Endpoint's own view must not be blocked by
+		// it. The probe runs on its own goroutine and is abandoned rather than
+		// waited on, so a policy invoked under the route lock records a missed
+		// probe here instead of deadlocking the whole package.
+		if endpoint != nil {
+			reached := make(chan struct{})
+			go func() {
+				defer close(reached)
+				_ = endpoint.MTPDestinationStatuses()
+			}()
+			select {
+			case <-reached:
+				reentrant.Add(1)
+			case <-time.After(time.Second):
+			}
+		}
+		return true
+	}
+
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	// Repointing the caller's field afterwards is the mutation a retained
+	// configuration would follow.
+	config.Routing.CongestionPolicy = func(uint8, uint8, bool) bool {
+		replaced.Add(1)
+		return false
+	}
+
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+	t.Cleanup(func() { _ = association.Close() })
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	association.cfg.PeerSGP = &SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}
+	association.noteRoutingContextsAcked(params.NewRoutingContext(1))
+	capture := &mtpTransferCapture{}
+	association.dataWriter = capture.write
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("provisioned Association was not attached")
+	}
+	if got := provided.Load() + replaced.Load(); got != 0 {
+		t.Fatalf("building the inventory evaluated the congestion policy %d times", got)
+	}
+
+	if _, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: params.NewProtocolDataPayload(
+			0x111111, 0x123456, params.ServiceIndSCCP, 0, 0, 1, []byte("x")),
+	}); err != nil {
+		t.Fatalf("MTPTransfer: %v", err)
+	}
+
+	// One evaluation for the unknown level and one for each of levels 1 to 3.
+	if got := provided.Load(); got != 4 {
+		t.Fatalf("the configured congestion policy was evaluated %d times, want 4", got)
+	}
+	if got := replaced.Load(); got != 0 {
+		t.Fatalf("the Endpoint followed the caller's field to a replacement policy %d times", got)
+	}
+	if got := reentrant.Load(); got != 4 {
+		t.Fatalf("the congestion policy reached the Endpoint %d of 4 times: it is "+
+			"evaluated while the route state it consults is locked", got)
+	}
+	if capture.count() != 1 {
+		t.Fatalf("the transfer carried %d messages, want 1", capture.count())
 	}
 }

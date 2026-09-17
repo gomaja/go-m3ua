@@ -30,41 +30,29 @@ func NewRoutingKeyGroup(dpc, si, opcs *Param) RoutingKeyGroup {
 }
 
 // RoutingKeyPayload is the payload of RoutingKey.
+//
+// Groups is the only representation of the RFC 4666 Section 3.6.1 Destination
+// Point Code, Service Indicators and Originating Point Code List grouping.
+// That grouping repeats within one Routing Key, so a singular field naming
+// only the first one cannot describe the parameter.
 type RoutingKeyPayload struct {
-	LocalRoutingKeyIdentifier, RoutingContext, TrafficModeType, DestinationPointCode, NetworkAppearance, ServiceIndicators, OriginatingPointCodeList *Param
+	LocalRoutingKeyIdentifier, RoutingContext, TrafficModeType, NetworkAppearance *Param
 
-	// Groups contains every DPC-led grouping in wire order. The three legacy
-	// singular fields above continue to describe the first group.
+	// Groups contains every DPC-led grouping in wire order.
 	Groups []RoutingKeyGroup
 	Others []*Param
 }
 
-// NewRoutingKeyPayload creates a new RoutingKeyPayload.
-func NewRoutingKeyPayload(rkID, rtCtx, tmType, dpc, nwApr, si, opcs *Param) *RoutingKeyPayload {
+// NewRoutingKeyPayload creates a Routing Key payload from its singleton
+// sub-parameters and one or more DPC-led groupings.
+func NewRoutingKeyPayload(rkID, rtCtx, tmType, nwApr *Param, groups ...RoutingKeyGroup) *RoutingKeyPayload {
 	return &RoutingKeyPayload{
-		LocalRoutingKeyIdentifier: rkID,
-		RoutingContext:            rtCtx,
-		TrafficModeType:           tmType,
-		DestinationPointCode:      dpc,
-		NetworkAppearance:         nwApr,
-		ServiceIndicators:         si,
-		OriginatingPointCodeList:  opcs,
-	}
-}
-
-// NewRoutingKeyPayloadWithGroups creates a Routing Key payload with one or
-// more DPC-led groupings. Groups are authoritative when NewRoutingKey encodes
-// this payload; the legacy singular fields are populated from the first group.
-func NewRoutingKeyPayloadWithGroups(rkID, rtCtx, tmType, nwApr *Param, groups ...RoutingKeyGroup) *RoutingKeyPayload {
-	payload := &RoutingKeyPayload{
 		LocalRoutingKeyIdentifier: rkID,
 		RoutingContext:            rtCtx,
 		TrafficModeType:           tmType,
 		NetworkAppearance:         nwApr,
 		Groups:                    append([]RoutingKeyGroup(nil), groups...),
 	}
-	payload.setLegacyGroup()
-	return payload
 }
 
 // Note that this parameter contains some optional parameters inside.
@@ -83,11 +71,7 @@ func NewRoutingKey(rk *RoutingKeyPayload) *Param {
 	}
 	groups := rk.Groups
 	if len(groups) == 0 {
-		groups = []RoutingKeyGroup{{
-			DestinationPointCode:     rk.DestinationPointCode,
-			ServiceIndicators:        rk.ServiceIndicators,
-			OriginatingPointCodeList: rk.OriginatingPointCodeList,
-		}}
+		return invalidNestedParam(RoutingKey)
 	}
 	for _, group := range groups {
 		if group.DestinationPointCode == nil {
@@ -212,18 +196,8 @@ func (r *RoutingKeyPayload) unmarshalBinaryAtDepth(b []byte, depth int) error {
 	if decoded.RoutingContext != nil && len(decoded.RoutingContext.Data) != 4 {
 		return invalidNestedLength("Routing Key Routing Context", len(decoded.RoutingContext.Data), 4)
 	}
-	decoded.setLegacyGroup()
 	*r = decoded
 	return nil
-}
-
-func (r *RoutingKeyPayload) setLegacyGroup() {
-	if len(r.Groups) == 0 {
-		return
-	}
-	r.DestinationPointCode = r.Groups[0].DestinationPointCode
-	r.ServiceIndicators = r.Groups[0].ServiceIndicators
-	r.OriginatingPointCodeList = r.Groups[0].OriginatingPointCodeList
 }
 
 func bytesContain(value []byte, target byte) bool {
