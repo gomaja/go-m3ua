@@ -7,6 +7,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1139,5 +1140,108 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 				t.Fatalf("signals after the DATA exchange = %v, want exactly [ASP Up, ASP Active]", got)
 			}
 		})
+	}
+}
+
+// A local MTP Route may name only an Application Server that every SGP serving
+// it binds statically. This is a deliberate boundary, not an omission.
+//
+// RFC 4666 Section 4.4.1 gives a dynamically bound Application Server its wire
+// Routing Context only when the SGP assigns one in a Registration Response, and
+// RFC 4666 Section 4.4 keeps registration optional and explicit. A configured
+// outbound route through such an Application Server would therefore name a
+// scope that does not exist at configuration time and may never exist, so the
+// route would be provisioning that can never carry traffic. Rejecting it at
+// configuration time reports that at the one moment the application can still
+// fix it.
+//
+// The boundary is on routes, not on dynamic binding: a dynamically bound
+// Application Server is fully supported, and an application reaches it by
+// owning its own outbound selection.
+func TestRouteBindingRequiresAStaticallyBoundApplicationServer(t *testing.T) {
+	dynamic := func() *RemoteASConfig {
+		return &RemoteASConfig{
+			ID: "as-dynamic",
+			RoutingKey: &RoutingKey{Groups: []RoutingKeyGroup{{
+				DestinationPointCode: 0x140000,
+				ServiceIndicators:    []uint8{params.ServiceIndSCCP},
+			}}},
+		}
+	}
+	base := func() *ASPConfig {
+		return &ASPConfig{
+			SignallingGateways: []SignallingGatewayConfig{{
+				ID: "sg-a",
+				SGPs: []SignallingGatewayProcessConfig{{
+					ID: "sgp-a1",
+					ApplicationServers: []RemoteASConfig{
+						{ID: "as-core", ASKey: staticASKey(7, 1)},
+						*dynamic(),
+					},
+				}},
+			}},
+			Routing: &ASPRoutingConfig{
+				SignallingGatewaySelection: RouteSelectionLoadshare,
+				SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
+					"sg-a": RouteSelectionPrimaryBackup,
+				},
+				MTPRoutes: []MTPRouteConfig{
+					{ID: "sccp-a", DestinationPointCode: 0x120000, Mask: 16},
+				},
+				Routes: []MTPRouteBinding{
+					{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
+				},
+			},
+		}
+	}
+
+	// Provisioned and reachable: no route names the dynamically bound
+	// Application Server, so the configuration is accepted and the Association
+	// that serves it is authorized without a Routing Context, which is exactly
+	// what it has before registration.
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: base()})
+	if err != nil {
+		t.Fatalf("NewEndpoint with a dynamically bound Application Server and no route to it: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	unregistered, _ := newTestConn(t, StateASPDown, RoleASP)
+	unregistered.cfg.NetworkAppearance = nil
+	unregistered.cfg.RoutingContexts = nil
+	unregistered.cfg.PeerSGP = &SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}
+	if err := endpoint.validateAssociationConfig(unregistered.cfg); err != nil {
+		t.Fatalf("Association serving a dynamically bound Application Server rejected: %v", err)
+	}
+
+	// Naming it from a route is the rejected case, and the rejection says which
+	// Application Server and which SGP made the route unroutable.
+	routed := base()
+	routed.Routing.Routes = append(routed.Routing.Routes, MTPRouteBinding{
+		MTPRoute: "sccp-a",
+		AS:       SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-dynamic"},
+	})
+	_, err = snapshotASPConfig(routed)
+	if !errors.Is(err, ErrInvalidASPConfig) {
+		t.Fatalf("snapshotASPConfig() error = %v, want %v", err, ErrInvalidASPConfig)
+	}
+	for _, named := range []string{"dynamically bound", "as-dynamic", "sgp-a1", "sccp-a"} {
+		if !strings.Contains(err.Error(), named) {
+			t.Fatalf("rejection %q does not name %q", err, named)
+		}
+	}
+
+	// One SGP binding it dynamically is enough, even where another binds the
+	// same canonical Application Server statically: the route would silently
+	// stop covering that SGP.
+	mixed := base()
+	mixed.SignallingGateways[0].SGPs = append(mixed.SignallingGateways[0].SGPs,
+		SignallingGatewayProcessConfig{
+			ID:                 "sgp-a2",
+			ApplicationServers: []RemoteASConfig{{ID: "as-core", RoutingKey: dynamic().RoutingKey}},
+		})
+	if _, err := snapshotASPConfig(mixed); !errors.Is(err, ErrInvalidASPConfig) {
+		t.Fatalf("snapshotASPConfig() error = %v, want %v", err, ErrInvalidASPConfig)
 	}
 }
