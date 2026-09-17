@@ -1157,9 +1157,10 @@ func ssnmRoutingContext(message messages.M3UA) (*params.Param, bool) {
 }
 
 // lockOutboundApplicationServers admits direct traffic only while every named
-// Application Server is AS-ACTIVE. RFC 4666 Section 4.3.4.3 permits an SGP to
-// withhold traffic until n ASPs are ASP-ACTIVE; Association writes must honor
-// the same aggregate state as Endpoint distribution.
+// Application Server is AS-ACTIVE. An AS "becomes AS-ACTIVE right after n ASPs
+// reach the ASP-ACTIVE state during the startup phase" (RFC 4666 Section
+// 4.3.2), and Association writes must honor that same aggregate state as
+// Endpoint distribution does.
 func (c *Association) lockOutboundApplicationServers(routingContexts []uint32) (func(), error) {
 	if (c.role != RoleSGP && c.role != RoleIPSP) || c.as == nil {
 		return func() {}, nil
