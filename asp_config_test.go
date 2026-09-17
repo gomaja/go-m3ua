@@ -35,12 +35,14 @@ func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 	if snapshot.maxAffectedPointCodesPerSSNM != DefaultMaxAffectedPointCodesPerSSNM ||
 		snapshot.maxSSNMStateRecordsPerRoute != DefaultMaxSSNMStateRecordsPerRoute ||
 		snapshot.maxSSNMStateRecordsPerSignallingGateway != DefaultMaxSSNMStateRecords/2 ||
-		snapshot.maxSSNMStateRecords != DefaultMaxSSNMStateRecords {
-		t.Fatalf("SSNM budgets = APC:%d route:%d SG:%d Endpoint:%d",
+		snapshot.maxSSNMStateRecords != DefaultMaxSSNMStateRecords ||
+		snapshot.maxSSNMDestinationRecords != DefaultMaxSSNMDestinationRecords {
+		t.Fatalf("SSNM budgets = APC:%d route:%d SG:%d Endpoint:%d destination:%d",
 			snapshot.maxAffectedPointCodesPerSSNM,
 			snapshot.maxSSNMStateRecordsPerRoute,
 			snapshot.maxSSNMStateRecordsPerSignallingGateway,
-			snapshot.maxSSNMStateRecords)
+			snapshot.maxSSNMStateRecords,
+			snapshot.maxSSNMDestinationRecords)
 	}
 	if got := snapshot.mtpRoutes[0].id; got != "sccp-a" {
 		t.Fatalf("MTP Route ID = %q, want sccp-a", got)
@@ -259,6 +261,12 @@ func TestASPConfigValidation(t *testing.T) {
 			name: "negative SSNM state records",
 			mutate: func(config *ASPConfig) {
 				config.MaxSSNMStateRecords = -1
+			},
+		},
+		{
+			name: "negative SSNM destination records",
+			mutate: func(config *ASPConfig) {
+				config.MaxSSNMDestinationRecords = -1
 			},
 		},
 		{

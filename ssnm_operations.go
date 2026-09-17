@@ -171,10 +171,15 @@ func (e *Endpoint) SignallingCongestion(request SignallingCongestionRequest) err
 		storageScope, request.Destinations, state,
 		request.CongestionLevel, request.CongestionLevelSet,
 	)
+	// An SG that cannot retain the report must not deliver it either: the audit
+	// it owes its ASPs afterwards would contradict what it had just sent.
 	if request.Scope.RoutingContextSet {
-		e.destinations.setScopedRanges(request.Scope.RoutingContexts, ranges)
+		err = e.destinations.setScopedRangesWithinBudget(request.Scope.RoutingContexts, ranges)
 	} else {
-		e.destinations.setRanges(ranges)
+		err = e.destinations.setRangesWithinBudget(ranges)
+	}
+	if err != nil {
+		return err
 	}
 	return fanoutEndpointSSNM(e, request.Scope, func(routingContext *params.Param) messages.M3UA {
 		return messages.NewSignallingCongestion(

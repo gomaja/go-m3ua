@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -157,16 +158,80 @@ type destinationPause struct {
 	routingContexts []uint32
 }
 
+// ErrSSNMDestinationRecordLimit reports that retained SSNM destination state
+// has reached its budget, so the update was refused rather than grown into.
+//
+// The Affected Point Codes of an SSNM message are chosen by the peer and need
+// not correspond to anything this node has a route to, so retention has to be
+// bounded to stay independent of what the peer sends.
+var ErrSSNMDestinationRecordLimit = errors.New("SSNM destination record limit exceeded")
+
 // destinations tracks destination ranges by Network Appearance and Routing
 // Context. Updates are sequenced so the newest range covering a query wins.
+//
+// maxRecords bounds how many records the store retains; see storeLocked for the
+// overflow policy and ForgetDestinations for the reclaim path. Zero resolves to
+// DefaultMaxSSNMDestinationRecords, so a store assembled without a limit is
+// bounded rather than unbounded.
 type destinations struct {
-	mu       sync.RWMutex
-	state    map[destinationKey]destinationRecord
-	sequence uint64
+	mu         sync.RWMutex
+	state      map[destinationKey]destinationRecord
+	sequence   uint64
+	maxRecords int
 }
 
 func newDestinations() *destinations {
-	return &destinations{state: make(map[destinationKey]destinationRecord)}
+	return &destinations{
+		state:      make(map[destinationKey]destinationRecord),
+		maxRecords: DefaultMaxSSNMDestinationRecords,
+	}
+}
+
+// setRecordLimit installs the configured retained-record budget.
+//
+// It is resolved on first use rather than at construction because
+// newAssociation builds the store before the Association is bound to the
+// Endpoint whose ASPConfig carries the value.
+func (d *destinations) setRecordLimit(limit int) {
+	if d == nil || limit <= 0 {
+		return
+	}
+	d.mu.RLock()
+	unchanged := d.maxRecords == limit
+	d.mu.RUnlock()
+	if unchanged {
+		return
+	}
+	d.mu.Lock()
+	d.maxRecords = limit
+	d.mu.Unlock()
+}
+
+func (d *destinations) recordLimitLocked() int {
+	if d.maxRecords > 0 {
+		return d.maxRecords
+	}
+	return DefaultMaxSSNMDestinationRecords
+}
+
+func (d *destinations) recordLimitErrorLocked(refused int) error {
+	if refused == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %d record(s) refused, %d retained, limit %d",
+		ErrSSNMDestinationRecordLimit, refused, len(d.state), d.recordLimitLocked())
+}
+
+// forget discards every retained record and reports how many were released.
+func (d *destinations) forget() int {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	released := len(d.state)
+	d.state = make(map[destinationKey]destinationRecord)
+	return released
 }
 
 // The nil receiver checks below keep an Association that was assembled directly, rather
@@ -191,17 +256,29 @@ func (d *destinations) get(key destinationKey) DestinationState {
 }
 
 func (d *destinations) setRanges(ranges []DestinationRange) {
+	_ = d.setRangesWithinBudget(ranges)
+}
+
+// setRangesWithinBudget is setRanges with the record budget reported. The
+// callers that can surface a refusal — the SSNM receive path and the local
+// destination-report API — use this form; the rest retain what they can and
+// carry on, because there is no peer or caller left to tell.
+func (d *destinations) setRangesWithinBudget(ranges []DestinationRange) error {
 	if d == nil || len(ranges) == 0 {
-		return
+		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
+	refused := 0
 	for _, rangeValue := range ranges {
-		d.storeLocked(destinationRecord{rangeValue: normalizeDestinationRange(rangeValue)})
+		if !d.storeLocked(destinationRecord{rangeValue: normalizeDestinationRange(rangeValue)}) {
+			refused++
+		}
 	}
+	return d.recordLimitErrorLocked(refused)
 }
 
 // setScopedRanges records point-code updates sharing one explicit Routing
@@ -209,8 +286,14 @@ func (d *destinations) setRanges(ranges []DestinationRange) {
 // set of contexts; storing that set once avoids materializing the product of
 // the two legal variable-length parameter lists.
 func (d *destinations) setScopedRanges(routingContexts []uint32, ranges []DestinationRange) {
+	_ = d.setScopedRangesWithinBudget(routingContexts, ranges)
+}
+
+// setScopedRangesWithinBudget is setScopedRanges with the record budget
+// reported.
+func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ranges []DestinationRange) error {
 	if d == nil || len(routingContexts) == 0 || len(ranges) == 0 {
-		return
+		return nil
 	}
 
 	canonical, scope := canonicalRoutingContextScope(routingContexts)
@@ -219,16 +302,20 @@ func (d *destinations) setScopedRanges(routingContexts []uint32, ranges []Destin
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
+	refused := 0
 	for _, rangeValue := range ranges {
 		rangeValue = normalizeDestinationRange(rangeValue)
 		rangeValue.RoutingContext = 0
 		rangeValue.RoutingContextSet = true
-		d.storeLocked(destinationRecord{
+		if !d.storeLocked(destinationRecord{
 			rangeValue:          rangeValue,
 			routingContexts:     canonical,
 			routingContextScope: scope,
-		})
+		}) {
+			refused++
+		}
 	}
+	return d.recordLimitErrorLocked(refused)
 }
 
 func canonicalRoutingContextScope(routingContexts []uint32) ([]uint32, string) {
@@ -248,14 +335,31 @@ func canonicalRoutingContextScope(routingContexts []uint32) ([]uint32, string) {
 	return canonical, string(encoded)
 }
 
-func (d *destinations) storeLocked(record destinationRecord) {
+// storeLocked installs one record and reports whether it was retained. It is
+// the only writer of d.state, and therefore the point at which the record
+// budget is enforced.
+//
+// Overflow policy: a record whose key is already held always replaces it, since
+// replacing costs no memory and discarding an update for a destination the peer
+// has already established would be worse than refusing a new one. A record for
+// a new key is refused once the store holds its budget, and the caller reports
+// the refusal as ErrSSNMDestinationRecordLimit. Refusing is deliberately
+// preferred to evicting the oldest record: eviction would let a peer that names
+// enough unknown point codes push out a genuine DUNA and so restart traffic
+// into a destination the SG has reported unreachable.
+func (d *destinations) storeLocked(record destinationRecord) bool {
+	key := destinationRecordKey(record)
+	if _, held := d.state[key]; !held && len(d.state) >= d.recordLimitLocked() {
+		return false
+	}
 	d.sequence++
 	if d.sequence == 0 {
 		d.renumberLocked()
 		d.sequence++
 	}
 	record.sequence = d.sequence
-	d.state[destinationRecordKey(record)] = record
+	d.state[key] = record
+	return true
 }
 
 func (d *destinations) renumberLocked() {
@@ -488,7 +592,8 @@ func (d *destinations) pause() []destinationPause {
 	paused := make([]destinationPause, 0, len(records))
 	for _, record := range records {
 		record.rangeValue.State = DestinationUnavailable
-		d.storeLocked(record)
+		// Every key here is already held, so no record is refused.
+		_ = d.storeLocked(record)
 		paused = append(paused, destinationPause{
 			rangeValue:      record.rangeValue,
 			routingContexts: destinationRecordRoutingContexts(record),
@@ -788,16 +893,34 @@ func (c *Association) applySSNM(
 			return err
 		}
 	}
+	c.destinations.setRecordLimit(c.destinationRecordLimit())
+	var retained error
 	if routingContextSet {
-		c.destinations.setScopedRanges(routingContexts, updates)
+		retained = c.destinations.setScopedRangesWithinBudget(routingContexts, updates)
 	} else {
-		c.destinations.setRanges(updates)
+		retained = c.destinations.setRangesWithinBudget(updates)
 	}
+	// The status channel reports what the peer said, which stands whether or not
+	// there was room to retain it, so the report goes out before a refused
+	// record is reported back to the peer as an Error.
 	for _, status := range statuses {
 		c.notifyStatus(status)
 	}
 
-	return nil
+	return retained
+}
+
+// destinationRecordLimit resolves the retained-record budget for this
+// association's SSNM state store. An ASP Endpoint's ASPConfig owns the value;
+// an Association assembled without one keeps the package default.
+func (c *Association) destinationRecordLimit() int {
+	// aspRoutes.config is written once, by NewEndpoint, before any Association
+	// can reach it.
+	if c != nil && c.endpoint != nil && c.endpoint.aspRoutes != nil &&
+		c.endpoint.aspRoutes.config.maxSSNMDestinationRecords > 0 {
+		return c.endpoint.aspRoutes.config.maxSSNMDestinationRecords
+	}
+	return DefaultMaxSSNMDestinationRecords
 }
 
 // reportSSNM reports a peer's SSNM message to the user without recording it as
@@ -1574,8 +1697,7 @@ func applyLocalDestinationRange(c *Association, rangeValue DestinationRange) err
 	if c == nil || c.destinations == nil {
 		return nil
 	}
-	c.destinations.setRanges([]DestinationRange{rangeValue})
-	return nil
+	return c.destinations.setRangesWithinBudget([]DestinationRange{rangeValue})
 }
 
 func (c *Association) applyDialedSGPDestinationRange(rangeValue DestinationRange, wait bool) error {
@@ -1600,9 +1722,33 @@ func (c *Association) applyDialedSGPDestinationRange(rangeValue DestinationRange
 	previous, known := c.destinations.lookupRange(
 		destinationRangeKey(rangeValue), rangeValue.PointCode, rangeValue.Mask,
 	)
-	c.destinations.setRanges([]DestinationRange{rangeValue})
+	// An SG that cannot retain the state must not announce it either: the audit
+	// it owes the ASP afterwards would contradict the report it just sent.
+	if err := c.destinations.setRangesWithinBudget([]DestinationRange{rangeValue}); err != nil {
+		return err
+	}
 	abateCongestion := known && previous == DestinationCongested && rangeValue.State != DestinationCongested
 	return publishDestinationRanges(c.as, []DestinationRange{rangeValue}, false, abateCongestion, wait)
+}
+
+// ForgetDestinations discards every SSNM destination record the association's
+// state store retains and reports how many were released.
+//
+// It is the reclaim path for the record budget: a store holding
+// MaxSSNMDestinationRecords, or DefaultMaxSSNMDestinationRecords where no ASP
+// Endpoint configured one, refuses further destinations until something
+// releases the space. Nothing is sent on the wire. An ASP re-learns what it
+// forgot with a DAUD (RFC 4666 Section 4.5.3); at an SGP the next audit a peer
+// sends is answered DUNA for every forgotten point code, because Section 4.5.3
+// makes an unknown Signalling Point Code unavailable.
+//
+// On an accepted association this clears the listener's node-wide view, which
+// is shared by every ASP it serves, exactly as SetDestinationState writes it.
+func (c *Association) ForgetDestinations() int {
+	if c == nil {
+		return 0
+	}
+	return c.destinations.forget()
 }
 
 // PeerCongestionLevel returns the congestion level the peer last reported about
