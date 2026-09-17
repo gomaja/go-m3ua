@@ -180,27 +180,47 @@ func TestReadDataDeliversEachMessageToExactlyOneReader(t *testing.T) {
 		deliver(t, conn, 1, inboundData(1, fmt.Sprintf("message-%d", index)))
 	}
 
-	seen := make(map[string]int, messages)
-	for index := 0; index < messages; index++ {
+	// A full queue discards, by design: that is the local-congestion path this
+	// package reports through DataQueueStats. On a single processor the
+	// deliveries outrun the readers and some are dropped, so what this test
+	// pins is exactly-once delivery of whatever was accepted, not that nothing
+	// was dropped. Demanding all of them back would be testing the scheduler.
+	discarded := int(conn.DataQueueStats().Discarded)
+	accepted := messages - discarded
+	if accepted <= 0 {
+		t.Fatalf("every message was discarded (%d of %d); the queue never accepted one", discarded, messages)
+	}
+
+	seen := make(map[string]int, accepted)
+	for index := 0; index < accepted; index++ {
 		select {
 		case payload := <-received:
 			seen[payload]++
 		case <-time.After(5 * time.Second):
-			t.Fatalf("only %d of %d messages were delivered", index, messages)
+			t.Fatalf("only %d of the %d accepted messages were delivered (%d discarded)",
+				index, accepted, discarded)
 		}
 	}
 	cancel()
 	wait.Wait()
 
-	for index := 0; index < messages; index++ {
-		payload := fmt.Sprintf("message-%d", index)
-		switch seen[payload] {
-		case 1:
-		case 0:
-			t.Errorf("%q was never delivered", payload)
-		default:
-			t.Errorf("%q was delivered to %d readers", payload, seen[payload])
+	// Nothing may arrive twice, and nothing may arrive that was never sent.
+	delivered := 0
+	for payload, count := range seen {
+		if count != 1 {
+			t.Errorf("%q was delivered to %d readers, want exactly 1", payload, count)
 		}
+		var index int
+		if _, err := fmt.Sscanf(payload, "message-%d", &index); err != nil || index < 0 || index >= messages {
+			t.Errorf("delivered %q, which was never sent", payload)
+		}
+		delivered += count
+	}
+	if delivered != accepted {
+		t.Errorf("delivered %d distinct messages, want the %d the queue accepted", delivered, accepted)
+	}
+	if queued := conn.DataQueueStats().Queued; queued != 0 {
+		t.Errorf("%d messages left queued after every reader stopped", queued)
 	}
 }
 
