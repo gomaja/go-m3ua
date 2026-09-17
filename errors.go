@@ -639,10 +639,18 @@ func (c *Association) handleErrors(e error) error {
 	}
 	var parameterFaultError *ParameterFaultError
 	if errors.As(e, &parameterFaultError) {
+		// A fault the dispatcher raised for a message it could not parse
+		// carries that message's octets. A fault raised afterwards, validating
+		// a parameter of a message that did decode, carries none: the
+		// dispatcher keeps the octets only where there is no decoded form.
+		// Re-marshalling the decoded message does not substitute for them: it
+		// writes back into parameters the dispatch goroutine still owns, and a
+		// parameter this fault rejected is by definition one that will not
+		// re-marshal. The Conditional parameter is left out instead.
 		res = messages.NewError(
 			params.NewErrorCode(parameterFaultError.Code),
 			nil, nil, nil,
-			params.NewDiagnosticInformation(parameterFaultError.first40Octets()),
+			diagnosticInformationFor(parameterFaultError.first40Octets()),
 		)
 	}
 	var UnexpectedMessageError *UnexpectedMessageError
@@ -819,6 +827,26 @@ func first40(raw []byte, msg messages.M3UA) []byte {
 		return b[:40]
 	}
 	return b
+}
+
+// diagnosticInformationFor returns the Diagnostic Information parameter holding
+// the given octets, or nil when there are none.
+//
+// RFC 4666 Section 3.8.1 lists the parameter as Conditional and says what
+// belongs in it: "When included, the optional Diagnostic Information can be any
+// information germane to the error condition, to assist in identification of
+// the error condition. The Diagnostic Information SHOULD contain the offending
+// message." The same section tolerates an empty one — "A Diagnostic Information
+// parameter with a zero length parameter is not considered an error" — but such
+// a parameter identifies nothing and tells the peer less than the Error Code
+// beside it already did, so it is omitted. The two codes that make the
+// parameter mandatory, Unsupported Message Class and Unsupported Message Type,
+// always have the received octets and attach it directly.
+func diagnosticInformationFor(octets []byte) *params.Param {
+	if len(octets) == 0 {
+		return nil
+	}
+	return params.NewDiagnosticInformation(octets)
 }
 
 const maxDiagnosticInformationLen = int(^uint16(0)) - 4
