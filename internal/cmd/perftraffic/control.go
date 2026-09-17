@@ -306,16 +306,36 @@ const (
 	recordUnique
 )
 
-func (control *receiverControl) record(transportIndex int, message receivedMessage) (messageIdentity, recordOutcome) {
+// arrival is one classified inbound message together with the cohort
+// generation it was committed under. The two always travel together, so work
+// scheduled from an arrival — the echo reply — cannot be separated from its
+// cohort: a reset in between can then neither credit nor charge it to the next
+// cohort.
+type arrival struct {
+	identity   messageIdentity
+	generation uint64
+}
+
+// replyJob builds the echo reply job for this arrival, carrying the cohort
+// generation through to the reply writer.
+func (received arrival) replyJob(size int) echoReplyJob {
+	return echoReplyJob{identity: received.identity, size: size, generation: received.generation}
+}
+
+// record classifies one arrival and reports the cohort generation it was
+// committed under.
+func (control *receiverControl) record(transportIndex int, message receivedMessage) (arrival, recordOutcome) {
 	control.mutex.Lock()
 	if control.phase == receiverStopped {
 		control.lateAfterStop++
+		generation := control.generation
 		control.mutex.Unlock()
-		return messageIdentity{}, recordIgnored
+		return arrival{generation: generation}, recordIgnored
 	}
 	if control.phase != receiverMeasuring || control.ledger == nil {
+		generation := control.generation
 		control.mutex.Unlock()
-		return messageIdentity{}, recordIgnored
+		return arrival{generation: generation}, recordIgnored
 	}
 	specification := control.spec
 	generation := control.generation
@@ -327,33 +347,33 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 	}
 	identity, err := validateMessage(message, specification.Cohort, specification.Seed,
 		specification.Associations, specification.Payload, expectedKind, specification.Direction == directionSGPToASP)
-	arrival := control.now()
+	received := control.now()
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	if control.phase != receiverMeasuring || control.generation != generation {
 		if control.ledger != nil {
 			control.ledger.snapshotData.Invalid++
 		}
-		return messageIdentity{}, recordIgnored
+		return arrival{generation: control.generation}, recordIgnored
 	}
 	if err != nil || !control.bindAssociation(transportIndex, int(identity.Association)) {
 		control.ledger.snapshotData.Invalid++
-		return identity, recordInvalid
+		return arrival{identity: identity, generation: generation}, recordInvalid
 	}
 	identity.Cohort = specification.Cohort
 	if control.firstArrival.IsZero() {
-		control.firstArrival = arrival
+		control.firstArrival = received
 	}
 	status := control.ledger.record(identity)
 	if status != ledgerUnique {
-		return identity, recordNotUnique
+		return arrival{identity: identity, generation: generation}, recordNotUnique
 	}
-	if arrival.Before(control.firstArrival.Add(control.spec.Duration)) {
+	if received.Before(control.firstArrival.Add(control.spec.Duration)) {
 		control.uniqueMeasurement++
 	} else {
 		control.uniqueDrain++
 	}
-	return identity, recordUnique
+	return arrival{identity: identity, generation: generation}, recordUnique
 }
 
 func (control *receiverControl) bindAssociation(transportIndex, logicalIndex int) bool {
@@ -378,9 +398,17 @@ func (control *receiverControl) echoMode() bool {
 	return control.phase == receiverMeasuring && control.spec.Mode == modeEcho
 }
 
-func (control *receiverControl) recordEchoReply(err error) {
+// recordEchoReply counts one reply write against the cohort that enqueued it.
+// A write can begin before a reset and finish after it, so the generation is
+// checked under the same mutex that advances it: the previous cohort's
+// counters are already cleared, and the new cohort must not inherit the
+// outcome of work it never scheduled.
+func (control *receiverControl) recordEchoReply(generation uint64, err error) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
+	if control.generation != generation {
+		return
+	}
 	if err != nil {
 		control.echoReplyErrors++
 		return
@@ -390,11 +418,23 @@ func (control *receiverControl) recordEchoReply(err error) {
 
 // recordEchoReplyDropped counts a validated request whose reply was never
 // written — queue full or the cohort ended first. Drops are losses and are
-// always counted, never silent.
-func (control *receiverControl) recordEchoReplyDropped() {
+// always counted for their own cohort, never silent; a drop belonging to a
+// cohort that has already been reset away is charged to no cohort at all.
+func (control *receiverControl) recordEchoReplyDropped(generation uint64) {
 	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	if control.generation != generation {
+		return
+	}
 	control.echoRepliesDropped++
-	control.mutex.Unlock()
+}
+
+// currentGeneration reports the active cohort generation under the mutex that
+// advances it.
+func (control *receiverControl) currentGeneration() uint64 {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return control.generation
 }
 
 // echoCounts returns the reply counters atomically. The reply writer

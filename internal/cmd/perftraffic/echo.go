@@ -223,10 +223,13 @@ func (registry *echoRegistry) fatalError() string {
 
 // echoReplyJob is one validated echo request awaiting its reply. The payload
 // is built by the writer, not at enqueue, so a full queue costs only the
-// identity and size per entry.
+// identity and size per entry. generation is the cohort the request was
+// validated under: a job can outlive its cohort in the queue, and the writer
+// answers and accounts for it only while that cohort is still the active one.
 type echoReplyJob struct {
-	identity messageIdentity
-	size     int
+	identity   messageIdentity
+	size       int
+	generation uint64
 }
 
 // offerEchoReply hands a reply job to the writer without ever blocking the
@@ -237,7 +240,7 @@ func offerEchoReply(queue chan<- echoReplyJob, job echoReplyJob, control *receiv
 	select {
 	case queue <- job:
 	default:
-		control.recordEchoReplyDropped()
+		control.recordEchoReplyDropped(job.generation)
 	}
 }
 
@@ -252,16 +255,19 @@ func startEchoReplyWriter(association *m3ua.Association, control *receiverContro
 }
 
 // runEchoReplyWriter writes queued replies until the queue is closed and
-// empty. Replies for a cohort that is no longer measuring are dropped and
-// counted; write failures are counted through recordEchoReply.
+// empty. A job is answered only while the cohort that validated its request is
+// still the active, measuring cohort: a reply for a cohort that has ended is
+// dropped and counted, and one for a cohort that has since been reset away is
+// dropped against that cohort, which charges it to no live counter. Write
+// failures are counted through recordEchoReply against the same generation.
 func runEchoReplyWriter(queue <-chan echoReplyJob, control *receiverControl, write func(job echoReplyJob, deadline time.Time, generation uint64) error) {
 	for job := range queue {
 		active, generation, deadline := control.echoReplyContext()
-		if !active {
-			control.recordEchoReplyDropped()
+		if !active || generation != job.generation {
+			control.recordEchoReplyDropped(job.generation)
 			continue
 		}
-		control.recordEchoReply(write(job, deadline, generation))
+		control.recordEchoReply(job.generation, write(job, deadline, job.generation))
 	}
 }
 

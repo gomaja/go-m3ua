@@ -152,12 +152,12 @@ func TestReceiverEchoResultAndReplyAccounting(testContext *testing.T) {
 	}
 	request := validReceivedMessage("echo-cohort", 7, 0, 0, 0, 128)
 	request.ProtocolData.Data[7] = kindEchoRequest
-	identity, outcome := control.record(0, request)
-	if outcome != recordUnique || identity.Cohort != "echo-cohort" || identity.Kind != kindEchoRequest {
-		testContext.Fatalf("record = %+v, %d; want a unique echo request with its cohort", identity, outcome)
+	received, outcome := control.record(0, request)
+	if outcome != recordUnique || received.identity.Cohort != "echo-cohort" || received.identity.Kind != kindEchoRequest {
+		testContext.Fatalf("record = %+v, %d; want a unique echo request with its cohort", received, outcome)
 	}
-	control.recordEchoReply(nil)
-	control.recordEchoReply(nil)
+	control.recordEchoReply(control.currentGeneration(), nil)
+	control.recordEchoReply(control.currentGeneration(), nil)
 	if err := control.stop(); err != nil {
 		testContext.Fatalf("stop: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestReceiverEchoReplyErrorIsInvalid(testContext *testing.T) {
 	request := validReceivedMessage("echo-cohort", 7, 0, 0, 0, 128)
 	request.ProtocolData.Data[7] = kindEchoRequest
 	control.record(0, request)
-	control.recordEchoReply(assertionError("write failed"))
+	control.recordEchoReply(control.currentGeneration(), assertionError("write failed"))
 	if err := control.stop(); err != nil {
 		testContext.Fatalf("stop: %v", err)
 	}

@@ -55,9 +55,9 @@ func TestReverseDirectionValidatesReversedTuples(testContext *testing.T) {
 	reverse := validReceivedMessage("bidi-reverse", 7, 0, 0, 0, 128)
 	reverse.ProtocolData.OriginatingPointCode, reverse.ProtocolData.DestinationPointCode =
 		reverse.ProtocolData.DestinationPointCode, reverse.ProtocolData.OriginatingPointCode
-	identity, outcome := control.record(0, reverse)
-	if outcome != recordUnique || identity.Sequence != 0 {
-		testContext.Fatalf("reverse tuple record = %+v, %d; want unique", identity, outcome)
+	received, outcome := control.record(0, reverse)
+	if outcome != recordUnique || received.identity.Sequence != 0 {
+		testContext.Fatalf("reverse tuple record = %+v, %d; want unique", received, outcome)
 	}
 }
 

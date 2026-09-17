@@ -174,7 +174,7 @@ func readAssociation(ctx context.Context, transportIndex int, association *m3ua.
 			nonblockingError(fatal, readFatalError(transportIndex, phase, err))
 			return
 		}
-		identity, outcome := control.record(transportIndex, receivedMessage{
+		received, outcome := control.record(transportIndex, receivedMessage{
 			ProtocolData:         protocolDataFromM3UA(message.ProtocolData),
 			NetworkAppearance:    message.NetworkAppearance,
 			NetworkAppearanceSet: message.NetworkAppearanceSet,
@@ -187,7 +187,7 @@ func readAssociation(ctx context.Context, transportIndex int, association *m3ua.
 		if replyQueue == nil {
 			replyQueue = startEchoReplyWriter(association, control, maxOutstanding/control.expectedAssociations)
 		}
-		offerEchoReply(replyQueue, echoReplyJob{identity: identity, size: len(message.ProtocolData.Data)}, control)
+		offerEchoReply(replyQueue, received.replyJob(len(message.ProtocolData.Data)), control)
 	}
 }
 
