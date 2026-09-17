@@ -80,7 +80,7 @@ func TestDynamicallyRegisteredASAvailableToASPManagement(t *testing.T) {
 				)
 				association.noteRoutingContextsActive([]uint32{key.RoutingContext})
 				request := DestinationStateAuditRequest{
-					Scope: SSNMScope{
+					Scope: WireScope{
 						NetworkAppearance:    key.NetworkAppearance,
 						NetworkAppearanceSet: true,
 						RoutingContexts:      []uint32{key.RoutingContext},

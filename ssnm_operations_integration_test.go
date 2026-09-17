@@ -65,7 +65,7 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sgpAssociation.Close() })
 
-	scope := SSNMScope{
+	scope := WireScope{
 		NetworkAppearance:    peer.networkAppearance,
 		NetworkAppearanceSet: true,
 		RoutingContexts:      []uint32{peer.routingContext},

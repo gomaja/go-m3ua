@@ -10,19 +10,10 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// SSNMScope is the Network Appearance and Application Server scope carried by
-// an RFC 4666 Section 3.4 Signalling Network Management message.
-type SSNMScope struct {
-	NetworkAppearance    uint32
-	NetworkAppearanceSet bool
-	RoutingContexts      []uint32
-	RoutingContextSet    bool
-}
-
 // DestinationStateAuditRequest is an RFC 4666 Sections 3.4.3 and 4.5.3 DAUD
 // request from an ASP to an SGP.
 type DestinationStateAuditRequest struct {
-	Scope        SSNMScope
+	Scope        WireScope
 	Destinations []PointCodeRange
 	Info         string
 }
@@ -30,7 +21,7 @@ type DestinationStateAuditRequest struct {
 // SignallingCongestionRequest is an RFC 4666 Section 3.4.4 SCON request.
 // Concerned Destination is valid only in the ASP-to-SGP direction.
 type SignallingCongestionRequest struct {
-	Scope        SSNMScope
+	Scope        WireScope
 	Destinations []PointCodeRange
 
 	CongestionLevel    uint8
@@ -44,7 +35,7 @@ type SignallingCongestionRequest struct {
 // DestinationUserPartUnavailableRequest is an RFC 4666 Section 3.4.5 DUPU
 // request from an SGP to its concerned active ASPs.
 type DestinationUserPartUnavailableRequest struct {
-	Scope       SSNMScope
+	Scope       WireScope
 	Destination PointCodeRange
 	User        uint16
 	Cause       uint16
@@ -232,7 +223,7 @@ func (e *Endpoint) DestinationUserPartUnavailable(request DestinationUserPartUna
 }
 
 func (c *Association) prepareASPSSNM(
-	scope SSNMScope,
+	scope WireScope,
 	destinations []PointCodeRange,
 	info string,
 ) (ssnmParameters, error) {
@@ -266,7 +257,7 @@ func (c *Association) prepareASPSSNM(
 
 func prepareEndpointSSNM(
 	endpoint *Endpoint,
-	scope SSNMScope,
+	scope WireScope,
 	destinations []PointCodeRange,
 	info string,
 ) (ssnmParameters, error) {
@@ -281,11 +272,11 @@ func prepareEndpointSSNM(
 }
 
 func buildSSNMParameters(
-	scope SSNMScope,
+	scope WireScope,
 	destinations []PointCodeRange,
 	info string,
 ) (ssnmParameters, error) {
-	networkAppearance, routingContext, err := buildSSNMScope(scope)
+	networkAppearance, routingContext, err := buildWireScope(scope)
 	if err != nil {
 		return ssnmParameters{}, err
 	}
@@ -305,7 +296,7 @@ func buildSSNMParameters(
 	}, nil
 }
 
-func buildSSNMScope(scope SSNMScope) (*params.Param, *params.Param, error) {
+func buildWireScope(scope WireScope) (*params.Param, *params.Param, error) {
 	var networkAppearance *params.Param
 	if scope.NetworkAppearanceSet {
 		networkAppearance = params.NewNetworkAppearance(scope.NetworkAppearance)
@@ -376,7 +367,7 @@ func buildSignallingCongestionParameters(
 	return concernedDestination, congestion, nil
 }
 
-func (c *Association) validateOutboundASPSSNMScope(scope SSNMScope, routingContext *params.Param) error {
+func (c *Association) validateOutboundASPSSNMScope(scope WireScope, routingContext *params.Param) error {
 	if err := c.validateSSNMRoutingContext(routingContext); err != nil {
 		return err
 	}
@@ -397,7 +388,7 @@ func (c *Association) validateOutboundASPSSNMScope(scope SSNMScope, routingConte
 	return nil
 }
 
-func outboundSSNMASKeys(scope SSNMScope, configured []ASKey) ([]ASKey, error) {
+func outboundSSNMASKeys(scope WireScope, configured []ASKey) ([]ASKey, error) {
 	if !scope.RoutingContextSet {
 		if len(configured) != 1 {
 			return nil, ErrMissingRoutingContext
@@ -444,7 +435,7 @@ func outboundSSNMASKeys(scope SSNMScope, configured []ASKey) ([]ASKey, error) {
 	return requested, nil
 }
 
-func validateEndpointSSNMScope(endpoint *Endpoint, scope SSNMScope) error {
+func validateEndpointSSNMScope(endpoint *Endpoint, scope WireScope) error {
 	if endpoint == nil || endpoint.as == nil {
 		return nil
 	}
@@ -498,7 +489,7 @@ func validateEndpointSSNMScope(endpoint *Endpoint, scope SSNMScope) error {
 
 func resolveEndpointSSNMNetworkAppearance(
 	endpoint *Endpoint,
-	scope SSNMScope,
+	scope WireScope,
 ) (uint32, bool, error) {
 	if scope.NetworkAppearanceSet {
 		return scope.NetworkAppearance, true, nil
@@ -536,7 +527,7 @@ func resolveEndpointSSNMNetworkAppearance(
 // congestion report. State is left to the store, which resolves it from the
 // availability the destination already has.
 func destinationRangesForSSNM(
-	scope SSNMScope,
+	scope WireScope,
 	destinations []PointCodeRange,
 	congestionLevel uint8,
 	congestionLevelSet bool,
@@ -557,7 +548,7 @@ func destinationRangesForSSNM(
 
 func fanoutEndpointSSNM(
 	endpoint *Endpoint,
-	scope SSNMScope,
+	scope WireScope,
 	build func(*params.Param) messages.M3UA,
 ) error {
 	targets := endpointActiveSSNMTargets(endpoint, scope)
@@ -615,7 +606,7 @@ func fanoutEndpointSSNM(
 	return deliveryError
 }
 
-func endpointActiveSSNMTargets(endpoint *Endpoint, scope SSNMScope) []activeSSNMTarget {
+func endpointActiveSSNMTargets(endpoint *Endpoint, scope WireScope) []activeSSNMTarget {
 	if endpoint == nil || endpoint.as == nil {
 		return nil
 	}
