@@ -88,9 +88,11 @@ type SSNMPartitionKind uint8
 
 const (
 	// SSNMCanonicalPartition is one Application Server reached through one
-	// Signalling Gateway. RFC 4666 Section 1.4.2 makes the Application Server a
-	// logical entity reached through the SGPs of its Signalling Gateway, so
-	// every SGP of that Signalling Gateway contributes to one partition.
+	// Signalling Gateway. RFC 4666 Section 1.2 has an SG contain a set of
+	// SGPs and, "Where an SG contains more than one SGP", has those SGPs
+	// "coordinated into a single management view to the SS7 network and to the
+	// supported Application Servers", so every SGP of one Signalling Gateway
+	// contributes to one partition.
 	SSNMCanonicalPartition SSNMPartitionKind = iota + 1
 	// SSNMStandalonePartition is one Association that resolves to no
 	// provisioned Application Server. Its knowledge is its own and cannot be
@@ -111,11 +113,12 @@ func (k SSNMPartitionKind) String() string {
 
 // SSNMPartition is the ownership scope of retained SSNM knowledge.
 //
-// It is deliberately not the wire scope. RFC 4666 Section 3.6.1 makes Routing
-// Context a label the peer assigns, so the same value on two Signalling
-// Gateways names different Application Servers, and two SGPs of one Signalling
-// Gateway may label one Application Server differently. Knowledge is therefore
-// owned by the canonical identity, not by the label that carried it.
+// It is deliberately not the wire scope. RFC 4666 Section 1.4.2.1 makes a
+// Routing Context "an index into a sending node's Message Distribution Table",
+// so the same value on two Signalling Gateways names different Application
+// Servers, and two SGPs of one Signalling Gateway may label one Application
+// Server differently. Knowledge is therefore owned by the canonical identity,
+// not by the label that carried it.
 type SSNMPartition struct {
 	Kind              SSNMPartitionKind
 	SignallingGateway SignallingGatewayID
@@ -337,8 +340,11 @@ type SSNMPartitionKnowledge struct {
 	// Bindings are the Associations currently admitted, in AssociationID order.
 	Bindings []SSNMBinding
 	// TrafficAuthorized is true only when at least one binding has completed
-	// activation. Reports admitted during the Section 4.5.1 window are
-	// retained but do not authorize traffic on their own.
+	// activation. RFC 4666 Section 4.3.4.3: "The ASP SHOULD NOT send Data or
+	// SSNM messages for the related Routing Context(s) before receiving an ASP
+	// Active Ack message, or it will risk message loss." Reports admitted
+	// during the Section 4.5.1 window are retained but authorize nothing on
+	// their own.
 	TrafficAuthorized bool
 	// Destinations are the retained dimensions, in point-code then mask order.
 	Destinations []SSNMDestinationKnowledge
@@ -478,6 +484,8 @@ func resolveSSNMStateConfig(config *SSNMStateConfig) (SSNMStateConfig, error) {
 				ErrInvalidSSNMStateConfig, field.name, *field.value)
 		}
 	}
+	explicitPeerRecords := resolved.MaxRecordsPerPeer != 0
+	explicitPartitionRecords := resolved.MaxRecordsPerPartition != 0
 	defaults := []struct {
 		value *int
 		fill  int
@@ -497,11 +505,21 @@ func resolveSSNMStateConfig(config *SSNMStateConfig) (SSNMStateConfig, error) {
 		}
 	}
 
-	// A reservation larger than the budget it is carved from can never be
-	// reached, so it is not a conservative bound but a misconfiguration that
-	// silently disables the inner limit. A partition belongs to one peer and a
-	// peer to one store, so these two checks cover the partition against the
-	// store as well.
+	// A default reservation is a starting point, not a demand. Tightening the
+	// store budget alone is an ordinary thing to do, and it should not be
+	// refused because a reservation nobody asked for no longer fits.
+	if !explicitPeerRecords && resolved.MaxRecordsPerPeer > resolved.MaxRecords {
+		resolved.MaxRecordsPerPeer = resolved.MaxRecords
+	}
+	if !explicitPartitionRecords && resolved.MaxRecordsPerPartition > resolved.MaxRecordsPerPeer {
+		resolved.MaxRecordsPerPartition = resolved.MaxRecordsPerPeer
+	}
+
+	// An explicit reservation larger than the budget it is carved from can
+	// never be reached, so it is not a conservative bound but a
+	// misconfiguration that silently disables the inner limit. A partition
+	// belongs to one peer and a peer to one store, so these two checks cover
+	// the partition against the store as well.
 	if resolved.MaxRecordsPerPeer > resolved.MaxRecords {
 		return SSNMStateConfig{}, fmt.Errorf(
 			"%w: %d records per peer cannot fit in the %d-record store",
@@ -556,8 +574,10 @@ func (s *ssnmState) nextRevisionLocked() uint64 {
 // bind admits one Association to a partition.
 //
 // A partition with no binding at all starts a new epoch: its previous
-// knowledge was retired with its last binding, and RFC 4666 Section 4.3.4.3
-// makes a reactivation a fresh start rather than a continuation.
+// knowledge was retired with its last binding, so what a later binding learns
+// is not a continuation of it. Numbering those generations is a library
+// choice, not an RFC procedure; it exists so a report validated under one
+// binding is recognisable after a reactivation replaced it.
 func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pending bool) error {
 	if s == nil || partition.Kind == 0 {
 		return nil
@@ -743,8 +763,12 @@ type ssnmDimensionWrite struct {
 //
 // Within one canonical partition and one dimension the last locally validated
 // report wins. That is a local ordering over what this node accepted, not a
-// claim about the order in which the peers produced them: RFC 4666 provides no
-// sequence number for SSNM, so no remote causal order exists to reconstruct.
+// claim about the order in which the peers produced them. RFC 4666 Section
+// 4.5.1 orders one SGP's own stream -- "DUNA, DAVA, SCON, and DRST messages
+// may be sent sequentially and processed at the receiver in the order sent",
+// while "Sequencing is not required for the DUPU or DAUD messages" -- and says
+// nothing about order between the SGPs of one Signalling Gateway, so there is
+// no remote causal order to reconstruct.
 func (s *ssnmState) apply(report SSNMReport) error {
 	if s == nil || report.Partition.Kind == 0 {
 		return nil
@@ -761,7 +785,13 @@ func (s *ssnmState) apply(report SSNMReport) error {
 		return s.publishEventOnlyLocked(report)
 	}
 	report.Epoch = state.epoch
-	if !report.retainsAvailability() && !report.retainsCongestion() {
+	// This store holds what peers have reported. What this node originates is
+	// an intention or a question -- the RFC 4666 Section 3.4.3 audit asks what
+	// a peer holds, and the Section 3.4.4 ASP-to-SGP congestion report
+	// describes this node's own M3UA layer -- so it is published and retained
+	// by nobody.
+	if report.Source != SSNMPeerReport ||
+		!report.retainsAvailability() && !report.retainsCongestion() {
 		return s.publishEventOnlyLocked(report)
 	}
 

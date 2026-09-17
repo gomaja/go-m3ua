@@ -93,13 +93,24 @@ func (c *Association) DestinationStateAudit(request DestinationStateAuditRequest
 	if err != nil {
 		return err
 	}
-	_, err = c.WriteSignal(messages.NewDestinationStateAudit(
+	if _, err = c.WriteSignal(messages.NewDestinationStateAudit(
 		parameters.networkAppearance,
 		parameters.routingContext,
 		parameters.affectedPointCode,
 		parameters.info,
-	))
-	return err
+	)); err != nil {
+		return err
+	}
+	// The audit is on the wire. A local observability bound that refuses to
+	// record it does not un-send it, and the refusal is already reported
+	// through the SSNM subscription, so it is not this call's failure.
+	_ = c.publishSSNMReport(SSNMReport{
+		Kind:         SSNMDestinationStateAuditReport,
+		Source:       SSNMLocalReport,
+		Scope:        request.Scope.clone(),
+		Destinations: append([]PointCodeRange(nil), request.Destinations...),
+	})
+	return nil
 }
 
 // SignallingCongestion originates the optional ASP-to-SGP SCON described by
@@ -113,15 +124,31 @@ func (c *Association) SignallingCongestion(request SignallingCongestionRequest) 
 	if err != nil {
 		return err
 	}
-	_, err = c.WriteSignal(messages.NewSignallingCongestion(
+	if _, err = c.WriteSignal(messages.NewSignallingCongestion(
 		parameters.networkAppearance,
 		parameters.routingContext,
 		parameters.affectedPointCode,
 		concernedDestination,
 		congestion,
 		parameters.info,
-	))
-	return err
+	)); err != nil {
+		return err
+	}
+	// An ASP-originated SCON reports "the congestion level of the M3UA layer
+	// or the ASP" (RFC 4666 Section 3.4.4). It describes this node, not a
+	// destination beyond a peer.
+	_ = c.publishSSNMReport(SSNMReport{
+		Kind:                    SSNMSignallingCongestionReport,
+		Source:                  SSNMLocalReport,
+		Scope:                   request.Scope.clone(),
+		Destinations:            append([]PointCodeRange(nil), request.Destinations...),
+		CongestionLevel:         request.CongestionLevel,
+		CongestionLevelSet:      request.CongestionLevelSet,
+		ConcernedDestination:    request.ConcernedDestination,
+		ConcernedDestinationSet: request.ConcernedDestinationSet,
+		PeerReported:            true,
+	})
+	return nil
 }
 
 // SignallingCongestion records an SGP destination congestion state before it
@@ -133,8 +160,7 @@ func (c *Association) SignallingCongestion(request SignallingCongestionRequest) 
 // 4666 Section 4.5.2.2 makes availability and congestion two separate statuses
 // of the same destination, so neither a congestion report nor the explicit
 // level zero that abates it returns an unavailable destination to service —
-// only DAVA does, and Sections 4.4.2 and 4.5.3 have the audit answered
-// accordingly.
+// only DAVA does, and Section 4.5.3 has the audit answered accordingly.
 func (e *Endpoint) SignallingCongestion(request SignallingCongestionRequest) error {
 	if e == nil || e.role != RoleSGP {
 		return ErrUnsupportedRole

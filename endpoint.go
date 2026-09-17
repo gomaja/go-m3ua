@@ -67,8 +67,10 @@ type Endpoint struct {
 	routingKeys        *routingKeyRegistry
 	// ssnm is the bounded, route-independent SSNM knowledge of this Endpoint.
 	// It is owned here rather than by an Association because RFC 4666 Section
-	// 1.4.2 reaches one Application Server through several SGPs, so the
-	// knowledge outlives any one of their Associations.
+	// 1.2 coordinates the SGPs of one Signalling Gateway "into a single
+	// management view ... to the supported Application Servers", and Section
+	// 1.3.2.5 has the M3UA layer of an ASP connected to several SGPs maintain
+	// that status itself. The knowledge outlives any one Association.
 	ssnm *ssnmState
 }
 

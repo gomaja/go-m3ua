@@ -997,3 +997,97 @@ func TestSSNMNamesAreStable(t *testing.T) {
 		}
 	}
 }
+
+// A report this node originates reaches subscribers with its source, and
+// changes nobody's destination knowledge. RFC 4666 Section 3.4.3 makes the
+// audit a question, and the Section 3.4.4 ASP-to-SGP congestion report
+// describes this node's own M3UA layer rather than a destination beyond a
+// peer.
+func TestLocallyOriginatedSSNMIsPublishedButRetainedByNobody(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
+	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+	partition := canonicalSSNMPartition("sg-a", "as-core")
+	sendDUNA(t, association, 7, 1, 0x123456)
+
+	_, subscription, err := endpoint.SubscribeSSNM()
+	if err != nil {
+		t.Fatalf("SubscribeSSNM: %v", err)
+	}
+	defer func() { _ = subscription.Close() }()
+
+	scope := WireScope{
+		NetworkAppearance:    7,
+		NetworkAppearanceSet: true,
+		RoutingContexts:      []uint32{1},
+		RoutingContextSet:    true,
+	}
+	if err := association.DestinationStateAudit(DestinationStateAuditRequest{
+		Scope:        scope,
+		Destinations: []PointCodeRange{{PointCode: 0x123456}},
+	}); err != nil {
+		t.Fatalf("DestinationStateAudit: %v", err)
+	}
+	audit, err := drainSSNMEvent(t, subscription)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if audit.Report.Kind != SSNMDestinationStateAuditReport || audit.Report.Source != SSNMLocalReport {
+		t.Fatalf("event = %+v, want a locally originated audit", audit.Report)
+	}
+	if audit.Report.Partition != partition {
+		t.Fatalf("audit partition = %+v, want %+v", audit.Report.Partition, partition)
+	}
+
+	if err := association.SignallingCongestion(SignallingCongestionRequest{
+		Scope:              scope,
+		Destinations:       []PointCodeRange{{PointCode: 0x123456}},
+		CongestionLevel:    2,
+		CongestionLevelSet: true,
+	}); err != nil {
+		t.Fatalf("SignallingCongestion: %v", err)
+	}
+	congestion, err := drainSSNMEvent(t, subscription)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if congestion.Report.Kind != SSNMSignallingCongestionReport ||
+		congestion.Report.Source != SSNMLocalReport || !congestion.Report.PeerReported {
+		t.Fatalf("event = %+v, want this node's own congestion report", congestion.Report)
+	}
+
+	// Neither changed what the peer had reported.
+	destination := ssnmDestination(t,
+		ssnmPartitionKnowledge(t, endpoint.SSNMKnowledge(), partition), 0x123456, 0)
+	if destination.Availability.State != DestinationUnavailable ||
+		destination.Availability.Source != SSNMPeerReport {
+		t.Fatalf("a locally originated report overwrote the peer's: %+v", destination.Availability)
+	}
+	if destination.CongestionSet {
+		t.Fatalf("this node's own congestion was retained as the destination's: %+v",
+			destination.Congestion)
+	}
+}
+
+// Tightening the store budget alone is enough. A default reservation that no
+// longer fits is clamped to the budget it is carved from rather than refusing
+// the configuration, and the store bound still binds where it should.
+func TestSSNMStateConfigClampsDefaultReservationsToASmallerStore(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), &SSNMStateConfig{MaxRecords: 2})
+	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+
+	sendDUNA(t, association, 7, 1, 0x123456, 0x123457)
+	if err := association.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		params.NewAffectedPointCode(0x123458),
+		nil,
+	)); !errors.Is(err, ErrSSNMStateLimit) {
+		t.Fatalf("record beyond the tightened store budget: error = %v, want ErrSSNMStateLimit", err)
+	}
+}

@@ -335,8 +335,8 @@ func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ran
 // level 0 "No Congestion or Undefined" — a report about congestion, never about
 // reachability. A SCON therefore never restores a destination the peer has
 // reported unavailable: Section 4.5.1 makes DUNA followed by SCON an ordinary
-// sequence, and Sections 4.4.2 and 4.5.3 have the SG keep answering a DAUD for
-// that destination with DUNA until a DAVA arrives.
+// sequence, and Section 4.5.3 has the SG keep answering a DAUD for that
+// destination with DUNA until a DAVA arrives.
 func (d *destinations) setCongestionRangesWithinBudget(ranges []DestinationRange) error {
 	if d == nil || len(ranges) == 0 {
 		return nil
@@ -1570,7 +1570,7 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	// two separate statuses, so the record applySSNM writes keeps the
 	// availability the peer last reported and only DAVA restores reachability —
 	// writing this value into it made an SG answer a later DAUD for an
-	// unavailable destination with DAVA (Sections 4.4.2 and 4.5.3).
+	// unavailable destination with DAVA (Section 4.5.3).
 	state := DestinationCongested
 	if !congested {
 		state = DestinationAvailable
@@ -1660,9 +1660,10 @@ func (c *Association) handleDestinationUserPartUnavailable(d *messages.Destinati
 // message that travels ASP to SGP. An ASP that receives one reports an Error.
 //
 // At an SGP the audit is answered from the destination state we hold: Section
-// 4.4.2 has the SG respond with DUNA for unavailable destinations and DAVA for
-// available ones, so a restarting ASP can resynchronise without waiting for the
-// next spontaneous update.
+// 4.5.3 indicates the status of each requested destination "in a DUNA message
+// (if unavailable), a DAVA message (if available), or a DRST (if restricted
+// ...)", so a restarting ASP can resynchronise without waiting for the next
+// spontaneous update.
 func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAudit) error {
 	if c.role != RoleSGP {
 		return NewUnexpectedMessageError(d)
@@ -1693,8 +1694,8 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 	}
 	// An audit is a request for what this node holds, not knowledge about a
 	// destination. It is published as an event and retained by nobody: RFC
-	// 4666 Section 3.4.3 has the ASP ask, and Section 4.4.2 has the SG answer
-	// from state it already had.
+	// 4666 Section 4.5.3 has the ASP request "the current availability and
+	// congestion status" and the SGP answer from the state it already had.
 	if err := c.publishSSNMReport(SSNMReport{
 		Kind:         SSNMDestinationStateAuditReport,
 		Source:       SSNMPeerReport,

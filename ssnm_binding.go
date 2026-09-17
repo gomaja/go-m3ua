@@ -40,9 +40,9 @@ func (c *Association) ssnmWireScope(networkAppearance, routingContext *params.Pa
 //
 // An omitted parameter is not an absent scope. RFC 4666 Section 3.4 makes
 // Network Appearance optional and Routing Context conditional, and Section
-// 4.3.4.1 makes an omitted Routing Context mean every flow the Association
-// carries, so the Association's own configuration supplies what the message
-// left out.
+// 4.3.4.3 has the receiver of a message without a Routing Context "know, via
+// configuration data, which Application Server(s) the ASP is a member", so the
+// Association's own configuration supplies what the message left out.
 func (c *Association) ssnmASKeys(scope WireScope) []ASKey {
 	appearance, appearanceSet := scope.NetworkAppearance, scope.NetworkAppearanceSet
 	if !appearanceSet && c != nil && c.cfg != nil {
@@ -77,12 +77,14 @@ func (c *Association) ssnmASKeys(scope WireScope) []ASKey {
 // ssnmPartitionFor resolves one exact wire scope into the canonical identity
 // that owns knowledge carried in it.
 //
-// Two SGPs of one Signalling Gateway may label one Application Server with
-// different Routing Contexts (RFC 4666 Section 3.6.1), and every SGP of that
-// Signalling Gateway serves the same Application Server (Section 1.4.2), so the
-// owner is the Signalling Gateway and Application Server pair rather than the
-// Association or its label. An Association that resolves to no provisioned
-// Application Server owns its knowledge alone.
+// A Routing Context is "an index into a sending node's Message Distribution
+// Table" (RFC 4666 Section 1.4.2.1), so two SGPs of one Signalling Gateway may
+// label one Application Server differently, while Section 1.2 has the SGPs of
+// one SG "coordinated into a single management view ... to the supported
+// Application Servers". The owner is therefore the Signalling Gateway and
+// Application Server pair rather than the Association or its label. An
+// Association that resolves to no provisioned Application Server owns its
+// knowledge alone.
 func (c *Association) ssnmPartitionFor(key ASKey) SSNMPartition {
 	if id, resolved := c.canonicalRemoteASFor(key); resolved {
 		return SSNMPartition{
@@ -177,8 +179,10 @@ type ssnmBindingScope struct {
 // An acknowledged Routing Context is an active binding. A Routing Context in
 // an outstanding ASP Active request is a pending binding: RFC 4666 Section
 // 4.5.1 lets the SGP send DUNA, DRST, and SCON "before sending the ASP Active
-// Ack that completes the activation procedure", so the knowledge is admitted
-// while the traffic it concerns is not yet authorized.
+// Ack that completes the activation procedure", while Section 4.3.4.3 keeps
+// the ASP from sending "Data or SSNM messages for the related Routing
+// Context(s) before receiving an ASP Active Ack message". The knowledge is
+// admitted; the traffic it concerns is not yet authorized.
 func (c *Association) ssnmBindingScopes() []ssnmBindingScope {
 	if c == nil {
 		return nil

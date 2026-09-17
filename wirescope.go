@@ -8,11 +8,13 @@ package m3ua
 // put on the wire, before any resolution into local membership or canonical
 // Application Server identity.
 //
-// RFC 4666 Section 3.3.1 makes Network Appearance the SS7 network context of a
-// message, and Section 3.6.1 makes Routing Context the label one peer assigns
-// to a Routing Key. Neither is globally meaningful: the same Routing Context
-// value names different Application Servers on different peers, so the exact
-// scope is kept separate from the canonical identity it resolves to.
+// RFC 4666 Section 3.3.1 makes the Network Appearance "of local significance
+// only, coordinated between the SGP and ASP", so "the same SS7 network context
+// may be identified by different Network Appearance values, depending on which
+// SGP a message is being transmitted/received". Section 1.4.2.1 makes a
+// Routing Context "an index into a sending node's Message Distribution Table".
+// Neither is globally meaningful, so the exact scope is kept separate from the
+// canonical identity it resolves to.
 //
 // Both presence bits are load bearing. Zero is a legitimate explicit value for
 // either parameter, and a Routing Context list may legitimately be empty, so
