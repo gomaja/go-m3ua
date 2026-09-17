@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,7 +82,7 @@ func TestReverseDriverRecordsFailureWithoutReplacingForwardEvidence(testContext 
 		testContext.Fatalf("reset: %v", err)
 	}
 	driver := &reverseDriver{ctx: context.Background(), cpuStatPath: control.cpuStatPath}
-	control.runReverseCohort(driver, specification, peer.URL)
+	control.runReverseCohort(driver, reverseRun{specification: specification, reverseControl: peer.URL, generation: control.currentGeneration()})
 	if control.reverseError == "" || !strings.Contains(control.reverseError, "reset receiver") {
 		testContext.Fatalf("reverseError = %q, want the reset failure preserved", control.reverseError)
 	}
@@ -321,7 +322,7 @@ func TestReverseCohortDrivesOnlyTheConfiguredDestination(testContext *testing.T)
 		Mode: modeBidirectional, Direction: directionASPToSGP, PeerControl: elsewhere.URL,
 	}
 	driver := &reverseDriver{ctx: context.Background(), cpuStatPath: control.cpuStatPath}
-	control.runReverseCohort(driver, specification, control.reverseControl)
+	control.runReverseCohort(driver, reverseRun{specification: specification, reverseControl: control.reverseControl, generation: control.currentGeneration()})
 
 	if elsewhereRequests.Load() != 0 {
 		testContext.Fatalf("the reverse cohort made %d request(s) to the host named in the specification", elsewhereRequests.Load())
@@ -393,5 +394,147 @@ func TestRunReceiverControlTakesItsReverseDestinationFromConfiguration(testConte
 	}
 	if control.cpuStatPath != config.CPUStatPath || control.expectedAssociations != config.Associations {
 		testContext.Fatalf("control = %+v, want it built from the configuration", control)
+	}
+}
+
+// A reverse cohort outlives the call that launched it. If it finishes after a
+// reset, the cohort it belonged to is gone — the reset cleared the reverse
+// fields and advanced the generation — so its records and its error belong
+// nowhere, and certainly not to the cohort that has taken its place.
+func TestReverseCohortCompletionForAnEndedCohortIsDiscarded(testContext *testing.T) {
+	peer, _ := countingPeer(testContext)
+	control := newReceiverControl(1, 16)
+	control.setAssociationReady(0, 15)
+	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 10\nnr_throttled 0\n")
+	control.reverseControl = peer.URL
+	specification := runSpec{
+		Cohort: "bidi", Seed: 1, Associations: 1, Expected: 2, Duration: time.Second,
+		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 2, Payload: workload128,
+		Mode: modeBidirectional, Direction: directionASPToSGP, PeerControl: peer.URL,
+	}
+	if err := control.reset(specification); err != nil {
+		testContext.Fatalf("reset: %v", err)
+	}
+	stale := control.currentGeneration()
+	if err := control.start(); err != nil {
+		testContext.Fatalf("start: %v", err)
+	}
+	if err := control.stop(); err != nil {
+		testContext.Fatalf("stop: %v", err)
+	}
+	if err := control.reset(specification); err != nil {
+		testContext.Fatalf("second reset: %v", err)
+	}
+	if control.currentGeneration() == stale {
+		testContext.Fatal("the second reset did not advance the generation")
+	}
+
+	driver := &reverseDriver{ctx: context.Background(), cpuStatPath: control.cpuStatPath}
+	control.runReverseCohort(driver, reverseRun{specification: specification, reverseControl: peer.URL, generation: stale})
+
+	if control.reverseSender != nil || control.reverseReceiver != nil || control.reverseError != "" {
+		testContext.Fatalf("an ended cohort's reverse run landed in the new cohort: sender recorded %t, receiver recorded %t, error %q",
+			control.reverseSender != nil, control.reverseReceiver != nil, control.reverseError)
+	}
+	record := control.result()
+	if record.Reverse != nil || record.ReverseReceiver != nil || record.ReverseError != "" {
+		testContext.Fatalf("the new cohort's record carries the ended cohort's reverse evidence: %+v", record)
+	}
+}
+
+// start must capture the generation, not leave the completion to read
+// whichever generation is current when it happens to finish. The peer holds
+// the reverse driver's first control call while the receiver is reset onto a
+// new cohort, so the completion lands strictly after the generation advanced.
+func TestStartCapturesTheGenerationTheReverseCohortBelongsTo(testContext *testing.T) {
+	control := newReceiverControl(1, 16)
+	control.setAssociationReady(0, 15)
+	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 10\nnr_throttled 0\n")
+
+	entered := make(chan struct{})
+	advanced := make(chan struct{})
+	var once sync.Once
+	peer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(entered) })
+		<-advanced
+		http.Error(writer, "conflict", http.StatusConflict)
+	}))
+	defer peer.Close()
+
+	control.reverseControl = peer.URL
+	control.driver = &reverseDriver{ctx: context.Background(), cpuStatPath: control.cpuStatPath}
+	specification := runSpec{
+		Cohort: "bidi", Seed: 1, Associations: 1, Expected: 2, Duration: time.Second,
+		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 2, Payload: workload128,
+		Mode: modeBidirectional, Direction: directionASPToSGP, PeerControl: peer.URL,
+	}
+	if err := control.reset(specification); err != nil {
+		testContext.Fatalf("reset: %v", err)
+	}
+	if err := control.start(); err != nil {
+		testContext.Fatalf("start: %v", err)
+	}
+	<-entered
+	if err := control.stop(); err != nil {
+		testContext.Fatalf("stop: %v", err)
+	}
+	if err := control.reset(specification); err != nil {
+		testContext.Fatalf("second reset: %v", err)
+	}
+	close(advanced)
+
+	// The in-flight cohort now completes: the peer has answered and the
+	// driver returns straight into its completion path, so a second is far
+	// more than the store would need. Its outcome must never appear in the
+	// cohort that replaced it.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		control.mutex.Lock()
+		sender, receiver, reverseErr := control.reverseSender, control.reverseReceiver, control.reverseError
+		control.mutex.Unlock()
+		if sender != nil || receiver != nil || reverseErr != "" {
+			testContext.Fatalf("the previous cohort's reverse run landed in the new cohort: sender recorded %t, receiver recorded %t, error %q",
+				sender != nil, receiver != nil, reverseErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The counterpart to discarding a stale completion: a reverse cohort that
+// finishes while its own cohort is still current must be recorded in full,
+// errors included. Discarding everything would hide a failed reverse
+// direction behind an apparently clean forward one.
+func TestReverseCohortCompletionForTheActiveCohortIsRecorded(testContext *testing.T) {
+	peer, _ := countingPeer(testContext)
+	control := newReceiverControl(1, 16)
+	control.setAssociationReady(0, 15)
+	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 10\nnr_throttled 0\n")
+	control.reverseControl = peer.URL
+	control.driver = &reverseDriver{ctx: context.Background(), cpuStatPath: control.cpuStatPath}
+	specification := runSpec{
+		Cohort: "bidi", Seed: 1, Associations: 1, Expected: 2, Duration: time.Second,
+		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 2, Payload: workload128,
+		Mode: modeBidirectional, Direction: directionASPToSGP, PeerControl: peer.URL,
+	}
+	if err := control.reset(specification); err != nil {
+		testContext.Fatalf("reset: %v", err)
+	}
+	if err := control.start(); err != nil {
+		testContext.Fatalf("start: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		control.mutex.Lock()
+		sender, receiver, reverseErr := control.reverseSender, control.reverseReceiver, control.reverseError
+		control.mutex.Unlock()
+		if sender != nil && receiver != nil && reverseErr != "" {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			testContext.Fatalf("the active cohort's reverse run was never recorded: sender recorded %t, receiver recorded %t, error %q",
+				sender != nil, receiver != nil, reverseErr)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

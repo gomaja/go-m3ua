@@ -261,12 +261,24 @@ func (control *receiverControl) start() error {
 	control.phase = receiverMeasuring
 	specification := control.spec
 	driver := control.driver
-	reverseControl := control.reverseControl
+	// Everything the reverse cohort is pinned to is captured here, under the
+	// mutex that commits the cohort.
+	run := reverseRun{specification: specification, reverseControl: control.reverseControl, generation: control.generation}
 	control.mutex.Unlock()
 	if specification.Mode == modeBidirectional && driver != nil {
-		go control.runReverseCohort(driver, specification, reverseControl)
+		go control.runReverseCohort(driver, run)
 	}
 	return nil
+}
+
+// reverseRun is the reverse cohort as start committed it: the specification,
+// the configured control destination, and the cohort generation the run
+// belongs to. The generation is captured at start rather than read at
+// completion, because the run outlives the call that launched it.
+type reverseRun struct {
+	specification  runSpec
+	reverseControl string
+	generation     uint64
 }
 
 // runReverseCohort drives the SGP-to-ASP direction of a bidirectional cohort
@@ -274,7 +286,8 @@ func (control *receiverControl) start() error {
 // measurement path as the forward direction. Its records are reported under
 // reverse and reverse_receiver in this receiver's results; its errors never
 // replace the forward records.
-func (control *receiverControl) runReverseCohort(driver *reverseDriver, specification runSpec, reverseControl string) {
+func (control *receiverControl) runReverseCohort(driver *reverseDriver, run reverseRun) {
+	specification := run.specification
 	reverseConfig := commandConfig{
 		Mode:        modeThroughput,
 		Direction:   directionSGPToASP,
@@ -289,12 +302,19 @@ func (control *receiverControl) runReverseCohort(driver *reverseDriver, specific
 		// it, and taking it from configuration here means a specification can
 		// never redirect this request even if it reached the cohort by some
 		// other path.
-		PeerControl: reverseControl,
+		PeerControl: run.reverseControl,
 		CPUStatPath: driver.cpuStatPath,
 	}
 	sender, receiver, err := runSenderCohort(driver.ctx, reverseConfig, driver.associations, nil, specification.Cohort+"-reverse", specification.Duration)
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
+	// A reverse cohort outlives the start that launched it. If a reset has
+	// advanced the generation meanwhile, the cohort these records describe no
+	// longer exists — the reset cleared its reverse fields — and the records
+	// belong to no live cohort rather than to the one that replaced it.
+	if control.generation != run.generation {
+		return
+	}
 	control.reverseSender = &sender
 	control.reverseReceiver = &receiver
 	if err != nil {
