@@ -6,7 +6,9 @@ package m3ua
 
 import (
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -501,5 +503,91 @@ func bindMTPRouteToEveryGateway(config *ASPConfig, mtpRoute MTPRouteID) {
 			MTPRoute: mtpRoute,
 			AS:       SGASKey{SignallingGateway: gateway.ID, ApplicationServer: "as-core"},
 		})
+	}
+}
+
+// The congestion policy is the one callback an application hands to the ASP
+// inventory. NewEndpoint takes the function value it was given and nothing
+// else: the Endpoint neither reads the caller's ASPRoutingConfig again at
+// transfer time, nor calls the policy while holding the route state it
+// protects, so a policy may ask the Endpoint what it knows before answering.
+func TestEndpointOwnsTheASPCongestionPolicyItWasGiven(t *testing.T) {
+	config := validASPConfig()
+	useSignallingGateways(config, "sg-a")
+
+	var endpoint *Endpoint
+	var provided, replaced, reentrant atomic.Int64
+	config.Routing.CongestionPolicy = func(uint8, uint8, bool) bool {
+		provided.Add(1)
+		// RFC 4666 Appendix A.2.2 route selection is the Endpoint's, so a
+		// policy that consults the Endpoint's own view must not be blocked by
+		// it. The probe runs on its own goroutine and is abandoned rather than
+		// waited on, so a policy invoked under the route lock records a missed
+		// probe here instead of deadlocking the whole package.
+		if endpoint != nil {
+			reached := make(chan struct{})
+			go func() {
+				defer close(reached)
+				_ = endpoint.MTPDestinationStatuses()
+			}()
+			select {
+			case <-reached:
+				reentrant.Add(1)
+			case <-time.After(time.Second):
+			}
+		}
+		return true
+	}
+
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	// Repointing the caller's field afterwards is the mutation a retained
+	// configuration would follow.
+	config.Routing.CongestionPolicy = func(uint8, uint8, bool) bool {
+		replaced.Add(1)
+		return false
+	}
+
+	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+	t.Cleanup(func() { _ = association.Close() })
+	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	association.cfg.PeerSGP = &SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}
+	association.noteRoutingContextsAcked(params.NewRoutingContext(1))
+	capture := &mtpTransferCapture{}
+	association.dataWriter = capture.write
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("provisioned Association was not attached")
+	}
+	if got := provided.Load() + replaced.Load(); got != 0 {
+		t.Fatalf("building the inventory evaluated the congestion policy %d times", got)
+	}
+
+	if _, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: params.NewProtocolDataPayload(
+			0x111111, 0x123456, params.ServiceIndSCCP, 0, 0, 1, []byte("x")),
+	}); err != nil {
+		t.Fatalf("MTPTransfer: %v", err)
+	}
+
+	// One evaluation for the unknown level and one for each of levels 1 to 3.
+	if got := provided.Load(); got != 4 {
+		t.Fatalf("the configured congestion policy was evaluated %d times, want 4", got)
+	}
+	if got := replaced.Load(); got != 0 {
+		t.Fatalf("the Endpoint followed the caller's field to a replacement policy %d times", got)
+	}
+	if got := reentrant.Load(); got != 4 {
+		t.Fatalf("the congestion policy reached the Endpoint %d of 4 times: it is "+
+			"evaluated while the route state it consults is locked", got)
+	}
+	if capture.count() != 1 {
+		t.Fatalf("the transfer carried %d messages, want 1", capture.count())
 	}
 }
