@@ -3,10 +3,22 @@ package perfstats
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func interval(lower, upper float64) *BacklogInterval {
 	return &BacklogInterval{Lower: lower, Upper: upper}
+}
+
+// unstalled is stall evidence from a run whose longest send call is in the
+// range the fixture actually measures: hundreds of microseconds, three orders
+// of magnitude below the threshold.
+func unstalled() *StallObservation {
+	return &StallObservation{LongestSend: 262144 * time.Nanosecond}
+}
+
+func stalled() *StallObservation {
+	return &StallObservation{LongestSend: 1200 * time.Millisecond}
 }
 
 // BacklogResolution is derived in backlog.go from the fixture's whole-message
@@ -66,7 +78,7 @@ func TestBacklogIntervalVerdictBoundaries(testContext *testing.T) {
 }
 
 func TestDecideRunPassRequiresNotGrowingLossFreeValidFixture(testContext *testing.T) {
-	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-3.4, 0)})
+	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-3.4, 0), Stall: unstalled()})
 	if decision.Decision != Pass || decision.Backlog != BacklogNotGrowing || decision.Reason != "" {
 		testContext.Fatalf("DecideRun() = %+v, want clean pass", decision)
 	}
@@ -78,10 +90,10 @@ func TestDecideRunNeverPassesWithStraddlingOrMissingEvidence(testContext *testin
 		evidence RunEvidence
 		reason   string
 	}{
-		{name: "straddling", evidence: RunEvidence{FixtureValid: true, Interval: interval(-3.4, 3.53)}, reason: BacklogUnresolvedReason},
-		{name: "missing interval", evidence: RunEvidence{FixtureValid: true}, reason: BacklogEvidenceMissingReason},
-		{name: "NaN interval", evidence: RunEvidence{FixtureValid: true, Interval: interval(math.NaN(), 0)}, reason: BacklogEvidenceMissingReason},
-		{name: "reversed interval", evidence: RunEvidence{FixtureValid: true, Interval: interval(1, -1)}, reason: BacklogEvidenceMissingReason},
+		{name: "straddling", evidence: RunEvidence{FixtureValid: true, Interval: interval(-3.4, 3.53), Stall: unstalled()}, reason: BacklogUnresolvedReason},
+		{name: "missing interval", evidence: RunEvidence{FixtureValid: true, Stall: unstalled()}, reason: BacklogEvidenceMissingReason},
+		{name: "NaN interval", evidence: RunEvidence{FixtureValid: true, Interval: interval(math.NaN(), 0), Stall: unstalled()}, reason: BacklogEvidenceMissingReason},
+		{name: "reversed interval", evidence: RunEvidence{FixtureValid: true, Interval: interval(1, -1), Stall: unstalled()}, reason: BacklogEvidenceMissingReason},
 	}
 	for _, test := range tests {
 		testContext.Run(test.name, func(testContext *testing.T) {
@@ -97,7 +109,7 @@ func TestDecideRunNeverPassesWithStraddlingOrMissingEvidence(testContext *testin
 }
 
 func TestDecideRunFailsOnGrowingBacklog(testContext *testing.T) {
-	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(1.5, 3)})
+	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(1.5, 3), Stall: unstalled()})
 	if decision.Decision != Fail || decision.Backlog != BacklogGrowing || decision.Reason != BacklogGrowingReason {
 		testContext.Fatalf("DecideRun() = %+v, want growing failure", decision)
 	}
@@ -124,7 +136,7 @@ func TestDecideRunFailsOnAnyCountedFailure(testContext *testing.T) {
 	for index, mutate := range counters {
 		var failing RunCounters
 		mutate(&failing)
-		decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-1, 0), Counters: failing})
+		decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-1, 0), Counters: failing, Stall: unstalled()})
 		if decision.Decision != Fail || decision.Reason != DeliveryFailuresReason {
 			testContext.Fatalf("counter %d: DecideRun() = %+v, want delivery-failures failure", index, decision)
 		}
@@ -141,7 +153,7 @@ func FuzzBacklogIntervalNeverPassesOnInvalidEvidence(fuzzContext *testing.F) {
 	fuzzContext.Add(BacklogResolution, math.Nextafter(BacklogResolution, math.Inf(1)))
 	fuzzContext.Add(math.Nextafter(BacklogResolution, math.Inf(1)), 4.0)
 	fuzzContext.Fuzz(func(testContext *testing.T, lower, upper float64) {
-		evidence := RunEvidence{FixtureValid: true, Interval: &BacklogInterval{Lower: lower, Upper: upper}}
+		evidence := RunEvidence{FixtureValid: true, Interval: &BacklogInterval{Lower: lower, Upper: upper}, Stall: unstalled()}
 		decision := DecideRun(evidence)
 		switch decision.Backlog {
 		case BacklogNotGrowing, BacklogGrowing, BacklogIndeterminate:
@@ -197,6 +209,7 @@ func TestDecideRunNeverPassesALossyRunWhoseCountersWrap(testContext *testing.T) 
 		FixtureValid: true,
 		Interval:     interval(-1, 0),
 		Counters:     RunCounters{Missing: math.MaxUint64, Duplicate: 1},
+		Stall:        unstalled(),
 	})
 	if decision.Decision != Fail || decision.Reason != DeliveryFailuresReason {
 		testContext.Fatalf("DecideRun() = %+v, want Fail with %q", decision, DeliveryFailuresReason)
@@ -208,7 +221,7 @@ func TestDecideRunNeverPassesALossyRunWhoseCountersWrap(testContext *testing.T) 
 // zero therefore makes not-growing unreachable for exactly the runs the rule
 // exists to accept, and no capacity or throughput row can ever reach Pass.
 func TestSteadyStateRunCanReachPass(testContext *testing.T) {
-	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-0.5, 0.5)})
+	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-0.5, 0.5), Stall: unstalled()})
 	if decision.Decision != Pass || decision.Backlog != BacklogNotGrowing || decision.Reason != "" {
 		testContext.Fatalf("DecideRun() = %+v, want a clean pass for a flat run", decision)
 	}

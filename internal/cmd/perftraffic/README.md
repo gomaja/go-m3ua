@@ -293,6 +293,15 @@ configuration and observations:
   records the candidate and can never name the baseline. The two are separate,
   separately labelled fields and are never interchangeable.
 
+`send_duration.max_ns` is the exact observed maximum send-call duration, unlike
+the `p50`/`p95`/`p99` fields beside it, which are power-of-two bucket bounds.
+The acceptance decision in `internal/perfstats` reads it as the predeclared
+transport-stall signal: a send call blocked for at least one second has spanned
+at least one SCTP minimum retransmission timeout (RFC 9260 Section 16), and the
+run it came from is reported inconclusive with the stall named rather than
+dropped or charged to the candidate. The fixture itself does not apply that
+rule; it records the measurement.
+
 Payload identity is `(cohort, association, flow, sequence)`. Thirty-two logical
 flows map stably to the configured associations and to 16 SLS values. The
 receiver validates deterministic payload bytes plus per-flow OPC, DPC, SCCP or

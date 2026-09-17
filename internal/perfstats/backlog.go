@@ -21,9 +21,10 @@ import "math"
 // here.
 //
 // Inputs come from the perftraffic fixture's sender-window accounting: the
-// first-to-last-quarter mean backlog-change interval plus the fixture-validity
-// and loss counters. A capacity or throughput row may pass only with a
-// not-growing interval, a loss-free run and a valid fixture.
+// first-to-last-quarter mean backlog-change interval, the transport-stall
+// evidence predeclared in stall.go, and the fixture-validity and loss
+// counters. A capacity or throughput row may pass only with a not-growing
+// interval, an unstalled run, a loss-free run and a valid fixture.
 
 type BacklogVerdict string
 
@@ -173,43 +174,84 @@ func (counters RunCounters) Total() uint64 {
 // RunEvidence is one full run's evidence for the sustained-rate decision.
 // Interval is nil when the fixture could not produce a bounded sender-window
 // backlog-change interval; missing evidence is inconclusive, never a pass.
+//
+// Stall is the run's transport-stall evidence. It is nil when the caller
+// supplied none, and a run whose freedom from stalls was never observed cannot
+// be credited with a sustained rate, so nil is inconclusive rather than read
+// as "no stall".
 type RunEvidence struct {
 	FixtureValid bool
 	Interval     *BacklogInterval
 	Counters     RunCounters
+	Stall        *StallObservation
 }
 
-// RunDecision is the per-run sustained-rate outcome.
+// RunDecision is the per-run sustained-rate outcome. Stall echoes whatever
+// stall evidence the run carried, whichever gate decided it, so a detected
+// stall reaches the report instead of disappearing behind another reason.
 type RunDecision struct {
-	Decision Decision       `json:"decision"`
-	Backlog  BacklogVerdict `json:"backlog"`
-	Reason   string         `json:"reason,omitempty"`
+	Decision Decision          `json:"decision"`
+	Backlog  BacklogVerdict    `json:"backlog"`
+	Reason   string            `json:"reason,omitempty"`
+	Stall    *StallObservation `json:"stall,omitempty"`
 }
 
 // DecideRun decides whether one run demonstrates a sustained, loss-free rate.
-// The evaluation order is fixed: fixture validity and loss counters first
-// (failures), then evidence presence and validity (inconclusive), then the
-// predeclared interval rule.
+// The evaluation order is fixed:
+//
+//  1. A detected transport stall is inconclusive, ahead of every other gate.
+//     The fixture offers its schedule open loop, so a transport block of at
+//     least one minimum retransmission timeout propagates into everything
+//     measured through it: the outstanding-cap refusals, the delivery counters
+//     and the backlog interval all sit downstream of the block, and none of
+//     them can be attributed to the candidate. The run is not dropped and no
+//     threshold moves for it; it is reported inconclusive with the stall
+//     named. The cost of this order is stated rather than hidden: a stall the
+//     candidate itself caused is reported inconclusive too. It is never
+//     reported as a pass and the stall is always carried into the report, so a
+//     campaign of such runs certifies nothing.
+//  2. Fixture validity, then the loss counters: failures. A stall that was
+//     merely never observed cannot excuse demonstrated loss.
+//  3. Missing stall evidence: inconclusive. An unobserved run is not credited.
+//  4. Backlog evidence presence and validity: inconclusive.
+//  5. The predeclared interval rule.
 func DecideRun(evidence RunEvidence) RunDecision {
 	backlog := BacklogIndeterminate
 	if evidence.Interval != nil {
 		backlog = evidence.Interval.Verdict()
 	}
+	// The echoed observation is a copy. The decision is reported and encoded
+	// elsewhere, and handing back the caller's own pointer would let either
+	// side alter the other's record of the run after the fact.
+	decide := func(decision Decision, reason string) RunDecision {
+		result := RunDecision{Decision: decision, Backlog: backlog, Reason: reason}
+		if evidence.Stall != nil {
+			echoed := *evidence.Stall
+			result.Stall = &echoed
+		}
+		return result
+	}
+	if evidence.Stall != nil && evidence.Stall.Stalled() {
+		return decide(Inconclusive, TransportStallReason)
+	}
 	if !evidence.FixtureValid {
-		return RunDecision{Decision: Fail, Backlog: backlog, Reason: FixtureInvalidReason}
+		return decide(Fail, FixtureInvalidReason)
 	}
 	if evidence.Counters.Total() != 0 {
-		return RunDecision{Decision: Fail, Backlog: backlog, Reason: DeliveryFailuresReason}
+		return decide(Fail, DeliveryFailuresReason)
+	}
+	if evidence.Stall == nil {
+		return decide(Inconclusive, StallEvidenceMissingReason)
 	}
 	if evidence.Interval == nil || !evidence.Interval.Valid() {
-		return RunDecision{Decision: Inconclusive, Backlog: backlog, Reason: BacklogEvidenceMissingReason}
+		return decide(Inconclusive, BacklogEvidenceMissingReason)
 	}
 	switch backlog {
 	case BacklogGrowing:
-		return RunDecision{Decision: Fail, Backlog: backlog, Reason: BacklogGrowingReason}
+		return decide(Fail, BacklogGrowingReason)
 	case BacklogNotGrowing:
-		return RunDecision{Decision: Pass, Backlog: backlog}
+		return decide(Pass, "")
 	default:
-		return RunDecision{Decision: Inconclusive, Backlog: backlog, Reason: BacklogUnresolvedReason}
+		return decide(Inconclusive, BacklogUnresolvedReason)
 	}
 }

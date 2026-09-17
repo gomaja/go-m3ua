@@ -97,10 +97,10 @@ than one message, so those intervals stay wider than the resolution and those
 rows stay `indeterminate`. The change makes the rule falsifiable; it does not
 make runs pass.
 
-A capacity or throughput run may pass only with `not-growing`, zero counted
-failures (missing, duplicate, invalid, reordered,
-late-after-stop, capped, send errors, echo deadline failures) and a
-fixture-valid run. A growing interval or any counted failure is a failure;
+A capacity or throughput run may pass only with `not-growing`, no detected
+transport stall, observed stall evidence, zero counted failures (missing,
+duplicate, invalid, reordered, late-after-stop, capped, send errors, echo
+deadline failures) and a fixture-valid run. A growing interval or any counted failure is a failure;
 everything else is inconclusive. The counted failures are summed with
 saturating addition, so counters large enough to wrap a `uint64` sum still fail
 the run rather than presenting a zero total.
@@ -113,6 +113,62 @@ row reports `not-growing`, and lowering it so that an inconvenient row reports
 admissible reason to change it is a change in how the fixture counts, and that
 change must be stated in the derivation. An interval that spans the resolution
 stays inconclusive rather than being interpreted as stability.
+
+## Predeclared transport-stall detection
+
+`stall.go` fixes the transport-stall detection **before** any capacity campaign
+run, on the same terms as the backlog rule: the signal and the threshold are
+named in advance and neither may be changed to move a result.
+
+The reference environment intermittently stalls the SCTP transport for about a
+second. It reproduces on both go-sctp v1.0.2 and v1.0.4, so it is a property of
+that environment and not a candidate regression. The response is not to drop
+the affected rows, not to widen a threshold for them, and not to exclude them
+as outliers. A run whose evidence a stall contaminated is reported
+`inconclusive` with the stall named, and the stall is carried in the decision
+so it reaches the report.
+
+- **Signal**: `send_duration.max_ns` from the fixture's sender record. The
+  fixture already records it: each `WritePDWithRoutingContext` call is timed
+  and fed to the send-duration histogram, whose `Max` is the exact observed
+  maximum rather than a power-of-two bucket bound (only p50, p95 and p99 are
+  bucket bounds). It measures the transport blocking the sender directly. The
+  offered schedule is open loop, so a transport block shows up first, and
+  unambiguously, as a send call that does not return; the outstanding-cap
+  refusals and missing deliveries that follow are its consequences. Dispatch
+  lag and echo round-trip time also rise when the fixture is merely loaded, so
+  no derived counter is used in its place.
+- **Threshold**: one second, taken from SCTP's own retransmission floor.
+  [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html) Section 16 recommends
+  `RTO.Min` of 1 second and `RTO.Initial` of 1 second, so no SCTP
+  retransmission timeout can expire in less than a second, and a single send
+  call blocked that long spans at least one whole minimum retransmission
+  timeout. Nothing in the fixture's send path accounts for it: the scheduler
+  releases work in 100 microsecond quanta, Nagle is disabled, SACK delay is
+  zero, and measured send calls run three to four orders of magnitude shorter.
+  RFC 9260 is the current SCTP Proposed Standard; the RFC Editor record and the
+  IETF Datatracker agree that no RFC obsoletes or updates it, and none of its
+  errata touch Section 16.
+
+`DecideRun` applies a fixed evaluation order:
+
+1. a **detected** stall is `inconclusive`, ahead of every other gate, because
+   the fixture offers its schedule open loop and everything measured through
+   the block sits downstream of it. The cost of that order is stated rather
+   than hidden: a stall the candidate itself caused is reported inconclusive
+   too. It is never reported as a pass, and the stall always reaches the
+   report, so a campaign of such runs certifies nothing;
+2. fixture validity, then the loss counters: failures. A stall that was merely
+   never observed cannot excuse demonstrated loss;
+3. **missing** stall evidence is `inconclusive`: a run whose freedom from
+   stalls was never observed is not credited with a sustained rate;
+4. missing or invalid backlog evidence is `inconclusive`;
+5. the predeclared interval rule above.
+
+The threshold must not be tuned after observing results. Raising it so a
+stalled row reports clean, and lowering it so an inconvenient row can be
+dismissed as environmental, are both the post-hoc threshold change the budgets
+forbid.
 
 `perfstats.DecideRun` is the boundary at which this rule produces a result.
 The traffic fixture at `internal/cmd/perftraffic` answers a different and
@@ -146,9 +202,29 @@ never widened into a pass; `no-passing-rate` is a failure.
 
 The CLI at `internal/cmd/perfcapacity` reads one strict JSON request with the
 search parameters, per-run fixture sender records in execution order, and the
-validation repetitions. Each run is decided by the predeclared backlog rule
-above; a missing or unbounded sender window, an insufficient-sample backlog
-change or absent interval bounds is missing evidence and stays inconclusive.
-Exit statuses are 0 pass, 1 fail, 2 inconclusive, 3 invalid input. A pass
-covers only the search and repetition rules; it does not establish
+validation repetitions. Each run is decided by the predeclared backlog and
+stall rules above; a missing or unbounded sender window, an insufficient-sample
+backlog change or absent interval bounds is missing evidence and stays
+inconclusive. Exit statuses are 0 pass, 1 fail, 2 inconclusive, 3 invalid
+input.
+
+Each run record must carry `send_duration.max_ns` and a `manifest`. Neither is
+optional: a record without the send-duration maximum cannot show whether a
+stall contaminated it, and a record without a manifest cannot say where it ran
+or which baseline it was assessed against. A record missing either is invalid
+input rather than a run decided on the fields that happen to be present.
+
+The response states the environment the campaign ran in, in `environments`:
+the toolchain, platform, `GOMAXPROCS`, go-sctp module and version, the
+fixture's own `vcs_revision`, and `assessed_baseline_revision`, the baseline
+commit required by issue #36. The last two are different commits and are never
+interchangeable. Distinct environments are listed in first-appearance order
+rather than merged, so a campaign whose runs did not all come from one
+environment shows that instead of presenting one it cannot support. Each run
+decision also reports its `stall`, so the measured longest send call reaches
+the report whether or not it decided the run.
+
+A pass covers only the search and repetition rules; it does not establish
 environmental validity, latency or CPU budgets, or independent-peer behavior.
+Stating the environment is a record of where the runs happened, not a
+certification that the environment was fit.
