@@ -318,6 +318,223 @@ func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ran
 	return d.recordLimitErrorLocked(refused)
 }
 
+// setCongestionRangesWithinBudget records an RFC 4666 Section 3.4.4 congestion
+// report against the availability the store already holds.
+//
+// Section 4.5.2.2 keeps availability and congestion apart as two statuses of
+// the same destination, and the Section 3.4.4 Congestion Level table makes
+// level 0 "No Congestion or Undefined" — a report about congestion, never about
+// reachability. A SCON therefore never restores a destination the peer has
+// reported unavailable: Section 4.5.1 makes DUNA followed by SCON an ordinary
+// sequence, and Sections 4.4.2 and 4.5.3 have the SG keep answering a DAUD for
+// that destination with DUNA until a DAVA arrives.
+func (d *destinations) setCongestionRangesWithinBudget(ranges []DestinationRange) error {
+	if d == nil || len(ranges) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.state == nil {
+		d.state = make(map[destinationKey]destinationRecord)
+	}
+	normalized := make([]DestinationRange, len(ranges))
+	queries := make([]destinationAvailabilityQuery, len(ranges))
+	for index, rangeValue := range ranges {
+		rangeValue = normalizeDestinationRange(rangeValue)
+		normalized[index] = rangeValue
+		queries[index] = destinationAvailabilityQuery{
+			scope: destinationKey{
+				networkAppearance:    rangeValue.NetworkAppearance,
+				networkAppearanceSet: rangeValue.NetworkAppearanceSet,
+				routingContext:       rangeValue.RoutingContext,
+				routingContextSet:    rangeValue.RoutingContextSet,
+			},
+			pointCode: rangeValue.PointCode,
+			mask:      rangeValue.Mask,
+		}
+	}
+	availabilities := d.availabilitiesLocked(queries)
+
+	refused := 0
+	for index, rangeValue := range normalized {
+		rangeValue.State = congestedDestinationState(availabilities[index], rangeValue)
+		if !d.storeLocked(destinationRecord{rangeValue: rangeValue}) {
+			refused++
+		}
+	}
+	return d.recordLimitErrorLocked(refused)
+}
+
+// setScopedCongestionRangesWithinBudget is setCongestionRangesWithinBudget for
+// a report naming several Routing Contexts.
+//
+// One message applies to every context it lists, but those contexts need not
+// share an availability, so the report is grouped by the availability it has to
+// preserve and recorded once per group rather than once for the whole list.
+func (d *destinations) setScopedCongestionRangesWithinBudget(
+	routingContexts []uint32,
+	ranges []DestinationRange,
+) error {
+	if d == nil || len(routingContexts) == 0 || len(ranges) == 0 {
+		return nil
+	}
+
+	canonical, _ := canonicalRoutingContextScope(routingContexts)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.state == nil {
+		d.state = make(map[destinationKey]destinationRecord)
+	}
+	normalized := make([]DestinationRange, len(ranges))
+	queries := make([]destinationAvailabilityQuery, 0, len(ranges)*len(canonical))
+	for index, rangeValue := range ranges {
+		rangeValue = normalizeDestinationRange(rangeValue)
+		rangeValue.RoutingContext = 0
+		rangeValue.RoutingContextSet = true
+		normalized[index] = rangeValue
+		for _, routingContext := range canonical {
+			queries = append(queries, destinationAvailabilityQuery{
+				scope: destinationKey{
+					networkAppearance:    rangeValue.NetworkAppearance,
+					networkAppearanceSet: rangeValue.NetworkAppearanceSet,
+					routingContext:       routingContext,
+					routingContextSet:    true,
+				},
+				pointCode: rangeValue.PointCode,
+				mask:      rangeValue.Mask,
+			})
+		}
+	}
+	availabilities := d.availabilitiesLocked(queries)
+
+	refused := 0
+	for index, rangeValue := range normalized {
+		groups := make([]destinationCongestionGroup, 0, 1)
+		for position, routingContext := range canonical {
+			groups = appendDestinationCongestionGroup(groups,
+				availabilities[index*len(canonical)+position], routingContext)
+		}
+		for _, group := range groups {
+			stored := rangeValue
+			stored.State = congestedDestinationState(group.availability, stored)
+			groupContexts, groupScope := canonicalRoutingContextScope(group.routingContexts)
+			if !d.storeLocked(destinationRecord{
+				rangeValue:          stored,
+				routingContexts:     groupContexts,
+				routingContextScope: groupScope,
+			}) {
+				refused++
+			}
+		}
+	}
+	return d.recordLimitErrorLocked(refused)
+}
+
+type destinationCongestionGroup struct {
+	availability    DestinationState
+	routingContexts []uint32
+}
+
+func appendDestinationCongestionGroup(
+	groups []destinationCongestionGroup,
+	availability DestinationState,
+	routingContext uint32,
+) []destinationCongestionGroup {
+	for index := range groups {
+		if groups[index].availability == availability {
+			groups[index].routingContexts = append(groups[index].routingContexts, routingContext)
+			return groups
+		}
+	}
+	return append(groups, destinationCongestionGroup{
+		availability:    availability,
+		routingContexts: []uint32{routingContext},
+	})
+}
+
+type destinationAvailabilityQuery struct {
+	scope     destinationKey
+	pointCode uint32
+	mask      uint8
+}
+
+type destinationCoverKey struct {
+	prefix uint32
+	mask   uint8
+}
+
+// availabilitiesLocked is the availability each congestion report has to
+// preserve: the availability carried by the newest record covering that range
+// in that scope, or Available for a destination the peer has not reported on,
+// which is what an unreported destination already resolves to.
+//
+// One SSNM message may name up to MaxAffectedPointCodesPerSSNM destinations, so
+// the answers are resolved in a single pass over the store rather than one scan
+// each. A stored range covers a query only at a mask the query itself can name,
+// and there are at most 25 of those, so the queries index by covering prefix and
+// the traversal is a map lookup per record.
+func (d *destinations) availabilitiesLocked(queries []destinationAvailabilityQuery) []DestinationState {
+	availabilities := make([]DestinationState, len(queries))
+	for index := range availabilities {
+		availabilities[index] = DestinationAvailable
+	}
+	if len(queries) == 0 || len(d.state) == 0 {
+		return availabilities
+	}
+
+	covering := make(map[destinationCoverKey][]int, len(queries))
+	for index, query := range queries {
+		for mask := effectiveDestinationMask(query.mask); mask <= 24; mask++ {
+			key := destinationCoverKey{
+				prefix: destinationRangePrefix(query.pointCode, mask),
+				mask:   mask,
+			}
+			covering[key] = append(covering[key], index)
+		}
+	}
+
+	newest := make([]uint64, len(queries))
+	for _, record := range d.state {
+		key := destinationCoverKey{
+			prefix: destinationRangePrefix(record.rangeValue.PointCode, record.rangeValue.Mask),
+			mask:   effectiveDestinationMask(record.rangeValue.Mask),
+		}
+		for _, index := range covering[key] {
+			if record.sequence <= newest[index] ||
+				!destinationRecordScopeMatches(record, queries[index].scope) {
+				continue
+			}
+			newest[index] = record.sequence
+			availabilities[index] = destinationAvailabilityOf(record.rangeValue.State)
+		}
+	}
+	return availabilities
+}
+
+// destinationAvailabilityOf recovers the availability a stored state carries.
+// DestinationCongested shares the field with the availability values and is
+// only ever installed for a destination that is otherwise available, so it
+// reads back as DestinationAvailable.
+func destinationAvailabilityOf(state DestinationState) DestinationState {
+	if state == DestinationCongested {
+		return DestinationAvailable
+	}
+	return state
+}
+
+// congestedDestinationState folds a congestion report into the single stored
+// availability field. Congestion shows as DestinationCongested only for a
+// destination that is otherwise available; an unavailable or restricted one
+// keeps its availability and retains the reported level alongside it. An
+// explicit level 0 is congestion abatement, so it congests nothing.
+func congestedDestinationState(availability DestinationState, rangeValue DestinationRange) DestinationState {
+	congested := !rangeValue.CongestionLevelSet || rangeValue.CongestionLevel != 0
+	if congested && availability == DestinationAvailable {
+		return DestinationCongested
+	}
+	return availability
+}
+
 func canonicalRoutingContextScope(routingContexts []uint32) ([]uint32, string) {
 	canonical := append([]uint32(nil), routingContexts...)
 	sort.Slice(canonical, func(i, j int) bool { return canonical[i] < canonical[j] })
@@ -866,6 +1083,9 @@ func (c *Association) applySSNM(
 	statusScope := newDestinationStatusScope(networkAppearance, routingContext)
 	statuses := make([]*DestinationStatus, 0, len(pcs))
 	updates := make([]DestinationRange, 0, len(pcs))
+	// SCON is the one message that reports congestion rather than reachability.
+	// Its record carries the level and leaves the destination's availability to
+	// the availability messages, as RFC 4666 Section 4.5.2.2 requires.
 	congestionUpdate := update != nil && update.kind == aspRouteCongestionUpdate
 
 	for index, pc := range pcs {
@@ -901,9 +1121,14 @@ func (c *Association) applySSNM(
 	}
 	c.destinations.setRecordLimit(c.destinationRecordLimit())
 	var retained error
-	if routingContextSet {
+	switch {
+	case congestionUpdate && routingContextSet:
+		retained = c.destinations.setScopedCongestionRangesWithinBudget(routingContexts, updates)
+	case congestionUpdate:
+		retained = c.destinations.setCongestionRangesWithinBudget(updates)
+	case routingContextSet:
 		retained = c.destinations.setScopedRangesWithinBudget(routingContexts, updates)
-	} else {
+	default:
 		retained = c.destinations.setRangesWithinBudget(updates)
 	}
 	// The status channel reports what the peer said, which stands whether or not
@@ -1286,6 +1511,13 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 		})
 	}
 
+	// This is the state reported to the MTP3-User, which is this message's own
+	// report: congestion, or the abatement an explicit level 0 announces. It is
+	// deliberately not the destination's availability. Section 4.5.2.2 makes the
+	// two separate statuses, so the record applySSNM writes keeps the
+	// availability the peer last reported and only DAVA restores reachability —
+	// writing this value into it made an SG answer a later DAUD for an
+	// unavailable destination with DAVA (Sections 4.4.2 and 4.5.3).
 	state := DestinationCongested
 	if !congested {
 		state = DestinationAvailable

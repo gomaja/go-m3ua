@@ -137,6 +137,13 @@ func (c *Association) SignallingCongestion(request SignallingCongestionRequest) 
 // is delivered to concerned active ASPs. RFC 4666 Sections 3.4.4 and 4.5.1
 // make an explicit level zero congestion abatement; an omitted level remains a
 // congestion report.
+//
+// Congestion is recorded against the availability the SG already holds. RFC
+// 4666 Section 4.5.2.2 makes availability and congestion two separate statuses
+// of the same destination, so neither a congestion report nor the explicit
+// level zero that abates it returns an unavailable destination to service —
+// only DAVA does, and Sections 4.4.2 and 4.5.3 have the audit answered
+// accordingly.
 func (e *Endpoint) SignallingCongestion(request SignallingCongestionRequest) error {
 	if e == nil || e.role != RoleSGP {
 		return ErrUnsupportedRole
@@ -155,10 +162,6 @@ func (e *Endpoint) SignallingCongestion(request SignallingCongestionRequest) err
 		return err
 	}
 
-	state := DestinationCongested
-	if request.CongestionLevelSet && request.CongestionLevel == 0 {
-		state = DestinationAvailable
-	}
 	storageScope := request.Scope
 	if !storageScope.NetworkAppearanceSet {
 		storageScope.NetworkAppearance, storageScope.NetworkAppearanceSet, err =
@@ -168,15 +171,15 @@ func (e *Endpoint) SignallingCongestion(request SignallingCongestionRequest) err
 		}
 	}
 	ranges := destinationRangesForSSNM(
-		storageScope, request.Destinations, state,
+		storageScope, request.Destinations,
 		request.CongestionLevel, request.CongestionLevelSet,
 	)
 	// An SG that cannot retain the report must not deliver it either: the audit
 	// it owes its ASPs afterwards would contradict what it had just sent.
 	if request.Scope.RoutingContextSet {
-		err = e.destinations.setScopedRangesWithinBudget(request.Scope.RoutingContexts, ranges)
+		err = e.destinations.setScopedCongestionRangesWithinBudget(request.Scope.RoutingContexts, ranges)
 	} else {
-		err = e.destinations.setRangesWithinBudget(ranges)
+		err = e.destinations.setCongestionRangesWithinBudget(ranges)
 	}
 	if err != nil {
 		return err
@@ -529,10 +532,12 @@ func resolveEndpointSSNMNetworkAppearance(
 	return networkAppearance, networkAppearanceSet, nil
 }
 
+// destinationRangesForSSNM builds the records for a locally originated
+// congestion report. State is left to the store, which resolves it from the
+// availability the destination already has.
 func destinationRangesForSSNM(
 	scope SSNMScope,
 	destinations []PointCodeRange,
-	state DestinationState,
 	congestionLevel uint8,
 	congestionLevelSet bool,
 ) []DestinationRange {
@@ -543,7 +548,6 @@ func destinationRangesForSSNM(
 			NetworkAppearanceSet: scope.NetworkAppearanceSet,
 			PointCode:            destination.PointCode,
 			Mask:                 destination.Mask,
-			State:                state,
 			CongestionLevel:      congestionLevel,
 			CongestionLevelSet:   congestionLevelSet,
 		}

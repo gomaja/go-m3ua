@@ -8,10 +8,122 @@ import (
 	"errors"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
+
+// Availability and congestion are two different statuses of the same
+// destination. RFC 4666 Section 4.5.2.2 keeps them apart, and the Congestion
+// Level table in Section 3.4.4 makes level 0 "No Congestion or Undefined" — a
+// statement about congestion, never about reachability. Section 4.5.1 makes
+// DUNA followed by SCON an ordinary sequence, and Sections 4.4.2 and 4.5.3 have
+// the SG answer a later DAUD with DUNA until a DAVA arrives. Folding a SCON
+// into the availability field told an ASP to resume traffic into a destination
+// the SG had just reported unreachable.
+func TestSCONNeverChangesDestinationAvailability(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		level     *params.Param
+		wantState DestinationState
+	}{
+		{"explicit level zero", params.NewCongestionIndications(0), DestinationUnavailable},
+		{"explicit level", params.NewCongestionIndications(2), DestinationUnavailable},
+		{"omitted level", nil, DestinationUnavailable},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, _ := ssnmConn(t)
+			if err := conn.handleDestinationUnavailable(
+				messages.NewDestinationUnavailable(nil, nil, apc(0x1234), nil)); err != nil {
+				t.Fatalf("handleDestinationUnavailable() error = %v, want nil", err)
+			}
+			if got := conn.DestinationState(0x1234); got != DestinationUnavailable {
+				t.Fatalf("state after DUNA = %v, want %v", got, DestinationUnavailable)
+			}
+
+			if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+				nil, nil, apc(0x1234), nil, tt.level, nil)); err != nil {
+				t.Fatalf("handleSignallingCongestion() error = %v, want nil", err)
+			}
+			if got := conn.DestinationState(0x1234); got != tt.wantState {
+				t.Errorf("state after SCON = %v, want %v: only a DAVA restores reachability",
+					got, tt.wantState)
+			}
+		})
+	}
+}
+
+// A destination that is congested and then reported available keeps the
+// availability the DAVA installed, and a SCON that follows a DAVA is still
+// visible as congestion.
+func TestSCONCongestsOnlyAnAvailableDestination(t *testing.T) {
+	conn, _ := ssnmConn(t)
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, nil, apc(0x1234), nil, params.NewCongestionIndications(2), nil)); err != nil {
+		t.Fatalf("handleSignallingCongestion() error = %v, want nil", err)
+	}
+	if got := conn.DestinationState(0x1234); got != DestinationCongested {
+		t.Fatalf("state after SCON = %v, want %v", got, DestinationCongested)
+	}
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, nil, apc(0x1234), nil, params.NewCongestionIndications(0), nil)); err != nil {
+		t.Fatalf("handleSignallingCongestion() abatement error = %v, want nil", err)
+	}
+	if got := conn.DestinationState(0x1234); got != DestinationAvailable {
+		t.Errorf("state after abatement = %v, want %v", got, DestinationAvailable)
+	}
+}
+
+// The wire consequence at an SGP: a congestion report, including the explicit
+// level zero that abates congestion, must not make a DAUD for an unavailable
+// destination answer DAVA. RFC 4666 Section 4.4.2 answers the audit from the
+// availability the SG holds.
+func TestSGPCongestionReportKeepsDAUDAnsweredWithDUNA(t *testing.T) {
+	endpoint, first, firstSent, _, _ := multiAssociationDialedSGPFixture(t)
+	const pointCode = 0x123456
+	if err := first.ReportDestinationStateForNetworkAndRoutingContext(
+		7, 1, pointCode, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("report destination unavailable: %v", err)
+	}
+	if err := endpoint.SignallingCongestion(SignallingCongestionRequest{
+		Scope: SSNMScope{
+			NetworkAppearance: 7, NetworkAppearanceSet: true,
+			RoutingContexts: []uint32{1}, RoutingContextSet: true,
+		},
+		Destinations:       []PointCodeRange{{PointCode: pointCode}},
+		CongestionLevel:    0,
+		CongestionLevelSet: true,
+	}); err != nil {
+		t.Fatalf("record congestion abatement: %v", err)
+	}
+
+	status, ok := endpoint.DestinationStatus(DestinationStatusKey{
+		NetworkAppearance: 7, NetworkAppearanceSet: true,
+		RoutingContext: 1, RoutingContextSet: true,
+		PointCode: pointCode,
+	})
+	if !ok || status.State != DestinationUnavailable {
+		t.Errorf("retained status = %+v, %v, want state %v",
+			status, ok, DestinationUnavailable)
+	}
+
+	firstSent.reset()
+	if err := first.handleDestinationStateAudit(messages.NewDestinationStateAudit(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		apc(pointCode),
+		nil,
+	)); err != nil {
+		t.Fatalf("handle DAUD: %v", err)
+	}
+	got := typeNames(ssnmMessages(firstSent.snapshot()))
+	want := []string{"Destination Unavailable"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("DAUD answered with %v, want %v: the destination is still unreachable", got, want)
+	}
+}
 
 // DestinationRanges is documented as a lossless snapshot. RFC 4666 Section
 // 3.4.4's Congestion Indications parameter is the only thing that distinguishes
@@ -215,6 +327,112 @@ func TestRefusedSSNMRecordIsStillReported(t *testing.T) {
 	}
 }
 
+// One SCON applies to every Routing Context it names, and those contexts need
+// not share an availability: RFC 4666 Section 4.5 scopes destination state per
+// Application Server traffic flow. The congestion report has to preserve each
+// one separately.
+func TestSCONPreservesPerRoutingContextAvailability(t *testing.T) {
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 0, 1, 2)
+	const pointCode = uint32(0x101001)
+
+	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, params.NewRoutingContext(1), apc(pointCode), nil)); err != nil {
+		t.Fatalf("scoped DUNA: %v", err)
+	}
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, params.NewRoutingContext(0, 1, 2), apc(pointCode), nil,
+		params.NewCongestionIndications(2), nil)); err != nil {
+		t.Fatalf("multi-context SCON: %v", err)
+	}
+
+	for _, test := range []struct {
+		routingContext uint32
+		want           DestinationState
+	}{
+		{routingContext: 0, want: DestinationCongested},
+		{routingContext: 1, want: DestinationUnavailable},
+		{routingContext: 2, want: DestinationCongested},
+	} {
+		scope := conn.destinationKey(nil, pointCode)
+		scope.routingContext = test.routingContext
+		scope.routingContextSet = true
+		state, known := conn.destinations.lookup(scope)
+		if !known || state != test.want {
+			t.Errorf("RC %d = (%v, known=%v), want %v and known",
+				test.routingContext, state, known, test.want)
+		}
+	}
+}
+
+// Availability is resolved over the ranges that actually cover the congestion
+// report, exactly as a lookup resolves it: a wider unavailable range covers a
+// point code inside it, and a single unavailable point code does not make the
+// range around it unavailable.
+func TestSCONResolvesAvailabilityThroughCoveringRangesOnly(t *testing.T) {
+	t.Run("a covering range is preserved", func(t *testing.T) {
+		conn, _ := ssnmConn(t)
+		if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+			nil, nil, params.NewAffectedPointCodeWithMask(8, 0x123400), nil)); err != nil {
+			t.Fatalf("range DUNA: %v", err)
+		}
+		if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+			nil, nil, apc(0x123412), nil, params.NewCongestionIndications(2), nil)); err != nil {
+			t.Fatalf("exact SCON: %v", err)
+		}
+		if got := conn.DestinationState(0x123412); got != DestinationUnavailable {
+			t.Errorf("state = %v, want %v: the SCON sits inside an unavailable range",
+				got, DestinationUnavailable)
+		}
+	})
+
+	t.Run("a narrower record does not cover the report", func(t *testing.T) {
+		conn, _ := ssnmConn(t)
+		// The unavailable point code is the range's own base, so the two records
+		// differ only by mask: a record narrower than the report never covers
+		// it, however the point codes line up.
+		if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+			nil, nil, apc(0x123400), nil)); err != nil {
+			t.Fatalf("exact DUNA: %v", err)
+		}
+		if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+			nil, nil, params.NewAffectedPointCodeWithMask(8, 0x123400), nil,
+			params.NewCongestionIndications(2), nil)); err != nil {
+			t.Fatalf("range SCON: %v", err)
+		}
+		scope := conn.destinationKey(nil, 0x123400)
+		scope.routingContext = 1
+		scope.routingContextSet = true
+		state, known := conn.destinations.lookupRange(scope, 0x123400, 8)
+		if !known || state != DestinationCongested {
+			t.Errorf("range state = (%v, known=%v), want %v: one point code does not make the range unreachable",
+				state, known, DestinationCongested)
+		}
+		if got := conn.DestinationState(0x123412); got != DestinationCongested {
+			t.Errorf("exact state = %v, want %v: the newer range covers it", got, DestinationCongested)
+		}
+	})
+
+	t.Run("the newest covering record wins", func(t *testing.T) {
+		conn, _ := ssnmConn(t)
+		if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+			nil, nil, params.NewAffectedPointCodeWithMask(8, 0x123400), nil)); err != nil {
+			t.Fatalf("range DUNA: %v", err)
+		}
+		if err := conn.handleDestinationAvailable(messages.NewDestinationAvailable(
+			nil, nil, apc(0x123412), nil)); err != nil {
+			t.Fatalf("exact DAVA: %v", err)
+		}
+		if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+			nil, nil, apc(0x123412), nil, params.NewCongestionIndications(2), nil)); err != nil {
+			t.Fatalf("exact SCON: %v", err)
+		}
+		if got := conn.DestinationState(0x123412); got != DestinationCongested {
+			t.Errorf("state = %v, want %v: the DAVA is newer than the range that covers it",
+				got, DestinationCongested)
+		}
+	})
+}
+
 // Zero is "not configured" throughout ASPConfig, so a store that was never
 // given a limit uses the package default rather than refusing everything.
 func TestDestinationStoreWithoutAConfiguredLimitUsesTheDefault(t *testing.T) {
@@ -279,5 +497,45 @@ func TestSGPDestinationReportsStopAtTheRecordBudget(t *testing.T) {
 	}
 	if got := len(ssnmMessages(firstSent.snapshot())); got != 0 {
 		t.Errorf("refused congestion report emitted %d SSNM messages, want 0", got)
+	}
+}
+
+// Resolving the availability a congestion report preserves must cost one pass
+// over the retained records, not one per Affected Point Code. RFC 4666 Section
+// 3.4.4 lets one SCON name as many destinations as the Affected Point Code
+// parameter holds, so a per-point-code scan multiplies the work a peer can buy
+// with a single message by the size of the store.
+//
+// This is a shape guard rather than a benchmark: the budget is two orders of
+// magnitude above the measured cost, and a per-point-code scan overruns it.
+func TestSCONCostStaysLinearInAffectedPointCodes(t *testing.T) {
+	conn, _ := ssnmConn(t)
+	affected := make([]uint32, DefaultMaxAffectedPointCodesPerSSNM)
+	for index := range affected {
+		affected[index] = uint32(index) + 1<<20
+	}
+	// Leave the congestion report room inside the budget, so what is measured is
+	// the resolution work rather than a refusal.
+	for pointCode := 0; pointCode < DefaultMaxSSNMDestinationRecords-len(affected); pointCode++ {
+		if err := duna(conn, uint32(pointCode)); err != nil {
+			t.Fatalf("filling the store: %v", err)
+		}
+	}
+
+	const rounds = 10
+	start := time.Now()
+	for round := 0; round < rounds; round++ {
+		if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+			nil, nil, params.NewAffectedPointCode(affected...), nil,
+			params.NewCongestionIndications(2), nil)); err != nil {
+			t.Fatalf("SCON round %d: %v", round, err)
+		}
+	}
+	elapsed := time.Since(start)
+	t.Logf("SCON naming %d destinations against %d retained records: %v per message",
+		len(affected), retainedDestinationRecords(conn), elapsed/rounds)
+	if budget := time.Second; elapsed > budget {
+		t.Errorf("%d SCON messages took %v, over the %v budget: the availability a congestion report preserves is being resolved per point code",
+			rounds, elapsed, budget)
 	}
 }
