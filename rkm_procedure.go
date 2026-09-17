@@ -380,6 +380,7 @@ func (c *Association) handleDeregistrationRequest(message *messages.Deregistrati
 	registry.deregistrationResponseWritten(c, results)
 	for _, deregistration := range successful {
 		c.removeDynamicASKey(deregistration.key.RoutingContext, false)
+		c.forgetCanonicalRemoteAS(deregistration.key.RoutingContext)
 		if c.as != nil && !c.hasStaticApplicationServerMembership(deregistration.key) {
 			c.as.deregisterDynamicASP(c, deregistration.key, deregistration.removeAS)
 		}
@@ -771,8 +772,14 @@ func (c *Association) removeRequesterRoutingKeyVersion(routingContext uint32, ve
 	defer c.rkmLifecycleMu.Unlock()
 	local := c.isIPSPDoubleExchange()
 	key, removed := c.removeDynamicASKeyVersion(routingContext, local, version)
-	if !local && removed && c.as != nil && !c.hasStaticApplicationServerMembership(key) {
-		c.as.deregisterDynamicASP(c, key, true)
+	if !local && removed {
+		c.forgetCanonicalRemoteAS(routingContext)
+		if c.as != nil && !c.hasStaticApplicationServerMembership(key) {
+			c.as.deregisterDynamicASP(c, key, true)
+		}
+	}
+	if removed {
+		c.syncSSNMBindings()
 	}
 }
 
@@ -826,6 +833,10 @@ type preparedRegistrationResult struct {
 	key        ASKey
 	routingKey RoutingKey
 	local      bool
+	// remoteAS is the canonical Application Server this registration named. It
+	// is what resolves a dynamically assigned Routing Context back to the
+	// identity that owns SSNM knowledge carried under it.
+	remoteAS RemoteASID
 }
 
 type assignedRegistrationResultScope struct {
@@ -930,15 +941,20 @@ func (c *Association) applyRegistrationResults(applications []registrationResult
 			key:        key,
 			routingKey: effectiveRoutingKey,
 			local:      local,
+			remoteAS:   result.RemoteAS.ApplicationServer,
 		})
 	}
 
 	for _, registration := range prepared {
 		c.addDynamicASKey(registration.key, registration.routingKey, registration.local)
-		if !registration.local && c.as != nil {
-			c.as.registerDynamicASP(c, registration.key)
+		if !registration.local {
+			c.noteCanonicalRemoteAS(registration.key.RoutingContext, registration.remoteAS)
+			if c.as != nil {
+				c.as.registerDynamicASP(c, registration.key)
+			}
 		}
 	}
+	c.syncSSNMBindings()
 	return nil
 }
 

@@ -39,20 +39,23 @@ type SignallingGatewayProcessID string
 // RemoteASID is the local name this ASP gives one Application Server it
 // reaches through one Signalling Gateway.
 //
-// RFC 4666 Section 1.4.2 makes an Application Server a logical entity of the
-// signalling network, reached through the SGPs of its Signalling Gateway. The
-// name is local: it is not carried on the wire, and equal names in different
-// Signalling Gateways are different Application Servers.
+// RFC 4666 Section 1.2 makes an Application Server "a logical entity serving a
+// specific Routing Key", and has the SGPs of one Signalling Gateway
+// "coordinated into a single management view to the SS7 network and to the
+// supported Application Servers". The name is local: it is not carried on the
+// wire, and equal names in different Signalling Gateways are different
+// Application Servers.
 type RemoteASID string
 
 // SGASKey is the canonical identity of one Application Server this ASP reaches
 // through one Signalling Gateway.
 //
 // The wire scope that names that Application Server belongs to the individual
-// SGP, not to this identity: RFC 4666 Section 3.6.1 makes Routing Context a
-// label the peer assigns, so two SGPs of one Signalling Gateway may label the
-// same Application Server differently, and the same Routing Context value in
-// another Signalling Gateway means something else entirely.
+// SGP, not to this identity: RFC 4666 Section 1.4.2.1 makes a Routing Context
+// "an index into a sending node's Message Distribution Table", so two SGPs of
+// one Signalling Gateway may label the same Application Server differently,
+// and the same Routing Context value in another Signalling Gateway means
+// something else entirely.
 type SGASKey struct {
 	SignallingGateway SignallingGatewayID
 	ApplicationServer RemoteASID
@@ -244,7 +247,11 @@ type aspSGPConfig struct {
 	id                 SignallingGatewayProcessID
 	applicationServers []aspRemoteAS
 	asByID             map[RemoteASID]int
-	routes             []aspSGPRoute
+	// asByStaticKey resolves one exact wire scope back to the canonical
+	// Application Server it was provisioned for. SSNM arrives labelled with
+	// the scope, while the knowledge it carries is owned by the identity.
+	asByStaticKey map[ASKey]RemoteASID
+	routes        []aspSGPRoute
 }
 
 type aspSignallingGatewayConfig struct {
@@ -431,8 +438,9 @@ func compileSGPApplicationServers(
 		id:                 sgp.ID,
 		applicationServers: make([]aspRemoteAS, 0, len(sgp.ApplicationServers)),
 		asByID:             make(map[RemoteASID]int, len(sgp.ApplicationServers)),
+		asByStaticKey:      make(map[ASKey]RemoteASID, len(sgp.ApplicationServers)),
 	}
-	staticKeys := make(map[ASKey]RemoteASID, len(sgp.ApplicationServers))
+	staticKeys := compiled.asByStaticKey
 	dynamicKeys := make([]canonicalRoutingKey, 0, len(sgp.ApplicationServers))
 	contextless := false
 	for _, applicationServer := range sgp.ApplicationServers {

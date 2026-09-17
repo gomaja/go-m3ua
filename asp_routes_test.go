@@ -265,8 +265,15 @@ func TestASPRouteStateRejectsOversizedSSNMAtomically(t *testing.T) {
 		params.NewAffectedPointCode(0x123456, 0x123457),
 		nil,
 	))
-	if !errors.Is(err, ErrASPRouteStateLimit) {
-		t.Fatalf("oversized SSNM error = %v, want ErrASPRouteStateLimit", err)
+	// The Affected Point Code bound is applied to the encoded parameter,
+	// before any point code is expanded, so an oversized message is refused as
+	// a local resource event rather than after the route layer has already
+	// built a status for every point code the peer named.
+	if !errors.Is(err, ErrSSNMOversizedReport) {
+		t.Fatalf("oversized SSNM error = %v, want ErrSSNMOversizedReport", err)
+	}
+	if !errors.Is(err, ErrSSNMResourceLoss) {
+		t.Fatalf("oversized SSNM error = %v, want it to report resource loss", err)
 	}
 	endpoint.aspRoutes.mu.RLock()
 	availabilityRecords := len(endpoint.aspRoutes.availability)

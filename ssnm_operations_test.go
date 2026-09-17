@@ -14,7 +14,7 @@ import (
 
 func TestSSNMOperationValidation(t *testing.T) {
 	validAudit := DestinationStateAuditRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			NetworkAppearance:    7,
 			NetworkAppearanceSet: true,
 			RoutingContexts:      []uint32{1},
@@ -38,10 +38,10 @@ func TestSSNMOperationValidation(t *testing.T) {
 			{name: "empty destinations", role: RoleASP, state: StateASPActive, request: withAuditDestinations(validAudit, nil), want: ErrMissingAffectedPointCode},
 			{name: "point code too large", role: RoleASP, state: StateASPActive, request: withAuditDestinations(validAudit, []PointCodeRange{{PointCode: 0x1000000}}), want: ErrInvalidParameterValue},
 			{name: "mask too large", role: RoleASP, state: StateASPActive, request: withAuditDestinations(validAudit, []PointCodeRange{{PointCode: 1, Mask: 25}}), want: ErrInvalidParameterValue},
-			{name: "present empty RC", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, SSNMScope{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContextSet: true}), want: ErrMissingRoutingContext},
-			{name: "duplicate RC", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, SSNMScope{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContexts: []uint32{1, 1}, RoutingContextSet: true}), want: ErrInvalidParameterValue},
-			{name: "unknown RC", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, SSNMScope{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContexts: []uint32{2}, RoutingContextSet: true}), want: ErrInvalidRoutingContext},
-			{name: "wrong Network Appearance", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, SSNMScope{NetworkAppearance: 8, NetworkAppearanceSet: true, RoutingContexts: []uint32{1}, RoutingContextSet: true}), want: ErrInvalidNetworkAppearance},
+			{name: "present empty RC", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, WireScope{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContextSet: true}), want: ErrMissingRoutingContext},
+			{name: "duplicate RC", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, WireScope{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContexts: []uint32{1, 1}, RoutingContextSet: true}), want: ErrInvalidParameterValue},
+			{name: "unknown RC", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, WireScope{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContexts: []uint32{2}, RoutingContextSet: true}), want: ErrInvalidRoutingContext},
+			{name: "wrong Network Appearance", role: RoleASP, state: StateASPActive, request: withAuditScope(validAudit, WireScope{NetworkAppearance: 8, NetworkAppearanceSet: true, RoutingContexts: []uint32{1}, RoutingContextSet: true}), want: ErrInvalidNetworkAppearance},
 			{name: "invalid UTF-8 info", role: RoleASP, state: StateASPActive, request: withAuditInfo(validAudit, string([]byte{0xff})), want: ErrInvalidParameterValue},
 			{name: "oversized info", role: RoleASP, state: StateASPActive, request: withAuditInfo(validAudit, string(make([]byte, 256))), want: ErrInvalidParameterValue},
 		}
@@ -212,7 +212,7 @@ func TestSSNMOperationAssociationWire(t *testing.T) {
 	}
 
 	audit := DestinationStateAuditRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			NetworkAppearance:    0,
 			NetworkAppearanceSet: true,
 			RoutingContexts:      []uint32{2, 1},
@@ -298,7 +298,7 @@ func TestSSNMOperationContextlessAssociationOmitsRoutingContext(t *testing.T) {
 		return message.MarshalLen(), nil
 	}
 	if err := association.DestinationStateAudit(DestinationStateAuditRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			NetworkAppearance:    7,
 			NetworkAppearanceSet: true,
 		},
@@ -316,7 +316,7 @@ func TestSSNMOperationEndpointFanout(t *testing.T) {
 	t.Run("SCON selects exact AS and records level", func(t *testing.T) {
 		endpoint, _, firstSent, second, secondSent := multiAssociationDialedSGPFixture(t)
 		if err := endpoint.SignallingCongestion(SignallingCongestionRequest{
-			Scope: SSNMScope{
+			Scope: WireScope{
 				NetworkAppearance:    7,
 				NetworkAppearanceSet: true,
 				RoutingContexts:      []uint32{2},
@@ -363,7 +363,7 @@ func TestSSNMOperationEndpointFanout(t *testing.T) {
 	t.Run("DUPU selects exact AS", func(t *testing.T) {
 		endpoint, first, firstSent, _, secondSent := multiAssociationDialedSGPFixture(t)
 		if err := endpoint.DestinationUserPartUnavailable(DestinationUserPartUnavailableRequest{
-			Scope: SSNMScope{
+			Scope: WireScope{
 				NetworkAppearance:    7,
 				NetworkAppearanceSet: true,
 				RoutingContexts:      []uint32{1},
@@ -421,7 +421,7 @@ func TestSSNMOperationEndpointFanout(t *testing.T) {
 		association.signalWriter = capture.write
 
 		if err := endpoint.SignallingCongestion(SignallingCongestionRequest{
-			Scope:        SSNMScope{NetworkAppearance: 7, NetworkAppearanceSet: true},
+			Scope:        WireScope{NetworkAppearance: 7, NetworkAppearanceSet: true},
 			Destinations: []PointCodeRange{{PointCode: 1}},
 		}); err != nil {
 			t.Fatalf("broad SCON: %v", err)
@@ -449,7 +449,7 @@ func TestSSNMOperationEndpointFanout(t *testing.T) {
 
 func TestSSNMOperationEndpointCongestionPresenceAndAbatement(t *testing.T) {
 	endpoint, _, _, second, secondSent := multiAssociationDialedSGPFixture(t)
-	scope := SSNMScope{
+	scope := WireScope{
 		NetworkAppearance:    7,
 		NetworkAppearanceSet: true,
 		RoutingContexts:      []uint32{2},
@@ -509,7 +509,7 @@ func TestSSNMOperationEndpointCongestionPresenceAndAbatement(t *testing.T) {
 func TestSSNMOperationEndpointOmittedNetworkAppearanceUsesUnambiguousAS(t *testing.T) {
 	endpoint, _, firstSent, _, secondSent := multiAssociationDialedSGPFixture(t)
 	if err := endpoint.SignallingCongestion(SignallingCongestionRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			RoutingContexts:   []uint32{2},
 			RoutingContextSet: true,
 		},
@@ -559,7 +559,7 @@ func TestSSNMOperationEndpointRejectsOmittedMixedNetworkAppearances(t *testing.T
 		}
 	}
 	err = endpoint.SignallingCongestion(SignallingCongestionRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			RoutingContexts: []uint32{1, 2}, RoutingContextSet: true,
 		},
 		Destinations: []PointCodeRange{{PointCode: 1}},
@@ -607,7 +607,7 @@ func TestSSNMOperationPartialFanoutErrorPreservesEveryOutcome(t *testing.T) {
 	}
 
 	err = endpoint.DestinationUserPartUnavailable(DestinationUserPartUnavailableRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			NetworkAppearance: 7, NetworkAppearanceSet: true,
 			RoutingContexts: []uint32{1}, RoutingContextSet: true,
 		},
@@ -672,7 +672,7 @@ func TestSSNMOperationConcurrentAssociationCloseReturnsTypedFailure(t *testing.T
 	result := make(chan error, 1)
 	go func() {
 		result <- endpoint.SignallingCongestion(SignallingCongestionRequest{
-			Scope: SSNMScope{
+			Scope: WireScope{
 				NetworkAppearance: 7, NetworkAppearanceSet: true,
 				RoutingContexts: []uint32{1}, RoutingContextSet: true,
 			},
@@ -764,7 +764,7 @@ func TestSSNMOperationRevalidatesActiveScopeAfterFanoutSelection(t *testing.T) {
 	result := make(chan error, 1)
 	go func() {
 		result <- endpoint.SignallingCongestion(SignallingCongestionRequest{
-			Scope: SSNMScope{
+			Scope: WireScope{
 				NetworkAppearance: 7, NetworkAppearanceSet: true,
 				RoutingContexts: []uint32{1}, RoutingContextSet: true,
 			},
@@ -808,7 +808,7 @@ func TestSSNMOperationRevalidatesActiveScopeAfterFanoutSelection(t *testing.T) {
 func TestSSNMOperationDAUDRetainsCongestionLevel(t *testing.T) {
 	endpoint, first, firstSent, _, _ := multiAssociationDialedSGPFixture(t)
 	request := SignallingCongestionRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			NetworkAppearance: 7, NetworkAppearanceSet: true,
 			RoutingContexts: []uint32{1}, RoutingContextSet: true,
 		},
@@ -848,7 +848,7 @@ func TestSSNMOperationDAUDRetainsCongestionLevel(t *testing.T) {
 func assertSSNMOperationScope(
 	t *testing.T,
 	networkAppearance, routingContext, affectedPointCode *params.Param,
-	wantScope SSNMScope,
+	wantScope WireScope,
 	wantDestinations []PointCodeRange,
 ) {
 	t.Helper()
@@ -942,7 +942,7 @@ func withAuditDestinations(request DestinationStateAuditRequest, destinations []
 	return request
 }
 
-func withAuditScope(request DestinationStateAuditRequest, scope SSNMScope) DestinationStateAuditRequest {
+func withAuditScope(request DestinationStateAuditRequest, scope WireScope) DestinationStateAuditRequest {
 	request.Scope = scope
 	return request
 }

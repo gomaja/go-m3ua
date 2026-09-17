@@ -321,6 +321,11 @@ type EndpointConfig struct {
 	SGP                  *SGPConfig
 	ApplicationServers   *ApplicationServerConfig
 	RoutingKeyManagement *RoutingKeyManagementConfig
+	// SSNMState bounds the route-independent SSNM state store. It applies to
+	// every role: an SGP retains what it publishes and what its peers report
+	// about themselves exactly as an ASP retains what its Signalling Gateways
+	// report. A nil configuration selects the package defaults.
+	SSNMState *SSNMStateConfig
 }
 
 func validateApplicationServerConfig(config *ApplicationServerConfig) error {

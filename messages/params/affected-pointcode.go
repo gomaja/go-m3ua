@@ -63,6 +63,27 @@ func (p *Param) AffectedPointCode() uint32 {
 	return apcs[0]
 }
 
+// AffectedPointCodeCount reports how many Affected Point Codes Param carries,
+// without decoding any of them.
+//
+// The count is what a receiver has to bound before it expands the parameter:
+// RFC 4666 Section 3.4.1 lets one message carry an unbounded list, and the
+// expanded form -- a point code, a mask, and a status per entry -- is many
+// times the size of the encoded one. Reading the length first keeps an
+// oversized message from costing memory proportional to what the peer claimed.
+//
+// A payload that is not a whole number of 32-bit words encodes no point code,
+// exactly as AffectedPointCodes decodes none from it.
+func (p *Param) AffectedPointCodeCount() int {
+	if p == nil || p.Tag != AffectedPointCode {
+		return 0
+	}
+	if len(p.Data)%4 != 0 {
+		return 0
+	}
+	return len(p.Data) / 4
+}
+
 // AffectedPointCodes returns every Affected Point Code from Param, each without
 // its Mask.
 func (p *Param) AffectedPointCodes() []uint32 {

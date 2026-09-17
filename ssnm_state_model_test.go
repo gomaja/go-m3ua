@@ -88,7 +88,7 @@ func TestSGPCongestionReportKeepsDAUDAnsweredWithDUNA(t *testing.T) {
 		t.Fatalf("report destination unavailable: %v", err)
 	}
 	if err := endpoint.SignallingCongestion(SignallingCongestionRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			NetworkAppearance: 7, NetworkAppearanceSet: true,
 			RoutingContexts: []uint32{1}, RoutingContextSet: true,
 		},
@@ -576,7 +576,7 @@ func TestSGPDestinationReportsStopAtTheRecordBudget(t *testing.T) {
 
 	firstSent.reset()
 	congestion := endpoint.SignallingCongestion(SignallingCongestionRequest{
-		Scope: SSNMScope{
+		Scope: WireScope{
 			NetworkAppearance: 7, NetworkAppearanceSet: true,
 			RoutingContexts: []uint32{1}, RoutingContextSet: true,
 		},

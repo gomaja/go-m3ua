@@ -364,11 +364,6 @@ func (r *aspRoutes) apply(
 		r.mu.Unlock()
 		return nil
 	}
-	if len(statuses) > r.config.maxAffectedPointCodesPerSSNM {
-		r.mu.Unlock()
-		return fmt.Errorf("%w: SSNM carries %d Affected Point Codes, limit %d",
-			ErrASPRouteStateLimit, len(statuses), r.config.maxAffectedPointCodesPerSSNM)
-	}
 	pendingKeys := make([]aspRouteRangeKey, 0, len(statuses))
 	pendingSet := make(map[aspRouteRangeKey]struct{}, len(statuses))
 	newRecordsPerRoute := make(map[aspRouteStateBudgetKey]int)
