@@ -669,3 +669,136 @@ func TestASPInventoryWithoutRoutingKeepsDataAuthorization(t *testing.T) {
 	default:
 	}
 }
+
+// One canonical Application Server is one membership however many local routes
+// name it and however many ASPs serve it. RFC 4666 Section 1.4.2 makes the
+// Application Server the entity an ASP serves; the routes an ASP keeps towards
+// it are its own bookkeeping and change nothing about that membership.
+func TestASPRoutesShareOneApplicationServerAcrossRoutesAndASPs(t *testing.T) {
+	config := &ASPConfig{
+		SignallingGateways: []SignallingGatewayConfig{{
+			ID: "sg-a",
+			SGPs: []SignallingGatewayProcessConfig{
+				{ID: "sgp-a1", ApplicationServers: []RemoteASConfig{{ID: "as-core", ASKey: staticASKey(7, 1)}}},
+				{ID: "sgp-a2", ApplicationServers: []RemoteASConfig{{ID: "as-core", ASKey: staticASKey(8, 2)}}},
+			},
+		}},
+		Routing: &ASPRoutingConfig{
+			SignallingGatewaySelection: RouteSelectionBroadcast,
+			SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
+				"sg-a": RouteSelectionBroadcast,
+			},
+			MTPRoutes: []MTPRouteConfig{
+				{ID: "sccp", DestinationPointCode: 0x120000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndSCCP}},
+				{ID: "isup", DestinationPointCode: 0x120000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndISUP}},
+			},
+			Routes: []MTPRouteBinding{
+				{MTPRoute: "sccp", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
+				{MTPRoute: "isup", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
+			},
+		},
+	}
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	transfer := func(serviceIndicator uint8) error {
+		_, err := endpoint.MTPTransfer(MTPTransferRequest{
+			ProtocolData: params.NewProtocolDataPayload(
+				0x111111, 0x123456, serviceIndicator, 0, 0, 1, []byte("x")),
+		})
+		return err
+	}
+	requireNoRoute := func(stage string) {
+		t.Helper()
+		for _, serviceIndicator := range []uint8{params.ServiceIndSCCP, params.ServiceIndISUP} {
+			if err := transfer(serviceIndicator); !errors.Is(err, ErrNoMTPRoute) {
+				t.Fatalf("%s: MTPTransfer(SI %d) error = %v, want %v",
+					stage, serviceIndicator, err, ErrNoMTPRoute)
+			}
+		}
+	}
+
+	type member struct {
+		association *Association
+		capture     *mtpTransferCapture
+		signals     *[]messages.M3UA
+	}
+	join := func(sgp SignallingGatewayProcessID, networkAppearance, routingContext uint32) member {
+		t.Helper()
+		association, signals := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContext)
+		association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+		association.cfg.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: sgp}
+		association.noteRoutingContextsAcked(params.NewRoutingContext(routingContext))
+		capture := &mtpTransferCapture{}
+		association.dataWriter = capture.write
+		if !endpoint.trackAssociation(association) {
+			t.Fatalf("ASP on %s was not attached", sgp)
+		}
+		return member{association: association, capture: capture, signals: signals}
+	}
+	// Broadcast reaches every SGP serving the Application Server once per
+	// route. Several ASPs on one SGP are several Associations to one peer
+	// process, so exactly one of them carries each flow: RFC 4666 Appendix
+	// A.2.2 broadcasts between SGPs, not between Associations to one SGP.
+	requireDelivery := func(stage string, groups map[SignallingGatewayProcessID][]member) {
+		t.Helper()
+		before := make(map[SignallingGatewayProcessID]int, len(groups))
+		for sgp, members := range groups {
+			for _, joined := range members {
+				before[sgp] += joined.capture.count()
+			}
+		}
+		for _, serviceIndicator := range []uint8{params.ServiceIndSCCP, params.ServiceIndISUP} {
+			if err := transfer(serviceIndicator); err != nil {
+				t.Fatalf("%s: MTPTransfer(SI %d): %v", stage, serviceIndicator, err)
+			}
+		}
+		for sgp, members := range groups {
+			carried := 0
+			for _, joined := range members {
+				carried += joined.capture.count()
+			}
+			if carried-before[sgp] != 2 {
+				t.Fatalf("%s: SGP %s carried %d of the 2 routes naming its Application Server",
+					stage, sgp, carried-before[sgp])
+			}
+		}
+	}
+	requireNoProcedures := func(stage string, members []member) {
+		t.Helper()
+		for index, joined := range members {
+			if len(*joined.signals) != 0 {
+				t.Fatalf("%s: ASP %d ran %d procedure(s) because the routes naming its "+
+					"Application Server changed: %v", stage, index, len(*joined.signals), *joined.signals)
+			}
+			if state := joined.association.State(); state != StateASPActive {
+				t.Fatalf("%s: ASP %d left ASP-ACTIVE for %v", stage, index, state)
+			}
+		}
+	}
+
+	requireNoRoute("no ASP")
+
+	first := join("sgp-a1", 7, 1)
+	requireDelivery("one ASP", map[SignallingGatewayProcessID][]member{"sgp-a1": {first}})
+	requireNoProcedures("one ASP", []member{first})
+
+	second := join("sgp-a1", 7, 1)
+	third := join("sgp-a2", 8, 2)
+	all := []member{first, second, third}
+	requireDelivery("many ASPs", map[SignallingGatewayProcessID][]member{
+		"sgp-a1": {first, second},
+		"sgp-a2": {third},
+	})
+	requireNoProcedures("many ASPs", all)
+
+	for index, joined := range all {
+		if err := joined.association.Close(); err != nil {
+			t.Fatalf("close ASP %d: %v", index, err)
+		}
+	}
+	requireNoRoute("every ASP gone")
+}
