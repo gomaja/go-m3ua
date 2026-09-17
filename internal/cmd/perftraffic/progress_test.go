@@ -215,7 +215,7 @@ func FuzzSenderWindowBounds(fuzzContext *testing.F) {
 func TestProgressReturnsAtomicCohortSnapshot(testContext *testing.T) {
 	control := newReceiverControl(1, 16)
 	control.setAssociationReady(0, 15)
-	specification := runSpec{Cohort: "progress", Seed: 7, Associations: 1, Expected: 2, Duration: time.Second, Payload: workload128, Rate: 2}
+	specification := runSpec{Cohort: "progress", Seed: 7, Associations: 1, Expected: 2, Duration: time.Second, Payload: workload128, Rate: 2, Outstanding: maxOutstanding}
 	if err := control.reset(specification); err != nil {
 		testContext.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestProgressReturnsAtomicCohortSnapshot(testContext *testing.T) {
 }
 
 func progressFixture() (runSpec, []progressObservation) {
-	specification := runSpec{Cohort: "bounds", Rate: 100, Expected: 1000, Duration: 10 * time.Second, Associations: 1, Payload: workload128}
+	specification := runSpec{Cohort: "bounds", Rate: 100, Expected: 1000, Duration: 10 * time.Second, Associations: 1, Payload: workload128, Outstanding: maxOutstanding}
 	observation := func(before, after time.Duration, unique uint64) progressObservation {
 		return progressObservation{Before: before, After: after, Snapshot: &receiverProgress{Spec: specification, Generation: 1, Phase: receiverMeasuring, Delivery: ledgerSnapshot{Unique: unique, Missing: 1000 - unique}}}
 	}

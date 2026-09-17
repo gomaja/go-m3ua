@@ -13,7 +13,7 @@ import (
 func echoSpec(cohort string) runSpec {
 	return runSpec{
 		Cohort: cohort, Seed: 7, Associations: 1, Expected: 100, Duration: time.Second,
-		Drain: 2 * time.Second, Rate: 100, Payload: workload128, Mode: modeEcho, Direction: directionASPToSGP,
+		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 100, Payload: workload128, Mode: modeEcho, Direction: directionASPToSGP,
 	}
 }
 

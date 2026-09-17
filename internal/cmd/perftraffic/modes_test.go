@@ -45,7 +45,7 @@ func TestBidirectionalStartWithoutReverseDriverDoesNotSpawn(testContext *testing
 	control.setAssociationReady(0, 15)
 	specification := runSpec{
 		Cohort: "bidi-no-driver", Seed: 1, Associations: 1, Expected: 1, Duration: time.Second,
-		Drain: 2 * time.Second, Rate: 1, Payload: workload128, Mode: modeBidirectional,
+		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 1, Payload: workload128, Mode: modeBidirectional,
 		Direction: directionASPToSGP, PeerControl: "http://127.0.0.1:1",
 	}
 	if err := control.reset(specification); err != nil {

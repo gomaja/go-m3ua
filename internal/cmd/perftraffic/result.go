@@ -17,11 +17,16 @@ type runSpec struct {
 	Duration     time.Duration `json:"duration_ns"`
 	Drain        time.Duration `json:"drain_ns,omitempty"`
 	Rate         uint64        `json:"rate,omitempty"`
-	Payload      workload      `json:"payload,omitempty"`
-	Mode         string        `json:"mode,omitempty"`
-	Direction    string        `json:"direction,omitempty"`
-	Initiation   string        `json:"initiation,omitempty"`
-	PeerControl  string        `json:"peer_control,omitempty"`
+	// Outstanding is the run's scheduled-but-unfinished send limit. It is
+	// carried in the specification rather than taken from each side's own
+	// flags so that both directions of a bidirectional run are bounded
+	// identically and report the same manifest.
+	Outstanding int      `json:"outstanding"`
+	Payload     workload `json:"payload,omitempty"`
+	Mode        string   `json:"mode,omitempty"`
+	Direction   string   `json:"direction,omitempty"`
+	Initiation  string   `json:"initiation,omitempty"`
+	PeerControl string   `json:"peer_control,omitempty"`
 }
 
 type deliveryResult struct {

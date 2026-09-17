@@ -139,7 +139,7 @@ func TestReceiverEchoResultAndReplyAccounting(testContext *testing.T) {
 	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 10\nnr_throttled 0\n")
 	specification := runSpec{
 		Cohort: "echo-cohort", Seed: 7, Associations: 1, Expected: 1, Duration: time.Second,
-		Drain: 2 * time.Second, Payload: workload128, Rate: 1, Mode: modeEcho, Direction: directionASPToSGP,
+		Drain: 2 * time.Second, Payload: workload128, Rate: 1, Outstanding: maxOutstanding, Mode: modeEcho, Direction: directionASPToSGP,
 	}
 	if err := control.reset(specification); err != nil {
 		testContext.Fatalf("reset: %v", err)
@@ -176,7 +176,7 @@ func TestReceiverEchoReplyErrorIsInvalid(testContext *testing.T) {
 	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 10\nnr_throttled 0\n")
 	specification := runSpec{
 		Cohort: "echo-cohort", Seed: 7, Associations: 1, Expected: 1, Duration: time.Second,
-		Payload: workload128, Rate: 1, Mode: modeEcho,
+		Payload: workload128, Rate: 1, Outstanding: maxOutstanding, Mode: modeEcho,
 	}
 	if err := control.reset(specification); err != nil {
 		testContext.Fatalf("reset: %v", err)
@@ -199,7 +199,7 @@ func TestReceiverEchoReplyErrorIsInvalid(testContext *testing.T) {
 func TestThroughputRejectsEchoRequestKind(testContext *testing.T) {
 	control := newReceiverControl(1, 16)
 	control.setAssociationReady(0, 15)
-	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 1, Expected: 1, Duration: time.Second, Payload: workload128, Rate: 1}); err != nil {
+	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 1, Expected: 1, Duration: time.Second, Payload: workload128, Rate: 1, Outstanding: maxOutstanding}); err != nil {
 		testContext.Fatalf("reset: %v", err)
 	}
 	if err := control.start(); err != nil {

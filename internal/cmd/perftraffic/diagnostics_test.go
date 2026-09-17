@@ -60,7 +60,7 @@ func TestReceiverPhaseNameDistinguishesStartupFromCohort(testContext *testing.T)
 	control.setAssociationReady(0, 15)
 	if err := control.reset(runSpec{
 		Cohort: "phase", Seed: 1, Associations: 1, Expected: 1, Duration: 1_000_000_000,
-		Rate: 1, Payload: workload128,
+		Outstanding: maxOutstanding, Rate: 1, Payload: workload128,
 	}); err != nil {
 		testContext.Fatalf("reset: %v", err)
 	}

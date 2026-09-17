@@ -294,7 +294,8 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	specification := runSpec{
 		Cohort: cohort, Seed: config.Seed, Associations: len(associations), Expected: expected,
 		Duration: duration, Drain: effectiveDrain, Rate: config.Rate, Payload: config.Workload,
-		Mode: config.Mode, Direction: config.Direction, Initiation: config.Initiation,
+		Outstanding: config.Outstanding,
+		Mode:        config.Mode, Direction: config.Direction, Initiation: config.Initiation,
 		PeerControl: config.ControlURL,
 	}
 	if specification.Mode == "" {

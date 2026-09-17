@@ -26,6 +26,7 @@ func TestReceiverControlRequiresResetBeforeStartAndStopAfterStart(testContext *t
 		Duration:     time.Second,
 		Payload:      workload128,
 		Rate:         10,
+		Outstanding:  maxOutstanding,
 	}
 	body, err := json.Marshal(specification)
 	if err != nil {
@@ -51,6 +52,7 @@ func TestReceiverControlRejectsUnboundedAssociationCountsAtHTTPBoundary(testCont
 			Expected:     1,
 			Duration:     time.Second,
 			Rate:         1,
+			Outstanding:  maxOutstanding,
 			Payload:      workload128,
 		}
 		body, err := json.Marshal(specification)
@@ -70,7 +72,7 @@ func TestReceiverControlSeparatesMeasurementAndDrainDeliveries(testContext *test
 	control.setAssociationReady(0, 15)
 	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 10\nnr_throttled 0\n")
 	control.now = func() time.Time { return now }
-	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 1, Expected: 2, Duration: time.Second, Payload: workload128, Rate: 2}); err != nil {
+	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 1, Expected: 2, Duration: time.Second, Payload: workload128, Rate: 2, Outstanding: maxOutstanding}); err != nil {
 		testContext.Fatalf("reset: %v", err)
 	}
 	if err := control.start(); err != nil {
@@ -107,7 +109,7 @@ func TestReceiverControlBindsLogicalAssociationToOneTransport(testContext *testi
 	control := newReceiverControl(2, 16)
 	control.setAssociationReady(0, 15)
 	control.setAssociationReady(1, 15)
-	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 2, Expected: 64, Duration: time.Second, Payload: workload128, Rate: 64}); err != nil {
+	if err := control.reset(runSpec{Cohort: "cohort-a", Seed: 7, Associations: 2, Expected: 64, Duration: time.Second, Payload: workload128, Rate: 64, Outstanding: maxOutstanding}); err != nil {
 		testContext.Fatalf("reset: %v", err)
 	}
 	if err := control.start(); err != nil {

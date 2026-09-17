@@ -181,6 +181,7 @@ func (control *receiverControl) reset(specification runSpec) error {
 		specification.Expected == 0 || specification.Duration <= 0 || specification.Duration > maxRunWindow ||
 		specification.Payload.size(0) == 0 || specification.Rate > maxOfferedRate ||
 		specification.Drain < 0 || specification.Drain > maxRunWindow ||
+		specification.Outstanding < 1 || specification.Outstanding > maxOutstanding ||
 		expectedErr != nil || expected != specification.Expected {
 		return errInvalidRunSpec
 	}
@@ -263,7 +264,7 @@ func (control *receiverControl) runReverseCohort(driver *reverseDriver, specific
 		Rate:        specification.Rate,
 		Workload:    specification.Payload,
 		Seed:        specification.Seed,
-		Outstanding: maxOutstanding,
+		Outstanding: specification.Outstanding,
 		Drain:       specification.Drain,
 		PeerControl: specification.PeerControl,
 		CPUStatPath: driver.cpuStatPath,
