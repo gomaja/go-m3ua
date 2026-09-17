@@ -126,7 +126,14 @@ func TestUnexpectedMessageErrorQuotesThePeersRoutingContexts(t *testing.T) {
 		params.NewRoutingContext(2),
 		nil,
 	)
-	if err := conn.handleErrors(NewUnexpectedMessageError(offending)); err != nil {
+	wire, err := offending.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshal offending ASP Active: %v", err)
+	}
+	// Through the dispatcher, which is what carries the octets as received:
+	// nothing marshals the decoded message to recover them afterwards.
+	conn.sendErrForMessage(offending, wire, NewUnexpectedMessageError(offending))
+	if err := conn.handleErrors(<-conn.errChan); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,14 +145,10 @@ func TestUnexpectedMessageErrorQuotesThePeersRoutingContexts(t *testing.T) {
 		t.Errorf("Error named Routing Contexts %v, want [2] — the ones the "+
 			"unexpected message carried, not this node's configuration", got)
 	}
-	wire, err := offending.MarshalBinary()
-	if err != nil {
-		t.Fatalf("marshal offending ASP Active: %v", err)
-	}
 	if e.DiagnosticInformation == nil {
 		t.Fatal("the Error carried no Diagnostic Information")
 	}
-	if got, want := e.DiagnosticInformation.DiagnosticInformation(), first40(wire, nil); !bytes.Equal(got, want) {
+	if got, want := e.DiagnosticInformation.DiagnosticInformation(), first40(wire); !bytes.Equal(got, want) {
 		t.Errorf("Diagnostic Information = %x, want first offending octets %x", got, want)
 	}
 }

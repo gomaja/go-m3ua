@@ -28,7 +28,7 @@ import (
 //	case raw := <-rawChan:
 //		go func() { ... c.handleSignals(ctx, msg) }()
 //
-// and handleSignals then spawned a second one for DATA (go c.handleData(...)).
+// and handleSignals then spawned a second one for DATA (go c.handleData(..., nil)).
 // Two independent scheduling points, so the order in which payloads reached
 // dataChan was whatever the scheduler chose. For an SS7 stack that is a
 // correctness failure, not a performance detail: reordered TCAP components
@@ -248,7 +248,7 @@ func TestFullDataQueueStillAnswersSignalling(t *testing.T) {
 			nil, params.NewRoutingContext(1),
 			params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("flood")),
 			nil,
-		))
+		), nil)
 	}
 
 	// The queue is full, but a BEAT must still be answered.
@@ -294,7 +294,7 @@ func TestDataQueueRecoversAfterOverflow(t *testing.T) {
 			nil, params.NewRoutingContext(1),
 			params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("queued")),
 			nil,
-		))
+		), nil)
 	}
 	drained := 0
 	for len(conn.dataChan) > 0 {
@@ -309,7 +309,7 @@ func TestDataQueueRecoversAfterOverflow(t *testing.T) {
 		nil, params.NewRoutingContext(1),
 		params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("after")),
 		nil,
-	))
+	), nil)
 	if len(conn.dataChan) != 1 {
 		t.Errorf("queue holds %d after draining and one more payload, want 1", len(conn.dataChan))
 	}
@@ -336,7 +336,7 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 			nil, params.NewRoutingContext(1),
 			params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("flood")),
 			nil,
-		))
+		), nil)
 	}
 
 	// The overflow is reported to monitor, which turns it into the wire message.
@@ -400,7 +400,7 @@ func TestLocalCongestionSCONIsSentOncePerEpisode(t *testing.T) {
 			nil, params.NewRoutingContext(1),
 			params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("flood")),
 			nil,
-		))
+		), nil)
 		drain()
 	}
 

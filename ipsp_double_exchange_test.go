@@ -375,7 +375,7 @@ func TestIPSPDoubleExchangeASPTMAndDATAFollowIndependentTrafficDirections(t *tes
 		params.NewNetworkAppearance(10),
 		params.NewRoutingContext(11),
 		params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("to-local")), nil,
-	))
+	), nil)
 	select {
 	case received := <-association.dataChan:
 		if string(received.ProtocolData.Data) != "to-local" {
@@ -1173,7 +1173,7 @@ func TestIPSPDoubleExchangeErrorsRetainTheOffendingTrafficDirection(t *testing.T
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			association, sent := newDoubleExchangeIPSPForTest(t)
-			association.sendErrForMessage(test.message, test.reported)
+			association.sendErrForMessage(test.message, nil, test.reported)
 			reported := <-association.errChan
 			if err := association.handleErrors(reported); err != nil {
 				t.Fatalf("handleErrors() error = %v", err)
@@ -1248,7 +1248,7 @@ func TestIPSPDoubleExchangeAlternateASPNotifyDoesNotOverrideTheOppositeDirection
 		params.NewNetworkAppearance(10),
 		params.NewRoutingContext(11),
 		params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("overridden-to-local")), nil,
-	))
+	), nil)
 	select {
 	case err := <-association.errChan:
 		var unexpected *UnexpectedMessageError
@@ -1287,7 +1287,7 @@ func TestIPSPDoubleExchangeAlternateASPNotifyDoesNotOverrideTheOppositeDirection
 		params.NewNetworkAppearance(10),
 		params.NewRoutingContext(11),
 		params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("reactivated-to-local")), nil,
-	))
+	), nil)
 	select {
 	case received := <-association.dataChan:
 		if string(received.ProtocolData.Data) != "reactivated-to-local" {
@@ -1331,7 +1331,7 @@ func TestIPSPDoubleExchangeSupportsOneContextlessTrafficDirection(t *testing.T) 
 		nil,
 		params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("contextless")),
 		nil,
-	))
+	), nil)
 	select {
 	case received := <-association.dataChan:
 		if received.RoutingContextSet || received.NetworkAppearanceSet {
@@ -1393,7 +1393,7 @@ func TestIPSPDoubleExchangeActivationIsPartialInEachDirection(t *testing.T) {
 		params.NewRoutingContext(12),
 		params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("inactive-local")),
 		nil,
-	))
+	), nil)
 	select {
 	case err := <-association.errChan:
 		var unexpected *UnexpectedMessageError
@@ -1570,7 +1570,7 @@ func TestIPSPDoubleExchangeDataRejectsWrongDirectionalScope(t *testing.T) {
 				params.NewNetworkAppearance(test.networkAppearance),
 				params.NewRoutingContext(test.routingContext),
 				params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("wrong-direction")), nil,
-			))
+			), nil)
 			select {
 			case err := <-association.errChan:
 				if !errors.Is(err, test.wantErr) {

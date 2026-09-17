@@ -506,7 +506,7 @@ func TestDataWithoutProtocolDataIsRejected(t *testing.T) {
 			// exercises: DATA on stream 0 is refused earlier, by Section
 			// 1.4.7's rule 1, and would mask the guard under test.
 			conn.recvStream.Store(1)
-			conn.handleData(context.Background(), data)
+			conn.handleData(context.Background(), data, nil)
 
 			select {
 			case err := <-conn.errChan:

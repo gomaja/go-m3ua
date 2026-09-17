@@ -916,7 +916,7 @@ func TestIPSPSingleExchangeRejectsDataOutsideActiveRoutingContext(t *testing.T) 
 		1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte{0x01},
 	), nil)
 
-	association.handleData(context.Background(), data)
+	association.handleData(context.Background(), data, nil)
 
 	select {
 	case delivered := <-association.dataChan:

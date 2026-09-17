@@ -179,7 +179,7 @@ func TestReceivedDataReportsTheTrafficFlowItNamed(t *testing.T) {
 		params.NewRoutingContext(8),
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 
 	d, err := conn.ReadData()
 	if err != nil {
@@ -215,7 +215,7 @@ func TestReceivedDataHonoursPerRoutingContextActivation(t *testing.T) {
 		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7, 8)
 		conn.noteRoutingContextsActive([]uint32{7})
 
-		conn.handleData(context.Background(), newData(8))
+		conn.handleData(context.Background(), newData(8), nil)
 
 		err := firstErr(conn)
 		var unexpected *UnexpectedMessageError
@@ -226,7 +226,7 @@ func TestReceivedDataHonoursPerRoutingContextActivation(t *testing.T) {
 			t.Error("DATA for the inactive AS reached the MTP3-User")
 		}
 
-		conn.handleData(context.Background(), newData(7))
+		conn.handleData(context.Background(), newData(7), nil)
 		if err := firstErr(conn); err != nil {
 			t.Fatalf("DATA for the active AS was rejected: %v", err)
 		}
@@ -239,7 +239,7 @@ func TestReceivedDataHonoursPerRoutingContextActivation(t *testing.T) {
 		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8)
 		conn.noteRoutingContextsAcked(params.NewRoutingContext(7))
 
-		conn.handleData(context.Background(), newData(8))
+		conn.handleData(context.Background(), newData(8), nil)
 
 		if err := firstErr(conn); err != nil {
 			t.Fatalf("inactive ASP reflected an Error instead of silently discarding DATA: %v", err)
@@ -248,7 +248,7 @@ func TestReceivedDataHonoursPerRoutingContextActivation(t *testing.T) {
 			t.Error("DATA for the inactive AS reached the MTP3-User")
 		}
 
-		conn.handleData(context.Background(), newData(7))
+		conn.handleData(context.Background(), newData(7), nil)
 		if err := firstErr(conn); err != nil {
 			t.Fatalf("DATA for the active AS was rejected: %v", err)
 		}
@@ -267,7 +267,7 @@ func TestReceivedDataWithoutARoutingContextSaysSo(t *testing.T) {
 		nil, nil,
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 
 	d, err := conn.ReadData()
 	if err != nil {
@@ -288,7 +288,7 @@ func TestRoutingContextZeroIsReportedAsPresent(t *testing.T) {
 		params.NewRoutingContext(0),
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 
 	d, err := conn.ReadData()
 	if err != nil {
@@ -503,7 +503,7 @@ func TestReceivedDataWithSeveralRoutingContextsIsRejected(t *testing.T) {
 		params.NewRoutingContext(7, 8),
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 
 	err := firstErr(conn)
 	var routingContextError *RoutingContextError
@@ -548,7 +548,7 @@ func TestDataWithAMalformedRoutingContextIsRefused(t *testing.T) {
 				params.NewParam(int(params.RoutingContext), tc.data),
 				params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 				nil,
-			))
+			), nil)
 
 			err := firstErr(conn)
 			if err == nil {
@@ -575,7 +575,7 @@ func TestDataWithAMalformedRoutingContextIsRefused(t *testing.T) {
 		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
 		conn.handleData(context.Background(), messages.NewData(
 			nil, nil,
-			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")), nil))
+			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")), nil), nil)
 		if err := firstErr(conn); err != nil {
 			t.Fatalf("a DATA with no Routing Context was refused: %v", err)
 		}
@@ -591,7 +591,7 @@ func TestDataWithAMalformedRoutingContextIsRefused(t *testing.T) {
 		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7, 8)
 		conn.handleData(context.Background(), messages.NewData(
 			nil, nil,
-			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")), nil))
+			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")), nil), nil)
 
 		if err := firstErr(conn); !errors.Is(err, ErrMissingRoutingContext) {
 			t.Fatalf("error = %v, want ErrMissingRoutingContext", err)
@@ -629,7 +629,7 @@ func FuzzDataRoutingContext(f *testing.F) {
 			params.NewParam(int(params.RoutingContext), rcData),
 			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 			nil,
-		))
+		), nil)
 
 		// Either the message was refused or it was delivered; both are correct
 		// answers, and neither may leave the two disagreeing.

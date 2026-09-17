@@ -11,9 +11,11 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func (c *Association) handleData(ctx context.Context, data *messages.Data) {
+// raw is the message as received, carried so an error reported against it can
+// quote the octets without marshalling the decoded message; see sendErrForMessage.
+func (c *Association) handleData(ctx context.Context, data *messages.Data, raw []byte) {
 	if !c.inboundDataActive() {
-		c.sendErrForMessage(data, NewUnexpectedMessageError(data))
+		c.sendErrForMessage(data, raw, NewUnexpectedMessageError(data))
 		return
 	}
 
@@ -23,17 +25,17 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 	// direction unchecked meant a peer that broke the rule was rewarded with
 	// delivery.
 	if c.receivedStreamID() == 0 {
-		c.sendErrForMessage(data, NewInvalidSCTPStreamIDError(0))
+		c.sendErrForMessage(data, raw, NewInvalidSCTPStreamIDError(0))
 		return
 	}
 
 	if err := c.validateDataNetworkAppearance(data.NetworkAppearance, data.RoutingContext); err != nil {
-		c.sendErrForMessage(data, err)
+		c.sendErrForMessage(data, raw, err)
 		return
 	}
 
 	if err := c.validateDataRoutingContext(data.RoutingContext); err != nil {
-		c.sendErrForMessage(data, err)
+		c.sendErrForMessage(data, raw, err)
 		return
 	}
 
@@ -46,7 +48,7 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 		switch c.role {
 		case RoleSGP:
 			if !c.activeForRoutingContext(rtCtx) {
-				c.sendErrForMessage(data, NewUnexpectedMessageError(data))
+				c.sendErrForMessage(data, raw, NewUnexpectedMessageError(data))
 				return
 			}
 		case RoleASP:
@@ -59,7 +61,7 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 				active = c.routingContextAcked(rtCtx)
 			}
 			if !active || c.routingContextOverridden(rtCtx) {
-				c.sendErrForMessage(data, NewUnexpectedMessageError(data))
+				c.sendErrForMessage(data, raw, NewUnexpectedMessageError(data))
 				return
 			}
 		}
@@ -70,13 +72,13 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data) {
 	// and the package installs no recover(), so dereferencing the absent
 	// parameter would terminate the process and every association it serves.
 	if data.ProtocolData == nil {
-		c.sendErrForMessage(data, ErrMissingProtocolData)
+		c.sendErrForMessage(data, raw, ErrMissingProtocolData)
 		return
 	}
 
 	pd, err := data.ProtocolData.ProtocolData()
 	if err != nil {
-		c.sendErrForMessage(data, ErrFailedToPeelOff)
+		c.sendErrForMessage(data, raw, ErrFailedToPeelOff)
 		return
 	}
 

@@ -153,7 +153,7 @@ func TestDataWithAnUnconfiguredRoutingContextIsRejected(t *testing.T) {
 		params.NewRoutingContext(4242),
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 
 	err := firstErr(conn)
 	if err == nil {
@@ -181,7 +181,7 @@ func TestDataWithAConfiguredRoutingContextIsDelivered(t *testing.T) {
 		params.NewRoutingContext(7),
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 	if err := firstErr(conn); err != nil {
 		t.Fatalf("a DATA on a configured Routing Context was rejected: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestDataWithoutARoutingContextIsDelivered(t *testing.T) {
 		nil, nil,
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 	if err := firstErr(conn); err != nil {
 		t.Fatalf("a DATA without a Routing Context was rejected: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestDataWithAnUnconfiguredNetworkAppearanceIsRejected(t *testing.T) {
 				params.NewRoutingContext(7),
 				params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 				nil,
-			))
+			), nil)
 
 			reported := firstErr(conn)
 			if reported == nil {
@@ -289,7 +289,7 @@ func TestDataPreservesNetworkAppearanceAndPresence(t *testing.T) {
 				params.NewRoutingContext(7),
 				params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 				nil,
-			))
+			), nil)
 
 			if err := firstErr(conn); err != nil {
 				t.Fatalf("valid DATA was rejected: %v", err)
@@ -328,7 +328,7 @@ func TestDataNetworkAppearanceValidationMatrix(t *testing.T) {
 				params.NewRoutingContext(7),
 				params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 				nil,
-			))
+			), nil)
 
 			err := firstErr(conn)
 			if !errors.Is(err, tt.wantErr) {
@@ -358,7 +358,7 @@ func TestMalformedDataNetworkAppearanceIsAParameterFieldError(t *testing.T) {
 				params.NewRoutingContext(7),
 				params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 				nil,
-			))
+			), nil)
 
 			reported := firstErr(conn)
 			var parameterFault *ParameterFaultError
@@ -397,7 +397,7 @@ func FuzzDataNetworkAppearance(f *testing.F) {
 			params.NewRoutingContext(7),
 			params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 			nil,
-		))
+		), nil)
 
 		shouldDeliver := len(appearanceData) == 4 && binary.BigEndian.Uint32(appearanceData) == 7
 		select {
@@ -505,7 +505,7 @@ func TestDataOnStreamZeroIsRejected(t *testing.T) {
 		params.NewRoutingContext(7),
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 		nil,
-	))
+	), nil)
 
 	err := firstErr(conn)
 	if err == nil {
