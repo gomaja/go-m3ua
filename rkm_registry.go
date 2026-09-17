@@ -16,18 +16,28 @@ const (
 
 // RoutingKeyRegistrationResult is one Registration Result returned for a
 // Routing Key in an RFC 4666 Registration Request.
+//
+// RemoteAS and ASKey describe the requesting side of the procedure: the
+// canonical Application Server the registration named and the exact wire scope
+// the peer assigned to it. ASKey is set only for a result that registered the
+// Routing Key, so a refused result carries the zero scope. Both are zero in
+// the results a responder produces, which name Application Servers of the
+// requesting ASP, not of the responder.
 type RoutingKeyRegistrationResult struct {
 	LocalRoutingKeyIdentifier uint32
 	Status                    RegistrationStatus
 	RoutingContext            uint32
+	RemoteAS                  SGASKey
+	ASKey                     ASKey
 }
 
 // RoutingKeyDeregistrationResult is one Deregistration Result returned for a
-// Routing Context in an RFC 4666 Deregistration Request.
+// Routing Context in an RFC 4666 Deregistration Request. ASKey is the exact
+// binding the result answers for.
 type RoutingKeyDeregistrationResult struct {
 	RoutingContext uint32
 	Status         DeregistrationStatus
-	asKey          ASKey
+	ASKey          ASKey
 	removeAS       bool
 }
 
@@ -641,7 +651,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 					}
 					delete(entry.members, association)
 					result.Status = DeregistrationSuccessfullyDeregistered
-					result.asKey = entry.asKey()
+					result.ASKey = entry.asKey()
 					storeDeregistrationReplay(deregistrationReplays, result)
 					purgeRegistrationReplayState(registrationReplays, routingContext)
 					if !entry.provisioned && len(entry.members) == 0 && registry.config.RemoveUnusedRoutingKeys {

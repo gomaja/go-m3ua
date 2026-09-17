@@ -337,6 +337,7 @@ Association:
 
 ```go
 results, err := association.RegisterRoutingKeys(ctx, m3ua.RoutingKeyRegistration{
+    RemoteAS: "as-core",
     RoutingKey: m3ua.RoutingKey{
         NetworkAppearance: 10,
         NetworkAppearanceSet: true,
@@ -356,8 +357,14 @@ if err != nil {
     log.Fatal(err)
 }
 
-_, err = association.DeregisterRoutingContexts(ctx, results[0].RoutingContext)
+_, err = association.DeregisterApplicationServers(ctx, results[0].ASKey)
 ```
+
+A successful result reports both the canonical Application Server it bound,
+`results[0].RemoteAS`, and the exact wire scope the peer assigned it,
+`results[0].ASKey`. Deregistration names that scope, so a request that would
+contradict the binding the Association holds, or that names no Routing Context
+at all, is refused before it reaches the transport.
 
 The responder handles each Routing Key in a batch independently, preserves
 deterministic results for duplicate requests, rejects ambiguous overlaps, and
@@ -371,7 +378,7 @@ RFC 4666 defines no RKM acknowledgement timer. Caller context cancellation
 bounds a local wait; peer retransmissions are handled idempotently rather than
 by inventing an RKM T(ack). If cancellation occurs after a DEREG REQ is written,
 the same Routing Context cannot be retried until its delayed DEREG RSP arrives:
-`DeregisterRoutingContexts` returns `ErrDeregistrationOutcomeUnknown` because
+`DeregisterApplicationServers` returns `ErrDeregistrationOutcomeUnknown` because
 RFC 4666 Sections 3.6.4 and 4.4.2 provide no transaction identifier that could
 distinguish the old response from the retry.
 

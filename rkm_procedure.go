@@ -18,8 +18,15 @@ const (
 // RoutingKeyRegistration describes one Routing Key to register. A requested
 // Routing Context is an RFC 4666 re-registration request; omission asks the
 // peer to select the Routing Context.
+//
+// RemoteAS names the canonical Application Server this Routing Key binds,
+// within the Signalling Gateway of the Association's provisioned SGP. On an
+// Endpoint that provisions peers it must be an Application Server that SGP
+// binds dynamically; on one that does not, it is local metadata carried back
+// on the result.
 type RoutingKeyRegistration struct {
 	RoutingKey              RoutingKey
+	RemoteAS                RemoteASID
 	RequestedRoutingContext uint32
 	RoutingContextRequested bool
 }
@@ -51,6 +58,7 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		return nil, ErrNotEstablished
 	}
 	requests := make([]RoutingKeyRegistrationRequest, len(registrations))
+	remoteASKeys := make([]SGASKey, len(registrations))
 	parameters := make([]*params.Param, len(registrations))
 	pending := make(map[uint32]int, len(registrations))
 	requestsByIdentifier := make(map[uint32]RoutingKeyRegistrationRequest, len(registrations))
@@ -58,6 +66,11 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		if _, err := canonicalizeRoutingKey(registration.RoutingKey); err != nil {
 			return nil, fmt.Errorf("routing key %d: %w", index, err)
 		}
+		remoteAS, err := c.remoteASKeyFor(registration.RemoteAS)
+		if err != nil {
+			return nil, fmt.Errorf("routing key %d: %w", index, err)
+		}
+		remoteASKeys[index] = remoteAS
 		identifier := c.nextLocalRoutingKeyIdentifier()
 		request := RoutingKeyRegistrationRequest{
 			LocalRoutingKeyIdentifier: identifier,
@@ -114,7 +127,9 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 				LocalRoutingKeyIdentifier: identifier,
 				Status:                    RegistrationStatus(payload.RegistrationStatus.RegistrationStatus()),
 				RoutingContext:            payload.RoutingContext.RoutingContext(),
+				RemoteAS:                  remoteASKeys[index],
 			}
+			result.ASKey = c.registeredASKey(requests[index], result)
 			results[index] = result
 			delete(pending, identifier)
 		}
@@ -130,14 +145,28 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 	return results, nil
 }
 
-// DeregisterRoutingContexts performs the RFC 4666 Section 4.4.2
-// Deregistration procedure and returns one result in input order.
-func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingContexts ...uint32) ([]RoutingKeyDeregistrationResult, error) {
+// DeregisterApplicationServers performs the RFC 4666 Section 4.4.2
+// Deregistration procedure for the named Application Servers and returns one
+// result in input order.
+//
+// Each ASKey names the Application Server to deregister by the wire scope its
+// registration confirmed. A scope without a Routing Context, a scope that
+// contradicts the binding this Association already holds for that Routing
+// Context, and a repeated Routing Context are all refused before anything is
+// submitted to the transport: RFC 4666 Section 3.6.3 carries only Routing
+// Context in DEREG REQ, so the peer would act on the Routing Context whatever
+// Application Server the caller believed it was naming, and a submitted
+// request cannot be taken back.
+func (c *Association) DeregisterApplicationServers(ctx context.Context, keys ...ASKey) ([]RoutingKeyDeregistrationResult, error) {
 	if c == nil || (c.role != RoleASP && c.role != RoleIPSP) {
 		return nil, ErrUnsupportedRole
 	}
-	if len(routingContexts) == 0 {
-		return nil, fmt.Errorf("deregistration request requires at least one routing context")
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("deregistration request requires at least one Application Server")
+	}
+	routingContexts, err := c.confirmedDeregistrationScopes(keys)
+	if err != nil {
+		return nil, err
 	}
 	if c.rkmRequesterState() == StateASPDown {
 		return nil, ErrNotEstablished
@@ -158,9 +187,6 @@ func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingCont
 	}
 	pending := make(map[uint32]int, len(routingContexts))
 	for index, routingContext := range routingContexts {
-		if _, duplicate := pending[routingContext]; duplicate {
-			return nil, fmt.Errorf("duplicate Routing Context %d", routingContext)
-		}
 		pending[routingContext] = index
 	}
 
@@ -198,6 +224,7 @@ func (c *Association) DeregisterRoutingContexts(ctx context.Context, routingCont
 			result := RoutingKeyDeregistrationResult{
 				RoutingContext: routingContext,
 				Status:         DeregistrationStatus(payload.DeregistrationStatus.DeregistrationStatus()),
+				ASKey:          keys[index],
 			}
 			results[index] = result
 			delete(pending, routingContext)
@@ -342,8 +369,8 @@ func (c *Association) handleDeregistrationRequest(message *messages.Deregistrati
 			params.NewDeregistrationStatus(deregistrationStatusParam(result.Status)),
 		))
 		if result.Status == DeregistrationSuccessfullyDeregistered {
-			if result.asKey.RoutingContextSet {
-				successful = append(successful, successfulDeregistration{key: result.asKey, removeAS: result.removeAS})
+			if result.ASKey.RoutingContextSet {
+				successful = append(successful, successfulDeregistration{key: result.ASKey, removeAS: result.removeAS})
 			}
 		}
 	}
@@ -993,4 +1020,107 @@ func routingKeyParameter(request RoutingKeyRegistrationRequest) (*params.Param, 
 		return nil, err
 	}
 	return parameter, nil
+}
+
+// remoteASKeyFor resolves the canonical identity of one Application Server this
+// Association may register a Routing Key for.
+func (c *Association) remoteASKeyFor(id RemoteASID) (SGASKey, error) {
+	if id == "" {
+		if c.aspPeerInventory() != nil && c.cfg != nil && c.cfg.PeerSGP != nil {
+			return SGASKey{}, fmt.Errorf("%w: a provisioned Association must name one", ErrUnknownRemoteAS)
+		}
+		return SGASKey{}, nil
+	}
+	if c.cfg == nil || c.cfg.PeerSGP == nil {
+		return SGASKey{ApplicationServer: id}, nil
+	}
+	key := SGASKey{
+		SignallingGateway: c.cfg.PeerSGP.SignallingGateway,
+		ApplicationServer: id,
+	}
+	inventory := c.aspPeerInventory()
+	if inventory == nil {
+		return key, nil
+	}
+	applicationServer, served := inventory.config.remoteASFor(*c.cfg.PeerSGP, id)
+	if !served || !applicationServer.routingKeySet {
+		return SGASKey{}, fmt.Errorf("%w: %q is not bound dynamically by SGP %q of Signalling Gateway %q",
+			ErrUnknownRemoteAS, id,
+			c.cfg.PeerSGP.SignallingGatewayProcess, c.cfg.PeerSGP.SignallingGateway)
+	}
+	return key, nil
+}
+
+// aspPeerInventory reports the ASP peer inventory of this Association's
+// Endpoint, or nil when it provisions none.
+func (c *Association) aspPeerInventory() *aspRoutes {
+	if c == nil || c.endpoint == nil || !c.endpoint.aspRoutes.peerInventoryConfigured() {
+		return nil
+	}
+	return c.endpoint.aspRoutes
+}
+
+// registeredASKey reports the exact wire scope a Registration Result assigned,
+// or the zero scope when the result registered nothing.
+func (c *Association) registeredASKey(
+	request RoutingKeyRegistrationRequest,
+	result RoutingKeyRegistrationResult,
+) ASKey {
+	if result.Status != RegistrationSuccessfullyRegistered &&
+		result.Status != RegistrationRoutingKeyAlreadyRegistered {
+		return ASKey{}
+	}
+	// RFC 4666 Section 3.6.1 lets a Routing Key omit Network Appearance when
+	// the Association configures one, so the scope the peer assigned is that
+	// implied appearance together with the Routing Context it chose.
+	effective, _ := routingKeyWithImpliedNetworkAppearance(request.RoutingKey, c.localNetworkAppearance())
+	return ASKey{
+		NetworkAppearance:    effective.NetworkAppearance,
+		NetworkAppearanceSet: effective.NetworkAppearanceSet,
+		RoutingContext:       result.RoutingContext,
+		RoutingContextSet:    true,
+	}
+}
+
+// confirmedDeregistrationScopes resolves every named Application Server to the
+// Routing Context that deregisters it, refusing anything the wire cannot
+// express or this Association contradicts before any of it reaches the
+// transport.
+func (c *Association) confirmedDeregistrationScopes(keys []ASKey) ([]uint32, error) {
+	routingContexts := make([]uint32, len(keys))
+	seen := make(map[uint32]struct{}, len(keys))
+	for index, key := range keys {
+		if !key.RoutingContextSet {
+			return nil, fmt.Errorf("%w: Application Server %d", ErrContextlessApplicationServer, index)
+		}
+		if conflict, held := c.conflictingApplicationServerScope(key); conflict {
+			return nil, fmt.Errorf("%w: %+v names Routing Context %d, which this Association holds as %+v",
+				ErrUnknownApplicationServerScope, key, key.RoutingContext, held)
+		}
+		if _, duplicate := seen[key.RoutingContext]; duplicate {
+			return nil, fmt.Errorf("duplicate Routing Context %d", key.RoutingContext)
+		}
+		seen[key.RoutingContext] = struct{}{}
+		routingContexts[index] = key.RoutingContext
+	}
+	return routingContexts, nil
+}
+
+// conflictingApplicationServerScope reports a scope that contradicts the
+// binding this Association already holds for the same Routing Context, whether
+// a registration assigned it or the Association configures it statically. A
+// Routing Context this Association holds no binding for is not a conflict: the
+// peer may still hold one, and RFC 4666 Section 3.6.4 answers Not Registered
+// when it does not.
+func (c *Association) conflictingApplicationServerScope(key ASKey) (bool, ASKey) {
+	local := c.isIPSPDoubleExchange()
+	if bound, exists := c.dynamicASKey(key.RoutingContext, local); exists {
+		return bound != key, bound
+	}
+	for _, configured := range c.staticallyConfiguredASKeys() {
+		if configured.RoutingContextSet && configured.RoutingContext == key.RoutingContext {
+			return configured != key, configured
+		}
+	}
+	return false, ASKey{}
 }

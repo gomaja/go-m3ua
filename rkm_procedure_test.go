@@ -470,9 +470,9 @@ func TestAssociationRegistrationAndDeregistrationAPI(t *testing.T) {
 		t.Fatalf("ASP configured Routing Contexts = %v, want [%d]", configured, routingContext)
 	}
 
-	deregistrations, err := asp.DeregisterRoutingContexts(context.Background(), routingContext)
+	deregistrations, err := asp.DeregisterApplicationServers(context.Background(), registrations[0].ASKey)
 	if err != nil {
-		t.Fatalf("DeregisterRoutingContexts: %v", err)
+		t.Fatalf("DeregisterApplicationServers: %v", err)
 	}
 	if len(deregistrations) != 1 || deregistrations[0].Status != DeregistrationSuccessfullyDeregistered {
 		t.Fatalf("Deregistration results = %+v", deregistrations)
@@ -849,8 +849,8 @@ func TestRKMRequesterAlreadyCanceledContextSendsNothing(t *testing.T) {
 	}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("RegisterRoutingKeys error = %v, want context.Canceled", err)
 	}
-	if _, err := association.DeregisterRoutingContexts(ctx, 1); !errors.Is(err, context.Canceled) {
-		t.Fatalf("DeregisterRoutingContexts error = %v, want context.Canceled", err)
+	if _, err := association.DeregisterApplicationServers(ctx, heldASKey(association, 1)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("DeregisterApplicationServers error = %v, want context.Canceled", err)
 	}
 	if writes != 0 {
 		t.Fatalf("writes = %d, want 0 for an already-canceled context", writes)
@@ -911,9 +911,10 @@ func TestRKMRequesterCollectsSplitResponses(t *testing.T) {
 		t.Fatalf("Registration results = %+v, want Routing Contexts 10 and 11", registrations)
 	}
 
-	deregistrations, err := association.DeregisterRoutingContexts(context.Background(), 10, 11)
+	deregistrations, err := association.DeregisterApplicationServers(
+		context.Background(), registrations[0].ASKey, registrations[1].ASKey)
 	if err != nil {
-		t.Fatalf("DeregisterRoutingContexts: %v", err)
+		t.Fatalf("DeregisterApplicationServers: %v", err)
 	}
 	if len(deregistrations) != 2 ||
 		deregistrations[0].Status != DeregistrationSuccessfullyDeregistered ||
@@ -1070,7 +1071,7 @@ func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 		}
 		firstDone := make(chan error, 1)
 		go func() {
-			_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+			_, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 100))
 			firstDone <- err
 		}()
 		<-written
@@ -1079,7 +1080,7 @@ func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 		defer cancel()
 		secondDone := make(chan error, 1)
 		go func() {
-			_, err := association.DeregisterRoutingContexts(ctx, 200)
+			_, err := association.DeregisterApplicationServers(ctx, heldASKey(association, 200))
 			secondDone <- err
 		}()
 		var secondErr error
@@ -1098,14 +1099,14 @@ func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 			t.Fatalf("first Deregistration Response: %v", err)
 		}
 		if err := <-firstDone; err != nil {
-			t.Fatalf("first DeregisterRoutingContexts: %v", err)
+			t.Fatalf("first DeregisterApplicationServers: %v", err)
 		}
 		if !returnedBeforeRelease {
 			<-secondDone
-			t.Fatal("queued DeregisterRoutingContexts ignored its context deadline until the first procedure completed")
+			t.Fatal("queued DeregisterApplicationServers ignored its context deadline until the first procedure completed")
 		}
 		if !errors.Is(secondErr, context.DeadlineExceeded) {
-			t.Fatalf("queued DeregisterRoutingContexts error = %v, want context.DeadlineExceeded", secondErr)
+			t.Fatalf("queued DeregisterApplicationServers error = %v, want context.DeadlineExceeded", secondErr)
 		}
 	})
 }
@@ -1210,7 +1211,7 @@ func TestRKMRequesterRechecksStateAfterSerialization(t *testing.T) {
 		}
 		firstDone := make(chan error, 1)
 		go func() {
-			_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+			_, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 100))
 			firstDone <- err
 		}()
 		<-written
@@ -1218,7 +1219,7 @@ func TestRKMRequesterRechecksStateAfterSerialization(t *testing.T) {
 		ctx := newRKMInitialCheckContext()
 		secondDone := make(chan error, 1)
 		go func() {
-			_, err := association.DeregisterRoutingContexts(ctx, 200)
+			_, err := association.DeregisterApplicationServers(ctx, heldASKey(association, 200))
 			secondDone <- err
 		}()
 		<-ctx.checked
@@ -1234,10 +1235,10 @@ func TestRKMRequesterRechecksStateAfterSerialization(t *testing.T) {
 			t.Fatalf("first Deregistration Response: %v", err)
 		}
 		if err := <-firstDone; err != nil {
-			t.Fatalf("first DeregisterRoutingContexts: %v", err)
+			t.Fatalf("first DeregisterApplicationServers: %v", err)
 		}
 		if err := <-secondDone; !errors.Is(err, ErrNotEstablished) {
-			t.Fatalf("queued DeregisterRoutingContexts error = %v, want ErrNotEstablished", err)
+			t.Fatalf("queued DeregisterApplicationServers error = %v, want ErrNotEstablished", err)
 		}
 		if writeCount != 1 {
 			t.Fatalf("Deregistration Request writes = %d, want only the first procedure", writeCount)
@@ -1281,7 +1282,7 @@ func TestRKMResponseChannelPublicationIsRaceSafe(t *testing.T) {
 		requestDone := make(chan struct{})
 		go func() {
 			defer close(requestDone)
-			_, _ = association.DeregisterRoutingContexts(ctx, 1)
+			_, _ = association.DeregisterApplicationServers(ctx, heldASKey(association, 1))
 		}()
 		<-written
 		cancel()
@@ -1361,8 +1362,8 @@ func TestRKMRequesterRejectsUnexpectedResultsWithoutPartialScopeMutation(t *test
 			)
 			return message.MarshalLen(), association.handleDeregistrationResponse(response)
 		}
-		if _, err := association.DeregisterRoutingContexts(context.Background(), 10, 11); err == nil {
-			t.Fatal("DeregisterRoutingContexts error = nil, want unexpected result error")
+		if _, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 10), heldASKey(association, 11)); err == nil {
+			t.Fatal("DeregisterApplicationServers error = nil, want unexpected result error")
 		}
 		if contexts := association.dynamicRoutingContexts(false); len(contexts) != 2 {
 			t.Fatalf("failed Deregistration mutated dynamic Routing Contexts: %v", contexts)
@@ -1904,7 +1905,7 @@ func TestRKMRequesterWaitStopsOnContextAndAssociationClose(t *testing.T) {
 		association, written := newWaitingAssociation(t)
 		result := make(chan error, 1)
 		go func() {
-			_, err := association.DeregisterRoutingContexts(context.Background(), 1)
+			_, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 1))
 			result <- err
 		}()
 		<-written
@@ -1912,7 +1913,7 @@ func TestRKMRequesterWaitStopsOnContextAndAssociationClose(t *testing.T) {
 			t.Fatalf("Close: %v", err)
 		}
 		if err := <-result; !errors.Is(err, ErrAssociationClosed) {
-			t.Fatalf("DeregisterRoutingContexts error = %v, want ErrAssociationClosed", err)
+			t.Fatalf("DeregisterApplicationServers error = %v, want ErrAssociationClosed", err)
 		}
 	})
 }
@@ -2000,7 +2001,7 @@ func TestRKMRequesterBoundsUnresolvedDeregistrationOutcomes(t *testing.T) {
 			cancel()
 			return message.MarshalLen(), nil
 		}
-		_, err := association.DeregisterRoutingContexts(ctx, uint32(attempt+1))
+		_, err := association.DeregisterApplicationServers(ctx, routingContextASKey(uint32(attempt+1)))
 		cancel()
 		if attempt < unresolvedLimit {
 			if !errors.Is(err, context.Canceled) {
@@ -2036,7 +2037,7 @@ func TestRKMRequesterBoundsUnresolvedDeregistrationOutcomes(t *testing.T) {
 		cancel()
 		return message.MarshalLen(), nil
 	}
-	_, err := association.DeregisterRoutingContexts(ctx, unresolvedLimit+2)
+	_, err := association.DeregisterApplicationServers(ctx, heldASKey(association, unresolvedLimit+2))
 	cancel()
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Deregistration after late result error = %v, want context.Canceled", err)
@@ -2164,7 +2165,7 @@ func TestRKMRequesterIgnoresStaleDeregistrationResponseAfterCancellation(t *test
 	firstContext, cancelFirst := context.WithCancel(context.Background())
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := association.DeregisterRoutingContexts(firstContext, 100)
+		_, err := association.DeregisterApplicationServers(firstContext, heldASKey(association, 100))
 		firstDone <- err
 	}()
 	if got := <-written; got != 100 {
@@ -2172,7 +2173,7 @@ func TestRKMRequesterIgnoresStaleDeregistrationResponseAfterCancellation(t *test
 	}
 	cancelFirst()
 	if err := <-firstDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("first DeregisterRoutingContexts error = %v, want context.Canceled", err)
+		t.Fatalf("first DeregisterApplicationServers error = %v, want context.Canceled", err)
 	}
 
 	type deregistrationAnswer struct {
@@ -2181,7 +2182,7 @@ func TestRKMRequesterIgnoresStaleDeregistrationResponseAfterCancellation(t *test
 	}
 	secondDone := make(chan deregistrationAnswer, 1)
 	go func() {
-		results, err := association.DeregisterRoutingContexts(context.Background(), 200)
+		results, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 200))
 		secondDone <- deregistrationAnswer{results: results, err: err}
 	}()
 	if got := <-written; got != 200 {
@@ -2232,18 +2233,18 @@ func TestRKMRequesterRejectsAmbiguousDeregistrationRetryAfterCancellation(t *tes
 	firstContext, cancelFirst := context.WithCancel(context.Background())
 	firstDone := make(chan error, 1)
 	go func() {
-		_, err := association.DeregisterRoutingContexts(firstContext, 100)
+		_, err := association.DeregisterApplicationServers(firstContext, heldASKey(association, 100))
 		firstDone <- err
 	}()
 	<-written
 	cancelFirst()
 	if err := <-firstDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("first DeregisterRoutingContexts error = %v, want context.Canceled", err)
+		t.Fatalf("first DeregisterApplicationServers error = %v, want context.Canceled", err)
 	}
 
 	retryContext, cancelRetry := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancelRetry()
-	_, err := association.DeregisterRoutingContexts(retryContext, 100)
+	_, err := association.DeregisterApplicationServers(retryContext, heldASKey(association, 100))
 	if !errors.Is(err, ErrDeregistrationOutcomeUnknown) {
 		t.Fatalf("ambiguous retry error = %v, want ErrDeregistrationOutcomeUnknown", err)
 	}
@@ -2265,7 +2266,7 @@ func TestRKMRequesterRejectsAmbiguousDeregistrationRetryAfterCancellation(t *tes
 
 	retryDone := make(chan error, 1)
 	go func() {
-		_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+		_, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 100))
 		retryDone <- err
 	}()
 	<-written
@@ -2312,13 +2313,13 @@ func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := association.DeregisterRoutingContexts(ctx, 100)
+		_, err := association.DeregisterApplicationServers(ctx, heldASKey(association, 100))
 		done <- err
 	}()
 	<-written
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("DeregisterRoutingContexts error = %v, want context.Canceled", err)
+		t.Fatalf("DeregisterApplicationServers error = %v, want context.Canceled", err)
 	}
 	if _, ok := association.dynamicASKey(100, false); !ok {
 		t.Fatal("dynamic ASKey removed before the unresolved response arrived")
@@ -2370,13 +2371,13 @@ func TestRKMLateSuccessfulDeregistrationPreservesReregisteredDynamicKey(t *testi
 	}
 	deregistrationDone := make(chan error, 1)
 	go func() {
-		_, err := association.DeregisterRoutingContexts(ctx, 100)
+		_, err := association.DeregisterApplicationServers(ctx, heldASKey(association, 100))
 		deregistrationDone <- err
 	}()
 	<-deregistrationWritten
 	cancel()
 	if err := <-deregistrationDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("DeregisterRoutingContexts error = %v, want context.Canceled", err)
+		t.Fatalf("DeregisterApplicationServers error = %v, want context.Canceled", err)
 	}
 
 	association.signalWriter = func(message messages.M3UA) (int, error) {
@@ -2655,13 +2656,13 @@ func TestRKMLateDeregistrationResponseIsAppliedAtomically(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := association.DeregisterRoutingContexts(ctx, 100)
+		_, err := association.DeregisterApplicationServers(ctx, heldASKey(association, 100))
 		done <- err
 	}()
 	<-written
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("DeregisterRoutingContexts error = %v, want context.Canceled", err)
+		t.Fatalf("DeregisterApplicationServers error = %v, want context.Canceled", err)
 	}
 
 	result := func(routingContext uint32) *params.Param {
@@ -2718,7 +2719,7 @@ func TestRKMDeregistrationWriteFailureDoesNotMakeOutcomeUnknown(t *testing.T) {
 	}
 
 	for attempt := range 2 {
-		_, err := association.DeregisterRoutingContexts(context.Background(), 100)
+		_, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 100))
 		if !errors.Is(err, writeErr) {
 			t.Fatalf("attempt %d error = %v, want write failure", attempt+1, err)
 		}
@@ -2771,7 +2772,7 @@ func TestRKMRequesterIgnoresDuplicateDeregistrationResults(t *testing.T) {
 	}
 	done := make(chan deregistrationAnswer, 1)
 	go func() {
-		results, err := association.DeregisterRoutingContexts(context.Background(), 100, 200)
+		results, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 100), heldASKey(association, 200))
 		done <- deregistrationAnswer{results: results, err: err}
 	}()
 	<-written
@@ -2799,7 +2800,7 @@ func TestRKMRequesterIgnoresDuplicateDeregistrationResults(t *testing.T) {
 	}
 	answer := <-done
 	if answer.err != nil {
-		t.Fatalf("DeregisterRoutingContexts: %v", answer.err)
+		t.Fatalf("DeregisterApplicationServers: %v", answer.err)
 	}
 	if len(answer.results) != 2 || answer.results[0].RoutingContext != 100 || answer.results[1].RoutingContext != 200 {
 		t.Fatalf("Deregistration results = %+v, want Routing Contexts 100 and 200", answer.results)
@@ -2859,7 +2860,7 @@ func TestRKMRequesterRejectsContradictoryDeregistrationResults(t *testing.T) {
 	}
 	done := make(chan deregistrationAnswer, 1)
 	go func() {
-		results, err := association.DeregisterRoutingContexts(context.Background(), 100, 200)
+		results, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, 100), heldASKey(association, 200))
 		done <- deregistrationAnswer{results: results, err: err}
 	}()
 	<-written
@@ -2889,7 +2890,7 @@ func TestRKMRequesterRejectsContradictoryDeregistrationResults(t *testing.T) {
 	}
 	answer := <-done
 	if answer.err != nil {
-		t.Fatalf("DeregisterRoutingContexts: %v", answer.err)
+		t.Fatalf("DeregisterApplicationServers: %v", answer.err)
 	}
 	if len(answer.results) != 2 || answer.results[0].RoutingContext != 100 || answer.results[1].RoutingContext != 200 {
 		t.Fatalf("Deregistration results = %+v, want Routing Contexts 100 and 200", answer.results)
@@ -3169,8 +3170,8 @@ func TestIPSPDoubleExchangeRKMScopesDirectionsIndependently(t *testing.T) {
 	if peerContexts := local.dynamicRoutingContexts(false); len(peerContexts) != 0 {
 		t.Fatalf("local Registration changed TrafficToPeer contexts: %v", peerContexts)
 	}
-	if _, err := local.DeregisterRoutingContexts(context.Background(), 99); err != nil {
-		t.Fatalf("DeregisterRoutingContexts: %v", err)
+	if _, err := local.DeregisterApplicationServers(context.Background(), heldASKey(local, 99)); err != nil {
+		t.Fatalf("DeregisterApplicationServers: %v", err)
 	}
 	if localContexts := local.dynamicRoutingContexts(true); len(localContexts) != 0 {
 		t.Fatalf("local Deregistration retained TrafficToLocal contexts: %v", localContexts)
@@ -3365,9 +3366,9 @@ func TestIPSPSingleExchangeRequesterCleansDynamicApplicationServer(t *testing.T)
 	association.commitState(StateASPInactive)
 	endpoint.as.aspStateChanged(association, StateASPInactive)
 
-	deregistrations, err := association.DeregisterRoutingContexts(context.Background(), routingContext)
+	deregistrations, err := association.DeregisterApplicationServers(context.Background(), heldASKey(association, routingContext))
 	if err != nil {
-		t.Fatalf("DeregisterRoutingContexts: %v", err)
+		t.Fatalf("DeregisterApplicationServers: %v", err)
 	}
 	if len(deregistrations) != 1 || deregistrations[0].Status != DeregistrationSuccessfullyDeregistered {
 		t.Fatalf("Deregistration results = %+v, want success", deregistrations)
@@ -4311,4 +4312,13 @@ func TestRKMResponderAcceptsWideOriginatingPointCodeMask(t *testing.T) {
 	if dynamic := endpoint.routingKeys.dynamicCount(); dynamic != 2 {
 		t.Fatalf("dynamic Routing Keys = %d, want both Routing Keys", dynamic)
 	}
+}
+
+// heldASKey is the wire scope an Association holds for one Routing Context, so
+// a test deregisters exactly the binding it registered.
+func heldASKey(association *Association, routingContext uint32) ASKey {
+	if key, bound := association.dynamicASKey(routingContext, association.isIPSPDoubleExchange()); bound {
+		return key
+	}
+	return routingContextASKey(routingContext)
 }
