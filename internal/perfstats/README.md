@@ -31,7 +31,9 @@ absolute performance and correctness gate passed.
 capacity campaign run, as required by the approved budgets. The rule is pure
 interval arithmetic over the sender-window backlog-change interval
 `[lower, upper]` (first versus last measurement-quarter means, computed by the
-traffic fixture) and admits no numeric tolerance.
+traffic fixture) and admits no numeric tolerance. Both comparisons are made
+against `BacklogResolution`, the instrument's own least count, which is derived
+below rather than chosen.
 
 Validity is decided first and the two comparisons are applied only to what
 survives it, so an unusable interval can never reach either of them:
@@ -40,21 +42,77 @@ survives it, so an unusable interval can never reach either of them:
   are finite, and `lower <= upper`. Missing evidence and any interval failing
   that test are `indeterminate`, and neither comparison below is applied. In
   particular `[1, +Inf]` is `indeterminate` because it is not finite, not
-  `growing` on `lower > 0`;
-- a usable interval is `not-growing` iff `upper <= 0`;
-- otherwise it is `growing` iff `lower > 0`;
+  `growing` on `lower > resolution`;
+- a usable interval is `not-growing` iff `upper <= resolution`;
+- otherwise it is `growing` iff `lower > resolution`;
 - otherwise it is `indeterminate`.
 
+### Why the comparison is against the instrument's resolution
+
+Comparing `upper` against zero made the rule unfalsifiable in one direction. A
+steady-state run's true mean backlog change is exactly zero, so its measured
+interval brackets zero from both sides and `upper <= 0` can never hold. Under
+that comparison `not-growing` is unreachable for precisely the runs the rule
+exists to accept, and no capacity or throughput row can ever reach `pass`. That
+is not a strict rule; it demands proof of a strict negative about a quantity
+whose correct value is zero.
+
+`BacklogResolution` is one message, and it is derived from the fixture's
+counting, not from any campaign result. The fixture's `analyzeProgress` brackets
+outstanding work as `[max(0, offered(before) - unique), offered(after) - unique]`
+over `uint64` message counts; `offeredAt` is `floor(elapsed*rate/second) + 1`,
+the same integer expression the dispatcher uses to decide what is due, so its
+least count is exactly one message; and `describeBacklogChange` differences
+means of those counts, which rescales the bounds but cannot manufacture a
+distinction the counted quantity does not carry. The bounds describe a level
+difference and not a rate: "the backlog grew" means at least one more message
+is outstanding at the end of the window than at its start, and below that the
+two levels are the same count. The fixture offers, transports
+and validates whole messages and holds no sub-message state, so the smallest
+backlog change it can tell apart from no change is one message. The fixture's
+own coarse series diagnostic, `assessBacklog`, independently treats a
+first-to-last-quarter mean difference of at most one outstanding message as
+"not growing"; its additional `1.10` proportional allowance is exactly the kind
+of percentage tolerance this rule forbids and is not adopted.
+
+The value does not depend on the offered rate, the run duration, the sample
+count or any observed interval. The full derivation is in `backlog.go` next to
+the constant.
+
+The sampling method's own uncertainty is deliberately not used as the
+resolution. Each sample's bracket is as wide as the offered schedule advances
+during one progress round trip, and `describeBacklogChange` already carries
+that width into the interval: it is exactly `upper - lower`. Using it as the
+threshold as well would make the rule self-referential, because
+`upper <= upper - lower` is only `lower <= 0`, and would leave `indeterminate`
+with nothing to cover. The window length and the number of samples in a quarter
+scale the arithmetic but put no floor on how finely two message counts can
+differ either. The threshold has to be a property of the instrument that does
+not vary with the run, and the message granularity is the only such property
+the fixture has.
+
+One message is a small threshold, not a generous one. At the offered rates the
+approved rows use, a progress round trip advances the offered schedule by more
+than one message, so those intervals stay wider than the resolution and those
+rows stay `indeterminate`. The change makes the rule falsifiable; it does not
+make runs pass.
+
 A capacity or throughput run may pass only with `not-growing`, zero counted
-failures (missing, duplicate, invalid, reordered, late-after-stop, capped,
-send errors, echo deadline failures) and a fixture-valid run. A growing
-interval or any counted failure is a failure; everything else is
-inconclusive. The counted failures are summed with saturating addition, so
-counters large enough to wrap a `uint64` sum still fail the run rather than
-presenting a zero total. The rule is fixed in advance and must not be relaxed
-after observing results: no repeat-until-pass, no percentage allowance for
-boundary uncertainty. An interval that straddles zero stays inconclusive
-rather than being interpreted as stability.
+failures (missing, duplicate, invalid, reordered,
+late-after-stop, capped, send errors, echo deadline failures) and a
+fixture-valid run. A growing interval or any counted failure is a failure;
+everything else is inconclusive. The counted failures are summed with
+saturating addition, so counters large enough to wrap a `uint64` sum still fail
+the run rather than presenting a zero total.
+
+The rule is fixed in advance and must not be relaxed after observing results:
+no repeat-until-pass, no percentage allowance for boundary uncertainty, and no
+tuning of `resolution`. Raising `resolution` so that a growing or unresolved
+row reports `not-growing`, and lowering it so that an inconvenient row reports
+`growing`, are both the post-hoc threshold change the budgets forbid. The only
+admissible reason to change it is a change in how the fixture counts, and that
+change must be stated in the derivation. An interval that spans the resolution
+stays inconclusive rather than being interpreted as stability.
 
 `perfstats.DecideRun` is the boundary at which this rule produces a result.
 The traffic fixture at `internal/cmd/perftraffic` answers a different and

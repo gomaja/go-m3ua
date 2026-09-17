@@ -24,7 +24,7 @@ func passingRunJSON() string {
 func failingRunJSON() string {
 	return `{"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":0.5,"mean_change_upper":2.5}}}`
+		`"sender_window":{"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
 }
 
 func straddlingRunJSON() string {

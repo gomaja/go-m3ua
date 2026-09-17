@@ -9,7 +9,20 @@ func interval(lower, upper float64) *BacklogInterval {
 	return &BacklogInterval{Lower: lower, Upper: upper}
 }
 
+// BacklogResolution is derived in backlog.go from the fixture's whole-message
+// counting, not chosen from results. Pinning the derived value here makes a
+// post-hoc change to it trip a named test instead of quietly moving verdicts.
+func TestBacklogResolutionIsOneMessage(testContext *testing.T) {
+	if BacklogResolution != 1 {
+		testContext.Fatalf("BacklogResolution = %v, want exactly 1 message: the fixture counts whole messages and holds nothing smaller", BacklogResolution)
+	}
+}
+
+// Both comparisons are made against BacklogResolution, so each is probed from
+// both sides by a single float step as well as at the boundary itself.
 func TestBacklogIntervalVerdictBoundaries(testContext *testing.T) {
+	aboveResolution := math.Nextafter(BacklogResolution, math.Inf(1))
+	belowResolution := math.Nextafter(BacklogResolution, math.Inf(-1))
 	tests := []struct {
 		name  string
 		lower float64
@@ -20,12 +33,20 @@ func TestBacklogIntervalVerdictBoundaries(testContext *testing.T) {
 		{name: "upper exactly zero", lower: -3.4, upper: 0, want: BacklogNotGrowing},
 		{name: "negative zero upper", lower: -1, upper: math.Copysign(0, -1), want: BacklogNotGrowing},
 		{name: "entirely negative", lower: -10, upper: -0.5, want: BacklogNotGrowing},
-		{name: "upper one float above zero", lower: -1, upper: math.SmallestNonzeroFloat64, want: BacklogIndeterminate},
-		{name: "straddles zero", lower: -3.4, upper: 3.53, want: BacklogIndeterminate},
+		{name: "upper one float above zero", lower: -1, upper: math.SmallestNonzeroFloat64, want: BacklogNotGrowing},
+		{name: "upper one float below the resolution", lower: -5, upper: belowResolution, want: BacklogNotGrowing},
+		{name: "upper exactly at the resolution", lower: -5, upper: BacklogResolution, want: BacklogNotGrowing},
+		{name: "upper one float above the resolution", lower: -5, upper: aboveResolution, want: BacklogIndeterminate},
+		{name: "collapsed on the resolution", lower: BacklogResolution, upper: BacklogResolution, want: BacklogNotGrowing},
+		{name: "lower exactly at the resolution", lower: BacklogResolution, upper: aboveResolution, want: BacklogIndeterminate},
+		{name: "lower one float above the resolution", lower: aboveResolution, upper: aboveResolution, want: BacklogGrowing},
+		{name: "lower one float above the resolution with a wide upper", lower: aboveResolution, upper: 4, want: BacklogGrowing},
+		{name: "straddles zero wider than the resolution", lower: -3.4, upper: 3.53, want: BacklogIndeterminate},
 		{name: "touches zero from below only", lower: 0, upper: 2, want: BacklogIndeterminate},
-		{name: "lower one float above zero", lower: math.SmallestNonzeroFloat64, upper: 1, want: BacklogGrowing},
-		{name: "entirely positive", lower: 0.25, upper: 4, want: BacklogGrowing},
-		{name: "both positive equal", lower: 2, upper: 2, want: BacklogGrowing},
+		{name: "lower one float above zero", lower: math.SmallestNonzeroFloat64, upper: 1, want: BacklogNotGrowing},
+		{name: "entirely positive within the resolution", lower: 0.25, upper: 0.75, want: BacklogNotGrowing},
+		{name: "entirely positive spanning the resolution", lower: 0.25, upper: 4, want: BacklogIndeterminate},
+		{name: "both positive equal above the resolution", lower: 2, upper: 2, want: BacklogGrowing},
 		{name: "lower NaN", lower: math.NaN(), upper: -1, want: BacklogIndeterminate},
 		{name: "upper NaN", lower: -1, upper: math.NaN(), want: BacklogIndeterminate},
 		{name: "lower negative infinity", lower: math.Inf(-1), upper: 0, want: BacklogIndeterminate},
@@ -57,7 +78,7 @@ func TestDecideRunNeverPassesWithStraddlingOrMissingEvidence(testContext *testin
 		evidence RunEvidence
 		reason   string
 	}{
-		{name: "straddling", evidence: RunEvidence{FixtureValid: true, Interval: interval(-3.4, 3.53)}, reason: BacklogStraddlesReason},
+		{name: "straddling", evidence: RunEvidence{FixtureValid: true, Interval: interval(-3.4, 3.53)}, reason: BacklogUnresolvedReason},
 		{name: "missing interval", evidence: RunEvidence{FixtureValid: true}, reason: BacklogEvidenceMissingReason},
 		{name: "NaN interval", evidence: RunEvidence{FixtureValid: true, Interval: interval(math.NaN(), 0)}, reason: BacklogEvidenceMissingReason},
 		{name: "reversed interval", evidence: RunEvidence{FixtureValid: true, Interval: interval(1, -1)}, reason: BacklogEvidenceMissingReason},
@@ -76,7 +97,7 @@ func TestDecideRunNeverPassesWithStraddlingOrMissingEvidence(testContext *testin
 }
 
 func TestDecideRunFailsOnGrowingBacklog(testContext *testing.T) {
-	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(0.5, 3)})
+	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(1.5, 3)})
 	if decision.Decision != Fail || decision.Backlog != BacklogGrowing || decision.Reason != BacklogGrowingReason {
 		testContext.Fatalf("DecideRun() = %+v, want growing failure", decision)
 	}
@@ -115,6 +136,10 @@ func FuzzBacklogIntervalNeverPassesOnInvalidEvidence(fuzzContext *testing.F) {
 	fuzzContext.Add(0.0, 0.0)
 	fuzzContext.Add(math.NaN(), 1.0)
 	fuzzContext.Add(math.Inf(-1), math.Inf(1))
+	fuzzContext.Add(-0.5, 0.5)
+	fuzzContext.Add(BacklogResolution, BacklogResolution)
+	fuzzContext.Add(BacklogResolution, math.Nextafter(BacklogResolution, math.Inf(1)))
+	fuzzContext.Add(math.Nextafter(BacklogResolution, math.Inf(1)), 4.0)
 	fuzzContext.Fuzz(func(testContext *testing.T, lower, upper float64) {
 		evidence := RunEvidence{FixtureValid: true, Interval: &BacklogInterval{Lower: lower, Upper: upper}}
 		decision := DecideRun(evidence)
@@ -125,11 +150,11 @@ func FuzzBacklogIntervalNeverPassesOnInvalidEvidence(fuzzContext *testing.F) {
 		}
 		switch decision.Decision {
 		case Pass:
-			if !evidence.Interval.Valid() || evidence.Interval.Upper > 0 {
+			if !evidence.Interval.Valid() || evidence.Interval.Upper > BacklogResolution {
 				testContext.Fatalf("pass without a valid non-positive interval: %+v", evidence.Interval)
 			}
 		case Fail:
-			if evidence.Interval.Valid() && evidence.Interval.Upper <= 0 {
+			if evidence.Interval.Valid() && evidence.Interval.Upper <= BacklogResolution {
 				testContext.Fatalf("loss-free valid run with non-positive interval failed: %+v", decision)
 			}
 		case Inconclusive:
@@ -175,5 +200,40 @@ func TestDecideRunNeverPassesALossyRunWhoseCountersWrap(testContext *testing.T) 
 	})
 	if decision.Decision != Fail || decision.Reason != DeliveryFailuresReason {
 		testContext.Fatalf("DecideRun() = %+v, want Fail with %q", decision, DeliveryFailuresReason)
+	}
+}
+
+// A steady-state run's true mean backlog change is zero, so the measured
+// interval brackets zero from both sides. Comparing the upper bound against
+// zero therefore makes not-growing unreachable for exactly the runs the rule
+// exists to accept, and no capacity or throughput row can ever reach Pass.
+func TestSteadyStateRunCanReachPass(testContext *testing.T) {
+	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-0.5, 0.5)})
+	if decision.Decision != Pass || decision.Backlog != BacklogNotGrowing || decision.Reason != "" {
+		testContext.Fatalf("DecideRun() = %+v, want a clean pass for a flat run", decision)
+	}
+}
+
+// The rule has to be falsifiable in both directions: a backlog that genuinely
+// grows must still be called growing, a genuinely flat one must be able to
+// reach not-growing, and a flat one measured too noisily to tell the two apart
+// must stay indeterminate.
+func TestBacklogVerdictIsFalsifiableInBothDirections(testContext *testing.T) {
+	tests := []struct {
+		name  string
+		lower float64
+		upper float64
+		want  BacklogVerdict
+	}{
+		{name: "growing beyond the resolution", lower: 1.5, upper: 4, want: BacklogGrowing},
+		{name: "flat within the resolution", lower: -0.5, upper: 0.5, want: BacklogNotGrowing},
+		{name: "flat but measured more coarsely than the resolution", lower: -3.4, upper: 3.53, want: BacklogIndeterminate},
+	}
+	for _, test := range tests {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			if got := (BacklogInterval{Lower: test.lower, Upper: test.upper}).Verdict(); got != test.want {
+				testContext.Fatalf("Verdict() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
