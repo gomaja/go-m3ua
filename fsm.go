@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -479,9 +480,17 @@ func (c *Association) sendErr(err error) {
 	}
 }
 
-func (c *Association) sendErrForMessage(message messages.M3UA, err error) {
+// sendErrForMessage reports err against the message that caused it, attaching
+// the octets as received so the Diagnostic Information parameter can quote them
+// without anyone marshalling the decoded message afterwards. raw is cloned here,
+// on the dispatch goroutine, because the caller goes on using its buffer.
+func (c *Association) sendErrForMessage(message messages.M3UA, raw []byte, err error) {
 	if err == nil {
 		return
+	}
+	var unexpected *UnexpectedMessageError
+	if errors.As(err, &unexpected) && len(unexpected.Raw) == 0 {
+		unexpected.Raw = bytes.Clone(raw)
 	}
 	c.sendErr(&receivedMessageError{Message: message, Err: err})
 }
@@ -581,7 +590,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// Inline, not on its own goroutine: this is the payload path whose
 		// order MTP3 depends on. handleData blocks only when dataChan is full,
 		// which is backpressure onto the peer rather than silent reordering.
-		c.handleData(ctx, msg)
+		c.handleData(ctx, msg, raw)
 		c.sendState(stateUnchanged)
 	// ASPSM
 	case *messages.AspUp:
@@ -591,7 +600,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// holds its state. A genuinely unusable message, such as one received on
 		// the wrong SCTP stream, also holds state.
 		if err := c.handleAspUp(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 
 			var unexpected *UnexpectedMessageError
 			if !errors.As(err, &unexpected) || (c.role != RoleSGP && !c.isIPSPDoubleExchange()) {
@@ -607,7 +616,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// the same remote-IPSP transition. An SGP cannot legitimately receive
 		// ASP Up Ack and holds its state after reporting the Error.
 		if err := c.handleAspUpAck(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 
 			var unexpected *UnexpectedMessageError
 			if !errors.As(err, &unexpected) || c.role != RoleASP {
@@ -622,7 +631,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		}
 	case *messages.AspDown:
 		if err := c.handleAspDown(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 			c.sendState(stateUnchanged)
 		} else {
 			c.sendState(StateASPDown)
@@ -634,7 +643,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// held would go on believing it was carrying traffic the SGP had
 		// already taken away.
 		if err := c.handleAspDownAck(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 
 			var unexpected *UnexpectedMessageError
 			if !errors.As(err, &unexpected) || c.role != RoleASP {
@@ -656,7 +665,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// node could not act on (unsupported traffic mode, failed write), holds
 		// its state instead.
 		if err := c.handleAspActive(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 
 			var unexpected *UnexpectedMessageError
 			// An ASP-DOWN peer is refused outright: no Ack was written, and
@@ -683,7 +692,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		c.sendState(StateASPActive)
 	case *messages.AspActiveAck:
 		if err := c.handleAspActiveAck(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 			c.sendState(stateUnchanged)
 		} else if c.isIPSPDoubleExchange() {
 			c.sendState(stateUnchanged)
@@ -695,7 +704,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// the ASP is already ASP-INACTIVE, so the transition stands alongside the
 		// Error. An ASP receiving an ASP Inactive holds its state.
 		if err := c.handleAspInactive(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 
 			var unexpected *UnexpectedMessageError
 			if errors.As(err, &unexpected) && (c.role == RoleSGP || c.role == RoleIPSP) &&
@@ -717,7 +726,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		c.sendState(c.stateForActiveRoutingContexts())
 	case *messages.AspInactiveAck:
 		if err := c.handleAspInactiveAck(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 			c.sendState(stateUnchanged)
 		} else if c.isIPSPDoubleExchange() {
 			c.sendState(stateUnchanged)
@@ -730,12 +739,12 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		}
 	case *messages.Heartbeat:
 		if err := c.handleHeartbeat(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.HeartbeatAck:
 		if err := c.handleHeartbeatAck(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		} else {
 			c.notifyBeatAck()
 		}
@@ -743,12 +752,12 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// Management
 	case *messages.Error:
 		if err := c.handleError(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.Notify:
 		if err := c.handleNotify(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 			c.sendState(stateUnchanged)
 			return
 		}
@@ -774,54 +783,54 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 	// destinations beyond the peer (RFC 4666 Section 4.5).
 	case *messages.DestinationUnavailable:
 		if err := c.handleDestinationUnavailable(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationAvailable:
 		if err := c.handleDestinationAvailable(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationRestricted:
 		if err := c.handleDestinationRestricted(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.SignallingCongestion:
 		if err := c.handleSignallingCongestion(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationUserPartUnavailable:
 		if err := c.handleDestinationUserPartUnavailable(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationStateAudit:
 		if err := c.handleDestinationStateAudit(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	// Routing Key Management. These procedures do not change the ASP state
 	// machine; successful Registration changes per-AS membership instead.
 	case *messages.RegistrationRequest:
 		if err := c.handleRegistrationRequest(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.RegistrationResponse:
 		if err := c.handleRegistrationResponse(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DeregistrationRequest:
 		if err := c.handleDeregistrationRequest(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DeregistrationResponse:
 		if err := c.handleDeregistrationResponse(msg); err != nil {
-			c.sendErrForMessage(msg, err)
+			c.sendErrForMessage(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	default:

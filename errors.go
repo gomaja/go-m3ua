@@ -353,7 +353,7 @@ func (e *UnsupportedClassError) Error() string {
 }
 
 func (e *UnsupportedClassError) first40Octets() []byte {
-	return first40(e.Raw, e.Msg)
+	return first40(e.Raw)
 }
 
 // UnsupportedMessageError is used if a message with an
@@ -388,7 +388,7 @@ func (e *UnsupportedMessageError) Error() string {
 }
 
 func (e *UnsupportedMessageError) first40Octets() []byte {
-	return first40(e.Raw, e.Msg)
+	return first40(e.Raw)
 }
 
 // ParameterFaultError is used when a message this package implements cannot be
@@ -446,7 +446,7 @@ func (e *ParameterFaultError) Error() string {
 func (e *ParameterFaultError) Unwrap() error { return e.Cause }
 
 func (e *ParameterFaultError) first40Octets() []byte {
-	return first40(e.Raw, nil)
+	return first40(e.Raw)
 }
 
 // UnexpectedMessageError is used if a defined and recognized message is received
@@ -454,9 +454,14 @@ func (e *ParameterFaultError) first40Octets() []byte {
 // silently discard the message and not send an Error message).
 type UnexpectedMessageError struct {
 	Msg messages.M3UA
+	// Raw is the snapshot quoted in Diagnostic Information, taken when the
+	// error is constructed so rendering never writes into Msg.
+	Raw []byte
 }
 
-// NewUnexpectedMessageError creates UnexpectedMessageError
+// NewUnexpectedMessageError creates UnexpectedMessageError. Raw is left empty
+// here and filled in by the dispatcher, which is the only place holding the
+// octets as received; see sendErrForMessage.
 func NewUnexpectedMessageError(msg messages.M3UA) *UnexpectedMessageError {
 	return &UnexpectedMessageError{Msg: msg}
 }
@@ -596,7 +601,7 @@ func (c *Association) handleErrors(e error) error {
 			raw = event.raw
 		}
 		var diagnostic *params.Param
-		if raw := diagnosticInformation(raw, nil); len(raw) > 0 {
+		if raw := diagnosticInformation(raw); len(raw) > 0 {
 			diagnostic = params.NewDiagnosticInformation(raw)
 		}
 		res = messages.NewError(
@@ -668,7 +673,7 @@ func (c *Association) handleErrors(e error) error {
 			networkAppearanceOf(UnexpectedMessageError.Msg).Copy(),
 			// Mask 0: this is one point code, this node's, not a range.
 			params.NewAffectedPointCodeWithMask(0, c.cfg.OriginatingPointCode),
-			params.NewDiagnosticInformation(first40(nil, UnexpectedMessageError.Msg)),
+			params.NewDiagnosticInformation(first40(UnexpectedMessageError.Raw)),
 		)
 	}
 	var InvalidSCTPStreamIDError *InvalidSCTPStreamIDError
@@ -818,11 +823,10 @@ func (c *Association) handleErrors(e error) error {
 	return nil
 }
 
-// first40 returns the octets to quote in Diagnostic Information: the received
-// message when the dispatcher kept it, and otherwise a re-marshal of the parsed
-// one, truncated to the 40 octets RFC 4666 Section 3.8.1 asks for.
-func first40(raw []byte, msg messages.M3UA) []byte {
-	b := diagnosticInformation(raw, msg)
+// first40 returns the octets to quote in Diagnostic Information: the message as
+// received, truncated to the 40 octets RFC 4666 Section 3.8.1 asks for.
+func first40(raw []byte) []byte {
+	b := diagnosticInformation(raw)
 	if len(b) > 40 {
 		return b[:40]
 	}
@@ -854,14 +858,16 @@ const maxDiagnosticInformationLen = int(^uint16(0)) - 4
 // diagnosticInformation returns an owned copy of the offending message. A
 // Diagnostic Information parameter has a 16-bit length including its four-byte
 // header, so a larger M3UA message cannot be represented in full.
-func diagnosticInformation(raw []byte, msg messages.M3UA) []byte {
+func diagnosticInformation(raw []byte) []byte {
+	// Only the octets as received are ever quoted; the decoded message is
+	// deliberately not reachable from here. Marshalling it writes Header.Payload
+	// and the parameter lengths, so doing that on the monitor goroutine writes
+	// into a message the dispatcher still holds, and doing it at construction
+	// races just as badly wherever one message is reported from several
+	// goroutines, as the RKM procedures do. RFC 4666 Section 3.8.1 makes the
+	// parameter Conditional and says a zero-length Diagnostic Information is
+	// not an error, so quoting nothing is permitted where nothing was kept.
 	b := bytes.Clone(raw)
-	if len(b) == 0 && msg != nil {
-		var err error
-		if b, err = msg.MarshalBinary(); err != nil {
-			return nil
-		}
-	}
 	if len(b) > maxDiagnosticInformationLen {
 		return b[:maxDiagnosticInformationLen]
 	}

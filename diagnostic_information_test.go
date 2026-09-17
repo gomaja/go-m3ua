@@ -68,7 +68,7 @@ func TestParameterFaultErrorNeverSendsAnEmptyDiagnosticInformation(t *testing.T)
 				params.NewRoutingContext(7),
 				params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")),
 				nil,
-			))
+			), nil)
 
 			reported := firstErr(conn)
 			if reported == nil {
@@ -202,7 +202,7 @@ func TestParameterFaultErrorRenderingIsRaceFree(t *testing.T) {
 		}
 
 		offending := messages.NewAspUp(params.NewAspIdentifier(uint32(i)), nil)
-		conn.sendErrForMessage(offending, NewParameterFaultErrorFor(nil, params.ErrInvalidLength))
+		conn.sendErrForMessage(offending, nil, NewParameterFaultErrorFor(nil, params.ErrInvalidLength))
 		// The dispatcher goes on using the message it just reported.
 		offending.SetLength()
 	}
