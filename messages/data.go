@@ -59,6 +59,18 @@ func (d *Data) MarshalBinary() ([]byte, error) {
 }
 
 // MarshalTo puts the byte sequence in the byte array given as b.
+//
+// Parameter validation runs before any byte is written, so a validation
+// failure leaves b untouched. A parameter value longer than the maximum
+// encodable length is only detected while marshalling, after earlier
+// parameters were already written to b; on such an error b may be partially
+// written (a Data carrying extension parameters keeps the old staged
+// behaviour and leaves b untouched on any error).
+//
+// After a successful return d.Header.Payload aliases b: it shares the
+// destination's storage rather than owning a copy. A caller that retains the
+// Data must not modify or recycle b (for example into a pool) while it keeps
+// the Data.
 func (d *Data) MarshalTo(b []byte) error {
 	if err := d.validateParameters(); err != nil {
 		return err
@@ -67,6 +79,53 @@ func (d *Data) MarshalTo(b []byte) error {
 		return ErrTooShortToMarshalBinary
 	}
 
+	if len(d.Others) > 0 {
+		return d.marshalToStaged(b)
+	}
+
+	// The named parameters marshal straight into the destination: staging
+	// them in a private payload buffer first would allocate a second
+	// message-sized buffer per DATA only to copy it into b. Header.Payload
+	// still names the serialized parameters afterwards, aliasing b (see the
+	// MarshalTo doc comment for what that means for b's lifetime).
+	payload := b[8:d.MarshalLen()]
+
+	var offset = 0
+	if param := d.NetworkAppearance; param != nil {
+		if err := param.MarshalTo(payload[offset:]); err != nil {
+			return err
+		}
+		offset += param.MarshalLen()
+	}
+
+	if param := d.RoutingContext; param != nil {
+		if err := param.MarshalTo(payload[offset:]); err != nil {
+			return err
+		}
+		offset += param.MarshalLen()
+	}
+
+	if param := d.ProtocolData; param != nil {
+		if err := param.MarshalTo(payload[offset:]); err != nil {
+			return err
+		}
+		offset += param.MarshalLen()
+	}
+
+	if param := d.CorrelationID; param != nil {
+		if err := param.MarshalTo(payload[offset:]); err != nil {
+			return err
+		}
+	}
+
+	d.Header.Payload = payload
+	return d.Header.MarshalTo(b)
+}
+
+// marshalToStaged is MarshalTo for a Data carrying extension parameters: the
+// parameters are staged in a private payload buffer so a parameter that fails
+// to marshal leaves the destination untouched.
+func (d *Data) marshalToStaged(b []byte) error {
 	d.Header.Payload = make([]byte, d.MarshalLen()-8)
 
 	var offset = 0
