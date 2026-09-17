@@ -256,9 +256,6 @@ func (r SSNMReport) clone() SSNMReport {
 // statuses of one destination, so only the availability messages move this
 // dimension.
 func (r SSNMReport) retainsAvailability() bool {
-	if r.PeerReported {
-		return false
-	}
 	switch r.Kind {
 	case SSNMDestinationUnavailableReport,
 		SSNMDestinationAvailableReport,
@@ -270,7 +267,12 @@ func (r SSNMReport) retainsAvailability() bool {
 }
 
 // retainsCongestion reports whether this report installs the congestion
-// dimension. A peer-only SCON does not: it describes the peer's own M3UA layer.
+// dimension.
+//
+// SCON is the only message that can be about an M3UA layer rather than a
+// destination -- RFC 4666 Section 3.4.4 lets one be sent "indicating that the
+// congestion level of the M3UA layer or the ASP has changed" -- so it is the
+// only dimension that has to ask.
 func (r SSNMReport) retainsCongestion() bool {
 	return r.Kind == SSNMSignallingCongestionReport && !r.PeerReported
 }
