@@ -229,6 +229,15 @@ func TestASPInventoryApplicationServerBinding(t *testing.T) {
 			})),
 		},
 		{
+			// An explicit Routing Context of 0 names a scope, so it is not the
+			// contextless Application Server that may not share its SGP.
+			name: "explicit zero Routing Context may share its SGP",
+			config: gateway(sgp(
+				RemoteASConfig{ID: "as-zero", ASKey: &ASKey{RoutingContextSet: true}},
+				RemoteASConfig{ID: "as-one", ASKey: staticASKey(7, 1)},
+			)),
+		},
+		{
 			name: "explicit zero Network Appearance is not an absent one",
 			config: gateway(sgp(
 				RemoteASConfig{ID: "as-zero", ASKey: &ASKey{NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}},
