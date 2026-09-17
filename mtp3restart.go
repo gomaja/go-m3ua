@@ -324,6 +324,9 @@ func (l *Listener) destinationRegistry() *destinations {
 	defer l.muConns.Unlock()
 	if l.destinations == nil {
 		l.destinations = newDestinations()
+		if l.endpoint != nil {
+			l.destinations.setRecordLimit(l.endpoint.destinationRecords)
+		}
 	}
 	return l.destinations
 }

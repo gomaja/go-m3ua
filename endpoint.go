@@ -60,8 +60,11 @@ type Endpoint struct {
 	aspRoutes         *aspRoutes
 	nif               *nifAvailability
 	destinations      *destinations
-	mtp3Restarts      *mtp3RestartRegistry
-	routingKeys       *routingKeyRegistry
+	// destinationRecords is the SGP record budget, applied to this Endpoint's
+	// store and to every Listener store it owns. Zero selects the default.
+	destinationRecords int
+	mtp3Restarts       *mtp3RestartRegistry
+	routingKeys        *routingKeyRegistry
 }
 
 // NewEndpoint creates an M3UA endpoint with an immutable protocol role and
@@ -128,7 +131,9 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 				snapshotSGPConfig(config.SGP),
 			)
 			endpoint.nif = &nifAvailability{}
+			endpoint.destinationRecords = sgpDestinationRecordLimit(config.SGP)
 			endpoint.destinations = newDestinations()
+			endpoint.destinations.setRecordLimit(endpoint.destinationRecords)
 		case RoleIPSP:
 			// RFC 4666 Sections 4.3.1 and 4.3.4.3 require the peer M3UA
 			// layer to maintain each remote IPSP's per-AS state, including
@@ -516,4 +521,14 @@ func validateActivationPolicyTrafficModes(
 		}
 	}
 	return nil
+}
+
+// sgpDestinationRecordLimit reports the SSNM destination record budget an SGP
+// Endpoint and its Listeners retain state within. Values less than or equal to
+// zero select DefaultMaxSSNMDestinationRecords, as elsewhere in SGPConfig.
+func sgpDestinationRecordLimit(config *SGPConfig) int {
+	if config == nil || config.MaxSSNMDestinationRecords <= 0 {
+		return DefaultMaxSSNMDestinationRecords
+	}
+	return config.MaxSSNMDestinationRecords
 }
