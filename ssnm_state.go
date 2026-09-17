@@ -499,12 +499,9 @@ func resolveSSNMStateConfig(config *SSNMStateConfig) (SSNMStateConfig, error) {
 
 	// A reservation larger than the budget it is carved from can never be
 	// reached, so it is not a conservative bound but a misconfiguration that
-	// silently disables the inner limit.
-	if resolved.MaxRecordsPerPartition > resolved.MaxRecords {
-		return SSNMStateConfig{}, fmt.Errorf(
-			"%w: %d records per partition cannot fit in the %d-record store",
-			ErrInvalidSSNMStateConfig, resolved.MaxRecordsPerPartition, resolved.MaxRecords)
-	}
+	// silently disables the inner limit. A partition belongs to one peer and a
+	// peer to one store, so these two checks cover the partition against the
+	// store as well.
 	if resolved.MaxRecordsPerPeer > resolved.MaxRecords {
 		return SSNMStateConfig{}, fmt.Errorf(
 			"%w: %d records per peer cannot fit in the %d-record store",
@@ -603,9 +600,16 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 		return nil
 	}
 	state.bindings[association] = pending
+	// A binding that was pending and is now complete is the activation
+	// acknowledgment arriving, not a fresh admission. It keeps what the
+	// Section 4.5.1 window admitted.
+	kind := SSNMBindingAdmittedEvent
+	if bound && previous && !pending {
+		kind = SSNMBindingActivatedEvent
+	}
 	revision := s.nextRevisionLocked()
 	s.publishLocked(SSNMEvent{
-		Kind:      SSNMBindingAdmittedEvent,
+		Kind:      kind,
 		Revision:  revision,
 		Partition: partition,
 		Epoch:     state.epoch,
@@ -613,34 +617,6 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 		States:    s.partitionDestinationsLocked(state),
 	})
 	return nil
-}
-
-// activate completes an admitted binding once the peer has acknowledged
-// activation. Knowledge already retained under the pending binding is kept.
-func (s *ssnmState) activate(partition SSNMPartition, association AssociationID) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state, exists := s.partitions[partition]
-	if !exists {
-		return
-	}
-	pending, bound := state.bindings[association]
-	if !bound || !pending {
-		return
-	}
-	state.bindings[association] = false
-	revision := s.nextRevisionLocked()
-	s.publishLocked(SSNMEvent{
-		Kind:      SSNMBindingActivatedEvent,
-		Revision:  revision,
-		Partition: partition,
-		Epoch:     state.epoch,
-		Binding:   SSNMBinding{Association: association},
-		States:    s.partitionDestinationsLocked(state),
-	})
 }
 
 // retire withdraws one binding. Losing the last binding of a partition retires

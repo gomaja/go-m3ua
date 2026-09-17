@@ -103,6 +103,61 @@ func TestSubscribeSSNMSnapshotAndDeltasCoverEveryReportExactlyOnce(t *testing.T)
 	}
 }
 
+// The sharper form of the same property. The store revision advances once per
+// retained report, so a subscription opened at revision R must be handed R+1
+// next. A report that slipped between the snapshot and the registration would
+// leave a gap there instead.
+func TestSubscribeSSNMLosesNoReportToAConcurrentReporter(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
+	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+
+	stop := make(chan struct{})
+	var reporter sync.WaitGroup
+	reporter.Add(1)
+	go func() {
+		defer reporter.Done()
+		for index := 0; ; index++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := association.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+				params.NewNetworkAppearance(7),
+				params.NewRoutingContext(1),
+				params.NewAffectedPointCode(0x700000+uint32(index%64)),
+				nil,
+			)); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		reporter.Wait()
+	}()
+
+	for round := range 300 {
+		snapshot, subscription, err := endpoint.SubscribeSSNM()
+		if err != nil {
+			t.Fatalf("round %d: SubscribeSSNM: %v", round, err)
+		}
+		event, err := drainSSNMEvent(t, subscription)
+		_ = subscription.Close()
+		if err != nil {
+			t.Fatalf("round %d: Next: %v", round, err)
+		}
+		if event.Revision != snapshot.Revision+1 {
+			t.Fatalf("round %d: first delta is revision %d after a snapshot at %d; "+
+				"a report fell between the snapshot and the subscription",
+				round, event.Revision, snapshot.Revision)
+		}
+	}
+}
+
 // A deliberate control for the test above: one goroutine reporting while
 // another snapshots, with the store's lock removed. It exists to fail, so it
 // is skipped by default.
@@ -210,7 +265,12 @@ func TestSSNMSubscriptionRejectsConcurrentConsumers(t *testing.T) {
 		runtime.Gosched()
 	}
 
-	if _, err := subscription.Next(context.Background()); !errors.Is(err, ErrSSNMSubscriptionBusy) {
+	// The probe is bounded: a second consumer that was admitted rather than
+	// rejected would block on an empty stream, and a hung suite reports the
+	// fault far less clearly than a failed assertion.
+	probe, stopProbe := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopProbe()
+	if _, err := subscription.Next(probe); !errors.Is(err, ErrSSNMSubscriptionBusy) {
 		t.Fatalf("concurrent Next: error = %v, want ErrSSNMSubscriptionBusy", err)
 	}
 	if _, err := subscription.Resync(); !errors.Is(err, ErrSSNMSubscriptionBusy) {
@@ -396,6 +456,46 @@ func TestSSNMSnapshotAndEventsAreOwnedByTheCaller(t *testing.T) {
 	}
 	if fresh.Bindings[0].Association != association.ID() {
 		t.Fatalf("a caller's mutation reached the bindings: %+v", fresh.Bindings)
+	}
+}
+
+// Two subscribers receive two copies, not two views of one. Events are fanned
+// out to every subscriber, so sharing their storage would let one consumer
+// rewrite what another is about to read.
+func TestSSNMEventsAreNotSharedBetweenSubscribers(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
+	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+	first := mustSubscribeSSNM(t, endpoint)
+	second := mustSubscribeSSNM(t, endpoint)
+
+	sendDUNA(t, association, 7, 1, 0x123456)
+
+	firstEvent, err := drainSSNMEvent(t, first)
+	if err != nil {
+		t.Fatalf("first Next: %v", err)
+	}
+	firstEvent.Report.Destinations[0].PointCode = 0
+	firstEvent.Report.Scope.RoutingContexts[0] = 777
+	firstEvent.States[0].Availability.State = DestinationAvailable
+	firstEvent.States[0].Availability.Scope.RoutingContexts[0] = 777
+
+	secondEvent, err := drainSSNMEvent(t, second)
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if secondEvent.Report.Destinations[0].PointCode != 0x123456 {
+		t.Fatalf("one subscriber rewrote another's Affected Point Code: %+v",
+			secondEvent.Report.Destinations)
+	}
+	if secondEvent.Report.Scope.RoutingContexts[0] != 1 {
+		t.Fatalf("one subscriber rewrote another's wire scope: %+v", secondEvent.Report.Scope)
+	}
+	if secondEvent.States[0].Availability.State != DestinationUnavailable ||
+		secondEvent.States[0].Availability.Scope.RoutingContexts[0] != 1 {
+		t.Fatalf("one subscriber rewrote another's retained state: %+v", secondEvent.States)
 	}
 }
 
@@ -723,5 +823,78 @@ func TestDAUDIsNotAnEventReplayOrCompletionPrimitive(t *testing.T) {
 	subscription.mu.Unlock()
 	if !cleared {
 		t.Fatal("Resync did not clear continuity loss")
+	}
+}
+
+// The binding lifecycle is observable, so an application can tell an
+// activation from an admission and a sibling handover from a retirement.
+func TestSSNMBindingLifecycleIsPublishedToSubscribers(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
+	_, subscription, err := endpoint.SubscribeSSNM()
+	if err != nil {
+		t.Fatalf("SubscribeSSNM: %v", err)
+	}
+	defer func() { _ = subscription.Close() }()
+
+	activating := attachActivatingSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+	admitted, err := drainSSNMEvent(t, subscription)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if admitted.Kind != SSNMBindingAdmittedEvent || !admitted.Binding.Pending {
+		t.Fatalf("event = %+v, want a pending admission", admitted)
+	}
+
+	activating.noteRoutingContextsAcked(params.NewRoutingContext(1))
+	activating.sendState(StateASPActive)
+	activated, err := drainSSNMEvent(t, subscription)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if activated.Kind != SSNMBindingActivatedEvent || activated.Binding.Pending {
+		t.Fatalf("event = %+v, want a completed activation", activated)
+	}
+	if activated.Revision <= admitted.Revision {
+		t.Fatalf("revision %d did not advance past %d", activated.Revision, admitted.Revision)
+	}
+
+	// A sibling joins, then the first one leaves: the partition survives and
+	// says so.
+	sibling := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a2",
+	}, 7, 2)
+	if _, err := drainSSNMEvent(t, subscription); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if err := activating.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	retired, err := drainSSNMEvent(t, subscription)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if retired.Kind != SSNMBindingRetiredEvent || retired.Binding.Association != activating.ID() {
+		t.Fatalf("event = %+v, want the first binding retired", retired)
+	}
+
+	// The last one leaves and the partition goes with it.
+	if err := sibling.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	for {
+		event, err := drainSSNMEvent(t, subscription)
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if event.Kind == SSNMPartitionRetiredEvent {
+			if event.Partition != canonicalSSNMPartition("sg-a", "as-core") {
+				t.Fatalf("retired partition = %+v", event.Partition)
+			}
+			return
+		}
 	}
 }

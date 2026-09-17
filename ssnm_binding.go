@@ -253,13 +253,7 @@ func (c *Association) syncSSNMBindings() {
 	held := make(map[SSNMPartition]struct{}, len(scopes))
 	for _, scope := range scopes {
 		held[scope.partition] = struct{}{}
-		if scope.pending {
-			_ = store.bind(scope.partition, c.ID(), true)
-			continue
-		}
-		if err := store.bind(scope.partition, c.ID(), false); err == nil {
-			store.activate(scope.partition, c.ID())
-		}
+		_ = store.bind(scope.partition, c.ID(), scope.pending)
 	}
 	for _, partition := range store.partitionsBoundTo(c.ID()) {
 		if _, retained := held[partition]; retained {

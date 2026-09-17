@@ -484,6 +484,63 @@ func TestSSNMStateRecordLimitBelowAtAndAboveTheCap(t *testing.T) {
 	}
 }
 
+// The store-wide record cap binds even when every inner reservation still has
+// room, because two peers can be individually within budget and jointly over
+// it.
+func TestSSNMStateRecordLimitBindsAcrossPeers(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		refused bool
+		second  uint32
+	}{
+		{name: "at the cap", second: 0x123457},
+		{name: "above the cap", second: 0x123458, refused: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), &SSNMStateConfig{
+				MaxRecords:             2,
+				MaxRecordsPerPartition: 2,
+				MaxRecordsPerPeer:      2,
+			})
+			first := attachSSNMAssociation(t, endpoint, SGPIdentity{
+				SignallingGateway:        "sg-a",
+				SignallingGatewayProcess: "sgp-a1",
+			}, 7, 1)
+			second := attachSSNMAssociation(t, endpoint, SGPIdentity{
+				SignallingGateway:        "sg-b",
+				SignallingGatewayProcess: "sgp-b1",
+			}, 7, 1)
+			if tt.refused {
+				// Fill the store without reaching either of the first peer's
+				// own reservations.
+				sendDUNA(t, first, 7, 1, 0x123456, tt.second)
+			} else {
+				sendDUNA(t, first, 7, 1, 0x123456)
+			}
+			err := second.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+				params.NewNetworkAppearance(7),
+				params.NewRoutingContext(1),
+				params.NewAffectedPointCode(0x123459),
+				nil,
+			))
+			if !tt.refused {
+				if err != nil {
+					t.Fatalf("error = %v, want the report retained", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrSSNMStateLimit) {
+				t.Fatalf("error = %v, want ErrSSNMStateLimit", err)
+			}
+			// Its own partition and peer budgets both still had room, so only
+			// the store-wide cap can have refused it.
+			if !strings.Contains(err.Error(), "store would hold") {
+				t.Fatalf("refusal = %v, want the store budget to be the one that refused", err)
+			}
+		})
+	}
+}
+
 // The two dimensions are independent records, so a destination at the
 // per-partition record cap can still be refused its congestion record.
 func TestSSNMStatePerPartitionRecordLimitCountsBothDimensions(t *testing.T) {
@@ -643,9 +700,6 @@ func TestSSNMStateConfigRejectsImpossibleReservations(t *testing.T) {
 		{"negative subscriber limit", SSNMStateConfig{MaxSubscribers: -1}},
 		{"negative queue size", SSNMStateConfig{SubscriptionQueueSize: -1}},
 		{"negative Affected Point Codes", SSNMStateConfig{MaxAffectedPointCodes: -1}},
-		{"partition reservation exceeds the store", SSNMStateConfig{
-			MaxRecords: 4, MaxRecordsPerPartition: 8, MaxRecordsPerPeer: 4,
-		}},
 		{"peer reservation exceeds the store", SSNMStateConfig{
 			MaxRecords: 4, MaxRecordsPerPartition: 4, MaxRecordsPerPeer: 8,
 		}},
@@ -832,5 +886,114 @@ func TestScopeInvalidSSNMStillFollowsProtocolValidation(t *testing.T) {
 	}
 	if errors.Is(err, ErrSSNMResourceLoss) {
 		t.Fatalf("a scope-invalid message took the resource-tolerance path: %v", err)
+	}
+}
+
+// Resource diagnostics are bounded and coalesced: a diagnostic that grew with
+// what a peer sent, or a list of them that grew with how often it sent, would
+// be the resource problem it was added to report.
+func TestSSNMResourceDiagnosticsAreBoundedAndCoalesced(t *testing.T) {
+	gateway := SignallingGatewayID(strings.Repeat("g", 300))
+	applicationServer := RemoteASID(strings.Repeat("a", 300))
+	endpoint := newSSNMStateEndpoint(t, &ASPConfig{
+		SignallingGateways: []SignallingGatewayConfig{{
+			ID: gateway,
+			SGPs: []SignallingGatewayProcessConfig{{
+				ID:                 "sgp-a1",
+				ApplicationServers: []RemoteASConfig{{ID: applicationServer, ASKey: staticASKey(7, 1)}},
+			}},
+		}},
+	}, &SSNMStateConfig{MaxRecords: 1, MaxRecordsPerPartition: 1, MaxRecordsPerPeer: 1})
+	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        gateway,
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+
+	sendDUNA(t, association, 7, 1, 0x123456)
+	const refusals = 50
+	for index := range refusals {
+		if err := association.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+			params.NewNetworkAppearance(7),
+			params.NewRoutingContext(1),
+			params.NewAffectedPointCode(0x500000+uint32(index)),
+			nil,
+		)); !errors.Is(err, ErrSSNMStateLimit) {
+			t.Fatalf("refusal %d: error = %v, want ErrSSNMStateLimit", index, err)
+		}
+	}
+
+	snapshot := endpoint.SSNMKnowledge()
+	if len(snapshot.LastResourceLoss) > ssnmResourceReasonLength {
+		t.Fatalf("resource diagnostic is %d characters, want at most %d",
+			len(snapshot.LastResourceLoss), ssnmResourceReasonLength)
+	}
+	if snapshot.LastResourceLoss == "" {
+		t.Fatal("no resource diagnostic was reported")
+	}
+	// Coalesced: the losses are counted, not accumulated one string each.
+	if snapshot.ReportsRefused != refusals {
+		t.Fatalf("reports refused = %d, want %d", snapshot.ReportsRefused, refusals)
+	}
+}
+
+// The exact wire scope is what the message carried, including what it left
+// out. RFC 4666 Section 3.4 makes Network Appearance optional and Routing
+// Context conditional, so absence is information and must not be filled in
+// from the Association's own configuration.
+func TestSSNMStateRetainsTheExactWireScopeIncludingAbsentParameters(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
+	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+
+	if err := association.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, nil, params.NewAffectedPointCode(0x123456), nil)); err != nil {
+		t.Fatalf("DUNA without optional scope: %v", err)
+	}
+
+	// The Association's own configuration resolves the canonical owner...
+	knowledge := ssnmPartitionKnowledge(t, endpoint.SSNMKnowledge(),
+		canonicalSSNMPartition("sg-a", "as-core"))
+	scope := ssnmDestination(t, knowledge, 0x123456, 0).Availability.Scope
+	// ...but what is retained beside it is what the peer actually sent.
+	if scope.NetworkAppearanceSet || scope.RoutingContextSet ||
+		scope.NetworkAppearance != 0 || len(scope.RoutingContexts) != 0 {
+		t.Fatalf("retained wire scope = %+v, want both parameters absent", scope)
+	}
+}
+
+// The names are what a diagnostic prints, so they are part of the contract.
+func TestSSNMNamesAreStable(t *testing.T) {
+	for _, tt := range []struct {
+		got  string
+		want string
+	}{
+		{SSNMCanonicalPartition.String(), "canonical"},
+		{SSNMStandalonePartition.String(), "standalone"},
+		{SSNMPartitionKind(0).String(), "unknown"},
+		{SSNMDestinationUnavailableReport.String(), "DUNA"},
+		{SSNMDestinationAvailableReport.String(), "DAVA"},
+		{SSNMDestinationStateAuditReport.String(), "DAUD"},
+		{SSNMSignallingCongestionReport.String(), "SCON"},
+		{SSNMDestinationUserPartUnavailableReport.String(), "DUPU"},
+		{SSNMDestinationRestrictedReport.String(), "DRST"},
+		{SSNMReportKind(0).String(), "unknown"},
+		{SSNMPeerReport.String(), "peer"},
+		{SSNMLocalReport.String(), "local"},
+		{SSNMReportSource(0).String(), "unknown"},
+		{SSNMReportEvent.String(), "report"},
+		{SSNMBindingAdmittedEvent.String(), "binding-admitted"},
+		{SSNMBindingActivatedEvent.String(), "binding-activated"},
+		{SSNMBindingRetiredEvent.String(), "binding-retired"},
+		{SSNMPartitionRetiredEvent.String(), "partition-retired"},
+		{SSNMPartitionInvalidatedEvent.String(), "partition-invalidated"},
+		{SSNMResourceLossEvent.String(), "resource-loss"},
+		{SSNMContinuityLostEvent.String(), "continuity-lost"},
+		{SSNMEventKind(0).String(), "unknown"},
+	} {
+		if tt.got != tt.want {
+			t.Errorf("name = %q, want %q", tt.got, tt.want)
+		}
 	}
 }

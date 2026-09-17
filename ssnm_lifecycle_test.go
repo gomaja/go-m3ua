@@ -375,6 +375,27 @@ func TestSSNMStateStandalonePartitionIsOwnedByOneAssociation(t *testing.T) {
 	}
 }
 
+// An Association the Endpoint forgets leaves no bindings behind, whatever
+// state the Association still believes it is in.
+func TestSSNMStateForgettingAnAssociationRetiresItsBindings(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
+	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}, 7, 1)
+	sendDUNA(t, association, 7, 1, 0x123456)
+
+	// Forgotten while it is still ASP-ACTIVE, so nothing derived from its own
+	// state can retire the binding on its behalf.
+	endpoint.forgetAssociation(association)
+	if association.State() != StateASPActive {
+		t.Fatalf("fixture state = %v, want the Association still ASP-ACTIVE", association.State())
+	}
+	if ssnmPartitionPresent(endpoint.SSNMKnowledge(), canonicalSSNMPartition("sg-a", "as-core")) {
+		t.Fatalf("a forgotten Association kept its binding: %+v", endpoint.SSNMKnowledge().Partitions)
+	}
+}
+
 // Within one canonical Application Server and one dimension, the last report
 // this node validated wins, whichever SGP carried it.
 //
