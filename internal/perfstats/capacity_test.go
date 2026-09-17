@@ -1,6 +1,7 @@
 package perfstats
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -231,5 +232,100 @@ func TestDecideCapacityInconclusiveProbeStaysInconclusive(testContext *testing.T
 	decision := DecideCapacity(search, nil, nil)
 	if decision.Decision != Inconclusive || decision.Reason != SearchNotRefinedReason {
 		testContext.Fatalf("DecideCapacity() = %+v, want inconclusive", decision)
+	}
+}
+
+// A maximum above MaximumSearchRate wraps the search arithmetic. Recorded
+// against the unbounded constructor, a pass at math.MaxInt/4 followed by a
+// fail at twice that rate wrapped 100*upper to -200, which satisfied
+// 100*upper <= 105*lower on a twofold bracket, reported SearchBracketed and
+// let DecideCapacity return a capacity pass. Doubling from math.MaxInt/2+1
+// selected a negative probe rate. The bound is what makes both unreachable.
+func TestNewCapacitySearchRejectsRatesThatOverflowTheSearchArithmetic(testContext *testing.T) {
+	tests := []struct {
+		name    string
+		initial int
+		maximum int
+	}{
+		{name: "one above the bound", initial: 1, maximum: MaximumSearchRate + 1},
+		{name: "signed limit", initial: 1, maximum: math.MaxInt},
+		{name: "bracket comparison wrap", initial: math.MaxInt / 4, maximum: math.MaxInt},
+		{name: "doubling wrap", initial: math.MaxInt/2 + 1, maximum: math.MaxInt},
+	}
+	for _, test := range tests {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			search, err := NewCapacitySearch(test.initial, test.maximum, DefaultMaxProbes)
+			if err == nil {
+				testContext.Fatalf("NewCapacitySearch(%d, %d, %d) accepted an overflowing maximum: %+v",
+					test.initial, test.maximum, DefaultMaxProbes, search)
+			}
+			if !strings.Contains(err.Error(), "maximum must not exceed") {
+				testContext.Fatalf("error = %v, want the maximum-rate bound", err)
+			}
+		})
+	}
+}
+
+// The bound must be exactly where the arithmetic stops being exact: high
+// enough to admit every rate the fixture can offer, low enough that the
+// widest product advance() forms still fits in an int.
+func TestMaximumSearchRateKeepsEverySearchProductExact(testContext *testing.T) {
+	// The products are formed from a variable so they wrap at run time the
+	// way advance() wraps, instead of being rejected as untyped constants.
+	bound := MaximumSearchRate
+	for name, product := range map[string]int{
+		"105*lower":     105 * bound,
+		"100*upper":     100 * bound,
+		"2*lower":       2 * bound,
+		"lower + upper": bound + bound,
+	} {
+		if product <= 0 {
+			testContext.Fatalf("%s overflowed to %d at MaximumSearchRate %d", name, product, bound)
+		}
+	}
+	if 105*bound/105 != bound {
+		testContext.Fatalf("105*%d does not round-trip", bound)
+	}
+	if MaximumSearchRate < DefaultMaximumRate {
+		testContext.Fatalf("MaximumSearchRate %d is below the default maximum rate %d", MaximumSearchRate, DefaultMaximumRate)
+	}
+	if _, err := NewCapacitySearch(1, MaximumSearchRate, DefaultMaxProbes); err != nil {
+		testContext.Fatalf("NewCapacitySearch at the bound: %v", err)
+	}
+	if _, err := NewCapacitySearch(1, DefaultMaximumRate, DefaultMaxProbes); err != nil {
+		testContext.Fatalf("NewCapacitySearch at the default maximum rate: %v", err)
+	}
+}
+
+// At the accepted bound the search still behaves: every selected rate is a
+// positive rate inside the bounds, and a terminal SearchBracketed really is
+// within five percent when the comparison is made in floating point rather
+// than in the integer arithmetic under test.
+func TestCapacitySearchStaysExactAtTheAcceptedMaximum(testContext *testing.T) {
+	for _, passAbove := range []int{1, MaximumSearchRate / 3, MaximumSearchRate / 2, MaximumSearchRate} {
+		search, err := NewCapacitySearch(1, MaximumSearchRate, 64)
+		if err != nil {
+			testContext.Fatalf("NewCapacitySearch: %v", err)
+		}
+		for {
+			rate, ok := search.NextRate()
+			if !ok {
+				break
+			}
+			if rate <= 0 || rate > MaximumSearchRate {
+				testContext.Fatalf("passAbove %d: selected rate %d outside (0, %d]", passAbove, rate, MaximumSearchRate)
+			}
+			outcome := ProbePassing
+			if rate > passAbove {
+				outcome = ProbeFailing
+			}
+			if err := search.Record(rate, outcome); err != nil {
+				testContext.Fatalf("Record(%d): %v", rate, err)
+			}
+		}
+		if search.Status() == SearchBracketed && float64(search.Upper()) > 1.05*float64(search.Lower()) {
+			testContext.Fatalf("passAbove %d: bracket [%d, %d] is wider than five percent but reported %q",
+				passAbove, search.Lower(), search.Upper(), SearchBracketed)
+		}
 	}
 }

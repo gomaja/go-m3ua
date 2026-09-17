@@ -3,6 +3,7 @@ package perfstats
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // This file mirrors the predeclared bounded capacity search semantics of the
@@ -23,6 +24,16 @@ const (
 	DefaultMaxProbes   = 24
 
 	RequiredFullRepetitions = 5
+
+	// MaximumSearchRate is the largest rate the search accepts. Every probe
+	// rate the search can select is bounded by the configured maximum, and
+	// the widest products advance() forms from those rates are 105*lower and
+	// 100*upper, so bounding the maximum at math.MaxInt/105 keeps the bracket
+	// comparison, the doubling step and the midpoint exact. Without it a
+	// large but "valid" maximum wraps 2*lower to a negative probe rate and
+	// wraps 100*upper negative, which satisfies the five-percent comparison
+	// on an arbitrarily wide bracket and lets a capacity campaign pass.
+	MaximumSearchRate = math.MaxInt / 105
 )
 
 type ProbeOutcome string
@@ -74,6 +85,12 @@ func NewCapacitySearch(initial, maximum, maxProbes int) (*CapacitySearch, error)
 	}
 	if initial > maximum {
 		return nil, errors.New("initial exceeds maximum")
+	}
+	// initial is already bounded by maximum, and every rate the search can
+	// select afterwards is bounded by maximum too, so bounding maximum alone
+	// keeps all of the search arithmetic exact.
+	if maximum > MaximumSearchRate {
+		return nil, fmt.Errorf("maximum must not exceed %d", MaximumSearchRate)
 	}
 	return &CapacitySearch{maximum: maximum, maxProbes: maxProbes, next: initial}, nil
 }

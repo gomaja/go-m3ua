@@ -226,6 +226,7 @@ func TestRejectsMalformedRequests(testContext *testing.T) {
 		{name: "missing run", input: `{"initial":10,"probes":[{"rate":10}]}`},
 		{name: "missing verdict", input: `{"initial":10,"probes":[{"rate":10,"run":{"capped":0}}]}`},
 		{name: "initial above maximum", input: `{"initial":200,"maximum":100}`},
+		{name: "maximum overflows the search arithmetic", input: `{"initial":1,"maximum":9223372036854775807}`},
 		{name: "negative probe budget", input: `{"initial":10,"max_probes":-1}`},
 		{name: "fractional rate", input: fmt.Sprintf(`{"initial":10,"probes":[{"rate":10.5,"run":%s}]}`, passingRunJSON())},
 	}
