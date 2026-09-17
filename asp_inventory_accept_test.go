@@ -46,12 +46,7 @@ func acceptedASPConfig(
 	sgp SignallingGatewayProcessID,
 	networkAppearance, routingContext uint32,
 ) *AssociationConfig {
-	config := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x111111, 0x222222, 1, params.TrafficModeLoadshare, networkAppearance, 0,
-		[]uint32{routingContext}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	config.CorrelationID = nil
+	config := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, networkAppearance, []uint32{routingContext})
 	config.PeerSGP = &SGPIdentity{
 		SignallingGateway:        signallingGateway,
 		SignallingGatewayProcess: sgp,

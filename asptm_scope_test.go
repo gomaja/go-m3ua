@@ -611,9 +611,7 @@ func TestExplicitEmptyASPTMRoutingContextIsRejected(t *testing.T) {
 }
 
 func TestSetASUnavailableLeavesOtherContextsActive(t *testing.T) {
-	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	listener := newSGPListener(NewListenerConfig(config))
 	registry, _, _ := listener.registry()
 

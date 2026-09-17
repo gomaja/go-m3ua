@@ -35,9 +35,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	const pointCode = uint32(0x123456)
 
 	srvCfg := func() *AssociationConfig {
-		return newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-			0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
+		return newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	}
 	srvAddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
@@ -63,9 +61,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 		}
 	}()
 
-	cliCfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
+	cliCfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
@@ -167,9 +163,7 @@ func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
 	// With an AssociationConfig, as Listen always builds it. The setter under
 	// test needs no accepted Association at all, which is the point — it is
 	// usable before anything has been accepted.
-	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1)
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	l := newSGPListener(NewListenerConfig(config))
 
 	if _, known := l.DestinationState(0x111111); known {

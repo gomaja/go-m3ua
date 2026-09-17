@@ -5,106 +5,42 @@
 package m3ua
 
 import (
-	"errors"
-	"io"
+	"context"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// Association.Read copied as much of the DATA payload as fitted but returned the
-// payload's full length, so a caller whose buffer was smaller than the message
-// was told it had received more bytes than its buffer holds. The idiomatic
+// M3UA is message-oriented, so a read yields one DATA payload whole.
 //
-//	n, _ := conn.Read(buf)
-//	handle(buf[:n])
-//
-// then panicked with a slice-bounds error — on a length the remote peer chooses.
-// The payload beyond the buffer was gone either way, since the message had
-// already been taken off the queue.
-func TestReadIntoShortBufferReportsWhatItWrote(t *testing.T) {
-	conn, _ := newTestConn(t, StateASPActive, RoleASP)
-
-	payload := []byte("0123456789")
-	conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: payload}}
-
-	buf := make([]byte, 4)
-	n, err := conn.Read(buf)
-
-	if n > len(buf) {
-		t.Fatalf("Read returned n = %d for a %d-byte buffer: buf[:n] panics", n, len(buf))
-	}
-	if n != len(buf) {
-		t.Errorf("Read returned n = %d, want %d (the buffer was filled)", n, len(buf))
-	}
-	if !errors.Is(err, io.ErrShortBuffer) {
-		t.Errorf("Read error = %v, want io.ErrShortBuffer: truncation must be reported, not silent", err)
-	}
-	if got := string(buf[:n]); got != "0123" {
-		t.Errorf("Read wrote %q, want %q", got, "0123")
-	}
-}
-
-// A buffer large enough for the payload must behave exactly as before: the full
-// payload, no error.
-func TestReadIntoAdequateBufferIsUnaffected(t *testing.T) {
-	for _, tc := range []struct {
+// The byte-stream read this replaced copied as much of the payload as fitted
+// the caller's buffer but reported the payload's full length, so the idiomatic
+// buf[:n] panicked on a length the remote peer chose. Truncation is now
+// structurally impossible: the payload is handed over as it arrived, and there
+// is no buffer for it to be too large for.
+func TestReadDataDeliversThePayloadWhole(t *testing.T) {
+	for _, test := range []struct {
 		name    string
-		bufSize int
+		payload []byte
 	}{
-		{"exact fit", 10},
-		{"room to spare", 64},
+		{name: "ten octets", payload: []byte("0123456789")},
+		{name: "larger than any buffer a caller would guess", payload: make([]byte, 9000)},
+		{name: "empty", payload: nil},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			conn, _ := newTestConn(t, StateASPActive, RoleASP)
+			conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: test.payload}}
 
-			payload := []byte("0123456789")
-			conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: payload}}
-
-			buf := make([]byte, tc.bufSize)
-			n, err := conn.Read(buf)
+			message, err := conn.ReadData(context.Background())
 			if err != nil {
-				t.Fatalf("Read: %v", err)
+				t.Fatalf("ReadData: %v", err)
 			}
-			if n != len(payload) {
-				t.Errorf("Read returned n = %d, want %d", n, len(payload))
+			if got := len(message.ProtocolData.Data); got != len(test.payload) {
+				t.Errorf("ReadData returned %d octets, want %d", got, len(test.payload))
 			}
-			if got := string(buf[:n]); got != string(payload) {
-				t.Errorf("Read wrote %q, want %q", got, payload)
+			if string(message.ProtocolData.Data) != string(test.payload) {
+				t.Errorf("ReadData returned %q, want %q", message.ProtocolData.Data, test.payload)
 			}
 		})
-	}
-}
-
-// An empty DATA payload must read as zero bytes and no error, not as a short
-// buffer: nothing was truncated.
-func TestReadOfEmptyPayloadIsNotShortBuffer(t *testing.T) {
-	conn, _ := newTestConn(t, StateASPActive, RoleASP)
-
-	conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: nil}}
-
-	n, err := conn.Read(make([]byte, 0))
-	if err != nil {
-		t.Errorf("Read of an empty payload returned %v, want nil", err)
-	}
-	if n != 0 {
-		t.Errorf("Read returned n = %d, want 0", n)
-	}
-}
-
-// ReadPD is the way to take a payload whole, and must be unaffected by any of
-// the above: it never sizes a buffer.
-func TestReadPDReturnsTheWholePayload(t *testing.T) {
-	conn, _ := newTestConn(t, StateASPActive, RoleASP)
-
-	payload := []byte("0123456789")
-	conn.dataChan <- &DataMessage{ProtocolData: &params.ProtocolDataPayload{Data: payload}}
-
-	pd, err := conn.ReadPD()
-	if err != nil {
-		t.Fatalf("ReadPD: %v", err)
-	}
-	if got := string(pd.Data); got != string(payload) {
-		t.Errorf("ReadPD returned %q, want %q", got, payload)
 	}
 }

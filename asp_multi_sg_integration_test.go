@@ -229,7 +229,7 @@ func integrationASPConfig() *ASPConfig {
 }
 
 func integrationAssociationConfig(role Role, peer integrationPeer) *AssociationConfig {
-	config := NewAssociationConfig(0x111111, 0x123456, params.ServiceIndSCCP, 0, 0, 1)
+	config := NewAssociationConfig()
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
 	config.NetworkAppearance = params.NewNetworkAppearance(peer.networkAppearance)
@@ -304,7 +304,7 @@ func requireIntegrationData(t *testing.T, association *Association, wanted *para
 	if err := association.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
-	data, err := association.ReadData()
+	data, err := association.ReadData(context.Background())
 	if err != nil {
 		t.Fatalf("ReadData: %v", err)
 	}

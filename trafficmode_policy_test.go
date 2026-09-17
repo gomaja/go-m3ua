@@ -11,20 +11,7 @@ import (
 )
 
 func TestAssociationFreezesTrafficModePolicyAtConstruction(t *testing.T) {
-	config := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222,
-		0x11111111,
-		1,
-		params.TrafficModeLoadshare,
-		0,
-		0,
-		[]uint32{1, 2},
-		params.ServiceIndSCCP,
-		0,
-		0,
-		1,
-	)
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	configuredModes := map[uint32]uint32{
 		1: params.TrafficModeOverride,
 		2: params.TrafficModeBroadcast,
@@ -67,20 +54,7 @@ func TestAssociationFreezesTrafficModePolicyAtConstruction(t *testing.T) {
 }
 
 func TestAssociationFreezesTrafficModePolicyForActiveAckValidation(t *testing.T) {
-	config := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222,
-		0x11111111,
-		1,
-		params.TrafficModeLoadshare,
-		0,
-		0,
-		[]uint32{1},
-		params.ServiceIndSCCP,
-		0,
-		0,
-		1,
-	)
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	configuredDefault := config.TrafficModeType
 	connection := newAssociation(RoleASP, config)
 
@@ -99,20 +73,7 @@ func TestAssociationFreezesTrafficModePolicyForActiveAckValidation(t *testing.T)
 }
 
 func TestAssociationTrafficModePolicyIsFrozenBeforeRegistryAgreement(t *testing.T) {
-	config := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222,
-		0x11111111,
-		1,
-		params.TrafficModeLoadshare,
-		0,
-		0,
-		[]uint32{1},
-		params.ServiceIndSCCP,
-		0,
-		0,
-		1,
-	)
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	configuredModes := map[uint32]uint32{1: params.TrafficModeOverride}
 	config.TrafficModes = configuredModes
 	policy := newTrafficModePolicy(config)
@@ -134,20 +95,7 @@ func TestAssociationTrafficModePolicyIsFrozenBeforeRegistryAgreement(t *testing.
 }
 
 func TestListenerTrafficModePolicyIsInheritedByAcceptedAssociations(t *testing.T) {
-	config := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222,
-		0x11111111,
-		1,
-		params.TrafficModeLoadshare,
-		0,
-		0,
-		[]uint32{1},
-		params.ServiceIndSCCP,
-		0,
-		0,
-		1,
-	)
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	configuredModes := map[uint32]uint32{1: params.TrafficModeOverride}
 	config.TrafficModes = configuredModes
 	listener := newSGPListener(NewListenerConfig(config))
@@ -260,20 +208,7 @@ func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 }
 
 func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
-	config := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222,
-		0x11111111,
-		1,
-		params.TrafficModeLoadshare,
-		0,
-		0,
-		[]uint32{1},
-		params.ServiceIndSCCP,
-		0,
-		0,
-		1,
-	)
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeOverride}
 	connection := newAssociation(RoleASP, config)
 	registry := newApplicationServers(time.Hour)

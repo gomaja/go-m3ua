@@ -672,13 +672,8 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 	f.Add(uint32(0x123456), uint8(0), uint32(1), uint8(DestinationAvailable), true, true)
 	f.Add(uint32(0xffffff), uint8(24), uint32(2), uint8(255), true, false)
 	f.Fuzz(func(t *testing.T, pointCode uint32, mask uint8, routingContext uint32, rawState uint8, routingContextSet, networkAppearanceSet bool) {
-		config := newSGPAssociationConfigForTest(
-			&HeartbeatInfo{Enabled: false}, 1, 2, 0,
-			params.TrafficModeLoadshare, 7, 0, []uint32{1},
-			params.ServiceIndSCCP, 0, 0, 1,
-		)
+		config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 0, params.TrafficModeLoadshare, 7, []uint32{1})
 		listener := newSGPListener(NewListenerConfig(config))
-		listener.AssociationConfig.CorrelationID = nil
 		destination := AffectedDestination{
 			NetworkAppearance:    7,
 			NetworkAppearanceSet: networkAppearanceSet,

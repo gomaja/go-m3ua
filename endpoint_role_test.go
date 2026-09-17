@@ -114,7 +114,7 @@ func TestASPListenerDoesNotRunSGPAvailabilityProcedures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewEndpoint(RoleASP): %v", err)
 			}
-			listener := newListener(endpoint, NewListenerConfig(NewAssociationConfig(0, 0, 0, 0, 0, 0)))
+			listener := newListener(endpoint, NewListenerConfig(NewAssociationConfig()))
 			association, sent := newTestConn(t, StateASPActive, RoleASP)
 			association.cfg.RoutingContexts = params.NewRoutingContext(1)
 			association.noteRoutingContextsActive([]uint32{1})
@@ -1047,7 +1047,7 @@ func TestIPSPDialAndListenRejectMissingExchangeModel(t *testing.T) {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}
 
-	if _, err := endpoint.Dial(context.Background(), "m3ua", nil, nil, NewAssociationConfig(0, 0, 0, 0, 0, 0)); !errors.Is(err, ErrInvalidRoleConfiguration) {
+	if _, err := endpoint.Dial(context.Background(), "m3ua", nil, nil, NewAssociationConfig()); !errors.Is(err, ErrInvalidRoleConfiguration) {
 		t.Fatalf("Dial error = %v, want ErrInvalidRoleConfiguration", err)
 	}
 	if _, err := endpoint.Listen("m3ua", nil, NewListenerConfig(nil)); !errors.Is(err, ErrInvalidRoleConfiguration) {
@@ -1297,7 +1297,7 @@ func TestAssociationConfigRejectsRoleSpecificSettings(t *testing.T) {
 			name: "ASP with SGP authorization policy",
 			role: RoleASP,
 			config: func() *AssociationConfig {
-				config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+				config := NewAssociationConfig()
 				config.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
 				return config
 			}(),
@@ -1305,7 +1305,7 @@ func TestAssociationConfigRejectsRoleSpecificSettings(t *testing.T) {
 		{
 			name: "SGP with local ASP Identifier",
 			role: RoleSGP,
-			config: NewAssociationConfig(0, 0, 0, 0, 0, 0).
+			config: NewAssociationConfig().
 				SetASPIdentifier(7),
 		},
 	}

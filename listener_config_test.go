@@ -11,11 +11,7 @@ import (
 )
 
 func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
-	selected := newSGPAssociationConfigForTest(
-		NewHeartbeatInfo(time.Second, 2*time.Second, []byte("beat")),
-		1, 2, 3, params.TrafficModeLoadshare, 10, 11,
-		[]uint32{7}, params.ServiceIndSCCP, 1, 2, 3,
-	)
+	selected := newSGPAssociationConfigForTest(NewHeartbeatInfo(time.Second, 2*time.Second), 3, params.TrafficModeLoadshare, 10, []uint32{7})
 	selected.Compatibility = AcceptInvalidOptionalInfoString()
 	selected.DataQueueSize = 99
 	selected.TAck = 250 * time.Millisecond
@@ -25,11 +21,7 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	selected.SetSCTPSACK(10, 1)
 	selected.SetSCTPNoDelay(true)
 
-	listenerConfig := NewListenerConfig(newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		1, 2, 3, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
-	))
+	listenerConfig := NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 3, params.TrafficModeLoadshare, 0, []uint32{1}))
 	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
 		return selected, nil
 	}
@@ -43,7 +35,6 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	}
 
 	selected.HeartbeatInfo.Interval = 9 * time.Second
-	selected.HeartbeatInfo.Data[0] = 'x'
 	selected.NetworkAppearance.Data[3] = 99
 	selected.RoutingContexts.Data[3] = 99
 	selected.TrafficModeType.Data[3] = 99
@@ -59,8 +50,11 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	if snapshot.HeartbeatInfo.Interval != time.Second {
 		t.Fatalf("HeartbeatInfo.Interval = %v, want 1s snapshot", snapshot.HeartbeatInfo.Interval)
 	}
-	if string(snapshot.HeartbeatInfo.Data) != "beat" {
-		t.Fatalf("HeartbeatInfo.Data = %q, want copied beat data", snapshot.HeartbeatInfo.Data)
+	if snapshot.HeartbeatInfo == selected.HeartbeatInfo {
+		t.Fatal("selected HeartbeatInfo was reused; want a copy the selected config cannot reach")
+	}
+	if snapshot.HeartbeatInfo.Timer != 2*time.Second {
+		t.Fatalf("HeartbeatInfo.Timer = %v, want 2s snapshot", snapshot.HeartbeatInfo.Timer)
 	}
 	if got := snapshot.NetworkAppearance.NetworkAppearance(); got != 10 {
 		t.Fatalf("NetworkAppearance = %d, want 10", got)
@@ -101,11 +95,7 @@ func TestListenerConfigSelectorErrorIsReturned(t *testing.T) {
 }
 
 func TestListenerConfigSelectorOnlyUsesDefaultAssociationConfigFallback(t *testing.T) {
-	selected := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		1, 2, 3, params.TrafficModeLoadshare, 10, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
-	)
+	selected := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 3, params.TrafficModeLoadshare, 10, []uint32{1})
 	listener := newSGPListener(&ListenerConfig{
 		SelectAssociationConfig: func(AcceptInfo) (*AssociationConfig, error) {
 			return selected, nil
@@ -134,7 +124,7 @@ func TestIPSPListenerSelectorOnlyDefersAssociationConfigValidation(t *testing.T)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	selected := NewAssociationConfig(1, 2, 3, 0, 0, 1)
+	selected := NewAssociationConfig()
 	selected.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	listenerConfig := &ListenerConfig{
 		SelectAssociationConfig: func(AcceptInfo) (*AssociationConfig, error) {
@@ -156,16 +146,8 @@ func TestIPSPListenerSelectorOnlyDefersAssociationConfigValidation(t *testing.T)
 }
 
 func TestListenerConfigSelectorIsFrozenWhenListenerIsBuilt(t *testing.T) {
-	first := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		1, 2, 3, params.TrafficModeLoadshare, 10, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
-	)
-	second := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		1, 2, 3, params.TrafficModeLoadshare, 20, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 0,
-	)
+	first := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 3, params.TrafficModeLoadshare, 10, []uint32{1})
+	second := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 3, params.TrafficModeLoadshare, 20, []uint32{1})
 	listenerConfig := NewListenerConfig(first)
 	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
 		return first, nil

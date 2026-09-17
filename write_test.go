@@ -16,19 +16,14 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// Association implements net.Conn, so Write carries io.Writer's contract: on success it
-// must return len(b) and nil. It returned neither. The M3UA message wrapping the
-// payload was marshalled, SCTPWrite returned how many bytes it had put on the
-// wire, and that count was then *added to itself*:
+// A successful send reports the SS7 user octets it carried — the payload the
+// caller handed over, not the size of the M3UA message it was wrapped in.
 //
-//	n, err = c.sctpConn.SCTPWrite(d, &info)
-//	n += len(d)
-//
-// so the caller got roughly twice the encoded message length — a number larger
-// than the buffer it passed in, and unrelated to it. Every wrapper that trusts
-// the contract is broken by that: io.Copy treats n > len(b) as an invalid write,
-// and a short-write check (n != len(b)) fires on every successful send.
-func TestWriteReturnsThePayloadLength(t *testing.T) {
+// The count used to be the encoded message length added to itself, so a caller
+// was told roughly twice the encoded length: a number larger than the payload
+// and unrelated to it. Every wrapper that trusts a byte count is broken by that,
+// and a short-write check (n != len(payload)) fires on every successful send.
+func TestWriteDataReturnsThePayloadLength(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -41,20 +36,21 @@ func TestWriteReturnsThePayloadLength(t *testing.T) {
 		make([]byte, 1024),
 	} {
 		t.Run(fmt.Sprintf("%d bytes", len(payload)), func(t *testing.T) {
-			n, err := conn.Write(payload)
+			n, err := writePayload(conn, 1, payload)
 			if err != nil {
-				t.Fatalf("Write: %v", err)
+				t.Fatalf("WriteData: %v", err)
 			}
 			if n != len(payload) {
-				t.Errorf("Write returned n = %d for a %d-byte payload, want %d (io.Writer's contract)",
+				t.Errorf("WriteData returned n = %d for a %d-byte payload, want %d",
 					n, len(payload), len(payload))
 			}
 		})
 	}
 }
 
-// WriteToStream carries the same contract.
-func TestWriteToStreamReturnsThePayloadLength(t *testing.T) {
+// The same count on an explicitly selected stream: choosing the stream does not
+// change what the return value means.
+func TestWriteDataToAnExplicitStreamReturnsThePayloadLength(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -63,40 +59,17 @@ func TestWriteToStreamReturnsThePayloadLength(t *testing.T) {
 
 	payload := []byte("stream-bound payload")
 	// Stream 1, not 0: RFC 4666 Section 1.4.7 forbids DATA on stream 0.
-	n, err := conn.WriteToStream(payload, 1)
+	n, err := writePayloadToStream(conn, 1, 1, payload)
 	if err != nil {
-		t.Fatalf("WriteToStream: %v", err)
+		t.Fatalf("WriteData: %v", err)
 	}
 	if n != len(payload) {
-		t.Errorf("WriteToStream returned n = %d, want %d", n, len(payload))
+		t.Errorf("WriteData returned n = %d, want %d", n, len(payload))
 	}
 }
 
-// WritePD takes the Protocol Data parameter rather than a payload, so its
-// natural count is the user octets it carried — the SS7 payload inside the
-// Protocol Data — and it must never exceed them.
-func TestWritePDReturnsTheUserPayloadLength(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	peer := newRawPeer(t, 3074, handshakeOnly)
-	conn := dialRawPeer(t, ctx, peer, 3074, &HeartbeatInfo{Enabled: false})
-
-	payload := []byte("protocol data payload")
-	pd := params.NewProtocolData(0x11111111, 0x22222222, 3, 0, 0, 1, payload)
-
-	n, err := conn.WritePD(pd)
-	if err != nil {
-		t.Fatalf("WritePD: %v", err)
-	}
-	if n != len(payload) {
-		t.Errorf("WritePD returned n = %d, want %d (the user octets carried)", n, len(payload))
-	}
-}
-
-// WriteSignal is not an io.Writer — it takes a message, not a buffer — so its
-// count is the encoded message length. It must still be that length once, not
-// twice.
+// WriteSignal takes a message rather than a payload, so its count is the
+// encoded message length. It must still be that length once, not twice.
 func TestWriteSignalReturnsTheEncodedLength(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -129,12 +102,12 @@ func TestWriteOfLargePayloadReportsItsOwnLength(t *testing.T) {
 	for i := range payload {
 		payload[i] = byte(i)
 	}
-	n, err := conn.Write(payload)
+	n, err := writePayload(conn, 1, payload)
 	if err != nil {
-		t.Fatalf("Write: %v", err)
+		t.Fatalf("WriteData: %v", err)
 	}
 	if n != len(payload) {
-		t.Errorf("Write returned n = %d for %d bytes, want %d", n, len(payload), len(payload))
+		t.Errorf("WriteData returned n = %d for %d bytes, want %d", n, len(payload), len(payload))
 	}
 
 	// And it must actually have gone out, so the count is not satisfied by a
@@ -147,7 +120,9 @@ func TestWriteOfLargePayloadReportsItsOwnLength(t *testing.T) {
 // Deliberate behaviour, pinned so a change to it is noticed.
 //
 // Sends pass MSG_DONTWAIT, so with no write deadline in force a full send
-// buffer reports syscall.EAGAIN rather than blocking. The dependency documents
+// buffer reports syscall.EAGAIN rather than blocking. The send classifies it as
+// indeterminate — submission to the transport had begun — and errors.Is still
+// reaches EAGAIN through that classification. The dependency documents
 // why that stays: a blocking sendmsg to a peer that has stopped reading does
 // not come back for many minutes, bounded by the retransmission backoff rather
 // than by anything the caller can set, and there is no way to interrupt it.
@@ -170,7 +145,7 @@ func TestWriteReportsEAGAINWhenTheSendBufferIsFull(t *testing.T) {
 	sent := 0
 	var failure error
 	for i := 0; i < 20000; i++ {
-		if _, err := asps[0].asp.WriteToStream(payload, 1); err != nil {
+		if _, err := writePayloadToStream(asps[0].asp, 1, 1, payload); err != nil {
 			failure = err
 			break
 		}
@@ -200,10 +175,10 @@ func TestWriteReportsEAGAINWhenTheSendBufferIsFull(t *testing.T) {
 		}
 	}
 	if !waitFor(func() bool {
-		_, err := asps[0].asp.WriteToStream(payload, 1)
+		_, err := writePayloadToStream(asps[0].asp, 1, 1, payload)
 		return err == nil
 	}, 10*time.Second) {
-		t.Error("Write never recovered after the far side drained")
+		t.Error("the send path never recovered after the far side drained")
 	}
 }
 
@@ -245,7 +220,7 @@ func TestWriteDeadlineTurnsAFullBufferIntoBackpressure(t *testing.T) {
 	payload := make([]byte, 512)
 	const burst = 3000
 	for i := 0; i < burst; i++ {
-		if _, err := asps[0].asp.WriteToStream(payload, 1); err != nil {
+		if _, err := writePayloadToStream(asps[0].asp, 1, 1, payload); err != nil {
 			t.Fatalf("write %d of %d failed with a deadline in force: %v "+
 				"(a full send buffer should have been waited out, not refused)", i, burst, err)
 		}

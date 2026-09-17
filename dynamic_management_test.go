@@ -253,7 +253,7 @@ func TestScopedASPActiveLeavesUnacknowledgedContextlessASInactive(t *testing.T) 
 }
 
 func TestScopedASPInactivePreservesAcknowledgedContextlessAS(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.noteRoutingContextsAcked(nil)
 	association.setState(StateASPActive)
 	dynamicKey := ASKey{
@@ -291,7 +291,7 @@ func newDynamicallyRegisteredASPManagementFixture(
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	association := newAssociation(role, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(role, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = state
 	association.muState.Unlock()

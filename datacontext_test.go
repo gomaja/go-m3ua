@@ -54,50 +54,49 @@ func firstErr(c *Association) error {
 // case the sentence is actually about — several contexts on one association —
 // is the one it gets most wrong.
 func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
-	t.Run("one configured context is used", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7)
-		rc, err := conn.dataRoutingContext()
-		if err != nil {
-			t.Fatalf("dataRoutingContext: %v", err)
+	t.Run("the named context is the one sent", func(t *testing.T) {
+		conn, capture := newDataWriteAssociation(t, 7, 8, 9)
+		conn.cfg.NetworkAppearance = nil
+		for _, routingContext := range []uint32{7, 8, 9} {
+			if _, err := conn.WriteData(DataRequest{
+				AS:           ASKey{RoutingContext: routingContext, RoutingContextSet: true},
+				ProtocolData: testProtocolData([]byte("x")),
+			}); err != nil {
+				t.Fatalf("WriteData(Routing Context %d): %v", routingContext, err)
+			}
 		}
-		if rc == nil {
-			t.Fatal("DATA would carry no Routing Context although one is configured")
+		sent := capture.messages(t)
+		if len(sent) != 3 {
+			t.Fatalf("%d messages reached the transport, want 3", len(sent))
 		}
-		if got := rc.RoutingContexts(); len(got) != 1 || got[0] != 7 {
-			t.Errorf("Routing Context = %v, want [7]", got)
-		}
-	})
-
-	t.Run("several configured contexts need one selected", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8, 9)
-		rc, err := conn.dataRoutingContext()
-		if err == nil {
-			t.Errorf("DATA would go out naming %v with none selected; it cannot "+
-				"identify the traffic flow", rc.RoutingContexts())
-		}
-		if !errors.Is(err, ErrAmbiguousRoutingContext) {
-			t.Errorf("error = %v, want ErrAmbiguousRoutingContext", err)
+		for index, want := range []uint32{7, 8, 9} {
+			got := sent[index].RoutingContext.RoutingContexts()
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("message %d named Routing Context %v, want [%d]", index, got, want)
+			}
 		}
 	})
 
-	t.Run("the selected context is the one sent", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8, 9)
-		if err := conn.SelectRoutingContext(8); err != nil {
-			t.Fatalf("SelectRoutingContext: %v", err)
-		}
-		rc, err := conn.dataRoutingContext()
-		if err != nil {
-			t.Fatalf("dataRoutingContext: %v", err)
-		}
-		if got := rc.RoutingContexts(); len(got) != 1 || got[0] != 8 {
-			t.Errorf("Routing Context = %v, want [8]", got)
+	t.Run("a message that names no context on a multi-flow association is refused", func(t *testing.T) {
+		conn, capture := newDataWriteAssociation(t, 7, 8, 9)
+		conn.cfg.NetworkAppearance = nil
+		_, err := conn.WriteData(DataRequest{ProtocolData: testProtocolData([]byte("x"))})
+		requireDataWriteError(t, err, DataNotSent, ErrMissingRoutingContext)
+		if capture.submissions() != 0 {
+			t.Error("a DATA identifying no traffic flow reached the transport")
 		}
 	})
 
-	t.Run("selecting an unconfigured context is refused", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 7, 8)
-		if err := conn.SelectRoutingContext(11); err == nil {
-			t.Error("selected a Routing Context that is not configured")
+	t.Run("naming an unconfigured context is refused", func(t *testing.T) {
+		conn, capture := newDataWriteAssociation(t, 7, 8)
+		conn.cfg.NetworkAppearance = nil
+		_, err := conn.WriteData(DataRequest{
+			AS:           ASKey{RoutingContext: 11, RoutingContextSet: true},
+			ProtocolData: testProtocolData([]byte("x")),
+		})
+		requireDataWriteError(t, err, DataNotSent, ErrInvalidRoutingContext)
+		if capture.submissions() != 0 {
+			t.Error("a DATA naming an unconfigured Routing Context reached the transport")
 		}
 	})
 }
@@ -111,18 +110,25 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 // left out. Emitting a zero-length one instead puts a parameter on the wire
 // that names no context at all.
 func TestDataOmitsAnEmptyRoutingContext(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP)
-	rc, err := conn.dataRoutingContext()
-	if err != nil {
-		t.Fatalf("dataRoutingContext: %v", err)
+	conn, capture := newDataWriteAssociation(t)
+	conn.cfg.NetworkAppearance = nil
+	conn.noteRoutingContextsAcked(nil)
+	if _, err := conn.WriteData(DataRequest{ProtocolData: testProtocolData([]byte("x"))}); err != nil {
+		t.Fatalf("WriteData on a contextless association: %v", err)
 	}
-	if rc != nil {
-		t.Errorf("DATA would carry a Routing Context of length %d with none "+
-			"configured; the parameter is Conditional and must be omitted", rc.Length)
+	sent := capture.messages(t)
+	if len(sent) != 1 {
+		t.Fatalf("%d messages reached the transport, want 1", len(sent))
+	}
+	if sent[0].RoutingContext != nil {
+		t.Errorf("DATA carried a Routing Context of length %d with none "+
+			"configured; the parameter is Conditional and must be omitted",
+			sent[0].RoutingContext.Length)
 	}
 
-	// And the message built from it leaves the parameter out entirely.
-	d := messages.NewData(nil, rc,
+	// And a message built with no Routing Context leaves the parameter out
+	// entirely rather than encoding an empty one.
+	d := messages.NewData(nil, nil,
 		params.NewProtocolData(0x111111, 0x222222, 3, 0, 0, 1, []byte("x")), nil)
 	b, err := d.MarshalBinary()
 	if err != nil {
@@ -296,9 +302,9 @@ func TestDataPreservesNetworkAppearanceAndPresence(t *testing.T) {
 			}
 			select {
 			case got := <-conn.dataChan:
-				if got.NetworkAppearance != tt.want || got.NetworkAppearanceSet != tt.wantSet {
+				if got.Scope.NetworkAppearance != tt.want || got.Scope.NetworkAppearanceSet != tt.wantSet {
 					t.Errorf("Network Appearance = %d (set=%v), want %d (set=%v)",
-						got.NetworkAppearance, got.NetworkAppearanceSet, tt.want, tt.wantSet)
+						got.Scope.NetworkAppearance, got.Scope.NetworkAppearanceSet, tt.want, tt.wantSet)
 				}
 			default:
 				t.Fatal("valid DATA was not delivered")
@@ -451,9 +457,9 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !delivered.NetworkAppearanceSet || delivered.NetworkAppearance != 0 {
+	if !delivered.Scope.NetworkAppearanceSet || delivered.Scope.NetworkAppearance != 0 {
 		t.Errorf("valid DATA Network Appearance = %d (set=%v), want explicit zero",
-			delivered.NetworkAppearance, delivered.NetworkAppearanceSet)
+			delivered.Scope.NetworkAppearance, delivered.Scope.NetworkAppearanceSet)
 	}
 
 	rawInvalid, err := data(8, "unconfigured-network").MarshalBinary()

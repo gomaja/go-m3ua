@@ -247,7 +247,7 @@ func TestEndpointRejectsAssociationOverrideWhenNExceedsOne(t *testing.T) {
 			name: "SGP",
 			role: RoleSGP,
 			config: func() *AssociationConfig {
-				config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+				config := NewAssociationConfig()
 				config.RoutingContexts = params.NewRoutingContext(1)
 				config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 				return config
@@ -257,7 +257,7 @@ func TestEndpointRejectsAssociationOverrideWhenNExceedsOne(t *testing.T) {
 			name: "IPSP Single Exchange",
 			role: RoleIPSP,
 			config: func() *AssociationConfig {
-				config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+				config := NewAssociationConfig()
 				config.RoutingContexts = params.NewRoutingContext(1)
 				config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 				config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
@@ -268,7 +268,7 @@ func TestEndpointRejectsAssociationOverrideWhenNExceedsOne(t *testing.T) {
 			name: "IPSP Double Exchange peer direction",
 			role: RoleIPSP,
 			config: func() *AssociationConfig {
-				config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+				config := NewAssociationConfig()
 				config.IPSP = &IPSPConfig{
 					ExchangeModel: IPSPExchangeDouble,
 					ASPSMExchange: IPSPASPSMExchangeDouble,
@@ -323,7 +323,7 @@ func TestAssociationOverrideValidationUsesExactASKey(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	restricted := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	restricted := NewAssociationConfig()
 	restricted.NetworkAppearance = params.NewNetworkAppearance(10)
 	restricted.RoutingContexts = params.NewRoutingContext(1)
 	restricted.TrafficModes = map[uint32]uint32{1: params.TrafficModeOverride}
@@ -354,7 +354,7 @@ func TestSGPDefersOverrideValidationUntilASPAuthorization(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 
 	configFor := func(authorized uint32) *AssociationConfig {
-		config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+		config := NewAssociationConfig()
 		config.RoutingContexts = params.NewRoutingContext(1, 2)
 		config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
 		config.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{authorized} }
@@ -438,7 +438,7 @@ func TestContextlessAssociationOverrideValidationUsesDefaultTrafficMode(t *testi
 			}
 			t.Cleanup(func() { _ = endpoint.Close() })
 
-			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			config := NewAssociationConfig()
 			if test.role == RoleIPSP {
 				config.IPSP = &IPSPConfig{
 					ExchangeModel: IPSPExchangeDouble,
@@ -473,7 +473,7 @@ func TestIPSPDoubleExchangeLocalOverrideDoesNotUsePeerActivationPolicy(t *testin
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{
 		ExchangeModel: IPSPExchangeDouble,
 		ASPSMExchange: IPSPASPSMExchangeDouble,
@@ -1032,7 +1032,7 @@ func TestRoutingKeyRegistrationRejectsOverrideWhenNExceedsOne(t *testing.T) {
 					}: {RequiredActiveASPs: 2},
 				},
 			})
-			associationConfig := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			associationConfig := NewAssociationConfig()
 			if test.associationMode != 0 {
 				associationConfig.TrafficModeType = params.NewTrafficModeType(test.associationMode)
 			}
@@ -1086,7 +1086,7 @@ func TestRoutingKeyRegistrationValidatesDuplicateRequestModesIndependently(t *te
 			applicationServers := newApplicationServersForIPSP(&ApplicationServerConfig{
 				DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
 			})
-			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association := newAssociation(RoleSGP, NewAssociationConfig())
 			association.as = applicationServers
 
 			omittedMode := testRoutingKey(10, 100, params.ServiceIndSCCP)

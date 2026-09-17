@@ -24,86 +24,31 @@ import (
 //	Routing Context MUST be sent to identify the traffic flow, assisting
 //	in the internal distribution of Data messages.
 //
-// SelectRoutingContext stores it on the Association instead, so naming a flow and
-// sending on it are two steps with a window between them. This states that
-// window without any timing: the two selections are the two flows' choices, and
-// the read that follows is the first flow's write. It gets the second flow's
-// context, and the payload goes out mis-attributed.
-//
-// The window is not closable from outside the package. A caller can only wrap
-// select-and-write in its own lock, which serialises every send on the
-// association — a throughput cost paid for a field that is per-message by
-// definition.
-func TestTheAssociationWideSelectionLosesTheCallersChoice(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+// There is no longer an association-wide selection for a second goroutine to
+// overwrite between one goroutine naming its flow and writing on it: the scope
+// is a field of DataRequest, and the association holds no outbound scope state
+// at all. The tests that pinned that window, and the four parallel write forms
+// that each resolved the context on their own path, are gone with the API they
+// described. What they were protecting is tested here and in datawrite_test.go:
+// a write names its own scope exactly, that scope is validated, and concurrent
+// flows keep their own.
 
-	// Flow A names its context, then flow B names its own before flow A gets
-	// to write. Two goroutines produce this ordering; stating it directly is
-	// the same sequence without the timing.
-	if err := conn.SelectRoutingContext(1); err != nil {
-		t.Fatalf("SelectRoutingContext(1): %v", err)
-	}
-	if err := conn.SelectRoutingContext(2); err != nil {
-		t.Fatalf("SelectRoutingContext(2): %v", err)
-	}
-
-	rc, err := conn.dataRoutingContext()
-	if err != nil {
-		t.Fatalf("dataRoutingContext: %v", err)
-	}
-	if got := rc.RoutingContexts(); len(got) != 1 || got[0] != 2 {
-		t.Fatalf("association-wide selection resolved to %v, want [2]; the "+
-			"premise of this test no longer holds", got)
-	}
-
-	// The per-message form takes flow A's own context through the identical
-	// interleaving, because it reads nothing the other flow can write.
-	flowA := uint32(1)
-	rc, err = conn.resolveRoutingContext(&flowA)
-	if err != nil {
-		t.Fatalf("resolveRoutingContext: %v", err)
-	}
-	if got := rc.RoutingContexts(); len(got) != 1 || got[0] != 1 {
-		t.Errorf("the message named Routing Context 1 and went out as %v; the "+
-			"traffic flow is mis-identified", got)
-	}
-}
-
-// A write that names no context keeps the association-wide behaviour exactly:
-// this is the single-flow caller the selection was designed for, and it must
-// not be disturbed by the per-message form existing.
-func TestAWriteThatNamesNoContextStillUsesTheSelection(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-
-	if _, err := conn.resolveRoutingContext(nil); !errors.Is(err, ErrAmbiguousRoutingContext) {
-		t.Errorf("error = %v, want ErrAmbiguousRoutingContext with several "+
-			"contexts and none selected", err)
-	}
-
-	if err := conn.SelectRoutingContext(2); err != nil {
-		t.Fatalf("SelectRoutingContext: %v", err)
-	}
-	rc, err := conn.resolveRoutingContext(nil)
-	if err != nil {
-		t.Fatalf("resolveRoutingContext: %v", err)
-	}
-	if got := rc.RoutingContexts(); len(got) != 1 || got[0] != 2 {
-		t.Errorf("Routing Context = %v, want [2]", got)
-	}
-}
-
-// Naming a context is not a way around the checks the selection had to pass.
+// Naming a context is not a way around the checks the association-wide
+// selection had to pass.
 func TestAPerMessageContextIsStillValidated(t *testing.T) {
 	t.Run("a context the association does not carry is refused", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-
-		_, err := conn.routingContextFor(9)
-		if err == nil {
-			t.Fatal("a DATA named a Routing Context this association never coordinated")
-		}
+		conn, capture := newDataWriteAssociation(t, 1, 2)
+		_, err := conn.WriteData(DataRequest{
+			AS:           writeScope(9),
+			ProtocolData: testProtocolData([]byte("x")),
+		})
+		requireDataWriteError(t, err, DataNotSent, ErrInvalidRoutingContext)
 		var rcErr *RoutingContextError
 		if !errors.As(err, &rcErr) {
 			t.Errorf("error = %v (%T), want a RoutingContextError", err, err)
+		}
+		if capture.submissions() != 0 {
+			t.Error("a DATA naming an uncoordinated Routing Context reached the transport")
 		}
 	})
 
@@ -112,6 +57,9 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 	// inactive and naming one of those explicitly must not send traffic for it.
 	t.Run("a context the peer never acknowledged is refused", func(t *testing.T) {
 		asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
+		asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		capture := &dataFrameCapture{}
+		asp.dataWriter = capture.write
 		if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
 			params.NewTrafficModeType(params.TrafficModeLoadshare),
 			params.NewRoutingContext(1), nil)); err != nil {
@@ -119,51 +67,63 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 		}
 		asp.setState(StateASPActive)
 
-		if _, err := asp.routingContextFor(1); err != nil {
+		if _, err := asp.WriteData(DataRequest{
+			AS:           writeScope(1),
+			ProtocolData: testProtocolData([]byte("acknowledged")),
+		}); err != nil {
 			t.Errorf("DATA refused for the acknowledged Routing Context: %v", err)
 		}
-		if _, err := asp.routingContextFor(2); !errors.Is(err, ErrRoutingContextNotActive) {
-			t.Errorf("error = %v, want ErrRoutingContextNotActive for a context "+
-				"no ASP Active Ack acknowledged", err)
-		}
+		_, err := asp.WriteData(DataRequest{
+			AS:           writeScope(2),
+			ProtocolData: testProtocolData([]byte("unacknowledged")),
+		})
+		requireDataWriteError(t, err, DataNotSent, ErrRoutingContextNotActive)
 	})
 
-	t.Run("SGP and selected paths enforce per-AS activity", func(t *testing.T) {
+	t.Run("an inactive or overridden context is refused", func(t *testing.T) {
 		sgpAssociation, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
+		sgpAssociation.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		sgpAssociation.dataWriter = (&dataFrameCapture{}).write
 		sgpAssociation.noteRoutingContextsActive([]uint32{1})
-		if _, err := sgpAssociation.routingContextFor(2); !errors.Is(err, ErrRoutingContextNotActive) {
-			t.Errorf("SGP explicit inactive RC error = %v, want ErrRoutingContextNotActive", err)
-		}
-		if err := sgpAssociation.SelectRoutingContext(2); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := sgpAssociation.dataRoutingContext(); !errors.Is(err, ErrRoutingContextNotActive) {
-			t.Errorf("SGP selected inactive RC error = %v, want ErrRoutingContextNotActive", err)
-		}
+		_, err := sgpAssociation.WriteData(DataRequest{
+			AS:           writeScope(2),
+			ProtocolData: testProtocolData([]byte("x")),
+		})
+		requireDataWriteError(t, err, DataNotSent, ErrRoutingContextNotActive)
 
 		aspAssociation, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+		aspAssociation.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		aspAssociation.dataWriter = (&dataFrameCapture{}).write
 		aspAssociation.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 		aspAssociation.noteRoutingContextsOverridden([]uint32{2})
-		if err := aspAssociation.SelectRoutingContext(2); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := aspAssociation.dataRoutingContext(); !errors.Is(err, ErrRoutingContextNotActive) {
-			t.Errorf("ASP selected overridden RC error = %v, want ErrRoutingContextNotActive", err)
-		}
+		_, err = aspAssociation.WriteData(DataRequest{
+			AS:           writeScope(2),
+			ProtocolData: testProtocolData([]byte("x")),
+		})
+		requireDataWriteError(t, err, DataNotSent, ErrRoutingContextNotActive)
 	})
 
 	// With no Routing Key coordinated the parameter is omitted, which Section
 	// 3.3.1 permits. Naming a flow anyway is a different statement and must not
 	// be quietly downgraded to the omission.
 	t.Run("naming a context with none coordinated is refused", func(t *testing.T) {
-		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP)
-
-		if rc, err := conn.resolveRoutingContext(nil); err != nil || rc != nil {
-			t.Errorf("resolveRoutingContext(nil) = %v, %v; want the parameter omitted", rc, err)
+		conn, capture := newDataWriteAssociation(t)
+		conn.noteRoutingContextsAcked(nil)
+		if _, err := conn.WriteData(DataRequest{
+			AS:           ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true},
+			ProtocolData: testProtocolData([]byte("omitted")),
+		}); err != nil {
+			t.Fatalf("WriteData with the parameter omitted: %v", err)
 		}
-		if _, err := conn.routingContextFor(1); err == nil {
-			t.Error("a DATA named a Routing Context although no Routing Key was coordinated")
+		sent := capture.messages(t)
+		if len(sent) != 1 || sent[0].RoutingContext != nil {
+			t.Fatalf("the contextless write did not omit the Routing Context: %v", sent)
 		}
+		_, err := conn.WriteData(DataRequest{
+			AS:           writeScope(1),
+			ProtocolData: testProtocolData([]byte("named")),
+		})
+		requireDataWriteError(t, err, DataNotSent, ErrInvalidRoutingContext)
 	})
 }
 
@@ -181,16 +141,16 @@ func TestReceivedDataReportsTheTrafficFlowItNamed(t *testing.T) {
 		nil,
 	), nil)
 
-	d, err := conn.ReadData()
+	d, err := conn.ReadData(context.Background())
 	if err != nil {
 		t.Fatalf("ReadData: %v", err)
 	}
-	if !d.RoutingContextSet {
+	if !d.Scope.RoutingContextSet {
 		t.Fatal("the DATA named Routing Context 8 and arrived with none; the " +
 			"application cannot distribute it to a traffic flow")
 	}
-	if d.RoutingContext != 8 {
-		t.Errorf("RoutingContext = %d, want 8", d.RoutingContext)
+	if wireRoutingContext(d.Scope) != 8 {
+		t.Errorf("RoutingContext = %d, want 8", wireRoutingContext(d.Scope))
 	}
 	if string(d.ProtocolData.Data) != "x" {
 		t.Errorf("payload = %q, want %q", d.ProtocolData.Data, "x")
@@ -269,12 +229,12 @@ func TestReceivedDataWithoutARoutingContextSaysSo(t *testing.T) {
 		nil,
 	), nil)
 
-	d, err := conn.ReadData()
+	d, err := conn.ReadData(context.Background())
 	if err != nil {
 		t.Fatalf("ReadData: %v", err)
 	}
-	if d.RoutingContextSet {
-		t.Errorf("a DATA carrying no Routing Context reported one (%d)", d.RoutingContext)
+	if d.Scope.RoutingContextSet {
+		t.Errorf("a DATA carrying no Routing Context reported one (%d)", wireRoutingContext(d.Scope))
 	}
 }
 
@@ -290,11 +250,11 @@ func TestRoutingContextZeroIsReportedAsPresent(t *testing.T) {
 		nil,
 	), nil)
 
-	d, err := conn.ReadData()
+	d, err := conn.ReadData(context.Background())
 	if err != nil {
 		t.Fatalf("ReadData: %v", err)
 	}
-	if !d.RoutingContextSet {
+	if !d.Scope.RoutingContextSet {
 		t.Error("Routing Context 0 was reported as absent; it is a context like any other")
 	}
 }
@@ -340,11 +300,11 @@ func TestConcurrentFlowsOnOneAssociationKeepTheirRoutingContexts(t *testing.T) {
 	go func() {
 		defer close(readerDone)
 		for i := 0; i < total; i++ {
-			d, err := srvConn.ReadData()
+			d, err := srvConn.ReadData(context.Background())
 			if err != nil {
 				return
 			}
-			inbox <- received{d.ProtocolData.Data, d.RoutingContext, d.RoutingContextSet}
+			inbox <- received{d.ProtocolData.Data, wireRoutingContext(d.Scope), d.Scope.RoutingContextSet}
 		}
 	}()
 
@@ -357,14 +317,15 @@ func TestConcurrentFlowsOnOneAssociationKeepTheirRoutingContexts(t *testing.T) {
 				// The payload names the flow it was sent for, so the receiver
 				// checks the pairing without trusting the sender's bookkeeping.
 				payload := []byte(fmt.Sprintf("rc=%d seq=%d", rc, i))
-				pd := params.NewProtocolData(
-					0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, payload)
 				if err := cliConn.SetWriteDeadline(time.Now().Add(20 * time.Second)); err != nil {
 					t.Errorf("SetWriteDeadline: %v", err)
 					return
 				}
-				if _, err := cliConn.WritePDWithRoutingContext(pd, rc); err != nil {
-					t.Errorf("WritePDWithRoutingContext(rc=%d): %v", rc, err)
+				if _, err := cliConn.WriteData(DataRequest{
+					AS:           associationScope(cliConn, rc),
+					ProtocolData: testProtocolData(payload),
+				}); err != nil {
+					t.Errorf("WriteData(rc=%d): %v", rc, err)
 				}
 			}(rc, i)
 		}
@@ -398,11 +359,11 @@ func TestConcurrentFlowsOnOneAssociationKeepTheirRoutingContexts(t *testing.T) {
 	}
 }
 
-// Every one of the four new writes has to name the flow, not just the one the
-// reporting caller happened to use. They differ in how the stream and the
-// routing label are chosen, and each resolves the Routing Context on its own
-// path, so a fix applied to one of them is not a fix applied to all.
-func TestEveryWithRoutingContextWriteNamesTheFlow(t *testing.T) {
+// Both remaining ways a payload reaches the wire have to carry the scope the
+// caller named. They resolve it on different code paths — the typed request
+// names it outright, while a caller-built DATA carries it in the message — so a
+// fix applied to one is not a fix applied to the other.
+func TestEveryPayloadWriteCarriesTheNamedFlow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -415,58 +376,57 @@ func TestEveryWithRoutingContextWriteNamesTheFlow(t *testing.T) {
 		_ = srvConn.Close()
 	}()
 
-	newPD := func(payload string) *params.Param {
-		return params.NewProtocolData(
-			0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte(payload))
-	}
-
 	writes := []struct {
 		name  string
-		write func(payload string, rtCtx uint32) (int, error)
+		write func(payload string, routingContext uint32) (int, error)
 	}{
-		{"Write", func(p string, rc uint32) (int, error) {
-			return cliConn.WriteWithRoutingContext([]byte(p), rc)
+		{"WriteData", func(p string, routingContext uint32) (int, error) {
+			return cliConn.WriteData(DataRequest{
+				AS:           associationScope(cliConn, routingContext),
+				ProtocolData: testProtocolData([]byte(p)),
+			})
 		}},
-		{"WriteToStream", func(p string, rc uint32) (int, error) {
-			return cliConn.WriteToStreamWithRoutingContext([]byte(p), 1, rc)
+		{"WriteData on an explicit stream", func(p string, routingContext uint32) (int, error) {
+			return cliConn.WriteData(DataRequest{
+				AS:           associationScope(cliConn, routingContext),
+				ProtocolData: testProtocolData([]byte(p)),
+				Stream:       1,
+			})
 		}},
-		{"WritePD", func(p string, rc uint32) (int, error) {
-			return cliConn.WritePDWithRoutingContext(newPD(p), rc)
-		}},
-		{"WritePDToStream", func(p string, rc uint32) (int, error) {
-			return cliConn.WritePDToStreamWithRoutingContext(newPD(p), 1, rc)
+		{"WriteSignal", func(p string, routingContext uint32) (int, error) {
+			scope := associationScope(cliConn, routingContext)
+			var appearance *params.Param
+			if scope.NetworkAppearanceSet {
+				appearance = params.NewNetworkAppearance(scope.NetworkAppearance)
+			}
+			return cliConn.WriteSignal(messages.NewData(
+				appearance,
+				params.NewRoutingContext(routingContext),
+				params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte(p)),
+				nil,
+			))
 		}},
 	}
 
-	// setupConn's association carries Routing Contexts 1 and 2, and the helper
-	// leaves one of them selected association-wide -- so a write that ignored
-	// its argument would still resolve to a context and succeed. That is not
-	// hypothetical: an earlier version of this test named the same context the
-	// helper had selected, and two of the four methods passed it with their
-	// argument deleted.
-	//
-	// So each round pins the selection to a decoy and has every write name the
-	// other context. Dropping the argument falls back to the decoy and is
-	// caught; hardcoding either context is caught by the round that names the
-	// other one.
+	// setupConn's association carries Routing Contexts 1 and 2. Each round has
+	// every write name the other one, so a write that resolved the scope from
+	// the association's configuration rather than from the caller is caught
+	// whichever context that configuration would have produced.
 	want := make(map[string]uint32, len(writes)*2)
-	for _, round := range []struct{ decoy, named uint32 }{{1, 2}, {2, 1}} {
-		if err := cliConn.SelectRoutingContext(round.decoy); err != nil {
-			t.Fatalf("SelectRoutingContext(%d): %v", round.decoy, err)
-		}
+	for _, named := range []uint32{2, 1} {
 		for _, w := range writes {
-			payload := fmt.Sprintf("%s-rc%d", w.name, round.named)
-			if _, err := w.write(payload, round.named); err != nil {
-				t.Fatalf("%s naming Routing Context %d: %v", w.name, round.named, err)
+			payload := fmt.Sprintf("%s-rc%d", w.name, named)
+			if _, err := w.write(payload, named); err != nil {
+				t.Fatalf("%s naming Routing Context %d: %v", w.name, named, err)
 			}
-			want[payload] = round.named
+			want[payload] = named
 		}
 	}
 
 	for i := 0; i < len(writes)*2; i++ {
 		done := make(chan *DataMessage, 1)
 		go func() {
-			d, err := srvConn.ReadData()
+			d, err := srvConn.ReadData(context.Background())
 			if err == nil {
 				done <- d
 			}
@@ -478,11 +438,11 @@ func TestEveryWithRoutingContextWriteNamesTheFlow(t *testing.T) {
 			if !ok {
 				t.Fatalf("unexpected payload %q", payload)
 			}
-			if !d.RoutingContextSet {
+			if !d.Scope.RoutingContextSet {
 				t.Errorf("payload %q arrived with no Routing Context", payload)
-			} else if d.RoutingContext != expect {
+			} else if got := wireRoutingContext(d.Scope); got != expect {
 				t.Errorf("payload %q arrived under Routing Context %d, want %d",
-					payload, d.RoutingContext, expect)
+					payload, got, expect)
 			}
 			delete(want, payload)
 		case <-time.After(20 * time.Second):
@@ -641,9 +601,9 @@ func FuzzDataRoutingContext(f *testing.F) {
 			// Anything delivered names a context this association serves, or
 			// none at all: passing traffic up under a context we do not carry is
 			// what Section 3.8.1's Invalid Routing Context exists to prevent.
-			if d.RoutingContextSet && d.RoutingContext != 7 && d.RoutingContext != 8 {
+			if d.Scope.RoutingContextSet && wireRoutingContext(d.Scope) != 7 && wireRoutingContext(d.Scope) != 8 {
 				t.Fatalf("delivered under Routing Context %d, which this "+
-					"association does not serve", d.RoutingContext)
+					"association does not serve", wireRoutingContext(d.Scope))
 			}
 		default:
 			if err := firstErr(conn); err == nil {

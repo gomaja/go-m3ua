@@ -79,16 +79,6 @@ var (
 	// value other than \"0\"."
 	ErrInvalidParameterValue = errors.New("parameter carries a value this message does not permit")
 
-	// ErrAmbiguousRoutingContext is returned when DATA is written on an
-	// association that carries several Routing Contexts and none has been
-	// chosen with SelectRoutingContext.
-	//
-	// RFC 4666 Section 3.3.1 requires the Routing Context "to identify the
-	// traffic flow" in exactly this case, and which flow a payload belongs to
-	// is the caller's knowledge. Sending every configured context instead
-	// identifies none of them.
-	ErrAmbiguousRoutingContext = errors.New("several Routing Contexts configured and none selected")
-
 	// ErrMissingProtocolData is used when a DATA message arrives without the
 	// Protocol Data parameter, which RFC 4666 Section 3.3.1 lists as Mandatory.
 	ErrMissingProtocolData = errors.New("DATA without Protocol Data parameter")
@@ -303,6 +293,18 @@ var (
 	// ErrRKMOutcomeLimit reports that another local REG REQ or DEREG REQ would
 	// exceed the bounded set of requests whose peer outcome remains unresolved.
 	ErrRKMOutcomeLimit = errors.New("unresolved Routing Key Management outcome limit reached")
+
+	// ErrProtocolDataTooLarge reports a Protocol Data value that cannot be
+	// encoded. RFC 4666 Section 3.2 gives every parameter a 16-bit Length
+	// field covering the whole TLV, so the routing label and user octets
+	// together cannot exceed what that field can express.
+	ErrProtocolDataTooLarge = errors.New("protocol data exceeds the 16-bit parameter length field")
+
+	// ErrPartialDataWrite reports a transport that accepted only part of an
+	// M3UA message. Nothing can be concluded about what the peer received, and
+	// the remainder cannot be sent separately: an M3UA message is one SCTP
+	// user message.
+	ErrPartialDataWrite = errors.New("transport accepted only part of the message")
 )
 
 // InvalidVersionError is used if a message with an unsupported version is received.
@@ -690,8 +692,15 @@ func (c *Association) handleErrors(e error) error {
 			// carried none, since the rule is conditional on it having had them.
 			routingContextOf(UnexpectedMessageError.Msg).Copy(),
 			networkAppearanceOf(UnexpectedMessageError.Msg).Copy(),
-			// Mask 0: this is one point code, this node's, not a range.
-			params.NewAffectedPointCodeWithMask(0, c.cfg.OriginatingPointCode),
+			// No Affected Point Code. Section 3.8.1 marks it "Mandatory*",
+			// "Only mandatory for specific Error Codes", and the codes it names
+			// are the ones that are about point codes — "Destination Status
+			// Unknown" requires "the invalid or unauthorized Point Code(s)".
+			// "Unexpected Message" is about the message's state, not about a
+			// destination, and this node's own point code is not a property of
+			// the association in any case: it travels in each message's routing
+			// label.
+			nil,
 			params.NewDiagnosticInformation(first40(UnexpectedMessageError.Raw)),
 		)
 	}
@@ -812,22 +821,34 @@ func (c *Association) handleErrors(e error) error {
 	// locally left the peer sending at full rate into a queue this node was
 	// discarding from.
 	//
-	// Affected Point Code is Mandatory in SCON, and the congested node is this
-	// one, so it names the configured Originating Point Code. A deployment that
-	// carries its real point codes per message — leaving OriginatingPointCode
-	// at zero — should set it to this node's own point code for the report to
-	// mean anything to the peer.
-	if errors.Is(e, ErrDataQueueFull) {
+	// Affected Point Code is Mandatory in SCON, and the message that could not
+	// be queued names the destination in its own routing label, so no
+	// configured point code of our own is needed for the report to mean
+	// something to the peer. The same section covers both directions this can
+	// be sent in: an SGP may send SCON "to an ASP in response to a DATA or DAUD
+	// message", where the discarded DATA's Destination Point Code is the
+	// destination the ASP was trying to reach, and an ASP may send it
+	// "indicating that the congestion level of the M3UA layer or the ASP has
+	// changed", where that same Destination Point Code is the ASP itself.
+	var overflow *DataQueueOverflowError
+	if errors.As(e, &overflow) {
 		if _, err := c.WriteSignal(messages.NewSignallingCongestion(
 			c.localNetworkAppearance().Copy(),
 			c.configuredLocalRoutingContextParam(),
-			params.NewAffectedPointCodeWithMask(0, c.cfg.OriginatingPointCode),
+			params.NewAffectedPointCodeWithMask(0, overflow.DestinationPointCode),
 			nil, nil, nil,
 		)); err != nil {
 			// The peer could not be told, but the association is still up and
 			// the queue is still the thing in trouble: report, do not close.
 			logf("m3ua: failed to send SCON for local congestion: %v", err)
 		}
+		return nil
+	}
+	if errors.Is(e, ErrDataQueueFull) {
+		// Congestion with no message to name a destination: nothing to put in
+		// the Mandatory Affected Point Code, so the peer is not told. The
+		// association stays up either way.
+		logf("m3ua: local congestion discarded inbound DATA")
 		return nil
 	}
 

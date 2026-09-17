@@ -27,21 +27,16 @@ type HeartbeatInfo struct {
 	// Timer is the M3UA liveness deadline for a BEAT round. Zero resolves to
 	// 2*T(beat), per RFC 4666 Section 4.3.4.6.
 	Timer time.Duration
-	// Data is retained for API compatibility. The managed BEAT loop ignores this
-	// field and sends fresh opaque Heartbeat Data each round so BEAT Acks can be
-	// matched and replay attempts rejected.
-	Data []byte
 }
 
 // NewHeartbeatInfo creates M3UA BEAT configuration.
 //
-// The data argument is retained in the returned HeartbeatInfo for API
-// compatibility, but the managed BEAT loop generates fresh Heartbeat Data for
-// every transmitted M3UA BEAT.
-func NewHeartbeatInfo(interval, timer time.Duration, data []byte) *HeartbeatInfo {
-	return &HeartbeatInfo{
-		Enabled: true, Interval: interval, Timer: timer, Data: data,
-	}
+// The managed BEAT loop generates fresh Heartbeat Data for every transmitted
+// M3UA BEAT, so there is no caller-supplied value: RFC 4666 Section 3.5.5 has
+// the peer echo the parameter, and matching the echo against freshly generated
+// data is what makes a BEAT Ack identifiable and a replayed one detectable.
+func NewHeartbeatInfo(interval, timer time.Duration) *HeartbeatInfo {
+	return &HeartbeatInfo{Enabled: true, Interval: interval, Timer: timer}
 }
 
 // SCTPSACKInfo configures the SCTP delayed-SACK timer.
@@ -290,23 +285,15 @@ type IPSPTrafficConfig struct {
 
 // IPSPConfig configures RFC 4666 peer-to-peer procedures for one Association.
 //
-// InitiateASPSM and InitiateASPTM select whether this IPSP automatically starts
-// the initial procedure of the named class. Either IPSP may initiate each
-// exchange, and the choices are independent from SCTP association initiation.
+// Which procedures this IPSP starts is AssociationConfig.ASPProcedures, which
+// an IPSP Association must set: either IPSP may initiate each exchange, the
+// choices are independent of SCTP association initiation, and there is no
+// role-implied default to fall back on.
 type IPSPConfig struct {
 	ExchangeModel IPSPExchangeModel
 	// ASPSMExchange is the ASPSM agreement for Double Exchange. It is not
 	// used by Single Exchange.
 	ASPSMExchange IPSPASPSMExchangeModel
-	// InitiateASPSM starts this IPSP's ASP Up procedure independently of SCTP
-	// association initiation. Normal Double Exchange requires TrafficToLocal;
-	// the agreed single-ASPSM simplification may establish both directions. A
-	// non-nil AssociationConfig.ASPProcedures policy supersedes this flag.
-	InitiateASPSM bool
-	// InitiateASPTM starts this IPSP's ASP Active procedure after its local
-	// ASPSM direction becomes ASP-INACTIVE. A non-nil
-	// AssociationConfig.ASPProcedures policy supersedes this flag.
-	InitiateASPTM bool
 	// TrafficToLocal configures DATA the peer sends to this IPSP.
 	TrafficToLocal *IPSPTrafficConfig
 	// TrafficToPeer configures DATA this IPSP sends to the peer.
@@ -486,14 +473,11 @@ type AssociationConfig struct {
 	// IPSP may use different models with different peers.
 	IPSP *IPSPConfig
 
-	RoutingContexts         *params.Param
-	CorrelationID           *params.Param
-	OriginatingPointCode    uint32
-	DestinationPointCode    uint32
-	ServiceIndicator        uint8
-	NetworkIndicator        uint8
-	MessagePriority         uint8
-	SignallingLinkSelection uint8
+	// RoutingContexts is the Routing Context inventory this Association is
+	// configured to carry. With NetworkAppearance it names this Association's
+	// Application Servers: the pair is the exact ASKey each DataRequest must
+	// name.
+	RoutingContexts *params.Param
 }
 
 // AcceptInfo identifies an SCTP association before its M3UA handshake starts.
@@ -524,7 +508,7 @@ type ListenerConfig struct {
 // AssociationConfig snapshot.
 func NewListenerConfig(defaultAssociationConfig *AssociationConfig) *ListenerConfig {
 	if defaultAssociationConfig == nil {
-		defaultAssociationConfig = NewAssociationConfig(0, 0, 0, 0, 0, 0)
+		defaultAssociationConfig = NewAssociationConfig()
 	}
 	return &ListenerConfig{
 		DefaultAssociationConfig: snapshotAssociationConfig(defaultAssociationConfig),
@@ -556,7 +540,6 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 	snapshot := *config
 	if config.HeartbeatInfo != nil {
 		heartbeat := *config.HeartbeatInfo
-		heartbeat.Data = append([]byte(nil), config.HeartbeatInfo.Data...)
 		snapshot.HeartbeatInfo = &heartbeat
 	}
 	if config.SCTPConfig != nil {
@@ -577,7 +560,6 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 	snapshot.TrafficModeType = config.TrafficModeType.Copy()
 	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
 	snapshot.RoutingContexts = config.RoutingContexts.Copy()
-	snapshot.CorrelationID = config.CorrelationID.Copy()
 	if config.ASPProcedures != nil {
 		procedures := *config.ASPProcedures
 		snapshot.ASPProcedures = &procedures
@@ -630,6 +612,9 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 		if config.IPSP == nil {
 			return fmt.Errorf("%w: IPSP requires an explicit exchange model", ErrInvalidRoleConfiguration)
 		}
+		if config.ASPProcedures == nil {
+			return fmt.Errorf("%w: IPSP requires an explicit ASP procedure policy", ErrInvalidRoleConfiguration)
+		}
 		if config.AuthorizeASP != nil {
 			return fmt.Errorf("%w: AuthorizeASP applies only to an SGP", ErrInvalidRoleConfiguration)
 		}
@@ -650,12 +635,8 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 			if config.IPSP.TrafficToLocal == nil && config.IPSP.TrafficToPeer == nil {
 				return fmt.Errorf("%w: IPSP Double Exchange requires at least one traffic direction", ErrInvalidRoleConfiguration)
 			}
-			automaticASPSM := config.IPSP.InitiateASPSM
-			automaticASPTM := config.IPSP.InitiateASPTM
-			if config.ASPProcedures != nil {
-				automaticASPSM = config.ASPProcedures.ASPUp == ASPProcedureAutomatic
-				automaticASPTM = config.ASPProcedures.ASPActive == ASPProcedureAutomatic
-			}
+			automaticASPSM := config.ASPProcedures.ASPUp == ASPProcedureAutomatic
+			automaticASPTM := config.ASPProcedures.ASPActive == ASPProcedureAutomatic
 			if config.IPSP.ASPSMExchange == IPSPASPSMExchangeDouble &&
 				automaticASPSM && config.IPSP.TrafficToLocal == nil {
 				return fmt.Errorf("%w: normal Double Exchange ASPSM initiation requires TrafficToLocal", ErrInvalidRoleConfiguration)
@@ -785,27 +766,13 @@ func cloneSCTPAddr(addr *sctp.SCTPAddr) *sctp.SCTPAddr {
 
 // NewAssociationConfig creates a role-neutral M3UA association configuration.
 //
-// To set additional parameters, use constructors in param package or
-// setters defined in this package. Note that the params left nil won't
-// appear in the packets but the initialized params will, with zero
-// values.
-func NewAssociationConfig(
-	originatingPointCode,
-	destinationPointCode uint32,
-	serviceIndicator,
-	networkIndicator,
-	messagePriority,
-	signallingLinkSelection uint8,
-) *AssociationConfig {
-	return &AssociationConfig{
-		SCTPConfig:              &SCTPConfig{},
-		OriginatingPointCode:    originatingPointCode,
-		DestinationPointCode:    destinationPointCode,
-		ServiceIndicator:        serviceIndicator,
-		NetworkIndicator:        networkIndicator,
-		MessagePriority:         messagePriority,
-		SignallingLinkSelection: signallingLinkSelection,
-	}
+// It takes no message defaults. Every DATA message carries its own MTP3 routing
+// label, Application Server scope and Correlation Id in its DataRequest, as RFC
+// 4666 Section 3.3.1 defines them, so there is nothing about a message for an
+// association to hold. Use the setters below, or the exported fields, for the
+// policy that genuinely belongs to the association.
+func NewAssociationConfig() *AssociationConfig {
+	return &AssociationConfig{SCTPConfig: &SCTPConfig{}}
 }
 
 // EnableHeartbeat enables RFC 4666 M3UA BEAT with the given interval and
@@ -816,12 +783,9 @@ func NewAssociationConfig(
 //
 // Each BEAT carries freshly generated random Heartbeat Data, and the BEAT
 // Ack's echo is validated against it, so BEAT/BEAT Ack pairs identify
-// themselves; the HeartbeatInfo.Data field does not influence the exchange.
+// themselves and a replayed Ack is rejected.
 func (c *AssociationConfig) EnableHeartbeat(interval, timer time.Duration) *AssociationConfig {
-	c.HeartbeatInfo = NewHeartbeatInfo(
-		interval, timer,
-		[]byte("Hi, this is a BEAT from go-m3ua. Are you alive?"),
-	)
+	c.HeartbeatInfo = NewHeartbeatInfo(interval, timer)
 	return c
 }
 
@@ -886,11 +850,5 @@ func (c *AssociationConfig) SetNetworkAppearance(networkAppearance uint32) *Asso
 // SetRoutingContexts sets the RFC 4666 Routing Context parameter.
 func (c *AssociationConfig) SetRoutingContexts(routingContexts ...uint32) *AssociationConfig {
 	c.RoutingContexts = params.NewRoutingContext(routingContexts...)
-	return c
-}
-
-// SetCorrelationID sets the RFC 4666 Correlation ID parameter.
-func (c *AssociationConfig) SetCorrelationID(id uint32) *AssociationConfig {
-	c.CorrelationID = params.NewCorrelationID(id)
 	return c
 }

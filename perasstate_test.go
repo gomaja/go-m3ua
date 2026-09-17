@@ -30,9 +30,7 @@ import (
 // Server the association was configured for, and ASPsForTraffic handed it
 // traffic for Application Servers it had never asked to serve.
 func TestAnASPIsActiveOnlyInTheApplicationServersItActivatedFor(t *testing.T) {
-	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)))
+	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})))
 
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
@@ -110,9 +108,7 @@ func TestSGPAssociationRoutingContextStateRejectsAmbiguousNetworkAppearances(t *
 // Activating for the second Application Server as well adds to the first rather
 // than replacing it: an ASP may serve several.
 func TestActivatingASecondApplicationServerKeepsTheFirst(t *testing.T) {
-	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)))
+	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})))
 
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
@@ -147,9 +143,7 @@ func TestActivatingASecondApplicationServerKeepsTheFirst(t *testing.T) {
 // association carries, which is what Section 4.3.4.3 means by acting on the
 // configured set when the parameter is absent.
 func TestAnUnscopedASPActiveCoversEveryApplicationServer(t *testing.T) {
-	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)))
+	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})))
 
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
@@ -171,9 +165,7 @@ func TestAnUnscopedASPActiveCoversEveryApplicationServer(t *testing.T) {
 
 // Standing down in one Application Server leaves the ASP active in the other.
 func TestASPInactiveForOneApplicationServerLeavesTheOther(t *testing.T) {
-	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)))
+	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})))
 
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()
@@ -208,9 +200,7 @@ func TestASPInactiveForOneApplicationServerLeavesTheOther(t *testing.T) {
 // and its next ASP Active decides afresh -- it must not inherit the Application
 // Servers it happened to hold before it went down.
 func TestGoingDownClearsEveryApplicationServer(t *testing.T) {
-	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1)))
+	l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})))
 
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
 	as, _, _ := l.registry()

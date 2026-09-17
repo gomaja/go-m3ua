@@ -193,12 +193,7 @@ func dialRawPeer(t *testing.T, ctx context.Context, p *rawPeer, port int, hb *He
 		t.Fatal(err)
 	}
 
-	cfg := newASPAssociationConfigForTest(
-		hb,
-		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(hb, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 
 	conn, err := dialASP(ctx, "m3ua", laddr, p.addr, cfg)
 	if err != nil {
@@ -208,11 +203,7 @@ func dialRawPeer(t *testing.T, ctx context.Context, p *rawPeer, port int, hb *He
 
 	// Two Routing Contexts are coordinated, so RFC 4666 Section 3.3.1 requires
 	// each DATA to name the one identifying its traffic flow. Which that is, is
-	// the caller's knowledge; these tests are not about distribution, so they
-	// pick one and keep it.
-	if err := conn.SelectRoutingContext(1); err != nil {
-		t.Fatalf("SelectRoutingContext: %v", err)
-	}
+	// the caller's knowledge, and it travels on the message: see writePayload.
 
 	return conn
 }
@@ -301,7 +292,7 @@ func TestHeartbeatExpiryIsDetectedAgainstSilentPeer(t *testing.T) {
 
 	peer := newRawPeer(t, 2960, handshakeOnly)
 	conn := dialRawPeer(t, ctx, peer, 2960,
-		NewHeartbeatInfo(50*time.Millisecond, 200*time.Millisecond, nil))
+		NewHeartbeatInfo(50*time.Millisecond, 200*time.Millisecond))
 
 	// T(beat) is 200ms after a 50ms interval; give many rounds of headroom.
 	if !waitFor(func() bool { return conn.State() != StateASPActive }, 5*time.Second) {
@@ -329,7 +320,7 @@ func TestHeartbeatGoroutineDoesNotLeakAfterExpiry(t *testing.T) {
 
 	peer := newRawPeer(t, 2961, handshakeOnly)
 	conn := dialRawPeer(t, ctx, peer, 2961,
-		NewHeartbeatInfo(50*time.Millisecond, 150*time.Millisecond, nil))
+		NewHeartbeatInfo(50*time.Millisecond, 150*time.Millisecond))
 
 	if !waitFor(func() bool { return conn.State() != StateASPActive }, 5*time.Second) {
 		t.Fatalf("association never torn down; state = %v", conn.State())
@@ -359,7 +350,7 @@ func TestHeartbeatSurvivesAgainstAnsweringPeer(t *testing.T) {
 		return handshakeOnly(msg)
 	})
 	conn := dialRawPeer(t, ctx, peer, 2962,
-		NewHeartbeatInfo(30*time.Millisecond, 500*time.Millisecond, nil))
+		NewHeartbeatInfo(30*time.Millisecond, 500*time.Millisecond))
 
 	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		t.Fatalf("never reached ASP-ACTIVE; state = %v", conn.State())
@@ -463,7 +454,7 @@ func TestGoroutinesStopOnContextCancel(t *testing.T) {
 
 	peer := newRawPeer(t, 2965, handshakeOnly)
 	conn := dialRawPeer(t, ctx, peer, 2965,
-		NewHeartbeatInfo(50*time.Millisecond, 5*time.Second, nil))
+		NewHeartbeatInfo(50*time.Millisecond, 5*time.Second))
 
 	if !waitFor(func() bool { return conn.State() == StateASPActive }, 5*time.Second) {
 		cancel()
@@ -508,19 +499,18 @@ func TestLargeDataRoundTrip(t *testing.T) {
 				msg[i] = byte(i % 251) // non-repeating enough to catch splices
 			}
 
-			if _, err := cliConn.Write(msg); err != nil {
+			if _, err := writePayload(cliConn, 1, msg); err != nil {
 				t.Fatalf("write %d bytes: %v", size, err)
 			}
 
 			type readResult struct {
-				n   int
-				err error
+				message *DataMessage
+				err     error
 			}
 			got := make(chan readResult, 1)
-			buf := make([]byte, size*2)
 			go func() {
-				n, err := srvConn.Read(buf)
-				got <- readResult{n, err}
+				message, err := srvConn.ReadData(context.Background())
+				got <- readResult{message, err}
 			}()
 
 			select {
@@ -528,10 +518,11 @@ func TestLargeDataRoundTrip(t *testing.T) {
 				if r.err != nil {
 					t.Fatalf("read %d bytes: %v", size, r.err)
 				}
-				if r.n != size {
-					t.Fatalf("read %d bytes, want %d (message truncated)", r.n, size)
+				payload := r.message.ProtocolData.Data
+				if len(payload) != size {
+					t.Fatalf("read %d bytes, want %d (message truncated)", len(payload), size)
 				}
-				if !bytes.Equal(buf[:r.n], msg) {
+				if !bytes.Equal(payload, msg) {
 					t.Error("payload corrupted in transit")
 				}
 			case <-time.After(5 * time.Second):
@@ -567,12 +558,7 @@ func TestOversizedMessageIsReportedNotDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	cfg.SCTPConfig.ReadBufferSize = 256
 
 	conn, err := dialASP(ctx, "m3ua", laddr, peer.addr, cfg)
@@ -648,12 +634,7 @@ func TestMessageExactlyAtCeilingIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	cfg.SCTPConfig.ReadBufferSize = len(rawData) // exactly the message size
 
 	conn, err := dialASP(ctx, "m3ua", laddr, peer.addr, cfg)
@@ -670,10 +651,9 @@ func TestMessageExactlyAtCeilingIsAccepted(t *testing.T) {
 
 	got := make(chan int, 1)
 	go func() {
-		buf := make([]byte, 4096)
-		n, err := conn.Read(buf)
+		message, err := conn.ReadData(context.Background())
 		if err == nil {
-			got <- n
+			got <- len(message.ProtocolData.Data)
 		}
 	}()
 

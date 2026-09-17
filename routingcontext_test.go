@@ -32,13 +32,8 @@ import (
 
 // rcSGPConfig is an SGP configured for several tenants' contexts.
 func rcSGPConfig(rcs ...uint32) *AssociationConfig {
-	cfg := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		rcs, params.ServiceIndSCCP, 0, 0, 1,
-	)
+	cfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, rcs)
 	cfg.ASPIdentifier = nil
-	cfg.CorrelationID = nil
 	served := make(map[uint32]struct{}, len(rcs))
 	for _, rc := range rcs {
 		served[rc] = struct{}{}
@@ -61,12 +56,7 @@ func rcASPConfig(opc uint32, rcs ...uint32) *AssociationConfig {
 	if len(rcs) == 1 {
 		aspID = rcs[0]
 	}
-	cfg := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		opc, 0x22222222, aspID, params.TrafficModeLoadshare, 0, 0,
-		rcs, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, aspID, params.TrafficModeLoadshare, 0, rcs)
 	return cfg
 }
 

@@ -56,14 +56,7 @@ func main() {
 		RoutingContextSet:    true,
 	}
 
-	associationConfig := m3ua.NewAssociationConfig(
-		0x111111,
-		0x222222,
-		params.ServiceIndSCCP,
-		0,
-		0,
-		1,
-	)
+	associationConfig := m3ua.NewAssociationConfig()
 	associationConfig.
 		EnableHeartbeat(*hbInt, 10*time.Second).
 		SetASPIdentifier(1).

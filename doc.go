@@ -12,10 +12,20 @@ orientation, so protocol behavior never follows from whether Dial or Accept was
 used.
 
 An IPSP Association must select the RFC 4666 Section 4.3 exchange model in
-AssociationConfig.IPSP. Single Exchange and Double Exchange are supported.
-Their ASPSM and ASPTM initiation policies are independent from each other and
-from SCTP association initiation, because either IPSP may initiate either
-exchange.
+AssociationConfig.IPSP and state which procedures it initiates in
+AssociationConfig.ASPProcedures. Single Exchange and Double Exchange are
+supported. The ASPSM and ASPTM initiation policies are independent from each
+other and from SCTP association initiation, because either IPSP may initiate
+either exchange.
+
+DATA is carried by WriteData and ReadData. A DataRequest names the exact
+Application Server scope and carries the whole MTP3 routing label of RFC 4666
+Section 3.3.1, so nothing about a message is held on the association and
+concurrent senders cannot take each other's scope. A successful send reports
+local transport acceptance only; every failure is a *DataWriteError whose
+Outcome distinguishes a message that never reached the transport from one whose
+fate is unknown. ReadData is context-scoped: cancelling a read ends that read
+and neither closes the association nor discards queued DATA.
 
 Endpoint exposes the RFC 4666 Layer Management status boundary for
 Associations, ASPs, Application Servers, MTP Routes, and destinations.

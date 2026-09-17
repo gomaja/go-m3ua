@@ -12,7 +12,6 @@ import (
 	"hash/fnv"
 	"sort"
 
-	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
@@ -22,6 +21,11 @@ import (
 type MTPTransferRequest struct {
 	MTPRoute     MTPRouteID
 	ProtocolData *params.ProtocolDataPayload
+	// CorrelationID carries the RFC 4666 Section 3.3.1 Correlation Id on every
+	// DATA this request produces. CorrelationIDSet distinguishes an explicit
+	// zero from an omitted parameter.
+	CorrelationID    uint32
+	CorrelationIDSet bool
 }
 
 // MTPTransferResult reports successful transfer of the MTP3-User payload.
@@ -144,7 +148,7 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 	successful := make([]SGPIdentity, 0, len(targets))
 	failures := make([]MTPTransferFailure, 0)
 	for _, target := range targets {
-		written, writeErr := target.association.writeMTPTransfer(request.ProtocolData, target.as)
+		written, writeErr := target.association.writeMTPTransfer(request, target.as)
 		if writeErr != nil {
 			failures = append(failures, MTPTransferFailure{SGP: target.identity, Err: writeErr})
 			continue
@@ -698,47 +702,35 @@ func (r *aspRoutes) invalidateAssociationTransferFlowsLocked(association *Associ
 	}
 }
 
-func (c *Association) writeMTPTransfer(protocolData *params.ProtocolDataPayload, key ASKey) (int, error) {
-	if c == nil || c.role != RoleASP || protocolData == nil {
+func (c *Association) writeMTPTransfer(request MTPTransferRequest, key ASKey) (int, error) {
+	if c == nil || c.role != RoleASP || request.ProtocolData == nil {
 		return 0, ErrInvalidMTPTransfer
 	}
 	c.aspTransferMu.RLock()
 	defer c.aspTransferMu.RUnlock()
 	if !aspAssociationEligibleForAS(c, key) {
-		return 0, ErrRoutingContextNotActive
+		return 0, newDataNotSent(key, 0, ErrRoutingContextNotActive)
 	}
-	stream := c.streamFor(protocolData.SignallingLinkSelection)
+	// The same encoding, stream selection and outcome classification as a
+	// direct WriteData: an Endpoint-selected send differs only in who chose the
+	// association and the Application Server.
+	data := DataRequest{
+		AS:               key,
+		ProtocolData:     *request.ProtocolData,
+		CorrelationID:    request.CorrelationID,
+		CorrelationIDSet: request.CorrelationIDSet,
+	}
+	if len(data.ProtocolData.Data) > maxProtocolDataOctets {
+		return 0, newDataNotSent(key, 0, ErrProtocolDataTooLarge)
+	}
+	stream := c.streamFor(data.ProtocolData.SignallingLinkSelection)
 	if err := c.checkDataStream(stream); err != nil {
-		return 0, err
+		return 0, newDataNotSent(key, 0, err)
 	}
-	var networkAppearance *params.Param
-	if key.NetworkAppearanceSet {
-		networkAppearance = params.NewNetworkAppearance(key.NetworkAppearance)
+	if err := c.submitData(c.encodeDataFrame(&data), stream); err != nil {
+		return 0, newDataSendIndeterminate(key, stream, err)
 	}
-	protocolDataParam := params.NewProtocolData(
-		protocolData.OriginatingPointCode,
-		protocolData.DestinationPointCode,
-		protocolData.ServiceIndicator,
-		protocolData.NetworkIndicator,
-		protocolData.MessagePriority,
-		protocolData.SignallingLinkSelection,
-		protocolData.Data,
-	)
-	encoded, err := messages.NewData(
-		networkAppearance,
-		routingContextParamForASKey(key),
-		protocolDataParam,
-		c.cfg.CorrelationID.Copy(),
-	).MarshalBinary()
-	if err != nil {
-		return 0, err
-	}
-	info := *c.sctpInfo
-	info.Stream = stream
-	if _, err := c.writeSCTPData(encoded, &info); err != nil {
-		return 0, err
-	}
-	return len(protocolData.Data), nil
+	return len(data.ProtocolData.Data), nil
 }
 
 func (c *Association) lockASPTransferMutation() func() {

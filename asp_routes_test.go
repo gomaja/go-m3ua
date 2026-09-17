@@ -783,7 +783,7 @@ func benchmarkASPRoutesWithSparseRecords(b *testing.B) (*aspRoutes, aspSignallin
 	if err != nil {
 		b.Fatalf("NewEndpoint: %v", err)
 	}
-	associationConfig := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	associationConfig := NewAssociationConfig()
 	associationConfig.NetworkAppearance = params.NewNetworkAppearance(7)
 	associationConfig.RoutingContexts = params.NewRoutingContext(1)
 	associationConfig.PeerSGP = &SGPIdentity{

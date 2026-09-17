@@ -57,8 +57,14 @@ func TestIPSPAssociationRequiresAnExplicitExchangeModel(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			config := NewAssociationConfig()
 			config.IPSP = test.ipsp
+			if test.role == RoleIPSP {
+				// An IPSP must also name its ASP procedure policy. The subject
+				// here is the exchange model, so the policy is a valid one and
+				// the model alone decides the outcome.
+				config.ASPProcedures = ipspInitiationPolicy(true, true)
+			}
 
 			err := validateAssociationConfigForRole(test.role, config)
 			if !errors.Is(err, test.wantErr) {
@@ -89,8 +95,12 @@ func TestIPSPAssociationRejectsForeignRolePolicy(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			config := NewAssociationConfig()
 			config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+			// Otherwise the missing ASP procedure policy is what the
+			// configuration is refused for, and the foreign role field the test
+			// is about is never reached.
+			config.ASPProcedures = ipspInitiationPolicy(true, true)
 			test.configure(config)
 
 			if err := validateAssociationConfigForRole(RoleIPSP, config); !errors.Is(err, ErrInvalidRoleConfiguration) {
@@ -101,35 +111,41 @@ func TestIPSPAssociationRejectsForeignRolePolicy(t *testing.T) {
 }
 
 func TestIPSPSingleExchangeConfigIsDeepSnapshotted(t *testing.T) {
-	original := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	original := NewAssociationConfig()
 	original.IPSP = &IPSPConfig{
 		ExchangeModel: IPSPExchangeSingle,
-		InitiateASPSM: true,
-		InitiateASPTM: true,
 	}
+	// Which exchanges this IPSP initiates itself is part of the same
+	// configuration, so it has to survive the snapshot just as the exchange
+	// model does.
+	original.ASPProcedures = ipspInitiationPolicy(true, true)
 
 	snapshot := snapshotAssociationConfig(original)
 	original.IPSP.ExchangeModel = IPSPExchangeDouble
-	original.IPSP.InitiateASPSM = false
-	original.IPSP.InitiateASPTM = false
+	original.ASPProcedures.ASPUp = ASPProcedureExplicit
+	original.ASPProcedures.ASPActive = ASPProcedureExplicit
 
 	if snapshot.IPSP == original.IPSP {
 		t.Fatal("snapshot shares its IPSPConfig pointer with the caller")
 	}
 	if got := *snapshot.IPSP; got != (IPSPConfig{
 		ExchangeModel: IPSPExchangeSingle,
-		InitiateASPSM: true,
-		InitiateASPTM: true,
 	}) {
 		t.Fatalf("snapshot IPSPConfig = %+v", got)
+	}
+	if snapshot.ASPProcedures == original.ASPProcedures {
+		t.Fatal("snapshot shares its ASPProcedurePolicy pointer with the caller")
+	}
+	if got := *snapshot.ASPProcedures; got != *ipspInitiationPolicy(true, true) {
+		t.Fatalf("snapshot ASPProcedurePolicy = %+v", got)
 	}
 }
 
 func TestIPSPSingleExchangeSimultaneousASPSMAndASPTM(t *testing.T) {
 	first, firstSent := newSingleExchangeIPSPForTest(t, StateASPDown)
 	second, secondSent := newSingleExchangeIPSPForTest(t, StateASPDown)
-	first.cfg.IPSP.InitiateASPSM, first.cfg.IPSP.InitiateASPTM = true, true
-	second.cfg.IPSP.InitiateASPSM, second.cfg.IPSP.InitiateASPTM = true, true
+	first.cfg.ASPProcedures = ipspInitiationPolicy(true, true)
+	second.cfg.ASPProcedures = ipspInitiationPolicy(true, true)
 
 	if err := first.handleStateUpdate(StateASPDown); err != nil {
 		t.Fatalf("first enter ASP-DOWN: %v", err)
@@ -194,7 +210,7 @@ func TestIPSPEndpointSharesApplicationServerStateAcrossAssociations(t *testing.T
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	listener := newListener(endpoint, NewListenerConfig(config))
 
@@ -294,6 +310,10 @@ func TestIPSPSingleExchangeOverrideDrainsDisplacedDirectTrafficBeforeNotify(t *t
 		association.as = registry
 	}
 	incumbent.noteRoutingContextsActive([]uint32{1})
+	// A caller-built DATA takes its stream from the Signalling Link Selection
+	// in its own Protocol Data, and RFC 4666 Section 1.4.7 rule 1 forbids
+	// stream 0 for DATA, so the association needs somewhere legal to send it.
+	incumbent.maxMessageStreamID = 4
 	registry.aspStateChanged(incumbent, StateASPActive)
 	registry.aspStateChanged(challenger, StateASPInactive)
 
@@ -707,7 +727,7 @@ func TestIPSPSingleExchangeDuplicateASPActiveIsAcknowledged(t *testing.T) {
 
 func TestIPSPSingleExchangeTAckTimeoutIsBounded(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
-	association.cfg.IPSP.InitiateASPSM = true
+	association.cfg.ASPProcedures = ipspInitiationPolicy(true, false)
 	association.cfg.TAck = 5 * time.Millisecond
 	association.cfg.TAckRetries = 1
 	writes := make(chan messages.M3UA, 4)
@@ -755,7 +775,7 @@ func TestIPSPSingleExchangeRestartRequiresFreshASPSM(t *testing.T) {
 
 func TestIPSPSingleExchangeRestartWhileDownReinitiatesConfiguredASPSM(t *testing.T) {
 	association, sent := newSingleExchangeIPSPForTest(t, StateASPDown)
-	association.cfg.IPSP.InitiateASPSM = true
+	association.cfg.ASPProcedures = ipspInitiationPolicy(true, false)
 	association.stateEntered = true
 	association.appliedState = StateASPDown
 
@@ -1142,6 +1162,10 @@ func TestIPSPSingleExchangeAllowsSCONInBothDirections(t *testing.T) {
 func TestIPSPSingleExchangeInactiveAckWaitsForAdmittedData(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.noteRoutingContextsActive([]uint32{1})
+	// A caller-built DATA takes its stream from the Signalling Link Selection
+	// in its own Protocol Data, and RFC 4666 Section 1.4.7 rule 1 forbids
+	// stream 0 for DATA, so the association needs somewhere legal to send it.
+	association.maxMessageStreamID = 4
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
 	ackWritten := make(chan struct{}, 1)
@@ -1195,6 +1219,10 @@ func TestIPSPSingleExchangeInactiveAckDefersCompletionUntilAdmittedDataDrains(t 
 	association.cfg.RoutingContexts = nil
 	association.cfg.TAck = 20 * time.Millisecond
 	association.noteRoutingContextsActive(nil)
+	// A caller-built DATA takes its stream from the Signalling Link Selection
+	// in its own Protocol Data, and RFC 4666 Section 1.4.7 rule 1 forbids
+	// stream 0 for DATA, so the association needs somewhere legal to send it.
+	association.maxMessageStreamID = 4
 
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
@@ -1370,6 +1398,8 @@ func TestIPSPSingleExchangeInitialProcedureInitiationIsExplicit(t *testing.T) {
 		initiateASPTM bool
 		wantMessage   string
 	}{
+		// initiateASPSM and initiateASPTM name the RFC 4666 Section 4.3.4
+		// procedures this IPSP starts by itself; the others wait for the peer.
 		{
 			name:          "initiate ASPSM",
 			initialState:  StateASPDown,
@@ -1401,9 +1431,10 @@ func TestIPSPSingleExchangeInitialProcedureInitiationIsExplicit(t *testing.T) {
 			association, sent := newTestConn(t, test.initialState, RoleIPSP)
 			association.cfg.IPSP = &IPSPConfig{
 				ExchangeModel: IPSPExchangeSingle,
-				InitiateASPSM: test.initiateASPSM,
-				InitiateASPTM: test.initiateASPTM,
 			}
+			association.cfg.ASPProcedures = ipspInitiationPolicy(
+				test.initiateASPSM, test.initiateASPTM,
+			)
 
 			if err := association.handleStateUpdate(test.enteredState); err != nil {
 				t.Fatalf("handleStateUpdate(%s): %v", test.enteredState, err)
@@ -1618,10 +1649,34 @@ func TestIPSPSingleExchangeReactivationClearsRoutingContextOverride(t *testing.T
 	}
 }
 
+// ipspInitiationPolicy is the RFC 4666 Section 4.3.4 procedure policy of an
+// IPSP that starts the named startup exchanges itself and waits for its peer to
+// start the others. Section 5.6.2 lets either peer initiate, so an IPSP
+// Association has to say. Orderly shutdown is always driven locally.
+func ipspInitiationPolicy(initiateASPSM, initiateASPTM bool) *ASPProcedurePolicy {
+	policy := &ASPProcedurePolicy{
+		ASPUp:       ASPProcedureExplicit,
+		ASPDown:     ASPProcedureAutomatic,
+		ASPActive:   ASPProcedureExplicit,
+		ASPInactive: ASPProcedureAutomatic,
+	}
+	if initiateASPSM {
+		policy.ASPUp = ASPProcedureAutomatic
+	}
+	if initiateASPTM {
+		policy.ASPActive = ASPProcedureAutomatic
+	}
+	return policy
+}
+
 func newSingleExchangeIPSPForTest(t *testing.T, state State) (*Association, *[]messages.M3UA) {
 	t.Helper()
 	association, sent := newTestConn(t, state, RoleIPSP)
 	association.cfg.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
+	// This IPSP waits for its peer to start both startup exchanges and drives
+	// its own orderly shutdown, which is what an Association configuration has
+	// to say now that RFC 4666 Section 5.6.2 initiation is named explicitly.
+	association.cfg.ASPProcedures = ipspInitiationPolicy(false, false)
 	association.cfg.RoutingContexts = params.NewRoutingContext(1)
 	return association, sent
 }

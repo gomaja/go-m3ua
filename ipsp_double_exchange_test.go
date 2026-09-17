@@ -42,8 +42,8 @@ func TestIPSPDoubleExchangeConfigurationUsesRFC4666TrafficDirections(t *testing.
 				config.IPSP.TrafficToLocal = nil
 				config.IPSP.TrafficToPeer = &IPSPTrafficConfig{}
 				config.IPSP.ASPSMExchange = IPSPASPSMExchangeDouble
-				config.IPSP.InitiateASPSM = true
-				config.IPSP.InitiateASPTM = false
+				config.ASPProcedures.ASPUp = ASPProcedureAutomatic
+				config.ASPProcedures.ASPActive = ASPProcedureExplicit
 			},
 		},
 		{
@@ -80,8 +80,8 @@ func TestIPSPDoubleExchangeConfigurationUsesRFC4666TrafficDirections(t *testing.
 	singleASPSMForPeerDirection.IPSP.TrafficToLocal = nil
 	singleASPSMForPeerDirection.IPSP.TrafficToPeer = &IPSPTrafficConfig{}
 	singleASPSMForPeerDirection.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
-	singleASPSMForPeerDirection.IPSP.InitiateASPSM = true
-	singleASPSMForPeerDirection.IPSP.InitiateASPTM = false
+	singleASPSMForPeerDirection.ASPProcedures.ASPUp = ASPProcedureAutomatic
+	singleASPSMForPeerDirection.ASPProcedures.ASPActive = ASPProcedureExplicit
 	if err := validateAssociationConfigForRole(RoleIPSP, singleASPSMForPeerDirection); err != nil {
 		t.Fatalf("agreed single ASPSM initiation for TrafficToPeer-only config: %v", err)
 	}
@@ -356,11 +356,11 @@ func TestIPSPDoubleExchangeASPTMAndDATAFollowIndependentTrafficDirections(t *tes
 	}
 
 	association.maxMessageStreamID = 4
-	if err := association.SelectRoutingContext(22); err != nil {
-		t.Fatalf("SelectRoutingContext(22): %v", err)
-	}
-	if _, err := association.Write([]byte("to-peer")); err != nil {
-		t.Fatalf("Write TrafficToPeer DATA: %v", err)
+	// RFC 4666 Section 3.3.1 carries the scope in the message itself, so the
+	// DATA names the TrafficToPeer Application Server: Routing Context 22 in
+	// the peer direction's Network Appearance.
+	if _, err := writeToPeer(association, 22, []byte("to-peer")); err != nil {
+		t.Fatalf("write TrafficToPeer DATA: %v", err)
 	}
 	data := (*sent)[len(*sent)-1].(*messages.Data)
 	if got := data.RoutingContext.RoutingContexts(); len(got) != 1 || got[0] != 22 {
@@ -642,7 +642,7 @@ func TestIPSPDoubleExchangeInactiveAckWaitsForAdmittedOutboundDATA(t *testing.T)
 
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := association.WriteWithRoutingContext([]byte("in-flight"), 22)
+		_, err := writeToPeer(association, 22, []byte("in-flight"))
 		writeDone <- err
 	}()
 	select {
@@ -698,7 +698,7 @@ func TestIPSPDoubleExchangeLocalInactiveAckDoesNotWaitForTrafficToPeerDATA(t *te
 	}
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := association.WriteWithRoutingContext([]byte("to-peer"), 22)
+		_, err := writeToPeer(association, 22, []byte("to-peer"))
 		writeDone <- err
 	}()
 	select {
@@ -858,7 +858,7 @@ func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testin
 			}
 			writeDone := make(chan error, 1)
 			go func() {
-				_, err := association.WriteWithRoutingContext([]byte("to-peer"), 22)
+				_, err := writeToPeer(association, 22, []byte("to-peer"))
 				writeDone <- err
 			}()
 			select {
@@ -954,7 +954,7 @@ func TestIPSPSingleASPSMDownAckDefersASNotifyUntilTrafficDrains(t *testing.T) {
 	}
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := association.WriteWithRoutingContext([]byte("to-peer"), 22)
+		_, err := writeToPeer(association, 22, []byte("to-peer"))
 		writeDone <- err
 	}()
 	select {
@@ -1013,7 +1013,7 @@ func TestIPSPDoubleExchangeSingleASPSMUpAckQuiescesTrafficToPeer(t *testing.T) {
 	}
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := association.WriteWithRoutingContext([]byte("to-peer"), 22)
+		_, err := writeToPeer(association, 22, []byte("to-peer"))
 		writeDone <- err
 	}()
 	select {
@@ -1239,7 +1239,7 @@ func TestIPSPDoubleExchangeAlternateASPNotifyDoesNotOverrideTheOppositeDirection
 	)); err != nil {
 		t.Fatalf("repeat peer ASP Active after local override: %v", err)
 	}
-	if _, err := association.WriteWithRoutingContext([]byte("still-to-peer"), 11); err != nil {
+	if _, err := writeToPeer(association, 11, []byte("still-to-peer")); err != nil {
 		t.Fatalf("TrafficToPeer DATA sharing the numeric Routing Context was overridden: %v", err)
 	}
 
@@ -1334,8 +1334,8 @@ func TestIPSPDoubleExchangeSupportsOneContextlessTrafficDirection(t *testing.T) 
 	), nil)
 	select {
 	case received := <-association.dataChan:
-		if received.RoutingContextSet || received.NetworkAppearanceSet {
-			t.Fatalf("contextless DATA scope = %+v", received)
+		if received.Scope.RoutingContextSet || received.Scope.NetworkAppearanceSet {
+			t.Fatalf("contextless DATA scope = %+v", received.Scope)
 		}
 	case err := <-association.errChan:
 		t.Fatalf("contextless DATA error: %v", err)
@@ -1350,7 +1350,11 @@ func TestIPSPDoubleExchangeSupportsOneContextlessTrafficDirection(t *testing.T) 
 	if err := association.handleAspActive(messages.NewAspActive(nil, nil, nil)); !errors.Is(err, ErrInvalidRoutingContext) {
 		t.Fatalf("ASP Active for missing TrafficToPeer error = %v, want ErrInvalidRoutingContext", err)
 	}
-	if _, err := association.Write([]byte("missing-direction")); !errors.Is(err, ErrNotEstablished) {
+	// No TrafficToPeer direction is configured, so there is no peer-directed
+	// Application Server to name at all.
+	if _, err := association.WriteData(DataRequest{
+		ProtocolData: testProtocolData([]byte("missing-direction")),
+	}); !errors.Is(err, ErrNotEstablished) {
 		t.Fatalf("DATA toward missing TrafficToPeer error = %v, want ErrNotEstablished", err)
 	}
 }
@@ -1414,7 +1418,7 @@ func TestIPSPDoubleExchangeActivationIsPartialInEachDirection(t *testing.T) {
 	if err := association.handleStateUpdate(association.stateForActiveRoutingContexts()); err != nil {
 		t.Fatalf("apply peer RC 22 activation: %v", err)
 	}
-	if _, err := association.WriteWithRoutingContext([]byte("inactive-peer"), 23); !errors.Is(err, ErrRoutingContextNotActive) {
+	if _, err := writeToPeer(association, 23, []byte("inactive-peer")); !errors.Is(err, ErrRoutingContextNotActive) {
 		t.Fatalf("DATA for inactive peer RC error = %v, want ErrRoutingContextNotActive", err)
 	}
 
@@ -1590,6 +1594,10 @@ func TestIPSPDoubleExchangeDirectDATAUsesTrafficToPeerNetworkAppearance(t *testi
 		TrafficToPeer:  StateASPActive,
 	})
 	association.noteRoutingContextsActive([]uint32{22})
+	// A caller-built DATA takes its stream from the Signalling Link Selection in
+	// its own Protocol Data, and RFC 4666 Section 1.4.7 rule 1 forbids stream 0
+	// for DATA, so the association needs somewhere legal to send it.
+	association.maxMessageStreamID = 4
 
 	protocolData := params.NewProtocolData(
 		1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("to-peer"),
@@ -1733,7 +1741,7 @@ func TestIPSPDoubleExchangeRestartDrainsOutboundDATABeforeFreshASPSM(t *testing.
 
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := association.WriteWithRoutingContext([]byte("old-epoch"), 22)
+		_, err := writeToPeer(association, 22, []byte("old-epoch"))
 		writeDone <- err
 	}()
 	select {
@@ -1791,12 +1799,19 @@ func TestIPSPDoubleExchangeRestartDrainsOutboundDATABeforeFreshASPSM(t *testing.
 }
 
 func newDoubleExchangeAssociationConfigForTest() *AssociationConfig {
-	config := NewAssociationConfig(1, 2, params.ServiceIndSCCP, 0, 0, 1)
+	config := NewAssociationConfig()
+	// RFC 4666 Section 5.6.2 lets either IPSP peer initiate each exchange, so
+	// an IPSP Association has to say which procedures it starts by itself. This
+	// association initiates both ASPSM and ASPTM for its local direction.
+	config.ASPProcedures = &ASPProcedurePolicy{
+		ASPUp:       ASPProcedureAutomatic,
+		ASPDown:     ASPProcedureAutomatic,
+		ASPActive:   ASPProcedureAutomatic,
+		ASPInactive: ASPProcedureAutomatic,
+	}
 	config.IPSP = &IPSPConfig{
 		ExchangeModel: IPSPExchangeDouble,
 		ASPSMExchange: IPSPASPSMExchangeDouble,
-		InitiateASPSM: true,
-		InitiateASPTM: true,
 		TrafficToLocal: &IPSPTrafficConfig{
 			TrafficModeType:   params.NewTrafficModeType(params.TrafficModeLoadshare),
 			TrafficModes:      map[uint32]uint32{11: params.TrafficModeLoadshare},
@@ -1811,6 +1826,29 @@ func newDoubleExchangeAssociationConfigForTest() *AssociationConfig {
 		},
 	}
 	return config
+}
+
+// peerTrafficScope is the exact Application Server one outbound DATA belongs
+// to in the peer-directed half of an IPSP Double Exchange association. RFC 4666
+// Section 5.6.2 keeps the two directions independent and Section 3.6.1 makes
+// the Network Appearance part of Routing Key identity, so the scope is the
+// IPSP.TrafficToPeer Network Appearance paired with the named Routing Context,
+// never the association-wide configuration.
+func peerTrafficScope(c *Association, routingContext uint32) ASKey {
+	key := routingContextASKey(routingContext)
+	if c.cfg != nil && c.cfg.IPSP != nil && c.cfg.IPSP.TrafficToPeer != nil {
+		key.NetworkAppearance, key.NetworkAppearanceSet =
+			appearanceOf(c.cfg.IPSP.TrafficToPeer.NetworkAppearance)
+	}
+	return key
+}
+
+// writeToPeer sends one DATA in the peer-directed traffic scope.
+func writeToPeer(c *Association, routingContext uint32, payload []byte) (int, error) {
+	return c.WriteData(DataRequest{
+		AS:           peerTrafficScope(c, routingContext),
+		ProtocolData: testProtocolData(payload),
+	})
 }
 
 func newDoubleExchangeIPSPForTest(t *testing.T) (*Association, *[]messages.M3UA) {

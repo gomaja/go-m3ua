@@ -18,7 +18,7 @@ import (
 // Deregistration Request with success.
 func rkmRequesterAssociation(t *testing.T, assign ...uint32) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()

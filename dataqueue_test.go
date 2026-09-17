@@ -6,8 +6,6 @@ package m3ua
 
 import (
 	"testing"
-
-	"github.com/gomaja/go-m3ua/messages/params"
 )
 
 func TestNewAssociationResolvesDataQueueSize(t *testing.T) {
@@ -22,7 +20,7 @@ func TestNewAssociationResolvesDataQueueSize(t *testing.T) {
 		{name: "custom", configured: 2048, want: 2048},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := NewAssociationConfig(1, 2, params.ServiceIndSCCP, 0, 0, 1)
+			cfg := NewAssociationConfig()
 			cfg.DataQueueSize = test.configured
 
 			conn := newAssociation(RoleASP, cfg)

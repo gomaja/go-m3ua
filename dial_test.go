@@ -169,12 +169,7 @@ func skipUnlessBlackholed(t *testing.T, err error) {
 }
 
 func dialCfg(initTimeout time.Duration) *AssociationConfig {
-	cfg := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	cfg.InitTimeout = initTimeout
 	return cfg
 }

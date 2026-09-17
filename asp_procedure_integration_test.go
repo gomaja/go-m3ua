@@ -41,12 +41,7 @@ func TestExplicitASPProcedurePolicyControlsDialReadinessAndWireSequence(t *testi
 	if err != nil {
 		t.Fatalf("ResolveSCTPAddr: %v", err)
 	}
-	config := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x111111, 0x222222, 1, params.TrafficModeLoadshare, 10, 0,
-		[]uint32{7}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	config.CorrelationID = nil
+	config := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 10, []uint32{7})
 	config.EstablishTimeout = time.Second
 	config.ASPProcedures = explicitASPProcedurePolicy()
 
