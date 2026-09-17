@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -167,6 +168,11 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	if config.SCTPAddress == "" {
 		return commandConfig{}, errors.New("sctp-address is required")
 	}
+	for name, value := range map[string]string{"peer-control": config.PeerControl, "control-url": config.ControlURL} {
+		if err := validateControlBaseURL(value); err != nil {
+			return commandConfig{}, fmt.Errorf("%s: %w", name, err)
+		}
+	}
 	if config.Role == "asp" {
 		if config.PeerControl == "" {
 			return commandConfig{}, errors.New("peer-control is required for the ASP sender")
@@ -182,4 +188,30 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 		return commandConfig{}, errors.New("control-address is required for the SGP receiver")
 	}
 	return config, nil
+}
+
+// validateControlBaseURL bounds a control base URL to the shape the fixture
+// builds requests from: scheme://host with the operation appended. Rejecting
+// anything else keeps a configured destination comparable by value, so the
+// receiver can pin the one reverse destination it is allowed to drive. An
+// empty value is not configured and is checked by the caller that needs it.
+func validateControlBaseURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("%q is not a URL: %w", value, err)
+	}
+	switch {
+	case parsed.Scheme != "http" && parsed.Scheme != "https":
+		return fmt.Errorf("%q must use the http or https scheme", value)
+	case parsed.Host == "":
+		return fmt.Errorf("%q must name a host", value)
+	case parsed.User != nil:
+		return fmt.Errorf("%q must not carry credentials", value)
+	case parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "":
+		return fmt.Errorf("%q must be a scheme and host only, with no path, query or fragment", value)
+	}
+	return nil
 }

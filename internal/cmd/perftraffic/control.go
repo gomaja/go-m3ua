@@ -64,9 +64,14 @@ type receiverControl struct {
 	series               []seriesPoint
 	generation           uint64
 	driver               *reverseDriver
-	reverseSender        *runRecord
-	reverseReceiver      *runRecord
-	reverseError         string
+	// reverseControl is the only control endpoint this receiver may drive a
+	// reverse cohort against, taken from this process's own configuration.
+	// The control listener is unauthenticated and binds every interface, so
+	// the destination must never be taken from a request body.
+	reverseControl  string
+	reverseSender   *runRecord
+	reverseReceiver *runRecord
+	reverseError    string
 }
 
 // reverseDriver lets the bidirectional SGP run the reverse (SGP-to-ASP)
@@ -200,8 +205,20 @@ func (control *receiverControl) reset(specification runSpec) error {
 	default:
 		return errInvalidRunSpec
 	}
-	if specification.Mode == modeBidirectional && specification.PeerControl == "" {
-		return fmt.Errorf("%w: bidirectional runs require the peer control URL", errInvalidRunSpec)
+	if specification.Mode == modeBidirectional {
+		// /start turns an armed bidirectional cohort into outbound HTTP
+		// requests, so the destination is pinned to this process's own
+		// configuration. A specification may only name that destination; it
+		// can never introduce another one.
+		if specification.PeerControl == "" {
+			return fmt.Errorf("%w: bidirectional runs require the peer control URL", errInvalidRunSpec)
+		}
+		if control.reverseControl == "" {
+			return fmt.Errorf("%w: this receiver has no configured reverse control destination", errInvalidRunSpec)
+		}
+		if specification.PeerControl != control.reverseControl {
+			return fmt.Errorf("%w: the peer control URL is not this receiver's configured reverse control destination", errInvalidRunSpec)
+		}
 	}
 	control.spec = specification
 	control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
@@ -244,19 +261,20 @@ func (control *receiverControl) start() error {
 	control.phase = receiverMeasuring
 	specification := control.spec
 	driver := control.driver
+	reverseControl := control.reverseControl
 	control.mutex.Unlock()
 	if specification.Mode == modeBidirectional && driver != nil {
-		go control.runReverseCohort(driver, specification)
+		go control.runReverseCohort(driver, specification, reverseControl)
 	}
 	return nil
 }
 
 // runReverseCohort drives the SGP-to-ASP direction of a bidirectional cohort
-// against the ASP's control endpoint with the same sender-side measurement
-// path as the forward direction. Its records are reported under reverse and
-// reverse_receiver in this receiver's results; its errors never replace the
-// forward records.
-func (control *receiverControl) runReverseCohort(driver *reverseDriver, specification runSpec) {
+// against the configured reverse control endpoint with the same sender-side
+// measurement path as the forward direction. Its records are reported under
+// reverse and reverse_receiver in this receiver's results; its errors never
+// replace the forward records.
+func (control *receiverControl) runReverseCohort(driver *reverseDriver, specification runSpec, reverseControl string) {
 	reverseConfig := commandConfig{
 		Mode:        modeThroughput,
 		Direction:   directionSGPToASP,
@@ -266,7 +284,12 @@ func (control *receiverControl) runReverseCohort(driver *reverseDriver, specific
 		Seed:        specification.Seed,
 		Outstanding: specification.Outstanding,
 		Drain:       specification.Drain,
-		PeerControl: specification.PeerControl,
+		// The destination is the configured one, never the one the run
+		// specification carries: reset accepts only a specification naming
+		// it, and taking it from configuration here means a specification can
+		// never redirect this request even if it reached the cohort by some
+		// other path.
+		PeerControl: reverseControl,
 		CPUStatPath: driver.cpuStatPath,
 	}
 	sender, receiver, err := runSenderCohort(driver.ctx, reverseConfig, driver.associations, nil, specification.Cohort+"-reverse", specification.Duration)

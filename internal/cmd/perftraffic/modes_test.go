@@ -43,10 +43,11 @@ func TestRunSenderCohortEchoModeWithoutRegistryIsANamedError(testContext *testin
 func TestBidirectionalStartWithoutReverseDriverDoesNotSpawn(testContext *testing.T) {
 	control := newReceiverControl(1, 16)
 	control.setAssociationReady(0, 15)
+	control.reverseControl = "http://127.0.0.1:1"
 	specification := runSpec{
 		Cohort: "bidi-no-driver", Seed: 1, Associations: 1, Expected: 1, Duration: time.Second,
 		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 1, Payload: workload128, Mode: modeBidirectional,
-		Direction: directionASPToSGP, PeerControl: "http://127.0.0.1:1",
+		Direction: directionASPToSGP, PeerControl: control.reverseControl,
 	}
 	if err := control.reset(specification); err != nil {
 		testContext.Fatalf("reset: %v", err)

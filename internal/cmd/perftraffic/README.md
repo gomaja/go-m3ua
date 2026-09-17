@@ -208,7 +208,11 @@ Warm-up is a separate cohort. The sender waits until every successfully
 submitted warm-up message is accounted for, stops that cohort, and only then
 resets the receiver for measurement. A reset during measurement and a start or
 stop in the wrong phase returns HTTP 409. Messages racing a cohort generation
-change are invalid rather than credited to the new cohort.
+change are invalid rather than credited to the new cohort, and so is work
+scheduled from them: an echo reply carries the generation its request was
+validated under, so a reply written, dropped or failed after a reset is
+accounted to the cohort that requested it and never to the new one. A reverse
+cohort that completes after a reset is discarded for the same reason.
 
 ## Result contract
 

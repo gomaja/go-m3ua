@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 func TestBidirectionalResetRequiresPeerControlURL(testContext *testing.T) {
 	control := newReceiverControl(1, 16)
 	control.setAssociationReady(0, 15)
+	control.reverseControl = "http://asp.example:8080"
 	server := httptest.NewServer(control.handler())
 	defer server.Close()
 
@@ -27,7 +29,7 @@ func TestBidirectionalResetRequiresPeerControlURL(testContext *testing.T) {
 	}
 	requireHTTPStatus(testContext, http.MethodPost, server.URL+"/reset", body, http.StatusBadRequest)
 
-	specification.PeerControl = "http://asp.example:8080"
+	specification.PeerControl = control.reverseControl
 	body, err = json.Marshal(specification)
 	if err != nil {
 		testContext.Fatalf("Marshal: %v", err)
@@ -74,11 +76,12 @@ func TestReverseDriverRecordsFailureWithoutReplacingForwardEvidence(testContext 
 		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 2, Payload: workload128, Mode: modeBidirectional,
 		Direction: directionASPToSGP, PeerControl: peer.URL,
 	}
+	control.reverseControl = peer.URL
 	if err := control.reset(specification); err != nil {
 		testContext.Fatalf("reset: %v", err)
 	}
 	driver := &reverseDriver{ctx: context.Background(), cpuStatPath: control.cpuStatPath}
-	control.runReverseCohort(driver, specification)
+	control.runReverseCohort(driver, specification, peer.URL)
 	if control.reverseError == "" || !strings.Contains(control.reverseError, "reset receiver") {
 		testContext.Fatalf("reverseError = %q, want the reset failure preserved", control.reverseError)
 	}
@@ -222,6 +225,7 @@ func TestReverseCohortUsesTheRunOutstandingLimit(testContext *testing.T) {
 	control := newReceiverControl(1, 16)
 	control.setAssociationReady(0, 15)
 	control.driver = &reverseDriver{ctx: context.Background()}
+	control.reverseControl = peer.URL
 	server := httptest.NewServer(control.handler())
 	defer server.Close()
 
@@ -252,12 +256,142 @@ func TestResetBoundsTheOutstandingLimit(testContext *testing.T) {
 	for _, outstanding := range []int{0, -1, maxOutstanding + 1, int(^uint(0) >> 1)} {
 		control := newReceiverControl(1, 16)
 		control.setAssociationReady(0, 15)
+		control.reverseControl = "http://peer.example:8080"
 		server := httptest.NewServer(control.handler())
 		requireHTTPStatus(testContext, http.MethodPost, server.URL+"/reset",
-			bidirectionalSpecBody(testContext, "http://peer.example:8080", outstanding), http.StatusBadRequest)
+			bidirectionalSpecBody(testContext, control.reverseControl, outstanding), http.StatusBadRequest)
 		if control.ledger != nil {
 			testContext.Fatalf("outstanding %d armed a cohort", outstanding)
 		}
 		server.Close()
+	}
+}
+
+// countingPeer records every request it receives, whatever the path, so a
+// test can assert that a host was never contacted at all.
+func countingPeer(testContext *testing.T) (*httptest.Server, *atomic.Int64) {
+	testContext.Helper()
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(writer, "conflict", http.StatusConflict)
+	}))
+	testContext.Cleanup(server.Close)
+	return server, &requests
+}
+
+// The control listener is unauthenticated and binds every interface, and
+// /start makes the receiver issue HTTP requests to the reverse control
+// destination. That destination must therefore come from this process's own
+// configuration and never from the request body, or anyone who can reach the
+// control port can aim the receiver at a host of their choosing.
+func TestResetRefusesAReverseControlDestinationTheReceiverWasNotConfiguredWith(testContext *testing.T) {
+	elsewhere, requests := countingPeer(testContext)
+	control := newReceiverControl(1, 16)
+	control.setAssociationReady(0, 15)
+	control.driver = &reverseDriver{ctx: context.Background()}
+	server := httptest.NewServer(control.handler())
+	defer server.Close()
+
+	requireHTTPStatus(testContext, http.MethodPost, server.URL+"/reset",
+		bidirectionalSpecBody(testContext, elsewhere.URL, maxOutstanding), http.StatusBadRequest)
+	// The refused reset armed nothing, so a start cannot drive a cohort either.
+	requireHTTPStatus(testContext, http.MethodPost, server.URL+"/start", nil, http.StatusConflict)
+	time.Sleep(250 * time.Millisecond)
+	if count := requests.Load(); count != 0 {
+		testContext.Fatalf("the receiver issued %d request(s) to a host it was never configured with", count)
+	}
+}
+
+// Pinning the destination at reset is the check an operator sees; taking it
+// from configuration inside the cohort is what makes a redirect impossible.
+// A specification that names another host must not reach that host even when
+// it is handed straight to the cohort.
+func TestReverseCohortDrivesOnlyTheConfiguredDestination(testContext *testing.T) {
+	configured, configuredRequests := countingPeer(testContext)
+	elsewhere, elsewhereRequests := countingPeer(testContext)
+
+	control := newReceiverControl(1, 16)
+	control.setAssociationReady(0, 15)
+	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 10\nnr_throttled 0\n")
+	control.reverseControl = configured.URL
+	specification := runSpec{
+		Cohort: "bidi", Seed: 1, Associations: 1, Expected: 2, Duration: time.Second,
+		Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 2, Payload: workload128,
+		Mode: modeBidirectional, Direction: directionASPToSGP, PeerControl: elsewhere.URL,
+	}
+	driver := &reverseDriver{ctx: context.Background(), cpuStatPath: control.cpuStatPath}
+	control.runReverseCohort(driver, specification, control.reverseControl)
+
+	if elsewhereRequests.Load() != 0 {
+		testContext.Fatalf("the reverse cohort made %d request(s) to the host named in the specification", elsewhereRequests.Load())
+	}
+	if configuredRequests.Load() == 0 {
+		testContext.Fatal("the reverse cohort never reached the configured destination")
+	}
+}
+
+// Each refusal reason is distinct, because they tell an operator different
+// things: one receiver was never given a reverse destination, the other was
+// given a different one than the specification names.
+func TestResetRefusesAnyReverseDestinationButTheConfiguredOne(testContext *testing.T) {
+	const configured = "http://asp.example:8080"
+	tests := []struct {
+		name        string
+		reverse     string
+		peerControl string
+		wantReason  string
+	}{
+		{name: "receiver has no configured destination", reverse: "", peerControl: "http://elsewhere.example:8080",
+			wantReason: "no configured reverse control destination"},
+		{name: "another host", reverse: configured, peerControl: "http://elsewhere.example:8080",
+			wantReason: "not this receiver's configured reverse control destination"},
+		{name: "another port on the configured host", reverse: configured, peerControl: "http://asp.example:9090",
+			wantReason: "not this receiver's configured reverse control destination"},
+		{name: "another scheme", reverse: configured, peerControl: "https://asp.example:8080",
+			wantReason: "not this receiver's configured reverse control destination"},
+		{name: "trailing slash", reverse: configured, peerControl: configured + "/",
+			wantReason: "not this receiver's configured reverse control destination"},
+		{name: "no destination at all", reverse: configured, peerControl: "",
+			wantReason: "bidirectional runs require the peer control URL"},
+	}
+	for _, test := range tests {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			control := newReceiverControl(1, 16)
+			control.setAssociationReady(0, 15)
+			control.reverseControl = test.reverse
+			err := control.reset(runSpec{
+				Cohort: "bidi", Seed: 1, Associations: 1, Expected: 2, Duration: time.Second,
+				Drain: 2 * time.Second, Outstanding: maxOutstanding, Rate: 2, Payload: workload128,
+				Mode: modeBidirectional, Direction: directionASPToSGP, PeerControl: test.peerControl,
+			})
+			if err == nil {
+				testContext.Fatal("reset accepted a reverse destination the receiver was not configured with")
+			}
+			if !errors.Is(err, errInvalidRunSpec) {
+				testContext.Fatalf("error = %v, want an invalid run specification", err)
+			}
+			if !strings.Contains(err.Error(), test.wantReason) {
+				testContext.Fatalf("error = %v, want it to name %q", err, test.wantReason)
+			}
+			if control.ledger != nil {
+				testContext.Fatal("the refused reset armed a cohort")
+			}
+		})
+	}
+}
+
+// The SGP receiver's reverse destination comes from its own configuration.
+func TestRunReceiverControlTakesItsReverseDestinationFromConfiguration(testContext *testing.T) {
+	config := commandConfig{Associations: 2, PeerControl: "http://asp.example:8080", CPUStatPath: "/fixture/cpu.stat"}
+	control := newRunReceiverControl(context.Background(), config)
+	if control.reverseControl != config.PeerControl {
+		testContext.Fatalf("reverseControl = %q, want the configured %q", control.reverseControl, config.PeerControl)
+	}
+	if control.driver == nil || control.driver.cpuStatPath != config.CPUStatPath {
+		testContext.Fatalf("reverse driver = %+v, want it built from the configuration", control.driver)
+	}
+	if control.cpuStatPath != config.CPUStatPath || control.expectedAssociations != config.Associations {
+		testContext.Fatalf("control = %+v, want it built from the configuration", control)
 	}
 }

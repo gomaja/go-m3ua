@@ -134,6 +134,16 @@ func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T)
 		{name: "unknown transport", args: []string{"-role=sgp", "-transport=accept"}},
 		{name: "bidirectional ASP without advertised control URL", args: []string{"-mode=bidirectional", "-role=asp", "-transport=dial", "-peer-control=http://10.0.0.2:8080", "-cohort=bidi-01"}},
 		{name: "unknown workload", args: []string{"-payload=129"}},
+		{name: "peer control with a path", args: []string{"-peer-control=http://10.0.0.2:8080/reset"}},
+		{name: "peer control with a query", args: []string{"-peer-control=http://10.0.0.2:8080?a=b"}},
+		{name: "peer control with a fragment", args: []string{"-peer-control=http://10.0.0.2:8080#f"}},
+		{name: "peer control with credentials", args: []string{"-peer-control=http://user:pass@10.0.0.2:8080"}},
+		{name: "peer control with a file scheme", args: []string{"-peer-control=file:///etc/passwd"}},
+		{name: "peer control with a non-HTTP scheme and a host", args: []string{"-peer-control=ftp://10.0.0.2:21"}},
+		{name: "peer control with a gopher scheme and a host", args: []string{"-peer-control=gopher://10.0.0.2:70"}},
+		{name: "peer control without a scheme", args: []string{"-peer-control=10.0.0.2:8080"}},
+		{name: "peer control without a host", args: []string{"-peer-control=http://"}},
+		{name: "advertised control URL with a path", args: []string{"-role=sgp", "-control-url=http://10.0.0.3:8080/x"}},
 	}
 	for _, testCase := range testCases {
 		testContext.Run(testCase.name, func(testContext *testing.T) {

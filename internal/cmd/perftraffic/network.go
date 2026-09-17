@@ -38,10 +38,21 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 	return config
 }
 
-func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
+// newRunReceiverControl builds the SGP receiver's control from its own
+// configuration. Every field the run depends on is set here, in one place:
+// notably reverseControl, the single control endpoint a bidirectional run may
+// drive, which must come from this process's configuration and never from a
+// control request.
+func newRunReceiverControl(ctx context.Context, config commandConfig) *receiverControl {
 	control := newReceiverControl(config.Associations, maxOutstanding)
 	control.cpuStatPath = config.CPUStatPath
 	control.driver = &reverseDriver{ctx: ctx, cpuStatPath: config.CPUStatPath}
+	control.reverseControl = config.PeerControl
+	return control
+}
+
+func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
+	control := newRunReceiverControl(ctx, config)
 	httpListener, err := net.Listen("tcp", config.ControlAddress)
 	if err != nil {
 		return runRecord{}, fmt.Errorf("startup control-bind: %w", err)
