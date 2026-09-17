@@ -7,7 +7,9 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -801,4 +803,341 @@ func TestASPRoutesShareOneApplicationServerAcrossRoutesAndASPs(t *testing.T) {
 		}
 	}
 	requireNoRoute("every ASP gone")
+}
+
+// aspSignalCapture records every M3UA signal an Association writes. The
+// procedure calls under test run in their own goroutine while the test feeds
+// acknowledgements, so the record needs its own lock rather than the plain
+// slice newTestConn installs.
+type aspSignalCapture struct {
+	mu   sync.Mutex
+	sent []messages.M3UA
+}
+
+func (c *aspSignalCapture) write(message messages.M3UA) (int, error) {
+	c.mu.Lock()
+	c.sent = append(c.sent, message)
+	c.mu.Unlock()
+	return message.MarshalLen(), nil
+}
+
+func (c *aspSignalCapture) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.sent)
+}
+
+func (c *aspSignalCapture) snapshot() []messages.M3UA {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]messages.M3UA(nil), c.sent...)
+}
+
+// referenceCountPeerInventory provisions the one Signalling Gateway Process
+// every reference-count stage shares. Only the route bindings differ between
+// stages, so anything the Endpoint does differently is caused by the number of
+// local references to as-core and by nothing else.
+func referenceCountPeerInventory() []SignallingGatewayConfig {
+	return []SignallingGatewayConfig{{
+		ID: "sg-a",
+		SGPs: []SignallingGatewayProcessConfig{{
+			ID: "sgp-a1",
+			ApplicationServers: []RemoteASConfig{
+				{ID: "as-core", ASKey: staticASKey(7, 1)},
+				{ID: "as-spare", ASKey: staticASKey(7, 2)},
+			},
+		}},
+	}}
+}
+
+func referenceCountMTPRoutes() []MTPRouteConfig {
+	return []MTPRouteConfig{
+		{ID: "spare", DestinationPointCode: 0x130000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndSCCP}},
+		{ID: "core-sccp", DestinationPointCode: 0x120000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndSCCP}},
+		{ID: "core-isup", DestinationPointCode: 0x120000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndISUP}},
+		{ID: "core-tup", DestinationPointCode: 0x120000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndTUP}},
+	}
+}
+
+func referenceCountRouting(routes []MTPRouteID, bindings []MTPRouteBinding) *ASPRoutingConfig {
+	configured := make([]MTPRouteConfig, 0, len(routes))
+	for _, wanted := range routes {
+		for _, mtpRoute := range referenceCountMTPRoutes() {
+			if mtpRoute.ID == wanted {
+				configured = append(configured, mtpRoute)
+			}
+		}
+	}
+	return &ASPRoutingConfig{
+		SignallingGatewaySelection: RouteSelectionLoadshare,
+		SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
+			"sg-a": RouteSelectionPrimaryBackup,
+		},
+		MTPRoutes: configured,
+		Routes:    bindings,
+	}
+}
+
+func referenceCountBinding(mtpRoute MTPRouteID, applicationServer RemoteASID) MTPRouteBinding {
+	return MTPRouteBinding{
+		MTPRoute: mtpRoute,
+		AS:       SGASKey{SignallingGateway: "sg-a", ApplicationServer: applicationServer},
+	}
+}
+
+// countASReferences counts the MTPRouteBinding entries naming one Application
+// Server, which is exactly the application-owned reference count under test.
+func countASReferences(config *ASPConfig, applicationServer RemoteASID) int {
+	if config.Routing == nil {
+		return 0
+	}
+	references := 0
+	for _, binding := range config.Routing.Routes {
+		if binding.AS.ApplicationServer == applicationServer {
+			references++
+		}
+	}
+	return references
+}
+
+// TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol covers the
+// second half of bullet 4: the number of application-owned references to one
+// Application Server changes nothing an M3UA peer can observe.
+//
+// NewEndpoint snapshots its configuration, so the reference count cannot be
+// mutated on a running Endpoint; the requirement is therefore demonstrated
+// across distinct Endpoint configurations in which everything but the number
+// of MTPRouteBinding entries naming as-core is held fixed. RFC 4666 Section
+// 1.4.2 makes the Application Server an entity of the signalling network that
+// an ASP serves, while the routes an ASP keeps towards it are local
+// bookkeeping; RFC 4666 Sections 4.3.4.1 and 4.3.4.3 make establishment and
+// activation functions of that membership alone.
+//
+// Each stage asserts on the octets the Association actually emitted, not on
+// Endpoint state, because the claim is about what the peer can tell apart.
+func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T) {
+	stages := []struct {
+		name       string
+		references int
+		routing    *ASPRoutingConfig
+	}{
+		{
+			// No binding names as-core, though the route inventory exists and
+			// carries another Application Server of the same SGP.
+			name:       "no reference",
+			references: 0,
+			routing: referenceCountRouting(
+				[]MTPRouteID{"spare"},
+				[]MTPRouteBinding{referenceCountBinding("spare", "as-spare")},
+			),
+		},
+		{
+			name:       "one reference",
+			references: 1,
+			routing: referenceCountRouting(
+				[]MTPRouteID{"spare", "core-sccp"},
+				[]MTPRouteBinding{
+					referenceCountBinding("spare", "as-spare"),
+					referenceCountBinding("core-sccp", "as-core"),
+				},
+			),
+		},
+		{
+			name:       "many references",
+			references: 3,
+			routing: referenceCountRouting(
+				[]MTPRouteID{"spare", "core-sccp", "core-isup", "core-tup"},
+				[]MTPRouteBinding{
+					referenceCountBinding("spare", "as-spare"),
+					referenceCountBinding("core-sccp", "as-core"),
+					referenceCountBinding("core-isup", "as-core"),
+					referenceCountBinding("core-tup", "as-core"),
+				},
+			),
+		},
+		{
+			// Back to no reference by a different arrangement than the first
+			// stage: the routes that named as-core still exist and now name
+			// as-spare instead.
+			name:       "no reference again",
+			references: 0,
+			routing: referenceCountRouting(
+				[]MTPRouteID{"spare", "core-sccp", "core-isup", "core-tup"},
+				[]MTPRouteBinding{
+					referenceCountBinding("spare", "as-spare"),
+					referenceCountBinding("core-sccp", "as-spare"),
+					referenceCountBinding("core-isup", "as-spare"),
+					referenceCountBinding("core-tup", "as-spare"),
+				},
+			),
+		},
+		{
+			// The other way to hold no reference: application-managed routing,
+			// where the Endpoint owns no outbound route inventory at all.
+			name:       "no route inventory at all",
+			references: 0,
+			routing:    nil,
+		},
+	}
+
+	for _, stage := range stages {
+		t.Run(stage.name, func(t *testing.T) {
+			config := &ASPConfig{
+				SignallingGateways: referenceCountPeerInventory(),
+				Routing:            stage.routing,
+			}
+			if got := countASReferences(config, "as-core"); got != stage.references {
+				t.Fatalf("stage names as-core in %d route bindings, want %d", got, stage.references)
+			}
+			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+			if err != nil {
+				t.Fatalf("NewEndpoint: %v", err)
+			}
+			t.Cleanup(func() { _ = endpoint.Close() })
+
+			// ASPSM and ASPTM messages travel on SCTP stream 0, so the
+			// Association keeps its default receive stream until the DATA
+			// exchange below, which must not use stream 0.
+			association, _ := newTestConn(t, StateASPDown, RoleASP)
+			association.cfg.RoutingContexts = params.NewRoutingContext(1)
+			association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			association.cfg.PeerSGP = &SGPIdentity{
+				SignallingGateway:        "sg-a",
+				SignallingGatewayProcess: "sgp-a1",
+			}
+			association.cfg.ASPProcedures = explicitASPProcedurePolicy()
+			capture := &aspSignalCapture{}
+			association.signalWriter = capture.write
+			if !endpoint.trackAssociation(association) {
+				t.Fatal("Association naming a provisioned SGP was not attached")
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			upResult := make(chan error, 1)
+			go func() { upResult <- association.ASPUp(ctx) }()
+			if !waitFor(func() bool { return capture.count() >= 1 }, time.Second) {
+				t.Fatal("ASP Up was never written")
+			}
+			// Through the dispatcher entry point rather than the handler, so
+			// the acknowledgement commits the state transition it carries.
+			association.handleSignals(ctx, messages.NewAspUpAck(nil, nil))
+			if err := firstErr(association); err != nil {
+				t.Fatalf("ASP Up Ack reported %v", err)
+			}
+			if err := <-upResult; err != nil {
+				t.Fatalf("ASPUp: %v", err)
+			}
+			if state := association.State(); state != StateASPInactive {
+				t.Fatalf("state after ASP Up Ack = %v, want ASP-INACTIVE", state)
+			}
+
+			key := ASKey{
+				NetworkAppearance:    7,
+				NetworkAppearanceSet: true,
+				RoutingContext:       1,
+				RoutingContextSet:    true,
+			}
+			activeResult := make(chan error, 1)
+			go func() { activeResult <- association.ASPActive(ctx, key) }()
+			if !waitFor(func() bool { return capture.count() >= 2 }, time.Second) {
+				t.Fatal("ASP Active was never written")
+			}
+			association.handleSignals(ctx, messages.NewAspActiveAck(
+				nil, params.NewRoutingContext(1), nil,
+			))
+			if err := firstErr(association); err != nil {
+				t.Fatalf("ASP Active Ack reported %v", err)
+			}
+			if err := <-activeResult; err != nil {
+				t.Fatalf("ASPActive: %v", err)
+			}
+
+			// Establishment and activation emitted one ASP Up and one ASP
+			// Active, whatever the reference count. A second ASP Up would be
+			// the reconnect the bullet forbids.
+			emitted := capture.snapshot()
+			if got := typeNames(emitted); len(got) != 2 || got[0] != "ASP Up" || got[1] != "ASP Active" {
+				t.Fatalf("emitted %v, want exactly [ASP Up, ASP Active]", got)
+			}
+			active, ok := emitted[1].(*messages.AspActive)
+			if !ok {
+				t.Fatalf("second signal is %T, want *messages.AspActive", emitted[1])
+			}
+			if got := active.RoutingContext.RoutingContexts(); len(got) != 1 || got[0] != 1 {
+				t.Fatalf("ASP Active Routing Contexts = %v, want [1]", got)
+			}
+
+			// RFC 4666 Section 4.4 registration stays optional and explicit:
+			// holding more or fewer local references to an Application Server
+			// never asks the peer to register or deregister one.
+			for index, message := range emitted {
+				switch message.(type) {
+				case *messages.RegistrationRequest, *messages.DeregistrationRequest:
+					t.Fatalf("signal %d is %T: the reference count drove an RKM procedure",
+						index, message)
+				}
+			}
+
+			// The Association stayed up and stayed ASP-ACTIVE.
+			if state := association.State(); state != StateASPActive {
+				t.Fatalf("state after ASP Active Ack = %v, want ASP-ACTIVE", state)
+			}
+			select {
+			case <-association.done:
+				t.Fatalf("Association was torn down: %v", association.Err())
+			default:
+			}
+			if err := association.Err(); err != nil {
+				t.Fatalf("Association reported %v", err)
+			}
+
+			association.maxMessageStreamID = 4
+			association.recvStream.Store(1)
+
+			// Inbound DATA authorization is the Association's coordinated
+			// scope, not the local route inventory. Routing Context 2 belongs
+			// to as-spare, which this SGP also serves, so accepting it would
+			// mean the inventory had widened what this Association may carry.
+			association.handleData(context.Background(), messages.NewData(
+				nil,
+				params.NewRoutingContext(1),
+				params.NewProtocolData(0x111111, 0x120000, params.ServiceIndSCCP, 0, 0, 1, []byte("core")),
+				nil,
+			), nil)
+			delivered, err := association.ReadData()
+			if err != nil {
+				t.Fatalf("ReadData: %v", err)
+			}
+			if !delivered.RoutingContextSet || delivered.RoutingContext != 1 {
+				t.Fatalf("delivered Routing Context = %d set=%v, want 1",
+					delivered.RoutingContext, delivered.RoutingContextSet)
+			}
+			for _, routingContext := range []uint32{2, 9} {
+				association.handleData(context.Background(), messages.NewData(
+					nil,
+					params.NewRoutingContext(routingContext),
+					params.NewProtocolData(0x111111, 0x120000, params.ServiceIndSCCP, 0, 0, 1, []byte("other")),
+					nil,
+				), nil)
+				refusal := firstErr(association)
+				if refusal == nil || !errors.Is(refusal, ErrInvalidRoutingContext) {
+					t.Fatalf("DATA naming Routing Context %d produced %v, want %v",
+						routingContext, refusal, ErrInvalidRoutingContext)
+				}
+				select {
+				case message := <-association.dataChan:
+					t.Fatalf("DATA naming Routing Context %d was delivered: %v",
+						routingContext, message)
+				default:
+				}
+			}
+
+			// Nothing above emitted another signal.
+			if got := typeNames(capture.snapshot()); len(got) != 2 {
+				t.Fatalf("signals after the DATA exchange = %v, want exactly [ASP Up, ASP Active]", got)
+			}
+		})
+	}
 }
