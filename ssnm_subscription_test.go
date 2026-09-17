@@ -133,7 +133,7 @@ func TestSubscribeSSNMLosesNoReportToAConcurrentReporter(t *testing.T) {
 	}
 	stop := make(chan struct{})
 	var reporters sync.WaitGroup
-	for range 4 {
+	for range 16 {
 		reporters.Add(1)
 		go func() {
 			defer reporters.Done()
@@ -154,7 +154,7 @@ func TestSubscribeSSNMLosesNoReportToAConcurrentReporter(t *testing.T) {
 		reporters.Wait()
 	}()
 
-	for round := range 500 {
+	for round := range 1500 {
 		snapshot, subscription, err := endpoint.SubscribeSSNM()
 		if err != nil {
 			t.Fatalf("round %d: SubscribeSSNM: %v", round, err)

@@ -785,13 +785,7 @@ func (s *ssnmState) apply(report SSNMReport) error {
 		return s.publishEventOnlyLocked(report)
 	}
 	report.Epoch = state.epoch
-	// This store holds what peers have reported. What this node originates is
-	// an intention or a question -- the RFC 4666 Section 3.4.3 audit asks what
-	// a peer holds, and the Section 3.4.4 ASP-to-SGP congestion report
-	// describes this node's own M3UA layer -- so it is published and retained
-	// by nobody.
-	if report.Source != SSNMPeerReport ||
-		!report.retainsAvailability() && !report.retainsCongestion() {
+	if !report.retainsAvailability() && !report.retainsCongestion() {
 		return s.publishEventOnlyLocked(report)
 	}
 
