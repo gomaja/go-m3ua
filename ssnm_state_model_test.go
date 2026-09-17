@@ -10,7 +10,50 @@ import (
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages"
+	"github.com/gomaja/go-m3ua/messages/params"
 )
+
+// DestinationRanges is documented as a lossless snapshot. RFC 4666 Section
+// 3.4.4's Congestion Indications parameter is the only thing that distinguishes
+// congestion abatement from a congestion report, so a snapshot that drops it
+// cannot be used to reproduce what the peer said.
+func TestInboundSCONRetainsCongestionLevelInRetainedRanges(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		level     *params.Param
+		wantState DestinationState
+		wantLevel uint8
+		wantSet   bool
+	}{
+		{"explicit level", params.NewCongestionIndications(3), DestinationCongested, 3, true},
+		{"explicit level zero", params.NewCongestionIndications(0), DestinationAvailable, 0, true},
+		{"omitted level", nil, DestinationCongested, 0, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, _ := ssnmConn(t)
+			if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+				nil, nil, apc(0x1234), nil, tt.level, nil)); err != nil {
+				t.Fatalf("handleSignallingCongestion() error = %v, want nil", err)
+			}
+			ranges := conn.DestinationRanges()
+			if len(ranges) != 1 {
+				t.Fatalf("retained ranges = %d, want 1", len(ranges))
+			}
+			retained := ranges[0]
+			if retained.State != tt.wantState {
+				t.Errorf("retained state = %v, want %v", retained.State, tt.wantState)
+			}
+			if retained.CongestionLevelSet != tt.wantSet {
+				t.Errorf("retained CongestionLevelSet = %v, want %v",
+					retained.CongestionLevelSet, tt.wantSet)
+			}
+			if retained.CongestionLevel != tt.wantLevel {
+				t.Errorf("retained CongestionLevel = %d, want %d",
+					retained.CongestionLevel, tt.wantLevel)
+			}
+		})
+	}
+}
 
 // duna reports one destination unavailable over the SSNM receive path.
 func duna(c *Association, pointCode uint32) error {

@@ -866,6 +866,7 @@ func (c *Association) applySSNM(
 	statusScope := newDestinationStatusScope(networkAppearance, routingContext)
 	statuses := make([]*DestinationStatus, 0, len(pcs))
 	updates := make([]DestinationRange, 0, len(pcs))
+	congestionUpdate := update != nil && update.kind == aspRouteCongestionUpdate
 
 	for index, pc := range pcs {
 		// DUPU reports an unavailable user part at a destination that is
@@ -877,13 +878,18 @@ func (c *Association) applySSNM(
 			mutate(status)
 		}
 		if !status.UserPartUnavailable {
-			updates = append(updates, DestinationRange{
+			applied := DestinationRange{
 				NetworkAppearance:    appearance.networkAppearance,
 				NetworkAppearanceSet: appearance.networkAppearanceSet,
 				PointCode:            pc,
 				Mask:                 masks[index],
 				State:                status.State,
-			})
+			}
+			if congestionUpdate {
+				applied.CongestionLevel = update.congestionLevel
+				applied.CongestionLevelSet = update.congestionLevelSet
+			}
+			updates = append(updates, applied)
 		}
 		statuses = append(statuses, status)
 	}
