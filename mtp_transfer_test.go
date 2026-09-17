@@ -17,7 +17,7 @@ import (
 
 func TestMTPTransferSelectsAvailableSGPAndSLSStream(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	const pointCode = uint32(0x123456)
 	applyASPDUNA(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
@@ -84,7 +84,7 @@ func TestMTPTransferValidatesEndpointAndRequest(t *testing.T) {
 
 func TestMTPTransferPrefersAvailableAndLeastCongestedRoutes(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	const pointCode = uint32(0x123456)
 
@@ -108,7 +108,7 @@ func TestMTPTransferPrefersAvailableAndLeastCongestedRoutes(t *testing.T) {
 
 func TestMTPTransferExcludesInactiveApplicationServerScope(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	associations["sg-a/sgp-a1"].noteRoutingContextsUnacked(params.NewRoutingContext(1))
 
@@ -140,22 +140,14 @@ func TestMTPTransferResolvesMTPRouteAndRejectsAmbiguity(t *testing.T) {
 	}
 
 	ambiguous := validASPConfig()
-	ambiguous.MTPRoutes = append(ambiguous.MTPRoutes, MTPRouteConfig{
+	ambiguous.Routing.MTPRoutes = append(ambiguous.Routing.MTPRoutes, MTPRouteConfig{
 		ID:                    "sccp-a-copy",
 		DestinationPointCode:  0x120000,
 		Mask:                  16,
 		ServiceIndicators:     []uint8{params.ServiceIndSCCP},
 		OriginatingPointCodes: []uint32{0x111111},
 	})
-	for gatewayIndex := range ambiguous.SignallingGateways {
-		for sgpIndex := range ambiguous.SignallingGateways[gatewayIndex].SGPs {
-			route := ambiguous.SignallingGateways[gatewayIndex].SGPs[sgpIndex].Routes[0]
-			route.MTPRoute = "sccp-a-copy"
-			ambiguous.SignallingGateways[gatewayIndex].SGPs[sgpIndex].Routes = append(
-				ambiguous.SignallingGateways[gatewayIndex].SGPs[sgpIndex].Routes, route,
-			)
-		}
-	}
+	bindMTPRouteToEveryGateway(ambiguous, "sccp-a-copy")
 	ambiguousEndpoint, _, _ := newASPTransferFixture(t, ambiguous)
 	if _, err := ambiguousEndpoint.MTPTransfer(MTPTransferRequest{
 		ProtocolData: transferProtocolData(0x123456, 1, nil),
@@ -200,7 +192,7 @@ func TestMTPTransferPrimaryBackupWithinSignallingGateway(t *testing.T) {
 
 func TestMTPTransferPrimaryBackupFailsBackAcrossSignallingGateways(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 7, nil)}
 
@@ -237,7 +229,7 @@ func TestMTPTransferLoadshareKeepsEachFlowStable(t *testing.T) {
 
 func TestMTPTransferBroadcastAndPartialFailure(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionBroadcast
+	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
 	endpoint, _, captures := newASPTransferFixture(t, config)
 	captures["sg-b/sgp-b1"].writeErr = errors.New("write failed")
 
@@ -281,7 +273,7 @@ func TestMTPTransferBroadcastIncludesEveryPermittedSignallingGateway(t *testing.
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			config := validASPConfig()
-			config.SignallingGatewaySelection = RouteSelectionBroadcast
+			config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
 			endpoint, associations, captures := newASPTransferFixture(t, config)
 			test.update(t, associations["sg-b/sgp-b1"])
 
@@ -302,7 +294,7 @@ func TestMTPTransferBroadcastIncludesEveryPermittedSignallingGateway(t *testing.
 
 func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionBroadcast
+	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
 	endpoint, associations, _ := newASPTransferFixture(t, config)
 	firstWriteStarted := make(chan struct{})
 	releaseFirstWrite := make(chan struct{})
@@ -382,7 +374,7 @@ func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testi
 
 func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionBroadcast
+	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
 	endpoint, associations, _ := newASPTransferFixture(t, config)
 	firstWriteStarted := make(chan struct{})
 	releaseFirstWrite := make(chan struct{})
@@ -441,7 +433,7 @@ func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
 
 func TestMTPTransferBroadcastAddsRecoveredSignallingGateway(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionBroadcast
+	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	const pointCode = uint32(0x123456)
 	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 4, nil)}
@@ -494,9 +486,7 @@ func TestMTPTransferBroadcastAddsRecoveredSignallingGatewayProcess(t *testing.T)
 
 func TestMTPTransferSGPBroadcastKeepsHealthyLoadsharedSignallingGateway(t *testing.T) {
 	config := validASPConfig()
-	for gatewayIndex := range config.SignallingGateways {
-		config.SignallingGateways[gatewayIndex].SGPSelection = RouteSelectionBroadcast
-	}
+	setSGPSelection(config, RouteSelectionBroadcast)
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	const pointCode = uint32(0x123456)
 	var request MTPTransferRequest
@@ -554,10 +544,8 @@ func TestMTPTransferLoadsharePromotesRecoveredBetterRoute(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			config := validASPConfig()
-			config.SignallingGatewaySelection = RouteSelectionLoadshare
-			for index := range config.SignallingGateways {
-				config.SignallingGateways[index].SGPSelection = RouteSelectionLoadshare
-			}
+			config.Routing.SignallingGatewaySelection = RouteSelectionLoadshare
+			setSGPSelection(config, RouteSelectionLoadshare)
 			endpoint, associations, captures := newASPTransferFixture(t, config)
 			test.setup(t, associations)
 			request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 19, nil)}
@@ -583,11 +571,9 @@ func TestMTPTransferLoadsharePromotesRecoveredBetterRoute(t *testing.T) {
 
 func TestMTPTransferLoadshareReevaluatesMessagePriorityCongestionPolicy(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionLoadshare
-	for index := range config.SignallingGateways {
-		config.SignallingGateways[index].SGPSelection = RouteSelectionLoadshare
-	}
-	config.CongestionPolicy = func(messagePriority, congestionLevel uint8, levelSet bool) bool {
+	config.Routing.SignallingGatewaySelection = RouteSelectionLoadshare
+	setSGPSelection(config, RouteSelectionLoadshare)
+	config.Routing.CongestionPolicy = func(messagePriority, congestionLevel uint8, levelSet bool) bool {
 		if !levelSet {
 			return false
 		}
@@ -684,7 +670,7 @@ func TestMTPTransferBroadcastsAcrossSGPsWithinSignallingGateway(t *testing.T) {
 
 func TestMTPTransferLoadsharesAcrossSignallingGateways(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionLoadshare
+	config.Routing.SignallingGatewaySelection = RouteSelectionLoadshare
 	endpoint, _, captures := newASPTransferFixture(t, config)
 	for sls := uint8(0); sls < 64; sls++ {
 		if _, err := endpoint.MTPTransfer(MTPTransferRequest{
@@ -701,17 +687,17 @@ func TestMTPTransferLoadsharesAcrossSignallingGateways(t *testing.T) {
 
 func TestMTPTransferSelectsMostSpecificMTPRoute(t *testing.T) {
 	config := validASPConfig()
-	config.MTPRoutes = append(config.MTPRoutes, MTPRouteConfig{
+	config.Routing.MTPRoutes = append(config.Routing.MTPRoutes, MTPRouteConfig{
 		ID:                    "sccp-specific",
 		DestinationPointCode:  0x123400,
 		Mask:                  8,
 		ServiceIndicators:     []uint8{params.ServiceIndSCCP},
 		OriginatingPointCodes: []uint32{0x111111},
 	})
-	config.SignallingGateways[1].SGPs[0].Routes = append(
-		config.SignallingGateways[1].SGPs[0].Routes,
-		SGPRoute{MTPRoute: "sccp-specific", AS: config.SignallingGateways[1].SGPs[0].Routes[0].AS},
-	)
+	config.Routing.Routes = append(config.Routing.Routes, MTPRouteBinding{
+		MTPRoute: "sccp-specific",
+		AS:       SGASKey{SignallingGateway: "sg-b", ApplicationServer: "as-core"},
+	})
 	endpoint, _, captures := newASPTransferFixture(t, config)
 	if _, err := endpoint.MTPTransfer(MTPTransferRequest{
 		ProtocolData: transferProtocolData(0x123456, 1, nil),
@@ -725,8 +711,8 @@ func TestMTPTransferSelectsMostSpecificMTPRoute(t *testing.T) {
 
 func TestMTPTransferKeepsHealthyAssignmentWhenAssociationAppears(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGateways = config.SignallingGateways[:1]
-	config.SignallingGateways[0].SGPSelection = RouteSelectionLoadshare
+	useSignallingGateways(config, "sg-a")
+	setSGPSelection(config, RouteSelectionLoadshare, "sg-a")
 	endpoint, _, captures := newASPTransferFixture(t, config)
 	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
 	var sls uint8
@@ -755,7 +741,7 @@ func TestMTPTransferKeepsHealthyAssignmentWhenAssociationAppears(t *testing.T) {
 
 func TestMTPTransferAppliesCongestionPolicy(t *testing.T) {
 	config := validASPConfig()
-	config.CongestionPolicy = func(_ uint8, level uint8, levelSet bool) bool {
+	config.Routing.CongestionPolicy = func(_ uint8, level uint8, levelSet bool) bool {
 		return levelSet && level <= 1
 	}
 	endpoint, associations, captures := newASPTransferFixture(t, config)
@@ -781,7 +767,7 @@ func TestMTPTransferCallsCongestionPolicyOutsideRouteLock(t *testing.T) {
 	var endpoint *Endpoint
 	called := false
 	lockAvailable := false
-	config.CongestionPolicy = func(_ uint8, _ uint8, _ bool) bool {
+	config.Routing.CongestionPolicy = func(_ uint8, _ uint8, _ bool) bool {
 		called = true
 		lockAvailable = endpoint.aspRoutes.mu.TryRLock()
 		if lockAvailable {
@@ -805,7 +791,7 @@ func TestMTPTransferCallsCongestionPolicyOutsideRouteLock(t *testing.T) {
 
 func TestMTPTransferReassignsFlowWhenSelectedRouteBecomesCongested(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionLoadshare
+	config.Routing.SignallingGatewaySelection = RouteSelectionLoadshare
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 12, nil)}
 	if _, err := endpoint.MTPTransfer(request); err != nil {
@@ -831,8 +817,8 @@ func TestMTPTransferReassignsFlowWhenSelectedRouteBecomesCongested(t *testing.T)
 
 func TestMTPTransferSupportsContextlessApplicationServer(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGateways = config.SignallingGateways[:1]
-	config.SignallingGateways[0].SGPs[0].Routes[0].AS = ASKey{
+	useSignallingGateways(config, "sg-a")
+	config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ASKey = &ASKey{
 		NetworkAppearance: 7, NetworkAppearanceSet: true,
 	}
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
@@ -863,8 +849,8 @@ func TestMTPTransferSupportsContextlessApplicationServer(t *testing.T) {
 
 func TestMTPTransferKeepsSameSGPAssociationStableAndFailsOver(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGateways = config.SignallingGateways[:1]
-	config.SignallingGateways[0].SGPSelection = RouteSelectionLoadshare
+	useSignallingGateways(config, "sg-a")
+	setSGPSelection(config, RouteSelectionLoadshare, "sg-a")
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
 	second := attachASPRouteAssociation(t, endpoint, identity, 7, 1)
@@ -900,7 +886,7 @@ func TestMTPTransferKeepsSameSGPAssociationStableAndFailsOver(t *testing.T) {
 
 func TestMTPTransferFlowCacheIsBounded(t *testing.T) {
 	config := validASPConfig()
-	config.TransferFlowCacheEntries = 2
+	config.Routing.TransferFlowCacheEntries = 2
 	endpoint, _, _ := newASPTransferFixture(t, config)
 	for sls := uint8(1); sls <= 3; sls++ {
 		if _, err := endpoint.MTPTransfer(MTPTransferRequest{
@@ -943,7 +929,7 @@ func TestTransferRouteGenerationWrapEvictsRouteAssignments(t *testing.T) {
 
 func TestMTPTransferOrdersScopeLossAfterInFlightWrite(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	endpoint, associations, captures := newASPTransferFixture(t, config)
 	primary := associations["sg-a/sgp-a1"]
 	writeStarted := make(chan struct{})
@@ -1000,7 +986,7 @@ func TestMTPTransferOrdersScopeLossAfterInFlightWrite(t *testing.T) {
 
 func TestAssociationCloseClosesTransportBeforeWaitingForMTPTransfer(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	endpoint, associations, _ := newASPTransferFixture(t, config)
 	primary := associations["sg-a/sgp-a1"]
 	writeStarted := make(chan struct{})
@@ -1106,11 +1092,11 @@ func newASPTransferFixture(
 	captures := make(map[string]*mtpTransferCapture)
 	for _, gateway := range config.SignallingGateways {
 		for _, sgp := range gateway.SGPs {
-			route := sgp.Routes[0]
+			asKey := *sgp.ApplicationServers[0].ASKey
 			association := attachASPRouteAssociation(t, endpoint, SGPIdentity{
 				SignallingGateway:        gateway.ID,
 				SignallingGatewayProcess: sgp.ID,
-			}, route.AS.NetworkAppearance, route.AS.RoutingContext)
+			}, asKey.NetworkAppearance, asKey.RoutingContext)
 			capture := &mtpTransferCapture{}
 			association.dataWriter = capture.write
 			key := string(gateway.ID) + "/" + string(sgp.ID)
@@ -1123,9 +1109,9 @@ func newASPTransferFixture(
 
 func oneSignallingGatewayTwoSGPConfig(mode RouteSelectionMode) *ASPConfig {
 	config := validASPConfig()
-	config.SignallingGatewaySelection = RouteSelectionPrimaryBackup
-	config.SignallingGateways = config.SignallingGateways[:1]
-	config.SignallingGateways[0].SGPSelection = mode
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	useSignallingGateways(config, "sg-a")
+	setSGPSelection(config, mode, "sg-a")
 	second := config.SignallingGateways[0].SGPs[0]
 	second.ID = "sgp-a2"
 	config.SignallingGateways[0].SGPs = append(config.SignallingGateways[0].SGPs, second)

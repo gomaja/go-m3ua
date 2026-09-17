@@ -184,6 +184,9 @@ var (
 	// ErrNoMTPRoute reports that no active, reachable, policy-permitted SGP
 	// Association can carry an MTP-TRANSFER request.
 	ErrNoMTPRoute = errors.New("no eligible MTP route")
+	// ErrRoutingNotConfigured reports a library-managed routing request to an
+	// ASP Endpoint whose ASPConfig selected application-managed routing.
+	ErrRoutingNotConfigured = errors.New("ASP Endpoint has no outbound route inventory")
 	// ErrMissingSGPIdentity reports an ASP Association without the provisioned
 	// remote SGP identity required for Endpoint route selection.
 	ErrMissingSGPIdentity = errors.New("ASP Association has no SGP identity")

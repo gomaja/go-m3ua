@@ -525,23 +525,13 @@ func TestASPRouteStateRemainsWhileSignallingGatewayHasAssociation(t *testing.T) 
 
 func TestASPRouteAggregationSeparatesMTPRoutes(t *testing.T) {
 	config := validASPConfig()
-	config.MTPRoutes = append(config.MTPRoutes, MTPRouteConfig{
+	config.Routing.MTPRoutes = append(config.Routing.MTPRoutes, MTPRouteConfig{
 		ID:                   "sccp-b",
 		DestinationPointCode: 0x340000,
 		Mask:                 16,
 		ServiceIndicators:    []uint8{3},
 	})
-	for gatewayIndex := range config.SignallingGateways {
-		for sgpIndex := range config.SignallingGateways[gatewayIndex].SGPs {
-			config.SignallingGateways[gatewayIndex].SGPs[sgpIndex].Routes = append(
-				config.SignallingGateways[gatewayIndex].SGPs[sgpIndex].Routes,
-				SGPRoute{
-					MTPRoute: "sccp-b",
-					AS:       config.SignallingGateways[gatewayIndex].SGPs[sgpIndex].Routes[0].AS,
-				},
-			)
-		}
-	}
+	bindMTPRouteToEveryGateway(config, "sccp-b")
 	endpoint, first, second := newASPMultiSGFixtureWithConfig(t, config)
 
 	applyASPDUNA(t, first, 7, 1, 0x123456, 0)

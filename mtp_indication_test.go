@@ -208,7 +208,7 @@ func TestClosingPartitionedSignallingGatewayDoesNotEmitSpuriousResume(t *testing
 
 func TestClosingLastASPAssociationReportsEveryCoalescedPause(t *testing.T) {
 	config := validASPConfig()
-	config.SignallingGateways = config.SignallingGateways[:1]
+	useSignallingGateways(config, "sg-a")
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
