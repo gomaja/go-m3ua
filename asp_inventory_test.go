@@ -558,6 +558,33 @@ func TestASPRoutingRejectsUnprovisionedReferences(t *testing.T) {
 			mutate: func(c *ASPConfig) { c.Routing.TransferFlowCacheEntries = -1 },
 		},
 		{
+			// A dynamically bound Application Server has no wire Routing
+			// Context until RFC 4666 Section 4.4.1 registration assigns one, so
+			// a route through it would never carry traffic.
+			name: "route through a dynamically bound Application Server",
+			mutate: func(c *ASPConfig) {
+				c.SignallingGateways[0].SGPs[0].ApplicationServers[0] = RemoteASConfig{
+					ID:         "as-core",
+					RoutingKey: &RoutingKey{Groups: []RoutingKeyGroup{{DestinationPointCode: 0x120000}}},
+				}
+			},
+		},
+		{
+			// The same Application Server statically bound on one SGP and
+			// dynamically bound on another is still not routable yet.
+			name: "route through an Application Server one SGP binds dynamically",
+			mutate: func(c *ASPConfig) {
+				c.SignallingGateways[0].SGPs = append(c.SignallingGateways[0].SGPs,
+					SignallingGatewayProcessConfig{
+						ID: "sgp-a2",
+						ApplicationServers: []RemoteASConfig{{
+							ID:         "as-core",
+							RoutingKey: &RoutingKey{Groups: []RoutingKeyGroup{{DestinationPointCode: 0x120000}}},
+						}},
+					})
+			},
+		},
+		{
 			name: "one SGP carries a route through two Application Servers",
 			mutate: func(c *ASPConfig) {
 				c.SignallingGateways[0].SGPs[0].ApplicationServers = append(
