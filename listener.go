@@ -615,6 +615,34 @@ func (l *Listener) associationForSCTPID(id sctp.SCTPAssocID) *Association {
 	return nil
 }
 
+// resolveAcceptedAssociationConfig produces the immutable AssociationConfig one
+// accepted peer runs under.
+//
+// The order is the contract. The application's listener selector chooses the
+// configuration first, from the accepted peer's addresses alone: nothing about
+// the peer has been provisioned or authorized at that point, and nothing after
+// it may re-open the choice. The role rules and this Endpoint's provisioned
+// peer inventory then authorize exactly what the selector returned, so an ASP
+// Endpoint that provisions peers judges the selected SGP identity rather than
+// the listener's default configuration. Every caller receives an owned
+// snapshot, so a selector may return configuration it goes on to reuse.
+func (l *Listener) resolveAcceptedAssociationConfig(
+	role Role,
+	info AcceptInfo,
+) (*AssociationConfig, error) {
+	associationConfig, err := l.listenerConfig.associationConfigForAccept(info)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateAssociationConfigForRole(role, associationConfig); err != nil {
+		return nil, err
+	}
+	if err := l.endpoint.validateAssociationConfig(associationConfig); err != nil {
+		return nil, err
+	}
+	return associationConfig, nil
+}
+
 // Accept waits for and returns the next M3UA association.
 // After establishment, DATA can be read through Association.Read; M3UA control
 // procedures continue in background goroutines.
@@ -674,18 +702,8 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	// rebound the previously accepted Association's socket to the SCTP
 	// association just taken, and that Association served the wrong ASP.
 	acceptInfo := newAcceptInfo(sctpAssociation.LocalAddr(), sctpAssociation.RemoteAddr())
-	associationConfig, err := l.listenerConfig.associationConfigForAccept(acceptInfo)
+	associationConfig, err := l.resolveAcceptedAssociationConfig(role, acceptInfo)
 	if err != nil {
-		l.rejectPendingSCTP(sctpAssociation)
-		_ = sctpAssociation.Close()
-		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
-	}
-	if err := validateAssociationConfigForRole(role, associationConfig); err != nil {
-		l.rejectPendingSCTP(sctpAssociation)
-		_ = sctpAssociation.Close()
-		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
-	}
-	if err := l.endpoint.validateAssociationConfig(associationConfig); err != nil {
 		l.rejectPendingSCTP(sctpAssociation)
 		_ = sctpAssociation.Close()
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
