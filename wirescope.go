@@ -32,20 +32,3 @@ func (s WireScope) clone() WireScope {
 	}
 	return s
 }
-
-// equal compares two wire scopes by value, including both presence bits and
-// the exact Routing Context list order.
-func (s WireScope) equal(other WireScope) bool {
-	if s.NetworkAppearanceSet != other.NetworkAppearanceSet ||
-		s.NetworkAppearance != other.NetworkAppearance ||
-		s.RoutingContextSet != other.RoutingContextSet ||
-		len(s.RoutingContexts) != len(other.RoutingContexts) {
-		return false
-	}
-	for index, routingContext := range s.RoutingContexts {
-		if other.RoutingContexts[index] != routingContext {
-			return false
-		}
-	}
-	return true
-}

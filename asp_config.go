@@ -244,7 +244,11 @@ type aspSGPConfig struct {
 	id                 SignallingGatewayProcessID
 	applicationServers []aspRemoteAS
 	asByID             map[RemoteASID]int
-	routes             []aspSGPRoute
+	// asByStaticKey resolves one exact wire scope back to the canonical
+	// Application Server it was provisioned for. SSNM arrives labelled with
+	// the scope, while the knowledge it carries is owned by the identity.
+	asByStaticKey map[ASKey]RemoteASID
+	routes        []aspSGPRoute
 }
 
 type aspSignallingGatewayConfig struct {
@@ -431,8 +435,9 @@ func compileSGPApplicationServers(
 		id:                 sgp.ID,
 		applicationServers: make([]aspRemoteAS, 0, len(sgp.ApplicationServers)),
 		asByID:             make(map[RemoteASID]int, len(sgp.ApplicationServers)),
+		asByStaticKey:      make(map[ASKey]RemoteASID, len(sgp.ApplicationServers)),
 	}
-	staticKeys := make(map[ASKey]RemoteASID, len(sgp.ApplicationServers))
+	staticKeys := compiled.asByStaticKey
 	dynamicKeys := make([]canonicalRoutingKey, 0, len(sgp.ApplicationServers))
 	contextless := false
 	for _, applicationServer := range sgp.ApplicationServers {

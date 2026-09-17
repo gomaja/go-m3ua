@@ -210,7 +210,11 @@ var (
 	ErrContextlessApplicationServer = errors.New("named Application Server has no Routing Context")
 	// ErrASPRouteStateLimit reports that a peer SSNM message would exceed the
 	// configured ASP route-state work or retention budget.
-	ErrASPRouteStateLimit = errors.New("ASP SSNM route-state limit exceeded")
+	//
+	// It wraps ErrSSNMResourceLoss: the message was valid and the budget is
+	// this node's own, so the association stays up and the peer is told
+	// nothing. See the SSNM state store for the rest of that family.
+	ErrASPRouteStateLimit = fmt.Errorf("%w: ASP SSNM route-state limit exceeded", ErrSSNMResourceLoss)
 
 	// ErrMissingUserCause is used when a DUPU arrives without the User/Cause
 	// parameter, which RFC 4666 Section 3.4.5 lists as Mandatory.

@@ -160,6 +160,12 @@ type Association struct {
 	dynamicASKeyVersion       uint64
 	dynamicPeerTrafficModes   map[uint32]uint32
 	dynamicLocalTrafficModes  map[uint32]uint32
+	// canonicalRemoteAS resolves a dynamically registered Routing Context back
+	// to the canonical Application Server the registration named. A static
+	// binding is answered from the provisioned inventory instead, which cannot
+	// change; only the dynamic ones need recording per Association.
+	muCanonicalAS     sync.RWMutex
+	canonicalRemoteAS map[uint32]RemoteASID
 	// peerASPIdentifier is the identifier an ASP supplied in ASP Up. It is
 	// distinct from cfg.ASPIdentifier, which is this endpoint's own optional
 	// identifier and is shared by every association a Listener accepts.
@@ -2926,6 +2932,11 @@ func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 }
 
 func (c *Association) notifyASPRouteStateChanged() {
+	// Every transition that changes which Application Servers this Association
+	// may carry also changes which partitions it may contribute SSNM knowledge
+	// to. Reconciling here keeps the two from drifting apart, and the
+	// reconciliation is idempotent, so no caller has to know what changed.
+	c.syncSSNMBindings()
 	if c == nil || c.role != RoleASP || c.endpoint == nil || c.endpoint.aspRoutes == nil {
 		return
 	}
@@ -2939,8 +2950,9 @@ func (c *Association) notifyASPRouteStateChanged() {
 // for.
 func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 	c.muAckedRCs.Lock()
-	defer c.muAckedRCs.Unlock()
 	c.noteRoutingContextsActiveLocked(rcs)
+	c.muAckedRCs.Unlock()
+	c.syncSSNMBindings()
 }
 
 func (c *Association) noteRoutingContextsActiveLocked(rcs []uint32) {
@@ -2992,13 +3004,20 @@ func (c *Association) commitPeerRoutingContextsActive(rcs []uint32) bool {
 	c.muState.Unlock()
 	if stateChanged {
 		c.notifyASPRouteStateChanged()
+		return true
 	}
+	// An already active peer that activates in a further Application Server
+	// changes no state but does change its SSNM partitions.
+	c.syncSSNMBindings()
 	return true
 }
 
 // noteRoutingContextsInactive records that this ASP has stood down in these
 // Application Servers. An empty set means all of them.
 func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
+	// The bindings are reconciled once the lock is released: syncSSNMBindings
+	// reads the very state this function is writing.
+	defer c.syncSSNMBindings()
 	c.muAckedRCs.Lock()
 	defer c.muAckedRCs.Unlock()
 

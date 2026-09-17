@@ -6,7 +6,6 @@ package m3ua
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -171,7 +170,10 @@ type destinationPause struct {
 // The Affected Point Codes of an SSNM message are chosen by the peer and need
 // not correspond to anything this node has a route to, so retention has to be
 // bounded to stay independent of what the peer sends.
-var ErrSSNMDestinationRecordLimit = errors.New("SSNM destination record limit exceeded")
+//
+// It wraps ErrSSNMResourceLoss: refusing to grow is a local decision, not a
+// fault the peer can correct, so it produces no protocol Error.
+var ErrSSNMDestinationRecordLimit = fmt.Errorf("%w: SSNM destination record limit exceeded", ErrSSNMResourceLoss)
 
 // destinations tracks destination ranges by Network Appearance and Routing
 // Context. Updates are sequenced so the newest range covering a query wins.
@@ -1066,6 +1068,7 @@ func (c *Association) closeStatus() {
 // Affected Point Code is Mandatory in every SSNM message (RFC 4666 Sections
 // 3.4.1 to 3.4.6) and may carry several point codes, each of which is updated.
 func (c *Association) applySSNM(
+	report SSNMReport,
 	networkAppearance,
 	routingContext,
 	apc *params.Param,
@@ -1073,18 +1076,13 @@ func (c *Association) applySSNM(
 	update *aspRouteUpdate,
 	mutate func(*DestinationStatus),
 ) error {
-	if apc == nil {
-		return ErrMissingAffectedPointCode
+	report.Scope = c.ssnmWireScope(networkAppearance, routingContext)
+	report.Source = SSNMPeerReport
+	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope)
+	if err != nil {
+		return err
 	}
-
-	pcs := apc.AffectedPointCodes()
-	if len(pcs) == 0 {
-		return ErrMissingAffectedPointCode
-	}
-	masks := apc.AffectedPointCodeMasks()
-	if len(masks) != len(pcs) {
-		return ErrInvalidParameterValue
-	}
+	report.Destinations = ssnmDestinationsFrom(pcs, masks)
 	routingContexts, routingContextSet := c.destinationRoutingContexts(routingContext)
 	appearance := c.destinationKey(networkAppearance, 0)
 	statusScope := newDestinationStatusScope(networkAppearance, routingContext)
@@ -1144,8 +1142,41 @@ func (c *Association) applySSNM(
 	for _, status := range statuses {
 		c.notifyStatus(status)
 	}
+	if err := c.publishSSNMReport(report); err != nil && retained == nil {
+		retained = err
+	}
 
 	return retained
+}
+
+// ssnmAffectedPointCodes bounds an SSNM message's Affected Point Code list
+// before expanding it.
+//
+// The count comes from the encoded parameter, so a message naming more point
+// codes than this node accepts costs nothing proportional to what the peer
+// claimed. Exceeding the bound is a local resource condition rather than a
+// fault in the message: it is reported as loss, the partitions it concerned
+// are invalidated, and no prefix of it is applied.
+func (c *Association) ssnmAffectedPointCodes(apc *params.Param, scope WireScope) ([]uint32, []uint8, error) {
+	if apc == nil {
+		return nil, nil, ErrMissingAffectedPointCode
+	}
+	count := apc.AffectedPointCodeCount()
+	if count == 0 {
+		return nil, nil, ErrMissingAffectedPointCode
+	}
+	if limit := c.ssnmAffectedPointCodeLimit(); count > limit {
+		return nil, nil, c.refuseOversizedSSNM(scope, count, limit)
+	}
+	pcs := apc.AffectedPointCodes()
+	if len(pcs) == 0 {
+		return nil, nil, ErrMissingAffectedPointCode
+	}
+	masks := apc.AffectedPointCodeMasks()
+	if len(masks) != len(pcs) {
+		return nil, nil, ErrInvalidParameterValue
+	}
+	return pcs, masks, nil
 }
 
 // destinationRecordLimit resolves the retained-record budget for this
@@ -1167,18 +1198,18 @@ func (c *Association) destinationRecordLimit() int {
 // It is what an SGP does with an ASP's SCON: the report is real and worth
 // surfacing, but it describes the ASP rather than a destination, so it must not
 // reach the map the SGP answers a DAUD from.
-func (c *Association) reportSSNM(networkAppearance, routingContext, apc *params.Param, mutate func(*DestinationStatus)) error {
-	if apc == nil {
-		return ErrMissingAffectedPointCode
+func (c *Association) reportSSNM(
+	report SSNMReport,
+	networkAppearance, routingContext, apc *params.Param,
+	mutate func(*DestinationStatus),
+) error {
+	report.Scope = c.ssnmWireScope(networkAppearance, routingContext)
+	report.Source = SSNMPeerReport
+	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope)
+	if err != nil {
+		return err
 	}
-	pcs := apc.AffectedPointCodes()
-	if len(pcs) == 0 {
-		return ErrMissingAffectedPointCode
-	}
-	masks := apc.AffectedPointCodeMasks()
-	if len(masks) != len(pcs) {
-		return ErrInvalidParameterValue
-	}
+	report.Destinations = ssnmDestinationsFrom(pcs, masks)
 
 	statusScope := newDestinationStatusScope(networkAppearance, routingContext)
 	for index, pc := range pcs {
@@ -1193,7 +1224,7 @@ func (c *Association) reportSSNM(networkAppearance, routingContext, apc *params.
 		}
 		c.notifyStatus(status)
 	}
-	return nil
+	return c.publishSSNMReport(report)
 }
 
 type destinationStatusScope struct {
@@ -1364,6 +1395,7 @@ func (c *Association) handleDestinationUnavailable(d *messages.DestinationUnavai
 	}
 
 	return c.applySSNM(
+		SSNMReport{Kind: SSNMDestinationUnavailableReport},
 		d.NetworkAppearance,
 		d.RoutingContext,
 		d.AffectedPointCode,
@@ -1401,6 +1433,7 @@ func (c *Association) handleDestinationAvailable(d *messages.DestinationAvailabl
 	}
 
 	return c.applySSNM(
+		SSNMReport{Kind: SSNMDestinationAvailableReport},
 		d.NetworkAppearance,
 		d.RoutingContext,
 		d.AffectedPointCode,
@@ -1435,6 +1468,7 @@ func (c *Association) handleDestinationRestricted(d *messages.DestinationRestric
 	}
 
 	return c.applySSNM(
+		SSNMReport{Kind: SSNMDestinationRestrictedReport},
 		d.NetworkAppearance,
 		d.RoutingContext,
 		d.AffectedPointCode,
@@ -1509,7 +1543,17 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	// every other ASP that audited it (Section 4.5.3).
 	if c.role == RoleSGP {
 		c.peerCongestion.Store(uint32(level))
-		return c.reportSSNM(s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, func(st *DestinationStatus) {
+		peerReport := SSNMReport{
+			Kind:               SSNMSignallingCongestionReport,
+			CongestionLevel:    level,
+			CongestionLevelSet: levelSet,
+			PeerReported:       true,
+		}
+		if s.ConcernedDestination != nil {
+			peerReport.ConcernedDestination = s.ConcernedDestination.ConcernedDestination()
+			peerReport.ConcernedDestinationSet = true
+		}
+		return c.reportSSNM(peerReport, s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, func(st *DestinationStatus) {
 			st.CongestionLevel = level
 			st.CongestionLevelSet = levelSet
 			st.PeerReported = true
@@ -1531,7 +1575,11 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	if !congested {
 		state = DestinationAvailable
 	}
-	return c.applySSNM(s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, state, &aspRouteUpdate{
+	return c.applySSNM(SSNMReport{
+		Kind:               SSNMSignallingCongestionReport,
+		CongestionLevel:    level,
+		CongestionLevelSet: levelSet,
+	}, s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, state, &aspRouteUpdate{
 		kind:               aspRouteCongestionUpdate,
 		congested:          congested,
 		congestionLevel:    level,
@@ -1595,7 +1643,11 @@ func (c *Association) handleDestinationUserPartUnavailable(d *messages.Destinati
 		}
 	}
 
-	return c.applySSNM(d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationAvailable, nil, func(st *DestinationStatus) {
+	return c.applySSNM(SSNMReport{
+		Kind:         SSNMDestinationUserPartUnavailableReport,
+		UserCause:    d.UserCause.UserCause(),
+		UserCauseSet: true,
+	}, d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationAvailable, nil, func(st *DestinationStatus) {
 		st.UserPartUnavailable = true
 		st.UserCause = d.UserCause.UserCause()
 	})
@@ -1634,16 +1686,22 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 		defer c.mtp3Restarts.procedureMu.RUnlock()
 	}
 
-	if d.AffectedPointCode == nil {
-		return ErrMissingAffectedPointCode
+	scope := c.ssnmWireScope(d.NetworkAppearance, d.RoutingContext)
+	pcs, masks, err := c.ssnmAffectedPointCodes(d.AffectedPointCode, scope)
+	if err != nil {
+		return err
 	}
-	pcs := d.AffectedPointCode.AffectedPointCodes()
-	if len(pcs) == 0 {
-		return ErrMissingAffectedPointCode
-	}
-	masks := d.AffectedPointCode.AffectedPointCodeMasks()
-	if len(masks) != len(pcs) {
-		return ErrInvalidParameterValue
+	// An audit is a request for what this node holds, not knowledge about a
+	// destination. It is published as an event and retained by nobody: RFC
+	// 4666 Section 3.4.3 has the ASP ask, and Section 4.4.2 has the SG answer
+	// from state it already had.
+	if err := c.publishSSNMReport(SSNMReport{
+		Kind:         SSNMDestinationStateAuditReport,
+		Source:       SSNMPeerReport,
+		Scope:        scope,
+		Destinations: ssnmDestinationsFrom(pcs, masks),
+	}); err != nil {
+		return err
 	}
 	appearance := c.destinationKey(d.NetworkAppearance, 0)
 	routingContexts, routingContextSet := c.destinationRoutingContexts(d.RoutingContext)

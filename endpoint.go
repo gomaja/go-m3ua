@@ -65,6 +65,11 @@ type Endpoint struct {
 	destinationRecords int
 	mtp3Restarts       *mtp3RestartRegistry
 	routingKeys        *routingKeyRegistry
+	// ssnm is the bounded, route-independent SSNM knowledge of this Endpoint.
+	// It is owned here rather than by an Association because RFC 4666 Section
+	// 1.4.2 reaches one Application Server through several SGPs, so the
+	// knowledge outlives any one of their Associations.
+	ssnm *ssnmState
 }
 
 // NewEndpoint creates an M3UA endpoint with an immutable protocol role and
@@ -111,6 +116,23 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 				return nil, fmt.Errorf("%w: %v", ErrInvalidRoleConfiguration, err)
 			}
 		}
+		// One Affected Point Code bound serves the whole receive path. The ASP
+		// route inventory configures it where there is one, so a deployment
+		// does not have to state the same limit twice.
+		ssnmConfig := config.SSNMState
+		if routes != nil && routes.config.maxAffectedPointCodesPerSSNM > 0 &&
+			(ssnmConfig == nil || ssnmConfig.MaxAffectedPointCodes == 0) {
+			effective := SSNMStateConfig{}
+			if ssnmConfig != nil {
+				effective = *ssnmConfig
+			}
+			effective.MaxAffectedPointCodes = routes.config.maxAffectedPointCodesPerSSNM
+			ssnmConfig = &effective
+		}
+		ssnm, err := newSSNMState(ssnmConfig)
+		if err != nil {
+			return nil, err
+		}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		endpoint := &Endpoint{
 			role:             config.Role,
@@ -123,6 +145,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 			mtp3Restarts:     &mtp3RestartRegistry{},
 			aspRoutes:        routes,
 			routingKeys:      routingKeys,
+			ssnm:             ssnm,
 		}
 		switch config.Role {
 		case RoleSGP:
@@ -211,6 +234,18 @@ func (e *Endpoint) trackAssociation(association *Association) bool {
 	if e == nil || association == nil {
 		return false
 	}
+	if !e.trackAssociationLocked(association) {
+		return false
+	}
+	// The Association only learns its Endpoint and its stable identity here,
+	// so any Application Server it already belongs to has to be reconciled
+	// now. The reconciliation runs outside e.mu: it reads Association state
+	// guarded by other locks.
+	association.syncSSNMBindings()
+	return true
+}
+
+func (e *Endpoint) trackAssociationLocked(association *Association) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -249,6 +284,10 @@ func (e *Endpoint) forgetAssociation(association *Association) {
 	if aspRoutes != nil {
 		aspRoutes.detach(association)
 	}
+	// A departing Association owes the store every binding it held. A
+	// partition losing its last one is retired with its knowledge in the same
+	// critical section, so no reader sees knowledge with no owner.
+	association.retireSSNMBindings()
 	sharedDynamicKeys := make([]ASKey, 0)
 	for _, routingContext := range association.dynamicRoutingContexts(false) {
 		if key, ok := association.dynamicASKey(routingContext, false); ok {
@@ -420,6 +459,10 @@ func (e *Endpoint) Close() error {
 	if e.aspRoutes != nil {
 		e.aspRoutes.closeIndications()
 	}
+	// Every Association has departed by here, so the store has no bindings
+	// left to retire; closing it moves each open subscription to its terminal
+	// state and wakes anything blocked in Next.
+	e.ssnm.close()
 	e.mu.Lock()
 	e.closeErr = firstErr
 	close(e.done)

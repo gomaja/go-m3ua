@@ -480,6 +480,22 @@ func (c *Association) sendErr(err error) {
 	}
 }
 
+// reportSSNMFailure answers a failed SSNM message.
+//
+// A local resource bound is not a protocol fault. RFC 4666 Section 3.8.1
+// enumerates the Error conditions, and a receiver unwilling to expand or
+// retain an otherwise valid message is not among them: telling the peer its
+// message was in error would have it retry or tear down a perfectly good
+// association over this node's own memory budget. The loss is already
+// observable through the SSNM subscription, so it is reported there and
+// nowhere else, and the association stays up.
+func (c *Association) reportSSNMFailure(message messages.M3UA, raw []byte, err error) {
+	if err == nil || errors.Is(err, ErrSSNMResourceLoss) {
+		return
+	}
+	c.sendErrForMessage(message, raw, err)
+}
+
 // sendErrForMessage reports err against the message that caused it, attaching
 // the octets as received so the Diagnostic Information parameter can quote them
 // without anyone marshalling the decoded message afterwards. raw is cloned here,
@@ -783,32 +799,32 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 	// destinations beyond the peer (RFC 4666 Section 4.5).
 	case *messages.DestinationUnavailable:
 		if err := c.handleDestinationUnavailable(msg); err != nil {
-			c.sendErrForMessage(msg, raw, err)
+			c.reportSSNMFailure(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationAvailable:
 		if err := c.handleDestinationAvailable(msg); err != nil {
-			c.sendErrForMessage(msg, raw, err)
+			c.reportSSNMFailure(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationRestricted:
 		if err := c.handleDestinationRestricted(msg); err != nil {
-			c.sendErrForMessage(msg, raw, err)
+			c.reportSSNMFailure(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.SignallingCongestion:
 		if err := c.handleSignallingCongestion(msg); err != nil {
-			c.sendErrForMessage(msg, raw, err)
+			c.reportSSNMFailure(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationUserPartUnavailable:
 		if err := c.handleDestinationUserPartUnavailable(msg); err != nil {
-			c.sendErrForMessage(msg, raw, err)
+			c.reportSSNMFailure(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	case *messages.DestinationStateAudit:
 		if err := c.handleDestinationStateAudit(msg); err != nil {
-			c.sendErrForMessage(msg, raw, err)
+			c.reportSSNMFailure(msg, raw, err)
 		}
 		c.sendState(stateUnchanged)
 	// Routing Key Management. These procedures do not change the ASP state
