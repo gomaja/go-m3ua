@@ -438,7 +438,7 @@ type AssociationConfig struct {
 	// Zero selects DefaultEstablishTimeout.
 	EstablishTimeout time.Duration
 	// DataQueueSize is the maximum number of inbound DATA messages retained for
-	// Read, ReadPD, or ReadData. Values less than or equal to zero select
+	// ReadData. Values less than or equal to zero select
 	// DefaultDataQueueSize. Once full, further DATA is discarded and local
 	// congestion is reported without blocking the association dispatcher.
 	DataQueueSize int

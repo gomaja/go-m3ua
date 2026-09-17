@@ -182,7 +182,7 @@ func TestWriteReportsEAGAINWhenTheSendBufferIsFull(t *testing.T) {
 	}
 }
 
-// A write deadline now buys what net.Conn promises: carry on until the message
+// A write deadline buys what a deadline should: carry on until the message
 // is accepted, or until the deadline.
 //
 // Sends still pass MSG_DONTWAIT, so a full send buffer with no deadline set

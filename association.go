@@ -329,7 +329,7 @@ type Association struct {
 	// endpoint owns node-wide state and the complete Listener/Association
 	// lifecycle independently of SCTP association initiation.
 	endpoint *Endpoint
-	// readDeadline bounds Read, ReadPD and ReadData, as Unix nanoseconds with
+	// readDeadline bounds ReadData, as Unix nanoseconds with
 	// zero meaning none. See SetReadDeadline for why it is not pushed down to
 	// the SCTP socket.
 	readDeadline atomic.Int64

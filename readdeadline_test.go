@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// SetReadDeadline is documented as keeping net.Conn's deadline contract, where
+// SetReadDeadline keeps the deadline contract a reader expects, where
 // a read deadline bounds the read and nothing else: the error reports Timeout()
 // true and the association stays usable.
 //
@@ -66,7 +66,8 @@ func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 	if !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("ReadData after the deadline = (%v, %v), want os.ErrDeadlineExceeded", message, err)
 	}
-	// net.Conn's contract: a read timeout is a net.Error reporting Timeout().
+	// A read timeout is reported as a net.Error whose Timeout() is true, so a
+	// caller can tell it apart from a failure that ended the association.
 	var netErr net.Error
 	if !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Errorf("error %v does not report Timeout(); a caller cannot tell it "+
@@ -105,7 +106,7 @@ func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 }
 
 // A deadline already in the past reports immediately rather than waiting, and a
-// zero time removes it. Both are net.Conn's stated behaviour and neither may
+// zero time removes it. Both are this package's stated behaviour and neither may
 // take the association with it.
 func TestReadDeadlineBoundaries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
