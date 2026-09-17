@@ -29,15 +29,21 @@ func TestRoutingKeyPayloadExposesOnlyGroupedScope(t *testing.T) {
 // Every grouping survives one encode and decode, and the decoded groups keep
 // the wire order the peer sent.
 func TestRoutingKeyGroupsRoundTrip(t *testing.T) {
+	groups := []RoutingKeyGroup{
+		NewRoutingKeyGroup(NewDestinationPointCode(3), NewServiceIndicators(ServiceIndSCCP), NewOriginatingPointCodeList(5)),
+		NewRoutingKeyGroup(NewDestinationPointCode(11), nil, nil),
+		NewRoutingKeyGroup(NewDestinationPointCode(12), NewServiceIndicators(ServiceIndISUP), nil),
+	}
 	payload := NewRoutingKeyPayload(
 		NewLocalRoutingKeyIdentifier(7),
 		NewRoutingContext(9),
 		NewTrafficModeType(TrafficModeLoadshare),
 		NewNetworkAppearance(4),
-		NewRoutingKeyGroup(NewDestinationPointCode(3), NewServiceIndicators(ServiceIndSCCP), NewOriginatingPointCodeList(5)),
-		NewRoutingKeyGroup(NewDestinationPointCode(11), nil, nil),
-		NewRoutingKeyGroup(NewDestinationPointCode(12), NewServiceIndicators(ServiceIndISUP), nil),
+		groups...,
 	)
+	if len(payload.Groups) != len(groups) {
+		t.Fatalf("constructed payload kept %d groupings, want %d", len(payload.Groups), len(groups))
+	}
 	encoded, err := NewRoutingKey(payload).MarshalBinary()
 	if err != nil {
 		t.Fatalf("MarshalBinary() error = %v", err)
@@ -50,13 +56,13 @@ func TestRoutingKeyGroupsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RoutingKey() error = %v", err)
 	}
-	if len(decoded.Groups) != len(payload.Groups) {
-		t.Fatalf("decoded %d groups, want %d", len(decoded.Groups), len(payload.Groups))
+	if len(decoded.Groups) != len(groups) {
+		t.Fatalf("decoded %d groups, want %d", len(decoded.Groups), len(groups))
 	}
-	for index := range payload.Groups {
-		assertParamEqual(t, "group DPC", decoded.Groups[index].DestinationPointCode, payload.Groups[index].DestinationPointCode)
-		assertParamEqual(t, "group SI", decoded.Groups[index].ServiceIndicators, payload.Groups[index].ServiceIndicators)
-		assertParamEqual(t, "group OPC list", decoded.Groups[index].OriginatingPointCodeList, payload.Groups[index].OriginatingPointCodeList)
+	for index := range groups {
+		assertParamEqual(t, "group DPC", decoded.Groups[index].DestinationPointCode, groups[index].DestinationPointCode)
+		assertParamEqual(t, "group SI", decoded.Groups[index].ServiceIndicators, groups[index].ServiceIndicators)
+		assertParamEqual(t, "group OPC list", decoded.Groups[index].OriginatingPointCodeList, groups[index].OriginatingPointCodeList)
 	}
 	assertParamEqual(t, "Network Appearance", decoded.NetworkAppearance, payload.NetworkAppearance)
 	assertParamEqual(t, "Routing Context", decoded.RoutingContext, payload.RoutingContext)
