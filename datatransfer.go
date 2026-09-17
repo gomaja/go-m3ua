@@ -69,12 +69,14 @@ const (
 // *DataWriteError whose Outcome says whether the message can safely be sent
 // again; the cause remains matchable with errors.Is and errors.As.
 //
-// The checks are, in order: the association state that Section 4.3.1 requires
-// for DATA, the structure of the message, the stream constraints of Section
-// 1.4.7, and the Application Server binding and its activation. Destination
-// availability is deliberately not among them — an application that owns
-// outbound selection has already made that decision, and SSNM state is
-// published to it separately.
+// The checks are, in order: the association state, which Section 4.3.1 defines
+// as ASP-ACTIVE — "the remote M3UA peer at the ASP/IPSP is available and
+// application traffic is active (for a particular Routing Context or set of
+// Routing Contexts)" — then the structure of the message, the stream
+// constraints of Section 1.4.7, and the Application Server binding with its
+// activation. Destination availability is deliberately not among them: an
+// application that owns outbound selection has already made that decision, and
+// SSNM state is published to it separately.
 func (c *Association) WriteData(request DataRequest) (int, error) {
 	if !c.outboundDataActive() {
 		return 0, newDataNotSent(request.AS, 0, ErrNotEstablished)
@@ -131,9 +133,14 @@ func (c *Association) submitData(frame []byte, stream uint16) error {
 }
 
 // outboundDataActive reports whether DATA may leave this association at all.
-// RFC 4666 Section 4.3.1 permits DATA only in ASP-ACTIVE; in the Section 5.6.2
-// Double Exchange model that is the state of the peer-directed traffic, which
-// is what Association.State holds.
+//
+// RFC 4666 Section 4.3.1 defines ASP-ACTIVE as the state in which "application
+// traffic is active (for a particular Routing Context or set of Routing
+// Contexts)", and Section 3.8.1 gives the receiving end of the same rule:
+// "silent discard is used by an ASP if it received a DATA message from an SGP
+// while it was in the ASP-INACTIVE state". In the Section 5.6.2 Double Exchange
+// model the state that governs sending is the peer-directed one, which is what
+// Association.State holds.
 func (c *Association) outboundDataActive() bool {
 	return c.State() == StateASPActive
 }
@@ -147,8 +154,9 @@ func (c *Association) outboundDataActive() bool {
 func (c *Association) encodeDataFrame(request *DataRequest) []byte {
 	protocolDataValue := routingLabelOctets + len(request.ProtocolData.Data)
 	// RFC 4666 Section 3.2: "If the length of the parameter is not a multiple
-	// of 4 bytes, the sender pads the parameter at the end [...] The length of
-	// the padding is NOT included in the parameter length field."
+	// of 4 octets, the sender pads the Parameter at the end (i.e., after the
+	// Parameter Value field) with all zero octets. The length of the padding is
+	// NOT included in the parameter length field."
 	protocolDataPadding := (4 - protocolDataValue%4) % 4
 
 	length := commonHeaderOctets + parameterHeaderOctets + protocolDataValue + protocolDataPadding

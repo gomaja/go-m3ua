@@ -178,9 +178,13 @@ func (c *Association) lockOutboundDataScopeForKey(key ASKey) (func(), error) {
 }
 
 // lockOutboundApplicationServerForKey holds one Application Server's delivery
-// barrier while the AS is admitting traffic. RFC 4666 Section 4.3.4.3 permits
-// an SGP to withhold traffic until n ASPs are ASP-ACTIVE, so a direct write
-// honors the same aggregate state as Endpoint distribution.
+// barrier while the AS is admitting traffic.
+//
+// The Application Server's own state is part of the decision, not just this
+// ASP's: RFC 4666 Section 4.3.4.3 has an SGP "withhold the Notify (AS-ACTIVE)
+// until there are sufficient resources", and for the n+k redundancy case ASPs
+// "should start sending traffic only after n ASPs are active". A direct write
+// therefore honors the same aggregate state as Endpoint distribution.
 func (c *Association) lockOutboundApplicationServerForKey(key ASKey) (func(), error) {
 	if (c.role != RoleSGP && c.role != RoleIPSP) || c.as == nil {
 		return noDeliveryBarrier, nil

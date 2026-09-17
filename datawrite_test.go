@@ -446,7 +446,11 @@ func TestWriteDataRefusesAScopeThatIsNotActive(t *testing.T) {
 }
 
 // Every state other than ASP-ACTIVE refuses DATA before anything else is
-// considered: RFC 4666 Section 4.3.1 permits DATA only in ASP-ACTIVE.
+// considered. RFC 4666 Section 4.3.1 defines ASP-ACTIVE as the state in which
+// "application traffic is active (for a particular Routing Context or set of
+// Routing Contexts)", and Section 3.8.1 states the receiving end of the same
+// rule: "silent discard is used by an ASP if it received a DATA message from an
+// SGP while it was in the ASP-INACTIVE state".
 func TestWriteDataRefusesWhileTheAssociationIsNotActive(t *testing.T) {
 	for _, state := range []State{StateASPDown, StateASPInactive} {
 		t.Run(state.String(), func(t *testing.T) {
