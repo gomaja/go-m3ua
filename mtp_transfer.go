@@ -80,10 +80,12 @@ type aspTransferFlowKey struct {
 }
 
 type aspTransferTarget struct {
-	identity    SGPIdentity
-	association *Association
-	as          ASKey
-	routeStatus aspDestinationStatus
+	identity          SGPIdentity
+	path              MTPRoutePathID
+	applicationServer RemoteASID
+	association       *Association
+	as                ASKey
+	routeStatus       aspDestinationStatus
 }
 
 type aspTransferAssignment struct {
@@ -93,10 +95,19 @@ type aspTransferAssignment struct {
 	congestionDecision aspCongestionDecision
 }
 
+// aspTransferMember is one Association of one SGP together with the wire scope
+// it carries the selected candidate in. The scope belongs to the Association
+// because an RFC 4666 Section 4.4.1 registration assigns it per Association.
+type aspTransferMember struct {
+	association *Association
+	as          ASKey
+}
+
 type aspTransferSGP struct {
-	identity     SGPIdentity
-	as           ASKey
-	associations []*Association
+	identity          SGPIdentity
+	path              MTPRoutePathID
+	applicationServer RemoteASID
+	members           []aspTransferMember
 }
 
 type aspTransferGateway struct {
@@ -257,15 +268,17 @@ func (r *aspRoutes) selectTransfer(
 		for _, sgp := range selectedSGPs {
 			associationHash := hashASPTransferFlow(flowKey,
 				string(sgp.identity.SignallingGateway)+"/"+string(sgp.identity.SignallingGatewayProcess))
-			association := sgp.associations[int(associationHash%uint64(len(sgp.associations)))]
-			if previous := previousASPTransferAssociation(previousTargets, sgp); previous != nil {
-				association = previous
+			member := sgp.members[int(associationHash%uint64(len(sgp.members)))]
+			if previous, held := previousASPTransferMember(previousTargets, sgp); held {
+				member = previous
 			}
 			targets = append(targets, aspTransferTarget{
-				identity:    sgp.identity,
-				association: association,
-				as:          sgp.as,
-				routeStatus: gateway.status,
+				identity:          sgp.identity,
+				path:              sgp.path,
+				applicationServer: sgp.applicationServer,
+				association:       member.association,
+				as:                member.as,
+				routeStatus:       gateway.status,
 			})
 		}
 	}
@@ -314,21 +327,21 @@ func sameASPTransferTargets(first, second []aspTransferTarget) bool {
 	return true
 }
 
-func previousASPTransferAssociation(
+func previousASPTransferMember(
 	targets []aspTransferTarget,
 	sgp aspTransferSGP,
-) *Association {
+) (aspTransferMember, bool) {
 	for _, target := range targets {
-		if target.identity != sgp.identity {
+		if target.identity != sgp.identity || target.applicationServer != sgp.applicationServer {
 			continue
 		}
-		for _, association := range sgp.associations {
-			if association == target.association {
-				return association
+		for _, member := range sgp.members {
+			if member.association == target.association && member.as == target.as {
+				return member, true
 			}
 		}
 	}
-	return nil
+	return aspTransferMember{}, false
 }
 
 func (r *aspRoutes) resolveTransferMTPRouteLocked(
@@ -425,27 +438,15 @@ func (r *aspRoutes) transferGatewayCandidatesLocked(
 		}
 		candidate := aspTransferGateway{config: gateway, status: status}
 		for _, sgp := range gateway.sgps {
-			route, exists := aspSGPRouteForMTPRoute(sgp, mtpRoute)
-			if !exists {
+			if !sgp.carries(mtpRoute) {
 				continue
 			}
 			identity := SGPIdentity{
 				SignallingGateway:        gateway.id,
 				SignallingGatewayProcess: sgp.id,
 			}
-			associations := make([]*Association, 0, len(r.associationsBySGP[identity]))
-			for association := range r.associationsBySGP[identity] {
-				if aspAssociationEligibleForAS(association, route.as) {
-					associations = append(associations, association)
-				}
-			}
-			sort.Slice(associations, func(first, second int) bool {
-				return r.associationOrder[associations[first]] < r.associationOrder[associations[second]]
-			})
-			if len(associations) > 0 {
-				candidate.sgps = append(candidate.sgps, aspTransferSGP{
-					identity: identity, as: route.as, associations: associations,
-				})
+			if selected, chosen := r.transferSGPCandidateLocked(sgp, identity, mtpRoute); chosen {
+				candidate.sgps = append(candidate.sgps, selected)
 			}
 		}
 		if len(candidate.sgps) > 0 {
@@ -453,6 +454,43 @@ func (r *aspRoutes) transferGatewayCandidatesLocked(
 		}
 	}
 	return candidates
+}
+
+// transferSGPCandidateLocked chooses the first eligible configured Application
+// Server within one SGP, as the approved selection order requires, and reports
+// the Associations that carry it.
+func (r *aspRoutes) transferSGPCandidateLocked(
+	sgp aspSGPConfig,
+	identity SGPIdentity,
+	mtpRoute MTPRouteID,
+) (aspTransferSGP, bool) {
+	associations := make([]*Association, 0, len(r.associationsBySGP[identity]))
+	for association := range r.associationsBySGP[identity] {
+		associations = append(associations, association)
+	}
+	sort.Slice(associations, func(first, second int) bool {
+		return r.associationOrder[associations[first]] < r.associationOrder[associations[second]]
+	})
+	for _, candidate := range sgp.candidatesFor(mtpRoute) {
+		members := make([]aspTransferMember, 0, len(associations))
+		for _, association := range associations {
+			for _, key := range r.config.asKeysFor(association, identity, candidate.applicationServer) {
+				if aspAssociationEligibleForAS(association, key) {
+					members = append(members, aspTransferMember{association: association, as: key})
+					break
+				}
+			}
+		}
+		if len(members) > 0 {
+			return aspTransferSGP{
+				identity:          identity,
+				path:              candidate.path,
+				applicationServer: candidate.applicationServer,
+				members:           members,
+			}, true
+		}
+	}
+	return aspTransferSGP{}, false
 }
 
 func bestASPTransferGateways(candidates []aspTransferGateway) []aspTransferGateway {

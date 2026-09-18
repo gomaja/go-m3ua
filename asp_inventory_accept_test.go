@@ -414,12 +414,15 @@ func twoGatewayRoutedInventory() *ASPConfig {
 			"sg-a": RouteSelectionLoadshare,
 			"sg-b": RouteSelectionLoadshare,
 		},
-		MTPRoutes: []MTPRouteConfig{
-			{ID: "sccp", DestinationPointCode: 0x120000, Mask: 16},
+		Paths: []MTPRoutePath{
+			{ID: "sg-a-core", SignallingGateway: "sg-a", ApplicationServers: []RemoteASID{"as-core"}},
+			{ID: "sg-b-core", SignallingGateway: "sg-b", ApplicationServers: []RemoteASID{"as-core"}},
 		},
-		Routes: []MTPRouteBinding{
-			{MTPRoute: "sccp", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
-			{MTPRoute: "sccp", AS: SGASKey{SignallingGateway: "sg-b", ApplicationServer: "as-core"}},
+		MTPRoutes: []MTPRouteConfig{
+			{
+				ID: "sccp", DestinationPointCode: 0x120000, Mask: 16,
+				Paths: []MTPRoutePathID{"sg-a-core", "sg-b-core"},
+			},
 		},
 	}
 	return config

@@ -37,8 +37,9 @@ func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 	config.Routing.MTPRoutes[0].ID = "changed"
 	config.Routing.MTPRoutes[0].ServiceIndicators[0] = 0xff
 	config.Routing.MTPRoutes[0].OriginatingPointCodes[0] = 0xffffff
-	config.Routing.Routes[0].MTPRoute = "changed"
-	config.Routing.Routes[0].AS.ApplicationServer = "changed"
+	config.Routing.MTPRoutes[0].Paths[0] = "changed"
+	config.Routing.Paths[0].ID = "changed"
+	config.Routing.Paths[0].ApplicationServers[0] = "changed"
 	config.SignallingGateways[0].ID = "changed"
 	config.SignallingGateways[0].SGPs[0].ID = "changed"
 	config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ID = "changed"
@@ -99,9 +100,13 @@ func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 		t.Fatalf("dynamic Service Indicator = %d, want 3", got)
 	}
 	sgp := snapshot.sgpByIdentity[identity]
-	route, routed := aspSGPRouteForMTPRoute(sgp, "sccp-a")
-	if !routed || route.applicationServer != "as-core" || route.as != *staticASKey(7, 1) {
-		t.Fatalf("SGP route = %#v routed=%v", route, routed)
+	candidates := sgp.candidatesFor("sccp-a")
+	if len(candidates) != 1 || candidates[0].applicationServer != "as-core" ||
+		candidates[0].path != "sg-a-core" {
+		t.Fatalf("SGP route candidates = %#v", candidates)
+	}
+	if key, resolved := snapshot.staticASKeyFor(identity, "as-core"); !resolved || key != *staticASKey(7, 1) {
+		t.Fatalf("as-core wire scope = %+v resolved=%v", key, resolved)
 	}
 }
 
@@ -223,15 +228,70 @@ func TestASPConfigValidation(t *testing.T) {
 			},
 		},
 		{
-			name: "route binding references unknown MTP Route",
+			name: "MTP Route references an unprovisioned path",
 			mutate: func(config *ASPConfig) {
-				config.Routing.Routes[0].MTPRoute = "unknown"
+				config.Routing.MTPRoutes[0].Paths[0] = "unknown"
 			},
 		},
 		{
-			name: "duplicate route binding",
+			name: "MTP Route references one path twice",
 			mutate: func(config *ASPConfig) {
-				config.Routing.Routes = append(config.Routing.Routes, config.Routing.Routes[0])
+				config.Routing.MTPRoutes[0].Paths = append(
+					config.Routing.MTPRoutes[0].Paths, config.Routing.MTPRoutes[0].Paths[0])
+			},
+		},
+		{
+			name: "route path is referenced by no MTP Route",
+			mutate: func(config *ASPConfig) {
+				config.Routing.MTPRoutes[0].Paths = config.Routing.MTPRoutes[0].Paths[:1]
+			},
+		},
+		{
+			name: "duplicate route path",
+			mutate: func(config *ASPConfig) {
+				config.Routing.Paths = append(config.Routing.Paths, config.Routing.Paths[0])
+			},
+		},
+		{
+			name: "route path names no Application Server",
+			mutate: func(config *ASPConfig) {
+				config.Routing.Paths[0].ApplicationServers = nil
+			},
+		},
+		{
+			name: "route path names one Application Server twice",
+			mutate: func(config *ASPConfig) {
+				config.Routing.Paths[0].ApplicationServers = []RemoteASID{"as-core", "as-core"}
+			},
+		},
+		{
+			name: "route path names an unserved Application Server",
+			mutate: func(config *ASPConfig) {
+				config.Routing.Paths[0].ApplicationServers = []RemoteASID{"as-absent"}
+			},
+		},
+		{
+			name: "route path names an unprovisioned Signalling Gateway",
+			mutate: func(config *ASPConfig) {
+				config.Routing.Paths[0].SignallingGateway = "sg-zz"
+			},
+		},
+		{
+			name: "route path has an empty ID",
+			mutate: func(config *ASPConfig) {
+				config.Routing.Paths[0].ID = ""
+			},
+		},
+		{
+			name: "MTP Route names no path",
+			mutate: func(config *ASPConfig) {
+				config.Routing.MTPRoutes[0].Paths = nil
+			},
+		},
+		{
+			name: "no route paths configured",
+			mutate: func(config *ASPConfig) {
+				config.Routing.Paths = nil
 			},
 		},
 		{
@@ -434,6 +494,10 @@ func validASPConfig() *ASPConfig {
 				"sg-a": RouteSelectionPrimaryBackup,
 				"sg-b": RouteSelectionLoadshare,
 			},
+			Paths: []MTPRoutePath{
+				{ID: "sg-a-core", SignallingGateway: "sg-a", ApplicationServers: []RemoteASID{"as-core"}},
+				{ID: "sg-b-core", SignallingGateway: "sg-b", ApplicationServers: []RemoteASID{"as-core"}},
+			},
 			MTPRoutes: []MTPRouteConfig{
 				{
 					ID:                    "sccp-a",
@@ -441,11 +505,8 @@ func validASPConfig() *ASPConfig {
 					Mask:                  16,
 					ServiceIndicators:     []uint8{3},
 					OriginatingPointCodes: []uint32{0x111111},
+					Paths:                 []MTPRoutePathID{"sg-a-core", "sg-b-core"},
 				},
-			},
-			Routes: []MTPRouteBinding{
-				{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
-				{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-b", ApplicationServer: "as-core"}},
 			},
 		},
 	}
@@ -468,13 +529,25 @@ func useSignallingGateways(config *ASPConfig, ids ...SignallingGatewayID) {
 	if config.Routing == nil {
 		return
 	}
-	routes := make([]MTPRouteBinding, 0, len(config.Routing.Routes))
-	for _, binding := range config.Routing.Routes {
-		if _, wanted := keep[binding.AS.SignallingGateway]; wanted {
-			routes = append(routes, binding)
+	paths := make([]MTPRoutePath, 0, len(config.Routing.Paths))
+	dropped := make(map[MTPRoutePathID]struct{}, len(config.Routing.Paths))
+	for _, path := range config.Routing.Paths {
+		if _, wanted := keep[path.SignallingGateway]; wanted {
+			paths = append(paths, path)
+			continue
 		}
+		dropped[path.ID] = struct{}{}
 	}
-	config.Routing.Routes = routes
+	config.Routing.Paths = paths
+	for index := range config.Routing.MTPRoutes {
+		retained := make([]MTPRoutePathID, 0, len(config.Routing.MTPRoutes[index].Paths))
+		for _, id := range config.Routing.MTPRoutes[index].Paths {
+			if _, gone := dropped[id]; !gone {
+				retained = append(retained, id)
+			}
+		}
+		config.Routing.MTPRoutes[index].Paths = retained
+	}
 	for id := range config.Routing.SignallingGatewayProcessSelection {
 		if _, wanted := keep[id]; !wanted {
 			delete(config.Routing.SignallingGatewayProcessSelection, id)
@@ -496,13 +569,23 @@ func setSGPSelection(config *ASPConfig, mode RouteSelectionMode, ids ...Signalli
 }
 
 // bindMTPRouteToEveryGateway carries one MTP Route over the as-core
-// Application Server of every provisioned Signalling Gateway.
+// Application Server of every provisioned Signalling Gateway, reusing the
+// provisioned path of each.
 func bindMTPRouteToEveryGateway(config *ASPConfig, mtpRoute MTPRouteID) {
+	paths := make([]MTPRoutePathID, 0, len(config.SignallingGateways))
 	for _, gateway := range config.SignallingGateways {
-		config.Routing.Routes = append(config.Routing.Routes, MTPRouteBinding{
-			MTPRoute: mtpRoute,
-			AS:       SGASKey{SignallingGateway: gateway.ID, ApplicationServer: "as-core"},
-		})
+		for _, path := range config.Routing.Paths {
+			if path.SignallingGateway == gateway.ID {
+				paths = append(paths, path.ID)
+				break
+			}
+		}
+	}
+	for index := range config.Routing.MTPRoutes {
+		if config.Routing.MTPRoutes[index].ID == mtpRoute {
+			config.Routing.MTPRoutes[index].Paths = paths
+			return
+		}
 	}
 }
 

@@ -693,11 +693,9 @@ func TestMTPTransferSelectsMostSpecificMTPRoute(t *testing.T) {
 		Mask:                  8,
 		ServiceIndicators:     []uint8{params.ServiceIndSCCP},
 		OriginatingPointCodes: []uint32{0x111111},
+		Paths:                 []MTPRoutePathID{"sg-b-core"},
 	})
-	config.Routing.Routes = append(config.Routing.Routes, MTPRouteBinding{
-		MTPRoute: "sccp-specific",
-		AS:       SGASKey{SignallingGateway: "sg-b", ApplicationServer: "as-core"},
-	})
+
 	endpoint, _, captures := newASPTransferFixture(t, config)
 	if _, err := endpoint.MTPTransfer(MTPTransferRequest{
 		ProtocolData: transferProtocolData(0x123456, 1, nil),

@@ -7,7 +7,6 @@ package m3ua
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -444,17 +443,18 @@ func TestASPRoutingBindsRoutesToCanonicalApplicationServers(t *testing.T) {
 				"sg-a": RouteSelectionPrimaryBackup,
 				"sg-b": RouteSelectionLoadshare,
 			},
+			Paths: []MTPRoutePath{
+				{ID: "sg-a-core", SignallingGateway: "sg-a", ApplicationServers: []RemoteASID{"as-core"}},
+				{ID: "sg-b-core", SignallingGateway: "sg-b", ApplicationServers: []RemoteASID{"as-core"}},
+			},
 			MTPRoutes: []MTPRouteConfig{{
 				ID:                    "sccp-a",
 				DestinationPointCode:  0x120000,
 				Mask:                  16,
 				ServiceIndicators:     []uint8{3},
 				OriginatingPointCodes: []uint32{0x111111},
+				Paths:                 []MTPRoutePathID{"sg-a-core", "sg-b-core"},
 			}},
-			Routes: []MTPRouteBinding{
-				{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
-				{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-b", ApplicationServer: "as-core"}},
-			},
 		},
 	}
 	snapshot, err := snapshotASPConfig(config)
@@ -474,12 +474,13 @@ func TestASPRoutingBindsRoutesToCanonicalApplicationServers(t *testing.T) {
 		if !exists {
 			t.Fatalf("%+v is not provisioned", identity)
 		}
-		route, routed := aspSGPRouteForMTPRoute(sgp, "sccp-a")
-		if !routed {
-			t.Fatalf("%+v does not carry sccp-a", identity)
+		candidates := sgp.candidatesFor("sccp-a")
+		if len(candidates) != 1 || candidates[0].applicationServer != "as-core" {
+			t.Fatalf("%+v carries sccp-a through %#v", identity, candidates)
 		}
-		if route.as != wantKey {
-			t.Fatalf("%+v carries sccp-a as %+v, want %+v", identity, route.as, wantKey)
+		key, resolved := snapshot.staticASKeyFor(identity, candidates[0].applicationServer)
+		if !resolved || key != wantKey {
+			t.Fatalf("%+v carries sccp-a as %+v, want %+v", identity, key, wantKey)
 		}
 	}
 }
@@ -501,10 +502,13 @@ func TestASPRoutingRejectsUnprovisionedReferences(t *testing.T) {
 				SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
 					"sg-a": RouteSelectionPrimaryBackup,
 				},
-				MTPRoutes: []MTPRouteConfig{{ID: "sccp-a", DestinationPointCode: 0x120000, Mask: 16}},
-				Routes: []MTPRouteBinding{
-					{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
+				Paths: []MTPRoutePath{
+					{ID: "sg-a-core", SignallingGateway: "sg-a", ApplicationServers: []RemoteASID{"as-core"}},
 				},
+				MTPRoutes: []MTPRouteConfig{{
+					ID: "sccp-a", DestinationPointCode: 0x120000, Mask: 16,
+					Paths: []MTPRoutePathID{"sg-a-core"},
+				}},
 			},
 		}
 	}
@@ -513,24 +517,26 @@ func TestASPRoutingRejectsUnprovisionedReferences(t *testing.T) {
 		mutate func(*ASPConfig)
 	}{
 		{
-			name:   "unknown MTP Route",
-			mutate: func(c *ASPConfig) { c.Routing.Routes[0].MTPRoute = "absent" },
+			name:   "unknown route path",
+			mutate: func(c *ASPConfig) { c.Routing.MTPRoutes[0].Paths[0] = "absent" },
 		},
 		{
 			name:   "unknown Signalling Gateway",
-			mutate: func(c *ASPConfig) { c.Routing.Routes[0].AS.SignallingGateway = "sg-zz" },
+			mutate: func(c *ASPConfig) { c.Routing.Paths[0].SignallingGateway = "sg-zz" },
 		},
 		{
 			name:   "unknown Application Server",
-			mutate: func(c *ASPConfig) { c.Routing.Routes[0].AS.ApplicationServer = "as-zz" },
+			mutate: func(c *ASPConfig) { c.Routing.Paths[0].ApplicationServers[0] = "as-zz" },
 		},
 		{
-			name:   "MTP Route with no binding",
-			mutate: func(c *ASPConfig) { c.Routing.Routes = nil },
+			name:   "MTP Route with no path",
+			mutate: func(c *ASPConfig) { c.Routing.MTPRoutes[0].Paths = nil },
 		},
 		{
-			name:   "duplicate binding",
-			mutate: func(c *ASPConfig) { c.Routing.Routes = append(c.Routing.Routes, c.Routing.Routes[0]) },
+			name: "duplicate path reference",
+			mutate: func(c *ASPConfig) {
+				c.Routing.MTPRoutes[0].Paths = append(c.Routing.MTPRoutes[0].Paths, c.Routing.MTPRoutes[0].Paths[0])
+			},
 		},
 		{
 			name:   "no SGP selection for a routed Signalling Gateway",
@@ -561,43 +567,9 @@ func TestASPRoutingRejectsUnprovisionedReferences(t *testing.T) {
 			mutate: func(c *ASPConfig) { c.Routing.TransferFlowCacheEntries = -1 },
 		},
 		{
-			// A dynamically bound Application Server has no wire Routing
-			// Context until RFC 4666 Section 4.4.1 registration assigns one, so
-			// a route through it would never carry traffic.
-			name: "route through a dynamically bound Application Server",
+			name: "one path names one Application Server twice",
 			mutate: func(c *ASPConfig) {
-				c.SignallingGateways[0].SGPs[0].ApplicationServers[0] = RemoteASConfig{
-					ID:         "as-core",
-					RoutingKey: &RoutingKey{Groups: []RoutingKeyGroup{{DestinationPointCode: 0x120000}}},
-				}
-			},
-		},
-		{
-			// The same Application Server statically bound on one SGP and
-			// dynamically bound on another is still not routable yet.
-			name: "route through an Application Server one SGP binds dynamically",
-			mutate: func(c *ASPConfig) {
-				c.SignallingGateways[0].SGPs = append(c.SignallingGateways[0].SGPs,
-					SignallingGatewayProcessConfig{
-						ID: "sgp-a2",
-						ApplicationServers: []RemoteASConfig{{
-							ID:         "as-core",
-							RoutingKey: &RoutingKey{Groups: []RoutingKeyGroup{{DestinationPointCode: 0x120000}}},
-						}},
-					})
-			},
-		},
-		{
-			name: "one SGP carries a route through two Application Servers",
-			mutate: func(c *ASPConfig) {
-				c.SignallingGateways[0].SGPs[0].ApplicationServers = append(
-					c.SignallingGateways[0].SGPs[0].ApplicationServers,
-					RemoteASConfig{ID: "as-second", ASKey: staticASKey(7, 2)},
-				)
-				c.Routing.Routes = append(c.Routing.Routes, MTPRouteBinding{
-					MTPRoute: "sccp-a",
-					AS:       SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-second"},
-				})
+				c.Routing.Paths[0].ApplicationServers = []RemoteASID{"as-core", "as-core"}
 			},
 		},
 	}
@@ -691,13 +663,20 @@ func TestASPRoutesShareOneApplicationServerAcrossRoutesAndASPs(t *testing.T) {
 			SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
 				"sg-a": RouteSelectionBroadcast,
 			},
-			MTPRoutes: []MTPRouteConfig{
-				{ID: "sccp", DestinationPointCode: 0x120000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndSCCP}},
-				{ID: "isup", DestinationPointCode: 0x120000, Mask: 16, ServiceIndicators: []uint8{params.ServiceIndISUP}},
+			Paths: []MTPRoutePath{
+				{ID: "sg-a-core", SignallingGateway: "sg-a", ApplicationServers: []RemoteASID{"as-core"}},
 			},
-			Routes: []MTPRouteBinding{
-				{MTPRoute: "sccp", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
-				{MTPRoute: "isup", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
+			MTPRoutes: []MTPRouteConfig{
+				{
+					ID: "sccp", DestinationPointCode: 0x120000, Mask: 16,
+					ServiceIndicators: []uint8{params.ServiceIndSCCP},
+					Paths:             []MTPRoutePathID{"sg-a-core"},
+				},
+				{
+					ID: "isup", DestinationPointCode: 0x120000, Mask: 16,
+					ServiceIndicators: []uint8{params.ServiceIndISUP},
+					Paths:             []MTPRoutePathID{"sg-a-core"},
+				},
 			},
 		},
 	}
@@ -860,7 +839,15 @@ func referenceCountMTPRoutes() []MTPRouteConfig {
 	}
 }
 
-func referenceCountRouting(routes []MTPRouteID, bindings []MTPRouteBinding) *ASPRoutingConfig {
+// referenceCountBinding is one application-owned reference: the MTP Route that
+// names it reaches the Application Server through the provisioned path of the
+// same name.
+type referenceCountBindingSpec struct {
+	mtpRoute          MTPRouteID
+	applicationServer RemoteASID
+}
+
+func referenceCountRouting(routes []MTPRouteID, bindings []referenceCountBindingSpec) *ASPRoutingConfig {
 	configured := make([]MTPRouteConfig, 0, len(routes))
 	for _, wanted := range routes {
 		for _, mtpRoute := range referenceCountMTPRoutes() {
@@ -869,33 +856,56 @@ func referenceCountRouting(routes []MTPRouteID, bindings []MTPRouteBinding) *ASP
 			}
 		}
 	}
+	paths := make([]MTPRoutePath, 0, 2)
+	provisioned := make(map[MTPRoutePathID]struct{}, 2)
+	for _, binding := range bindings {
+		id := referenceCountPathID(binding.applicationServer)
+		if _, exists := provisioned[id]; !exists {
+			provisioned[id] = struct{}{}
+			paths = append(paths, MTPRoutePath{
+				ID:                 id,
+				SignallingGateway:  "sg-a",
+				ApplicationServers: []RemoteASID{binding.applicationServer},
+			})
+		}
+		for index := range configured {
+			if configured[index].ID == binding.mtpRoute {
+				configured[index].Paths = append(configured[index].Paths, id)
+			}
+		}
+	}
 	return &ASPRoutingConfig{
 		SignallingGatewaySelection: RouteSelectionLoadshare,
 		SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
 			"sg-a": RouteSelectionPrimaryBackup,
 		},
+		Paths:     paths,
 		MTPRoutes: configured,
-		Routes:    bindings,
 	}
 }
 
-func referenceCountBinding(mtpRoute MTPRouteID, applicationServer RemoteASID) MTPRouteBinding {
-	return MTPRouteBinding{
-		MTPRoute: mtpRoute,
-		AS:       SGASKey{SignallingGateway: "sg-a", ApplicationServer: applicationServer},
-	}
+func referenceCountPathID(applicationServer RemoteASID) MTPRoutePathID {
+	return MTPRoutePathID("via-" + applicationServer)
 }
 
-// countASReferences counts the MTPRouteBinding entries naming one Application
-// Server, which is exactly the application-owned reference count under test.
+func referenceCountBinding(mtpRoute MTPRouteID, applicationServer RemoteASID) referenceCountBindingSpec {
+	return referenceCountBindingSpec{mtpRoute: mtpRoute, applicationServer: applicationServer}
+}
+
+// countASReferences counts the MTP Route path references naming one
+// Application Server, which is exactly the application-owned reference count
+// under test.
 func countASReferences(config *ASPConfig, applicationServer RemoteASID) int {
 	if config.Routing == nil {
 		return 0
 	}
+	wanted := referenceCountPathID(applicationServer)
 	references := 0
-	for _, binding := range config.Routing.Routes {
-		if binding.AS.ApplicationServer == applicationServer {
-			references++
+	for _, mtpRoute := range config.Routing.MTPRoutes {
+		for _, id := range mtpRoute.Paths {
+			if id == wanted {
+				references++
+			}
 		}
 	}
 	return references
@@ -908,7 +918,7 @@ func countASReferences(config *ASPConfig, applicationServer RemoteASID) int {
 // NewEndpoint snapshots its configuration, so the reference count cannot be
 // mutated on a running Endpoint; the requirement is therefore demonstrated
 // across distinct Endpoint configurations in which everything but the number
-// of MTPRouteBinding entries naming as-core is held fixed. RFC 4666 Section
+// of route path references naming as-core is held fixed. RFC 4666 Section
 // 1.4.2 makes the Application Server an entity of the signalling network that
 // an ASP serves, while the routes an ASP keeps towards it are local
 // bookkeeping; RFC 4666 Sections 4.3.4.1 and 4.3.4.3 make establishment and
@@ -929,7 +939,7 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 			references: 0,
 			routing: referenceCountRouting(
 				[]MTPRouteID{"spare"},
-				[]MTPRouteBinding{referenceCountBinding("spare", "as-spare")},
+				[]referenceCountBindingSpec{referenceCountBinding("spare", "as-spare")},
 			),
 		},
 		{
@@ -937,7 +947,7 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 			references: 1,
 			routing: referenceCountRouting(
 				[]MTPRouteID{"spare", "core-sccp"},
-				[]MTPRouteBinding{
+				[]referenceCountBindingSpec{
 					referenceCountBinding("spare", "as-spare"),
 					referenceCountBinding("core-sccp", "as-core"),
 				},
@@ -948,7 +958,7 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 			references: 3,
 			routing: referenceCountRouting(
 				[]MTPRouteID{"spare", "core-sccp", "core-isup", "core-tup"},
-				[]MTPRouteBinding{
+				[]referenceCountBindingSpec{
 					referenceCountBinding("spare", "as-spare"),
 					referenceCountBinding("core-sccp", "as-core"),
 					referenceCountBinding("core-isup", "as-core"),
@@ -964,7 +974,7 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 			references: 0,
 			routing: referenceCountRouting(
 				[]MTPRouteID{"spare", "core-sccp", "core-isup", "core-tup"},
-				[]MTPRouteBinding{
+				[]referenceCountBindingSpec{
 					referenceCountBinding("spare", "as-spare"),
 					referenceCountBinding("core-sccp", "as-spare"),
 					referenceCountBinding("core-isup", "as-spare"),
@@ -1143,22 +1153,7 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 	}
 }
 
-// A local MTP Route may name only an Application Server that every SGP serving
-// it binds statically. This is a deliberate boundary, not an omission.
-//
-// RFC 4666 Section 4.4.1 gives a dynamically bound Application Server its wire
-// Routing Context only when the SGP assigns one in a Registration Response, and
-// RFC 4666 Section 4.4 keeps registration optional and explicit. A configured
-// outbound route through such an Application Server would therefore name a
-// scope that does not exist at configuration time and may never exist, so the
-// route would be provisioning that can never carry traffic. Rejecting it at
-// configuration time reports that at the one moment the application can still
-// fix it.
-//
-// The boundary is on routes, not on dynamic binding: a dynamically bound
-// Application Server is fully supported, and an application reaches it by
-// owning its own outbound selection.
-func TestRouteBindingRequiresAStaticallyBoundApplicationServer(t *testing.T) {
+func TestRoutePathMayNameADynamicallyBoundApplicationServer(t *testing.T) {
 	dynamic := func() *RemoteASConfig {
 		return &RemoteASConfig{
 			ID: "as-dynamic",
@@ -1185,23 +1180,22 @@ func TestRouteBindingRequiresAStaticallyBoundApplicationServer(t *testing.T) {
 				SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
 					"sg-a": RouteSelectionPrimaryBackup,
 				},
-				MTPRoutes: []MTPRouteConfig{
-					{ID: "sccp-a", DestinationPointCode: 0x120000, Mask: 16},
+				Paths: []MTPRoutePath{
+					{ID: "sg-a-core", SignallingGateway: "sg-a", ApplicationServers: []RemoteASID{"as-core"}},
 				},
-				Routes: []MTPRouteBinding{
-					{MTPRoute: "sccp-a", AS: SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-core"}},
+				MTPRoutes: []MTPRouteConfig{
+					{ID: "sccp-a", DestinationPointCode: 0x120000, Mask: 16, Paths: []MTPRoutePathID{"sg-a-core"}},
 				},
 			},
 		}
 	}
 
-	// Provisioned and reachable: no route names the dynamically bound
-	// Application Server, so the configuration is accepted and the Association
-	// that serves it is authorized without a Routing Context, which is exactly
-	// what it has before registration.
+	// An Association serving only the dynamically bound Application Server is
+	// authorized without a Routing Context, which is exactly what it has
+	// before registration.
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: base()})
 	if err != nil {
-		t.Fatalf("NewEndpoint with a dynamically bound Application Server and no route to it: %v", err)
+		t.Fatalf("NewEndpoint with a dynamically bound Application Server and no path to it: %v", err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	unregistered, _ := newTestConn(t, StateASPDown, RoleASP)
@@ -1215,33 +1209,32 @@ func TestRouteBindingRequiresAStaticallyBoundApplicationServer(t *testing.T) {
 		t.Fatalf("Association serving a dynamically bound Application Server rejected: %v", err)
 	}
 
-	// Naming it from a route is the rejected case, and the rejection says which
-	// Application Server and which SGP made the route unroutable.
+	// Naming it from a path is accepted: the candidate exists in the
+	// inventory, and the wire scope it will be reached in is the Routing
+	// Context the SGP assigns during RFC 4666 Section 4.4.1 registration,
+	// resolved per Association rather than provisioned here.
 	routed := base()
-	routed.Routing.Routes = append(routed.Routing.Routes, MTPRouteBinding{
-		MTPRoute: "sccp-a",
-		AS:       SGASKey{SignallingGateway: "sg-a", ApplicationServer: "as-dynamic"},
+	routed.Routing.Paths = append(routed.Routing.Paths, MTPRoutePath{
+		ID:                 "sg-a-dynamic",
+		SignallingGateway:  "sg-a",
+		ApplicationServers: []RemoteASID{"as-dynamic"},
 	})
-	_, err = snapshotASPConfig(routed)
-	if !errors.Is(err, ErrInvalidASPConfig) {
-		t.Fatalf("snapshotASPConfig() error = %v, want %v", err, ErrInvalidASPConfig)
+	routed.Routing.MTPRoutes[0].Paths = append(routed.Routing.MTPRoutes[0].Paths, "sg-a-dynamic")
+	snapshot, err := snapshotASPConfig(routed)
+	if err != nil {
+		t.Fatalf("snapshotASPConfig with a dynamically bound candidate: %v", err)
 	}
-	for _, named := range []string{"dynamically bound", "as-dynamic", "sgp-a1", "sccp-a"} {
-		if !strings.Contains(err.Error(), named) {
-			t.Fatalf("rejection %q does not name %q", err, named)
-		}
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	candidates := snapshot.sgpByIdentity[identity].candidatesFor("sccp-a")
+	if len(candidates) != 2 ||
+		candidates[0].applicationServer != "as-core" ||
+		candidates[1].applicationServer != "as-dynamic" {
+		t.Fatalf("sccp-a candidates = %#v, want as-core then as-dynamic", candidates)
 	}
-
-	// One SGP binding it dynamically is enough, even where another binds the
-	// same canonical Application Server statically: the route would silently
-	// stop covering that SGP.
-	mixed := base()
-	mixed.SignallingGateways[0].SGPs = append(mixed.SignallingGateways[0].SGPs,
-		SignallingGatewayProcessConfig{
-			ID:                 "sgp-a2",
-			ApplicationServers: []RemoteASConfig{{ID: "as-core", RoutingKey: dynamic().RoutingKey}},
-		})
-	if _, err := snapshotASPConfig(mixed); !errors.Is(err, ErrInvalidASPConfig) {
-		t.Fatalf("snapshotASPConfig() error = %v, want %v", err, ErrInvalidASPConfig)
+	if _, resolved := snapshot.staticASKeyFor(identity, "as-dynamic"); resolved {
+		t.Fatal("a dynamically bound Application Server must carry no provisioned wire scope")
+	}
+	if keys := snapshot.asKeysFor(unregistered, identity, "as-dynamic"); len(keys) != 0 {
+		t.Fatalf("unregistered dynamic candidate resolved to %#v, want no wire scope", keys)
 	}
 }
