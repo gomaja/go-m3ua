@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -185,44 +184,4 @@ func (a *AspUp) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (a *AspUp) MessageTypeName() string {
 	return "ASP Up"
-}
-
-// Serialize returns the byte sequence generated from a AspUp.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (a *AspUp) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return a.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (a *AspUp) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return a.MarshalTo(b)
-}
-
-// DecodeAspUp decodes given byte sequence as a AspUp.
-//
-// DEPRECATED: use ParseAspUp instead.
-func DecodeAspUp(b []byte) (*AspUp, error) {
-	log.Println("DEPRECATED: use ParseAspUp instead")
-	return ParseAspUp(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (a *AspUp) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return a.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of AspUp.
-//
-// DEPRECATED: use MarshalLen instead.
-func (a *AspUp) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return a.MarshalLen()
 }

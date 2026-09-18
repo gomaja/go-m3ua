@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -165,44 +164,4 @@ func (a *AspDown) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (a *AspDown) MessageTypeName() string {
 	return "ASP Down"
-}
-
-// Serialize returns the byte sequence generated from a AspDown.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (a *AspDown) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return a.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (a *AspDown) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return a.MarshalTo(b)
-}
-
-// DecodeAspDown decodes given byte sequence as a AspDown.
-//
-// DEPRECATED: use ParseAspDown instead.
-func DecodeAspDown(b []byte) (*AspDown, error) {
-	log.Println("DEPRECATED: use ParseAspDown instead")
-	return ParseAspDown(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (a *AspDown) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return a.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of AspDown.
-//
-// DEPRECATED: use MarshalLen instead.
-func (a *AspDown) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return a.MarshalLen()
 }

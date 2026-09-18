@@ -6,7 +6,6 @@ package params
 
 import (
 	"fmt"
-	"log"
 )
 
 // RegistrationResultPayload is the payload of RegistrationResult.
@@ -139,20 +138,4 @@ func (d *RegistrationResultPayload) unmarshalBinaryAtDepth(b []byte, depth int) 
 	}
 	*d = decoded
 	return nil
-}
-
-// DecodeRegistrationResultPayload decodes given byte sequence as a RegistrationResultPayload.
-//
-// DEPRECATED: use ParseRegistrationResultPayload instead.
-func DecodeRegistrationResultPayload(b []byte) (*RegistrationResultPayload, error) {
-	log.Println("DEPRECATED: use ParseRegistrationResultPayload instead")
-	return ParseRegistrationResultPayload(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a Param.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (d *RegistrationResultPayload) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return d.UnmarshalBinary(b)
 }

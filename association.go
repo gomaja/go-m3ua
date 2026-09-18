@@ -2943,25 +2943,22 @@ type ManagementIndication struct {
 	// indication. For ManagementNotify it contains every explicitly named
 	// Routing Context, or the configured AS memberships inferred under RFC 4666
 	// Section 4.3.4.5 when NTFY omitted the parameter. For ManagementError it
-	// contains every Routing Context the peer explicitly named. The slice is
-	// owned by the indication and may be retained or modified by the caller.
-	RoutingContexts []uint32
-
-	// RoutingContext is the first explicitly named traffic flow, valid only
-	// when RoutingContextSet is true. It is retained for source compatibility;
-	// RoutingContexts carries the complete explicit or inferred scope.
+	// contains every Routing Context the peer explicitly named, exactly as it
+	// named them: Section 3.8.1 requires an "Invalid Routing Context" error to
+	// carry "the invalid Routing Context(s)", which by definition resolve to no
+	// configured Application Server, so this is the exact wire scope and never
+	// the resolved membership reported in ASKeys.
 	//
-	// It is what makes the indication actionable on an association carrying
-	// more than one Application Server. RFC 4666 Errata ID 2065 asks for the
-	// parameter to be Conditional rather than Optional in Notify for exactly
-	// this reason: when a second ASP becomes active for one of several
-	// Application Servers, the Notify names which one, "allow[ing] the first
-	// ASP to become inactive only for that particular Application Server,
-	// rather than all of them". Section 3.8.1 goes further for Error and makes
-	// it Mandatory for specific codes — an "Invalid Routing Context" error
-	// carries the context that was invalid.
-	RoutingContext    uint32
-	RoutingContextSet bool
+	// Every named context is reported, not the first one. RFC 4666 Errata ID
+	// 2065 asks for the parameter to be Conditional rather than Optional in
+	// Notify for the same reason: when a second ASP becomes active for one of
+	// several Application Servers, the Notify names which one, "allow[ing] the
+	// first ASP to become inactive only for that particular Application Server,
+	// rather than all of them" — and a peer may name several at once.
+	//
+	// The slice is owned by the indication and may be retained or modified by
+	// the caller.
+	RoutingContexts []uint32
 
 	// ASPIdentifier is the ASP the indication concerns, valid only when
 	// ASPIdentifierSet is true. Set for ManagementNotify: Section 3.8.2 lists
@@ -2977,15 +2974,17 @@ type ManagementIndication struct {
 	NetworkAppearance    uint32
 	NetworkAppearanceSet bool
 
-	// AffectedPointCodes are the destinations an Error concerns, empty when it
-	// named none. Section 3.8.1 on "Destination Status Unknown": "the invalid
+	// AffectedDestinations are the destinations an Error concerns, empty when it
+	// named none. Each entry keeps one Affected Point Code together with its
+	// Mask and the exact Network Appearance and Routing Context scope the peer
+	// named it in. Section 3.8.1 on "Destination Status Unknown": "the invalid
 	// or unauthorized Point Code(s) MUST be included along with the Network
 	// Appearance and/or Routing Context associated with the Point Code(s)."
-	AffectedPointCodes []uint32
-
-	// AffectedDestinations preserves every Affected Point Code mask and its
-	// exact Network Appearance and Routing Context scope. The legacy
-	// AffectedPointCodes projection remains available above.
+	//
+	// The Mask is part of the destination rather than decoration: Section 3.4.1
+	// gives the parameter a Mask octet per point code, and a non-zero Mask names
+	// a contiguous range instead of the single code beside it. The slice is
+	// owned by the indication.
 	AffectedDestinations []AffectedDestination
 
 	// Cause is the local failure reported by M-ERROR or M-SCTP_RELEASE. A peer
@@ -2996,25 +2995,12 @@ type ManagementIndication struct {
 	Description string
 }
 
-// firstRoutingContext projects a management message's first explicitly named
-// Routing Context into the compatibility fields on ManagementIndication. The
-// complete explicit or inferred scope is carried by RoutingContexts.
+// routingContextsOf reports every Routing Context a management message named,
+// as an owned copy.
 //
-// The bool means the value was decoded, not merely that a parameter was
-// present: a value that is not a whole number of 32-bit words yields nothing,
-// and reporting a zero for it would be indistinguishable from Routing Context 0,
-// which a peer may legitimately use.
-func firstRoutingContext(p *params.Param) (uint32, bool) {
-	if p == nil {
-		return 0, false
-	}
-	rcs := p.RoutingContexts()
-	if len(rcs) == 0 {
-		return 0, false
-	}
-	return rcs[0], true
-}
-
+// An empty result means the peer named none that decoded: a value that is not a
+// whole number of 32-bit words yields nothing, and inferring anything from it
+// would report Application Servers the peer never referred to.
 func routingContextsOf(p *params.Param) []uint32 {
 	if p == nil {
 		return nil
@@ -3066,7 +3052,6 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 	snapshot.Association = c.ID()
 	snapshot.ASKeys = append([]ASKey(nil), ind.ASKeys...)
 	snapshot.RoutingContexts = append([]uint32(nil), ind.RoutingContexts...)
-	snapshot.AffectedPointCodes = append([]uint32(nil), ind.AffectedPointCodes...)
 	snapshot.AffectedDestinations = append(
 		[]AffectedDestination(nil), ind.AffectedDestinations...,
 	)

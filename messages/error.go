@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -251,44 +250,4 @@ func (e *Error) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (e *Error) MessageTypeName() string {
 	return "Error"
-}
-
-// Serialize returns the byte sequence generated from a Error.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (e *Error) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return e.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (e *Error) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return e.MarshalTo(b)
-}
-
-// DecodeError decodes given byte sequence as a Error.
-//
-// DEPRECATED: use ParseError instead.
-func DecodeError(b []byte) (*Error, error) {
-	log.Println("DEPRECATED: use ParseError instead")
-	return ParseError(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (e *Error) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return e.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of Error.
-//
-// DEPRECATED: use MarshalLen instead.
-func (e *Error) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return e.MarshalLen()
 }

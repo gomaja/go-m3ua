@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -168,44 +167,4 @@ func (g *Generic) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (g *Generic) MessageTypeName() string {
 	return "Unknown"
-}
-
-// Serialize returns the byte sequence generated from a Generic.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (g *Generic) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return g.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (g *Generic) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return g.MarshalTo(b)
-}
-
-// DecodeGeneric decodes given byte sequence as a Generic.
-//
-// DEPRECATED: use ParseGeneric instead.
-func DecodeGeneric(b []byte) (*Generic, error) {
-	log.Println("DEPRECATED: use ParseGeneric instead")
-	return ParseGeneric(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (g *Generic) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return g.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of Generic.
-//
-// DEPRECATED: use MarshalLen instead.
-func (g *Generic) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return g.MarshalLen()
 }

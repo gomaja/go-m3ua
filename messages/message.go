@@ -6,7 +6,6 @@ package messages
 
 import (
 	"errors"
-	"log"
 )
 
 // Message Class definitions.
@@ -211,15 +210,6 @@ func newMessageFor(class, msgType uint8) M3UA {
 		return nil
 	}
 	return m
-}
-
-// Decode decodes the given bytes.
-// This function checks the Message Class and Message Type and chooses the appropriate type.
-//
-// DEPRECATED: use Parse instead.
-func Decode(b []byte) (M3UA, error) {
-	log.Println("DEPRECATED: use Parse instead")
-	return Parse(b)
 }
 
 // Error definitions.
