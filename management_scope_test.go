@@ -153,10 +153,9 @@ func TestManagementErrorWithAppearanceAndNoContextStaysInThatAppearance(t *testi
 func TestManagementIndicationOwnsAllSlices(t *testing.T) {
 	_, association := trackedManagementAssociation(t, StateASPActive, 10, 1)
 	indication := &ManagementIndication{
-		Kind:               ManagementError,
-		ASKeys:             []ASKey{{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}},
-		RoutingContexts:    []uint32{1},
-		AffectedPointCodes: []uint32{0x123456},
+		Kind:            ManagementError,
+		ASKeys:          []ASKey{{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}},
+		RoutingContexts: []uint32{1},
 		AffectedDestinations: []AffectedDestination{{
 			NetworkAppearance: 10, NetworkAppearanceSet: true,
 			RoutingContext: 1, RoutingContextSet: true,
@@ -166,7 +165,6 @@ func TestManagementIndicationOwnsAllSlices(t *testing.T) {
 	association.notifyManagement(indication)
 	indication.ASKeys[0].RoutingContext = 99
 	indication.RoutingContexts[0] = 99
-	indication.AffectedPointCodes[0] = 99
 	indication.AffectedDestinations[0].PointCode = 99
 
 	got := <-association.ManagementIndications()
@@ -176,7 +174,6 @@ func TestManagementIndicationOwnsAllSlices(t *testing.T) {
 	if got.Association != association.ID() ||
 		got.ASKeys[0].RoutingContext != 1 ||
 		got.RoutingContexts[0] != 1 ||
-		got.AffectedPointCodes[0] != 0x123456 ||
 		got.AffectedDestinations[0].PointCode != 0x123456 {
 		t.Fatalf("snapshotted indication changed with producer mutation: %+v", got)
 	}

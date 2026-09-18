@@ -51,15 +51,20 @@ func (c *Association) handleError(e *messages.Error) error {
 	// carries the appearance, and "Destination Status Unknown" carries the point
 	// codes. All three were parsed and dropped, so an application was told only
 	// that something had been refused, never what.
+	//
+	// The Routing Context an Error names is reported exactly as the peer named
+	// it, and separately from the AS membership it resolves to. That separation
+	// is the point for this message: the "Invalid Routing Context" error
+	// "is sent if a message is received from a peer with an invalid
+	// (unconfigured) Routing Context value", so the very value the peer is
+	// complaining about matches no configured Application Server, and resolving
+	// it away would leave the application with the contexts the peer did not
+	// name and without the one it did.
 	ind.RoutingContexts = routingContextsOf(e.RoutingContext)
-	ind.RoutingContext, ind.RoutingContextSet = firstRoutingContext(e.RoutingContext)
 	ind.NetworkAppearance, ind.NetworkAppearanceSet = uint32ParamOf(
 		e.NetworkAppearance, params.NetworkAppearance, (*params.Param).NetworkAppearance)
 	ind.ASKeys = c.managementASKeys(e.NetworkAppearance, e.RoutingContext)
-	if e.AffectedPointCode != nil {
-		ind.AffectedPointCodes = e.AffectedPointCode.AffectedPointCodes()
-		ind.AffectedDestinations = managementAffectedDestinations(ind.ASKeys, e.AffectedPointCode)
-	}
+	ind.AffectedDestinations = managementAffectedDestinations(ind.ASKeys, e.AffectedPointCode)
 	c.notifyManagement(ind)
 
 	return nil
@@ -207,13 +212,12 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 	// Contexts was told that "an" AS had gone AS-PENDING, or that "an"
 	// alternate ASP had become active, with no way to tell which — and the
 	// decision Section 4.3.4.5 leaves to it is not one it could then make.
-	// See ManagementIndication.RoutingContext and RFC 4666 Errata ID 2065.
+	// See ManagementIndication.RoutingContexts and RFC 4666 Errata ID 2065.
 	ind.RoutingContexts = routingContextsOf(n.RoutingContext)
 	if n.RoutingContext == nil {
 		ind.RoutingContexts = append([]uint32(nil), configured...)
 	}
 	ind.ASKeys = c.managementASKeys(c.localNetworkAppearance(), n.RoutingContext)
-	ind.RoutingContext, ind.RoutingContextSet = firstRoutingContext(n.RoutingContext)
 	ind.ASPIdentifier, ind.ASPIdentifierSet = uint32ParamOf(
 		n.AspIdentifier, params.AspIdentifier, (*params.Param).AspIdentifier)
 	c.notifyManagement(ind)

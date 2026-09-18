@@ -7,6 +7,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages"
@@ -45,13 +46,14 @@ func TestNotifyReportsWhichApplicationServerItIsAbout(t *testing.T) {
 	}
 
 	ind := <-conn.ManagementIndications()
-	if !ind.RoutingContextSet {
-		t.Fatal("the Notify named Routing Context 2 and the indication carried " +
-			"none; an ASP serving several cannot tell which Application Server " +
-			"to stand down for")
+	if !equalNotifyScope(ind.RoutingContexts, []uint32{2}) {
+		t.Fatalf("RoutingContexts = %v, want [2]; the Notify named Routing Context 2 "+
+			"and an ASP serving several cannot otherwise tell which Application "+
+			"Server to stand down for", ind.RoutingContexts)
 	}
-	if ind.RoutingContext != 2 {
-		t.Errorf("RoutingContext = %d, want 2", ind.RoutingContext)
+	wantKey := ASKey{RoutingContext: 2, RoutingContextSet: true}
+	if !reflect.DeepEqual(ind.ASKeys, []ASKey{wantKey}) {
+		t.Errorf("ASKeys = %+v, want [%+v]", ind.ASKeys, wantKey)
 	}
 	// Section 3.8.2 lists the ASP Identifier Conditional, and an "Alternate ASP
 	// Active" notification uses it to name the ASP that took over.
@@ -63,7 +65,9 @@ func TestNotifyReportsWhichApplicationServerItIsAbout(t *testing.T) {
 // The parameter is not always present, and absence must stay distinguishable
 // from Routing Context zero.
 func TestNotifyWithoutARoutingContextSaysSo(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+	// With nothing configured either, there is no scope to infer under RFC 4666
+	// Section 4.3.4.5, and an empty scope is what must be reported.
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP)
 
 	if err := conn.handleNotify(messages.NewNotify(
 		params.NewStatus(params.AsStatePending), nil, nil, nil)); err != nil {
@@ -71,20 +75,27 @@ func TestNotifyWithoutARoutingContextSaysSo(t *testing.T) {
 	}
 
 	ind := <-conn.ManagementIndications()
-	if ind.RoutingContextSet {
-		t.Errorf("a Notify carrying no Routing Context reported one (%d)", ind.RoutingContext)
+	if len(ind.RoutingContexts) != 0 {
+		t.Errorf("a Notify carrying no Routing Context reported %v", ind.RoutingContexts)
+	}
+	// The association itself is the contextless Application Server here, which
+	// RFC 4666 Section 4.3.4.5 says the notification applies to; that is a real
+	// membership, not an inferred Routing Context.
+	if !reflect.DeepEqual(ind.ASKeys, []ASKey{{}}) {
+		t.Errorf("ASKeys = %+v, want the single contextless Application Server", ind.ASKeys)
 	}
 	if ind.ASPIdentifierSet {
 		t.Errorf("a Notify carrying no ASP Identifier reported one (%d)", ind.ASPIdentifier)
 	}
-	// Routing Context 0 is a context like any other.
+	// Routing Context 0 is a context like any other, so it must not read as the
+	// empty scope above.
 	zeroConn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 0)
 	if err := zeroConn.handleNotify(messages.NewNotify(
 		params.NewStatus(params.AsStatePending), nil, params.NewRoutingContext(0), nil)); err != nil {
 		t.Fatalf("handleNotify: %v", err)
 	}
-	if ind := <-zeroConn.ManagementIndications(); !ind.RoutingContextSet {
-		t.Error("Routing Context 0 was reported as absent")
+	if ind := <-zeroConn.ManagementIndications(); !equalNotifyScope(ind.RoutingContexts, []uint32{0}) {
+		t.Errorf("Routing Context 0 was reported as %v, want [0]", ind.RoutingContexts)
 	}
 }
 
@@ -119,19 +130,20 @@ func TestErrorReportsWhatThePeerRefused(t *testing.T) {
 	}
 
 	ind := <-conn.ManagementIndications()
-	if !ind.RoutingContextSet || ind.RoutingContext != 9 {
-		t.Errorf("RoutingContext = %d (set=%v), want 9; the peer said which "+
-			"context it refused", ind.RoutingContext, ind.RoutingContextSet)
-	}
 	if !equalNotifyScope(ind.RoutingContexts, []uint32{9, 10}) {
-		t.Errorf("RoutingContexts = %v, want [9 10]", ind.RoutingContexts)
+		t.Errorf("RoutingContexts = %v, want [9 10]; the peer said which contexts "+
+			"it refused", ind.RoutingContexts)
 	}
 	if !ind.NetworkAppearanceSet || ind.NetworkAppearance != 7 {
 		t.Errorf("NetworkAppearance = %d (set=%v), want 7",
 			ind.NetworkAppearance, ind.NetworkAppearanceSet)
 	}
-	if len(ind.AffectedPointCodes) != 1 || ind.AffectedPointCodes[0] != 0x123456 {
-		t.Errorf("AffectedPointCodes = %#v, want [0x123456]", ind.AffectedPointCodes)
+	wantDestinations := []AffectedDestination{
+		{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 9, RoutingContextSet: true, PointCode: 0x123456},
+		{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 10, RoutingContextSet: true, PointCode: 0x123456},
+	}
+	if !reflect.DeepEqual(ind.AffectedDestinations, wantDestinations) {
+		t.Errorf("AffectedDestinations = %+v, want %+v", ind.AffectedDestinations, wantDestinations)
 	}
 	if ind.ErrorCode != params.ErrInvalidRoutingContext {
 		t.Errorf("ErrorCode = %#x, want %#x", ind.ErrorCode, params.ErrInvalidRoutingContext)
@@ -149,14 +161,14 @@ func TestErrorWithoutTheOptionalContextSaysSo(t *testing.T) {
 	}
 
 	ind := <-conn.ManagementIndications()
-	if ind.RoutingContextSet {
-		t.Errorf("reported Routing Context %d for an Error that named none", ind.RoutingContext)
+	if len(ind.RoutingContexts) != 0 {
+		t.Errorf("reported Routing Contexts %v for an Error that named none", ind.RoutingContexts)
 	}
 	if ind.NetworkAppearanceSet {
 		t.Errorf("reported Network Appearance %d for an Error that named none", ind.NetworkAppearance)
 	}
-	if len(ind.AffectedPointCodes) != 0 {
-		t.Errorf("reported point codes %v for an Error that named none", ind.AffectedPointCodes)
+	if len(ind.AffectedDestinations) != 0 {
+		t.Errorf("reported destinations %v for an Error that named none", ind.AffectedDestinations)
 	}
 }
 

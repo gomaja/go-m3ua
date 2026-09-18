@@ -41,10 +41,6 @@ func TestContextlessNotifyUsesConfiguredScopeForEveryDefinedStatus(t *testing.T)
 				t.Errorf("state = %v after advisory handler, want %v", got, StateASPActive)
 			}
 			indication := <-conn.ManagementIndications()
-			if indication.RoutingContextSet {
-				t.Errorf("inferred scope was reported as an explicit Routing Context %d",
-					indication.RoutingContext)
-			}
 			if !equalNotifyScope(indication.RoutingContexts, []uint32{10, 20}) {
 				t.Errorf("inferred Routing Contexts = %v, want [10 20]", indication.RoutingContexts)
 			}
@@ -67,10 +63,6 @@ func TestNotifyPreservesEveryExplicitRoutingContext(t *testing.T) {
 				t.Fatalf("handleNotify: %v", err)
 			}
 			indication := <-conn.ManagementIndications()
-			if !indication.RoutingContextSet || indication.RoutingContext != 20 {
-				t.Errorf("compatibility RoutingContext = %d (set=%v), want 20 (set)",
-					indication.RoutingContext, indication.RoutingContextSet)
-			}
 			if !equalNotifyScope(indication.RoutingContexts, []uint32{20, 10}) {
 				t.Errorf("explicit Routing Contexts = %v, want [20 10]", indication.RoutingContexts)
 			}
@@ -187,9 +179,6 @@ func TestContextlessMultiASOverrideUsesConfiguredScopeFromTheWire(t *testing.T) 
 		t.Fatal("accepted override published no state result")
 	}
 	indication := <-conn.ManagementIndications()
-	if indication.RoutingContextSet {
-		t.Errorf("inferred scope was reported as explicit context %d", indication.RoutingContext)
-	}
 	if !equalNotifyScope(indication.RoutingContexts, []uint32{1, 2}) {
 		t.Errorf("inferred override scope = %v, want [1 2]", indication.RoutingContexts)
 	}
@@ -221,9 +210,8 @@ func TestContextlessNotifyIsAcceptedFromTheWire(t *testing.T) {
 	}
 	select {
 	case indication := <-conn.ManagementIndications():
-		if indication.RoutingContextSet || len(indication.RoutingContexts) != 0 {
-			t.Fatalf("contextless NTFY scope = %v (set=%v), want omitted",
-				indication.RoutingContexts, indication.RoutingContextSet)
+		if len(indication.RoutingContexts) != 0 {
+			t.Fatalf("contextless NTFY scope = %v, want omitted", indication.RoutingContexts)
 		}
 	default:
 		t.Fatal("accepted wire NTFY did not reach Layer Management")
