@@ -222,7 +222,7 @@ func TestTAckResendsAspActiveUntilAcked(t *testing.T) {
 	}
 
 	if err := conn.handleAspActiveAck(messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil)); err != nil {
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil)); err != nil {
 		t.Fatalf("handleAspActiveAck() error = %v", err)
 	}
 
@@ -493,7 +493,7 @@ func TestAspActiveAckWithForeignRoutingContextIsRejected(t *testing.T) {
 
 	// Configured contexts are 1 and 2; the peer answers about 99.
 	err := conn.handleAspActiveAck(messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType, params.NewRoutingContext(99), nil))
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(99), nil))
 	if !errors.Is(err, ErrInvalidRoutingContext) {
 		t.Fatalf("handleAspActiveAck() error = %v, want ErrInvalidRoutingContext", err)
 	}
@@ -515,7 +515,7 @@ func TestAspActiveAckWithoutRoutingContextIsAccepted(t *testing.T) {
 	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 
 	if err := conn.handleAspActiveAck(messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType, nil, nil)); err != nil {
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), nil, nil)); err != nil {
 		t.Errorf("handleAspActiveAck() error = %v, want nil when the peer omits Routing Context", err)
 	}
 }
@@ -527,7 +527,7 @@ func TestAspActiveAckWithIncompatibleTrafficModeIsRejected(t *testing.T) {
 
 	err := conn.handleAspActiveAck(messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeBroadcast),
-		conn.cfg.RoutingContexts, nil))
+		asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 	if !errors.Is(err, ErrUnsupportedTrafficMode) {
 		t.Errorf("handleAspActiveAck() error = %v, want ErrUnsupportedTrafficMode", err)
 	}
@@ -596,7 +596,7 @@ func FuzzAckValidation(f *testing.F) {
 		// message that was never about this ASP.
 		if err == nil {
 			ours := map[uint32]struct{}{}
-			for _, v := range conn.cfg.RoutingContexts.RoutingContexts() {
+			for _, v := range asConfigRoutingContexts(conn.cfg.ApplicationServers) {
 				ours[v] = struct{}{}
 			}
 			for _, v := range rc.RoutingContexts() {
@@ -604,9 +604,9 @@ func FuzzAckValidation(f *testing.F) {
 					t.Fatalf("accepted an ASP Active Ack naming foreign routing context %#x", v)
 				}
 			}
-			if tm.TrafficModeType() != conn.cfg.TrafficModeType.TrafficModeType() {
+			if tm.TrafficModeType() != inventoryUniformTrafficMode(conn.cfg.ApplicationServers) {
 				t.Fatalf("accepted an ASP Active Ack with traffic mode %d, ours is %d",
-					tm.TrafficModeType(), conn.cfg.TrafficModeType.TrafficModeType())
+					tm.TrafficModeType(), inventoryUniformTrafficMode(conn.cfg.ApplicationServers))
 			}
 		}
 
@@ -671,7 +671,7 @@ func TestTAckIsArmedBeforeAnImmediateAck(t *testing.T) {
 		conn.signalWriter = func(message messages.M3UA) (int, error) {
 			if _, ok := message.(*messages.AspActive); ok {
 				if err := conn.handleAspActiveAck(messages.NewAspActiveAck(
-					conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+					inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 				)); err != nil {
 					t.Fatalf("immediate ASP Active Ack: %v", err)
 				}
@@ -726,7 +726,7 @@ func TestInvalidAspActiveAckDoesNotStopTAck(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 			conn.startTAck(messages.NewAspActive(
-				conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+				inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 			), requestAspActive)
 
 			if err := conn.handleAspActiveAck(tt.ack); err == nil {
@@ -746,11 +746,11 @@ func TestInvalidAspActiveAckDoesNotStopTAck(t *testing.T) {
 func TestTAckTracksPartialAspActiveAcknowledgements(t *testing.T) {
 	conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1, 2), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(1, 2), nil,
 	), requestAspActive)
 
 	if err := conn.handleAspActiveAck(messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 	)); err != nil {
 		t.Fatalf("first partial Ack: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestTAckTracksPartialAspActiveAcknowledgements(t *testing.T) {
 	}
 
 	if err := conn.handleAspActiveAck(messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(2), nil,
 	)); err != nil {
 		t.Fatalf("final partial Ack: %v", err)
 	}
@@ -807,7 +807,7 @@ func TestTAckTracksConcurrentScopedASPTMRequests(t *testing.T) {
 			},
 			ack: func(connection *Association, routingContext uint32) error {
 				return connection.handleAspActiveAck(messages.NewAspActiveAck(
-					connection.cfg.TrafficModeType.Copy(), params.NewRoutingContext(routingContext), nil,
+					inventoryTrafficModeParam(connection.cfg.ApplicationServers), params.NewRoutingContext(routingContext), nil,
 				))
 			},
 			active: func(connection *Association, routingContext uint32) bool {
@@ -890,9 +890,9 @@ func TestInvalidAspInactiveAckDoesNotStopTAck(t *testing.T) {
 
 func TestUnsolicitedAspInactiveAckReturnsToThePreviousActiveState(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPActive, RoleASP)
-	conn.noteRoutingContextsAcked(conn.cfg.RoutingContexts)
+	conn.noteRoutingContextsAcked(asConfigRoutingContextParam(conn.cfg.ApplicationServers))
 
-	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(conn.cfg.RoutingContexts.Copy(), nil))
+	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 	if got := conn.State(); got != StateASPInactive {
 		t.Fatalf("state after unsolicited ASP Inactive Ack = %v, want ASP-INACTIVE first", got)
 	}
@@ -975,7 +975,7 @@ func TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting(t *testing.T) {
 			},
 			ack: func(conn *Association) error {
 				return conn.handleAspActiveAck(messages.NewAspActiveAck(
-					conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
+					inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(2), nil,
 				))
 			},
 			kind: requestAspActive,
@@ -1075,11 +1075,11 @@ func TestAspActiveAckMustStayWithinTheOutstandingRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := newTestConn(t, StateASPInactive, RoleASP)
 			conn.startTAck(messages.NewAspActive(
-				conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+				inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 			), requestAspActive)
 
 			err := conn.handleAspActiveAck(messages.NewAspActiveAck(
-				conn.cfg.TrafficModeType.Copy(), tt.ack, nil,
+				inventoryTrafficModeParam(conn.cfg.ApplicationServers), tt.ack, nil,
 			))
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want %v", err, tt.want)

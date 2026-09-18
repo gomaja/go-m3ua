@@ -75,7 +75,7 @@ func (c *dataFrameCapture) messages(t *testing.T) []*messages.Data {
 func newDataWriteAssociation(t *testing.T, routingContexts ...uint32) (*Association, *dataFrameCapture) {
 	t.Helper()
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContexts...)
-	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(routingContexts...))
 	capture := &dataFrameCapture{}
 	conn.dataWriter = capture.write
@@ -104,8 +104,7 @@ func TestConcurrentWriteDataCarriesEachMessagesOwnLabelAndScope(t *testing.T) {
 
 	// The configuration is shared by every association a Listener accepts, so a
 	// send that writes to it corrupts the others. Pinned by value here.
-	appearanceBefore := conn.cfg.NetworkAppearance.String()
-	contextsBefore := conn.cfg.RoutingContexts.String()
+	inventoryBefore := fmt.Sprint(conn.cfg.ApplicationServers)
 
 	const writers, perWriter = 8, 64
 	type sent struct {
@@ -215,11 +214,8 @@ func TestConcurrentWriteDataCarriesEachMessagesOwnLabelAndScope(t *testing.T) {
 		}
 	}
 
-	if got := conn.cfg.NetworkAppearance.String(); got != appearanceBefore {
-		t.Errorf("the shared Network Appearance changed from %s to %s", appearanceBefore, got)
-	}
-	if got := conn.cfg.RoutingContexts.String(); got != contextsBefore {
-		t.Errorf("the shared Routing Contexts changed from %s to %s", contextsBefore, got)
+	if got := fmt.Sprint(conn.cfg.ApplicationServers); got != inventoryBefore {
+		t.Errorf("the shared Application Server inventory changed from %s to %s", inventoryBefore, got)
 	}
 }
 
@@ -363,7 +359,7 @@ func TestWriteDataRequiresAnExactApplicationServerScope(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, test.contexts...)
-			conn.cfg.NetworkAppearance = test.appearance
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, test.appearance)
 			capture := &dataFrameCapture{}
 			conn.dataWriter = capture.write
 			if len(test.contexts) == 0 {

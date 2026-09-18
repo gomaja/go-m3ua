@@ -202,7 +202,7 @@ func TestDirectIPSPTrafficRequiresActiveApplicationServer(t *testing.T) {
 
 func TestWriteSignalDataEnforcesASPAcknowledgedScope(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(0))
 	asp.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	var writes atomic.Int32
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
@@ -653,7 +653,7 @@ func TestASPInactiveAckWaitsForUnscopedDirectData(t *testing.T) {
 	// The write has already resolved and locked the dedicated-association path.
 	// Give the directly constructed Association a static AS so ASP Inactive can name
 	// the Ack scope without changing the in-flight write's resolved scope.
-	asp.cfg.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&asp.cfg.ApplicationServers, params.NewRoutingContext(1))
 	inactiveDone := make(chan error, 1)
 	go func() { inactiveDone <- asp.handleAspInactive(messages.NewAspInactive(nil, nil)) }()
 	select {
@@ -709,7 +709,7 @@ func TestASPInactiveAckWaitsForUnscopedSSNM(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("unscoped SSNM write did not start")
 	}
-	asp.cfg.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&asp.cfg.ApplicationServers, params.NewRoutingContext(1))
 	inactiveDone := make(chan error, 1)
 	go func() { inactiveDone <- asp.handleAspInactive(messages.NewAspInactive(nil, nil)) }()
 	select {

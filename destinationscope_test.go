@@ -184,7 +184,7 @@ func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
 	if as == nil || nif == nil || dests == nil {
 		t.Fatal("registry returned a nil member")
 	}
-	appearance, set := appearanceOf(l.AssociationConfig.NetworkAppearance)
+	appearance, set := appearanceOf(inventoryNetworkAppearanceParam(l.AssociationConfig.ApplicationServers))
 	if state, known := dests.lookup(destinationKey{
 		networkAppearance:    appearance,
 		networkAppearanceSet: set,

@@ -65,7 +65,7 @@ func aspAssociationForSGP(
 	t.Helper()
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContexts...)
 	if networkAppearance != 0 {
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 	}
 	peer := identity
 	association.cfg.PeerSGP = &peer
@@ -623,7 +623,7 @@ func TestASPInventoryWithoutRoutingKeepsDataAuthorization(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	t.Cleanup(func() { _ = association.Close() })
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	association.cfg.PeerSGP = &SGPIdentity{
 		SignallingGateway:        "sg-a",
 		SignallingGatewayProcess: "sgp-a1",
@@ -732,7 +732,7 @@ func TestASPRoutesShareOneApplicationServerAcrossRoutesAndASPs(t *testing.T) {
 	join := func(sgp SignallingGatewayProcessID, networkAppearance, routingContext uint32) member {
 		t.Helper()
 		association, signals := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContext)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 		association.cfg.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: sgp}
 		association.noteRoutingContextsAcked(params.NewRoutingContext(routingContext))
 		capture := &mtpTransferCapture{}
@@ -1000,8 +1000,8 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 			// Association keeps its default receive stream until the DATA
 			// exchange below, which must not use stream 0.
 			association, _ := newTestConn(t, StateASPDown, RoleASP)
-			association.cfg.RoutingContexts = params.NewRoutingContext(1)
-			association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1))
+			setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			association.cfg.PeerSGP = &SGPIdentity{
 				SignallingGateway:        "sg-a",
 				SignallingGatewayProcess: "sgp-a1",
@@ -1205,8 +1205,8 @@ func TestRouteBindingRequiresAStaticallyBoundApplicationServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	unregistered, _ := newTestConn(t, StateASPDown, RoleASP)
-	unregistered.cfg.NetworkAppearance = nil
-	unregistered.cfg.RoutingContexts = nil
+	setInventoryNetworkAppearance(&unregistered.cfg.ApplicationServers, nil)
+	setInventoryRoutingContexts(&unregistered.cfg.ApplicationServers, nil)
 	unregistered.cfg.PeerSGP = &SGPIdentity{
 		SignallingGateway:        "sg-a",
 		SignallingGatewayProcess: "sgp-a1",

@@ -250,7 +250,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 			conn, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
 			conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 			conn.startTAck(messages.NewAspActive(
-				conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
+				inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(2), nil,
 			), requestAspActive)
 			if err := message.call(conn, params.NewRoutingContext(2)); err != nil {
 				t.Fatalf("%s for the activating RC was rejected: %v", message.name, err)
@@ -287,7 +287,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 					conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2, 3)
 					conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 					conn.startTAck(messages.NewAspActive(
-						conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
+						inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(2), nil,
 					), requestAspActive)
 
 					if err := message.call(conn, params.NewRoutingContext(scope.rcs...)); err != nil {
@@ -303,7 +303,7 @@ func TestScopedSSNMActivationWindow(t *testing.T) {
 		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2, 3)
 		conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 		conn.startTAck(messages.NewAspActive(
-			conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(2), nil,
+			inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(2), nil,
 		), requestAspActive)
 
 		if err := aspBoundSSNMScopeCases()[0].call(conn, params.NewRoutingContext(3)); err != nil {

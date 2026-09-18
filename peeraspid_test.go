@@ -134,10 +134,10 @@ func TestClosedRegistryRejectsNewASPIdentifierClaims(t *testing.T) {
 func TestOverrideNotifyNamesTheRemoteOverridingASP(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	incumbent, incumbentSent := asTestConn(t, registry, StateASPActive, 1)
-	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 
 	challenger, _ := asTestConn(t, registry, StateASPInactive, 1)
-	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&challenger.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	challenger.cfg.ASPIdentifier = params.NewAspIdentifier(0xaaaa)
 	if err := challenger.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x1234), nil)); err != nil {
 		t.Fatalf("handleAspUp() error = %v", err)

@@ -265,11 +265,7 @@ func (l *Listener) SetDestinationState(pointCode uint32, state DestinationState)
 // SetDestinationRange records an all-Routing-Context destination range in the
 // configured Network Appearance. Mask wildcards that many low-order bits.
 func (l *Listener) SetDestinationRange(pointCode uint32, mask uint8, state DestinationState) {
-	var configured *params.Param
-	if l.AssociationConfig != nil {
-		configured = l.AssociationConfig.NetworkAppearance
-	}
-	appearance, set := appearanceOf(configured)
+	appearance, set := listenerNetworkAppearance(l)
 	_ = l.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    appearance,
 		NetworkAppearanceSet: set,
@@ -325,11 +321,7 @@ func (l *Listener) ReportDestinationState(pointCode uint32, state DestinationSta
 
 // ReportDestinationRange records and synchronously reports a destination range.
 func (l *Listener) ReportDestinationRange(pointCode uint32, mask uint8, state DestinationState) error {
-	var configured *params.Param
-	if l.AssociationConfig != nil {
-		configured = l.AssociationConfig.NetworkAppearance
-	}
-	appearance, set := appearanceOf(configured)
+	appearance, set := listenerNetworkAppearance(l)
 	return l.applyDestinationRange(DestinationRange{
 		NetworkAppearance:    appearance,
 		NetworkAppearanceSet: set,
@@ -422,10 +414,10 @@ func (l *Listener) legacyDestinationScope(networkAppearance uint32, networkAppea
 		networkAppearance:    networkAppearance,
 		networkAppearanceSet: networkAppearanceSet,
 	}
-	if l.AssociationConfig == nil || l.AssociationConfig.RoutingContexts == nil {
+	if l.AssociationConfig == nil {
 		return scope
 	}
-	configured := l.AssociationConfig.RoutingContexts.RoutingContexts()
+	configured := asConfigRoutingContexts(l.AssociationConfig.ApplicationServers)
 	if len(configured) == 1 {
 		scope.routingContext = configured[0]
 		scope.routingContextSet = true
@@ -445,11 +437,7 @@ func (l *Listener) DestinationState(pointCode uint32) (DestinationState, bool) {
 	if d == nil {
 		return DestinationUnavailable, false
 	}
-	var configured *params.Param
-	if l.AssociationConfig != nil {
-		configured = l.AssociationConfig.NetworkAppearance
-	}
-	appearance, set := appearanceOf(configured)
+	appearance, set := listenerNetworkAppearance(l)
 	scope := l.legacyDestinationScope(appearance, set)
 	scope.pointCode = pointCode
 	return d.lookup(scope)
@@ -501,11 +489,7 @@ func (l *Listener) DestinationRanges() []DestinationRange {
 	if d == nil {
 		return []DestinationRange{}
 	}
-	var configured *params.Param
-	if l.AssociationConfig != nil {
-		configured = l.AssociationConfig.NetworkAppearance
-	}
-	appearance, set := appearanceOf(configured)
+	appearance, set := listenerNetworkAppearance(l)
 	return d.rangesForScope(l.legacyDestinationScope(appearance, set))
 }
 

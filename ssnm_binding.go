@@ -45,8 +45,8 @@ func (c *Association) ssnmWireScope(networkAppearance, routingContext *params.Pa
 // Association's own configuration supplies what the message left out.
 func (c *Association) ssnmASKeys(scope WireScope) []ASKey {
 	appearance, appearanceSet := scope.NetworkAppearance, scope.NetworkAppearanceSet
-	if !appearanceSet && c != nil && c.cfg != nil {
-		appearance, appearanceSet = appearanceOf(c.cfg.NetworkAppearance)
+	if !appearanceSet {
+		appearance, appearanceSet = c.outboundNetworkAppearance()
 	}
 	routingContexts := scope.RoutingContexts
 	routingContextSet := scope.RoutingContextSet

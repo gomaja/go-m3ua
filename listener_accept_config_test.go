@@ -51,7 +51,7 @@ func TestConcurrentAcceptsUseSelectedAssociationConfig(t *testing.T) {
 
 	for index, ip := range []string{"127.0.0.2", "127.0.0.3"} {
 		aspConfig := mcASPConfig(0xCC000001 + uint32(index))
-		aspConfig.RoutingContexts = params.NewRoutingContext(1)
+		setInventoryRoutingContexts(&aspConfig.ApplicationServers, params.NewRoutingContext(1))
 		aspConfig.EstablishTimeout = 5 * time.Second
 		aspConfig.TAck = 100 * time.Millisecond
 		aspConfig.TAckRetries = 5
@@ -72,7 +72,7 @@ func TestConcurrentAcceptsUseSelectedAssociationConfig(t *testing.T) {
 			if result.err != nil {
 				t.Fatalf("Accept %d: %v", i, result.err)
 			}
-			networkAppearance := result.association.cfg.NetworkAppearance.NetworkAppearance()
+			networkAppearance := inventoryUniformNetworkAppearance(result.association.cfg.ApplicationServers)
 			seenNetworkAppearance[networkAppearance] = result.association
 		case <-time.After(15 * time.Second):
 			t.Fatal("Accept did not return for both peers")
@@ -159,7 +159,7 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 	}()
 
 	rejectedASPConfig := mcASPConfig(0xDD000001)
-	rejectedASPConfig.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&rejectedASPConfig.ApplicationServers, params.NewRoutingContext(1))
 	if rejected, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), listenerAddr, rejectedASPConfig); err == nil {
 		_ = rejected.Close()
 		t.Fatal("Dial succeeded even though the SGP selector rejected the association")
@@ -189,7 +189,7 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 		accepted <- acceptResult{association: association, err: err}
 	}()
 	acceptedASPConfig := mcASPConfig(0xDD000002)
-	acceptedASPConfig.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&acceptedASPConfig.ApplicationServers, params.NewRoutingContext(1))
 	aspAssociation, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.3"), listenerAddr, acceptedASPConfig)
 	if err != nil {
 		t.Fatalf("second Dial after selector rejection: %v", err)
@@ -204,7 +204,7 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 		if result.err != nil {
 			t.Fatalf("second Accept after selector rejection: %v", result.err)
 		}
-		if got := result.association.cfg.NetworkAppearance.NetworkAppearance(); got != 30 {
+		if got := inventoryUniformNetworkAppearance(result.association.cfg.ApplicationServers); got != 30 {
 			t.Fatalf("second accepted Network Appearance = %d, want selected config 30", got)
 		}
 	case <-time.After(10 * time.Second):
@@ -237,8 +237,8 @@ func TestAcceptReturnsSCTPListenerFailureDirectly(t *testing.T) {
 
 func selectedAcceptConfig(networkAppearance uint32, heartbeatInterval time.Duration, compatibility CompatibilityPolicy) *AssociationConfig {
 	config := mcSGPConfig()
-	config.RoutingContexts = params.NewRoutingContext(1)
-	config.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(1))
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 	config.HeartbeatInfo = NewHeartbeatInfo(heartbeatInterval, 2*heartbeatInterval)
 	config.EstablishTimeout = 5 * time.Second
 	config.TAck = 100 * time.Millisecond

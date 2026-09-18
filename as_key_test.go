@@ -13,13 +13,13 @@ func TestApplicationServersKeyIncludesNetworkAppearance(t *testing.T) {
 	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
 	first.as = registry
 	first.noteRoutingContextsActive([]uint32{1})
 	registry.aspStateChanged(first, StateASPActive)
 
 	second, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(20))
 	second.as = registry
 	second.noteRoutingContextsActive([]uint32{1})
 	registry.aspStateChanged(second, StateASPActive)
@@ -39,13 +39,13 @@ func TestApplicationServersSupportContextlessASKeysPerNetworkAppearance(t *testi
 	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
 	first.as = registry
 	first.noteRoutingContextsActive(nil)
 	registry.aspStateChanged(first, StateASPActive)
 
 	second, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(20))
 	second.as = registry
 	second.noteRoutingContextsActive(nil)
 	registry.aspStateChanged(second, StateASPActive)
@@ -65,16 +65,16 @@ func TestContextlessASRejectsIncompatibleTrafficModeForSameASKey(t *testing.T) {
 	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	first.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryTrafficModeType(&first.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	first.as = registry
 	if err := first.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
 		t.Fatalf("first contextless ASP Active: %v", err)
 	}
 
 	second, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	second.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryTrafficModeType(&second.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeLoadshare))
 	second.as = registry
 	err := second.handleAspActive(messages.NewAspActive(nil, nil, nil))
 	if !errors.Is(err, ErrUnsupportedTrafficMode) {
@@ -86,16 +86,16 @@ func TestContextlessASAllowsDifferentNetworkAppearanceTrafficModes(t *testing.T)
 	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	first.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryTrafficModeType(&first.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	first.as = registry
 	if err := first.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
 		t.Fatalf("first contextless ASP Active: %v", err)
 	}
 
 	second, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
-	second.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(20))
+	setInventoryTrafficModeType(&second.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeLoadshare))
 	second.as = registry
 	if err := second.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
 		t.Fatalf("second contextless ASP Active in another Network Appearance: %v", err)
@@ -132,8 +132,8 @@ func TestContextlessOverrideDisplacesOnlySameASKey(t *testing.T) {
 	registry := newApplicationServers(DefaultRecoveryTimer)
 
 	first, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	first.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryTrafficModeType(&first.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	first.as = registry
 	if err := first.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
 		t.Fatalf("first contextless Override ASP Active: %v", err)
@@ -143,8 +143,8 @@ func TestContextlessOverrideDisplacesOnlySameASKey(t *testing.T) {
 	}
 
 	third, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
-	third.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
-	third.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryNetworkAppearance(&third.cfg.ApplicationServers, params.NewNetworkAppearance(20))
+	setInventoryTrafficModeType(&third.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	third.as = registry
 	if err := third.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
 		t.Fatalf("third contextless Override ASP Active in another Network Appearance: %v", err)
@@ -154,8 +154,8 @@ func TestContextlessOverrideDisplacesOnlySameASKey(t *testing.T) {
 	}
 
 	second, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	second.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryTrafficModeType(&second.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	second.as = registry
 	if err := second.handleAspActive(messages.NewAspActive(nil, nil, nil)); err != nil {
 		t.Fatalf("second contextless Override ASP Active: %v", err)

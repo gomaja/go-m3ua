@@ -330,7 +330,7 @@ func TestWriteSignalUsesTheDatasOwnSLS(t *testing.T) {
 	}
 
 	data := messages.NewData(
-		aspAssociation.cfg.NetworkAppearance.Copy(),
+		inventoryNetworkAppearanceParam(aspAssociation.cfg.ApplicationServers),
 		params.NewRoutingContext(1),
 		params.NewProtocolData(
 			0x11111111, 0x22222222, params.ServiceIndSCCP, 2, 3,

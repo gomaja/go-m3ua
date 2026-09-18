@@ -142,9 +142,9 @@ func integrationIPSPConfig(_, _ uint32, initiateASPSM, initiateASPTM bool) *Asso
 		ExchangeModel: IPSPExchangeSingle,
 	}
 	config.ASPProcedures = ipspInitiationPolicy(initiateASPSM, initiateASPTM)
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
-	config.NetworkAppearance = params.NewNetworkAppearance(7)
-	config.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeLoadshare))
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(7))
+	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(1))
 	config.EstablishTimeout = 10 * time.Second
 	config.TAck = 100 * time.Millisecond
 	config.TAckRetries = 10

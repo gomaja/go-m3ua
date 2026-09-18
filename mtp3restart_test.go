@@ -537,7 +537,7 @@ func TestMTP3RestartStatusPrecedesAspActiveAck(t *testing.T) {
 	sent.reset()
 
 	if err := asp.handleAspActive(messages.NewAspActive(
-		asp.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+		inventoryTrafficModeParam(asp.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 	)); err != nil {
 		t.Fatalf("handle ASP Active: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestMTP3RestartPreAckWriteFailureWithholdsAck(t *testing.T) {
 	}
 
 	err = asp.handleAspActive(messages.NewAspActive(
-		asp.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+		inventoryTrafficModeParam(asp.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 	))
 	if !errors.Is(err, failure) {
 		t.Fatalf("handle ASP Active error = %v, want injected failure", err)
@@ -714,7 +714,9 @@ func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applic
 	t.Helper()
 	listener, applicationServer, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, routingContexts,
-		func(config *distributionFixtureConfig) { config.NetworkAppearance = params.NewNetworkAppearance(7) },
+		func(config *distributionFixtureConfig) {
+			setInventoryNetworkAppearance(&config.AssociationConfig.ApplicationServers, params.NewNetworkAppearance(7))
+		},
 	)
 	restartAttachConn(listener, asp)
 	return listener, applicationServer, asp, sent
@@ -723,7 +725,7 @@ func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applic
 func restartAttachConn(listener *Listener, connection *Association) {
 	connection.listener = listener
 	connection.mtp3Restarts = listener.mtp3Restarts
-	connection.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
+	setInventoryNetworkAppearance(&connection.cfg.ApplicationServers, inventoryNetworkAppearanceParam(listener.AssociationConfig.ApplicationServers))
 	if listener.destinations == nil {
 		listener.destinations = newDestinations()
 	}

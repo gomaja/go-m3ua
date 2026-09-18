@@ -651,15 +651,20 @@ func (sgp aspSGPConfig) servesASKey(key ASKey) bool {
 }
 
 func associationConfigASKeys(config *AssociationConfig) []ASKey {
-	if config == nil || config.RoutingContexts == nil || len(config.RoutingContexts.RoutingContexts()) == 0 {
-		return []ASKey{contextlessASKeyForConfig(config)}
+	if config == nil {
+		return []ASKey{{}}
 	}
-	routingContexts := config.RoutingContexts.RoutingContexts()
-	keys := make([]ASKey, 0, len(routingContexts))
-	for _, routingContext := range routingContexts {
-		keys = append(keys, asKeyForConfigRoutingContext(config, routingContext))
+	return inventoryASKeys(config.ApplicationServers)
+}
+
+// inventoryASKeys returns the Application Servers one inventory declares. An
+// empty inventory declares the contextless Application Server of RFC 4666
+// Section 3.6.1 with nothing configured for it.
+func inventoryASKeys(servers []ASConfig) []ASKey {
+	if len(servers) == 0 {
+		return []ASKey{{}}
 	}
-	return keys
+	return asConfigASKeys(servers)
 }
 
 func (r *aspRoutes) destinationStatus(mtpRouteID MTPRouteID, pointCode uint32, mask uint8) (aspDestinationStatus, bool) {
@@ -1243,7 +1248,7 @@ func aspRouteASMatchesStatus(association *Association, key ASKey, status *Destin
 	networkAppearance := status.NetworkAppearance
 	networkAppearanceSet := status.NetworkAppearanceSet
 	if !networkAppearanceSet && association.cfg != nil {
-		networkAppearance, networkAppearanceSet = appearanceOf(association.cfg.NetworkAppearance)
+		networkAppearance, networkAppearanceSet = asConfigNetworkAppearance(association.cfg.ApplicationServers)
 	}
 	if key.NetworkAppearanceSet != networkAppearanceSet || key.NetworkAppearance != networkAppearance {
 		return false

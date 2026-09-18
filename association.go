@@ -6,7 +6,6 @@ package m3ua
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -773,30 +772,48 @@ func (c *Association) inboundDataActive() bool {
 	return c.State() == StateASPActive
 }
 
-func (c *Association) outboundNetworkAppearance() *params.Param {
-	if c == nil || c.cfg == nil {
-		return nil
+// contextlessASKey is the contextless Application Server of RFC 4666 Section
+// 3.6.1 as this Association's inventory declares it. An inventory that declares
+// only Routing-Context-scoped Application Servers still answers, with the
+// Network Appearance they share, because a message may name that scope before
+// registration has assigned a Routing Context.
+func (c *Association) contextlessASKey(local bool) ASKey {
+	servers := c.applicationServerInventory(local)
+	if key, declared := asConfigContextlessASKey(servers); declared {
+		return key
 	}
-	if c.isIPSPDoubleExchange() {
-		if c.cfg.IPSP.TrafficToPeer == nil {
-			return nil
-		}
-		return c.cfg.IPSP.TrafficToPeer.NetworkAppearance
-	}
-	return c.cfg.NetworkAppearance
+	var key ASKey
+	key.NetworkAppearance, key.NetworkAppearanceSet = asConfigNetworkAppearance(servers)
+	return key
 }
 
-func (c *Association) localNetworkAppearance() *params.Param {
-	if c == nil || c.cfg == nil {
-		return nil
+// staticASKeyForRoutingContext is the Application Server one Routing Context
+// belongs to by configuration: the declaring entry's exact ASKey, or that
+// context in the Network Appearance the inventory shares when no entry declares
+// it.
+func (c *Association) staticASKeyForRoutingContext(rtCtx uint32, local bool) ASKey {
+	servers := c.applicationServerInventory(local)
+	if key, declared := asConfigASKeyFor(servers, rtCtx); declared {
+		return key
 	}
-	if c.isIPSPDoubleExchange() {
-		if c.cfg.IPSP.TrafficToLocal == nil {
-			return nil
-		}
-		return c.cfg.IPSP.TrafficToLocal.NetworkAppearance
-	}
-	return c.cfg.NetworkAppearance
+	key := routingContextASKey(rtCtx)
+	key.NetworkAppearance, key.NetworkAppearanceSet = asConfigNetworkAppearance(servers)
+	return key
+}
+
+// outboundNetworkAppearance is the Network Appearance this Association's
+// peer-directed Application Servers share, for the messages that carry one for
+// the whole Association. It returns a value rather than a parameter because
+// every outbound DATA asks it and building one per message would allocate.
+func (c *Association) outboundNetworkAppearance() (uint32, bool) {
+	return asConfigNetworkAppearance(c.applicationServerInventory(false))
+}
+
+// localNetworkAppearance is outboundNetworkAppearance for the inventory
+// governing traffic towards this node, which an IPSP Double Exchange keeps
+// separate under RFC 4666 Section 5.6.2.
+func (c *Association) localNetworkAppearance() (uint32, bool) {
+	return asConfigNetworkAppearance(c.applicationServerInventory(true))
 }
 
 // WriteSignal writes an M3UA message on the SCTP association.
@@ -1040,8 +1057,8 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 		if state != StateASPActive {
 			return nil, ErrNotEstablished
 		}
-		if c.role == RoleSGP && c.cfg != nil && c.cfg.RoutingContexts != nil &&
-			len(c.cfg.RoutingContexts.RoutingContexts()) > 0 {
+		if c.role == RoleSGP && c.cfg != nil &&
+			len(asConfigRoutingContexts(c.cfg.ApplicationServers)) > 0 {
 			return nil, ErrNoConfiguredAS
 		}
 		if c.role == RoleSGP {
@@ -1512,13 +1529,7 @@ func (c *Association) staticallyConfiguredRoutingContexts() []uint32 {
 		}
 		c.muAuthorizedRCs.RUnlock()
 	}
-	if c.isIPSPDoubleExchange() {
-		return routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToPeer)
-	}
-	if c.cfg == nil || c.cfg.RoutingContexts == nil {
-		return nil
-	}
-	return append([]uint32(nil), c.cfg.RoutingContexts.RoutingContexts()...)
+	return asConfigRoutingContexts(c.applicationServerInventory(false))
 }
 
 func (c *Association) configuredLocalRoutingContexts() []uint32 {
@@ -1527,18 +1538,11 @@ func (c *Association) configuredLocalRoutingContexts() []uint32 {
 	}
 	if c.isIPSPDoubleExchange() {
 		return appendRoutingContexts(
-			routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal),
+			asConfigRoutingContexts(c.applicationServerInventory(true)),
 			c.dynamicRoutingContexts(true),
 		)
 	}
 	return c.configuredRoutingContexts()
-}
-
-func routingContextsFromIPSPTrafficConfig(config *IPSPTrafficConfig) []uint32 {
-	if config == nil || config.RoutingContexts == nil {
-		return nil
-	}
-	return append([]uint32(nil), config.RoutingContexts.RoutingContexts()...)
 }
 
 func (c *Association) configuredRoutingContextParam() *params.Param {
@@ -1572,11 +1576,7 @@ func (c *Association) configuredASKeys() []ASKey {
 	if len(routingContexts) > 0 && c.hasStaticallyConfiguredContextlessAS() {
 		// RFC 4666 Sections 4.4.1 and 4.3.4.3 add the dynamically registered
 		// AS to this Association; they do not replace its configured AS.
-		appearance, appearanceSet := appearanceOf(c.applicationServerNetworkAppearance())
-		keys = append([]ASKey{{
-			NetworkAppearance:    appearance,
-			NetworkAppearanceSet: appearanceSet,
-		}}, keys...)
+		keys = append([]ASKey{c.contextlessASKey(false)}, keys...)
 	}
 	return uniqueASKeys(keys)
 }
@@ -1589,7 +1589,6 @@ func (c *Association) staticallyConfiguredASKeys() []ASKey {
 	if len(routingContexts) == 0 {
 		return nil
 	}
-	appearance, appearanceSet := appearanceOf(c.applicationServerNetworkAppearance())
 	keys := make([]ASKey, 0, len(routingContexts))
 	seen := make(map[uint32]struct{}, len(routingContexts))
 	for _, routingContext := range routingContexts {
@@ -1597,12 +1596,7 @@ func (c *Association) staticallyConfiguredASKeys() []ASKey {
 			continue
 		}
 		seen[routingContext] = struct{}{}
-		keys = append(keys, ASKey{
-			NetworkAppearance:    appearance,
-			NetworkAppearanceSet: appearanceSet,
-			RoutingContext:       routingContext,
-			RoutingContextSet:    true,
-		})
+		keys = append(keys, c.staticASKeyForRoutingContext(routingContext, false))
 	}
 	return keys
 }
@@ -1629,9 +1623,8 @@ func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey
 	if c == nil {
 		return nil
 	}
-	appearance, appearanceSet := appearanceOf(c.applicationServerNetworkAppearance())
 	if len(routingContexts) == 0 {
-		return []ASKey{{NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet}}
+		return []ASKey{c.contextlessASKey(false)}
 	}
 	keys := make([]ASKey, 0, len(routingContexts))
 	seen := make(map[ASKey]struct{}, len(routingContexts))
@@ -1644,12 +1637,7 @@ func (c *Association) asKeysForRoutingContexts(routingContexts []uint32) []ASKey
 			keys = append(keys, dynamic)
 			continue
 		}
-		key := ASKey{
-			NetworkAppearance:    appearance,
-			NetworkAppearanceSet: appearanceSet,
-			RoutingContext:       routingContext,
-			RoutingContextSet:    true,
-		}
+		key := c.staticASKeyForRoutingContext(routingContext, false)
 		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
@@ -1852,10 +1840,6 @@ func (c *Association) resolveNetworkAppearanceScope(
 	routingContext *params.Param,
 	local bool,
 ) (*params.Param, bool, error) {
-	configured := c.outboundNetworkAppearance()
-	if local {
-		configured = c.localNetworkAppearance()
-	}
 	var contexts []uint32
 	if routingContext != nil {
 		contexts = routingContext.RoutingContexts()
@@ -1866,17 +1850,21 @@ func (c *Association) resolveNetworkAppearanceScope(
 		}
 	}
 	if len(contexts) == 0 {
-		return configured.Copy(), false, nil
+		contextless := c.contextlessASKey(local)
+		if !contextless.NetworkAppearanceSet {
+			return nil, false, nil
+		}
+		return params.NewNetworkAppearance(contextless.NetworkAppearance), false, nil
 	}
 
-	configuredValue, configuredSet := appearanceOf(configured)
 	var resolvedValue uint32
 	var resolvedSet bool
 	var allNetworkAppearances bool
 	resolved := false
 	for _, routingContextValue := range contexts {
-		value := configuredValue
-		valueSet := configuredSet
+		configured := c.staticASKeyForRoutingContext(routingContextValue, local)
+		value := configured.NetworkAppearance
+		valueSet := configured.NetworkAppearanceSet
 		all := false
 		if key, ok := c.dynamicASKey(routingContextValue, local); ok {
 			value = key.NetworkAppearance
@@ -1906,19 +1894,6 @@ func (c *Association) resolveNetworkAppearanceScope(
 	return params.NewNetworkAppearance(resolvedValue), false, nil
 }
 
-func (c *Association) applicationServerNetworkAppearance() *params.Param {
-	if c == nil || c.cfg == nil {
-		return nil
-	}
-	if c.isIPSPDoubleExchange() {
-		if c.cfg.IPSP.TrafficToPeer == nil {
-			return nil
-		}
-		return c.cfg.IPSP.TrafficToPeer.NetworkAppearance
-	}
-	return c.cfg.NetworkAppearance
-}
-
 func (c *Association) resolveASPAuthorization(identifier *params.Param) error {
 	identifierSet := identifier != nil
 	identifierValue := uint32(0)
@@ -1939,8 +1914,8 @@ func (c *Association) resolveASPAuthorization(identifier *params.Param) error {
 	c.muAuthorizedRCs.RUnlock()
 
 	configured := []uint32(nil)
-	if c.cfg != nil && c.cfg.RoutingContexts != nil {
-		configured = append(configured, c.cfg.RoutingContexts.RoutingContexts()...)
+	if c.cfg != nil {
+		configured = asConfigRoutingContexts(c.cfg.ApplicationServers)
 	}
 	authorized := append([]uint32(nil), configured...)
 	explicitAuthorization := c.cfg != nil && c.cfg.AuthorizeASP != nil
@@ -2213,31 +2188,7 @@ func (c *Association) staticRoutingContextConfigured(rtCtx uint32) bool {
 		}
 		c.muAuthorizedRCs.RUnlock()
 	}
-	if c.isIPSPDoubleExchange() {
-		if c.cfg.IPSP.TrafficToPeer == nil {
-			return false
-		}
-		return routingContextParamCarries(c.cfg.IPSP.TrafficToPeer.RoutingContexts, rtCtx)
-	}
-	if c.cfg == nil || c.cfg.RoutingContexts == nil {
-		return false
-	}
-	return routingContextParamCarries(c.cfg.RoutingContexts, rtCtx)
-}
-
-// routingContextParamCarries reports whether a Routing Context parameter names
-// rtCtx, scanning the serialized value directly: decoding it into a slice with
-// RoutingContexts only to answer membership would allocate on every send.
-func routingContextParamCarries(p *params.Param, rtCtx uint32) bool {
-	if p == nil || p.Tag != params.RoutingContext || len(p.Data)%4 != 0 {
-		return false
-	}
-	for offset := 0; offset+4 <= len(p.Data); offset += 4 {
-		if binary.BigEndian.Uint32(p.Data[offset:offset+4]) == rtCtx {
-			return true
-		}
-	}
-	return false
+	return asConfigCarriesRoutingContext(c.applicationServerInventory(false), rtCtx)
 }
 
 func (c *Association) outboundRoutingContextActive(rtCtx uint32) bool {
@@ -2561,7 +2512,7 @@ func (c *Association) hasConfiguredLocalContextlessAS() bool {
 	if !c.hasLocalIPSPTrafficDirection() {
 		return false
 	}
-	return len(routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal)) == 0
+	return len(asConfigRoutingContexts(c.applicationServerInventory(true))) == 0
 }
 
 // activeForRoutingContext reports whether this ASP is ASP-ACTIVE in the
@@ -2657,7 +2608,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	}
 	if state == StateASPActive &&
 		c.aspProcedureMode(aspProcedureInactive) == ASPProcedureAutomatic {
-		routingContext := c.cfg.RoutingContexts
+		routingContext := asConfigRoutingContextParam(c.cfg.ApplicationServers)
 		if c.isIPSPDoubleExchange() {
 			routingContext = c.configuredLocalRoutingContextParam()
 		}

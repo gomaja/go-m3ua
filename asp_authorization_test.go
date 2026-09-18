@@ -136,7 +136,7 @@ func TestEmptyASPAuthorizationDoesNotJoinContextlessApplicationServer(t *testing
 	}
 
 	authorized, _ := asTestConn(t, registry, StateASPDown, 1)
-	authorized.cfg.RoutingContexts = nil
+	setInventoryRoutingContexts(&authorized.cfg.ApplicationServers, nil)
 	if err := authorized.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(101), nil)); err != nil {
 		t.Fatalf("contextless ASP Up: %v", err)
 	}

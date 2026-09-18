@@ -154,8 +154,8 @@ func TestRKMRegistrationDoesNotActivateNewApplicationServer(t *testing.T) {
 	defer func() { _ = endpoint.Close() }()
 
 	config := NewAssociationConfig()
-	config.NetworkAppearance = params.NewNetworkAppearance(10)
-	config.RoutingContexts = params.NewRoutingContext(5000)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(5000))
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
 	association.as = endpoint.as
@@ -231,7 +231,7 @@ func TestRKMRegistrationAfterUnscopedActivationRequiresNewASPActive(t *testing.T
 	defer func() { _ = endpoint.Close() }()
 
 	config := NewAssociationConfig()
-	config.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
 	association.as = endpoint.as
@@ -364,8 +364,8 @@ func TestRKMAllocatorAvoidsConfiguredApplicationServerRoutingContexts(t *testing
 			defer func() { _ = endpoint.Close() }()
 
 			config := NewAssociationConfig()
-			config.NetworkAppearance = params.NewNetworkAppearance(10)
-			config.RoutingContexts = params.NewRoutingContext(1)
+			setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
+			setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(1))
 			association := newAssociation(RoleSGP, config)
 			association.endpoint = endpoint
 			association.as = endpoint.as
@@ -623,7 +623,7 @@ func TestRKMResponderAppliesImpliedAssociationNetworkAppearance(t *testing.T) {
 	}
 	defer func() { _ = endpoint.Close() }()
 	config := NewAssociationConfig()
-	config.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
 	association.as = endpoint.as
@@ -668,7 +668,7 @@ func TestRKMResponderAppliesImpliedAssociationNetworkAppearance(t *testing.T) {
 
 func TestRKMRequesterUsesImpliedNetworkAppearanceWithoutAddingItToRequest(t *testing.T) {
 	config := NewAssociationConfig()
-	config.NetworkAppearance = params.NewNetworkAppearance(20)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(20))
 	association := newAssociation(RoleASP, config)
 	association.muState.Lock()
 	association.state = StateASPInactive
@@ -745,7 +745,7 @@ func TestRegisteredRoutingKeyTrafficModeOverridesAssociationDefault(t *testing.T
 	defer func() { _ = endpoint.Close() }()
 
 	config := NewAssociationConfig()
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
+	setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeBroadcast))
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
 	association.as = endpoint.as
@@ -802,7 +802,7 @@ func TestRequestedTrafficModeAppliesToProvisionedRoutingKeyWithoutConfiguredMode
 	}
 	defer func() { _ = endpoint.Close() }()
 	config := NewAssociationConfig()
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
+	setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeBroadcast))
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
 	association.as = endpoint.as
@@ -1665,8 +1665,8 @@ func TestRKMRequesterRejectsContradictoryPreviouslyDeliveredRegistrationResult(t
 func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingScope(t *testing.T) {
 	t.Run("Static", func(t *testing.T) {
 		config := NewAssociationConfig()
-		config.NetworkAppearance = params.NewNetworkAppearance(10)
-		config.RoutingContexts = params.NewRoutingContext(77)
+		setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
+		setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(77))
 		association := newAssociation(RoleASP, config)
 		association.muState.Lock()
 		association.state = StateASPInactive
@@ -1771,9 +1771,9 @@ func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingTrafficMode
 
 	t.Run("Static", func(t *testing.T) {
 		config := NewAssociationConfig()
-		config.NetworkAppearance = params.NewNetworkAppearance(10)
-		config.RoutingContexts = params.NewRoutingContext(77)
-		config.TrafficModes = map[uint32]uint32{77: params.TrafficModeOverride}
+		setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
+		setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(77))
+		setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{77: params.TrafficModeOverride})
 		association := newAssociation(RoleASP, config)
 		association.muState.Lock()
 		association.state = StateASPInactive
@@ -3013,7 +3013,7 @@ func TestLocalRoutingKeyIdentifierIssuedClassificationWraps(t *testing.T) {
 
 func TestDynamicRoutingKeyNetworkAppearanceScopesInboundSSNM(t *testing.T) {
 	association := newAssociation(RoleSGP, NewAssociationConfig())
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	routingKey := testRoutingKey(10, 100, 3)
 	association.addDynamicASKey(ASKey{
 		NetworkAppearance:    10,
@@ -3036,7 +3036,7 @@ func TestDynamicRoutingKeyNetworkAppearanceScopesInboundSSNM(t *testing.T) {
 
 func TestDynamicRoutingKeyNetworkAppearanceScopesMultiContextSSNM(t *testing.T) {
 	association := newAssociation(RoleSGP, NewAssociationConfig())
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	for _, routingContext := range []uint32{9, 10} {
 		association.addDynamicASKey(ASKey{
 			NetworkAppearance:    10,
@@ -4018,8 +4018,8 @@ func TestRKMResponderDeregistrationPreservesStaticApplicationServerMembership(t 
 	}
 	defer func() { _ = endpoint.Close() }()
 	config := NewAssociationConfig()
-	config.NetworkAppearance = params.NewNetworkAppearance(10)
-	config.RoutingContexts = params.NewRoutingContext(7)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(7))
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
 	association.as = endpoint.as
@@ -4061,8 +4061,8 @@ func TestRKMResponderDeregistrationPreservesStaticApplicationServerMembership(t 
 func TestRKMRequesterDeregistrationPreservesStaticApplicationServerMembership(t *testing.T) {
 	applicationServers := newApplicationServers(time.Hour)
 	config := NewAssociationConfig()
-	config.NetworkAppearance = params.NewNetworkAppearance(10)
-	config.RoutingContexts = params.NewRoutingContext(7)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(7))
 	association := newAssociation(RoleASP, config)
 	association.as = applicationServers
 	key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 7, RoutingContextSet: true}

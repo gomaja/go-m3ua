@@ -21,7 +21,7 @@ import (
 func newTestConnWithContexts(t *testing.T, state State, role Role, rtCtxs ...uint32) (*Association, *[]messages.M3UA) {
 	t.Helper()
 	conn, sent := newTestConn(t, state, role)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(rtCtxs...)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(rtCtxs...))
 	// DATA must not go out on stream 0 (Section 1.4.7 rule 1), so give the
 	// association a data stream to use and record arrivals on it.
 	conn.maxMessageStreamID = 4
@@ -56,7 +56,7 @@ func firstErr(c *Association) error {
 func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 	t.Run("the named context is the one sent", func(t *testing.T) {
 		conn, capture := newDataWriteAssociation(t, 7, 8, 9)
-		conn.cfg.NetworkAppearance = nil
+		setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, nil)
 		for _, routingContext := range []uint32{7, 8, 9} {
 			if _, err := conn.WriteData(DataRequest{
 				AS:           ASKey{RoutingContext: routingContext, RoutingContextSet: true},
@@ -79,7 +79,7 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 
 	t.Run("a message that names no context on a multi-flow association is refused", func(t *testing.T) {
 		conn, capture := newDataWriteAssociation(t, 7, 8, 9)
-		conn.cfg.NetworkAppearance = nil
+		setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, nil)
 		_, err := conn.WriteData(DataRequest{ProtocolData: testProtocolData([]byte("x"))})
 		requireDataWriteError(t, err, DataNotSent, ErrMissingRoutingContext)
 		if capture.submissions() != 0 {
@@ -89,7 +89,7 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 
 	t.Run("naming an unconfigured context is refused", func(t *testing.T) {
 		conn, capture := newDataWriteAssociation(t, 7, 8)
-		conn.cfg.NetworkAppearance = nil
+		setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, nil)
 		_, err := conn.WriteData(DataRequest{
 			AS:           ASKey{RoutingContext: 11, RoutingContextSet: true},
 			ProtocolData: testProtocolData([]byte("x")),
@@ -111,7 +111,7 @@ func TestDataCarriesTheOneRoutingContextIdentifyingTheFlow(t *testing.T) {
 // that names no context at all.
 func TestDataOmitsAnEmptyRoutingContext(t *testing.T) {
 	conn, capture := newDataWriteAssociation(t)
-	conn.cfg.NetworkAppearance = nil
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, nil)
 	conn.noteRoutingContextsAcked(nil)
 	if _, err := conn.WriteData(DataRequest{ProtocolData: testProtocolData([]byte("x"))}); err != nil {
 		t.Fatalf("WriteData on a contextless association: %v", err)
@@ -231,7 +231,7 @@ func TestDataWithAnUnconfiguredNetworkAppearanceIsRejected(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
-			conn.cfg.NetworkAppearance = tt.configured
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, tt.configured)
 
 			conn.handleData(context.Background(), messages.NewData(
 				params.NewNetworkAppearance(tt.peer),
@@ -289,7 +289,7 @@ func TestDataPreservesNetworkAppearanceAndPresence(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := newTestConnWithContexts(t, StateASPActive, tt.role, 7)
-			conn.cfg.NetworkAppearance = tt.configured
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, tt.configured)
 			conn.handleData(context.Background(), messages.NewData(
 				tt.peer,
 				params.NewRoutingContext(7),
@@ -328,7 +328,7 @@ func TestDataNetworkAppearanceValidationMatrix(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
-			conn.cfg.NetworkAppearance = tt.configured
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, tt.configured)
 			conn.handleData(context.Background(), messages.NewData(
 				tt.peer,
 				params.NewRoutingContext(7),
@@ -358,7 +358,7 @@ func TestMalformedDataNetworkAppearanceIsAParameterFieldError(t *testing.T) {
 	for _, size := range []int{0, 1, 3, 5, 8} {
 		t.Run(string(rune('0'+size)), func(t *testing.T) {
 			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
-			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			conn.handleData(context.Background(), messages.NewData(
 				params.NewParam(int(params.NetworkAppearance), make([]byte, size)),
 				params.NewRoutingContext(7),
@@ -397,7 +397,7 @@ func FuzzDataNetworkAppearance(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, appearanceData []byte) {
 		conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 7)
-		conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		conn.handleData(context.Background(), messages.NewData(
 			params.NewParam(int(params.NetworkAppearance), appearanceData),
 			params.NewRoutingContext(7),

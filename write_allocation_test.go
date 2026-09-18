@@ -38,7 +38,7 @@ func newSendAllocationAssociation(t *testing.T) *Association {
 
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
-	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	conn.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
 		return len(data), nil
 	}

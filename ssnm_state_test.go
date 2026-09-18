@@ -67,7 +67,7 @@ func attachSSNMAssociation(
 ) *Association {
 	t.Helper()
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContexts...)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 	peer := identity
 	association.cfg.PeerSGP = &peer
 	association.noteRoutingContextsAcked(params.NewRoutingContext(routingContexts...))

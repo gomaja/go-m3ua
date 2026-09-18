@@ -206,7 +206,7 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 		// Override is the mode an "Alternate ASP Active" notification arises in
 		// (Section 3.7.1: "the ASP takes over all traffic in an Application
 		// Server"), and the Ack's mode is checked against the configured one.
-		asp.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryTrafficModeType(&asp.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
 			params.NewTrafficModeType(params.TrafficModeOverride),
 			params.NewRoutingContext(1, 2), nil)); err != nil {
@@ -323,7 +323,7 @@ func TestTheDispatcherAppliesTheOverrideScope(t *testing.T) {
 	activeASP := func(t *testing.T) *Association {
 		t.Helper()
 		asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
-		asp.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryTrafficModeType(&asp.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
 			params.NewTrafficModeType(params.TrafficModeOverride),
 			params.NewRoutingContext(1, 2), nil)); err != nil {

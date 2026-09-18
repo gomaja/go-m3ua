@@ -3,6 +3,7 @@ package m3ua
 import (
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	selected.TAck = 250 * time.Millisecond
 	selected.TAckRetries = 4
 	selected.EstablishTimeout = 3 * time.Second
-	selected.TrafficModes = map[uint32]uint32{7: params.TrafficModeOverride}
+	setInventoryTrafficModes(&selected.ApplicationServers, map[uint32]uint32{7: params.TrafficModeOverride})
 	selected.SetSCTPSACK(10, 1)
 	selected.SetSCTPNoDelay(true)
 
@@ -35,10 +36,15 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	}
 
 	selected.HeartbeatInfo.Interval = 9 * time.Second
-	selected.NetworkAppearance.Data[3] = 99
-	selected.RoutingContexts.Data[3] = 99
-	selected.TrafficModeType.Data[3] = 99
-	selected.TrafficModes[7] = params.TrafficModeBroadcast
+	selected.ApplicationServers[0] = ASConfig{
+		ASKey: ASKey{
+			NetworkAppearance:    99,
+			NetworkAppearanceSet: true,
+			RoutingContext:       99,
+			RoutingContextSet:    true,
+		},
+		TrafficMode: params.TrafficModeBroadcast,
+	}
 	selected.SCTPSACKInfo.SackDelay = 500
 	selected.SCTPNoDelayInfo.NoDelay = false
 	selected.Compatibility = CompatibilityPolicy{}
@@ -56,17 +62,17 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	if snapshot.HeartbeatInfo.Timer != 2*time.Second {
 		t.Fatalf("HeartbeatInfo.Timer = %v, want 2s snapshot", snapshot.HeartbeatInfo.Timer)
 	}
-	if got := snapshot.NetworkAppearance.NetworkAppearance(); got != 10 {
-		t.Fatalf("NetworkAppearance = %d, want 10", got)
-	}
-	if got := snapshot.RoutingContexts.RoutingContexts(); len(got) != 1 || got[0] != 7 {
-		t.Fatalf("RoutingContexts = %v, want [7]", got)
-	}
-	if got := snapshot.TrafficModeType.TrafficModeType(); got != params.TrafficModeLoadshare {
-		t.Fatalf("TrafficModeType = %d, want Loadshare", got)
-	}
-	if got := snapshot.TrafficModes[7]; got != params.TrafficModeOverride {
-		t.Fatalf("TrafficModes[7] = %d, want Override", got)
+	want := []ASConfig{{
+		ASKey: ASKey{
+			NetworkAppearance:    10,
+			NetworkAppearanceSet: true,
+			RoutingContext:       7,
+			RoutingContextSet:    true,
+		},
+		TrafficMode: params.TrafficModeOverride,
+	}}
+	if !reflect.DeepEqual(snapshot.ApplicationServers, want) {
+		t.Fatalf("ApplicationServers = %+v, want %+v", snapshot.ApplicationServers, want)
 	}
 	if snapshot.SCTPSACKInfo.SackDelay != 10 {
 		t.Fatalf("SackDelay = %d, want 10", snapshot.SCTPSACKInfo.SackDelay)
@@ -112,7 +118,7 @@ func TestListenerConfigSelectorOnlyUsesDefaultAssociationConfigFallback(t *testi
 	if err != nil {
 		t.Fatalf("connConfigForAccept: %v", err)
 	}
-	if got := snapshot.NetworkAppearance.NetworkAppearance(); got != 10 {
+	if got := inventoryUniformNetworkAppearance(snapshot.ApplicationServers); got != 10 {
 		t.Fatalf("selected Network Appearance = %d, want 10", got)
 	}
 }
@@ -162,7 +168,7 @@ func TestListenerConfigSelectorIsFrozenWhenListenerIsBuilt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connConfigForAccept: %v", err)
 	}
-	if got := selected.NetworkAppearance.NetworkAppearance(); got != 10 {
+	if got := inventoryUniformNetworkAppearance(selected.ApplicationServers); got != 10 {
 		t.Fatalf("selected Network Appearance = %d, want frozen selector result 10", got)
 	}
 }
@@ -195,13 +201,13 @@ func TestListenerASKeyAPIsSeparateSameRoutingContextByNetworkAppearance(t *testi
 	registry, _, _ := listener.registry()
 
 	first, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
 	first.as = registry
 	first.noteRoutingContextsActive([]uint32{1})
 	registry.aspStateChanged(first, StateASPActive)
 
 	second, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(20))
 	second.as = registry
 	second.noteRoutingContextsActive([]uint32{1})
 	registry.aspStateChanged(second, StateASPActive)

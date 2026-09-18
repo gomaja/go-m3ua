@@ -193,18 +193,18 @@ func TestAcceptedAssociationConfigIsOwnedBeforeTheInventoryJudgesIt(t *testing.T
 	// scope afterwards.
 	reused.PeerSGP.SignallingGateway = "sg-b"
 	reused.PeerSGP.SignallingGatewayProcess = "sgp-b2"
-	reused.NetworkAppearance = params.NewNetworkAppearance(9)
-	reused.RoutingContexts = params.NewRoutingContext(2)
+	setInventoryNetworkAppearance(&reused.ApplicationServers, params.NewNetworkAppearance(9))
+	setInventoryRoutingContexts(&reused.ApplicationServers, params.NewRoutingContext(2))
 	reused.ASPProcedures = explicitASPProcedurePolicy()
 
 	if resolved.PeerSGP.SignallingGateway != "sg-a" ||
 		resolved.PeerSGP.SignallingGatewayProcess != "sgp-a1" {
 		t.Fatalf("resolved SGP followed the selector's object to %+v", resolved.PeerSGP)
 	}
-	if appearance, set := appearanceOf(resolved.NetworkAppearance); !set || appearance != 7 {
+	if appearance, set := asConfigNetworkAppearance(resolved.ApplicationServers); !set || appearance != 7 {
 		t.Fatalf("resolved Network Appearance = %d set=%v, want 7", appearance, set)
 	}
-	if got := resolved.RoutingContexts.RoutingContexts(); len(got) != 1 || got[0] != 1 {
+	if got := asConfigRoutingContexts(resolved.ApplicationServers); len(got) != 1 || got[0] != 1 {
 		t.Fatalf("resolved Routing Contexts = %v, want [1]", got)
 	}
 	if resolved.ASPProcedures != nil {

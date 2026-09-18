@@ -347,7 +347,8 @@ func prepareLocalDestinationRange(config *AssociationConfig, registry *applicati
 		return DestinationRange{}, fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
 	}
 	if !rangeValue.NetworkAppearanceSet && config != nil {
-		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
+		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet =
+			asConfigNetworkAppearance(config.ApplicationServers)
 	}
 	rangeValue = normalizeDestinationRange(rangeValue)
 	if !rangeValue.RoutingContextSet {
@@ -366,33 +367,19 @@ func prepareLocalDestinationRange(config *AssociationConfig, registry *applicati
 
 func hasLocalASKey(config *AssociationConfig, registry *applicationServers, key ASKey) bool {
 	if registry == nil {
-		if config == nil || config.RoutingContexts == nil {
+		if config == nil {
 			return false
 		}
-		for _, routingContext := range config.RoutingContexts.RoutingContexts() {
-			if routingContext == key.RoutingContext {
-				return true
-			}
-		}
-		return false
+		return asConfigCarriesRoutingContext(config.ApplicationServers, key.RoutingContext)
 	}
 	if _, ok := registry.lookup(key); ok {
 		return true
 	}
-	if config == nil || config.RoutingContexts == nil {
+	if config == nil {
 		return false
 	}
-	networkAppearance, networkAppearanceSet := appearanceOf(config.NetworkAppearance)
-	if key.NetworkAppearanceSet != networkAppearanceSet ||
-		key.NetworkAppearanceSet && key.NetworkAppearance != networkAppearance {
-		return false
-	}
-	for _, routingContext := range config.RoutingContexts.RoutingContexts() {
-		if routingContext == key.RoutingContext {
-			return true
-		}
-	}
-	return false
+	declared, found := asConfigASKeyFor(config.ApplicationServers, key.RoutingContext)
+	return found && declared == key
 }
 
 func restartEpochCovers(epoch *mtp3RestartEpoch, rangeValue DestinationRange) bool {

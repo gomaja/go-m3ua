@@ -98,7 +98,7 @@ func TestAspActiveForAnUnservicableASIsRefused(t *testing.T) {
 // failure stays partial.
 func TestAspActiveForAServicableASIsUnaffected(t *testing.T) {
 	sgp, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	sgp.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+	setInventoryRoutingContexts(&sgp.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
 	sgp.nif = &nifAvailability{}
 	sgp.nif.setASAvailable(2, false) // a different AS is the broken one
 
@@ -121,7 +121,7 @@ func TestSetNIFAvailableTellsEveryASP(t *testing.T) {
 	var sentPerConn []*[]messages.M3UA
 	for i := 0; i < 2; i++ {
 		c, sent := newTestConn(t, StateASPActive, RoleSGP)
-		c.cfg.RoutingContexts = params.NewRoutingContext(1)
+		setInventoryRoutingContexts(&c.cfg.ApplicationServers, params.NewRoutingContext(1))
 		c.listener = l
 		if !l.promoteAcceptedAssociation(c) {
 			t.Fatal("track refused an association")
@@ -153,14 +153,14 @@ func TestSetASAvailableTellsOnlyTheAffectedASPs(t *testing.T) {
 	l := newSGPListener(NewListenerConfig(config))
 
 	affected, affectedSent := newTestConn(t, StateASPActive, RoleSGP)
-	affected.cfg.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&affected.cfg.ApplicationServers, params.NewRoutingContext(1))
 	affected.listener = l
 	if !l.promoteAcceptedAssociation(affected) {
 		t.Fatal("track refused the affected Association")
 	}
 
 	other, otherSent := newTestConn(t, StateASPActive, RoleSGP)
-	other.cfg.RoutingContexts = params.NewRoutingContext(2)
+	setInventoryRoutingContexts(&other.cfg.ApplicationServers, params.NewRoutingContext(2))
 	other.listener = l
 	if !l.promoteAcceptedAssociation(other) {
 		t.Fatal("track refused the unaffected Association")

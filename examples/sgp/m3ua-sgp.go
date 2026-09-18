@@ -70,11 +70,21 @@ func main() {
 		log.Fatal("accept-concurrency must be greater than zero")
 	}
 
+	applicationServers := make([]m3ua.ASConfig, 0, 2)
+	for _, routingContext := range []uint32{1, 2} {
+		applicationServers = append(applicationServers, m3ua.ASConfig{
+			ASKey: m3ua.ASKey{
+				NetworkAppearance:    0,
+				NetworkAppearanceSet: true,
+				RoutingContext:       routingContext,
+				RoutingContextSet:    true,
+			},
+			TrafficMode: params.TrafficModeLoadshare,
+		})
+	}
 	config := m3ua.NewAssociationConfig().
 		EnableHeartbeat(*hbInt, *hbTimer).
-		SetTrafficModeType(params.TrafficModeLoadshare).
-		SetNetworkAppearance(0).
-		SetRoutingContexts(1, 2)
+		SetApplicationServers(applicationServers...)
 
 	// setup SCTP listener on the specified IPs and Port.
 	laddr, err := sctp.ResolveSCTPAddr("sctp", *addr)

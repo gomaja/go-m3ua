@@ -63,7 +63,7 @@ func (c *Association) handleError(e *messages.Error) error {
 	ind.RoutingContexts = routingContextsOf(e.RoutingContext)
 	ind.NetworkAppearance, ind.NetworkAppearanceSet = uint32ParamOf(
 		e.NetworkAppearance, params.NetworkAppearance, (*params.Param).NetworkAppearance)
-	ind.ASKeys = c.managementASKeys(e.NetworkAppearance, e.RoutingContext)
+	ind.ASKeys = c.managementASKeys(ind.NetworkAppearance, ind.NetworkAppearanceSet, e.RoutingContext)
 	ind.AffectedDestinations = managementAffectedDestinations(ind.ASKeys, e.AffectedPointCode)
 	c.notifyManagement(ind)
 
@@ -217,7 +217,8 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 	if n.RoutingContext == nil {
 		ind.RoutingContexts = append([]uint32(nil), configured...)
 	}
-	ind.ASKeys = c.managementASKeys(c.localNetworkAppearance(), n.RoutingContext)
+	appearance, appearanceSet := c.localNetworkAppearance()
+	ind.ASKeys = c.managementASKeys(appearance, appearanceSet, n.RoutingContext)
 	ind.ASPIdentifier, ind.ASPIdentifierSet = uint32ParamOf(
 		n.AspIdentifier, params.AspIdentifier, (*params.Param).AspIdentifier)
 	c.notifyManagement(ind)
@@ -226,10 +227,10 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 }
 
 func (c *Association) managementASKeys(
-	networkAppearance,
+	appearance uint32,
+	appearanceSet bool,
 	routingContext *params.Param,
 ) []ASKey {
-	appearance, appearanceSet := appearanceOf(networkAppearance)
 	routingContexts := routingContextsOf(routingContext)
 	if len(routingContexts) == 0 {
 		if routingContext == nil {

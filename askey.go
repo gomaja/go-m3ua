@@ -46,19 +46,31 @@ func normalizeASKey(scope any) (ASKey, bool) {
 	}
 }
 
+// asKeyForConfigRoutingContext returns the Application Server one Association
+// configuration gives a Routing Context: the declaring entry's own ASKey when
+// the inventory declares it, and otherwise that context in the Network
+// Appearance the inventory shares.
 func asKeyForConfigRoutingContext(config *AssociationConfig, routingContext uint32) ASKey {
-	key := routingContextASKey(routingContext)
-	if config != nil {
-		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
+	if config == nil {
+		return routingContextASKey(routingContext)
 	}
+	if key, declared := asConfigASKeyFor(config.ApplicationServers, routingContext); declared {
+		return key
+	}
+	key := routingContextASKey(routingContext)
+	key.NetworkAppearance, key.NetworkAppearanceSet = asConfigNetworkAppearance(config.ApplicationServers)
 	return key
 }
 
 func contextlessASKeyForConfig(config *AssociationConfig) ASKey {
-	var key ASKey
-	if config != nil {
-		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
+	if config == nil {
+		return ASKey{}
 	}
+	if key, declared := asConfigContextlessASKey(config.ApplicationServers); declared {
+		return key
+	}
+	var key ASKey
+	key.NetworkAppearance, key.NetworkAppearanceSet = asConfigNetworkAppearance(config.ApplicationServers)
 	return key
 }
 

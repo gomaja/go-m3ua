@@ -44,7 +44,7 @@ func TestContextlessNotifyUsesConfiguredScopeForEveryDefinedStatus(t *testing.T)
 			if !equalNotifyScope(indication.RoutingContexts, []uint32{10, 20}) {
 				t.Errorf("inferred Routing Contexts = %v, want [10 20]", indication.RoutingContexts)
 			}
-			binary.BigEndian.PutUint32(conn.cfg.RoutingContexts.Data[0:4], 30)
+			conn.cfg.ApplicationServers[0].ASKey.RoutingContext = 30
 			if !equalNotifyScope(indication.RoutingContexts, []uint32{10, 20}) {
 				t.Errorf("indication scope aliased configured membership: %v", indication.RoutingContexts)
 			}

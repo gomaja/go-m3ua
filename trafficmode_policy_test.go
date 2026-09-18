@@ -12,20 +12,16 @@ import (
 
 func TestAssociationFreezesTrafficModePolicyAtConstruction(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
-	configuredModes := map[uint32]uint32{
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeOverride,
 		2: params.TrafficModeBroadcast,
-	}
-	config.TrafficModes = configuredModes
+	})
 	connection := newAssociation(RoleASP, config)
 
-	configuredModes[1] = params.TrafficModeBroadcast
-	configuredModes[2] = params.TrafficModeOverride
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
-	config.TrafficModes = map[uint32]uint32{
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeBroadcast,
 		2: params.TrafficModeOverride,
-	}
+	})
 
 	requests, err := connection.aspActiveRequests(params.NewRoutingContext(1, 2))
 	if err != nil {
@@ -55,12 +51,10 @@ func TestAssociationFreezesTrafficModePolicyAtConstruction(t *testing.T) {
 
 func TestAssociationFreezesTrafficModePolicyForActiveAckValidation(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
-	configuredDefault := config.TrafficModeType
 	connection := newAssociation(RoleASP, config)
 
-	configuredDefault.Data[3] = byte(params.TrafficModeBroadcast)
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
-	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeBroadcast}
+	config.ApplicationServers[0].TrafficMode = params.TrafficModeBroadcast
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeBroadcast})
 
 	err := connection.validateAspActiveAckTrafficMode(messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -74,14 +68,11 @@ func TestAssociationFreezesTrafficModePolicyForActiveAckValidation(t *testing.T)
 
 func TestAssociationTrafficModePolicyIsFrozenBeforeRegistryAgreement(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
-	configuredModes := map[uint32]uint32{1: params.TrafficModeOverride}
-	config.TrafficModes = configuredModes
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeOverride})
 	policy := newTrafficModePolicy(config)
 	registry := newApplicationServers(time.Hour)
 
-	configuredModes[1] = params.TrafficModeBroadcast
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
-	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeBroadcast}
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeBroadcast})
 
 	agreed, err := registry.agreeTrafficModeForKeys(
 		[]ASKey{associationConfigASKey(config, 1)}, policy, nil,
@@ -96,13 +87,10 @@ func TestAssociationTrafficModePolicyIsFrozenBeforeRegistryAgreement(t *testing.
 
 func TestListenerTrafficModePolicyIsInheritedByAcceptedAssociations(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
-	configuredModes := map[uint32]uint32{1: params.TrafficModeOverride}
-	config.TrafficModes = configuredModes
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeOverride})
 	listener := newSGPListener(NewListenerConfig(config))
 
-	configuredModes[1] = params.TrafficModeBroadcast
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
-	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeBroadcast}
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeBroadcast})
 
 	registry, _, _ := listener.registry()
 	accepted := newAssociationWithTrafficModePolicy(
@@ -128,9 +116,9 @@ func TestListenerTrafficModePolicyIsInheritedByAcceptedAssociations(t *testing.T
 
 func TestPerRoutingContextTrafficModePrecedesConfiguredDefault(t *testing.T) {
 	connection, sent := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
-	connection.cfg.TrafficModes = map[uint32]uint32{
+	setInventoryTrafficModes(&connection.cfg.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeOverride,
-	}
+	})
 	registry := newApplicationServers(time.Hour)
 	connection.as = registry
 	registry.aspStateChanged(connection, StateASPInactive)
@@ -165,9 +153,9 @@ func TestPerRoutingContextTrafficModePrecedesConfiguredDefault(t *testing.T) {
 
 func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 	connection, sent := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 1, 2)
-	connection.cfg.TrafficModes = map[uint32]uint32{
+	setInventoryTrafficModes(&connection.cfg.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeOverride,
-	}
+	})
 	registry := newApplicationServers(time.Hour)
 	_, agreementErr := registry.agreeTrafficModeForKeys(
 		connection.asKeysForRoutingContexts([]uint32{1, 2}), connection.trafficModePolicy(),
@@ -209,7 +197,7 @@ func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 
 func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
-	config.TrafficModes = map[uint32]uint32{1: params.TrafficModeOverride}
+	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeOverride})
 	connection := newAssociation(RoleASP, config)
 	registry := newApplicationServers(time.Hour)
 	ack := messages.NewAspActiveAck(
@@ -224,11 +212,13 @@ func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		<-start
+		// Only the Traffic Mode of an already declared Application Server is
+		// mutated. Replacing the inventory itself changes this Association's
+		// membership, which Dial and Accept prevent by handing the Association
+		// its own snapshot; the policy freeze is about the values inside it.
 		for index := 0; index < 2_000; index++ {
-			config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
-			config.TrafficModes = map[uint32]uint32{1: params.TrafficModeBroadcast}
-			config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
-			config.TrafficModes = map[uint32]uint32{1: params.TrafficModeOverride}
+			config.ApplicationServers[0].TrafficMode = params.TrafficModeBroadcast
+			config.ApplicationServers[0].TrafficMode = params.TrafficModeOverride
 		}
 	}()
 

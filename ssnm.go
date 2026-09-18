@@ -838,7 +838,7 @@ func appearanceOf(param *params.Param) (uint32, bool) {
 func (c *Association) destinationKey(networkAppearance *params.Param, pointCode uint32) destinationKey {
 	appearance, set := appearanceOf(networkAppearance)
 	if !set {
-		appearance, set = appearanceOf(c.outboundNetworkAppearance())
+		appearance, set = c.outboundNetworkAppearance()
 	}
 	return destinationKey{
 		networkAppearance:    appearance,

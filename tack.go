@@ -132,7 +132,7 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 	if routingContext == nil && (ackFor == requestAspActive || ackFor == requestAspInactive) {
 		req.routingContextOmitted = true
 		if c.cfg != nil {
-			routingContext = c.cfg.RoutingContexts
+			routingContext = asConfigRoutingContextParam(c.cfg.ApplicationServers)
 		}
 	}
 	if routingContext != nil {

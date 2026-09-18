@@ -255,22 +255,13 @@ func (c *Association) configuredLocalASKeysForStatus() []ASKey {
 	if !c.hasLocalIPSPTrafficDirection() {
 		return nil
 	}
-	traffic := c.cfg.IPSP.TrafficToLocal
-	appearance, appearanceSet := appearanceOf(traffic.NetworkAppearance)
-	routingContexts := routingContextsFromIPSPTrafficConfig(traffic)
+	routingContexts := asConfigRoutingContexts(c.applicationServerInventory(true))
 	keys := make([]ASKey, 0, len(routingContexts)+1)
 	if len(routingContexts) == 0 {
-		keys = append(keys, ASKey{
-			NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet,
-		})
+		keys = append(keys, c.contextlessASKey(true))
 	} else {
 		for _, routingContext := range routingContexts {
-			keys = append(keys, ASKey{
-				NetworkAppearance:    appearance,
-				NetworkAppearanceSet: appearanceSet,
-				RoutingContext:       routingContext,
-				RoutingContextSet:    true,
-			})
+			keys = append(keys, c.staticASKeyForRoutingContext(routingContext, true))
 		}
 	}
 	c.muDynamicASKeys.RLock()

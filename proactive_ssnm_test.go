@@ -27,8 +27,8 @@ func TestListenerDestinationUpdatesNotifyOnlyConcernedActiveASPs(t *testing.T) {
 				t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 			)
 			second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1, 2)
-			first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
-			second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(7))
+			setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			firstApplicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 			secondApplicationServer := proactiveSSNMApplicationServer(listener, 7, 2)
 			first.noteRoutingContextsActive([]uint32{1})
@@ -76,7 +76,7 @@ func TestAllContextDestinationUpdateDeduplicatesAnASPAndNamesItsActiveScopes(t *
 	listener, _, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1, 2}, nil,
 	)
-	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	firstApplicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	secondApplicationServer := proactiveSSNMApplicationServer(listener, 7, 2)
 	asp.noteRoutingContextsActive([]uint32{1, 2})
@@ -102,7 +102,7 @@ func TestAllContextDestinationUpdateScopesTargetsByNetworkAppearance(t *testing.
 	listener, _, first, firstSent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1}, nil,
 	)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
 	first.noteRoutingContextsActive([]uint32{1})
 	first.setState(StateASPActive)
 	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
@@ -111,7 +111,7 @@ func TestAllContextDestinationUpdateScopesTargetsByNetworkAppearance(t *testing.
 	applicationServer10.setASPState(first, StateASPActive, time.Hour)
 
 	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(20))
 	second.noteRoutingContextsActive([]uint32{1})
 	second.setState(StateASPActive)
 	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
@@ -136,7 +136,7 @@ func TestDestinationUpdateScopesSameASPRoutingContextByNetworkAppearance(t *test
 	listener, _, asp, sent := distributionFixtureForContexts(
 		t, params.TrafficModeLoadshare, []uint32{1}, nil,
 	)
-	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(10))
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
 	for _, key := range []ASKey{
@@ -170,8 +170,8 @@ func TestDestinationUpdateContinuesAfterOneASPWriteFails(t *testing.T) {
 		t, params.TrafficModeLoadshare,
 	)
 	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(7))
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	first.noteRoutingContextsActive([]uint32{1})
 	first.setState(StateASPActive)
@@ -225,8 +225,8 @@ func TestAcceptedAssociationDestinationUpdateUsesListenerWideBroadcast(t *testin
 		t, params.TrafficModeLoadshare,
 	)
 	second, secondSent := addDistributionASP(t, listener, StateASPInactive, 1)
-	first.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
-	second.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(7))
+	setInventoryNetworkAppearance(&second.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	first.noteRoutingContextsActive([]uint32{1})
 	first.setState(StateASPActive)
@@ -357,7 +357,7 @@ func multiAssociationDialedSGPFixture(t *testing.T) (*Endpoint, *Association, *d
 	t.Cleanup(func() { _ = endpoint.Close() })
 	attach := func(routingContext uint32) (*Association, *distributionCapture) {
 		association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, routingContext)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
 		association.as.register(association.configuredASKeys())
 		if !endpoint.trackAssociation(association) {
@@ -460,8 +460,8 @@ func TestDialedSGPDestinationRecoveryClearsCongestionBeforeDAVA(t *testing.T) {
 func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routingContexts ...uint32) (*Association, *distributionCapture) {
 	t.Helper()
 	association, _ := newTestConn(t, StateASPActive, RoleSGP)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
-	association.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(routingContexts...))
 	association.noteRoutingContextsActive(routingContexts)
 	association.as = newApplicationServers(time.Hour)
 	for _, routingContext := range routingContexts {
@@ -491,8 +491,8 @@ func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
 		t, params.TrafficModeLoadshare,
 	)
 	healthy, healthySent := addDistributionASP(t, listener, StateASPInactive, 1)
-	blocked.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
-	healthy.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&blocked.cfg.ApplicationServers, params.NewNetworkAppearance(7))
+	setInventoryNetworkAppearance(&healthy.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	blocked.noteRoutingContextsActive([]uint32{1})
 	blocked.setState(StateASPActive)
@@ -543,7 +543,7 @@ func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
 	listener, _, asp, sent := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
-	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
@@ -586,7 +586,7 @@ func TestProactiveSSNMQueueOverflowClosesAssociation(t *testing.T) {
 	listener, _, asp, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
-	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
@@ -610,7 +610,7 @@ func TestDestinationReportValidatesScopeBeforeConcurrentCommit(t *testing.T) {
 	listener, _, asp, sent := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
-	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
@@ -663,7 +663,7 @@ func TestQueuedProactiveSSNMPrecedesAspInactiveAck(t *testing.T) {
 	listener, _, asp, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
-	asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	applicationServer := proactiveSSNMApplicationServer(listener, 7, 1)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)

@@ -326,13 +326,13 @@ func TestMixedASPInactiveCanDeactivateTheLastServedContext(t *testing.T) {
 func TestOverrideIsScopedToSuccessfullyActivatedContexts(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	incumbent, incumbentSent := asTestConn(t, registry, StateASPInactive, 1, 2)
-	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	incumbent.noteRoutingContextsActive(nil)
 	incumbent.setState(StateASPActive)
 	registry.aspStateChanged(incumbent, StateASPActive)
 
 	challenger, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
-	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&challenger.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 
 	before := len(notifies(*incumbentSent))
 	challenger.handleSignals(context.Background(), messages.NewAspActive(
@@ -371,12 +371,12 @@ func TestOverrideIsScopedToSuccessfullyActivatedContexts(t *testing.T) {
 func TestOverrideMovesIncumbentInactiveAfterItsLastContext(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	incumbent, _ := asTestConn(t, registry, StateASPActive, 1)
-	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	incumbent.noteRoutingContextsActive(nil)
 	registry.aspStateChanged(incumbent, StateASPActive)
 
 	challenger, _ := asTestConn(t, registry, StateASPInactive, 1)
-	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&challenger.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	challenger.handleSignals(context.Background(), messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeOverride),
 		params.NewRoutingContext(1), nil))
@@ -399,7 +399,7 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 	first, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 	second, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 	for _, connection := range []*Association{first, second} {
-		connection.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryTrafficModeType(&connection.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		connection.signalWriter = func(message messages.M3UA) (int, error) {
 			return message.MarshalLen(), nil
 		}
@@ -442,7 +442,7 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 func TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	first, firstSent := asTestConn(t, registry, StateASPInactive, 1)
-	first.cfg.TrafficModeType = nil
+	setInventoryTrafficModeType(&first.cfg.ApplicationServers, nil)
 	if err := first.handleAspActive(messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeBroadcast),
 		params.NewRoutingContext(1), nil,
@@ -458,7 +458,7 @@ func TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement(t *testing.T) {
 	}
 
 	second, secondSent := asTestConn(t, registry, StateASPInactive, 1)
-	second.cfg.TrafficModeType = nil
+	setInventoryTrafficModeType(&second.cfg.ApplicationServers, nil)
 	before := len(*secondSent)
 	err := second.handleAspActive(messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeOverride),
@@ -481,8 +481,8 @@ func TestConcurrentFirstTrafficModeAgreementHasOneWinner(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	first, firstSent := asTestConn(t, registry, StateASPInactive, 1)
 	second, secondSent := asTestConn(t, registry, StateASPInactive, 1)
-	first.cfg.TrafficModeType = nil
-	second.cfg.TrafficModeType = nil
+	setInventoryTrafficModeType(&first.cfg.ApplicationServers, nil)
+	setInventoryTrafficModeType(&second.cfg.ApplicationServers, nil)
 
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -535,11 +535,11 @@ func TestConcurrentFirstTrafficModeAgreementHasOneWinner(t *testing.T) {
 func TestTrafficModeCanBeConfiguredPerApplicationServer(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	connection, sent := asTestConn(t, registry, StateASPInactive, 1, 2)
-	connection.cfg.TrafficModeType = nil
-	connection.cfg.TrafficModes = map[uint32]uint32{
+	setInventoryTrafficModeType(&connection.cfg.ApplicationServers, nil)
+	setInventoryTrafficModes(&connection.cfg.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeOverride,
 		2: params.TrafficModeBroadcast,
-	}
+	})
 
 	for _, request := range []struct {
 		routingContext uint32

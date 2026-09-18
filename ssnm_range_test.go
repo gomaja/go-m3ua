@@ -251,7 +251,7 @@ func TestDestinationStateIsScopedByNetworkAndRoutingContext(t *testing.T) {
 
 func TestDestinationScopePresenceIsDistinctFromExplicitZero(t *testing.T) {
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	conn.cfg.NetworkAppearance = nil
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, nil)
 	const pointCode = uint32(0x234567)
 	conn.SetDestinationStateForNetworkAndRoutingContext(
 		0, 1, pointCode, DestinationUnavailable)
@@ -328,7 +328,7 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 	for _, mask := range []uint8{0, 3, 8, 14, 24, 255} {
 		t.Run(maskName(mask), func(t *testing.T) {
 			conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			const pointCode = uint32(0x123457)
 			conn.SetDestinationRangeForNetworkAndRoutingContext(
 				7, 1, pointCode, mask, DestinationRestricted,
@@ -377,7 +377,7 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 
 func TestDAUDSplitsRoutingContextsByResolvedState(t *testing.T) {
 	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
-	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	conn.noteRoutingContextsActive([]uint32{1, 2})
 	const pointCode = uint32(0x234567)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, pointCode, 3, DestinationUnavailable)
@@ -422,7 +422,7 @@ func TestDAUDSplitsRoutingContextsByResolvedState(t *testing.T) {
 
 func TestDAUDCongestedRangePreservesMaskOnBothReplies(t *testing.T) {
 	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	const pointCode = uint32(0x456789)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(
 		7, 1, pointCode, 14, DestinationCongested)
@@ -499,7 +499,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 
 func TestDAUDRangeLookupDoesNotLetAnExactOverrideInventAWholeRangeState(t *testing.T) {
 	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	const pointCode = uint32(0x123456)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, pointCode, 8, DestinationUnavailable)
 	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, pointCode, 0, DestinationAvailable)

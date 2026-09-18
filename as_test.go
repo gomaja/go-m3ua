@@ -39,7 +39,7 @@ func statusOf(t *testing.T, n *messages.Notify) (uint16, uint16) {
 func asTestConn(t *testing.T, reg *applicationServers, state State, rtCtxs ...uint32) (*Association, *[]messages.M3UA) {
 	t.Helper()
 	conn, sent := newTestConn(t, state, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(rtCtxs...)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(rtCtxs...))
 	conn.as = reg
 	reg.aspStateChanged(conn, state)
 	return conn, sent
@@ -461,11 +461,11 @@ func TestOverrideDisplacesThePreviousASP(t *testing.T) {
 	reg := newApplicationServers(time.Hour)
 
 	incumbent, incumbentSent := asTestConn(t, reg, StateASPInactive, 1)
-	incumbent.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	reg.aspStateChanged(incumbent, StateASPActive)
 
 	challenger, _ := asTestConn(t, reg, StateASPInactive, 1)
-	challenger.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryTrafficModeType(&challenger.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	if err := challenger.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0xABCD), nil)); err != nil {
 		t.Fatalf("handleAspUp: %v", err)
 	}
@@ -537,7 +537,7 @@ func TestASPStateChangesReachTheApplicationServer(t *testing.T) {
 	as := reg.get(1)
 
 	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1))
 	conn.as = reg
 
 	// Drive the state machine the way monitor() does, rather than poking the
@@ -726,7 +726,7 @@ func TestASPsForTrafficAppliesTheTrafficMode(t *testing.T) {
 		conns := make([]*Association, 0, n)
 		for i := 0; i < n; i++ {
 			c, _ := newTestConn(t, StateASPInactive, RoleSGP)
-			c.cfg.RoutingContexts = params.NewRoutingContext(1)
+			setInventoryRoutingContexts(&c.cfg.ApplicationServers, params.NewRoutingContext(1))
 			c.cfg.ASPIdentifier = params.NewAspIdentifier(uint32(i + 1))
 			c.as = l.as
 			l.as.aspStateChanged(c, StateASPActive)

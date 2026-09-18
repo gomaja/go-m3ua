@@ -116,7 +116,7 @@ func TestASPListenerDoesNotRunSGPAvailabilityProcedures(t *testing.T) {
 			}
 			listener := newListener(endpoint, NewListenerConfig(NewAssociationConfig()))
 			association, sent := newTestConn(t, StateASPActive, RoleASP)
-			association.cfg.RoutingContexts = params.NewRoutingContext(1)
+			setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1))
 			association.noteRoutingContextsActive([]uint32{1})
 			if !listener.track(association) {
 				t.Fatal("failed to track test Association")
@@ -299,9 +299,9 @@ func TestSGPEndpointContextlessDistributionUsesExplicitNetworkAppearance(t *test
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
 	firstConfig := scopedSGPConfig(10, 1)
-	firstConfig.RoutingContexts = nil
+	setInventoryRoutingContexts(&firstConfig.ApplicationServers, nil)
 	secondConfig := scopedSGPConfig(20, 1)
-	secondConfig.RoutingContexts = nil
+	setInventoryRoutingContexts(&secondConfig.ApplicationServers, nil)
 	firstListener := newListener(endpoint, NewListenerConfig(firstConfig))
 	secondListener := newListener(endpoint, NewListenerConfig(secondConfig))
 	first, firstSent := attachActiveEndpointAssociation(t, endpoint, firstListener, ASKey{
@@ -343,9 +343,9 @@ func TestSGPEndpointRejectsAmbiguousContextlessDistribution(t *testing.T) {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
 	firstConfig := scopedSGPConfig(10, 1)
-	firstConfig.RoutingContexts = nil
+	setInventoryRoutingContexts(&firstConfig.ApplicationServers, nil)
 	secondConfig := scopedSGPConfig(20, 1)
-	secondConfig.RoutingContexts = nil
+	setInventoryRoutingContexts(&secondConfig.ApplicationServers, nil)
 	firstListener := newListener(endpoint, NewListenerConfig(firstConfig))
 	secondListener := newListener(endpoint, NewListenerConfig(secondConfig))
 	first, firstSent := attachActiveEndpointAssociation(t, endpoint, firstListener, ASKey{
@@ -420,9 +420,9 @@ func TestSGPEndpointSharesStateAcrossAcceptedAndInitiatedAssociations(t *testing
 
 func scopedSGPConfig(networkAppearance, routingContext uint32) *AssociationConfig {
 	config := mcSGPConfig()
-	config.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
-	config.RoutingContexts = params.NewRoutingContext(routingContext)
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
+	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(routingContext))
+	setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeLoadshare))
 	return config
 }
 
@@ -431,14 +431,14 @@ func attachActiveEndpointAssociation(t *testing.T, endpoint *Endpoint, listener 
 	association, sent := newTestConn(t, StateASPActive, RoleSGP)
 	association.listener = listener
 	if key.NetworkAppearanceSet {
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(key.NetworkAppearance)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(key.NetworkAppearance))
 	} else {
-		association.cfg.NetworkAppearance = nil
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, nil)
 	}
 	if key.RoutingContextSet {
-		association.cfg.RoutingContexts = params.NewRoutingContext(key.RoutingContext)
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(key.RoutingContext))
 	} else {
-		association.cfg.RoutingContexts = nil
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, nil)
 	}
 	association.trafficModes = trafficModeSnapshot{}
 	association.trafficModes.freeze(newTrafficModePolicy(association.cfg))
@@ -460,14 +460,14 @@ func attachActiveInitiatedEndpointAssociation(t *testing.T, endpoint *Endpoint, 
 	t.Helper()
 	association, sent := newTestConn(t, StateASPActive, RoleSGP)
 	if key.NetworkAppearanceSet {
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(key.NetworkAppearance)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(key.NetworkAppearance))
 	} else {
-		association.cfg.NetworkAppearance = nil
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, nil)
 	}
 	if key.RoutingContextSet {
-		association.cfg.RoutingContexts = params.NewRoutingContext(key.RoutingContext)
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(key.RoutingContext))
 	} else {
-		association.cfg.RoutingContexts = nil
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, nil)
 	}
 	association.trafficModes = trafficModeSnapshot{}
 	association.trafficModes.freeze(newTrafficModePolicy(association.cfg))
@@ -786,8 +786,8 @@ func TestSGPEndpointConcurrentAttachmentQueriesAndShutdown(t *testing.T) {
 	for index := range associations {
 		association, _ := newTestConn(t, StateASPInactive, RoleSGP)
 		association.listener = listener
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-		association.cfg.RoutingContexts = params.NewRoutingContext(1)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1))
 		associations[index] = association
 	}
 
@@ -863,7 +863,7 @@ func TestSGPEndpointCanInitiateMultipleAssociations(t *testing.T) {
 		}
 		defer func() { _ = aspEndpoint.Close() }()
 		aspConfig := mcASPConfig(identifier)
-		aspConfig.RoutingContexts = params.NewRoutingContext(1)
+		setInventoryRoutingContexts(&aspConfig.ApplicationServers, params.NewRoutingContext(1))
 		listener, err := aspEndpoint.Listen(
 			"m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(aspConfig),
 		)
@@ -884,7 +884,7 @@ func TestSGPEndpointCanInitiateMultipleAssociations(t *testing.T) {
 	}
 	defer func() { _ = sgpEndpoint.Close() }()
 	sgpConfig := mcSGPConfig()
-	sgpConfig.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&sgpConfig.ApplicationServers, params.NewRoutingContext(1))
 	initiated := make([]*Association, 0, len(listeners))
 	for index, listener := range listeners {
 		association, err := sgpEndpoint.Dial(
@@ -1107,7 +1107,7 @@ func TestASPListenerRejectsSGPDestinationProcedures(t *testing.T) {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
 	config := mcASPConfig(1)
-	config.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(7))
 	listener := newListener(endpoint, NewListenerConfig(config))
 	const pointCode = uint32(0x123456)
 
@@ -1228,7 +1228,7 @@ func TestRejectedIPSPPromotionDoesNotRetainApplicationServer(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 	listener := newListener(endpoint, NewListenerConfig(nil))
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 
 	endpoint.mu.Lock()
 	endpoint.closed = true
@@ -1261,8 +1261,8 @@ func TestFailedAcceptedAssociationsDoNotRetainApplicationServers(t *testing.T) {
 
 			for routingContext := uint32(1); routingContext <= 3; routingContext++ {
 				association, _ := newTestConn(t, StateASPDown, role)
-				association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
-				association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
+				setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
+				setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(routingContext))
 				if role == RoleIPSP {
 					association.cfg.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 				}

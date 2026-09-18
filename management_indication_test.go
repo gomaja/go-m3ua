@@ -68,7 +68,7 @@ func TestManagementIndicationHasNoCompatibilityProjections(t *testing.T) {
 // different question and loses the only value the message carried.
 func TestManagementErrorKeepsAnInvalidRoutingContextOffResolvedMembership(t *testing.T) {
 	association, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
 	association.noteRoutingContextsActive([]uint32{1, 2})
 
 	raw, err := messages.NewError(

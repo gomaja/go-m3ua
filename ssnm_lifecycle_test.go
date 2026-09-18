@@ -20,14 +20,14 @@ func attachActivatingSSNMAssociation(
 ) *Association {
 	t.Helper()
 	association, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, routingContexts...)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 	peer := identity
 	association.cfg.PeerSGP = &peer
 	if !endpoint.trackAssociation(association) {
 		t.Fatalf("failed to attach Association to SGP %+v", identity)
 	}
 	association.startTAck(messages.NewAspActive(
-		association.cfg.TrafficModeType.Copy(),
+		inventoryTrafficModeParam(association.cfg.ApplicationServers),
 		params.NewRoutingContext(routingContexts...),
 		nil,
 	), requestAspActive)
@@ -357,7 +357,7 @@ func TestSSNMStateStandalonePartitionIsOwnedByOneAssociation(t *testing.T) {
 	// An Association that names no provisioned peer resolves to no canonical
 	// Application Server.
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	association.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	association.endpoint = endpoint
 	association.managementID.Store(99)

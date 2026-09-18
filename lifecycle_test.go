@@ -362,8 +362,7 @@ func TestAssociationConfigWithoutHeartbeatInfoDials(t *testing.T) {
 	peer := newRawPeer(t, 3042, handshakeOnly)
 
 	cfg := NewAssociationConfig()
-	cfg.SetTrafficModeType(params.TrafficModeLoadshare)
-	cfg.SetRoutingContexts(1, 2)
+	cfg.SetApplicationServers(buildTestInventory(0, false, params.TrafficModeLoadshare, []uint32{1, 2})...)
 	if cfg.HeartbeatInfo != nil {
 		t.Fatalf("NewAssociationConfig set HeartbeatInfo = %+v; this test exists to cover the nil case", cfg.HeartbeatInfo)
 	}
@@ -386,8 +385,7 @@ func TestAssociationConfigWithoutHeartbeatInfoAccepts(t *testing.T) {
 
 	const port = 3044
 	sgpConfig := NewAssociationConfig()
-	sgpConfig.SetTrafficModeType(params.TrafficModeLoadshare)
-	sgpConfig.SetRoutingContexts(1, 2)
+	sgpConfig.SetApplicationServers(buildTestInventory(0, false, params.TrafficModeLoadshare, []uint32{1, 2})...)
 	if sgpConfig.HeartbeatInfo != nil {
 		t.Fatalf("NewAssociationConfig set HeartbeatInfo = %+v; this test exists to cover the nil case", sgpConfig.HeartbeatInfo)
 	}

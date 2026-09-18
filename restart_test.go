@@ -251,7 +251,7 @@ func TestSCTPRestartCancelsEveryOldTAckBeforeFreshAspUp(t *testing.T) {
 	conn.assocID.Store(7)
 	conn.startTAck(messages.NewAspUp(nil, params.NewInfoString("old")), requestAspUp)
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 	), requestAspActive)
 	conn.startTAck(messages.NewAspInactive(params.NewRoutingContext(2), nil), requestAspInactive)
 	conn.startTAck(messages.NewAspDown(params.NewInfoString("old")), requestAspDown)
@@ -302,7 +302,7 @@ func TestSCTPRestartFencesAnInFlightOldTAckWrite(t *testing.T) {
 		return message.MarshalLen(), nil
 	}
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	), requestAspActive)
 
 	select {
@@ -353,7 +353,7 @@ func TestSCTPRestartRejectsDelayedOldASPTMAcksUntilAspUpCompletes(t *testing.T) 
 	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 	), requestAspActive)
 	conn.startTAck(messages.NewAspInactive(params.NewRoutingContext(2), nil), requestAspInactive)
 
@@ -371,7 +371,7 @@ func TestSCTPRestartRejectsDelayedOldASPTMAcksUntilAspUpCompletes(t *testing.T) 
 	}
 
 	conn.handleSignals(context.Background(), messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 	))
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(
 		params.NewRoutingContext(2), nil,
@@ -455,7 +455,7 @@ func TestSCTPRestartAllowsASPTMAcksAfterFreshAspUpAck(t *testing.T) {
 	}
 
 	conn.handleSignals(context.Background(), messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	))
 	if got := conn.State(); got != StateASPActive {
 		t.Errorf("state after new-epoch ASP Active Ack = %v, want ASP-ACTIVE", got)
@@ -465,7 +465,7 @@ func TestSCTPRestartAllowsASPTMAcksAfterFreshAspUpAck(t *testing.T) {
 	// unsolicited-Ack semantics are restored. This has no matching timer with
 	// which to bypass a restart gate accidentally left armed.
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(
-		conn.cfg.RoutingContexts.Copy(), nil,
+		asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	))
 	if got := conn.State(); got != StateASPInactive {
 		t.Errorf("post-recovery unsolicited ASP Inactive Ack left state %v, want ASP-INACTIVE", got)
