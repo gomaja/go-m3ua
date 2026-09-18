@@ -213,3 +213,61 @@ func TestPeerActivationCommitDrainsRetainedTraffic(t *testing.T) {
 		t.Fatalf("retained DATA written after the activation commit = %d, want 1", got)
 	}
 }
+
+// TestPeerActivationCommitHoldsTheStateLockAcrossTheRegistryCommit is the
+// atomicity the fix is about, as opposed to the ordering the tests above cover.
+//
+// They call the commit and then look, which cannot tell "the registry was
+// written before the state became observable" from "the registry was written
+// before the call returned". This one pins the first: while the registry commit
+// cannot finish, ASP-ACTIVE must not be readable out of the association at all.
+func TestPeerActivationCommitHoldsTheStateLockAcrossTheRegistryCommit(t *testing.T) {
+	_, applicationServer, asp, _ := distributionFixtureForContexts(
+		t, params.TrafficModeLoadshare, []uint32{1}, nil,
+	)
+
+	// Holding the Application Server's own lock stalls the registry commit
+	// wherever it happens, without the test needing to know when it starts.
+	applicationServer.mu.Lock()
+	committed := make(chan struct{})
+	go func() {
+		defer close(committed)
+		asp.commitPeerRoutingContextsActive([]uint32{1})
+	}()
+
+	observed := func() (State, bool) {
+		// A failed TryRLock is the commit holding the state lock, which is the
+		// answer this test wants: nothing can read the state while the registry
+		// it authorises is still being written.
+		if !asp.muState.TryRLock() {
+			return 0, false
+		}
+		defer asp.muState.RUnlock()
+		return asp.state, true
+	}
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		state, readable := observed()
+		if readable && state == StateASPActive {
+			applicationServer.mu.Unlock()
+			<-committed
+			t.Fatal("ASP-ACTIVE was readable while the Application Server registry commit was still outstanding")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	applicationServer.mu.Unlock()
+	<-committed
+
+	applicationServer.mu.Lock()
+	recorded, member := applicationServer.asps[asp]
+	applicationServer.mu.Unlock()
+	if !member || recorded != StateASPActive {
+		t.Fatalf("Application Server recorded (%v, member=%t) after the commit, want (%v, true)",
+			recorded, member, StateASPActive)
+	}
+	if got := asp.State(); got != StateASPActive {
+		t.Fatalf("State() after the commit = %v, want %v", got, StateASPActive)
+	}
+}
