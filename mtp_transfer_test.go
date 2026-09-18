@@ -336,6 +336,12 @@ func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testi
 	select {
 	case <-firstWriteStarted:
 	case <-time.After(time.Second):
+		// The deadline expiring does not mean the write never starts, and a
+		// write left blocked here holds the Endpoint's in-flight operation
+		// count, which Close waits on. Releasing it first turns a loaded
+		// machine's missed deadline into a failure rather than a hang.
+		close(releaseFirstWrite)
+		<-firstDone
 		t.Fatal("first MTPTransfer did not reach the first Signalling Gateway")
 	}
 	secondDone := make(chan error, 1)
@@ -405,6 +411,12 @@ func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
 	select {
 	case <-firstWriteStarted:
 	case <-time.After(time.Second):
+		// The deadline expiring does not mean the write never starts, and a
+		// write left blocked here holds the Endpoint's in-flight operation
+		// count, which Close waits on. Releasing it first turns a loaded
+		// machine's missed deadline into a failure rather than a hang.
+		close(releaseFirstWrite)
+		<-firstDone
 		t.Fatal("first MTPTransfer did not reach the first Signalling Gateway")
 	}
 	secondDone := make(chan error, 1)
