@@ -108,7 +108,7 @@ func TestPartialNIFIsolationWaitsForScopedDirectDataBeforeAspInactiveAck(t *test
 func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.T) {
 	asp, _ := newTestConn(t, StateASPActive, RoleSGP)
 	asp.maxMessageStreamID = 4
-	asp.cfg.RoutingContexts = nil
+	setInventoryRoutingContexts(&asp.cfg.ApplicationServers, nil)
 	listener := newSGPListener(NewListenerConfig(asp.cfg))
 	asp.listener = listener
 	if !listener.promoteAcceptedAssociation(asp) {

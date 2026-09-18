@@ -60,9 +60,10 @@ func main() {
 	associationConfig.
 		EnableHeartbeat(*hbInt, 10*time.Second).
 		SetASPIdentifier(1).
-		SetTrafficModeType(params.TrafficModeLoadshare).
-		SetNetworkAppearance(networkAppearance).
-		SetRoutingContexts(routingContext)
+		SetApplicationServers(m3ua.ASConfig{
+			ASKey:       asKey,
+			TrafficMode: params.TrafficModeLoadshare,
+		})
 	associationConfig.PeerSGP = &peer
 
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{

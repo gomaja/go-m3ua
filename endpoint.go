@@ -539,10 +539,7 @@ func (e *Endpoint) validateAssociationActivationPolicy(config *AssociationConfig
 		if peer == nil {
 			return nil
 		}
-		keys = associationConfigASKeys(&AssociationConfig{
-			NetworkAppearance: peer.NetworkAppearance,
-			RoutingContexts:   peer.RoutingContexts,
-		})
+		keys = inventoryASKeys(peer.ApplicationServers)
 		policy = newIPSPTrafficModePolicy(peer)
 	}
 

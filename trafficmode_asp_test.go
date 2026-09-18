@@ -10,12 +10,12 @@ import (
 
 func TestASPActivationSplitsRoutingContextsByTrafficMode(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2, 3)
-	asp.cfg.TrafficModeType = nil
-	asp.cfg.TrafficModes = map[uint32]uint32{
+	setInventoryTrafficModeType(&asp.cfg.ApplicationServers, nil)
+	setInventoryTrafficModes(&asp.cfg.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeLoadshare,
 		2: params.TrafficModeBroadcast,
 		3: params.TrafficModeLoadshare,
-	}
+	})
 	var sent []*messages.AspActive
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		if active, ok := message.(*messages.AspActive); ok {
@@ -57,11 +57,11 @@ func TestASPActivationSplitsRoutingContextsByTrafficMode(t *testing.T) {
 
 func TestASPRejectsActiveAckWithWrongRequestedTrafficMode(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
-	asp.cfg.TrafficModeType = nil
-	asp.cfg.TrafficModes = map[uint32]uint32{
+	setInventoryTrafficModeType(&asp.cfg.ApplicationServers, nil)
+	setInventoryTrafficModes(&asp.cfg.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeLoadshare,
 		2: params.TrafficModeBroadcast,
-	}
+	})
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		return message.MarshalLen(), nil
 	}
@@ -98,7 +98,7 @@ func TestASPRejectsActiveAckWithWrongRequestedTrafficMode(t *testing.T) {
 
 func TestASPRefusesInvalidConfiguredPerRoutingContextTrafficModeBeforeWriting(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1)
-	asp.cfg.TrafficModes = map[uint32]uint32{1: 99}
+	setInventoryTrafficModes(&asp.cfg.ApplicationServers, map[uint32]uint32{1: 99})
 	writes := 0
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		writes++

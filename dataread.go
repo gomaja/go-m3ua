@@ -203,10 +203,10 @@ func (c *Association) receivedASKey(data *messages.Data) ASKey {
 			return key
 		}
 	}
-	appearance := c.applicationServerNetworkAppearance()
-	if local {
-		appearance = c.localNetworkAppearance()
+	configured := c.contextlessASKey(local)
+	if key.RoutingContextSet {
+		configured = c.staticASKeyForRoutingContext(key.RoutingContext, local)
 	}
-	key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(appearance)
+	key.NetworkAppearance, key.NetworkAppearanceSet = configured.NetworkAppearance, configured.NetworkAppearanceSet
 	return key
 }

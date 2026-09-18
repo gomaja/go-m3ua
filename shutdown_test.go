@@ -50,7 +50,7 @@ func TestShutdownWaitsForEachAckBeforeAdvancing(t *testing.T) {
 	}
 	assertNoSignal(t, writes, 25*time.Millisecond, "ASP Down before ASP Inactive Ack")
 
-	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(conn.cfg.RoutingContexts.Copy(), nil))
+	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 	second := receiveSignal(t, writes)
 	if _, ok := second.(*messages.AspDown); !ok {
 		t.Fatalf("second shutdown signal = %T, want *messages.AspDown", second)
@@ -81,7 +81,7 @@ func TestShutdownCancelsOldTAckBeforeEachOrderlyRequest(t *testing.T) {
 	conn.cfg.TAck = time.Hour
 	conn.startTAck(messages.NewAspUp(nil, params.NewInfoString("old")), requestAspUp)
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), params.NewRoutingContext(1), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), params.NewRoutingContext(1), nil,
 	), requestAspActive)
 	conn.startTAck(messages.NewAspInactive(params.NewRoutingContext(2), nil), requestAspInactive)
 	conn.startTAck(messages.NewAspDown(params.NewInfoString("old")), requestAspDown)
@@ -101,7 +101,7 @@ func TestShutdownCancelsOldTAckBeforeEachOrderlyRequest(t *testing.T) {
 		t.Fatalf("first shutdown write retained %d pending requests, want only ASP Inactive", got)
 	}
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(
-		conn.cfg.RoutingContexts.Copy(), nil,
+		asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	))
 
 	if _, ok := receiveSignal(t, writes).(*messages.AspDown); !ok {
@@ -142,7 +142,7 @@ func TestShutdownFencesAnInFlightOldTAckBeforeAspInactive(t *testing.T) {
 		return message.MarshalLen(), nil
 	}
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	), requestAspActive)
 	select {
 	case <-oldWriteStarted:
@@ -168,7 +168,7 @@ func TestShutdownFencesAnInFlightOldTAckBeforeAspInactive(t *testing.T) {
 		t.Fatalf("next write = %T, want ASP Inactive after the old write", second)
 	}
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(
-		conn.cfg.RoutingContexts.Copy(), nil,
+		asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	))
 	if _, ok := receiveSignal(t, writes).(*messages.AspDown); !ok {
 		t.Fatal("shutdown did not send ASP Down after ASP Inactive Ack")
@@ -191,7 +191,7 @@ func TestShutdownIgnoresDelayedCancelledAspActiveAck(t *testing.T) {
 	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	), requestAspActive)
 
 	writes := make(chan messages.M3UA, 8)
@@ -205,7 +205,7 @@ func TestShutdownIgnoresDelayedCancelledAspActiveAck(t *testing.T) {
 		t.Fatal("shutdown did not send ASP Inactive")
 	}
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(
-		conn.cfg.RoutingContexts.Copy(), nil,
+		asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	))
 	if _, ok := receiveSignal(t, writes).(*messages.AspDown); !ok {
 		t.Fatal("shutdown did not send ASP Down")
@@ -215,7 +215,7 @@ func TestShutdownIgnoresDelayedCancelledAspActiveAck(t *testing.T) {
 	}
 
 	conn.handleSignals(context.Background(), messages.NewAspActiveAck(
-		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	))
 	if got := conn.State(); got != StateASPInactive {
 		t.Errorf("delayed cancelled ASP Active Ack changed shutdown state to %v", got)

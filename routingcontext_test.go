@@ -307,7 +307,7 @@ func TestRoutingContextHandshakeMatrix(t *testing.T) {
 // The Ack must name what the ASP asked about, not the SGP's whole inventory.
 func TestAspActiveAckEchoesTheASPsRoutingContext(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	if err := conn.handleAspActive(
 		messages.NewAspActive(params.NewTrafficModeType(params.TrafficModeLoadshare), params.NewRoutingContext(2), nil),
@@ -325,7 +325,7 @@ func TestAspActiveAckEchoesTheASPsRoutingContext(t *testing.T) {
 // before: there is nothing else to name.
 func TestAspActiveAckWithoutARequestedContextUsesTheConfiguredSet(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	if err := conn.handleAspActive(
 		messages.NewAspActive(params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil),
@@ -349,7 +349,7 @@ func TestAspActiveAckWithoutARequestedContextUsesTheConfiguredSet(t *testing.T) 
 // Section 3.8.1, and this rule is the specific one for ASP Active.
 func TestAspActiveForAnUnservedRoutingContextIsRefused(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	err := conn.handleAspActive(
 		messages.NewAspActive(params.NewTrafficModeType(params.TrafficModeLoadshare), params.NewRoutingContext(9), nil),
@@ -372,7 +372,7 @@ func TestAspActiveForAnUnservedRoutingContextIsRefused(t *testing.T) {
 // configured contexts, telling the peer that ours were the invalid ones.
 func TestErrorForAnUnservedRoutingContextNamesTheOffendingContexts(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	err := conn.handleAspActive(
 		messages.NewAspActive(params.NewTrafficModeType(params.TrafficModeLoadshare), params.NewRoutingContext(9, 2, 8), nil),
@@ -411,7 +411,7 @@ func TestErrorForAnUnservedRoutingContextNamesTheOffendingContexts(t *testing.T)
 // which the first version of this change did.
 func TestAspActiveWhileAlreadyActiveIsAckedWhateverTheRoutingContext(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	err := conn.handleAspActive(
 		messages.NewAspActive(params.NewTrafficModeType(params.TrafficModeLoadshare), params.NewRoutingContext(9), nil),
@@ -437,7 +437,7 @@ func TestAspActiveWhileAlreadyActiveIsAckedWhateverTheRoutingContext(t *testing.
 // ASP is already ASP-INACTIVE.
 func TestAspInactiveWhileAlreadyInactiveIsAckedWhateverTheRoutingContext(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	err := conn.handleAspInactive(messages.NewAspInactive(params.NewRoutingContext(9), nil))
 	if err == nil {
@@ -459,7 +459,7 @@ func TestAspInactiveWhileAlreadyInactiveIsAckedWhateverTheRoutingContext(t *test
 // rule.
 func TestAspInactiveAckEchoesTheASPsRoutingContext(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	if err := conn.handleAspInactive(
 		messages.NewAspInactive(params.NewRoutingContext(3), nil),
@@ -543,7 +543,7 @@ func TestUnservedRoutingContextUsesThePerMessageErrorCode(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, sent := newTestConn(t, tt.state, RoleSGP)
-			conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+			setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 			err := tt.send(conn)
 			if err == nil {
@@ -585,7 +585,7 @@ func TestUnservedRoutingContextUsesThePerMessageErrorCode(t *testing.T) {
 // else — and never activated for the context it was entitled to.
 func TestMixedRoutingContextAcksTheServedOnesAndRefusesTheRest(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	err := conn.handleAspActive(messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -622,7 +622,7 @@ func TestMixedRoutingContextAcksTheServedOnesAndRefusesTheRest(t *testing.T) {
 // to acknowledge.
 func TestWhollyUnservedRoutingContextGetsNoAck(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1, 2, 3)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1, 2, 3))
 
 	err := conn.handleAspActive(messages.NewAspActive(
 		params.NewTrafficModeType(params.TrafficModeLoadshare),
@@ -648,7 +648,7 @@ func TestContextlessConfiguredASActivatesWithoutRoutingContext(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
-			conn.cfg.RoutingContexts = tt.configured
+			setInventoryRoutingContexts(&conn.cfg.ApplicationServers, tt.configured)
 
 			if err := conn.handleAspActive(messages.NewAspActive(
 				params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil,
@@ -675,7 +675,7 @@ func TestContextlessConfiguredASInactivatesWithoutRoutingContext(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, sent := newTestConn(t, StateASPActive, RoleSGP)
-			conn.cfg.RoutingContexts = tt.configured
+			setInventoryRoutingContexts(&conn.cfg.ApplicationServers, tt.configured)
 
 			conn.handleSignals(context.Background(), messages.NewAspInactive(nil, nil))
 
@@ -700,7 +700,7 @@ func TestContextlessConfiguredASInactivatesWithoutRoutingContext(t *testing.T) {
 func TestContextlessASPInactiveQuiescesApplicationServerBeforeAck(t *testing.T) {
 	registry := newApplicationServers(time.Hour)
 	association, _ := newTestConn(t, StateASPActive, RoleSGP)
-	association.cfg.RoutingContexts = nil
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, nil)
 	association.as = registry
 	applicationServer := registry.get(contextlessASKeyForConfig(association.cfg))
 	applicationServer.setASPState(association, StateASPActive, time.Hour)
@@ -756,9 +756,9 @@ func TestExplicitContextCannotCreateItsOwnRoutingKey(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			for _, empty := range []bool{false, true} {
 				connection, sent := newTestConn(t, test.state, RoleSGP)
-				connection.cfg.RoutingContexts = nil
+				setInventoryRoutingContexts(&connection.cfg.ApplicationServers, nil)
 				if empty {
-					connection.cfg.RoutingContexts = params.NewRoutingContext()
+					setInventoryRoutingContexts(&connection.cfg.ApplicationServers, params.NewRoutingContext())
 				}
 				if err := test.handle(connection); !errors.Is(err, test.want) {
 					t.Fatalf("empty=%t error = %v, want %v", empty, err, test.want)

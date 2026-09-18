@@ -274,13 +274,17 @@ const (
 )
 
 // IPSPTrafficConfig configures one direction of IPSP Double Exchange traffic.
-// RoutingContexts identify the Routing Keys for that direction, while Network
-// Appearance and Traffic Mode apply only to those traffic flows.
+//
+// ApplicationServers is that direction's own Application Server inventory and
+// the only thing the direction declares. RFC 4666 Section 5.6.2 keeps the two
+// directions of a Double Exchange independent, so neither reads the other's
+// membership, Network Appearance or Traffic Mode.
+//
+// A nil IPSPTrafficConfig is no traffic in that direction at all. A non-nil one
+// with an empty inventory is the contextless Application Server of Section
+// 3.6.1 in that direction, exactly as it is on an Association.
 type IPSPTrafficConfig struct {
-	TrafficModeType   *params.Param
-	TrafficModes      map[uint32]uint32
-	NetworkAppearance *params.Param
-	RoutingContexts   *params.Param
+	ApplicationServers []ASConfig
 }
 
 // IPSPConfig configures RFC 4666 peer-to-peer procedures for one Association.
@@ -411,11 +415,36 @@ type ASPIdentity struct {
 }
 
 // ASPAuthorizer returns the Routing Contexts an accepted ASP is configured to
-// serve. The result is copied and must be a subset of
-// AssociationConfig.RoutingContexts.
+// serve. The result is copied and must be a subset of the Routing Contexts
+// named by AssociationConfig.ApplicationServers.
 // Returning an empty slice authorizes no Application Server. The decision is
 // resolved once at ASP Up and remains immutable for that association.
 type ASPAuthorizer func(ASPIdentity) []uint32
+
+// ASConfig declares one Application Server an Association carries.
+//
+// ASKey is the exact scope that names it on this Association's wire. RFC 4666
+// Section 3.3.1 makes the Network Appearance "of local significance only,
+// coordinated between the SGP and ASP", and Section 1.4.2.1 makes a Routing
+// Context "an index into a sending node's Message Distribution Table", so the
+// pair identifies the Application Server and the Routing Context alone does
+// not. That pair is what a DataRequest names and what a received message is
+// resolved against.
+//
+// An ASKey without a Routing Context is the contextless Application Server of
+// Section 3.6.1, the one an SGP serving a single Routing Key needs no Routing
+// Context for. An Association may declare at most one, and not beside
+// Routing-Context-scoped ones: a message that omitted the Routing Context would
+// otherwise name both.
+//
+// TrafficMode is the Section 3.7.1 Traffic Mode Type agreed for this one
+// Application Server. The table there defines 1 Override, 2 Loadshare and 3
+// Broadcast and nothing else, so zero leaves the mode unconfigured and the
+// peer's requested mode stands.
+type ASConfig struct {
+	ASKey       ASKey
+	TrafficMode uint32
+}
 
 // AssociationConfig configures one M3UA association.
 //
@@ -443,20 +472,10 @@ type AssociationConfig struct {
 	// congestion is reported without blocking the association dispatcher.
 	DataQueueSize int
 	ASPIdentifier *params.Param
-	// TrafficModeType is the default traffic-handling mode. Its value is copied
-	// when an Association or Listener is constructed; later mutations do not
-	// alter established protocol policy.
-	TrafficModeType *params.Param
 	// AuthorizeASP optionally narrows this accepted Association's configured
 	// Routing Context inventory to the immutable set its peer ASP may serve.
 	// Without it, the peer ASP may serve every configured Routing Context.
 	AuthorizeASP ASPAuthorizer
-	// TrafficModes optionally configures Traffic Mode per Routing Context. It
-	// takes precedence over TrafficModeType and permits one association to serve
-	// ASes with different modes. Values must be Override, Loadshare, or Broadcast.
-	// The map is copied when an Association or Listener is constructed.
-	TrafficModes      map[uint32]uint32
-	NetworkAppearance *params.Param
 	// Compatibility configures explicit receive-side tolerance for known peer
 	// protocol violations. The zero value keeps RFC-strict behaviour.
 	Compatibility CompatibilityPolicy
@@ -473,11 +492,15 @@ type AssociationConfig struct {
 	// IPSP may use different models with different peers.
 	IPSP *IPSPConfig
 
-	// RoutingContexts is the Routing Context inventory this Association is
-	// configured to carry. With NetworkAppearance it names this Association's
-	// Application Servers: the pair is the exact ASKey each DataRequest must
-	// name.
-	RoutingContexts *params.Param
+	// ApplicationServers is the Application Server inventory this Association
+	// carries. It is the whole of the Association's membership: each entry
+	// names one Application Server by the exact ASKey a DataRequest must name,
+	// and carries the Traffic Mode agreed for that one Application Server.
+	//
+	// An empty inventory is the contextless Application Server of RFC 4666
+	// Section 3.6.1 with no Network Appearance and no agreed Traffic Mode.
+	// Declaring that Application Server explicitly is how it is given either.
+	ApplicationServers []ASConfig
 }
 
 // AcceptInfo identifies an SCTP association before its M3UA handshake starts.
@@ -557,9 +580,7 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 		snapshot.SCTPConfig = &SCTPConfig{}
 	}
 	snapshot.ASPIdentifier = config.ASPIdentifier.Copy()
-	snapshot.TrafficModeType = config.TrafficModeType.Copy()
-	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
-	snapshot.RoutingContexts = config.RoutingContexts.Copy()
+	snapshot.ApplicationServers = snapshotApplicationServers(config.ApplicationServers)
 	if config.ASPProcedures != nil {
 		procedures := *config.ASPProcedures
 		snapshot.ASPProcedures = &procedures
@@ -574,18 +595,25 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 		ipsp.TrafficToPeer = snapshotIPSPTrafficConfig(config.IPSP.TrafficToPeer)
 		snapshot.IPSP = &ipsp
 	}
-	if config.TrafficModes != nil {
-		snapshot.TrafficModes = make(map[uint32]uint32, len(config.TrafficModes))
-		for routingContext, trafficMode := range config.TrafficModes {
-			snapshot.TrafficModes[routingContext] = trafficMode
-		}
-	}
 	return &snapshot
+}
+
+// snapshotApplicationServers copies an Application Server inventory. The
+// public AssociationConfig may be reused and mutated by its owner, so the
+// protocol goroutines must never read the caller's slice.
+func snapshotApplicationServers(servers []ASConfig) []ASConfig {
+	if servers == nil {
+		return nil
+	}
+	return append(make([]ASConfig, 0, len(servers)), servers...)
 }
 
 func validateAssociationConfigForRole(role Role, config *AssociationConfig) error {
 	if config == nil {
 		return ErrNilAssociationConfig
+	}
+	if err := validateApplicationServers("ApplicationServers", config.ApplicationServers); err != nil {
+		return err
 	}
 	if err := validateASPProcedurePolicy(role, config.ASPProcedures); err != nil {
 		return err
@@ -644,8 +672,7 @@ func validateAssociationConfigForRole(role Role, config *AssociationConfig) erro
 			if automaticASPTM && config.IPSP.TrafficToLocal == nil {
 				return fmt.Errorf("%w: automatic ASP Active requires TrafficToLocal", ErrInvalidRoleConfiguration)
 			}
-			if config.RoutingContexts != nil || config.NetworkAppearance != nil ||
-				config.TrafficModeType != nil || len(config.TrafficModes) != 0 {
+			if len(config.ApplicationServers) != 0 {
 				return fmt.Errorf("%w: IPSP Double Exchange traffic policy must be directional", ErrInvalidRoleConfiguration)
 			}
 			if err := validateIPSPTrafficConfig("TrafficToLocal", config.IPSP.TrafficToLocal); err != nil {
@@ -668,49 +695,63 @@ func validateIPSPTrafficConfig(name string, config *IPSPTrafficConfig) error {
 	if config == nil {
 		return nil
 	}
-	if err := validateIPSPTrafficParam(name, "TrafficModeType", config.TrafficModeType, params.TrafficModeType); err != nil {
-		return err
-	}
-	if err := validateIPSPTrafficParam(name, "NetworkAppearance", config.NetworkAppearance, params.NetworkAppearance); err != nil {
-		return err
-	}
-	if err := validateIPSPTrafficParam(name, "RoutingContexts", config.RoutingContexts, params.RoutingContext); err != nil {
-		return err
-	}
-
-	configuredRoutingContexts := make(map[uint32]struct{})
-	if config.RoutingContexts != nil {
-		for _, routingContext := range config.RoutingContexts.RoutingContexts() {
-			if _, duplicate := configuredRoutingContexts[routingContext]; duplicate {
-				return fmt.Errorf("%w: %s contains duplicate Routing Context %d",
-					ErrInvalidRoleConfiguration, name, routingContext)
-			}
-			configuredRoutingContexts[routingContext] = struct{}{}
-		}
-	}
-	for routingContext, trafficMode := range config.TrafficModes {
-		if !validTrafficMode(trafficMode) {
-			return fmt.Errorf("%w: %s has undefined Traffic Mode %d for Routing Context %d",
-				ErrInvalidRoleConfiguration, name, trafficMode, routingContext)
-		}
-		if _, configured := configuredRoutingContexts[routingContext]; !configured {
-			return fmt.Errorf("%w: %s has a Traffic Mode for unconfigured Routing Context %d",
-				ErrInvalidRoleConfiguration, name, routingContext)
-		}
-	}
-	return nil
+	return validateApplicationServers(name+".ApplicationServers", config.ApplicationServers)
 }
 
-func validateIPSPTrafficParam(direction, name string, parameter *params.Param, wantTag uint16) error {
-	if parameter == nil {
-		return nil
+// validateApplicationServers rejects an Application Server inventory that
+// names one Application Server twice, that could name two at once, or that
+// carries a Traffic Mode RFC 4666 Section 3.7.1 does not define.
+//
+// The presence flags are load bearing: zero is a legitimate explicit value for
+// either half of an ASKey, so a value left behind without its flag would make
+// two equal scopes compare unequal and is refused rather than normalized.
+func validateApplicationServers(name string, servers []ASConfig) error {
+	seen := make(map[ASKey]struct{}, len(servers))
+	contextless := false
+	routingContextScoped := false
+	for _, server := range servers {
+		key := server.ASKey
+		if !key.NetworkAppearanceSet && key.NetworkAppearance != 0 {
+			return fmt.Errorf("%w: %s Network Appearance %d is present without NetworkAppearanceSet",
+				ErrInvalidApplicationServerConfig, name, key.NetworkAppearance)
+		}
+		if !key.RoutingContextSet && key.RoutingContext != 0 {
+			return fmt.Errorf("%w: %s Routing Context %d is present without RoutingContextSet",
+				ErrInvalidApplicationServerConfig, name, key.RoutingContext)
+		}
+		if server.TrafficMode != 0 && !validTrafficMode(server.TrafficMode) {
+			return fmt.Errorf("%w: %s has undefined Traffic Mode %d for %+v",
+				ErrInvalidApplicationServerConfig, name, server.TrafficMode, key)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("%w: %s names %+v twice",
+				ErrInvalidApplicationServerConfig, name, key)
+		}
+		seen[key] = struct{}{}
+		if key.RoutingContextSet {
+			routingContextScoped = true
+			continue
+		}
+		if contextless {
+			return fmt.Errorf("%w: %s declares more than one contextless Application Server",
+				ErrInvalidApplicationServerConfig, name)
+		}
+		contextless = true
+		if !key.NetworkAppearanceSet && server.TrafficMode == 0 {
+			// An entry that names nothing is the empty inventory written a
+			// second way, and two spellings of one membership can drift apart.
+			return fmt.Errorf("%w: %s declares a contextless Application Server with no Network Appearance "+
+				"and no Traffic Mode; omit the entry instead",
+				ErrInvalidApplicationServerConfig, name)
+		}
 	}
-	if parameter.Tag != wantTag {
-		return fmt.Errorf("%w: %s %s has parameter tag %#04x, want %#04x",
-			ErrInvalidRoleConfiguration, direction, name, parameter.Tag, wantTag)
-	}
-	if _, err := parameter.Copy().MarshalBinary(); err != nil {
-		return fmt.Errorf("%w: %s %s: %v", ErrInvalidRoleConfiguration, direction, name, err)
+	if contextless && routingContextScoped {
+		// RFC 4666 Section 3.3.1 lets a message omit the Routing Context only
+		// "where a Routing Key has not been coordinated". With one coordinated,
+		// an omitted Routing Context would name the contextless Application
+		// Server and the coordinated ones alike.
+		return fmt.Errorf("%w: %s declares a contextless Application Server beside Routing-Context-scoped ones",
+			ErrInvalidApplicationServerConfig, name)
 	}
 	return nil
 }
@@ -720,15 +761,7 @@ func snapshotIPSPTrafficConfig(config *IPSPTrafficConfig) *IPSPTrafficConfig {
 		return nil
 	}
 	snapshot := *config
-	snapshot.TrafficModeType = config.TrafficModeType.Copy()
-	snapshot.NetworkAppearance = config.NetworkAppearance.Copy()
-	snapshot.RoutingContexts = config.RoutingContexts.Copy()
-	if config.TrafficModes != nil {
-		snapshot.TrafficModes = make(map[uint32]uint32, len(config.TrafficModes))
-		for routingContext, trafficMode := range config.TrafficModes {
-			snapshot.TrafficModes[routingContext] = trafficMode
-		}
-	}
+	snapshot.ApplicationServers = snapshotApplicationServers(config.ApplicationServers)
 	return &snapshot
 }
 
@@ -835,20 +868,11 @@ func (c *AssociationConfig) SetASPIdentifier(id uint32) *AssociationConfig {
 	return c
 }
 
-// SetTrafficModeType sets the RFC 4666 Traffic Mode Type parameter.
-func (c *AssociationConfig) SetTrafficModeType(trafficMode uint32) *AssociationConfig {
-	c.TrafficModeType = params.NewTrafficModeType(trafficMode)
-	return c
-}
-
-// SetNetworkAppearance sets the RFC 4666 Network Appearance parameter.
-func (c *AssociationConfig) SetNetworkAppearance(networkAppearance uint32) *AssociationConfig {
-	c.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
-	return c
-}
-
-// SetRoutingContexts sets the RFC 4666 Routing Context parameter.
-func (c *AssociationConfig) SetRoutingContexts(routingContexts ...uint32) *AssociationConfig {
-	c.RoutingContexts = params.NewRoutingContext(routingContexts...)
+// SetApplicationServers replaces the Application Server inventory this
+// Association carries. Passing none leaves the contextless Application Server
+// of RFC 4666 Section 3.6.1 with no Network Appearance and no agreed Traffic
+// Mode.
+func (c *AssociationConfig) SetApplicationServers(servers ...ASConfig) *AssociationConfig {
+	c.ApplicationServers = snapshotApplicationServers(servers)
 	return c
 }

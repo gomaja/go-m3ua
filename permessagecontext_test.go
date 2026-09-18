@@ -57,7 +57,7 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 	// inactive and naming one of those explicitly must not send traffic for it.
 	t.Run("a context the peer never acknowledged is refused", func(t *testing.T) {
 		asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
-		asp.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		capture := &dataFrameCapture{}
 		asp.dataWriter = capture.write
 		if err := asp.handleAspActiveAck(messages.NewAspActiveAck(
@@ -82,7 +82,7 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 
 	t.Run("an inactive or overridden context is refused", func(t *testing.T) {
 		sgpAssociation, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
-		sgpAssociation.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&sgpAssociation.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		sgpAssociation.dataWriter = (&dataFrameCapture{}).write
 		sgpAssociation.noteRoutingContextsActive([]uint32{1})
 		_, err := sgpAssociation.WriteData(DataRequest{
@@ -92,7 +92,7 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 		requireDataWriteError(t, err, DataNotSent, ErrRoutingContextNotActive)
 
 		aspAssociation, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-		aspAssociation.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&aspAssociation.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		aspAssociation.dataWriter = (&dataFrameCapture{}).write
 		aspAssociation.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 		aspAssociation.noteRoutingContextsOverridden([]uint32{2})

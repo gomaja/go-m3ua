@@ -41,7 +41,7 @@ func newSGPListener(config *ListenerConfig) *Listener {
 func associationConfigASKey(config *AssociationConfig, routingContext uint32) ASKey {
 	key := routingContextASKey(routingContext)
 	if config != nil {
-		key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(config.NetworkAppearance)
+		key.NetworkAppearance, key.NetworkAppearanceSet = asConfigNetworkAppearance(config.ApplicationServers)
 	}
 	return key
 }
@@ -58,12 +58,10 @@ func newSGPAssociationConfigForTest(heartbeat *HeartbeatInfo, aspID, trafficMode
 
 func newAssociationConfigForTest(heartbeat *HeartbeatInfo, aspID, trafficMode, networkAppearance uint32, routingContexts []uint32) *AssociationConfig {
 	return &AssociationConfig{
-		HeartbeatInfo:     heartbeat,
-		SCTPConfig:        &SCTPConfig{},
-		ASPIdentifier:     params.NewAspIdentifier(aspID),
-		TrafficModeType:   params.NewTrafficModeType(trafficMode),
-		NetworkAppearance: params.NewNetworkAppearance(networkAppearance),
-		RoutingContexts:   params.NewRoutingContext(routingContexts...),
+		HeartbeatInfo:      heartbeat,
+		SCTPConfig:         &SCTPConfig{},
+		ASPIdentifier:      params.NewAspIdentifier(aspID),
+		ApplicationServers: buildTestInventory(networkAppearance, true, trafficMode, routingContexts),
 	}
 }
 
@@ -83,12 +81,10 @@ func wireRoutingContext(scope WireScope) uint32 {
 //
 // Tests whose subject is the scope itself name it explicitly instead.
 func associationScope(c *Association, routingContext uint32) ASKey {
-	var key ASKey
-	key.NetworkAppearance, key.NetworkAppearanceSet = appearanceOf(c.applicationServerNetworkAppearance())
-	if len(c.configuredRoutingContexts()) > 0 {
-		key.RoutingContext, key.RoutingContextSet = routingContext, true
+	if len(c.configuredRoutingContexts()) == 0 {
+		return c.contextlessASKey(false)
 	}
-	return key
+	return c.staticASKeyForRoutingContext(routingContext, false)
 }
 
 // testProtocolData is a recognizable MTP3 routing label for tests that care

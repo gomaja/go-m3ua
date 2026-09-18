@@ -23,16 +23,22 @@ const (
 )
 
 func associationConfig(role string) *m3ua.AssociationConfig {
-	routingContexts := make([]uint32, flowCount)
-	for index := range routingContexts {
-		routingContexts[index] = 100 + uint32(index)
+	applicationServers := make([]m3ua.ASConfig, flowCount)
+	for index := range applicationServers {
+		applicationServers[index] = m3ua.ASConfig{
+			ASKey: m3ua.ASKey{
+				NetworkAppearance:    testNetworkAppearance,
+				NetworkAppearanceSet: true,
+				RoutingContext:       100 + uint32(index),
+				RoutingContextSet:    true,
+			},
+			TrafficMode: params.TrafficModeLoadshare,
+		}
 	}
 	config := m3ua.NewAssociationConfig()
 	config.SetSCTPNoDelay(sctpNoDelay).
 		SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).
-		SetTrafficModeType(params.TrafficModeLoadshare).
-		SetNetworkAppearance(testNetworkAppearance).
-		SetRoutingContexts(routingContexts...)
+		SetApplicationServers(applicationServers...)
 	config.HeartbeatInfo = &m3ua.HeartbeatInfo{Enabled: false}
 	config.DataQueueSize = 1024
 	return config

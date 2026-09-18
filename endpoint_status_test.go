@@ -115,8 +115,8 @@ func TestEndpointApplicationServerStatusesSeparateNetworkAppearances(t *testing.
 	endpoint.as.register([]ASKey{secondKey, firstKey})
 
 	association, _ := newTestConn(t, StateASPActive, RoleSGP)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(firstKey.NetworkAppearance)
-	association.cfg.RoutingContexts = params.NewRoutingContext(firstKey.RoutingContext)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(firstKey.NetworkAppearance))
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(firstKey.RoutingContext))
 	association.noteRoutingContextsActive([]uint32{firstKey.RoutingContext})
 	association.as = endpoint.as
 	if !endpoint.trackAssociation(association) {
@@ -163,8 +163,8 @@ func TestEndpointASPStatusesPreserveDirectionAndExactASKey(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = endpoint.Close() })
 		association, _ := newTestConn(t, StateASPActive, RoleASP)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(key.NetworkAppearance)
-		association.cfg.RoutingContexts = params.NewRoutingContext(key.RoutingContext)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(key.NetworkAppearance))
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(key.RoutingContext))
 		association.cfg.ASPIdentifier = params.NewAspIdentifier(42)
 		association.noteRoutingContextsAcked(params.NewRoutingContext(key.RoutingContext))
 		if !endpoint.trackAssociation(association) {
@@ -192,8 +192,8 @@ func TestEndpointASPStatusesPreserveDirectionAndExactASKey(t *testing.T) {
 		t.Cleanup(func() { _ = endpoint.Close() })
 		endpoint.as.register([]ASKey{key})
 		association, _ := newTestConn(t, StateASPInactive, RoleSGP)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(key.NetworkAppearance)
-		association.cfg.RoutingContexts = params.NewRoutingContext(key.RoutingContext)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(key.NetworkAppearance))
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(key.RoutingContext))
 		association.as = endpoint.as
 		association.savePeerASPIdentifier(params.NewAspIdentifier(99))
 		if !endpoint.trackAssociation(association) {

@@ -49,19 +49,19 @@ func TestIPSPDoubleExchangeConfigurationUsesRFC4666TrafficDirections(t *testing.
 		{
 			name: "ambiguous association routing contexts",
 			configure: func(config *AssociationConfig) {
-				config.RoutingContexts = params.NewRoutingContext(99)
+				setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(99))
 			},
 		},
 		{
 			name: "ambiguous association network appearance",
 			configure: func(config *AssociationConfig) {
-				config.NetworkAppearance = params.NewNetworkAppearance(99)
+				setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(99))
 			},
 		},
 		{
 			name: "ambiguous association traffic mode",
 			configure: func(config *AssociationConfig) {
-				config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
+				setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeLoadshare))
 			},
 		},
 	}
@@ -93,51 +93,36 @@ func TestIPSPDoubleExchangeRejectsInvalidDirectionalTrafficConfiguration(t *test
 		configure func(*IPSPTrafficConfig)
 	}{
 		{
-			name: "Traffic Mode parameter tag",
-			configure: func(direction *IPSPTrafficConfig) {
-				direction.TrafficModeType = params.NewNetworkAppearance(1)
-			},
-		},
-		{
 			name: "undefined Traffic Mode",
 			configure: func(direction *IPSPTrafficConfig) {
-				direction.TrafficModeType = params.NewTrafficModeType(99)
+				direction.ApplicationServers[0].TrafficMode = 99
 			},
 		},
 		{
-			name: "Network Appearance parameter tag",
+			name: "duplicate Application Server",
 			configure: func(direction *IPSPTrafficConfig) {
-				direction.NetworkAppearance = params.NewRoutingContext(10)
+				direction.ApplicationServers = append(
+					direction.ApplicationServers, direction.ApplicationServers[0])
 			},
 		},
 		{
-			name: "empty Routing Context parameter",
+			name: "Network Appearance without its presence flag",
 			configure: func(direction *IPSPTrafficConfig) {
-				direction.RoutingContexts = params.NewRoutingContext()
+				direction.ApplicationServers[0].ASKey.NetworkAppearanceSet = false
 			},
 		},
 		{
-			name: "Routing Context parameter tag",
+			name: "Routing Context without its presence flag",
 			configure: func(direction *IPSPTrafficConfig) {
-				direction.RoutingContexts = params.NewNetworkAppearance(11)
+				direction.ApplicationServers[0].ASKey.RoutingContextSet = false
 			},
 		},
 		{
-			name: "duplicate Routing Context",
+			name: "contextless Application Server beside a scoped one",
 			configure: func(direction *IPSPTrafficConfig) {
-				direction.RoutingContexts = params.NewRoutingContext(11, 11)
-			},
-		},
-		{
-			name: "undefined per-context Traffic Mode",
-			configure: func(direction *IPSPTrafficConfig) {
-				direction.TrafficModes[11] = 99
-			},
-		},
-		{
-			name: "Traffic Mode for unconfigured Routing Context",
-			configure: func(direction *IPSPTrafficConfig) {
-				direction.TrafficModes[12] = params.TrafficModeLoadshare
+				direction.ApplicationServers = append(direction.ApplicationServers, ASConfig{
+					ASKey: ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true},
+				})
 			},
 		},
 	}
@@ -146,10 +131,18 @@ func TestIPSPDoubleExchangeRejectsInvalidDirectionalTrafficConfiguration(t *test
 		t.Run(test.name, func(t *testing.T) {
 			config := newDoubleExchangeAssociationConfigForTest()
 			test.configure(config.IPSP.TrafficToLocal)
-			if err := validateAssociationConfigForRole(RoleIPSP, config); !errors.Is(err, ErrInvalidRoleConfiguration) {
-				t.Fatalf("validateAssociationConfigForRole() error = %v, want ErrInvalidRoleConfiguration", err)
+			if err := validateAssociationConfigForRole(RoleIPSP, config); !errors.Is(err, ErrInvalidApplicationServerConfig) {
+				t.Fatalf("validateAssociationConfigForRole() error = %v, want ErrInvalidApplicationServerConfig", err)
 			}
 		})
+	}
+
+	// RFC 4666 Section 5.6.2 keeps the directions independent, so a fault in one
+	// is not read from the other.
+	peerDirection := newDoubleExchangeAssociationConfigForTest()
+	peerDirection.IPSP.TrafficToPeer.ApplicationServers[0].TrafficMode = 99
+	if err := validateAssociationConfigForRole(RoleIPSP, peerDirection); !errors.Is(err, ErrInvalidApplicationServerConfig) {
+		t.Fatalf("TrafficToPeer validation error = %v, want ErrInvalidApplicationServerConfig", err)
 	}
 
 	contextless := newDoubleExchangeAssociationConfigForTest()
@@ -157,40 +150,36 @@ func TestIPSPDoubleExchangeRejectsInvalidDirectionalTrafficConfiguration(t *test
 	if err := validateAssociationConfigForRole(RoleIPSP, contextless); err != nil {
 		t.Fatalf("contextless TrafficToLocal validation error = %v", err)
 	}
-
-	contextlessWithScopedMode := newDoubleExchangeAssociationConfigForTest()
-	contextlessWithScopedMode.IPSP.TrafficToLocal = &IPSPTrafficConfig{
-		TrafficModes: map[uint32]uint32{11: params.TrafficModeLoadshare},
-	}
-	if err := validateAssociationConfigForRole(RoleIPSP, contextlessWithScopedMode); !errors.Is(err, ErrInvalidRoleConfiguration) {
-		t.Fatalf("contextless scoped mode validation error = %v, want ErrInvalidRoleConfiguration", err)
-	}
 }
 
 func TestIPSPDoubleExchangeConfigurationIsDeepSnapshotted(t *testing.T) {
 	original := newDoubleExchangeAssociationConfigForTest()
 	snapshot := snapshotAssociationConfig(original)
 
-	original.IPSP.TrafficToLocal.RoutingContexts.Data[3] = 99
-	original.IPSP.TrafficToLocal.TrafficModes[11] = params.TrafficModeOverride
-	original.IPSP.TrafficToPeer.NetworkAppearance.Data[3] = 99
-	original.IPSP.TrafficToPeer.TrafficModeType.Data[3] = byte(params.TrafficModeBroadcast)
+	original.IPSP.TrafficToLocal.ApplicationServers[0] = ASConfig{
+		ASKey:       ASKey{RoutingContext: 99, RoutingContextSet: true},
+		TrafficMode: params.TrafficModeOverride,
+	}
+	original.IPSP.TrafficToPeer.ApplicationServers[0] = ASConfig{
+		ASKey:       ASKey{NetworkAppearance: 99, NetworkAppearanceSet: true},
+		TrafficMode: params.TrafficModeBroadcast,
+	}
 
 	if snapshot.IPSP == original.IPSP ||
 		snapshot.IPSP.TrafficToLocal == original.IPSP.TrafficToLocal ||
 		snapshot.IPSP.TrafficToPeer == original.IPSP.TrafficToPeer {
 		t.Fatal("snapshot shares IPSP Double Exchange configuration with the caller")
 	}
-	if got := snapshot.IPSP.TrafficToLocal.RoutingContexts.RoutingContexts(); len(got) != 1 || got[0] != 11 {
+	if got := asConfigRoutingContexts(snapshot.IPSP.TrafficToLocal.ApplicationServers); len(got) != 1 || got[0] != 11 {
 		t.Fatalf("TrafficToLocal Routing Contexts = %v, want [11]", got)
 	}
-	if got := snapshot.IPSP.TrafficToLocal.TrafficModes[11]; got != params.TrafficModeLoadshare {
+	if got := inventoryUniformTrafficMode(snapshot.IPSP.TrafficToLocal.ApplicationServers); got != params.TrafficModeLoadshare {
 		t.Fatalf("TrafficToLocal Traffic Mode = %d, want Loadshare", got)
 	}
-	if got := snapshot.IPSP.TrafficToPeer.NetworkAppearance.NetworkAppearance(); got != 20 {
+	if got := inventoryUniformNetworkAppearance(snapshot.IPSP.TrafficToPeer.ApplicationServers); got != 20 {
 		t.Fatalf("TrafficToPeer Network Appearance = %d, want 20", got)
 	}
-	if got := snapshot.IPSP.TrafficToPeer.TrafficModeType.TrafficModeType(); got != params.TrafficModeLoadshare {
+	if got := inventoryUniformTrafficMode(snapshot.IPSP.TrafficToPeer.ApplicationServers); got != params.TrafficModeLoadshare {
 		t.Fatalf("TrafficToPeer Traffic Mode = %d, want Loadshare", got)
 	}
 }
@@ -579,8 +568,9 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateActiveAck(t *testing.T) {
 
 func TestIPSPDoubleExchangeShutdownRejectsUnrequestedActiveAckScope(t *testing.T) {
 	config := newDoubleExchangeAssociationConfigForTest()
-	config.IPSP.TrafficToLocal.RoutingContexts = params.NewRoutingContext(11, 12)
-	config.IPSP.TrafficToLocal.TrafficModes[12] = params.TrafficModeLoadshare
+	setInventoryRoutingContexts(&config.IPSP.TrafficToLocal.ApplicationServers, params.NewRoutingContext(11, 12))
+	setInventoryTrafficModes(&config.IPSP.TrafficToLocal.ApplicationServers,
+		map[uint32]uint32{12: params.TrafficModeLoadshare})
 	association, _ := newDoubleExchangeIPSPWithConfigForTest(t, config)
 	association.setIPSPState(IPSPState{
 		TrafficToLocal: StateASPInactive,
@@ -1196,15 +1186,15 @@ func TestIPSPDoubleExchangeErrorsRetainTheOffendingTrafficDirection(t *testing.T
 
 func TestIPSPDoubleExchangeAlternateASPNotifyDoesNotOverrideTheOppositeDirection(t *testing.T) {
 	config := newDoubleExchangeAssociationConfigForTest()
-	config.IPSP.TrafficToLocal.RoutingContexts = params.NewRoutingContext(11, 12)
-	config.IPSP.TrafficToLocal.TrafficModes = map[uint32]uint32{
+	setInventoryRoutingContexts(&config.IPSP.TrafficToLocal.ApplicationServers, params.NewRoutingContext(11, 12))
+	setInventoryTrafficModes(&config.IPSP.TrafficToLocal.ApplicationServers, map[uint32]uint32{
 		11: params.TrafficModeOverride,
 		12: params.TrafficModeOverride,
-	}
-	config.IPSP.TrafficToPeer.RoutingContexts = params.NewRoutingContext(11)
-	config.IPSP.TrafficToPeer.TrafficModes = map[uint32]uint32{
+	})
+	setInventoryRoutingContexts(&config.IPSP.TrafficToPeer.ApplicationServers, params.NewRoutingContext(11))
+	setInventoryTrafficModes(&config.IPSP.TrafficToPeer.ApplicationServers, map[uint32]uint32{
 		11: params.TrafficModeLoadshare,
-	}
+	})
 	association, _ := newDoubleExchangeIPSPWithConfigForTest(t, config)
 	association.setIPSPState(IPSPState{
 		TrafficToLocal: StateASPActive,
@@ -1361,16 +1351,16 @@ func TestIPSPDoubleExchangeSupportsOneContextlessTrafficDirection(t *testing.T) 
 
 func TestIPSPDoubleExchangeActivationIsPartialInEachDirection(t *testing.T) {
 	config := newDoubleExchangeAssociationConfigForTest()
-	config.IPSP.TrafficToLocal.RoutingContexts = params.NewRoutingContext(11, 12)
-	config.IPSP.TrafficToLocal.TrafficModes = map[uint32]uint32{
+	setInventoryRoutingContexts(&config.IPSP.TrafficToLocal.ApplicationServers, params.NewRoutingContext(11, 12))
+	setInventoryTrafficModes(&config.IPSP.TrafficToLocal.ApplicationServers, map[uint32]uint32{
 		11: params.TrafficModeLoadshare,
 		12: params.TrafficModeLoadshare,
-	}
-	config.IPSP.TrafficToPeer.RoutingContexts = params.NewRoutingContext(22, 23)
-	config.IPSP.TrafficToPeer.TrafficModes = map[uint32]uint32{
+	})
+	setInventoryRoutingContexts(&config.IPSP.TrafficToPeer.ApplicationServers, params.NewRoutingContext(22, 23))
+	setInventoryTrafficModes(&config.IPSP.TrafficToPeer.ApplicationServers, map[uint32]uint32{
 		22: params.TrafficModeLoadshare,
 		23: params.TrafficModeLoadshare,
-	}
+	})
 	association, _ := newDoubleExchangeIPSPWithConfigForTest(t, config)
 	association.setIPSPState(IPSPState{
 		TrafficToLocal: StateASPInactive,
@@ -1813,16 +1803,12 @@ func newDoubleExchangeAssociationConfigForTest() *AssociationConfig {
 		ExchangeModel: IPSPExchangeDouble,
 		ASPSMExchange: IPSPASPSMExchangeDouble,
 		TrafficToLocal: &IPSPTrafficConfig{
-			TrafficModeType:   params.NewTrafficModeType(params.TrafficModeLoadshare),
-			TrafficModes:      map[uint32]uint32{11: params.TrafficModeLoadshare},
-			NetworkAppearance: params.NewNetworkAppearance(10),
-			RoutingContexts:   params.NewRoutingContext(11),
+			ApplicationServers: buildTestInventory(
+				10, true, params.TrafficModeLoadshare, []uint32{11}),
 		},
 		TrafficToPeer: &IPSPTrafficConfig{
-			TrafficModeType:   params.NewTrafficModeType(params.TrafficModeLoadshare),
-			TrafficModes:      map[uint32]uint32{22: params.TrafficModeLoadshare},
-			NetworkAppearance: params.NewNetworkAppearance(20),
-			RoutingContexts:   params.NewRoutingContext(22),
+			ApplicationServers: buildTestInventory(
+				20, true, params.TrafficModeLoadshare, []uint32{22}),
 		},
 	}
 	return config
@@ -1838,7 +1824,7 @@ func peerTrafficScope(c *Association, routingContext uint32) ASKey {
 	key := routingContextASKey(routingContext)
 	if c.cfg != nil && c.cfg.IPSP != nil && c.cfg.IPSP.TrafficToPeer != nil {
 		key.NetworkAppearance, key.NetworkAppearanceSet =
-			appearanceOf(c.cfg.IPSP.TrafficToPeer.NetworkAppearance)
+			asConfigNetworkAppearance(c.cfg.IPSP.TrafficToPeer.ApplicationServers)
 	}
 	return key
 }

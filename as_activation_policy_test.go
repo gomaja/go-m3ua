@@ -248,8 +248,8 @@ func TestEndpointRejectsAssociationOverrideWhenNExceedsOne(t *testing.T) {
 			role: RoleSGP,
 			config: func() *AssociationConfig {
 				config := NewAssociationConfig()
-				config.RoutingContexts = params.NewRoutingContext(1)
-				config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+				setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(1))
+				setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 				return config
 			}(),
 		},
@@ -258,8 +258,8 @@ func TestEndpointRejectsAssociationOverrideWhenNExceedsOne(t *testing.T) {
 			role: RoleIPSP,
 			config: func() *AssociationConfig {
 				config := NewAssociationConfig()
-				config.RoutingContexts = params.NewRoutingContext(1)
-				config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+				setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(1))
+				setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 				config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 				return config
 			}(),
@@ -273,8 +273,8 @@ func TestEndpointRejectsAssociationOverrideWhenNExceedsOne(t *testing.T) {
 					ExchangeModel: IPSPExchangeDouble,
 					ASPSMExchange: IPSPASPSMExchangeDouble,
 					TrafficToPeer: &IPSPTrafficConfig{
-						RoutingContexts: params.NewRoutingContext(1),
-						TrafficModeType: params.NewTrafficModeType(params.TrafficModeOverride),
+						ApplicationServers: buildTestInventory(
+							0, false, params.TrafficModeOverride, []uint32{1}),
 					},
 				}
 				return config
@@ -324,15 +324,15 @@ func TestAssociationOverrideValidationUsesExactASKey(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 
 	restricted := NewAssociationConfig()
-	restricted.NetworkAppearance = params.NewNetworkAppearance(10)
-	restricted.RoutingContexts = params.NewRoutingContext(1)
-	restricted.TrafficModes = map[uint32]uint32{1: params.TrafficModeOverride}
+	setInventoryNetworkAppearance(&restricted.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&restricted.ApplicationServers, params.NewRoutingContext(1))
+	setInventoryTrafficModes(&restricted.ApplicationServers, map[uint32]uint32{1: params.TrafficModeOverride})
 	if err := endpoint.validateAssociationConfig(restricted); !errors.Is(err, ErrInvalidApplicationServerConfig) {
 		t.Fatalf("restricted AS error = %v, want %v", err, ErrInvalidApplicationServerConfig)
 	}
 
 	permitted := snapshotAssociationConfig(restricted)
-	permitted.NetworkAppearance = params.NewNetworkAppearance(20)
+	setInventoryNetworkAppearance(&permitted.ApplicationServers, params.NewNetworkAppearance(20))
 	if err := endpoint.validateAssociationConfig(permitted); err != nil {
 		t.Fatalf("same Routing Context in another Network Appearance: %v", err)
 	}
@@ -355,8 +355,8 @@ func TestSGPDefersOverrideValidationUntilASPAuthorization(t *testing.T) {
 
 	configFor := func(authorized uint32) *AssociationConfig {
 		config := NewAssociationConfig()
-		config.RoutingContexts = params.NewRoutingContext(1, 2)
-		config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(1, 2))
+		setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		config.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{authorized} }
 		return config
 	}
@@ -389,39 +389,40 @@ func TestSGPDefersOverrideValidationUntilASPAuthorization(t *testing.T) {
 	}
 }
 
-func TestContextlessAssociationOverrideValidationUsesDefaultTrafficMode(t *testing.T) {
+// The contextless Application Server of RFC 4666 Section 3.6.1 has its own
+// Traffic Mode, and that is the one the n+k activation policy of Sections
+// 1.4.4.1 and 4.3.2 is validated against. Routing Context zero is a different
+// Application Server — zero is a legitimate Routing Context value, which is why
+// the presence flag exists — and the two cannot be declared together, so the
+// one cannot be read as the other's default.
+func TestContextlessApplicationServerCarriesItsOwnTrafficMode(t *testing.T) {
 	tests := []struct {
-		name        string
-		role        Role
-		defaultMode uint32
-		zeroMode    uint32
-		want        error
+		name            string
+		role            Role
+		contextlessMode uint32
+		want            error
 	}{
 		{
-			name:        "SGP rejects default Override",
-			role:        RoleSGP,
-			defaultMode: params.TrafficModeOverride,
-			zeroMode:    params.TrafficModeLoadshare,
-			want:        ErrInvalidApplicationServerConfig,
+			name:            "SGP rejects contextless Override",
+			role:            RoleSGP,
+			contextlessMode: params.TrafficModeOverride,
+			want:            ErrInvalidApplicationServerConfig,
 		},
 		{
-			name:        "SGP permits default Loadshare",
-			role:        RoleSGP,
-			defaultMode: params.TrafficModeLoadshare,
-			zeroMode:    params.TrafficModeOverride,
+			name:            "SGP permits contextless Loadshare",
+			role:            RoleSGP,
+			contextlessMode: params.TrafficModeLoadshare,
 		},
 		{
-			name:        "IPSP Double Exchange rejects peer default Override",
-			role:        RoleIPSP,
-			defaultMode: params.TrafficModeOverride,
-			zeroMode:    params.TrafficModeLoadshare,
-			want:        ErrInvalidApplicationServerConfig,
+			name:            "IPSP Double Exchange rejects peer contextless Override",
+			role:            RoleIPSP,
+			contextlessMode: params.TrafficModeOverride,
+			want:            ErrInvalidApplicationServerConfig,
 		},
 		{
-			name:        "IPSP Double Exchange permits peer default Loadshare",
-			role:        RoleIPSP,
-			defaultMode: params.TrafficModeLoadshare,
-			zeroMode:    params.TrafficModeOverride,
+			name:            "IPSP Double Exchange permits peer contextless Loadshare",
+			role:            RoleIPSP,
+			contextlessMode: params.TrafficModeLoadshare,
 		},
 	}
 
@@ -438,19 +439,16 @@ func TestContextlessAssociationOverrideValidationUsesDefaultTrafficMode(t *testi
 			}
 			t.Cleanup(func() { _ = endpoint.Close() })
 
+			contextless := []ASConfig{{TrafficMode: test.contextlessMode}}
 			config := NewAssociationConfig()
 			if test.role == RoleIPSP {
 				config.IPSP = &IPSPConfig{
 					ExchangeModel: IPSPExchangeDouble,
 					ASPSMExchange: IPSPASPSMExchangeDouble,
-					TrafficToPeer: &IPSPTrafficConfig{
-						TrafficModeType: params.NewTrafficModeType(test.defaultMode),
-						TrafficModes:    map[uint32]uint32{0: test.zeroMode},
-					},
+					TrafficToPeer: &IPSPTrafficConfig{ApplicationServers: contextless},
 				}
 			} else {
-				config.TrafficModeType = params.NewTrafficModeType(test.defaultMode)
-				config.TrafficModes = map[uint32]uint32{0: test.zeroMode}
+				config.ApplicationServers = contextless
 			}
 
 			err = endpoint.validateAssociationConfig(config)
@@ -458,6 +456,16 @@ func TestContextlessAssociationOverrideValidationUsesDefaultTrafficMode(t *testi
 				t.Fatalf("validateAssociationConfig error = %v, want %v", err, test.want)
 			}
 		})
+	}
+
+	both := NewAssociationConfig()
+	both.ApplicationServers = []ASConfig{
+		{TrafficMode: params.TrafficModeLoadshare},
+		{ASKey: ASKey{RoutingContextSet: true}, TrafficMode: params.TrafficModeOverride},
+	}
+	if err := validateAssociationConfigForRole(RoleSGP, both); !errors.Is(err, ErrInvalidApplicationServerConfig) {
+		t.Fatalf("contextless Application Server declared beside Routing Context zero error = %v, "+
+			"want ErrInvalidApplicationServerConfig", err)
 	}
 }
 
@@ -478,8 +486,8 @@ func TestIPSPDoubleExchangeLocalOverrideDoesNotUsePeerActivationPolicy(t *testin
 		ExchangeModel: IPSPExchangeDouble,
 		ASPSMExchange: IPSPASPSMExchangeDouble,
 		TrafficToLocal: &IPSPTrafficConfig{
-			RoutingContexts: params.NewRoutingContext(1),
-			TrafficModeType: params.NewTrafficModeType(params.TrafficModeOverride),
+			ApplicationServers: buildTestInventory(
+				0, false, params.TrafficModeOverride, []uint32{1}),
 		},
 	}
 	if err := endpoint.validateAssociationConfig(config); err != nil {
@@ -827,7 +835,7 @@ func TestConcurrentApplicationServerActivationThreshold(t *testing.T) {
 	associations := make([]*Association, 0, total)
 	for range total {
 		association, _ := newTestConn(t, StateASPInactive, RoleSGP)
-		association.cfg.RoutingContexts = params.NewRoutingContext(1)
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1))
 		association.as = registry
 		association.signalWriter = func(message messages.M3UA) (int, error) {
 			return message.MarshalLen(), nil
@@ -888,7 +896,7 @@ func TestEndpointCloseRacesApplicationServerThresholdChanges(t *testing.T) {
 	associations := make([]*Association, 0, 8)
 	for range 8 {
 		association, _ := newTestConn(t, StateASPInactive, RoleSGP)
-		association.cfg.RoutingContexts = params.NewRoutingContext(1)
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1))
 		association.as = registry
 		association.signalWriter = func(message messages.M3UA) (int, error) {
 			return message.MarshalLen(), nil
@@ -928,7 +936,7 @@ func TestEndpointCloseRacesApplicationServerThresholdChanges(t *testing.T) {
 
 func TestOverrideRequiresOneActiveASP(t *testing.T) {
 	registry := applicationServerRegistryForActivationTest(t, ASActivationPolicy{RequiredActiveASPs: 2})
-	policy := trafficModePolicy{defaultMode: params.TrafficModeOverride, defaultModeSet: true}
+	policy := trafficModePolicy{contextlessMode: params.TrafficModeOverride, contextlessModeSet: true}
 	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
 	applicationServer := registry.get(key)
 
@@ -1034,7 +1042,7 @@ func TestRoutingKeyRegistrationRejectsOverrideWhenNExceedsOne(t *testing.T) {
 			})
 			associationConfig := NewAssociationConfig()
 			if test.associationMode != 0 {
-				associationConfig.TrafficModeType = params.NewTrafficModeType(test.associationMode)
+				setInventoryTrafficModeType(&associationConfig.ApplicationServers, params.NewTrafficModeType(test.associationMode))
 			}
 			association := newAssociation(RoleSGP, associationConfig)
 			association.as = applicationServers

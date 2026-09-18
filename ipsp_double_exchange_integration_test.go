@@ -249,16 +249,15 @@ func integrationIPSPDoubleExchangeConfig(
 
 func ipspIntegrationTraffic(networkAppearance, routingContext uint32) *IPSPTrafficConfig {
 	return &IPSPTrafficConfig{
-		TrafficModeType:   params.NewTrafficModeType(params.TrafficModeLoadshare),
-		NetworkAppearance: params.NewNetworkAppearance(networkAppearance),
-		RoutingContexts:   params.NewRoutingContext(routingContext),
+		ApplicationServers: buildTestInventory(
+			networkAppearance, true, params.TrafficModeLoadshare, []uint32{routingContext}),
 	}
 }
 
 func ipspIntegrationContextlessTraffic(networkAppearance uint32) *IPSPTrafficConfig {
 	return &IPSPTrafficConfig{
-		TrafficModeType:   params.NewTrafficModeType(params.TrafficModeLoadshare),
-		NetworkAppearance: params.NewNetworkAppearance(networkAppearance),
+		ApplicationServers: buildTestInventory(
+			networkAppearance, true, params.TrafficModeLoadshare, nil),
 	}
 }
 

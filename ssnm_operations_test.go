@@ -49,7 +49,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 		for _, test := range tests {
 			t.Run(test.name, func(t *testing.T) {
 				association, _ := newTestConnWithContexts(t, test.state, test.role, 1)
-				association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+				setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 				association.noteRoutingContextsActive([]uint32{1})
 				writes := 0
 				association.signalWriter = func(message messages.M3UA) (int, error) {
@@ -77,7 +77,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 	t.Run("SCON optional fields and direction", func(t *testing.T) {
 		for level := uint8(0); level <= 3; level++ {
 			association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
-			association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			association.noteRoutingContextsActive([]uint32{1})
 			writes := 0
 			association.signalWriter = func(message messages.M3UA) (int, error) {
@@ -101,7 +101,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 		}
 
 		association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		association.noteRoutingContextsActive([]uint32{1})
 		writes := 0
 		association.signalWriter = func(message messages.M3UA) (int, error) {
@@ -203,7 +203,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 
 func TestSSNMOperationAssociationWire(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(0))
 	association.noteRoutingContextsActive([]uint32{1, 2})
 	writes := make(chan messages.M3UA, 4)
 	association.signalWriter = func(message messages.M3UA) (int, error) {
@@ -290,7 +290,7 @@ func TestSSNMOperationAssociationWire(t *testing.T) {
 
 func TestSSNMOperationContextlessAssociationOmitsRoutingContext(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	association.noteRoutingContextsActive(nil)
 	writes := make(chan messages.M3UA, 1)
 	association.signalWriter = func(message messages.M3UA) (int, error) {
@@ -403,7 +403,7 @@ func TestSSNMOperationEndpointFanout(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = endpoint.Close() })
 		association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
 		if !endpoint.trackAssociation(association) {
 			t.Fatal("trackAssociation")
@@ -539,7 +539,7 @@ func TestSSNMOperationEndpointRejectsOmittedMixedNetworkAppearances(t *testing.T
 	for index, networkAppearance := range []uint32{10, 20} {
 		routingContext := uint32(index + 1)
 		association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, routingContext)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 		association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
 		association.as.register(association.configuredASKeys())
 		if !endpoint.trackAssociation(association) {
@@ -580,7 +580,7 @@ func TestSSNMOperationPartialFanoutErrorPreservesEveryOutcome(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 	attach := func() (*Association, *distributionCapture) {
 		association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
 		association.as.register(association.configuredASKeys())
 		if !endpoint.trackAssociation(association) {
@@ -646,7 +646,7 @@ func TestSSNMOperationConcurrentAssociationCloseReturnsTypedFailure(t *testing.T
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
 	association.as.register(association.configuredASKeys())
 	if !endpoint.trackAssociation(association) {
@@ -718,7 +718,7 @@ func TestSSNMOperationRevalidatesActiveScopeAfterFanoutSelection(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
 	association.as.register(association.configuredASKeys())
 	if !endpoint.trackAssociation(association) {

@@ -444,12 +444,12 @@ func snapshotRoutingKey(key RoutingKey) RoutingKey {
 	return snapshot
 }
 
-func routingKeyWithImpliedNetworkAppearance(key RoutingKey, configured *params.Param) (RoutingKey, bool) {
+func routingKeyWithImpliedNetworkAppearance(key RoutingKey, appearance uint32, appearanceSet bool) (RoutingKey, bool) {
 	snapshot := snapshotRoutingKey(key)
-	if snapshot.NetworkAppearanceSet || configured == nil || configured.Tag != params.NetworkAppearance || len(configured.Data) != 4 {
+	if snapshot.NetworkAppearanceSet || !appearanceSet {
 		return snapshot, false
 	}
-	snapshot.NetworkAppearance = configured.NetworkAppearance()
+	snapshot.NetworkAppearance = appearance
 	snapshot.NetworkAppearanceSet = true
 	return snapshot, true
 }

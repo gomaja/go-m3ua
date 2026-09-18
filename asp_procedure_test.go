@@ -308,8 +308,8 @@ func TestAssociationASPActiveAndInactiveWaitForExactAcknowledgement(t *testing.T
 	}
 
 	association, _ := newTestConn(t, StateASPInactive, RoleASP)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	association.cfg.RoutingContexts = params.NewRoutingContext(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(7))
 	writes := make(chan messages.M3UA, 2)
 	association.signalWriter = func(message messages.M3UA) (int, error) {
 		writes <- message
@@ -360,13 +360,13 @@ func TestAssociationASPActiveAndInactiveWaitForExactAcknowledgement(t *testing.T
 
 func TestAssociationASPActiveGroupsTrafficModesAndWaitsForEveryAck(t *testing.T) {
 	association, _ := newTestConn(t, StateASPInactive, RoleASP)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	association.cfg.RoutingContexts = params.NewRoutingContext(7, 8)
-	association.cfg.TrafficModeType = nil
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(7, 8))
+	setInventoryTrafficModeType(&association.cfg.ApplicationServers, nil)
 	association.trafficModes.freeze(newTrafficModePolicy(&AssociationConfig{
-		TrafficModes: map[uint32]uint32{
-			7: params.TrafficModeLoadshare,
-			8: params.TrafficModeBroadcast,
+		ApplicationServers: []ASConfig{
+			{ASKey: routingContextASKey(7), TrafficMode: params.TrafficModeLoadshare},
+			{ASKey: routingContextASKey(8), TrafficMode: params.TrafficModeBroadcast},
 		},
 	}))
 	writes := make(chan messages.M3UA, 2)
@@ -420,8 +420,8 @@ func TestAssociationASPActiveGroupsTrafficModesAndWaitsForEveryAck(t *testing.T)
 
 func TestAssociationASPTMExplicitOperationsRejectBeforeWrite(t *testing.T) {
 	association, _ := newTestConn(t, StateASPInactive, RoleASP)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	association.cfg.RoutingContexts = params.NewRoutingContext(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(7))
 	writes := 0
 	association.signalWriter = func(message messages.M3UA) (int, error) {
 		writes++
@@ -632,7 +632,7 @@ func TestShutdownContextRunsOnlyAutomaticASPProcedures(t *testing.T) {
 			t.Fatalf("Shutdown wrote %T, want ASP Inactive", message)
 		}
 		if err := association.handleAspInactiveAck(messages.NewAspInactiveAck(
-			association.cfg.RoutingContexts.Copy(), nil,
+			asConfigRoutingContextParam(association.cfg.ApplicationServers), nil,
 		)); err != nil {
 			t.Fatalf("handleAspInactiveAck: %v", err)
 		}

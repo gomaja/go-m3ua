@@ -63,7 +63,7 @@ func (c *Association) aspActiveRequests(routingContext *params.Param) ([]aspActi
 	}
 
 	if len(routingContexts) == 0 {
-		trafficMode := trafficModes.defaultParam()
+		trafficMode := trafficModes.contextlessParam()
 		if trafficMode != nil && !validTrafficMode(trafficMode.TrafficModeType()) {
 			return nil, ErrUnsupportedTrafficMode
 		}
@@ -374,7 +374,7 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 		acknowledged = aspActive.RoutingContext.Copy()
 	}
 
-	acknowledgedMode := c.trafficModePolicy().defaultParam()
+	acknowledgedMode := c.trafficModePolicy().contextlessParam()
 	if aspActive.TrafficModeType != nil {
 		acknowledgedMode = aspActive.TrafficModeType.Copy()
 	}
@@ -470,7 +470,7 @@ func (c *Association) validateTrafficModeForRoutingContexts(peer *params.Param, 
 	requestedMode := peer.TrafficModeType()
 	trafficModes := c.trafficModePolicy()
 	if len(routingContexts) == 0 {
-		if trafficModes.defaultModeSet && trafficModes.defaultMode != requestedMode {
+		if trafficModes.contextlessModeSet && trafficModes.contextlessMode != requestedMode {
 			return ErrUnsupportedTrafficMode
 		}
 		return nil
@@ -619,8 +619,8 @@ func (c *Association) validateAspActiveAckTrafficMode(ack *messages.AspActiveAck
 			return ErrUnsupportedTrafficMode
 		}
 	}
-	if len(acknowledgedContexts) == 0 && trafficModes.defaultModeSet &&
-		trafficModes.defaultMode != acknowledgedMode {
+	if len(acknowledgedContexts) == 0 && trafficModes.contextlessModeSet &&
+		trafficModes.contextlessMode != acknowledgedMode {
 		return ErrUnsupportedTrafficMode
 	}
 	return nil

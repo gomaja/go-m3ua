@@ -32,7 +32,7 @@ func newTestConn(t *testing.T, state State, role Role) (*Association, *[]message
 	var sent []messages.M3UA
 
 	cfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
-	cfg.NetworkAppearance = nil
+	setInventoryNetworkAppearance(&cfg.ApplicationServers, nil)
 
 	conn := &Association{
 		// The transport is per-Association, so the send template lives here rather
@@ -679,7 +679,7 @@ func TestSGPRecoversAfterDuplicateAspUp(t *testing.T) {
 
 	// Step 2: a conformant ASP follows with ASP Active.
 	conn.handleSignals(context.Background(), messages.NewAspActive(
-		conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil))
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 	drainErr()
 	if got := apply(); got != StateASPActive {
 		t.Fatalf("state after ASP Active = %v, want %v (traffic must resume)", got, StateASPActive)
@@ -1037,7 +1037,7 @@ func TestHandleAspActiveAlwaysAcks(t *testing.T) {
 			conn, sent := newTestConn(t, st, RoleSGP)
 
 			_ = conn.handleAspActive(messages.NewAspActive(
-				conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil))
+				inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 
 			if len(*sent) == 0 {
 				t.Fatalf("no signal sent from %v; want an ASP Active Ack", st)
@@ -1063,7 +1063,7 @@ func TestHandleAspInactiveAlwaysAcks(t *testing.T) {
 		t.Run(st.String(), func(t *testing.T) {
 			conn, sent := newTestConn(t, st, RoleSGP)
 
-			_ = conn.handleAspInactive(messages.NewAspInactive(conn.cfg.RoutingContexts, nil))
+			_ = conn.handleAspInactive(messages.NewAspInactive(asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 
 			if len(*sent) == 0 {
 				t.Fatalf("no signal sent from %v; want an ASP Inactive Ack", st)
@@ -1082,7 +1082,7 @@ func TestDuplicateAspActiveAcksAndHoldsActive(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
 
 	conn.handleSignals(context.Background(), messages.NewAspActive(
-		conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil))
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 
 	if got := typeNames(*sent); len(got) == 0 || got[0] != "ASP Active Ack" {
 		t.Errorf("sent = %v, want an ASP Active Ack first", got)
@@ -1102,7 +1102,7 @@ func TestDuplicateAspActiveAcksAndHoldsActive(t *testing.T) {
 func TestDuplicateAspInactiveAcksAndHoldsInactive(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 
-	conn.handleSignals(context.Background(), messages.NewAspInactive(conn.cfg.RoutingContexts, nil))
+	conn.handleSignals(context.Background(), messages.NewAspInactive(asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 
 	if got := typeNames(*sent); len(got) == 0 || got[0] != "ASP Inactive Ack" {
 		t.Errorf("sent = %v, want an ASP Inactive Ack first", got)
@@ -1127,10 +1127,10 @@ func TestASPHoldsStateOnAspActiveAndAspInactive(t *testing.T) {
 			msg  func(c *Association) messages.M3UA
 		}{
 			{"AspActive", func(c *Association) messages.M3UA {
-				return messages.NewAspActive(c.cfg.TrafficModeType, c.cfg.RoutingContexts, nil)
+				return messages.NewAspActive(inventoryTrafficModeParam(c.cfg.ApplicationServers), asConfigRoutingContextParam(c.cfg.ApplicationServers), nil)
 			}},
 			{"AspInactive", func(c *Association) messages.M3UA {
-				return messages.NewAspInactive(c.cfg.RoutingContexts, nil)
+				return messages.NewAspInactive(asConfigRoutingContextParam(c.cfg.ApplicationServers), nil)
 			}},
 		} {
 			t.Run(tt.name+"/"+st.String(), func(t *testing.T) {
@@ -1168,7 +1168,7 @@ func TestAspActiveWithIncompatibleTrafficModeIsRefused(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 	// Configured mode is Loadshare; the peer demands Broadcast.
 	err := conn.handleAspActive(messages.NewAspActive(
-		params.NewTrafficModeType(params.TrafficModeBroadcast), conn.cfg.RoutingContexts, nil))
+		params.NewTrafficModeType(params.TrafficModeBroadcast), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 
 	if !errors.Is(err, ErrUnsupportedTrafficMode) {
 		t.Fatalf("handleAspActive() error = %v, want ErrUnsupportedTrafficMode", err)
@@ -1194,7 +1194,7 @@ func TestAspActiveWithIncompatibleTrafficModeIsRefused(t *testing.T) {
 func TestAspActiveWithoutTrafficModeIsAccepted(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleSGP)
 
-	if err := conn.handleAspActive(messages.NewAspActive(nil, conn.cfg.RoutingContexts, nil)); err != nil {
+	if err := conn.handleAspActive(messages.NewAspActive(nil, asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil)); err != nil {
 		t.Fatalf("handleAspActive() error = %v, want nil when the peer omits the mode", err)
 	}
 	if got := typeNames(*sent); len(got) == 0 || got[0] != "ASP Active Ack" {
@@ -1424,7 +1424,7 @@ func TestConcurrentSendsDoNotShareConfigParams(t *testing.T) {
 			_ = conn.handleErrors(NewUnexpectedMessageError(
 				messages.NewAspUp(nil, nil)))
 			_, _ = conn.WriteSignal(messages.NewAspActiveAck(
-				conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil))
+				inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 		}()
 	}
 	wg.Wait()

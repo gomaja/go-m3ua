@@ -97,14 +97,18 @@ func (c *Association) resolveOutboundDataBinding(key ASKey) (ASKey, error) {
 	if !c.staticRoutingContextConfigured(key.RoutingContext) {
 		return key, NewInvalidRoutingContextError(key.RoutingContext)
 	}
-	appearance, set := c.applicationServerAppearance()
-	return key, c.checkOutboundNetworkAppearance(key, appearance, set)
+	// Section 3.6.1 makes the Network Appearance part of Routing Key identity,
+	// so the appearance checked is the one the declaring entry gives this exact
+	// Routing Context, not one the whole Association is assumed to share.
+	declared := c.staticASKeyForRoutingContext(key.RoutingContext, false)
+	return key, c.checkOutboundNetworkAppearance(key, declared.NetworkAppearance, declared.NetworkAppearanceSet)
 }
 
 // applicationServerAppearance is the Network Appearance of this association's
-// statically configured Application Servers, with its presence flag.
+// contextless Application Server, with its presence flag.
 func (c *Association) applicationServerAppearance() (uint32, bool) {
-	return appearanceOf(c.applicationServerNetworkAppearance())
+	key := c.contextlessASKey(false)
+	return key.NetworkAppearance, key.NetworkAppearanceSet
 }
 
 func (c *Association) checkOutboundNetworkAppearance(key ASKey, appearance uint32, set bool) error {

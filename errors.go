@@ -597,7 +597,7 @@ func (e *RoutingContextError) Is(target error) bool {
 func (c *Association) handleErrors(e error) error {
 	var res messages.M3UA
 	errorRoutingContext := c.configuredRoutingContextParam()
-	errorNetworkAppearance := c.cfg.NetworkAppearance.Copy()
+	errorNetworkAppearance := networkAppearanceParam(c.outboundNetworkAppearance())
 	var receivedError *receivedMessageError
 	if errors.As(e, &receivedError) {
 		errorRoutingContext = routingContextOf(receivedError.Message).Copy()
@@ -742,7 +742,7 @@ func (c *Association) handleErrors(e error) error {
 		res = messages.NewError(
 			params.NewErrorCode(params.ErrProtocolError),
 			c.configuredRoutingContextParam(),
-			c.cfg.NetworkAppearance.Copy(),
+			networkAppearanceParam(c.outboundNetworkAppearance()),
 			nil, nil,
 		)
 	}
@@ -833,7 +833,7 @@ func (c *Association) handleErrors(e error) error {
 	var overflow *DataQueueOverflowError
 	if errors.As(e, &overflow) {
 		if _, err := c.WriteSignal(messages.NewSignallingCongestion(
-			c.localNetworkAppearance().Copy(),
+			networkAppearanceParam(c.localNetworkAppearance()),
 			c.configuredLocalRoutingContextParam(),
 			params.NewAffectedPointCodeWithMask(0, overflow.DestinationPointCode),
 			nil, nil, nil,

@@ -231,9 +231,9 @@ func integrationASPConfig() *ASPConfig {
 func integrationAssociationConfig(role Role, peer integrationPeer) *AssociationConfig {
 	config := NewAssociationConfig()
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
-	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
-	config.NetworkAppearance = params.NewNetworkAppearance(peer.networkAppearance)
-	config.RoutingContexts = params.NewRoutingContext(peer.routingContext)
+	setInventoryTrafficModeType(&config.ApplicationServers, params.NewTrafficModeType(params.TrafficModeLoadshare))
+	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(peer.networkAppearance))
+	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(peer.routingContext))
 	config.EstablishTimeout = 10 * time.Second
 	config.TAck = 100 * time.Millisecond
 	config.TAckRetries = 10

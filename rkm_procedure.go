@@ -265,9 +265,11 @@ func (c *Association) handleRegistrationRequest(message *messages.RegistrationRe
 			)
 		}
 		identifiers[request.LocalRoutingKeyIdentifier] = struct{}{}
+		impliedAppearance, impliedAppearanceSet := c.outboundNetworkAppearance()
 		request.RoutingKey, request.NetworkAppearanceImplied = routingKeyWithImpliedNetworkAppearance(
 			request.RoutingKey,
-			c.applicationServerNetworkAppearance(),
+			impliedAppearance,
+			impliedAppearanceSet,
 		)
 		requests[index] = request
 	}
@@ -854,26 +856,18 @@ func (c *Association) applyRegistrationResults(applications []registrationResult
 
 	local := c.isIPSPDoubleExchange()
 	configuredContexts := c.staticallyConfiguredRoutingContexts()
-	configuredAppearance := c.applicationServerNetworkAppearance()
 	if local {
-		configuredContexts = routingContextsFromIPSPTrafficConfig(c.cfg.IPSP.TrafficToLocal)
-		configuredAppearance = c.localNetworkAppearance()
+		configuredContexts = asConfigRoutingContexts(c.applicationServerInventory(true))
 	}
 	trafficModes := c.trafficModes.get(c.cfg)
 	if local {
 		trafficModes = c.localIPSPTrafficModes.get(nil)
 	}
-	appearance, appearanceSet := appearanceOf(configuredAppearance)
 	assigned := make(map[uint32]assignedRegistrationResultScope, len(configuredContexts)+len(applications))
 	for _, routingContext := range configuredContexts {
 		trafficMode, trafficModeSet := trafficModes.configured(routingContext)
 		assigned[routingContext] = assignedRegistrationResultScope{
-			key: ASKey{
-				NetworkAppearance:    appearance,
-				NetworkAppearanceSet: appearanceSet,
-				RoutingContext:       routingContext,
-				RoutingContextSet:    true,
-			},
+			key:            c.staticASKeyForRoutingContext(routingContext, local),
 			trafficMode:    trafficMode,
 			trafficModeSet: trafficModeSet,
 		}
@@ -910,9 +904,11 @@ func (c *Association) applyRegistrationResults(applications []registrationResult
 		if result.Status != RegistrationSuccessfullyRegistered && result.Status != RegistrationRoutingKeyAlreadyRegistered {
 			continue
 		}
+		localAppearance, localAppearanceSet := c.localNetworkAppearance()
 		effectiveRoutingKey, _ := routingKeyWithImpliedNetworkAppearance(
 			application.request.RoutingKey,
-			c.localNetworkAppearance(),
+			localAppearance,
+			localAppearanceSet,
 		)
 		key := ASKey{
 			NetworkAppearance:    effectiveRoutingKey.NetworkAppearance,
@@ -1089,7 +1085,8 @@ func (c *Association) registeredASKey(
 	// RFC 4666 Section 3.6.1 lets a Routing Key omit Network Appearance when
 	// the Association configures one, so the scope the peer assigned is that
 	// implied appearance together with the Routing Context it chose.
-	effective, _ := routingKeyWithImpliedNetworkAppearance(request.RoutingKey, c.localNetworkAppearance())
+	localAppearance, localAppearanceSet := c.localNetworkAppearance()
+	effective, _ := routingKeyWithImpliedNetworkAppearance(request.RoutingKey, localAppearance, localAppearanceSet)
 	return ASKey{
 		NetworkAppearance:    effective.NetworkAppearance,
 		NetworkAppearanceSet: effective.NetworkAppearanceSet,

@@ -828,7 +828,7 @@ func TestMTPTransferSupportsContextlessApplicationServer(t *testing.T) {
 	t.Cleanup(func() { _ = endpoint.Close() })
 	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	association.cfg.PeerSGP = &identity
 	capture := &mtpTransferCapture{}
 	association.dataWriter = capture.write

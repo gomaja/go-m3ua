@@ -610,7 +610,7 @@ func newASPMultiSGFixtureWithConfig(t *testing.T, config *ASPConfig) (*Endpoint,
 func attachASPRouteAssociation(t *testing.T, endpoint *Endpoint, identity SGPIdentity, networkAppearance, routingContext uint32) *Association {
 	t.Helper()
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContext)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 	association.cfg.PeerSGP = &identity
 	association.noteRoutingContextsAcked(params.NewRoutingContext(routingContext))
 	if !endpoint.trackAssociation(association) {
@@ -784,8 +784,8 @@ func benchmarkASPRoutesWithSparseRecords(b *testing.B) (*aspRoutes, aspSignallin
 		b.Fatalf("NewEndpoint: %v", err)
 	}
 	associationConfig := NewAssociationConfig()
-	associationConfig.NetworkAppearance = params.NewNetworkAppearance(7)
-	associationConfig.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryNetworkAppearance(&associationConfig.ApplicationServers, params.NewNetworkAppearance(7))
+	setInventoryRoutingContexts(&associationConfig.ApplicationServers, params.NewRoutingContext(1))
 	associationConfig.PeerSGP = &SGPIdentity{
 		SignallingGateway:        "sg-a",
 		SignallingGatewayProcess: "sgp-a1",

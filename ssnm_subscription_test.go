@@ -30,7 +30,7 @@ func newSGPSSNMFixture(t *testing.T) (*Endpoint, *Association) {
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	if !endpoint.trackAssociation(association) {
 		t.Fatal("failed to attach SGP Association")
 	}
@@ -620,7 +620,7 @@ func TestSSNMStateRetentionStaysBoundedAcrossBindingChurn(t *testing.T) {
 	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
 	for round := range 50 {
 		association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		association.cfg.PeerSGP = &SGPIdentity{
 			SignallingGateway:        "sg-a",
 			SignallingGatewayProcess: "sgp-a1",

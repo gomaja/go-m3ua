@@ -217,7 +217,7 @@ func TestIPSPEndpointSharesApplicationServerStateAcrossAssociations(t *testing.T
 	incumbent, incumbentSent := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	for _, association := range []*Association{incumbent, challenger} {
-		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryTrafficModeType(&association.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		if !listener.promoteAcceptedAssociation(association) {
 			t.Fatal("promoteAcceptedAssociation() = false")
 		}
@@ -262,7 +262,7 @@ func TestIPSPSingleExchangeActiveAckAppliesSharedASOverride(t *testing.T) {
 	incumbent, incumbentSent := newSingleExchangeIPSPForTest(t, StateASPActive)
 	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	for _, association := range []*Association{incumbent, challenger} {
-		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryTrafficModeType(&association.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		association.as = registry
 	}
 	incumbent.noteRoutingContextsActive([]uint32{1})
@@ -306,7 +306,7 @@ func TestIPSPSingleExchangeOverrideDrainsDisplacedDirectTrafficBeforeNotify(t *t
 	incumbent, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	for _, association := range []*Association{incumbent, challenger} {
-		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryTrafficModeType(&association.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		association.as = registry
 	}
 	incumbent.noteRoutingContextsActive([]uint32{1})
@@ -407,7 +407,7 @@ func TestConcurrentIPSPSingleExchangeOverrideKeepsWinningAssociationActive(t *te
 	first, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	second, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	for _, association := range []*Association{first, second} {
-		association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+		setInventoryTrafficModeType(&association.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 		association.as = registry
 		association.noteRoutingContextsActive([]uint32{1})
 	}
@@ -493,7 +493,7 @@ func TestIPSPASPUpAckWaitsForActiveTrafficToQuiesce(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.maxMessageStreamID = 4
 	association.recvStream.Store(0)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(0))
 
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
@@ -572,7 +572,7 @@ func TestIPSPSingleExchangeReceivedASPUpAckQuiescesActiveTraffic(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.maxMessageStreamID = 4
 	association.recvStream.Store(0)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(0))
 	association.noteRoutingContextsActive([]uint32{1})
 	registry := newApplicationServers(time.Hour)
 	t.Cleanup(registry.close)
@@ -692,7 +692,7 @@ func TestIPSPSingleExchangeScopedInactiveAckDoesNotActivateUntouchedContexts(t *
 	for _, initialState := range []State{StateASPDown, StateASPInactive} {
 		t.Run(initialState.String(), func(t *testing.T) {
 			association, _ := newSingleExchangeIPSPForTest(t, initialState)
-			association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+			setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
 
 			association.handleSignals(context.Background(), messages.NewAspInactiveAck(
 				params.NewRoutingContext(1), nil,
@@ -823,7 +823,7 @@ func TestIPSPSingleExchangeShutdownUsesASPTMThenASPSM(t *testing.T) {
 func TestIPSPSingleExchangeASPDownAckDrainsActiveTrafficBeforeCompletion(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	association.maxMessageStreamID = 4
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(0)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(0))
 	association.noteRoutingContextsActive([]uint32{1})
 
 	dataStarted := make(chan struct{})
@@ -929,7 +929,7 @@ func TestIPSPSingleExchangeInactiveAckPublishesPeerInactive(t *testing.T) {
 
 func TestIPSPSingleExchangeRejectsDataOutsideActiveRoutingContext(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
-	association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
 	association.noteRoutingContextsActive([]uint32{1})
 	association.recvStream.Store(1)
 	data := messages.NewData(nil, params.NewRoutingContext(2), params.NewProtocolData(
@@ -978,7 +978,7 @@ func TestIPSPSingleExchangeRejectsMalformedNotifyASPIdentifierBeforeStateChange(
 	for _, valueLength := range []int{0, 1, 3, 5, 8} {
 		t.Run(fmt.Sprintf("%d value octets", valueLength), func(t *testing.T) {
 			association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
-			association.cfg.RoutingContexts = params.NewRoutingContext(1)
+			setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1))
 			association.noteRoutingContextsActive([]uint32{1})
 			notify := messages.NewNotify(
 				params.NewStatus(params.AlternateAspActive), nil,
@@ -1056,7 +1056,7 @@ func TestIPSPSingleExchangeRejectsSGPOnlySCONConcernedDestination(t *testing.T) 
 
 func TestIPSPSingleExchangeRejectsSCONOutsideActiveRoutingContext(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
-	association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
 	association.noteRoutingContextsActive([]uint32{1})
 	congestion := messages.NewSignallingCongestion(
 		nil,
@@ -1216,7 +1216,7 @@ func TestIPSPSingleExchangeInactiveAckWaitsForAdmittedData(t *testing.T) {
 
 func TestIPSPSingleExchangeInactiveAckDefersCompletionUntilAdmittedDataDrains(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
-	association.cfg.RoutingContexts = nil
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, nil)
 	association.cfg.TAck = 20 * time.Millisecond
 	association.noteRoutingContextsActive(nil)
 	// A caller-built DATA takes its stream from the Signalling Link Selection
@@ -1322,8 +1322,8 @@ func TestIPSPSingleExchangeInactiveAckDefersCompletionUntilAdmittedDataDrains(t 
 
 func TestIPSPSingleExchangeInactiveAckExcludesOverriddenContextsFromState(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
-	association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
-	association.cfg.TrafficModeType = params.NewTrafficModeType(params.TrafficModeOverride)
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
+	setInventoryTrafficModeType(&association.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	association.noteRoutingContextsActive([]uint32{1, 2})
 	registry := newApplicationServers(time.Hour)
 	t.Cleanup(registry.close)
@@ -1371,7 +1371,7 @@ func TestIPSPSingleExchangeInactiveAckExcludesOverriddenContextsFromState(t *tes
 
 func TestIPSPSingleExchangeScopedOverridesCumulativelyDeactivateAssociation(t *testing.T) {
 	association, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
-	association.cfg.RoutingContexts = params.NewRoutingContext(1, 2)
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
 	association.noteRoutingContextsActive([]uint32{1, 2})
 
 	for index, routingContext := range []uint32{1, 2} {
@@ -1677,6 +1677,6 @@ func newSingleExchangeIPSPForTest(t *testing.T, state State) (*Association, *[]m
 	// its own orderly shutdown, which is what an Association configuration has
 	// to say now that RFC 4666 Section 5.6.2 initiation is named explicitly.
 	association.cfg.ASPProcedures = ipspInitiationPolicy(false, false)
-	association.cfg.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1))
 	return association, sent
 }

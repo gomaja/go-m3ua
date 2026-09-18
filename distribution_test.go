@@ -1188,8 +1188,8 @@ func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingCon
 func addDistributionASP(t *testing.T, listener *Listener, state State, routingContexts ...uint32) (*Association, *distributionCapture) {
 	t.Helper()
 	asp, _ := newTestConn(t, state, RoleSGP)
-	asp.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
-	asp.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
+	setInventoryRoutingContexts(&asp.cfg.ApplicationServers, params.NewRoutingContext(routingContexts...))
+	setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, inventoryNetworkAppearanceParam(listener.AssociationConfig.ApplicationServers))
 	// A negotiated data stream, as an established association has: RFC 4666
 	// Section 1.4.7 rule 1 forbids DATA on stream 0, so an association that
 	// negotiated none has nowhere legal to deliver traffic.

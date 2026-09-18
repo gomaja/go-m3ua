@@ -324,7 +324,7 @@ func TestDistributeDataResolvesAndValidatesRoutingContext(t *testing.T) {
 
 	t.Run("omitted with one registered AS and no Config parameter", func(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
-			config.RoutingContexts = nil
+			setInventoryRoutingContexts(&config.ApplicationServers, nil)
 		})
 		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
@@ -399,8 +399,8 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 		listener, _, first, firstSent := distributionFixtureForContexts(
 			t, params.TrafficModeLoadshare, []uint32{1}, nil,
 		)
-		first.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-		first.cfg.RoutingContexts = params.NewRoutingContext(2)
+		setInventoryNetworkAppearance(&first.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+		setInventoryRoutingContexts(&first.cfg.ApplicationServers, params.NewRoutingContext(2))
 		first.noteRoutingContextsActive([]uint32{2})
 		first.setState(StateASPActive)
 		key := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 2, RoutingContextSet: true}
@@ -429,8 +429,8 @@ func TestDistributeDataValidatesNetworkAppearanceAndPreservesCorrelationID(t *te
 
 	t.Run("unknown Network Appearance without configured default", func(t *testing.T) {
 		listener, applicationServer, asp, sent := distributionFixtureConfigured(t, params.TrafficModeLoadshare, func(config *distributionFixtureConfig) {
-			config.NetworkAppearance = nil
-			config.RoutingContexts = nil
+			setInventoryNetworkAppearance(&config.ApplicationServers, nil)
+			setInventoryRoutingContexts(&config.ApplicationServers, nil)
 		})
 		applicationServer.setASPState(asp, StateASPActive, time.Hour)
 		sent.reset()
@@ -578,8 +578,8 @@ func TestDistributionPolicyDoesNotRaceConcurrentConfigMutation(t *testing.T) {
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
-	configuredRoutingContexts := listener.AssociationConfig.RoutingContexts
-	configuredNetworkAppearance := listener.AssociationConfig.NetworkAppearance
+	configuredRoutingContexts := asConfigRoutingContextParam(listener.AssociationConfig.ApplicationServers)
+	configuredNetworkAppearance := inventoryNetworkAppearanceParam(listener.AssociationConfig.ApplicationServers)
 	stop := make(chan struct{})
 	var mutations sync.WaitGroup
 	mutations.Add(1)
@@ -593,8 +593,8 @@ func TestDistributionPolicyDoesNotRaceConcurrentConfigMutation(t *testing.T) {
 			}
 			configuredRoutingContexts.Data[3] = byte(2 + iteration%200)
 			configuredNetworkAppearance.Data[3] = byte(2 + iteration%200)
-			listener.AssociationConfig.RoutingContexts = params.NewRoutingContext(uint32(2 + iteration%200))
-			listener.AssociationConfig.NetworkAppearance = params.NewNetworkAppearance(uint32(2 + iteration%200))
+			setInventoryRoutingContexts(&listener.AssociationConfig.ApplicationServers, params.NewRoutingContext(uint32(2+iteration%200)))
+			setInventoryNetworkAppearance(&listener.AssociationConfig.ApplicationServers, params.NewNetworkAppearance(uint32(2+iteration%200)))
 			mutablePolicy.RecoveryQueueMessages = iteration + 1
 			mutablePolicy.RecoveryQueueBytes = iteration + 1
 			mutablePolicy.BroadcastFlowCacheEntries = iteration + 1

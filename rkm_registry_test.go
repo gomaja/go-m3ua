@@ -69,8 +69,8 @@ func TestRoutingKeyRegistryReportsStaticMembershipAlreadyRegistered(t *testing.T
 				t.Fatalf("newRoutingKeyRegistry: %v", err)
 			}
 			config := NewAssociationConfig()
-			config.NetworkAppearance = params.NewNetworkAppearance(10)
-			config.RoutingContexts = params.NewRoutingContext(7)
+			setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
+			setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(7))
 			association := newAssociation(RoleSGP, config)
 			applicationServers := newApplicationServers(time.Hour)
 			association.as = applicationServers
@@ -245,8 +245,8 @@ func TestRoutingKeyRegistryRejectsAssociationRoutingContextAppearanceCollision(t
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
 	association := newAssociation(RoleSGP, NewAssociationConfig())
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-	association.cfg.RoutingContexts = params.NewRoutingContext(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(7))
 
 	for index, request := range []RoutingKeyRegistrationRequest{
 		{LocalRoutingKeyIdentifier: 1, RoutingKey: provisioned},
@@ -279,8 +279,8 @@ func TestRoutingKeyRegistryAllowsSameRoutingContextAppearanceOnAnotherAssociatio
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
 	association := newAssociation(RoleSGP, NewAssociationConfig())
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
-	association.cfg.RoutingContexts = params.NewRoutingContext(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(20))
+	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(7))
 
 	result := registry.register(association, []RoutingKeyRegistrationRequest{{
 		LocalRoutingKeyIdentifier: 1,
@@ -731,7 +731,7 @@ func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierWhenScopesConverge(t *te
 	newPeer := func(routingContext, identifier uint32) *Association {
 		association := newAssociation(RoleSGP, NewAssociationConfig())
 		association.as = applicationServers
-		association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(routingContext))
 		association.savePeerASPIdentifier(params.NewAspIdentifier(identifier))
 		applicationServers.register(association.staticallyConfiguredASKeys())
 		if !applicationServers.claimASPIdentifier(association, identifier) {
@@ -786,8 +786,8 @@ func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierFromStaticApplicationSer
 	newStaticPeer := func(routingContext, identifier uint32) *Association {
 		association := newAssociation(RoleSGP, NewAssociationConfig())
 		association.as = applicationServers
-		association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-		association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
+		setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+		setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(routingContext))
 		association.savePeerASPIdentifier(params.NewAspIdentifier(identifier))
 		applicationServers.register(association.staticallyConfiguredASKeys())
 		applicationServers.aspStateChanged(association, StateASPInactive)
@@ -841,8 +841,8 @@ func TestRoutingKeyRegistrySerializesASPIdentifierClaimsWithRegistration(t *test
 			association := newAssociation(RoleSGP, NewAssociationConfig())
 			association.endpoint = endpoint
 			association.as = applicationServers
-			association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
-			association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
+			setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(10))
+			setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(routingContext))
 			applicationServers.register(association.staticallyConfiguredASKeys())
 			applicationServers.aspStateChanged(association, StateASPInactive)
 			return association

@@ -331,7 +331,7 @@ func boundedSSNMConn(t *testing.T, records int) *Association {
 	conn.role = RoleASP
 	// The Endpoint provisions sg-a/sgp-a1 for one Application Server, so the
 	// Association has to name that Application Server's wire scope.
-	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	conn.cfg.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
 	if got := conn.destinationRecordLimit(); got != DefaultMaxSSNMDestinationRecords {
 		t.Fatalf("unbound Association record limit = %d, want the package default %d",

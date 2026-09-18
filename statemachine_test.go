@@ -134,9 +134,9 @@ func TestUnexpectedAspUpAckReturnsToThePreviousState(t *testing.T) {
 // by immediately activating again.
 func TestSolicitedAspInactiveAckDoesNotReactivate(t *testing.T) {
 	asp, _ := newTestConn(t, StateASPActive, RoleASP)
-	asp.startTAck(messages.NewAspInactive(asp.cfg.RoutingContexts.Copy(), nil), requestAspInactive)
+	asp.startTAck(messages.NewAspInactive(asConfigRoutingContextParam(asp.cfg.ApplicationServers), nil), requestAspInactive)
 
-	if err := asp.handleAspInactiveAck(messages.NewAspInactiveAck(asp.cfg.RoutingContexts.Copy(), nil)); err != nil {
+	if err := asp.handleAspInactiveAck(messages.NewAspInactiveAck(asConfigRoutingContextParam(asp.cfg.ApplicationServers), nil)); err != nil {
 		t.Fatalf("handleAspInactiveAck: %v", err)
 	}
 	if asp.resumeAfterStrayAck() {
@@ -229,7 +229,7 @@ func TestDataOnlyFlowsForAnAcknowledgedRoutingContext(t *testing.T) {
 func TestTrafficModeTypeOutsideTheDefinedValuesIsRejected(t *testing.T) {
 	for _, mode := range []uint32{0, 4, 99} {
 		sgp, _ := newTestConn(t, StateASPInactive, RoleSGP)
-		sgp.cfg.TrafficModeType = nil // nothing configured locally
+		setInventoryTrafficModeType(&sgp.cfg.ApplicationServers, nil) // nothing configured locally
 
 		err := sgp.validateTrafficMode(params.NewTrafficModeType(mode))
 		if err == nil {
@@ -247,7 +247,7 @@ func TestDefinedTrafficModeTypesAreAccepted(t *testing.T) {
 		params.TrafficModeBroadcast,
 	} {
 		sgp, _ := newTestConn(t, StateASPInactive, RoleSGP)
-		sgp.cfg.TrafficModeType = nil
+		setInventoryTrafficModeType(&sgp.cfg.ApplicationServers, nil)
 
 		if err := sgp.validateTrafficMode(params.NewTrafficModeType(mode)); err != nil {
 			t.Errorf("Traffic Mode Type %d was rejected: %v", mode, err)
@@ -302,7 +302,7 @@ func TestUnchangedStateIsNotReportedToTheApplicationServer(t *testing.T) {
 	as := reg.get(1)
 
 	conn, _ := newTestConn(t, StateASPInactive, RoleSGP)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1))
 	conn.as = reg
 
 	if err := conn.handleStateUpdate(StateASPActive); err != nil {
@@ -391,7 +391,7 @@ func TestAspActiveInTheAckWindowIsNotRefused(t *testing.T) {
 
 	// Deliberately no drain of stateChan here: that is the defect's window.
 	conn.handleSignals(ctx, messages.NewAspActive(
-		conn.cfg.TrafficModeType, conn.cfg.RoutingContexts, nil))
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 
 	names := typeNames(*sent)
 	var sawActiveAck bool

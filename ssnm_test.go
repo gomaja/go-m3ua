@@ -36,7 +36,7 @@ func ssnmConn(t *testing.T) (*Association, *[]messages.M3UA) {
 func newSSNMTestConn(t *testing.T, state State, role Role) (*Association, *[]messages.M3UA) {
 	t.Helper()
 	conn, sent := newTestConn(t, state, role)
-	conn.cfg.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1))
 	return conn, sent
 }
 
@@ -429,7 +429,7 @@ func TestDAVAAcceptedOnlyDuringPendingActivationAndDUPURejected(t *testing.T) {
 		t.Errorf("DAVA without ASP Active pending: error = %v, want *UnexpectedMessageError", err)
 	}
 	conn.startTAck(messages.NewAspActive(
-		conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+		inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 	), requestAspActive)
 	if err := conn.handleDestinationAvailable(
 		messages.NewDestinationAvailable(nil, nil, apc(0x1234), nil)); err != nil {
@@ -753,7 +753,7 @@ func TestSSNMIsAcceptedBeforeTheAspActiveAck(t *testing.T) {
 			// ASP-INACTIVE: the ASP Active has gone out, the Ack has not come back.
 			conn, _ := newSSNMTestConn(t, StateASPInactive, RoleASP)
 			conn.startTAck(messages.NewAspActive(
-				conn.cfg.TrafficModeType.Copy(), conn.cfg.RoutingContexts.Copy(), nil,
+				inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil,
 			), requestAspActive)
 
 			if err := tt.send(conn); err != nil {
@@ -838,7 +838,7 @@ func TestSGPRejectsInvalidNetworkAppearanceInASPSSNM(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
-			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 
 			reported := tt.handle(conn)
 			if !errors.Is(reported, ErrInvalidNetworkAppearance) {
@@ -886,7 +886,7 @@ func TestSSNMPreservesNetworkAppearance(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
-			conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			if err := tt.handle(conn, params.NewNetworkAppearance(8)); err != nil {
 				t.Fatalf("valid SSNM was rejected: %v", err)
 			}
@@ -967,7 +967,7 @@ func TestSSNMRejectsMalformedNetworkAppearance(t *testing.T) {
 func TestDestinationStateIsScopedByNetworkAppearance(t *testing.T) {
 	const pointCode = 0x222222
 	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
-	conn.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 
 	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
 		params.NewNetworkAppearance(8), nil, apc(pointCode), nil)); err != nil {

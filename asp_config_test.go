@@ -378,8 +378,8 @@ func TestASPEndpointValidatesAssociationSGPIdentityAndScope(t *testing.T) {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	valid := NewAssociationConfig()
-	valid.NetworkAppearance = params.NewNetworkAppearance(7)
-	valid.RoutingContexts = params.NewRoutingContext(1)
+	setInventoryNetworkAppearance(&valid.ApplicationServers, params.NewNetworkAppearance(7))
+	setInventoryRoutingContexts(&valid.ApplicationServers, params.NewRoutingContext(1))
 	valid.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
 
 	missing := snapshotAssociationConfig(valid)
@@ -393,7 +393,7 @@ func TestASPEndpointValidatesAssociationSGPIdentityAndScope(t *testing.T) {
 		t.Fatalf("unknown SGP error = %v, want ErrUnknownSGP", err)
 	}
 	mismatched := snapshotAssociationConfig(valid)
-	mismatched.NetworkAppearance = params.NewNetworkAppearance(9)
+	setInventoryNetworkAppearance(&mismatched.ApplicationServers, params.NewNetworkAppearance(9))
 	if err := endpoint.validateAssociationConfig(mismatched); !errors.Is(err, ErrSGPRouteScopeMismatch) {
 		t.Fatalf("mismatched SGP scope error = %v, want ErrSGPRouteScopeMismatch", err)
 	}
@@ -554,7 +554,7 @@ func TestEndpointOwnsTheASPCongestionPolicyItWasGiven(t *testing.T) {
 
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	t.Cleanup(func() { _ = association.Close() })
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	association.cfg.PeerSGP = &SGPIdentity{
 		SignallingGateway:        "sg-a",
 		SignallingGatewayProcess: "sgp-a1",

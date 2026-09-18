@@ -318,7 +318,7 @@ func trackedManagementAssociation(
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	association, _ := newTestConnWithContexts(t, state, RoleASP, routingContexts...)
-	association.cfg.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 	if state == StateASPActive {
 		association.noteRoutingContextsActive(routingContexts)
 	}
