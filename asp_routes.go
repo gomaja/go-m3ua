@@ -1374,18 +1374,26 @@ func (c *Association) dynamicASKeysForRemoteAS(id RemoteASID) []ASKey {
 	return keys
 }
 
+// aspAssociationBoundToAS reports whether one Association is configured for, or
+// has registered, one Application Server scope. It is the binding and
+// authorization question, asked before the active-state one.
+func aspAssociationBoundToAS(association *Association, key ASKey) bool {
+	if association == nil {
+		return false
+	}
+	for _, configuredKey := range association.configuredASKeys() {
+		if configuredKey == key {
+			return true
+		}
+	}
+	return false
+}
+
 func aspAssociationEligibleForAS(association *Association, key ASKey) bool {
 	if association == nil || association.State() != StateASPActive {
 		return false
 	}
-	configured := false
-	for _, configuredKey := range association.configuredASKeys() {
-		if configuredKey == key {
-			configured = true
-			break
-		}
-	}
-	if !configured {
+	if !aspAssociationBoundToAS(association, key) {
 		return false
 	}
 	if !key.RoutingContextSet {

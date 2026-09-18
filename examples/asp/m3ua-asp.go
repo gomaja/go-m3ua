@@ -154,8 +154,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("MTP-TRANSFER failed: %s", err)
 		}
-		log.Printf("MTP-TRANSFER sent %d user octets through %d Association(s)",
-			result.UserDataOctets, result.TransmittedAssociations)
+		for _, path := range result.SuccessfulPaths {
+			log.Printf("MTP-TRANSFER sent %d user octets to Application Server %q of SGP %q",
+				result.UserDataOctets, path.ApplicationServer, path.SGP.SignallingGatewayProcess)
+		}
 		time.Sleep(3 * time.Second)
 	}
 }

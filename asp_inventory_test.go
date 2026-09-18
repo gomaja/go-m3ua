@@ -719,6 +719,7 @@ func TestASPRoutesShareOneApplicationServerAcrossRoutesAndASPs(t *testing.T) {
 		if !endpoint.trackAssociation(association) {
 			t.Fatalf("ASP on %s was not attached", sgp)
 		}
+		reportRoutesAvailable(t, config, association, networkAppearance, routingContext)
 		return member{association: association, capture: capture, signals: signals}
 	}
 	// Broadcast reaches every SGP serving the Application Server once per

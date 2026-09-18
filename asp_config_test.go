@@ -648,6 +648,7 @@ func TestEndpointOwnsTheASPCongestionPolicyItWasGiven(t *testing.T) {
 	if !endpoint.trackAssociation(association) {
 		t.Fatal("provisioned Association was not attached")
 	}
+	reportRoutesAvailable(t, config, association, 7, 1)
 	if got := provided.Load() + replaced.Load(); got != 0 {
 		t.Fatalf("building the inventory evaluated the congestion policy %d times", got)
 	}

@@ -28,7 +28,7 @@ func TestMTPTransferSelectsAvailableSGPAndSLSStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MTPTransfer: %v", err)
 	}
-	if result.UserDataOctets != len("payload") || result.TransmittedAssociations != 1 {
+	if result.UserDataOctets != len("payload") || len(result.SuccessfulPaths) != 1 {
 		t.Fatalf("MTPTransfer result = %#v", result)
 	}
 	if captures["sg-a/sgp-a1"].count() != 0 || captures["sg-b/sgp-b1"].count() != 1 {
@@ -236,16 +236,16 @@ func TestMTPTransferBroadcastAndPartialFailure(t *testing.T) {
 	result, err := endpoint.MTPTransfer(MTPTransferRequest{
 		ProtocolData: transferProtocolData(0x123456, 4, []byte("broadcast")),
 	})
-	if result.TransmittedAssociations != 1 || result.UserDataOctets != len("broadcast") {
+	if len(result.SuccessfulPaths) != 1 || result.UserDataOctets != len("broadcast") {
 		t.Fatalf("partial broadcast result = %#v", result)
 	}
 	var transferErr *MTPTransferError
 	if !errors.As(err, &transferErr) {
 		t.Fatalf("partial broadcast error = %v, want *MTPTransferError", err)
 	}
-	if len(transferErr.SuccessfulSGPs) != 1 || transferErr.SuccessfulSGPs[0] != (SGPIdentity{
+	if len(transferErr.SuccessfulPaths) != 1 || transferErr.SuccessfulPaths[0].SGP != (SGPIdentity{
 		SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1",
-	}) || len(transferErr.Failures) != 1 || transferErr.Failures[0].SGP != (SGPIdentity{
+	}) || len(transferErr.Failures) != 1 || transferErr.Failures[0].Target.SGP != (SGPIdentity{
 		SignallingGateway: "sg-b", SignallingGatewayProcess: "sgp-b1",
 	}) {
 		t.Fatalf("partial broadcast error detail = %#v", transferErr)
@@ -283,7 +283,7 @@ func TestMTPTransferBroadcastIncludesEveryPermittedSignallingGateway(t *testing.
 			if err != nil {
 				t.Fatalf("MTPTransfer: %v", err)
 			}
-			if result.TransmittedAssociations != 2 || captures["sg-a/sgp-a1"].count() != 1 ||
+			if len(result.SuccessfulPaths) != 2 || captures["sg-a/sgp-a1"].count() != 1 ||
 				captures["sg-b/sgp-b1"].count() != 1 {
 				t.Fatalf("broadcast result = %#v, counts = sg-a:%d sg-b:%d, want 1 each", result,
 					captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
@@ -661,7 +661,7 @@ func TestMTPTransferBroadcastsAcrossSGPsWithinSignallingGateway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MTPTransfer: %v", err)
 	}
-	if result.TransmittedAssociations != 2 || captures["sg-a/sgp-a1"].count() != 1 ||
+	if len(result.SuccessfulPaths) != 2 || captures["sg-a/sgp-a1"].count() != 1 ||
 		captures["sg-a/sgp-a2"].count() != 1 {
 		t.Fatalf("SGP broadcast result = %#v, counts = %d and %d", result,
 			captures["sg-a/sgp-a1"].count(), captures["sg-a/sgp-a2"].count())
@@ -833,6 +833,16 @@ func TestMTPTransferSupportsContextlessApplicationServer(t *testing.T) {
 	if !endpoint.trackAssociation(association) {
 		t.Fatal("failed to attach contextless ASP Association")
 	}
+	// A contextless Application Server is named by no Routing Context at all,
+	// so the SGP's report carries none either.
+	if err := association.handleDestinationAvailable(messages.NewDestinationAvailable(
+		params.NewNetworkAppearance(7),
+		nil,
+		params.NewAffectedPointCodeWithMask(16, 0x120000),
+		nil,
+	)); err != nil {
+		t.Fatalf("contextless DAVA: %v", err)
+	}
 
 	if _, err := endpoint.MTPTransfer(MTPTransferRequest{
 		ProtocolData: transferProtocolData(0x123456, 1, nil),
@@ -910,7 +920,7 @@ func TestTransferRouteGenerationWrapEvictsRouteAssignments(t *testing.T) {
 	const mtpRoute = MTPRouteID("sccp-a")
 	key := aspTransferFlowKey{mtpRoute: mtpRoute}
 	routes.transferRouteGeneration[mtpRoute] = ^uint64(0)
-	routes.rememberTransferFlowLocked(key, []aspTransferTarget{{}}, aspCongestionDecision{})
+	routes.rememberTransferFlowLocked(key, []aspTransferTarget{{}}, aspCongestionDecision{}, 0)
 	if len(routes.transferFlows) != 1 {
 		t.Fatalf("flow cache entries before wrap = %d, want 1", len(routes.transferFlows))
 	}
@@ -1081,6 +1091,26 @@ func newASPTransferFixture(
 	config *ASPConfig,
 ) (*Endpoint, map[string]*Association, map[string]*mtpTransferCapture) {
 	t.Helper()
+	return newASPTransferFixtureReporting(t, config, true)
+}
+
+// newUnreportedASPTransferFixture attaches the same peers without any
+// Signalling Gateway having reported a destination state, which is what an ASP
+// has before its first SSNM message arrives.
+func newUnreportedASPTransferFixture(
+	t *testing.T,
+	config *ASPConfig,
+) (*Endpoint, map[string]*Association, map[string]*mtpTransferCapture) {
+	t.Helper()
+	return newASPTransferFixtureReporting(t, config, false)
+}
+
+func newASPTransferFixtureReporting(
+	t *testing.T,
+	config *ASPConfig,
+	reportAvailable bool,
+) (*Endpoint, map[string]*Association, map[string]*mtpTransferCapture) {
+	t.Helper()
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
@@ -1102,7 +1132,40 @@ func newASPTransferFixture(
 			captures[key] = capture
 		}
 	}
+	// A Signalling Gateway that has reported nothing leaves its destinations
+	// unknown, and an unknown destination fails closed. The fixture therefore
+	// starts from every SGP having reported its routes available, which is the
+	// state a live ASP reaches once RFC 4666 Section 4.3.4.3 activation has
+	// drawn the SG's audit or its unsolicited DAVA. Tests that care about a
+	// particular state report it themselves afterwards.
+	if reportAvailable {
+		for _, gateway := range config.SignallingGateways {
+			for _, sgp := range gateway.SGPs {
+				asKey := *sgp.ApplicationServers[0].ASKey
+				reportRoutesAvailable(t, config, associations[string(gateway.ID)+"/"+string(sgp.ID)],
+					asKey.NetworkAppearance, asKey.RoutingContext)
+			}
+		}
+	}
 	return endpoint, associations, captures
+}
+
+// reportRoutesAvailable has one SGP report every configured MTP Route
+// available. It is the state a live ASP reaches once the Signalling Gateway has
+// answered for its destinations, and it is what an unreported destination is
+// deliberately not.
+func reportRoutesAvailable(
+	t *testing.T,
+	config *ASPConfig,
+	association *Association,
+	networkAppearance,
+	routingContext uint32,
+) {
+	t.Helper()
+	for _, mtpRoute := range config.Routing.MTPRoutes {
+		applyASPDAVA(t, association, networkAppearance, routingContext,
+			mtpRoute.DestinationPointCode, mtpRoute.Mask)
+	}
 }
 
 func oneSignallingGatewayTwoSGPConfig(mode RouteSelectionMode) *ASPConfig {
