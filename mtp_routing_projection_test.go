@@ -1414,3 +1414,172 @@ func TestMTPTransferRefusesAnUnencodablePayload(t *testing.T) {
 		t.Fatal("an unencodable payload reached the transport")
 	}
 }
+
+// A loadshared flow stays on the SGP it was assigned to when the SGP inventory
+// grows. RFC 4666 Appendix A.2.2 loadsharing must not move a flow because the
+// candidate list got longer; moving it is the missequencing the mode exists to
+// avoid.
+func TestLoadsharedFlowKeepsItsSGPWhenAThirdJoins(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := oneSignallingGatewayTwoSGPConfig(RouteSelectionLoadshare)
+	config.Routing.SignallingGatewaySelection = RouteSelectionLoadshare
+	third := config.SignallingGateways[0].SGPs[0]
+	third.ID = "sgp-a3"
+	config.SignallingGateways[0].SGPs = append(config.SignallingGateways[0].SGPs, third)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	captures := make(map[SignallingGatewayProcessID]*mtpTransferCapture, 3)
+	join := func(sgp SignallingGatewayProcessID) {
+		t.Helper()
+		association, capture := attachMultiScopeASPAssociation(t, endpoint,
+			SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: sgp}, 7, 1)
+		applyASPDAVA(t, association, 7, 1, 0x120000, 16)
+		captures[sgp] = capture
+	}
+	join("sgp-a1")
+	join("sgp-a2")
+
+	// The flow has to be one the hash would place differently over two
+	// candidates and over three, or a flow that did move would look stable.
+	var sls uint8
+	found := false
+	for candidate := uint8(0); candidate < 255 && !found; candidate++ {
+		key := newASPTransferFlowKey("sccp-a", transferProtocolData(pointCode, candidate, nil))
+		hash := hashASPTransferFlow(key, "sg-a")
+		if hash%2 != hash%3 {
+			sls, found = candidate, true
+		}
+	}
+	if !found {
+		t.Fatal("no Signalling Link Selection places the flow differently over two and three SGPs")
+	}
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, sls, nil)}
+
+	result, err := endpoint.MTPTransfer(request)
+	if err != nil {
+		t.Fatalf("first MTPTransfer: %v", err)
+	}
+	if len(result.SuccessfulPaths) != 1 {
+		t.Fatalf("first selection = %#v, want one target", result.SuccessfulPaths)
+	}
+	assigned := result.SuccessfulPaths[0].SGP.SignallingGatewayProcess
+
+	join("sgp-a3")
+	result, err = endpoint.MTPTransfer(request)
+	if err != nil {
+		t.Fatalf("MTPTransfer after a third SGP joined: %v", err)
+	}
+	if len(result.SuccessfulPaths) != 1 ||
+		result.SuccessfulPaths[0].SGP.SignallingGatewayProcess != assigned {
+		t.Fatalf("the flow moved from %q to %#v", assigned, result.SuccessfulPaths)
+	}
+	if captures["sgp-a3"].count() != 0 {
+		t.Fatal("the joining SGP took over an established loadshared flow")
+	}
+	if captures[assigned].count() != 2 {
+		t.Fatalf("the assigned SGP carried %d of 2 messages", captures[assigned].count())
+	}
+}
+
+// Two MTP Routes are two traffic flows even where their routing labels are
+// identical, because the route is what the application named. One route's
+// assignment is not the other's.
+func TestNamedMTPRoutesKeepSeparateFlowAssignments(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionLoadshare
+	setSGPSelection(config, RouteSelectionLoadshare)
+	config.Routing.MTPRoutes = []MTPRouteConfig{
+		{
+			ID: "wide", DestinationPointCode: 0x120000, Mask: 16,
+			ServiceIndicators: []uint8{params.ServiceIndSCCP},
+			Paths:             []MTPRoutePathID{"sg-a-core"},
+		},
+		{
+			ID: "narrow", DestinationPointCode: 0x123400, Mask: 8,
+			ServiceIndicators: []uint8{params.ServiceIndSCCP},
+			Paths:             []MTPRoutePathID{"sg-b-core"},
+		},
+	}
+	endpoint, _, captures := newASPTransferFixture(t, config)
+
+	for _, named := range []MTPRouteID{"wide", "narrow"} {
+		result, err := endpoint.MTPTransfer(MTPTransferRequest{
+			MTPRoute:     named,
+			ProtocolData: transferProtocolData(pointCode, 1, nil),
+		})
+		if err != nil {
+			t.Fatalf("MTPTransfer(%q): %v", named, err)
+		}
+		want := MTPRoutePathID("sg-a-core")
+		if named == "narrow" {
+			want = "sg-b-core"
+		}
+		if len(result.SuccessfulPaths) != 1 || result.SuccessfulPaths[0].Path != want {
+			t.Fatalf("MTPTransfer(%q) selection = %#v, want path %q", named, result.SuccessfulPaths, want)
+		}
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 || captures["sg-b/sgp-b1"].count() != 1 {
+		t.Fatalf("counts = sg-a:%d sg-b:%d, want 1 each",
+			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+	}
+}
+
+// Broadcast within one Signalling Gateway reaches every SGP that may carry the
+// destination, including one whose Application Server is merely restricted.
+// Preferring the better-placed SGP is what the other modes do.
+func TestBroadcastWithinASignallingGatewayIncludesARestrictedSGP(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := &ASPConfig{
+		SignallingGateways: []SignallingGatewayConfig{{
+			ID: "sg-a",
+			SGPs: []SignallingGatewayProcessConfig{
+				{ID: "sgp-a1", ApplicationServers: []RemoteASConfig{{ID: "as-one", ASKey: staticASKey(7, 1)}}},
+				{ID: "sgp-a2", ApplicationServers: []RemoteASConfig{{ID: "as-two", ASKey: staticASKey(7, 2)}}},
+			},
+		}},
+		Routing: &ASPRoutingConfig{
+			SignallingGatewaySelection: RouteSelectionBroadcast,
+			SignallingGatewayProcessSelection: map[SignallingGatewayID]RouteSelectionMode{
+				"sg-a": RouteSelectionBroadcast,
+			},
+			Paths: []MTPRoutePath{{
+				ID:                 "sg-a-both",
+				SignallingGateway:  "sg-a",
+				ApplicationServers: []RemoteASID{"as-one", "as-two"},
+			}},
+			MTPRoutes: []MTPRouteConfig{{
+				ID: "sccp-a", DestinationPointCode: 0x120000, Mask: 16,
+				Paths: []MTPRoutePathID{"sg-a-both"},
+			}},
+		},
+	}
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	first, firstCapture := attachMultiScopeASPAssociation(t, endpoint,
+		SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}, 7, 1)
+	second, secondCapture := attachMultiScopeASPAssociation(t, endpoint,
+		SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a2"}, 7, 2)
+	applyASPDRST(t, first, 7, 1, pointCode, 0)
+	applyASPDAVA(t, second, 7, 2, pointCode, 0)
+
+	result, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: transferProtocolData(pointCode, 1, nil),
+	})
+	if err != nil {
+		t.Fatalf("broadcast MTPTransfer: %v", err)
+	}
+	if len(result.SuccessfulPaths) != 2 {
+		t.Fatalf("broadcast targets = %#v, want both SGPs", result.SuccessfulPaths)
+	}
+	if firstCapture.count() != 1 || secondCapture.count() != 1 {
+		t.Fatalf("counts = sgp-a1:%d sgp-a2:%d, want 1 each", firstCapture.count(), secondCapture.count())
+	}
+}
