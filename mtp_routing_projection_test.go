@@ -390,3 +390,358 @@ func TestMTPTransferProjectsStateRetainedForADynamicallyBoundApplicationServer(t
 		t.Fatal("a destination reported unavailable through a dynamically bound Application Server carried traffic")
 	}
 }
+
+// Availability and congestion are separate statuses of one destination, as RFC
+// 4666 Section 4.5.2.2 requires. Neither installs, clears or implies the
+// other, and neither is inferred from a report about a different destination or
+// a different Application Server.
+func TestSelectionKeepsAvailabilityAndCongestionIndependent(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	useSignallingGateways(config, "sg-a")
+	endpoint, associations, captures := newUnreportedASPTransferFixture(t, config)
+	association := associations["sg-a/sgp-a1"]
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 1, nil)}
+
+	// A congestion report is not an availability report: the destination is
+	// still one nobody has said is reachable.
+	applyASPSCON(t, association, 7, 1, pointCode, 0, params.NewCongestionIndications(1))
+	if _, err := endpoint.MTPTransfer(request); !errors.Is(err, ErrDestinationStateUnknown) {
+		t.Fatalf("congestion-only error = %v, want ErrDestinationStateUnknown", err)
+	}
+
+	// An availability report about a different destination is not one about
+	// this destination.
+	applyASPDAVA(t, association, 7, 1, 0x654321, 0)
+	if _, err := endpoint.MTPTransfer(request); !errors.Is(err, ErrDestinationStateUnknown) {
+		t.Fatalf("unrelated-destination error = %v, want ErrDestinationStateUnknown", err)
+	}
+
+	applyASPDAVA(t, association, 7, 1, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer once the destination was reported available: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 {
+		t.Fatalf("captured %d messages, want 1", captures["sg-a/sgp-a1"].count())
+	}
+
+	// The congestion the SCON reported survived the availability reports: it
+	// is a separate dimension and no availability message touched it.
+	refused := validASPConfig()
+	refused.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	useSignallingGateways(refused, "sg-a")
+	refused.Routing.CongestionPolicy = func(_, level uint8, levelSet bool) bool {
+		return !levelSet || level == 0
+	}
+	strict, strictAssociations, strictCaptures := newUnreportedASPTransferFixture(t, refused)
+	applyASPDAVA(t, strictAssociations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+	applyASPSCON(t, strictAssociations["sg-a/sgp-a1"], 7, 1, pointCode, 0, params.NewCongestionIndications(1))
+	applyASPDAVA(t, strictAssociations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+	_, err := strict.MTPTransfer(request)
+	var selection *MTPSelectionError
+	if !errors.As(err, &selection) || len(selection.Rejections) != 1 ||
+		selection.Rejections[0].Reason != MTPCandidateCongested {
+		t.Fatalf("congested candidate error = %v, want a congestion rejection", err)
+	}
+	if strictCaptures["sg-a/sgp-a1"].count() != 0 {
+		t.Fatal("a congestion policy that refused the level still carried traffic")
+	}
+}
+
+// A restricted destination is one the peer says it can still reach. It carries
+// traffic when it is what the route has, and loses only to a candidate the peer
+// called available.
+func TestSelectionUsesARestrictedCandidateWhenItIsTheOnlyOne(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	useSignallingGateways(config, "sg-a")
+	endpoint, associations, captures := newUnreportedASPTransferFixture(t, config)
+	applyASPDRST(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+
+	if _, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: transferProtocolData(pointCode, 1, nil),
+	}); err != nil {
+		t.Fatalf("MTPTransfer to a restricted destination: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 {
+		t.Fatal("a restricted destination carried no traffic")
+	}
+}
+
+// One Signalling Gateway reporting a destination unavailable is that Signalling
+// Gateway's report. The alternative keeps carrying the destination, and the
+// first one comes back when it says so.
+func TestSingleSignallingGatewayFailureDoesNotFailEveryPath(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	endpoint, associations, captures := newASPTransferFixture(t, config)
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 1, nil)}
+
+	applyASPDUNA(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+	result, err := endpoint.MTPTransfer(request)
+	if err != nil {
+		t.Fatalf("MTPTransfer with the primary Signalling Gateway unavailable: %v", err)
+	}
+	if len(result.SuccessfulPaths) != 1 || result.SuccessfulPaths[0].Path != "sg-b-core" {
+		t.Fatalf("selection = %#v, want the sg-b path", result.SuccessfulPaths)
+	}
+	if captures["sg-a/sgp-a1"].count() != 0 || captures["sg-b/sgp-b1"].count() != 1 {
+		t.Fatalf("counts = sg-a:%d sg-b:%d, want 0 and 1",
+			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
+	}
+
+	// The alternative going away does not restore the first: its own report
+	// still stands and nothing inferred a recovery from the loss of a sibling.
+	if err := associations["sg-b/sgp-b1"].Close(); err != nil {
+		t.Fatalf("close the alternative Association: %v", err)
+	}
+	if _, err := endpoint.MTPTransfer(request); !errors.Is(err, ErrNoMTPRoute) {
+		t.Fatalf("MTPTransfer with one path unavailable and the other gone = %v, want ErrNoMTPRoute", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 0 {
+		t.Fatal("the unavailable Signalling Gateway carried traffic after its alternative went away")
+	}
+
+	applyASPDAVA(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer after the primary reported recovery: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 {
+		t.Fatal("the recovered Signalling Gateway carried no traffic")
+	}
+}
+
+// Broadcast reaches every eligible SGP exactly once, and exactly one
+// Application Server per SGP even where several are provisioned and eligible.
+func TestBroadcastSelectsOneApplicationServerPerSGP(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := twoApplicationServerASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
+	config.Routing.SignallingGatewayProcessSelection["sg-a"] = RouteSelectionBroadcast
+	config.SignallingGateways[0].SGPs = append(config.SignallingGateways[0].SGPs,
+		SignallingGatewayProcessConfig{
+			ID: "sgp-a2",
+			ApplicationServers: []RemoteASConfig{
+				{ID: "as-core", ASKey: staticASKey(7, 1)},
+				{ID: "as-backup", ASKey: staticASKey(7, 2)},
+			},
+		})
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+
+	first, firstCapture := attachMultiScopeASPAssociation(t, endpoint,
+		SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}, 7, 1, 2)
+	second, secondCapture := attachMultiScopeASPAssociation(t, endpoint,
+		SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a2"}, 7, 1, 2)
+	for _, association := range []*Association{first, second} {
+		applyASPDAVA(t, association, 7, 1, pointCode, 0)
+		applyASPDAVA(t, association, 7, 2, pointCode, 0)
+	}
+
+	result, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: transferProtocolData(pointCode, 1, nil),
+	})
+	if err != nil {
+		t.Fatalf("broadcast MTPTransfer: %v", err)
+	}
+	if len(result.SuccessfulPaths) != 2 {
+		t.Fatalf("broadcast targets = %#v, want one per SGP", result.SuccessfulPaths)
+	}
+	seen := make(map[SGPIdentity]struct{}, 2)
+	for _, target := range result.SuccessfulPaths {
+		if _, duplicate := seen[target.SGP]; duplicate {
+			t.Fatalf("broadcast selected SGP %+v twice", target.SGP)
+		}
+		seen[target.SGP] = struct{}{}
+		if target.ApplicationServer != "as-core" {
+			t.Fatalf("broadcast target %+v, want the first eligible Application Server", target)
+		}
+	}
+	if firstCapture.count() != 1 || secondCapture.count() != 1 {
+		t.Fatalf("broadcast counts = sgp-a1:%d sgp-a2:%d, want 1 each",
+			firstCapture.count(), secondCapture.count())
+	}
+}
+
+// Targets are frozen when the request is admitted. A target that refuses the
+// write is reported as it is; nothing else is tried for the same request,
+// because a failed write does not prove the peer received no DATA and the next
+// Application Server of the same SGP would risk a duplicate.
+func TestFailedTargetIsNotRetriedThroughAnotherApplicationServer(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	association, capture := attachMultiScopeASPAssociation(t, endpoint, identity, 7, 1, 2)
+	applyASPDAVA(t, association, 7, 1, pointCode, 0)
+	applyASPDAVA(t, association, 7, 2, pointCode, 0)
+	capture.writeErr = errors.New("transport refused the write")
+
+	result, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: transferProtocolData(pointCode, 1, []byte("x")),
+	})
+	if len(result.SuccessfulPaths) != 0 {
+		t.Fatalf("failed transfer reported successes %#v", result.SuccessfulPaths)
+	}
+	var transferErr *MTPTransferError
+	if !errors.As(err, &transferErr) || len(transferErr.Failures) != 1 {
+		t.Fatalf("transfer error = %v, want one failure", err)
+	}
+	failure := transferErr.Failures[0]
+	if failure.Target.ApplicationServer != "as-core" || failure.Target.Path != "sg-a-pair" ||
+		failure.Target.SGP != identity || failure.Target.AS != *staticASKey(7, 1) ||
+		failure.Target.Association != association.ID() ||
+		failure.Target.Epoch != partitionEpoch(t, endpoint, "sg-a", "as-core") {
+		t.Fatalf("failure target = %+v", failure.Target)
+	}
+	var writeErr *DataWriteError
+	if !errors.As(failure.Err, &writeErr) || writeErr.Outcome != DataSendIndeterminate {
+		t.Fatalf("failure cause = %v, want an indeterminate DataWriteError", failure.Err)
+	}
+	if capture.count() != 0 {
+		t.Fatalf("captured %d messages, want none", capture.count())
+	}
+}
+
+// Looking a route up is a read. It never audits, never probes and never
+// resends: RFC 4666 Section 4.5.2 scheduling of DAUD belongs to the
+// application, which owns when and how often it asks.
+func TestRouteLookupSendsNothingOfItsOwn(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	useSignallingGateways(config, "sg-a")
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	association, signals := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
+	association.cfg.PeerSGP = &SGPIdentity{
+		SignallingGateway:        "sg-a",
+		SignallingGatewayProcess: "sgp-a1",
+	}
+	association.noteRoutingContextsAcked(params.NewRoutingContext(1))
+	capture := &mtpTransferCapture{}
+	association.dataWriter = capture.write
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("failed to attach ASP Association")
+	}
+	t.Cleanup(func() { _ = association.Close() })
+
+	*signals = nil
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 1, nil)}
+	if _, err := endpoint.MTPTransfer(request); !errors.Is(err, ErrDestinationStateUnknown) {
+		t.Fatalf("unknown-state error = %v, want ErrDestinationStateUnknown", err)
+	}
+	applyASPDUNA(t, association, 7, 1, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); !errors.Is(err, ErrNoMTPRoute) {
+		t.Fatalf("unavailable-destination error = %v, want ErrNoMTPRoute", err)
+	}
+	if len(*signals) != 0 {
+		t.Fatalf("route lookup emitted %d message(s) of its own: %v", len(*signals), *signals)
+	}
+	if capture.count() != 0 {
+		t.Fatalf("route lookup emitted %d DATA message(s)", capture.count())
+	}
+}
+
+// Two routes naming one path are two routes, not two inventories. They select
+// the same Association and the same Application Server membership, and neither
+// route's use of the path changes anything the other sees.
+func TestSharedRoutePathPreservesAssociationAndMembership(t *testing.T) {
+	config := twoApplicationServerASPConfig()
+	config.Routing.MTPRoutes = []MTPRouteConfig{
+		{
+			ID: "sccp", DestinationPointCode: 0x120000, Mask: 16,
+			ServiceIndicators: []uint8{params.ServiceIndSCCP},
+			Paths:             []MTPRoutePathID{"sg-a-pair"},
+		},
+		{
+			ID: "isup", DestinationPointCode: 0x120000, Mask: 16,
+			ServiceIndicators: []uint8{params.ServiceIndISUP},
+			Paths:             []MTPRoutePathID{"sg-a-pair"},
+		},
+	}
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	association, capture := attachMultiScopeASPAssociation(t, endpoint, identity, 7, 1, 2)
+	applyASPDAVA(t, association, 7, 1, 0x120000, 16)
+	applyASPDAVA(t, association, 7, 2, 0x120000, 16)
+
+	targets := make([]MTPTransferPath, 0, 2)
+	for _, serviceIndicator := range []uint8{params.ServiceIndSCCP, params.ServiceIndISUP} {
+		result, err := endpoint.MTPTransfer(MTPTransferRequest{
+			ProtocolData: params.NewProtocolDataPayload(
+				0x111111, 0x123456, serviceIndicator, 0, 0, 1, []byte("x")),
+		})
+		if err != nil {
+			t.Fatalf("MTPTransfer(SI %d): %v", serviceIndicator, err)
+		}
+		if len(result.SuccessfulPaths) != 1 {
+			t.Fatalf("MTPTransfer(SI %d) targets = %#v", serviceIndicator, result.SuccessfulPaths)
+		}
+		targets = append(targets, result.SuccessfulPaths[0])
+	}
+	if targets[0].Association != targets[1].Association ||
+		targets[0].ApplicationServer != targets[1].ApplicationServer ||
+		targets[0].AS != targets[1].AS || targets[0].Path != targets[1].Path {
+		t.Fatalf("the shared path selected %+v and %+v", targets[0], targets[1])
+	}
+	if capture.count() != 2 {
+		t.Fatalf("captured %d messages, want 2", capture.count())
+	}
+}
+
+// Application-managed routing is not a degraded mode of the route inventory.
+// An Endpoint with no Routing owns no outbound selection at all: MTPTransfer
+// says so, and direct per-message WriteData is unaffected by it.
+func TestApplicationManagedDirectIORemainsIndependent(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: &ASPConfig{
+		SignallingGateways: []SignallingGatewayConfig{{
+			ID: "sg-a",
+			SGPs: []SignallingGatewayProcessConfig{{
+				ID:                 "sgp-a1",
+				ApplicationServers: []RemoteASConfig{{ID: "as-core", ASKey: staticASKey(7, 1)}},
+			}},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("NewEndpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	association, capture := attachMultiScopeASPAssociation(t, endpoint, identity, 7, 1)
+
+	if _, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: transferProtocolData(0x123456, 1, nil),
+	}); !errors.Is(err, ErrRoutingNotConfigured) {
+		t.Fatalf("MTPTransfer without a route inventory = %v, want ErrRoutingNotConfigured", err)
+	}
+
+	// Nothing has been reported about the destination, which would refuse a
+	// library-managed selection and has no bearing on a direct send.
+	if _, err := association.WriteData(DataRequest{
+		AS:           *staticASKey(7, 1),
+		ProtocolData: *transferProtocolData(0x123456, 1, []byte("direct")),
+	}); err != nil {
+		t.Fatalf("WriteData: %v", err)
+	}
+	if capture.count() != 1 {
+		t.Fatalf("captured %d messages, want 1", capture.count())
+	}
+}
