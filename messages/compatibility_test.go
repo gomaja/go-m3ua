@@ -271,3 +271,225 @@ func rawParameter(tag uint16, value []byte) []byte {
 	copy(wire[4:], value)
 	return wire
 }
+
+// ParseWithOptions is the only receive path that may relax anything, so the
+// zero value of ParseOptions has to be exactly the strict decoder -- not
+// "close enough". A caller that constructs ParseOptions and leaves the
+// Tolerator unset has asked for no tolerance at all, and every accepted
+// message and every rejection must match Parse on the same octets.
+func TestParseWithOptionsWithZeroOptionsIsStrictParse(t *testing.T) {
+	t.Run("accepted messages", func(t *testing.T) {
+		for _, fixture := range validTypedMessageFixtures() {
+			t.Run(fixture.name, func(t *testing.T) {
+				wire, err := fixture.message.MarshalBinary()
+				if err != nil {
+					t.Fatalf("MarshalBinary() error = %v", err)
+				}
+				strict, strictErr := Parse(wire)
+				zero, zeroErr := ParseWithOptions(wire, ParseOptions{})
+				if strictErr != nil || zeroErr != nil {
+					t.Fatalf("Parse() error = %v, ParseWithOptions(zero) error = %v", strictErr, zeroErr)
+				}
+				if diff := cmp.Diff(strict, zero); diff != "" {
+					t.Errorf("zero options decoded differently from Parse (-parse +zero):\n%s", diff)
+				}
+			})
+		}
+	})
+
+	t.Run("rejections", func(t *testing.T) {
+		for _, test := range strictlyRejectedWires(t) {
+			t.Run(test.name, func(t *testing.T) {
+				strict, strictErr := Parse(test.wire)
+				zero, zeroErr := ParseWithOptions(test.wire, ParseOptions{})
+				if strictErr == nil {
+					t.Fatalf("Parse() accepted %s; the case no longer tests a rejection", test.name)
+				}
+				if zeroErr == nil {
+					t.Fatalf("ParseWithOptions(zero) accepted what Parse rejected: %v", zero)
+				}
+				if strictErr.Error() != zeroErr.Error() {
+					t.Errorf("ParseWithOptions(zero) error = %q, Parse error = %q", zeroErr, strictErr)
+				}
+				if strict != nil || zero != nil {
+					t.Errorf("a rejection returned a message: Parse %v, zero options %v", strict, zero)
+				}
+			})
+		}
+	})
+}
+
+// The optional INFO String tolerance is the one relaxation this package
+// offers, and it is scoped to a single parameter value on messages that define
+// that parameter. It must not become a way in for anything else: not DATA's
+// parameter order, not a missing mandatory parameter, and not a Routing Context
+// whose value is not the "n x 32 bits" RFC 4666 Section 3.4.1 defines it as.
+//
+// Every case below is run under all three decisions, because the accept and
+// drop paths rebuild the octets and re-decode, and a rebuild is exactly where a
+// second fault could be lost.
+func TestInfoStringToleranceNeverBypassesValidation(t *testing.T) {
+	validStatus := rawParameter(params.Status, []byte{0x00, 0x01, 0x00, 0x02})
+	malformedRoutingContext := rawParameter(params.RoutingContext, []byte{0x00, 0x00, 0x09})
+	invalidInfoString := rawParameter(params.InfoString, []byte{0xff, 0xfe})
+	protocolData, err := params.NewProtocolData(
+		1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("data")).MarshalBinary()
+	if err != nil {
+		t.Fatalf("Protocol Data MarshalBinary() error = %v", err)
+	}
+	routingContext, err := params.NewRoutingContext(7).MarshalBinary()
+	if err != nil {
+		t.Fatalf("Routing Context MarshalBinary() error = %v", err)
+	}
+	networkAppearance, err := params.NewNetworkAppearance(8).MarshalBinary()
+	if err != nil {
+		t.Fatalf("Network Appearance MarshalBinary() error = %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		wire         []byte
+		toleratedErr error
+	}{
+		{
+			name: "malformed Routing Context ahead of the invalid INFO String",
+			wire: NewHeader(1, MsgClassManagement, MsgTypeNotify,
+				concatParameters(validStatus, malformedRoutingContext, invalidInfoString),
+			).mustMarshalForTest(t),
+			toleratedErr: params.ErrInvalidLength,
+		},
+		{
+			name: "malformed Routing Context behind the invalid INFO String",
+			wire: NewHeader(1, MsgClassManagement, MsgTypeNotify,
+				concatParameters(validStatus, invalidInfoString, malformedRoutingContext),
+			).mustMarshalForTest(t),
+			toleratedErr: params.ErrInvalidLength,
+		},
+		{
+			name: "empty Routing Context behind the invalid INFO String",
+			wire: NewHeader(1, MsgClassManagement, MsgTypeNotify,
+				concatParameters(validStatus, invalidInfoString,
+					rawParameter(params.RoutingContext, nil)),
+			).mustMarshalForTest(t),
+			toleratedErr: params.ErrInvalidLength,
+		},
+		{
+			name: "mandatory Status missing behind the invalid INFO String",
+			wire: NewHeader(1, MsgClassManagement, MsgTypeNotify,
+				concatParameters(invalidInfoString, routingContext),
+			).mustMarshalForTest(t),
+			toleratedErr: ErrMissingParameter,
+		},
+		{
+			name: "DATA Network Appearance out of order beside an invalid INFO String",
+			wire: NewHeader(1, MsgClassTransfer, MsgTypePayloadData,
+				concatParameters(routingContext, networkAppearance, protocolData, invalidInfoString),
+			).mustMarshalForTest(t),
+			toleratedErr: params.ErrInvalidValue,
+		},
+		{
+			name: "DATA Network Appearance out of order behind a valid INFO String",
+			wire: NewHeader(1, MsgClassTransfer, MsgTypePayloadData,
+				concatParameters(routingContext, networkAppearance, protocolData,
+					rawParameter(params.InfoString, []byte("info"))),
+			).mustMarshalForTest(t),
+			toleratedErr: ErrInvalidParameter,
+		},
+	}
+
+	decisions := []struct {
+		name     string
+		decision ProtocolDecision
+	}{
+		{"accept", ProtocolAccept},
+		{"drop", ProtocolDropParameter},
+		{"reject", ProtocolReject},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Parse(test.wire); err == nil {
+				t.Fatal("strict Parse accepted the wire; the case no longer tests a rejection")
+			}
+			for _, decision := range decisions {
+				t.Run(decision.name, func(t *testing.T) {
+					message, err := ParseWithOptions(test.wire, ParseOptions{
+						Tolerator: ToleratorFunc(func(ProtocolViolation) ProtocolDecision {
+							return decision.decision
+						}),
+					})
+					if err == nil {
+						t.Fatalf("tolerance produced a message from invalid octets: %v", message)
+					}
+					if message != nil {
+						t.Errorf("a rejected decode returned %v as well as %v", message, err)
+					}
+					if decision.decision == ProtocolReject {
+						// Rejecting reports the classified violation itself,
+						// which is a different, equally valid refusal.
+						return
+					}
+					if !errors.Is(err, test.toleratedErr) {
+						t.Errorf("ParseWithOptions() error = %v, want %v", err, test.toleratedErr)
+					}
+				})
+			}
+		})
+	}
+}
+
+// strictlyRejectedWires is the malformed-input corpus the zero-options case
+// re-checks: one shape per class of rejection the decoder owns.
+func strictlyRejectedWires(t *testing.T) []struct {
+	name string
+	wire []byte
+} {
+	t.Helper()
+
+	aspUp, err := NewAspUp(params.NewAspIdentifier(7), params.NewInfoString("valid")).MarshalBinary()
+	if err != nil {
+		t.Fatalf("ASP Up MarshalBinary() error = %v", err)
+	}
+	data, err := NewData(nil, nil,
+		params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 1, []byte("data")), nil).MarshalBinary()
+	if err != nil {
+		t.Fatalf("DATA MarshalBinary() error = %v", err)
+	}
+	routingContext, err := params.NewRoutingContext(7).MarshalBinary()
+	if err != nil {
+		t.Fatalf("Routing Context MarshalBinary() error = %v", err)
+	}
+	networkAppearance, err := params.NewNetworkAppearance(8).MarshalBinary()
+	if err != nil {
+		t.Fatalf("Network Appearance MarshalBinary() error = %v", err)
+	}
+
+	return []struct {
+		name string
+		wire []byte
+	}{
+		{"invalid optional INFO String", replaceParameterValue(t, aspUp, params.InfoString, []byte{0xff, 0xfe})},
+		{"oversized INFO String", replaceParameterValue(t, aspUp, params.InfoString, bytes.Repeat([]byte{'x'}, 256))},
+		{"duplicate INFO String", NewHeader(aspUp[0], aspUp[2], aspUp[3],
+			concatParameters(aspUp[8:], rawParameter(params.InfoString, []byte("second")))).mustMarshalForTest(t)},
+		{"missing mandatory Status", NewHeader(1, MsgClassManagement, MsgTypeNotify,
+			rawParameter(params.InfoString, []byte("info"))).mustMarshalForTest(t)},
+		{"DATA Network Appearance out of order", NewHeader(1, MsgClassTransfer, MsgTypePayloadData,
+			concatParameters(routingContext, networkAppearance, data[8:])).mustMarshalForTest(t)},
+		{"malformed Routing Context", NewHeader(1, MsgClassManagement, MsgTypeNotify,
+			concatParameters(rawParameter(params.Status, []byte{0x00, 0x01, 0x00, 0x02}),
+				rawParameter(params.RoutingContext, []byte{0x00, 0x00, 0x09}))).mustMarshalForTest(t)},
+		{"truncated common header", []byte{0x01, 0x00, 0x03, 0x01}},
+		{"declared length beyond the octets received", []byte{0x01, 0x00, 0x03, 0x01, 0xff, 0xff, 0xff, 0xff}},
+		{"parameter length below the TLV header", NewHeader(1, MsgClassASPSM, MsgTypeAspUp,
+			[]byte{0x00, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07}).mustMarshalForTest(t)},
+	}
+}
+
+func concatParameters(parts ...[]byte) []byte {
+	var out []byte
+	for _, part := range parts {
+		out = append(out, part...)
+	}
+	return out
+}

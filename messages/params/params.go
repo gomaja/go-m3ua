@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"unicode/utf8"
 )
 
@@ -579,64 +578,4 @@ func parseMultiParamsAtDepth(b []byte, depth int) ([]*Param, error) {
 		b = b[paddedLength:]
 	}
 	return prms, nil
-}
-
-// Serialize returns the byte sequence generated from a Param.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (p *Param) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return p.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (p *Param) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return p.MarshalTo(b)
-}
-
-// Decode decodes given byte sequence as a Param.
-//
-// DEPRECATED: use Parse instead.
-func Decode(b []byte) (*Param, error) {
-	log.Println("DEPRECATED: use Parse instead")
-	return Parse(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (p *Param) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return p.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of Param.
-//
-// DEPRECATED: use MarshalLen instead.
-func (p *Param) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return p.MarshalLen()
-}
-
-// SerializeMultiParams creates the byte sequence from multiple Param instances.
-//
-// DEPRECATED: use MarshalMultiParams instead.
-func SerializeMultiParams(params []*Param) ([]byte, error) {
-	log.Println("DEPRECATED: use MarshalMultiParams instead")
-	return MarshalMultiParams(params)
-}
-
-// DecodeMultiParams decodes multiple Params at a time.
-//
-// This is easy and useful but slower than decoding one by one.
-// When you don't know the number of Params, this is the only way to decode them.
-// See benchmarks in diameter_test.go for the detail.
-//
-// DEPRECATED: use ParseMultiParams instead.
-func DecodeMultiParams(b []byte) ([]*Param, error) {
-	log.Println("DEPRECATED: use ParseMultiParams instead")
-	return ParseMultiParams(b)
 }

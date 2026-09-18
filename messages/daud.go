@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -226,44 +225,4 @@ func (d *DestinationStateAudit) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (d *DestinationStateAudit) MessageTypeName() string {
 	return "Destination State Audit"
-}
-
-// Serialize returns the byte sequence generated from a DestinationStateAudit.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (d *DestinationStateAudit) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return d.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (d *DestinationStateAudit) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return d.MarshalTo(b)
-}
-
-// DecodeDestinationStateAudit decodes given byte sequence as a DestinationStateAudit.
-//
-// DEPRECATED: use ParseDestinationStateAudit instead.
-func DecodeDestinationStateAudit(b []byte) (*DestinationStateAudit, error) {
-	log.Println("DEPRECATED: use ParseDestinationStateAudit instead")
-	return ParseDestinationStateAudit(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (d *DestinationStateAudit) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return d.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of DestinationStateAudit.
-//
-// DEPRECATED: use MarshalLen instead.
-func (d *DestinationStateAudit) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return d.MarshalLen()
 }

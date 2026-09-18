@@ -6,7 +6,6 @@ package params
 
 import (
 	"fmt"
-	"log"
 )
 
 // DeregResultPayload is the payload of DeregistrationResult.
@@ -106,20 +105,4 @@ func (d *DeregResultPayload) unmarshalBinaryAtDepth(b []byte, depth int) error {
 	}
 	*d = decoded
 	return nil
-}
-
-// DecodeDeregResultPayload decodes given byte sequence as a DeregResultPayload.
-//
-// DEPRECATED: use ParseDeregResultPayload instead.
-func DecodeDeregResultPayload(b []byte) (*DeregResultPayload, error) {
-	log.Println("DEPRECATED: use ParseDeregResultPayload instead")
-	return ParseDeregResultPayload(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a Param.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (d *DeregResultPayload) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return d.UnmarshalBinary(b)
 }

@@ -17,11 +17,43 @@ import (
 // shortcut describing "the first group" cannot express the parameter and
 // silently disagrees with Groups once a second grouping arrives.
 func TestRoutingKeyPayloadExposesOnlyGroupedScope(t *testing.T) {
+	grouped := []string{"DestinationPointCode", "ServiceIndicators", "OriginatingPointCodeList"}
+
 	payloadType := reflect.TypeOf(RoutingKeyPayload{})
-	for _, name := range []string{"DestinationPointCode", "ServiceIndicators", "OriginatingPointCodeList"} {
+	for _, name := range grouped {
 		if field, exists := payloadType.FieldByName(name); exists {
 			t.Errorf("RoutingKeyPayload still exposes scalar shortcut field %s %s; "+
 				"RFC 4666 Section 3.6.1 grouping belongs only to Groups", field.Name, field.Type)
+		}
+	}
+
+	// A method is as much a competing representation as a field: a caller
+	// reading payload.DestinationPointCode() would get an answer that stops
+	// being true the moment a second grouping arrives.
+	pointerType := reflect.TypeOf(&RoutingKeyPayload{})
+	for _, name := range grouped {
+		if _, exists := payloadType.MethodByName(name); exists {
+			t.Errorf("RoutingKeyPayload has a %s accessor beside Groups", name)
+		}
+		if _, exists := pointerType.MethodByName(name); exists {
+			t.Errorf("*RoutingKeyPayload has a %s accessor beside Groups", name)
+		}
+	}
+
+	// Groups is the only way in as well as the only way out: the payload
+	// constructor takes the groupings variadically and nothing else carries a
+	// Destination Point Code into a Routing Key.
+	constructor := reflect.TypeOf(NewRoutingKeyPayload)
+	if !constructor.IsVariadic() {
+		t.Fatal("NewRoutingKeyPayload is no longer variadic over its groupings")
+	}
+	if got, want := constructor.In(constructor.NumIn()-1), reflect.TypeOf([]RoutingKeyGroup(nil)); got != want {
+		t.Errorf("NewRoutingKeyPayload variadic parameter = %s, want %s", got, want)
+	}
+	for index := 0; index < constructor.NumIn()-1; index++ {
+		if got := constructor.In(index); got != reflect.TypeOf(&Param{}) {
+			t.Errorf("NewRoutingKeyPayload parameter %d = %s, want *Param; only the "+
+				"singleton sub-parameters precede the groupings", index, got)
 		}
 	}
 }

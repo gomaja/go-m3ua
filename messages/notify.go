@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -232,44 +231,4 @@ func (n *Notify) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (n *Notify) MessageTypeName() string {
 	return "Notify"
-}
-
-// Serialize returns the byte sequence generated from a Notify.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (n *Notify) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return n.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (n *Notify) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return n.MarshalTo(b)
-}
-
-// DecodeNotify decodes given byte sequence as a Notify.
-//
-// DEPRECATED: use ParseNotify instead.
-func DecodeNotify(b []byte) (*Notify, error) {
-	log.Println("DEPRECATED: use ParseNotify instead")
-	return ParseNotify(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (n *Notify) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return n.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of Notify.
-//
-// DEPRECATED: use MarshalLen instead.
-func (n *Notify) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return n.MarshalLen()
 }

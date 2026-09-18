@@ -7,7 +7,6 @@ package params
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 )
 
 // ServiceIndicator definitions.
@@ -144,44 +143,4 @@ func (p *ProtocolDataPayload) String() string {
 		p.SignallingLinkSelection,
 		p.Data,
 	)
-}
-
-// Serialize returns the byte sequence generated from a ProtocolDataPayload.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (p *ProtocolDataPayload) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return p.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (p *ProtocolDataPayload) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return p.MarshalTo(b)
-}
-
-// DecodeProtocolDataPayload decodes given byte sequence as a ProtocolDataPayload.
-//
-// DEPRECATED: use ParseProtocolDataPayload instead.
-func DecodeProtocolDataPayload(b []byte) (*ProtocolDataPayload, error) {
-	log.Println("DEPRECATED: use ParseProtocolDataPayload instead")
-	return ParseProtocolDataPayload(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (p *ProtocolDataPayload) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return p.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of ProtocolDataPayload.
-//
-// DEPRECATED: use MarshalLen instead.
-func (p *ProtocolDataPayload) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return p.MarshalLen()
 }

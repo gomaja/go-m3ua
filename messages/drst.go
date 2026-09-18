@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -226,44 +225,4 @@ func (d *DestinationRestricted) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (d *DestinationRestricted) MessageTypeName() string {
 	return "Destination Restricted"
-}
-
-// Serialize returns the byte sequence generated from a DestinationRestricted.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (d *DestinationRestricted) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return d.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (d *DestinationRestricted) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return d.MarshalTo(b)
-}
-
-// DecodeDestinationRestricted decodes given byte sequence as a DestinationRestricted.
-//
-// DEPRECATED: use ParseDestinationRestricted instead.
-func DecodeDestinationRestricted(b []byte) (*DestinationRestricted, error) {
-	log.Println("DEPRECATED: use ParseDestinationRestricted instead")
-	return ParseDestinationRestricted(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (d *DestinationRestricted) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return d.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of DestinationRestricted.
-//
-// DEPRECATED: use MarshalLen instead.
-func (d *DestinationRestricted) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return d.MarshalLen()
 }

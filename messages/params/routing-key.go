@@ -6,7 +6,6 @@ package params
 
 import (
 	"fmt"
-	"log"
 )
 
 // RoutingKeyGroup is one Destination Point Code and its optional Service
@@ -211,20 +210,4 @@ func bytesContain(value []byte, target byte) bool {
 
 func ungroupedRoutingKeyParameter(name string) error {
 	return invalidNestedParameter("Routing Key", name+" precedes its Destination Point Code")
-}
-
-// DecodeRoutingKeyPayload decodes given byte sequence as a RoutingKeyPayload.
-//
-// DEPRECATED: use ParseRoutingKeyPayload instead.
-func DecodeRoutingKeyPayload(b []byte) (*RoutingKeyPayload, error) {
-	log.Println("DEPRECATED: use ParseRoutingKeyPayload instead")
-	return ParseRoutingKeyPayload(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a Param.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (r *RoutingKeyPayload) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return r.UnmarshalBinary(b)
 }

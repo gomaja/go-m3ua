@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -185,44 +184,4 @@ func (a *AspInactive) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (a *AspInactive) MessageTypeName() string {
 	return "ASP Inactive"
-}
-
-// Serialize returns the byte sequence generated from a AspInactive.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (a *AspInactive) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return a.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (a *AspInactive) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return a.MarshalTo(b)
-}
-
-// DecodeAspInactive decodes given byte sequence as a AspInactive.
-//
-// DEPRECATED: use ParseAspInactive instead.
-func DecodeAspInactive(b []byte) (*AspInactive, error) {
-	log.Println("DEPRECATED: use ParseAspInactive instead")
-	return ParseAspInactive(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (a *AspInactive) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return a.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of AspInactive.
-//
-// DEPRECATED: use MarshalLen instead.
-func (a *AspInactive) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return a.MarshalLen()
 }

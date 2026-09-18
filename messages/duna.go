@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -226,44 +225,4 @@ func (d *DestinationUnavailable) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (d *DestinationUnavailable) MessageTypeName() string {
 	return "Destination Unavailable"
-}
-
-// Serialize returns the byte sequence generated from a DestinationUnavailable.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (d *DestinationUnavailable) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return d.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (d *DestinationUnavailable) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return d.MarshalTo(b)
-}
-
-// DecodeDestinationUnavailable decodes given byte sequence as a DestinationUnavailable.
-//
-// DEPRECATED: use ParseDestinationUnavailable instead.
-func DecodeDestinationUnavailable(b []byte) (*DestinationUnavailable, error) {
-	log.Println("DEPRECATED: use ParseDestinationUnavailable instead")
-	return ParseDestinationUnavailable(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (d *DestinationUnavailable) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return d.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of DestinationUnavailable.
-//
-// DEPRECATED: use MarshalLen instead.
-func (d *DestinationUnavailable) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return d.MarshalLen()
 }

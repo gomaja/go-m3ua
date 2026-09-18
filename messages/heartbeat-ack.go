@@ -6,7 +6,6 @@ package messages
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -169,44 +168,4 @@ func (h *HeartbeatAck) MessageClassName() string {
 // MessageTypeName returns the name of message type.
 func (h *HeartbeatAck) MessageTypeName() string {
 	return "Heartbeat Ack"
-}
-
-// Serialize returns the byte sequence generated from a HeartbeatAck.
-//
-// DEPRECATED: use MarshalBinary instead.
-func (h *HeartbeatAck) Serialize() ([]byte, error) {
-	log.Println("DEPRECATED: MarshalBinary instead")
-	return h.MarshalBinary()
-}
-
-// SerializeTo puts the byte sequence in the byte array given as b.
-//
-// DEPRECATED: use MarshalTo instead.
-func (h *HeartbeatAck) SerializeTo(b []byte) error {
-	log.Println("DEPRECATED: MarshalTo instead")
-	return h.MarshalTo(b)
-}
-
-// DecodeHeartbeatAck decodes given byte sequence as a HeartbeatAck.
-//
-// DEPRECATED: use ParseHeartbeatAck instead.
-func DecodeHeartbeatAck(b []byte) (*HeartbeatAck, error) {
-	log.Println("DEPRECATED: use ParseHeartbeatAck instead")
-	return ParseHeartbeatAck(b)
-}
-
-// DecodeFromBytes sets the values retrieved from byte sequence in a M3UA common header.
-//
-// DEPRECATED: use UnmarshalBinary instead.
-func (h *HeartbeatAck) DecodeFromBytes(b []byte) error {
-	log.Println("DEPRECATED: use UnmarshalBinary instead")
-	return h.UnmarshalBinary(b)
-}
-
-// Len returns the serial length of HeartbeatAck.
-//
-// DEPRECATED: use MarshalLen instead.
-func (h *HeartbeatAck) Len() int {
-	log.Println("DEPRECATED: use MarshalLen instead")
-	return h.MarshalLen()
 }
