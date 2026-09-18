@@ -281,7 +281,7 @@ func TestASPRouteStateRejectsOversizedSSNMAtomically(t *testing.T) {
 	if availabilityRecords != 0 {
 		t.Fatalf("oversized SSNM stored %d availability records", availabilityRecords)
 	}
-	if state := first.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); state != DestinationAvailable {
+	if state := retainedAvailabilityForNetworkAndRoutingContext(first, 7, 1, 0x123456); state != DestinationAvailable {
 		t.Fatalf("oversized SSNM changed Association destination state to %v", state)
 	}
 }
@@ -346,10 +346,10 @@ func TestASPRouteStatePartitionsEndpointBudgetAcrossSignallingGateways(t *testin
 		t.Fatalf("partitioned budgets = total:%d sg-a:%d sg-b:%d availability:%d, want 2/1/1/2",
 			recordCount, firstRecords, secondRecords, availabilityRecords)
 	}
-	if state := first.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123457); state != DestinationAvailable {
+	if state := retainedAvailabilityForNetworkAndRoutingContext(first, 7, 1, 0x123457); state != DestinationAvailable {
 		t.Fatalf("first SG overflow changed Association destination state to %v", state)
 	}
-	if state := second.DestinationStateForNetworkAndRoutingContext(9, 42, 0x123457); state != DestinationAvailable {
+	if state := retainedAvailabilityForNetworkAndRoutingContext(second, 9, 42, 0x123457); state != DestinationAvailable {
 		t.Fatalf("second SG overflow changed Association destination state to %v", state)
 	}
 }
@@ -412,7 +412,7 @@ func TestASPRouteStateCountsAvailabilityAndCongestionSeparately(t *testing.T) {
 	if recordCount != 1 || congestionRecords != 0 {
 		t.Fatalf("congestion overflow left count %d and %d congestion records, want 1 and 0", recordCount, congestionRecords)
 	}
-	if state := first.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); state != DestinationUnavailable {
+	if state := retainedAvailabilityForNetworkAndRoutingContext(first, 7, 1, 0x123456); state != DestinationUnavailable {
 		t.Fatalf("congestion overflow changed Association destination state to %v", state)
 	}
 }
@@ -627,7 +627,7 @@ func requireASPRouteStatus(
 	endpoint *Endpoint,
 	mtpRoute MTPRouteID,
 	pointCode uint32,
-	availability DestinationState,
+	availability DestinationAvailability,
 	congested bool,
 	congestionLevel uint8,
 	congestionLevelSet bool,

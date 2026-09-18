@@ -26,7 +26,7 @@ func TestSCONNeverChangesDestinationAvailability(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
 		level     *params.Param
-		wantState DestinationState
+		wantState DestinationAvailability
 	}{
 		{"explicit level zero", params.NewCongestionIndications(0), DestinationUnavailable},
 		{"explicit level", params.NewCongestionIndications(2), DestinationUnavailable},
@@ -38,7 +38,7 @@ func TestSCONNeverChangesDestinationAvailability(t *testing.T) {
 				messages.NewDestinationUnavailable(nil, nil, apc(0x1234), nil)); err != nil {
 				t.Fatalf("handleDestinationUnavailable() error = %v, want nil", err)
 			}
-			if got := conn.DestinationState(0x1234); got != DestinationUnavailable {
+			if got := retainedAvailability(conn, 0x1234); got != DestinationUnavailable {
 				t.Fatalf("state after DUNA = %v, want %v", got, DestinationUnavailable)
 			}
 
@@ -46,7 +46,7 @@ func TestSCONNeverChangesDestinationAvailability(t *testing.T) {
 				nil, nil, apc(0x1234), nil, tt.level, nil)); err != nil {
 				t.Fatalf("handleSignallingCongestion() error = %v, want nil", err)
 			}
-			if got := conn.DestinationState(0x1234); got != tt.wantState {
+			if got := retainedAvailability(conn, 0x1234); got != tt.wantState {
 				t.Errorf("state after SCON = %v, want %v: only a DAVA restores reachability",
 					got, tt.wantState)
 			}
@@ -63,15 +63,19 @@ func TestSCONCongestsOnlyAnAvailableDestination(t *testing.T) {
 		nil, nil, apc(0x1234), nil, params.NewCongestionIndications(2), nil)); err != nil {
 		t.Fatalf("handleSignallingCongestion() error = %v, want nil", err)
 	}
-	if got := conn.DestinationState(0x1234); got != DestinationCongested {
-		t.Fatalf("state after SCON = %v, want %v", got, DestinationCongested)
+	// Congestion and availability are read separately now: the destination is
+	// congested and still reachable (RFC 4666 Section 4.5.2.2).
+	if got := retainedDestinationState(conn, 0x1234); !got.Congestion.Congested ||
+		got.Availability != DestinationAvailable {
+		t.Fatalf("state after SCON = %+v, want congested and available", got)
 	}
 	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
 		nil, nil, apc(0x1234), nil, params.NewCongestionIndications(0), nil)); err != nil {
 		t.Fatalf("handleSignallingCongestion() abatement error = %v, want nil", err)
 	}
-	if got := conn.DestinationState(0x1234); got != DestinationAvailable {
-		t.Errorf("state after abatement = %v, want %v", got, DestinationAvailable)
+	if got := retainedDestinationState(conn, 0x1234); got.Congestion.Congested ||
+		got.Availability != DestinationAvailable {
+		t.Errorf("state after abatement = %+v, want uncongested and available", got)
 	}
 }
 
@@ -82,8 +86,8 @@ func TestSCONCongestsOnlyAnAvailableDestination(t *testing.T) {
 func TestSGPCongestionReportKeepsDAUDAnsweredWithDUNA(t *testing.T) {
 	endpoint, first, firstSent, _, _ := multiAssociationDialedSGPFixture(t)
 	const pointCode = 0x123456
-	if err := first.ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, pointCode, DestinationUnavailable,
+	if err := reportAvailability(
+		first.endpoint, testWireScope(7, true, 1), pointCode, 0, DestinationUnavailable,
 	); err != nil {
 		t.Fatalf("report destination unavailable: %v", err)
 	}
@@ -104,8 +108,8 @@ func TestSGPCongestionReportKeepsDAUDAnsweredWithDUNA(t *testing.T) {
 		RoutingContext: 1, RoutingContextSet: true,
 		PointCode: pointCode,
 	})
-	if !ok || status.State != DestinationUnavailable {
-		t.Errorf("retained status = %+v, %v, want state %v",
+	if !ok || status.State.Availability != DestinationUnavailable {
+		t.Errorf("retained status = %+v, %v, want availability %v",
 			status, ok, DestinationUnavailable)
 	}
 
@@ -125,21 +129,27 @@ func TestSGPCongestionReportKeepsDAUDAnsweredWithDUNA(t *testing.T) {
 	}
 }
 
-// DestinationRanges is documented as a lossless snapshot. RFC 4666 Section
+// retainedDestinationRanges is the lossless snapshot of what an Association has
+// retained in the scope its own queries resolve.
+func retainedDestinationRanges(c *Association) []DestinationRange {
+	return c.destinations.rangesForScope(associationDestinationScope(c, nil))
+}
+
+// The retained ranges are documented as a lossless snapshot. RFC 4666 Section
 // 3.4.4's Congestion Indications parameter is the only thing that distinguishes
 // congestion abatement from a congestion report, so a snapshot that drops it
 // cannot be used to reproduce what the peer said.
 func TestInboundSCONRetainsCongestionLevelInRetainedRanges(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		level     *params.Param
-		wantState DestinationState
-		wantLevel uint8
-		wantSet   bool
+		name          string
+		level         *params.Param
+		wantCongested bool
+		wantLevel     uint8
+		wantSet       bool
 	}{
-		{"explicit level", params.NewCongestionIndications(3), DestinationCongested, 3, true},
-		{"explicit level zero", params.NewCongestionIndications(0), DestinationAvailable, 0, true},
-		{"omitted level", nil, DestinationCongested, 0, false},
+		{"explicit level", params.NewCongestionIndications(3), true, 3, true},
+		{"explicit level zero", params.NewCongestionIndications(0), false, 0, true},
+		{"omitted level", nil, true, 0, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := ssnmConn(t)
@@ -147,21 +157,29 @@ func TestInboundSCONRetainsCongestionLevelInRetainedRanges(t *testing.T) {
 				nil, nil, apc(0x1234), nil, tt.level, nil)); err != nil {
 				t.Fatalf("handleSignallingCongestion() error = %v, want nil", err)
 			}
-			ranges := conn.DestinationRanges()
+			ranges := retainedDestinationRanges(conn)
 			if len(ranges) != 1 {
 				t.Fatalf("retained ranges = %d, want 1", len(ranges))
 			}
 			retained := ranges[0]
-			if retained.State != tt.wantState {
-				t.Errorf("retained state = %v, want %v", retained.State, tt.wantState)
+			if retained.State.Congestion.Congested != tt.wantCongested {
+				t.Errorf("retained congestion = %v, want %v",
+					retained.State.Congestion.Congested, tt.wantCongested)
 			}
-			if retained.CongestionLevelSet != tt.wantSet {
-				t.Errorf("retained CongestionLevelSet = %v, want %v",
-					retained.CongestionLevelSet, tt.wantSet)
+			// The record a SCON leaves is a statement about congestion alone,
+			// so the availability it carries is the untouched initial one
+			// (RFC 4666 Section 4.5.2.2).
+			if retained.State.Availability != DestinationAvailable {
+				t.Errorf("retained availability = %v, want %v",
+					retained.State.Availability, DestinationAvailable)
 			}
-			if retained.CongestionLevel != tt.wantLevel {
-				t.Errorf("retained CongestionLevel = %d, want %d",
-					retained.CongestionLevel, tt.wantLevel)
+			if retained.State.Congestion.LevelSet != tt.wantSet {
+				t.Errorf("retained congestion LevelSet = %v, want %v",
+					retained.State.Congestion.LevelSet, tt.wantSet)
+			}
+			if retained.State.Congestion.Level != tt.wantLevel {
+				t.Errorf("retained congestion Level = %d, want %d",
+					retained.State.Congestion.Level, tt.wantLevel)
 			}
 		})
 	}
@@ -175,11 +193,12 @@ func TestInboundSCONRetainsCongestionLevelInRetainedRanges(t *testing.T) {
 // coming back.
 func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
 	for _, tt := range []struct {
-		name      string
-		send      func(*Association) error
-		wantState DestinationState
-		wantLevel uint8
-		wantSet   bool
+		name             string
+		send             func(*Association) error
+		wantAvailability DestinationAvailability
+		wantCongested    bool
+		wantLevel        uint8
+		wantSet          bool
 	}{
 		{
 			name: "DAVA",
@@ -187,7 +206,7 @@ func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
 				return c.handleDestinationAvailable(
 					messages.NewDestinationAvailable(nil, nil, apc(0x1234), nil))
 			},
-			wantState: DestinationAvailable,
+			wantAvailability: DestinationAvailable,
 		},
 		{
 			name: "SCON with explicit level zero",
@@ -195,8 +214,8 @@ func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
 				return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 					nil, nil, apc(0x1234), nil, params.NewCongestionIndications(0), nil))
 			},
-			wantState: DestinationAvailable,
-			wantSet:   true,
+			wantAvailability: DestinationAvailable,
+			wantSet:          true,
 		},
 		{
 			name: "SCON without a level",
@@ -204,7 +223,8 @@ func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
 				return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 					nil, nil, apc(0x1234), nil, nil, nil))
 			},
-			wantState: DestinationCongested,
+			wantAvailability: DestinationAvailable,
+			wantCongested:    true,
 		},
 		{
 			name: "SCON with an explicit level",
@@ -212,9 +232,10 @@ func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
 				return c.handleSignallingCongestion(messages.NewSignallingCongestion(
 					nil, nil, apc(0x1234), nil, params.NewCongestionIndications(3), nil))
 			},
-			wantState: DestinationCongested,
-			wantLevel: 3,
-			wantSet:   true,
+			wantAvailability: DestinationAvailable,
+			wantCongested:    true,
+			wantLevel:        3,
+			wantSet:          true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -223,16 +244,24 @@ func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
 				t.Fatalf("send: %v", err)
 			}
 			status := nextStatus(t, conn)
-			if status.State != tt.wantState {
-				t.Errorf("status.State = %v, want %v", status.State, tt.wantState)
+			// The status reports both dimensions, so a SCON leaves availability
+			// at whatever the last DUNA, DAVA or DRST said — here the initial
+			// reachable assumption (RFC 4666 Section 4.5.2.2).
+			if status.State.Availability != tt.wantAvailability {
+				t.Errorf("status.State.Availability = %v, want %v",
+					status.State.Availability, tt.wantAvailability)
 			}
-			if status.CongestionLevelSet != tt.wantSet {
-				t.Errorf("status.CongestionLevelSet = %v, want %v",
-					status.CongestionLevelSet, tt.wantSet)
+			if status.State.Congestion.Congested != tt.wantCongested {
+				t.Errorf("status.State.Congestion.Congested = %v, want %v",
+					status.State.Congestion.Congested, tt.wantCongested)
 			}
-			if status.CongestionLevel != tt.wantLevel {
-				t.Errorf("status.CongestionLevel = %d, want %d",
-					status.CongestionLevel, tt.wantLevel)
+			if status.State.Congestion.LevelSet != tt.wantSet {
+				t.Errorf("status.State.Congestion.LevelSet = %v, want %v",
+					status.State.Congestion.LevelSet, tt.wantSet)
+			}
+			if status.State.Congestion.Level != tt.wantLevel {
+				t.Errorf("status.State.Congestion.Level = %d, want %d",
+					status.State.Congestion.Level, tt.wantLevel)
 			}
 		})
 	}
@@ -250,9 +279,9 @@ func TestPeerReportedCongestionCarriesLevelPresence(t *testing.T) {
 	if !status.PeerReported {
 		t.Fatalf("status.PeerReported = false, want true")
 	}
-	if !status.CongestionLevelSet || status.CongestionLevel != 0 {
+	if !status.State.Congestion.LevelSet || status.State.Congestion.Level != 0 {
 		t.Errorf("status congestion = %d/%v, want an explicit zero",
-			status.CongestionLevel, status.CongestionLevelSet)
+			status.State.Congestion.Level, status.State.Congestion.LevelSet)
 	}
 }
 
@@ -367,11 +396,11 @@ func TestSSNMDestinationRecordBudgetRefusesAndReclaims(t *testing.T) {
 	if got := retainedDestinationRecords(conn); got != 4 {
 		t.Errorf("retained records after a refusal = %d, want 4", got)
 	}
-	if got := conn.DestinationState(1); got != DestinationUnavailable {
+	if got := retainedAvailability(conn, 1); got != DestinationUnavailable {
 		t.Errorf("state of a retained destination = %v, want %v: a refusal must not evict",
 			got, DestinationUnavailable)
 	}
-	if got := conn.DestinationState(5); got != DestinationAvailable {
+	if got := retainedAvailability(conn, 5); got != DestinationAvailable {
 		t.Errorf("state of a refused destination = %v, want %v", got, DestinationAvailable)
 	}
 
@@ -381,7 +410,7 @@ func TestSSNMDestinationRecordBudgetRefusesAndReclaims(t *testing.T) {
 		messages.NewDestinationAvailable(nil, nil, apc(1), nil)); err != nil {
 		t.Errorf("DAVA for a retained destination: %v", err)
 	}
-	if got := conn.DestinationState(1); got != DestinationAvailable {
+	if got := retainedAvailability(conn, 1); got != DestinationAvailable {
 		t.Errorf("state after DAVA = %v, want %v", got, DestinationAvailable)
 	}
 
@@ -394,7 +423,7 @@ func TestSSNMDestinationRecordBudgetRefusesAndReclaims(t *testing.T) {
 	if err := duna(conn, 5); err != nil {
 		t.Errorf("DUNA after reclaim: %v", err)
 	}
-	if got := conn.DestinationState(5); got != DestinationUnavailable {
+	if got := retainedAvailability(conn, 5); got != DestinationUnavailable {
 		t.Errorf("state after reclaim = %v, want %v", got, DestinationUnavailable)
 	}
 }
@@ -413,9 +442,9 @@ func TestRefusedSSNMRecordIsStillReported(t *testing.T) {
 		t.Fatalf("DUNA beyond the budget: error = %v, want ErrSSNMDestinationRecordLimit", err)
 	}
 	status := nextStatus(t, conn)
-	if status.PointCode != 2 || status.State != DestinationUnavailable {
+	if status.PointCode != 2 || status.State.Availability != DestinationUnavailable {
 		t.Errorf("status = %#x/%v, want the refused destination reported as unavailable",
-			status.PointCode, status.State)
+			status.PointCode, status.State.Availability)
 	}
 }
 
@@ -437,20 +466,25 @@ func TestSCONPreservesPerRoutingContextAvailability(t *testing.T) {
 		t.Fatalf("multi-context SCON: %v", err)
 	}
 
+	// The SCON congests all three contexts and restates none of their
+	// availability, so Routing Context 1 keeps the DUNA it was given.
 	for _, test := range []struct {
 		routingContext uint32
-		want           DestinationState
+		want           DestinationNetworkState
 	}{
-		{routingContext: 0, want: DestinationCongested},
-		{routingContext: 1, want: DestinationUnavailable},
-		{routingContext: 2, want: DestinationCongested},
+		{routingContext: 0, want: DestinationNetworkState{
+			Availability: DestinationAvailable, Congestion: congestionStateFor(2, true)}},
+		{routingContext: 1, want: DestinationNetworkState{
+			Availability: DestinationUnavailable, Congestion: congestionStateFor(2, true)}},
+		{routingContext: 2, want: DestinationNetworkState{
+			Availability: DestinationAvailable, Congestion: congestionStateFor(2, true)}},
 	} {
 		scope := conn.destinationKey(nil, pointCode)
 		scope.routingContext = test.routingContext
 		scope.routingContextSet = true
 		state, known := conn.destinations.lookup(scope)
 		if !known || state != test.want {
-			t.Errorf("RC %d = (%v, known=%v), want %v and known",
+			t.Errorf("RC %d = (%+v, known=%v), want %+v and known",
 				test.routingContext, state, known, test.want)
 		}
 	}
@@ -471,7 +505,7 @@ func TestSCONResolvesAvailabilityThroughCoveringRangesOnly(t *testing.T) {
 			nil, nil, apc(0x123412), nil, params.NewCongestionIndications(2), nil)); err != nil {
 			t.Fatalf("exact SCON: %v", err)
 		}
-		if got := conn.DestinationState(0x123412); got != DestinationUnavailable {
+		if got := retainedAvailability(conn, 0x123412); got != DestinationUnavailable {
 			t.Errorf("state = %v, want %v: the SCON sits inside an unavailable range",
 				got, DestinationUnavailable)
 		}
@@ -495,12 +529,15 @@ func TestSCONResolvesAvailabilityThroughCoveringRangesOnly(t *testing.T) {
 		scope.routingContext = 1
 		scope.routingContextSet = true
 		state, known := conn.destinations.lookupRange(scope, 0x123400, 8)
-		if !known || state != DestinationCongested {
-			t.Errorf("range state = (%v, known=%v), want %v: one point code does not make the range unreachable",
-				state, known, DestinationCongested)
+		// The congestion the range reports stands on its own: the narrower DUNA
+		// does not cover it, so the range is congested and still reachable.
+		if !known || !state.Congestion.Congested || state.Availability != DestinationAvailable {
+			t.Errorf("range state = (%+v, known=%v), want congested and available: "+
+				"one point code does not make the range unreachable", state, known)
 		}
-		if got := conn.DestinationState(0x123412); got != DestinationCongested {
-			t.Errorf("exact state = %v, want %v: the newer range covers it", got, DestinationCongested)
+		if got := retainedDestinationState(conn, 0x123412); !got.Congestion.Congested ||
+			got.Availability != DestinationAvailable {
+			t.Errorf("exact state = %+v, want congested and available: the newer range covers it", got)
 		}
 	})
 
@@ -518,9 +555,10 @@ func TestSCONResolvesAvailabilityThroughCoveringRangesOnly(t *testing.T) {
 			nil, nil, apc(0x123412), nil, params.NewCongestionIndications(2), nil)); err != nil {
 			t.Fatalf("exact SCON: %v", err)
 		}
-		if got := conn.DestinationState(0x123412); got != DestinationCongested {
-			t.Errorf("state = %v, want %v: the DAVA is newer than the range that covers it",
-				got, DestinationCongested)
+		if got := retainedDestinationState(conn, 0x123412); !got.Congestion.Congested ||
+			got.Availability != DestinationAvailable {
+			t.Errorf("state = %+v, want congested and available: the DAVA is newer "+
+				"than the range that covers it", got)
 		}
 	})
 }
@@ -557,15 +595,15 @@ func TestSGPDestinationReportsStopAtTheRecordBudget(t *testing.T) {
 	endpoint, first, firstSent, _, _ := multiAssociationDialedSGPFixture(t)
 	first.destinations.setRecordLimit(1)
 
-	if err := first.ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, 0x123456, DestinationUnavailable,
+	if err := reportAvailability(
+		first.endpoint, testWireScope(7, true, 1), 0x123456, 0, DestinationUnavailable,
 	); err != nil {
 		t.Fatalf("first destination report: %v", err)
 	}
 	firstSent.reset()
 
-	err := first.ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, 0x123457, DestinationUnavailable,
+	err := reportAvailability(
+		first.endpoint, testWireScope(7, true, 1), 0x123457, 0, DestinationUnavailable,
 	)
 	if !errors.Is(err, ErrSSNMDestinationRecordLimit) {
 		t.Errorf("destination report beyond the budget: error = %v, want ErrSSNMDestinationRecordLimit", err)

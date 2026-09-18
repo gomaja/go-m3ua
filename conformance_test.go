@@ -97,7 +97,7 @@ func TestDUPUWithoutUserCauseIsRejected(t *testing.T) {
 	}
 
 	// And the destination must not have been touched on the strength of it.
-	if got := conn.DestinationState(0x11111111); got != DestinationAvailable {
+	if got := retainedAvailability(conn, 0x11111111); got != DestinationAvailable {
 		t.Errorf("destination state = %v after a rejected DUPU, want %v", got, DestinationAvailable)
 	}
 }

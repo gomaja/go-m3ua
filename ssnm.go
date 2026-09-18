@@ -14,26 +14,27 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// DestinationState is the availability of an SS7 destination as most recently
-// reported by the peer through the SSNM procedures of RFC 4666 Section 4.5.
-type DestinationState uint8
+// DestinationAvailability is whether an SS7 destination is reachable. It is the
+// dimension DUNA, DAVA and DRST move, and the only one they move: RFC 4666
+// Section 4.5.2.2 keeps availability and congestion as two separate statuses of
+// the same destination, so congestion is carried by CongestionState instead of
+// occupying a value here.
+type DestinationAvailability uint8
 
-// Destination state definitions.
+// Destination availability definitions.
 const (
-	// DestinationAvailable is the initial assumption for any destination the
-	// peer has not reported on, and the state a DAVA restores.
-	DestinationAvailable DestinationState = iota
-	// DestinationUnavailable is set by DUNA: the SG cannot reach the
-	// destination and the MTP3-User is expected to stop traffic to it.
+	// DestinationAvailable is the initial assumption for any destination
+	// nothing has been reported about, and the state a DAVA restores.
+	DestinationAvailable DestinationAvailability = iota
+	// DestinationUnavailable is set by DUNA: the destination cannot be reached
+	// and the MTP3-User is expected to stop traffic to it.
 	DestinationUnavailable
 	// DestinationRestricted is set by DRST: the destination is reachable but
 	// the SG would prefer traffic went elsewhere.
 	DestinationRestricted
-	// DestinationCongested is set by SCON: traffic should be reduced.
-	DestinationCongested
 )
 
-func (s DestinationState) String() string {
+func (s DestinationAvailability) String() string {
 	switch s {
 	case DestinationAvailable:
 		return "Available"
@@ -41,15 +42,73 @@ func (s DestinationState) String() string {
 		return "Unavailable"
 	case DestinationRestricted:
 		return "Restricted"
-	case DestinationCongested:
-		return "Congested"
 	default:
 		return "Unknown"
 	}
 }
 
-func validDestinationState(state DestinationState) bool {
-	return state >= DestinationAvailable && state <= DestinationCongested
+func validDestinationAvailability(availability DestinationAvailability) bool {
+	return availability >= DestinationAvailable && availability <= DestinationRestricted
+}
+
+// CongestionState is the congestion status of an SS7 destination, independent
+// of whether it is reachable.
+//
+// RFC 4666 Section 3.4.4 makes the Congestion Indications parameter optional
+// and its level 0 "No Congestion or Undefined", so an explicit zero is
+// congestion abatement while an absent parameter is congestion without a level.
+// Neither can be expressed by a level alone, which is why presence is carried
+// beside it.
+type CongestionState struct {
+	// Congested reports that traffic to the destination should be reduced.
+	Congested bool
+	// Level is the reported congestion level, valid only when LevelSet is true.
+	Level uint8
+	// LevelSet distinguishes an omitted Congestion Indications parameter from
+	// an explicit level zero.
+	LevelSet bool
+}
+
+// reported distinguishes a congestion statement from the absence of one. An
+// explicit level, including RFC 4666 Section 3.4.4's level 0 abatement, and an
+// omitted Congestion Indications parameter are both statements; the zero value
+// is not, and must not be put on the wire as one.
+func (c CongestionState) reported() bool {
+	return c.Congested || c.LevelSet
+}
+
+// congestionStateFor builds the congestion dimension a Signalling Congestion
+// report installs. An explicit level 0 abates congestion; any other level, and
+// an omitted parameter, report it.
+func congestionStateFor(level uint8, levelSet bool) CongestionState {
+	return CongestionState{
+		Congested: !levelSet || level != 0,
+		Level:     level,
+		LevelSet:  levelSet,
+	}
+}
+
+func validCongestionState(congestion CongestionState) bool {
+	return !congestion.LevelSet || congestion.Level <= 3
+}
+
+// DestinationNetworkState is an SS7 destination's state in both of the
+// dimensions RFC 4666 Section 4.5 names: its availability and its congestion.
+//
+// They are answered together and independently. Section 4.5.3 has an audit
+// answered with "a DUNA message (if unavailable), a DAVA message (if
+// available), or a DRST (if restricted...)" and, "additionally... a SCON message
+// (if the destination is congested) before the DAVA or DRST", so a node that
+// cannot state one without the other cannot answer the audit it owes. A
+// congestion report therefore never restores reachability and an availability
+// report never clears congestion.
+type DestinationNetworkState struct {
+	Availability DestinationAvailability
+	Congestion   CongestionState
+}
+
+func validDestinationNetworkState(state DestinationNetworkState) bool {
+	return validDestinationAvailability(state.Availability) && validCongestionState(state.Congestion)
 }
 
 // DestinationStatus is a change in an SS7 destination's availability, reported
@@ -78,18 +137,14 @@ type DestinationStatus struct {
 	// for an explicit presence bit.
 	RoutingContexts   []uint32
 	RoutingContextSet bool
-	// State is the destination's availability after this message.
-	State DestinationState
-	// CongestionLevel is the congestion level reported by SCON, if the peer
-	// included the Congestion Indications parameter. Zero otherwise.
-	CongestionLevel uint8
-	// CongestionLevelSet reports whether the peer included the Congestion
-	// Indications parameter, which RFC 4666 Section 3.4.4 makes optional. The
-	// same section makes level 0 "No Congestion or Undefined", so an explicit
-	// zero reports congestion abatement while an absent parameter reports
-	// congestion without a level; without this flag the two, and a DAVA, all
-	// arrive as a level of zero.
-	CongestionLevelSet bool
+	// State is the destination's network state after this message. A DUNA, DAVA
+	// or DRST moves only Availability and a SCON moves only Congestion (RFC
+	// 4666 Section 4.5.2.2), so the dimension this message did not carry is
+	// filled in from what this node has retained about the destination, in the
+	// exact scope the message named. It is left at its zero value when the
+	// message named several Routing Contexts, which need not agree, and for a
+	// report that describes the peer rather than a destination.
+	State DestinationNetworkState
 	// UserCause carries the MTP3-User identity and unavailability cause from
 	// DUPU, which reports that a user part — not the destination itself — is
 	// unavailable. Zero for other messages.
@@ -132,14 +187,10 @@ type DestinationRange struct {
 	PointCode uint32
 	// Mask is the number of wildcarded low-order point-code bits.
 	Mask uint8
-	// State is the availability installed by this update.
-	State DestinationState
-	// CongestionLevel is the RFC 4666 Section 3.4.4 congestion level retained
-	// for a locally originated SCON, valid only when CongestionLevelSet is true.
-	CongestionLevel uint8
-	// CongestionLevelSet distinguishes an omitted Congestion Indications
-	// parameter from explicit level zero, which reports congestion abatement.
-	CongestionLevelSet bool
+	// State is the network state installed by this update. Which of its two
+	// dimensions the update actually carries is recorded beside the record, so
+	// a congestion report does not restate an availability it never learned.
+	State DestinationNetworkState
 }
 
 type destinationKey struct {
@@ -152,11 +203,30 @@ type destinationKey struct {
 	mask                 uint8
 }
 
+// destinationDimensions records which dimensions of a destinationRecord carry
+// knowledge. RFC 4666 Section 4.5.3 has an audit answered with the destination's
+// availability and, separately and additionally, its congestion, so a record
+// written by one of them must not be read as a statement about the other: an
+// availability-only record leaves congestion to whatever a congestion report
+// last said, and the reverse.
+type destinationDimensions uint8
+
+const (
+	destinationAvailabilityDimension destinationDimensions = 1 << iota
+	destinationCongestionDimension
+)
+
+func (d destinationDimensions) carries(dimension destinationDimensions) bool {
+	return d&dimension != 0
+}
+
 type destinationRecord struct {
 	rangeValue          DestinationRange
 	routingContexts     []uint32
 	routingContextScope string
-	sequence            uint64
+	// dimensions is the set of dimensions this record is a statement about.
+	dimensions destinationDimensions
+	sequence   uint64
 }
 
 type destinationPause struct {
@@ -247,7 +317,7 @@ func (d *destinations) forget() int {
 // than through Dial or Accept, from crashing on the first SSNM message a peer
 // sends. Tracking is inert in that case; state reads report the default.
 
-func (d *destinations) set(key destinationKey, state DestinationState) {
+func (d *destinations) set(key destinationKey, availability DestinationAvailability) {
 	d.setRanges([]DestinationRange{{
 		NetworkAppearance:    key.networkAppearance,
 		NetworkAppearanceSet: key.networkAppearanceSet,
@@ -255,13 +325,8 @@ func (d *destinations) set(key destinationKey, state DestinationState) {
 		RoutingContextSet:    key.routingContextSet,
 		PointCode:            key.pointCode,
 		Mask:                 key.mask,
-		State:                state,
+		State:                DestinationNetworkState{Availability: availability},
 	}})
-}
-
-func (d *destinations) get(key destinationKey) DestinationState {
-	state, _ := d.lookup(key)
-	return state
 }
 
 func (d *destinations) setRanges(ranges []DestinationRange) {
@@ -283,7 +348,10 @@ func (d *destinations) setRangesWithinBudget(ranges []DestinationRange) error {
 	}
 	refused := 0
 	for _, rangeValue := range ranges {
-		if !d.storeLocked(destinationRecord{rangeValue: normalizeDestinationRange(rangeValue)}) {
+		if !d.storeLocked(destinationRecord{
+			rangeValue: normalizeDestinationRange(rangeValue),
+			dimensions: destinationAvailabilityDimension,
+		}) {
 			refused++
 		}
 	}
@@ -320,6 +388,7 @@ func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ran
 			rangeValue:          rangeValue,
 			routingContexts:     canonical,
 			routingContextScope: scope,
+			dimensions:          destinationAvailabilityDimension,
 		}) {
 			refused++
 		}
@@ -346,28 +415,12 @@ func (d *destinations) setCongestionRangesWithinBudget(ranges []DestinationRange
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
-	normalized := make([]DestinationRange, len(ranges))
-	queries := make([]destinationAvailabilityQuery, len(ranges))
-	for index, rangeValue := range ranges {
-		rangeValue = normalizeDestinationRange(rangeValue)
-		normalized[index] = rangeValue
-		queries[index] = destinationAvailabilityQuery{
-			scope: destinationKey{
-				networkAppearance:    rangeValue.NetworkAppearance,
-				networkAppearanceSet: rangeValue.NetworkAppearanceSet,
-				routingContext:       rangeValue.RoutingContext,
-				routingContextSet:    rangeValue.RoutingContextSet,
-			},
-			pointCode: rangeValue.PointCode,
-			mask:      rangeValue.Mask,
-		}
-	}
-	availabilities := d.availabilitiesLocked(queries)
-
 	refused := 0
-	for index, rangeValue := range normalized {
-		rangeValue.State = congestedDestinationState(availabilities[index], rangeValue)
-		if !d.storeLocked(destinationRecord{rangeValue: rangeValue}) {
+	for _, rangeValue := range ranges {
+		if !d.storeLocked(destinationRecord{
+			rangeValue: normalizeDestinationRange(rangeValue),
+			dimensions: destinationCongestionDimension,
+		}) {
 			refused++
 		}
 	}
@@ -375,11 +428,8 @@ func (d *destinations) setCongestionRangesWithinBudget(ranges []DestinationRange
 }
 
 // setScopedCongestionRangesWithinBudget is setCongestionRangesWithinBudget for
-// a report naming several Routing Contexts.
-//
-// One message applies to every context it lists, but those contexts need not
-// share an availability, so the report is grouped by the availability it has to
-// preserve and recorded once per group rather than once for the whole list.
+// a report naming several Routing Contexts. One message applies to every
+// context it lists, and the contexts share one record.
 func (d *destinations) setScopedCongestionRangesWithinBudget(
 	routingContexts []uint32,
 	ranges []DestinationRange,
@@ -388,160 +438,27 @@ func (d *destinations) setScopedCongestionRangesWithinBudget(
 		return nil
 	}
 
-	canonical, _ := canonicalRoutingContextScope(routingContexts)
+	canonical, scope := canonicalRoutingContextScope(routingContexts)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
-	normalized := make([]DestinationRange, len(ranges))
-	queries := make([]destinationAvailabilityQuery, 0, len(ranges)*len(canonical))
-	for index, rangeValue := range ranges {
+	refused := 0
+	for _, rangeValue := range ranges {
 		rangeValue = normalizeDestinationRange(rangeValue)
 		rangeValue.RoutingContext = 0
 		rangeValue.RoutingContextSet = true
-		normalized[index] = rangeValue
-		for _, routingContext := range canonical {
-			queries = append(queries, destinationAvailabilityQuery{
-				scope: destinationKey{
-					networkAppearance:    rangeValue.NetworkAppearance,
-					networkAppearanceSet: rangeValue.NetworkAppearanceSet,
-					routingContext:       routingContext,
-					routingContextSet:    true,
-				},
-				pointCode: rangeValue.PointCode,
-				mask:      rangeValue.Mask,
-			})
-		}
-	}
-	availabilities := d.availabilitiesLocked(queries)
-
-	refused := 0
-	for index, rangeValue := range normalized {
-		groups := make([]destinationCongestionGroup, 0, 1)
-		for position, routingContext := range canonical {
-			groups = appendDestinationCongestionGroup(groups,
-				availabilities[index*len(canonical)+position], routingContext)
-		}
-		for _, group := range groups {
-			stored := rangeValue
-			stored.State = congestedDestinationState(group.availability, stored)
-			groupContexts, groupScope := canonicalRoutingContextScope(group.routingContexts)
-			if !d.storeLocked(destinationRecord{
-				rangeValue:          stored,
-				routingContexts:     groupContexts,
-				routingContextScope: groupScope,
-			}) {
-				refused++
-			}
+		if !d.storeLocked(destinationRecord{
+			rangeValue:          rangeValue,
+			routingContexts:     canonical,
+			routingContextScope: scope,
+			dimensions:          destinationCongestionDimension,
+		}) {
+			refused++
 		}
 	}
 	return d.recordLimitErrorLocked(refused)
-}
-
-type destinationCongestionGroup struct {
-	availability    DestinationState
-	routingContexts []uint32
-}
-
-func appendDestinationCongestionGroup(
-	groups []destinationCongestionGroup,
-	availability DestinationState,
-	routingContext uint32,
-) []destinationCongestionGroup {
-	for index := range groups {
-		if groups[index].availability == availability {
-			groups[index].routingContexts = append(groups[index].routingContexts, routingContext)
-			return groups
-		}
-	}
-	return append(groups, destinationCongestionGroup{
-		availability:    availability,
-		routingContexts: []uint32{routingContext},
-	})
-}
-
-type destinationAvailabilityQuery struct {
-	scope     destinationKey
-	pointCode uint32
-	mask      uint8
-}
-
-type destinationCoverKey struct {
-	prefix uint32
-	mask   uint8
-}
-
-// availabilitiesLocked is the availability each congestion report has to
-// preserve: the availability carried by the newest record covering that range
-// in that scope, or Available for a destination the peer has not reported on,
-// which is what an unreported destination already resolves to.
-//
-// One SSNM message may name up to MaxAffectedPointCodesPerSSNM destinations, so
-// the answers are resolved in a single pass over the store rather than one scan
-// each. A stored range covers a query only at a mask the query itself can name,
-// and there are at most 25 of those, so the queries index by covering prefix and
-// the traversal is a map lookup per record.
-func (d *destinations) availabilitiesLocked(queries []destinationAvailabilityQuery) []DestinationState {
-	availabilities := make([]DestinationState, len(queries))
-	for index := range availabilities {
-		availabilities[index] = DestinationAvailable
-	}
-	if len(queries) == 0 || len(d.state) == 0 {
-		return availabilities
-	}
-
-	covering := make(map[destinationCoverKey][]int, len(queries))
-	for index, query := range queries {
-		for mask := effectiveDestinationMask(query.mask); mask <= 24; mask++ {
-			key := destinationCoverKey{
-				prefix: destinationRangePrefix(query.pointCode, mask),
-				mask:   mask,
-			}
-			covering[key] = append(covering[key], index)
-		}
-	}
-
-	newest := make([]uint64, len(queries))
-	for _, record := range d.state {
-		key := destinationCoverKey{
-			prefix: destinationRangePrefix(record.rangeValue.PointCode, record.rangeValue.Mask),
-			mask:   effectiveDestinationMask(record.rangeValue.Mask),
-		}
-		for _, index := range covering[key] {
-			if record.sequence <= newest[index] ||
-				!destinationRecordScopeMatches(record, queries[index].scope) {
-				continue
-			}
-			newest[index] = record.sequence
-			availabilities[index] = destinationAvailabilityOf(record.rangeValue.State)
-		}
-	}
-	return availabilities
-}
-
-// destinationAvailabilityOf recovers the availability a stored state carries.
-// DestinationCongested shares the field with the availability values and is
-// only ever installed for a destination that is otherwise available, so it
-// reads back as DestinationAvailable.
-func destinationAvailabilityOf(state DestinationState) DestinationState {
-	if state == DestinationCongested {
-		return DestinationAvailable
-	}
-	return state
-}
-
-// congestedDestinationState folds a congestion report into the single stored
-// availability field. Congestion shows as DestinationCongested only for a
-// destination that is otherwise available; an unavailable or restricted one
-// keeps its availability and retains the reported level alongside it. An
-// explicit level 0 is congestion abatement, so it congests nothing.
-func congestedDestinationState(availability DestinationState, rangeValue DestinationRange) DestinationState {
-	congested := !rangeValue.CongestionLevelSet || rangeValue.CongestionLevel != 0
-	if congested && availability == DestinationAvailable {
-		return DestinationCongested
-	}
-	return availability
 }
 
 func canonicalRoutingContextScope(routingContexts []uint32) ([]uint32, string) {
@@ -575,8 +492,25 @@ func canonicalRoutingContextScope(routingContexts []uint32) ([]uint32, string) {
 // into a destination the SG has reported unreachable.
 func (d *destinations) storeLocked(record destinationRecord) bool {
 	key := destinationRecordKey(record)
-	if _, held := d.state[key]; !held && len(d.state) >= d.recordLimitLocked() {
+	held, exists := d.state[key]
+	if !exists && len(d.state) >= d.recordLimitLocked() {
 		return false
+	}
+	if exists {
+		// A record states only the dimensions its update carried. Keeping the
+		// other dimension as the last statement about it left it is what keeps
+		// the two statuses of RFC 4666 Section 4.5 independent: a congestion
+		// report restates no availability, and an availability report clears no
+		// congestion. Section 4.5.1 makes DUNA followed by SCON an ordinary
+		// sequence, and Section 4.5.3 keeps answering that destination's audit
+		// with DUNA until a DAVA arrives.
+		if !record.dimensions.carries(destinationAvailabilityDimension) {
+			record.rangeValue.State.Availability = held.rangeValue.State.Availability
+		}
+		if !record.dimensions.carries(destinationCongestionDimension) {
+			record.rangeValue.State.Congestion = held.rangeValue.State.Congestion
+		}
+		record.dimensions |= held.dimensions
 	}
 	d.sequence++
 	if d.sequence == 0 {
@@ -708,70 +642,153 @@ func destinationRecordRoutingContexts(record destinationRecord) []uint32 {
 // "An SG SHOULD respond with a DUNA message when DAUD was received with an
 // unknown Signalling Point Code", which cannot be honoured if an unknown point
 // code is indistinguishable from a known reachable one.
-func (d *destinations) lookup(key destinationKey) (DestinationState, bool) {
+func (d *destinations) lookup(key destinationKey) (DestinationNetworkState, bool) {
 	return d.lookupRange(key, key.pointCode, key.mask)
 }
 
-func (d *destinations) lookupRange(scope destinationKey, pointCode uint32, mask uint8) (DestinationState, bool) {
+// destinationQuery is one destination to resolve, with the exact scope to
+// resolve it in.
+type destinationQuery struct {
+	scope     destinationKey
+	pointCode uint32
+	mask      uint8
+}
+
+type destinationCoverKey struct {
+	prefix uint32
+	mask   uint8
+}
+
+// resolveMany answers a batch of destination queries in one pass over the store.
+//
+// One SSNM message may name up to MaxAffectedPointCodesPerSSNM destinations, and
+// resolving each of them with its own scan is quadratic in what the peer sends
+// against what this node retains. A stored range covers a query only at a mask
+// the query itself can name, and there are at most 25 of those, so the queries
+// index by covering prefix and the traversal costs one map lookup per record.
+func (d *destinations) resolveMany(queries []destinationQuery) []DestinationNetworkState {
 	if d == nil {
-		return DestinationAvailable, false
+		return make([]DestinationNetworkState, len(queries))
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.resolveManyLocked(queries)
+}
+
+func (d *destinations) resolveManyLocked(queries []destinationQuery) []DestinationNetworkState {
+	states := make([]DestinationNetworkState, len(queries))
+	if len(queries) == 0 || len(d.state) == 0 {
+		return states
+	}
+
+	covering := make(map[destinationCoverKey][]int, len(queries))
+	for index, query := range queries {
+		for mask := effectiveDestinationMask(query.mask); mask <= 24; mask++ {
+			key := destinationCoverKey{
+				prefix: destinationRangePrefix(query.pointCode, mask),
+				mask:   mask,
+			}
+			covering[key] = append(covering[key], index)
+		}
+	}
+
+	availability := make([]uint64, len(queries))
+	congestion := make([]uint64, len(queries))
+	for _, record := range d.state {
+		key := destinationCoverKey{
+			prefix: destinationRangePrefix(record.rangeValue.PointCode, record.rangeValue.Mask),
+			mask:   effectiveDestinationMask(record.rangeValue.Mask),
+		}
+		for _, index := range covering[key] {
+			if !destinationRecordScopeMatches(record, queries[index].scope) {
+				continue
+			}
+			if record.dimensions.carries(destinationAvailabilityDimension) &&
+				record.sequence > availability[index] {
+				availability[index] = record.sequence
+				states[index].Availability = record.rangeValue.State.Availability
+			}
+			if record.dimensions.carries(destinationCongestionDimension) &&
+				record.sequence > congestion[index] {
+				congestion[index] = record.sequence
+				states[index].Congestion = record.rangeValue.State.Congestion
+			}
+		}
+	}
+	return states
+}
+
+func (d *destinations) lookupRange(scope destinationKey, pointCode uint32, mask uint8) (DestinationNetworkState, bool) {
+	if d == nil {
+		return DestinationNetworkState{}, false
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.lookupRangeLocked(scope, pointCode, mask)
 }
 
-func (d *destinations) lookupRangeLocked(scope destinationKey, pointCode uint32, mask uint8) (DestinationState, bool) {
-	record, known := d.lookupRecordLocked(scope, pointCode, mask)
-	if known {
-		return record.rangeValue.State, true
-	}
-	return DestinationAvailable, false
-}
-
-func (d *destinations) lookupRecord(scope destinationKey, pointCode uint32, mask uint8) (destinationRecord, bool) {
-	if d == nil {
-		return destinationRecord{}, false
-	}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.lookupRecordLocked(scope, pointCode, mask)
-}
-
-func (d *destinations) lookupRecordLocked(scope destinationKey, pointCode uint32, mask uint8) (destinationRecord, bool) {
-	var newest destinationRecord
-	known := false
+// lookupRangeLocked composes both dimensions of a destination's state, each
+// from the newest record covering it that is a statement about that dimension.
+//
+// Resolving them separately is what answering an RFC 4666 Section 4.5.3 audit
+// requires: a SCON naming one point code must not hide the DUNA that a broader
+// range carries, and that DUNA must not withdraw the congestion the SCON
+// reported. A dimension nothing has reported on resolves to its zero value,
+// which is the documented initial assumption: reachable and uncongested.
+func (d *destinations) lookupRangeLocked(scope destinationKey, pointCode uint32, mask uint8) (DestinationNetworkState, bool) {
+	var (
+		state           DestinationNetworkState
+		availabilitySeq uint64
+		congestionSeq   uint64
+		known           bool
+	)
 	for _, record := range d.state {
 		if !destinationRecordScopeMatches(record, scope) ||
 			!destinationRangeCovers(record.rangeValue, pointCode, mask) {
 			continue
 		}
-		if !known || record.sequence > newest.sequence {
-			newest = record
-			known = true
+		known = true
+		if record.dimensions.carries(destinationAvailabilityDimension) &&
+			record.sequence > availabilitySeq {
+			availabilitySeq = record.sequence
+			state.Availability = record.rangeValue.State.Availability
+		}
+		if record.dimensions.carries(destinationCongestionDimension) &&
+			record.sequence > congestionSeq {
+			congestionSeq = record.sequence
+			state.Congestion = record.rangeValue.State.Congestion
 		}
 	}
-	return newest, known
+	return state, known
 }
 
-func (d *destinations) snapshotForScope(scope destinationKey) map[uint32]DestinationState {
+func (d *destinations) snapshotForScope(scope destinationKey) map[uint32]DestinationNetworkState {
 	if d == nil {
-		return map[uint32]DestinationState{}
+		return map[uint32]DestinationNetworkState{}
 	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	out := make(map[uint32]DestinationState)
-	sequences := make(map[uint32]uint64)
+	out := make(map[uint32]DestinationNetworkState)
+	availability := make(map[uint32]uint64)
+	congestion := make(map[uint32]uint64)
 	for _, record := range d.state {
 		if record.rangeValue.Mask != 0 || !destinationRecordScopeMatches(record, scope) {
 			continue
 		}
 		pointCode := record.rangeValue.PointCode
-		if sequence, ok := sequences[pointCode]; !ok || record.sequence > sequence {
-			out[pointCode] = record.rangeValue.State
-			sequences[pointCode] = record.sequence
+		state := out[pointCode]
+		if record.dimensions.carries(destinationAvailabilityDimension) &&
+			record.sequence > availability[pointCode] {
+			availability[pointCode] = record.sequence
+			state.Availability = record.rangeValue.State.Availability
 		}
+		if record.dimensions.carries(destinationCongestionDimension) &&
+			record.sequence > congestion[pointCode] {
+			congestion[pointCode] = record.sequence
+			state.Congestion = record.rangeValue.State.Congestion
+		}
+		out[pointCode] = state
 	}
 	return out
 }
@@ -808,7 +825,7 @@ func (d *destinations) pause() []destinationPause {
 
 	records := make([]destinationRecord, 0, len(d.state))
 	for _, record := range d.state {
-		if record.rangeValue.State != DestinationUnavailable {
+		if record.rangeValue.State.Availability != DestinationUnavailable {
 			records = append(records, record)
 		}
 	}
@@ -817,7 +834,8 @@ func (d *destinations) pause() []destinationPause {
 	})
 	paused := make([]destinationPause, 0, len(records))
 	for _, record := range records {
-		record.rangeValue.State = DestinationUnavailable
+		record.rangeValue.State.Availability = DestinationUnavailable
+		record.dimensions |= destinationAvailabilityDimension
 		// Every key here is already held, so no record is refused.
 		_ = d.storeLocked(record)
 		paused = append(paused, destinationPause{
@@ -847,16 +865,6 @@ func (c *Association) destinationKey(networkAppearance *params.Param, pointCode 
 	}
 }
 
-func (c *Association) legacyDestinationScope(networkAppearance *params.Param) destinationKey {
-	scope := c.destinationKey(networkAppearance, 0)
-	configured := c.configuredRoutingContexts()
-	if len(configured) == 1 {
-		scope.routingContext = configured[0]
-		scope.routingContextSet = true
-	}
-	return scope
-}
-
 func (c *Association) destinationRoutingContexts(routingContext *params.Param) ([]uint32, bool) {
 	if routingContext != nil {
 		return append([]uint32(nil), routingContext.RoutingContexts()...), true
@@ -866,95 +874,6 @@ func (c *Association) destinationRoutingContexts(routingContext *params.Param) (
 		return nil, false
 	}
 	return []uint32{configured[0]}, true
-}
-
-// DestinationState reports the availability of an SS7 destination as most
-// recently advertised by the peer. On a single-Routing-Context association it
-// resolves that flow. On a multi-Routing-Context association the legacy API is
-// ambiguous and therefore sees only all-context baselines; use
-// DestinationStateForNetworkAndRoutingContext for a per-flow answer.
-// Destinations the peer has not reported on are Available, since SSNM carries
-// changes rather than a full inventory.
-func (c *Association) DestinationState(pointCode uint32) DestinationState {
-	scope := c.legacyDestinationScope(nil)
-	return c.destinations.get(destinationKey{
-		networkAppearance:    scope.networkAppearance,
-		networkAppearanceSet: scope.networkAppearanceSet,
-		routingContext:       scope.routingContext,
-		routingContextSet:    scope.routingContextSet,
-		pointCode:            pointCode,
-	})
-}
-
-// DestinationStateForNetwork reports a destination's state within an explicit
-// Network Appearance. On a multi-Routing-Context association it sees only
-// all-context baselines; use DestinationStateForNetworkAndRoutingContext for a
-// per-flow answer.
-func (c *Association) DestinationStateForNetwork(networkAppearance, pointCode uint32) DestinationState {
-	scope := c.legacyDestinationScope(params.NewNetworkAppearance(networkAppearance))
-	return c.destinations.get(destinationKey{
-		networkAppearance:    scope.networkAppearance,
-		networkAppearanceSet: scope.networkAppearanceSet,
-		routingContext:       scope.routingContext,
-		routingContextSet:    scope.routingContextSet,
-		pointCode:            pointCode,
-	})
-}
-
-// DestinationStateForNetworkAndRoutingContext reports a destination's state
-// in one explicit Network Appearance and Routing Context. All-context baseline
-// ranges participate, and the newest covering update wins.
-func (c *Association) DestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32) DestinationState {
-	return c.destinations.get(destinationKey{
-		networkAppearance:    networkAppearance,
-		networkAppearanceSet: true,
-		routingContext:       routingContext,
-		routingContextSet:    true,
-		pointCode:            pointCode,
-	})
-}
-
-// DestinationStates returns the exact, Mask-zero destination records visible
-// through DestinationState. The legacy map cannot represent ranges; use
-// DestinationRanges for a lossless snapshot.
-func (c *Association) DestinationStates() map[uint32]DestinationState {
-	return c.destinations.snapshotForScope(c.legacyDestinationScope(nil))
-}
-
-// DestinationStatesForNetwork returns the exact, Mask-zero records visible for
-// an explicit Network Appearance. On a multi-Routing-Context association it is
-// limited to all-context baselines. Use
-// DestinationRangesForNetworkAndRoutingContext for a lossless per-flow view.
-func (c *Association) DestinationStatesForNetwork(networkAppearance uint32) map[uint32]DestinationState {
-	return c.destinations.snapshotForScope(
-		c.legacyDestinationScope(params.NewNetworkAppearance(networkAppearance)))
-}
-
-// DestinationRanges returns every range visible through DestinationState in
-// update order. On a multi-Routing-Context association it contains only
-// all-context baselines.
-func (c *Association) DestinationRanges() []DestinationRange {
-	return c.destinations.rangesForScope(c.legacyDestinationScope(nil))
-}
-
-// DestinationRangesForNetwork returns every range visible for an explicit
-// Network Appearance in update order. On a multi-Routing-Context association
-// it contains only all-context baselines.
-func (c *Association) DestinationRangesForNetwork(networkAppearance uint32) []DestinationRange {
-	return c.destinations.rangesForScope(
-		c.legacyDestinationScope(params.NewNetworkAppearance(networkAppearance)))
-}
-
-// DestinationRangesForNetworkAndRoutingContext returns every all-context and
-// per-context range visible in one Network Appearance and Routing Context, in
-// update order.
-func (c *Association) DestinationRangesForNetworkAndRoutingContext(networkAppearance, routingContext uint32) []DestinationRange {
-	return c.destinations.rangesForScope(destinationKey{
-		networkAppearance:    networkAppearance,
-		networkAppearanceSet: true,
-		routingContext:       routingContext,
-		routingContextSet:    true,
-	})
 }
 
 // SignallingStatus returns the channel on which SSNM status changes are
@@ -1041,7 +960,7 @@ func (c *Association) pauseDestinations() {
 			Mask:                 rangeValue.Mask,
 			NetworkAppearance:    rangeValue.NetworkAppearance,
 			NetworkAppearanceSet: rangeValue.NetworkAppearanceSet,
-			State:                DestinationUnavailable,
+			State:                DestinationNetworkState{Availability: DestinationUnavailable},
 		}
 		if len(paused.routingContexts) > 0 {
 			status.RoutingContexts = paused.routingContexts
@@ -1072,7 +991,8 @@ func (c *Association) applySSNM(
 	networkAppearance,
 	routingContext,
 	apc *params.Param,
-	state DestinationState,
+	state DestinationNetworkState,
+	dimensions destinationDimensions,
 	update *aspRouteUpdate,
 	mutate func(*DestinationStatus),
 ) error {
@@ -1091,13 +1011,17 @@ func (c *Association) applySSNM(
 	// SCON is the one message that reports congestion rather than reachability.
 	// Its record carries the level and leaves the destination's availability to
 	// the availability messages, as RFC 4666 Section 4.5.2.2 requires.
-	congestionUpdate := update != nil && update.kind == aspRouteCongestionUpdate
+	congestionUpdate := dimensions.carries(destinationCongestionDimension)
 
 	for index, pc := range pcs {
 		// DUPU reports an unavailable user part at a destination that is
 		// itself still reachable, so it must not overwrite the destination's
 		// own availability. mutate marks those.
-		status := &DestinationStatus{PointCode: pc, Mask: masks[index], State: state}
+		status := &DestinationStatus{
+			PointCode: pc,
+			Mask:      masks[index],
+			State:     state,
+		}
 		statusScope.apply(status)
 		if mutate != nil {
 			mutate(status)
@@ -1109,10 +1033,6 @@ func (c *Association) applySSNM(
 				PointCode:            pc,
 				Mask:                 masks[index],
 				State:                status.State,
-			}
-			if congestionUpdate {
-				applied.CongestionLevel = update.congestionLevel
-				applied.CongestionLevelSet = update.congestionLevelSet
 			}
 			updates = append(updates, applied)
 		}
@@ -1136,9 +1056,14 @@ func (c *Association) applySSNM(
 	default:
 		retained = c.destinations.setRangesWithinBudget(updates)
 	}
-	// The status channel reports what the peer said, which stands whether or not
-	// there was room to retain it, so the report goes out before a refused
-	// record is reported back to the peer as an Error.
+	// The status channel reports the destination's state in both dimensions
+	// after this message, not just the dimension the message carried: RFC 4666
+	// Section 4.5.2.2 keeps the two apart, so the one this message says nothing
+	// about is read back rather than restated as its zero value.
+	c.resolveStatusDimensions(statuses, appearance, routingContexts, routingContextSet, dimensions)
+	// What the peer said stands whether or not there was room to retain it, so
+	// the report goes out before a refused record is reported back to the peer
+	// as an Error.
 	for _, status := range statuses {
 		c.notifyStatus(status)
 	}
@@ -1147,6 +1072,64 @@ func (c *Association) applySSNM(
 	}
 
 	return retained
+}
+
+// resolveStatusDimensions fills in the dimension a status does not itself carry
+// from what this node has retained about the destination.
+func (c *Association) resolveStatusDimensions(
+	statuses []*DestinationStatus,
+	appearance destinationKey,
+	routingContexts []uint32,
+	routingContextSet bool,
+	dimensions destinationDimensions,
+) {
+	missing := (destinationAvailabilityDimension | destinationCongestionDimension) &^ dimensions
+	if missing == 0 || c.destinations == nil {
+		return
+	}
+	scope := destinationKey{
+		networkAppearance:    appearance.networkAppearance,
+		networkAppearanceSet: appearance.networkAppearanceSet,
+	}
+	switch {
+	case !routingContextSet:
+	case len(routingContexts) == 1:
+		scope.routingContext = routingContexts[0]
+		scope.routingContextSet = true
+	default:
+		// Several Routing Contexts need not hold the same state for the same
+		// destination, and one status carries one value, so nothing is filled in
+		// rather than picking one of them.
+		return
+	}
+
+	queries := make([]destinationQuery, 0, len(statuses))
+	resolving := make([]*DestinationStatus, 0, len(statuses))
+	for _, status := range statuses {
+		// DUPU reports an unavailable user part at a destination that is itself
+		// still reachable, and writes no record, so neither dimension is filled
+		// in for it.
+		if status.UserPartUnavailable {
+			continue
+		}
+		queries = append(queries, destinationQuery{
+			scope:     scope,
+			pointCode: status.PointCode,
+			mask:      status.Mask,
+		})
+		resolving = append(resolving, status)
+	}
+	if len(queries) == 0 {
+		return
+	}
+	for index, retained := range c.destinations.resolveMany(queries) {
+		if missing.carries(destinationAvailabilityDimension) {
+			resolving[index].State.Availability = retained.Availability
+		}
+		if missing.carries(destinationCongestionDimension) {
+			resolving[index].State.Congestion = retained.Congestion
+		}
+	}
 }
 
 // ssnmAffectedPointCodes bounds an SSNM message's Affected Point Code list
@@ -1216,7 +1199,6 @@ func (c *Association) reportSSNM(
 		status := &DestinationStatus{
 			PointCode: pc,
 			Mask:      masks[index],
-			State:     DestinationCongested,
 		}
 		statusScope.apply(status)
 		if mutate != nil {
@@ -1399,7 +1381,8 @@ func (c *Association) handleDestinationUnavailable(d *messages.DestinationUnavai
 		d.NetworkAppearance,
 		d.RoutingContext,
 		d.AffectedPointCode,
-		DestinationUnavailable,
+		DestinationNetworkState{Availability: DestinationUnavailable},
+		destinationAvailabilityDimension,
 		&aspRouteUpdate{kind: aspRouteAvailabilityUpdate, availability: DestinationUnavailable},
 		nil,
 	)
@@ -1437,7 +1420,8 @@ func (c *Association) handleDestinationAvailable(d *messages.DestinationAvailabl
 		d.NetworkAppearance,
 		d.RoutingContext,
 		d.AffectedPointCode,
-		DestinationAvailable,
+		DestinationNetworkState{Availability: DestinationAvailable},
+		destinationAvailabilityDimension,
 		&aspRouteUpdate{kind: aspRouteAvailabilityUpdate, availability: DestinationAvailable},
 		nil,
 	)
@@ -1472,7 +1456,8 @@ func (c *Association) handleDestinationRestricted(d *messages.DestinationRestric
 		d.NetworkAppearance,
 		d.RoutingContext,
 		d.AffectedPointCode,
-		DestinationRestricted,
+		DestinationNetworkState{Availability: DestinationRestricted},
+		destinationAvailabilityDimension,
 		&aspRouteUpdate{kind: aspRouteAvailabilityUpdate, availability: DestinationRestricted},
 		nil,
 	)
@@ -1542,7 +1527,6 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	// let any ASP make the SG report SS7 congestion that does not exist, to
 	// every other ASP that audited it (Section 4.5.3).
 	if c.role == RoleSGP {
-		c.peerCongestion.Store(uint32(level))
 		peerReport := SSNMReport{
 			Kind:               SSNMSignallingCongestionReport,
 			CongestionLevel:    level,
@@ -1554,8 +1538,7 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 			peerReport.ConcernedDestinationSet = true
 		}
 		return c.reportSSNM(peerReport, s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, func(st *DestinationStatus) {
-			st.CongestionLevel = level
-			st.CongestionLevelSet = levelSet
+			st.State.Congestion = CongestionState{Congested: congested, Level: level, LevelSet: levelSet}
 			st.PeerReported = true
 			if s.ConcernedDestination != nil {
 				st.ConcernedDestination = s.ConcernedDestination.ConcernedDestination()
@@ -1571,23 +1554,20 @@ func (c *Association) handleSignallingCongestion(s *messages.SignallingCongestio
 	// availability the peer last reported and only DAVA restores reachability —
 	// writing this value into it made an SG answer a later DAUD for an
 	// unavailable destination with DAVA (Section 4.5.3).
-	state := DestinationCongested
-	if !congested {
-		state = DestinationAvailable
-	}
+	congestion := CongestionState{Congested: congested, Level: level, LevelSet: levelSet}
 	return c.applySSNM(SSNMReport{
 		Kind:               SSNMSignallingCongestionReport,
 		CongestionLevel:    level,
 		CongestionLevelSet: levelSet,
-	}, s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode, state, &aspRouteUpdate{
-		kind:               aspRouteCongestionUpdate,
-		congested:          congested,
-		congestionLevel:    level,
-		congestionLevelSet: levelSet,
-	}, func(st *DestinationStatus) {
-		st.CongestionLevel = level
-		st.CongestionLevelSet = levelSet
-	})
+	}, s.NetworkAppearance, s.RoutingContext, s.AffectedPointCode,
+		DestinationNetworkState{Congestion: congestion},
+		destinationCongestionDimension,
+		&aspRouteUpdate{
+			kind:               aspRouteCongestionUpdate,
+			congested:          congested,
+			congestionLevel:    level,
+			congestionLevelSet: levelSet,
+		}, nil)
 }
 
 // handleDestinationUserPartUnavailable processes a DUPU.
@@ -1647,10 +1627,11 @@ func (c *Association) handleDestinationUserPartUnavailable(d *messages.Destinati
 		Kind:         SSNMDestinationUserPartUnavailableReport,
 		UserCause:    d.UserCause.UserCause(),
 		UserCauseSet: true,
-	}, d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode, DestinationAvailable, nil, func(st *DestinationStatus) {
-		st.UserPartUnavailable = true
-		st.UserCause = d.UserCause.UserCause()
-	})
+	}, d.NetworkAppearance, d.RoutingContext, d.AffectedPointCode,
+		DestinationNetworkState{}, 0, nil, func(st *DestinationStatus) {
+			st.UserPartUnavailable = true
+			st.UserCause = d.UserCause.UserCause()
+		})
 }
 
 // handleDestinationStateAudit processes a DAUD.
@@ -1707,6 +1688,23 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 	appearance := c.destinationKey(d.NetworkAppearance, 0)
 	routingContexts, routingContextSet := c.destinationRoutingContexts(d.RoutingContext)
 
+	auditState := func(scope destinationKey, pointCode uint32, mask uint8) DestinationNetworkState {
+		// RFC 4666 Section 4.5.3: "An SG SHOULD respond with a DUNA message
+		// when DAUD was received with an unknown Signalling Point Code", so an
+		// unknown destination answers unavailable rather than available.
+		state := DestinationNetworkState{Availability: DestinationUnavailable}
+		if retained, known := c.destinations.lookupRange(scope, pointCode, mask); known {
+			state = retained
+		}
+		if restartForcesUnavailable(c.mtp3Restarts, scope, pointCode, mask) {
+			// Section 4.6 isolates the affected scope until the restart
+			// completes, and an isolated destination reports nothing about
+			// congestion either.
+			state = DestinationNetworkState{Availability: DestinationUnavailable}
+		}
+		return state
+	}
+
 	for index, pc := range pcs {
 		groups := make([]destinationAuditGroup, 0, max(1, len(routingContexts)))
 		if routingContextSet {
@@ -1717,22 +1715,8 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 					routingContext:       rtCtx,
 					routingContextSet:    true,
 				}
-				record, known := c.destinations.lookupRecord(scope, pc, masks[index])
-				state := DestinationUnavailable
-				var congestionLevel uint8
-				var congestionLevelSet bool
-				if known {
-					state = record.rangeValue.State
-					congestionLevel = record.rangeValue.CongestionLevel
-					congestionLevelSet = record.rangeValue.CongestionLevelSet
-				}
-				if restartForcesUnavailable(c.mtp3Restarts, scope, pc, masks[index]) {
-					state = DestinationUnavailable
-					congestionLevel = 0
-					congestionLevelSet = false
-				}
 				groups = appendDestinationAuditGroup(
-					groups, state, congestionLevel, congestionLevelSet, rtCtx,
+					groups, auditState(scope, pc, masks[index]), rtCtx,
 				)
 			}
 		} else {
@@ -1740,24 +1724,8 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 				networkAppearance:    appearance.networkAppearance,
 				networkAppearanceSet: appearance.networkAppearanceSet,
 			}
-			record, known := c.destinations.lookupRecord(scope, pc, masks[index])
-			state := DestinationUnavailable
-			var congestionLevel uint8
-			var congestionLevelSet bool
-			if known {
-				state = record.rangeValue.State
-				congestionLevel = record.rangeValue.CongestionLevel
-				congestionLevelSet = record.rangeValue.CongestionLevelSet
-			}
-			if restartForcesUnavailable(c.mtp3Restarts, scope, pc, masks[index]) {
-				state = DestinationUnavailable
-				congestionLevel = 0
-				congestionLevelSet = false
-			}
 			groups = append(groups, destinationAuditGroup{
-				state:              state,
-				congestionLevel:    congestionLevel,
-				congestionLevelSet: congestionLevelSet,
+				state: auditState(scope, pc, masks[index]),
 			})
 		}
 
@@ -1765,7 +1733,6 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 			if err := c.writeDestinationAuditReply(
 				d.NetworkAppearance, d.RoutingContext != nil, group.routingContexts,
 				pc, masks[index], group.state,
-				group.congestionLevel, group.congestionLevelSet,
 			); err != nil {
 				return err
 			}
@@ -1776,44 +1743,44 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 }
 
 type destinationAuditGroup struct {
-	state              DestinationState
-	congestionLevel    uint8
-	congestionLevelSet bool
-	routingContexts    []uint32
+	state           DestinationNetworkState
+	routingContexts []uint32
 }
 
 func appendDestinationAuditGroup(
 	groups []destinationAuditGroup,
-	state DestinationState,
-	congestionLevel uint8,
-	congestionLevelSet bool,
+	state DestinationNetworkState,
 	routingContext uint32,
 ) []destinationAuditGroup {
 	for index := range groups {
-		if groups[index].state == state &&
-			groups[index].congestionLevel == congestionLevel &&
-			groups[index].congestionLevelSet == congestionLevelSet {
+		if groups[index].state == state {
 			groups[index].routingContexts = append(groups[index].routingContexts, routingContext)
 			return groups
 		}
 	}
 	return append(groups, destinationAuditGroup{
-		state:              state,
-		congestionLevel:    congestionLevel,
-		congestionLevelSet: congestionLevelSet,
-		routingContexts:    []uint32{routingContext},
+		state:           state,
+		routingContexts: []uint32{routingContext},
 	})
 }
 
+// writeDestinationAuditReply answers one audited destination with what this SG
+// holds in both dimensions.
+//
+// RFC 4666 Section 4.5.3: "The status of each SS7 destination requested is
+// indicated in a DUNA message (if unavailable), a DAVA message (if available),
+// or a DRST (if restricted...). For national networks, the SGP SHOULD
+// additionally respond with a SCON message (if the destination is congested)
+// before the DAVA or DRST." The congestion report therefore precedes an
+// available or restricted answer and is not sent with an unavailable one, for
+// which congestion says nothing.
 func (c *Association) writeDestinationAuditReply(
 	networkAppearance *params.Param,
 	routingContextPresent bool,
 	routingContexts []uint32,
 	pointCode uint32,
 	mask uint8,
-	state DestinationState,
-	congestionLevel uint8,
-	congestionLevelSet bool,
+	state DestinationNetworkState,
 ) error {
 	routingContext := func() *params.Param {
 		if !routingContextPresent {
@@ -1825,25 +1792,25 @@ func (c *Association) writeDestinationAuditReply(
 		return params.NewAffectedPointCodeWithMask(mask, pointCode)
 	}
 
-	var reply messages.M3UA
-	switch state {
-	case DestinationUnavailable:
-		reply = messages.NewDestinationUnavailable(
-			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
-	case DestinationRestricted:
-		reply = messages.NewDestinationRestricted(
-			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
-	case DestinationCongested:
+	if state.Congestion.Congested && state.Availability != DestinationUnavailable {
 		var congestion *params.Param
-		if congestionLevelSet {
-			congestion = params.NewCongestionIndications(congestionLevel)
+		if state.Congestion.LevelSet {
+			congestion = params.NewCongestionIndications(state.Congestion.Level)
 		}
 		if _, err := c.WriteSignal(messages.NewSignallingCongestion(
 			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil, congestion, nil,
 		)); err != nil {
 			return err
 		}
-		reply = messages.NewDestinationAvailable(
+	}
+
+	var reply messages.M3UA
+	switch state.Availability {
+	case DestinationUnavailable:
+		reply = messages.NewDestinationUnavailable(
+			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
+	case DestinationRestricted:
+		reply = messages.NewDestinationRestricted(
 			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
 	default:
 		reply = messages.NewDestinationAvailable(
@@ -1852,190 +1819,6 @@ func (c *Association) writeDestinationAuditReply(
 
 	_, err := c.WriteSignal(reply)
 	return err
-}
-
-// SetDestinationState records a destination's availability at an SGP so that
-// DAUD audits can be answered from it. An SG learns this state from the SS7
-// network, which is outside M3UA, so the application supplies it.
-//
-// On an accepted association this writes the listener's node-wide view, which is
-// shared by every ASP it serves and outlives any one of them. Prefer
-// Listener.SetDestinationState, which says so; this form remains because an
-// operator holding an Association should not have to find the Listener to record what
-// the SS7 network just told it.
-func (c *Association) SetDestinationState(pointCode uint32, state DestinationState) {
-	c.SetDestinationRange(pointCode, 0, state)
-}
-
-// SetDestinationRange records an all-Routing-Context destination range in the
-// configured Network Appearance. Mask wildcards that many low-order bits.
-func (c *Association) SetDestinationRange(pointCode uint32, mask uint8, state DestinationState) {
-	scope := c.destinationKey(nil, pointCode)
-	_ = c.applyDestinationRange(DestinationRange{
-		NetworkAppearance:    scope.networkAppearance,
-		NetworkAppearanceSet: scope.networkAppearanceSet,
-		PointCode:            pointCode,
-		Mask:                 mask,
-		State:                state,
-	}, false)
-}
-
-// SetDestinationStateForNetwork records an SGP destination state within an
-// explicit Network Appearance.
-func (c *Association) SetDestinationStateForNetwork(networkAppearance, pointCode uint32, state DestinationState) {
-	c.SetDestinationRangeForNetwork(networkAppearance, pointCode, 0, state)
-}
-
-// SetDestinationRangeForNetwork records an all-Routing-Context range within
-// an explicit Network Appearance.
-func (c *Association) SetDestinationRangeForNetwork(networkAppearance, pointCode uint32, mask uint8, state DestinationState) {
-	_ = c.applyDestinationRange(DestinationRange{
-		NetworkAppearance:    networkAppearance,
-		NetworkAppearanceSet: true,
-		PointCode:            pointCode,
-		Mask:                 mask,
-		State:                state,
-	}, false)
-}
-
-// SetDestinationStateForNetworkAndRoutingContext records one exact destination
-// in an explicit Network Appearance and Routing Context.
-func (c *Association) SetDestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, state DestinationState) {
-	c.SetDestinationRangeForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode, 0, state)
-}
-
-// SetDestinationRangeForNetworkAndRoutingContext records a destination range
-// in one explicit Network Appearance and Routing Context.
-func (c *Association) SetDestinationRangeForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, mask uint8, state DestinationState) {
-	_ = c.applyDestinationRange(DestinationRange{
-		NetworkAppearance:    networkAppearance,
-		NetworkAppearanceSet: true,
-		RoutingContext:       routingContext,
-		RoutingContextSet:    true,
-		PointCode:            pointCode,
-		Mask:                 mask,
-		State:                state,
-	}, false)
-}
-
-// ReportDestinationState records and synchronously reports a destination.
-func (c *Association) ReportDestinationState(pointCode uint32, state DestinationState) error {
-	return c.ReportDestinationRange(pointCode, 0, state)
-}
-
-// ReportDestinationRange records and synchronously reports a destination range.
-func (c *Association) ReportDestinationRange(pointCode uint32, mask uint8, state DestinationState) error {
-	scope := c.destinationKey(nil, pointCode)
-	return c.applyDestinationRange(DestinationRange{
-		NetworkAppearance:    scope.networkAppearance,
-		NetworkAppearanceSet: scope.networkAppearanceSet,
-		PointCode:            pointCode,
-		Mask:                 mask,
-		State:                state,
-	}, true)
-}
-
-// ReportDestinationStateForNetwork records and synchronously reports a
-// destination in an explicit Network Appearance.
-func (c *Association) ReportDestinationStateForNetwork(networkAppearance, pointCode uint32, state DestinationState) error {
-	return c.ReportDestinationRangeForNetwork(networkAppearance, pointCode, 0, state)
-}
-
-// ReportDestinationRangeForNetwork records and synchronously reports a range
-// in an explicit Network Appearance.
-func (c *Association) ReportDestinationRangeForNetwork(networkAppearance, pointCode uint32, mask uint8, state DestinationState) error {
-	return c.applyDestinationRange(DestinationRange{
-		NetworkAppearance:    networkAppearance,
-		NetworkAppearanceSet: true,
-		PointCode:            pointCode,
-		Mask:                 mask,
-		State:                state,
-	}, true)
-}
-
-// ReportDestinationStateForNetworkAndRoutingContext records and synchronously
-// reports one destination in one explicit traffic scope.
-func (c *Association) ReportDestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, state DestinationState) error {
-	return c.ReportDestinationRangeForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode, 0, state,
-	)
-}
-
-// ReportDestinationRangeForNetworkAndRoutingContext records and synchronously
-// reports a destination range in one explicit traffic scope.
-func (c *Association) ReportDestinationRangeForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode uint32, mask uint8, state DestinationState) error {
-	return c.applyDestinationRange(DestinationRange{
-		NetworkAppearance:    networkAppearance,
-		NetworkAppearanceSet: true,
-		RoutingContext:       routingContext,
-		RoutingContextSet:    true,
-		PointCode:            pointCode,
-		Mask:                 mask,
-		State:                state,
-	}, true)
-}
-
-func (c *Association) applyDestinationRange(rangeValue DestinationRange, wait bool) error {
-	if c != nil {
-		if c.role == RoleIPSP || wait && c.role != RoleSGP {
-			return ErrUnsupportedRole
-		}
-		if c.role != RoleSGP {
-			return applyLocalDestinationRange(c, rangeValue)
-		}
-		select {
-		case <-c.done:
-			return ErrAssociationClosed
-		default:
-		}
-		if c.listener != nil {
-			return c.listener.applyDestinationRange(rangeValue, wait)
-		}
-		return c.applyDialedSGPDestinationRange(rangeValue, wait)
-	}
-	return applyLocalDestinationRange(c, rangeValue)
-}
-
-func applyLocalDestinationRange(c *Association, rangeValue DestinationRange) error {
-	if !validDestinationState(rangeValue.State) {
-		return fmt.Errorf("%w: destination state %d", ErrInvalidParameterValue, rangeValue.State)
-	}
-	if c == nil || c.destinations == nil {
-		return nil
-	}
-	return c.destinations.setRangesWithinBudget([]DestinationRange{rangeValue})
-}
-
-func (c *Association) applyDialedSGPDestinationRange(rangeValue DestinationRange, wait bool) error {
-	// RFC 4666 Section 4.5.1 requires an SGP that receives an MTP-PAUSE,
-	// MTP-RESUME, or MTP-STATUS primitive to send the corresponding SSNM to
-	// concerned ASPs. SCTP association initiation does not alter that SGP duty.
-	prepared, err := c.prepareLocalDestinationRange(rangeValue)
-	if err != nil {
-		return err
-	}
-	rangeValue = prepared
-
-	restarts := c.mtp3Restarts
-	if restarts != nil {
-		restarts.procedureMu.RLock()
-		defer restarts.procedureMu.RUnlock()
-		if stageAnyMTP3RestartRangeLocked(restarts, rangeValue) {
-			return nil
-		}
-	}
-
-	previous, known := c.destinations.lookupRange(
-		destinationRangeKey(rangeValue), rangeValue.PointCode, rangeValue.Mask,
-	)
-	// An SG that cannot retain the state must not announce it either: the audit
-	// it owes the ASP afterwards would contradict the report it just sent.
-	if err := c.destinations.setRangesWithinBudget([]DestinationRange{rangeValue}); err != nil {
-		return err
-	}
-	abateCongestion := known && previous == DestinationCongested && rangeValue.State != DestinationCongested
-	return publishDestinationRanges(c.as, []DestinationRange{rangeValue}, false, abateCongestion, wait)
 }
 
 // ForgetDestinations discards every SSNM destination record the association's
@@ -2049,27 +1832,12 @@ func (c *Association) applyDialedSGPDestinationRange(rangeValue DestinationRange
 // sends is answered DUNA for every forgotten point code, because Section 4.5.3
 // makes an unknown Signalling Point Code unavailable.
 //
-// On an accepted association this clears the listener's node-wide view, which
-// is shared by every ASP it serves, exactly as SetDestinationState writes it.
+// On an accepted association this clears the node-wide view the owning SGP
+// Endpoint holds, which is shared by every Listener, Association and ASP it
+// serves and is the view Endpoint.ReportDestinationAvailability writes.
 func (c *Association) ForgetDestinations() int {
 	if c == nil {
 		return 0
 	}
 	return c.destinations.forget()
-}
-
-// PeerCongestionLevel returns the congestion level the peer last reported about
-// itself, or 0 if it has reported none.
-//
-// This is the ASP-to-peer direction of SCON, which RFC 4666 Section 3.4.4
-// describes as "indicating that the congestion level of the M3UA layer or the
-// ASP has changed". It says nothing about whether any SS7 destination is
-// reachable, which is why it is reported separately from DestinationState: an
-// SGP that folded the two together would answer another ASP's DAUD with
-// congestion this ASP invented.
-//
-// The values are those of Section 3.4.4: 0 "No Congestion or Undefined", and 1
-// to 3 for the national congestion levels.
-func (c *Association) PeerCongestionLevel() uint8 {
-	return uint8(c.peerCongestion.Load())
 }

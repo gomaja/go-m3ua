@@ -1057,22 +1057,35 @@ func TestIPSPDialAndListenRejectMissingExchangeModel(t *testing.T) {
 
 func TestIPSPAssociationRejectsSGPDestinationProcedures(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleIPSP, 1)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	association.endpoint = endpoint
 	const (
 		networkAppearance = uint32(7)
 		routingContext    = uint32(1)
 		pointCode         = uint32(0x123456)
 	)
 
-	if err := association.ReportDestinationStateForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode, DestinationRestricted,
+	// The destination procedures belong to the Endpoint that owns the SG's
+	// destination state, so an IPSP Endpoint refuses to run either of them and
+	// nothing is recorded for the association it owns.
+	if err := reportAvailability(
+		endpoint, testWireScope(networkAppearance, true, routingContext),
+		pointCode, 0, DestinationRestricted,
 	); !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("IPSP destination report error = %v, want ErrUnsupportedRole", err)
 	}
-	association.SetDestinationStateForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode, DestinationRestricted,
-	)
-	if got := association.DestinationStateForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode,
+	if err := reportCongestion(
+		endpoint, testWireScope(networkAppearance, true, routingContext),
+		pointCode, 0, 2, true,
+	); !errors.Is(err, ErrUnsupportedRole) {
+		t.Fatalf("IPSP congestion report error = %v, want ErrUnsupportedRole", err)
+	}
+	if got := retainedAvailabilityForNetworkAndRoutingContext(
+		association, networkAppearance, routingContext, pointCode,
 	); got != DestinationAvailable {
 		t.Fatalf("IPSP destination state = %v after unsupported update, want available", got)
 	}
@@ -1080,22 +1093,37 @@ func TestIPSPAssociationRejectsSGPDestinationProcedures(t *testing.T) {
 
 func TestASPAssociationRejectsSGPDestinationReports(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleASP): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	association.endpoint = endpoint
 	const (
 		networkAppearance = uint32(7)
 		routingContext    = uint32(1)
 		pointCode         = uint32(0x123456)
 	)
-	association.SetDestinationStateForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode, DestinationRestricted,
-	)
+	seedDestinationRange(association, DestinationRange{
+		NetworkAppearance:    networkAppearance,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+		PointCode:            pointCode,
+		State:                availabilityState(DestinationRestricted),
+	})
 
-	if err := association.ReportDestinationStateForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode, DestinationUnavailable,
+	// An ASP retains what its SGs tell it, but it never originates an SSNM
+	// statement of its own, so the Endpoint publication is refused and leaves
+	// what was retained alone.
+	if err := reportAvailability(
+		endpoint, testWireScope(networkAppearance, true, routingContext),
+		pointCode, 0, DestinationUnavailable,
 	); !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("ASP destination report error = %v, want ErrUnsupportedRole", err)
 	}
-	if got := association.DestinationStateForNetworkAndRoutingContext(
-		networkAppearance, routingContext, pointCode,
+	if got := retainedAvailabilityForNetworkAndRoutingContext(
+		association, networkAppearance, routingContext, pointCode,
 	); got != DestinationRestricted {
 		t.Fatalf("ASP destination state = %v after rejected report, want restricted", got)
 	}
@@ -1111,13 +1139,19 @@ func TestASPListenerRejectsSGPDestinationProcedures(t *testing.T) {
 	listener := newListener(endpoint, NewListenerConfig(config))
 	const pointCode = uint32(0x123456)
 
-	if err := listener.ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, pointCode, DestinationRestricted,
+	if err := reportAvailability(
+		listenerEndpoint(t, listener), testWireScope(7, true, 1), pointCode, 0, DestinationRestricted,
 	); !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("ASP Listener destination report error = %v, want ErrUnsupportedRole", err)
 	}
-	listener.SetDestinationStateForNetworkAndRoutingContext(7, 1, pointCode, DestinationRestricted)
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 1, pointCode); known {
+	// An ASP Endpoint owns no SG destination state, so the Listener it built
+	// holds nothing for the destination the refused report named.
+	if state, known := listener.destinations.lookupRange(destinationKey{
+		networkAppearance:    7,
+		networkAppearanceSet: true,
+		routingContext:       1,
+		routingContextSet:    true,
+	}, pointCode, 0); known {
 		t.Fatalf("ASP Listener destination state = (%v, %v) after unsupported update, want unknown", state, known)
 	}
 }
@@ -1409,9 +1443,15 @@ func TestEndpointRoleIsIndependentOfSCTPOrientation(t *testing.T) {
 
 			if test.dialRole == RoleSGP {
 				const pointCode = 0x1234
-				dialed.SetDestinationStateForNetworkAndRoutingContext(
-					0, 1, pointCode, DestinationAvailable,
-				)
+				// Seeded rather than published, so the DAVA the ASP waits for
+				// can only be the answer to its own DAUD.
+				seedDestinationRange(dialed, DestinationRange{
+					NetworkAppearanceSet: true,
+					RoutingContext:       1,
+					RoutingContextSet:    true,
+					PointCode:            pointCode,
+					State:                availabilityState(DestinationAvailable),
+				})
 				if _, err := acceptedAssociation.WriteSignal(
 					messages.NewDestinationStateAudit(
 						nil,
@@ -1434,7 +1474,7 @@ func TestEndpointRoleIsIndependentOfSCTPOrientation(t *testing.T) {
 					RoutingContextSet:    true,
 					PointCode:            restartPointCode,
 				}
-				restart, err := dialed.BeginMTP3Restart(restartDestination)
+				restart, err := dialEndpoint.BeginMTP3Restart(restartDestination)
 				if err != nil {
 					t.Fatalf("dialing SGP begin MTP3 restart: %v", err)
 				}
@@ -1442,7 +1482,7 @@ func TestEndpointRoleIsIndependentOfSCTPOrientation(t *testing.T) {
 					t, ctx, acceptedAssociation, restartPointCode, DestinationUnavailable,
 					"restart isolation status",
 				)
-				if err := restart.Update(restartDestination, DestinationAvailable); err != nil {
+				if err := restart.Update(restartDestination, availabilityState(DestinationAvailable)); err != nil {
 					t.Fatalf("dialing SGP stage MTP3 restart recovery: %v", err)
 				}
 				if err := restart.Complete(); err != nil {
@@ -1469,7 +1509,7 @@ func waitForEndpointDestinationStatus(
 	ctx context.Context,
 	association *Association,
 	pointCode uint32,
-	state DestinationState,
+	state DestinationAvailability,
 	description string,
 ) {
 	t.Helper()
@@ -1479,7 +1519,7 @@ func waitForEndpointDestinationStatus(
 			if !ok {
 				t.Fatalf("Association closed before %s arrived", description)
 			}
-			if status != nil && status.PointCode == pointCode && status.State == state {
+			if status != nil && status.PointCode == pointCode && status.State.Availability == state {
 				return
 			}
 		case <-ctx.Done():

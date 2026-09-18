@@ -1154,8 +1154,11 @@ func TestIPSPSingleExchangeAllowsSCONInBothDirections(t *testing.T) {
 		t.Fatalf("handleSignallingCongestion(): %v", err)
 	}
 	status := nextStatus(t, association)
-	if status.State != DestinationCongested || status.CongestionLevel != 2 {
-		t.Fatalf("SCON status = %+v, want congested at level 2", status)
+	// RFC 4666 Section 4.5.2.2 keeps the two statuses apart, so the SCON reports
+	// congestion at its level and leaves the destination reachable.
+	if !status.State.Congestion.Congested || status.State.Congestion.Level != 2 ||
+		status.State.Availability != DestinationAvailable {
+		t.Fatalf("SCON status = %+v, want congested at level 2 and still available", status)
 	}
 }
 

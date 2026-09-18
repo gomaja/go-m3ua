@@ -24,7 +24,7 @@ type aspRouteStateBudgetKey struct {
 }
 
 type aspAvailabilityRecord struct {
-	availability DestinationState
+	availability DestinationAvailability
 	sequence     uint64
 }
 
@@ -36,7 +36,7 @@ type aspCongestionRecord struct {
 }
 
 type aspDestinationStatus struct {
-	availability       DestinationState
+	availability       DestinationAvailability
 	congested          bool
 	congestionLevel    uint8
 	congestionLevelSet bool
@@ -51,7 +51,7 @@ const (
 
 type aspRouteUpdate struct {
 	kind               aspRouteUpdateKind
-	availability       DestinationState
+	availability       DestinationAvailability
 	congested          bool
 	congestionLevel    uint8
 	congestionLevelSet bool
@@ -1333,7 +1333,7 @@ func aspAssociationEligibleForAS(association *Association, key ASKey) bool {
 	return association.outboundRoutingContextActive(key.RoutingContext)
 }
 
-func aspAvailabilityRank(state DestinationState) int {
+func aspAvailabilityRank(state DestinationAvailability) int {
 	switch state {
 	case DestinationAvailable:
 		return 0

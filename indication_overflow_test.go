@@ -14,8 +14,8 @@ func TestSignallingStatusOverflowRequiresResynchronization(t *testing.T) {
 	connection, _ := newTestConn(t, StateASPActive, RoleASP)
 	connection.statusChan = make(chan *DestinationStatus, 1)
 
-	connection.notifyStatus(&DestinationStatus{PointCode: 1, State: DestinationUnavailable})
-	connection.notifyStatus(&DestinationStatus{PointCode: 2, State: DestinationAvailable})
+	connection.notifyStatus(&DestinationStatus{PointCode: 1, State: availabilityState(DestinationUnavailable)})
+	connection.notifyStatus(&DestinationStatus{PointCode: 2, State: availabilityState(DestinationAvailable)})
 
 	status := <-connection.SignallingStatus()
 	if status == nil || !status.ResyncRequired {

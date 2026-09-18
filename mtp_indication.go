@@ -44,7 +44,7 @@ type MTPDestination struct {
 // every provisioned Signalling Gateway route.
 type MTPDestinationStatus struct {
 	Destination        MTPDestination
-	Availability       DestinationState
+	Availability       DestinationAvailability
 	Congested          bool
 	CongestionLevel    uint8
 	CongestionLevelSet bool

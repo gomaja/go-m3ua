@@ -185,7 +185,7 @@ func TestSSNMRaceDetectorControl(t *testing.T) {
 	}
 	// The shape of ssnmState without its mutex: a reporter writing retained
 	// state while a subscriber snapshots it.
-	unguarded := make(map[uint32]DestinationState)
+	unguarded := make(map[uint32]DestinationAvailability)
 	var reporters sync.WaitGroup
 	reporters.Add(2)
 	go func() {
@@ -197,7 +197,7 @@ func TestSSNMRaceDetectorControl(t *testing.T) {
 	go func() {
 		defer reporters.Done()
 		for range 1000 {
-			snapshot := make(map[uint32]DestinationState, len(unguarded))
+			snapshot := make(map[uint32]DestinationAvailability, len(unguarded))
 			for pointCode, state := range unguarded {
 				snapshot[pointCode] = state
 			}
@@ -769,7 +769,7 @@ func TestDAUDIsNotAnEventReplayOrCompletionPrimitive(t *testing.T) {
 	endpoint, sgp := newSGPSSNMFixture(t)
 	endpoint.destinations.setRanges([]DestinationRange{{
 		RoutingContext: 1, RoutingContextSet: true,
-		PointCode: 0x123456, State: DestinationUnavailable,
+		PointCode: 0x123456, State: availabilityState(DestinationUnavailable),
 	}})
 	sgp.destinations = endpoint.destinations
 

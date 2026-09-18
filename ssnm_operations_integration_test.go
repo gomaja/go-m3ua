@@ -79,7 +79,10 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 		t.Fatalf("SGP SCON: %v", err)
 	}
 	status := receiveDestinationStatus(t, ctx, aspAssociation)
-	if status.State != DestinationCongested || status.CongestionLevel != 2 ||
+	// The SCON carries congestion alone; the availability RFC 4666
+	// Section 4.5.2.2 keeps separate from it is still the Available default.
+	if status.State.Availability != DestinationAvailable ||
+		!status.State.Congestion.Congested || status.State.Congestion.Level != 2 ||
 		status.PointCode != destination.PointCode || status.Mask != destination.Mask {
 		t.Fatalf("ASP SCON status = %+v", status)
 	}
@@ -91,10 +94,10 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 	}
 	congested := receiveDestinationStatus(t, ctx, aspAssociation)
 	available := receiveDestinationStatus(t, ctx, aspAssociation)
-	if congested.State != DestinationCongested || congested.CongestionLevel != 2 {
+	if !congested.State.Congestion.Congested || congested.State.Congestion.Level != 2 {
 		t.Fatalf("DAUD SCON status = %+v", congested)
 	}
-	if available.State != DestinationAvailable {
+	if available.State.Availability != DestinationAvailable {
 		t.Fatalf("DAUD DAVA status = %+v", available)
 	}
 

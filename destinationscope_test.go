@@ -68,10 +68,14 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	}
 
 	// The SG learns from the SS7 network that the destination is reachable, and
-	// records it against the node.
-	ln.SetDestinationState(pointCode, DestinationAvailable)
+	// records it against the node. The Endpoint owns that record: RFC 4666
+	// Section 1.2 has one management view per SG, not one per association.
+	if err := reportAvailability(listenerEndpoint(t, ln), listenerDestinationScope(ln),
+		pointCode, 0, DestinationAvailable); err != nil {
+		t.Fatalf("recording the destination as available: %v", err)
+	}
 
-	auditState := func(t *testing.T, asp *Association) DestinationState {
+	auditState := func(t *testing.T, asp *Association) DestinationAvailability {
 		t.Helper()
 		audit := messages.NewDestinationStateAudit(nil,
 			params.NewRoutingContext(1),
@@ -81,7 +85,7 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 		}
 		select {
 		case s := <-asp.SignallingStatus():
-			return s.State
+			return s.State.Availability
 		case <-time.After(10 * time.Second):
 			t.Fatal("the SG never answered the DAUD")
 			return DestinationUnavailable
@@ -118,9 +122,9 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 	}
 }
 
-// The setter on an Association writes the same node-wide view, so an operator holding an
-// accepted association does not have to find the Listener, and what they record
-// is still there for the next ASP.
+// An accepted Association and its Listener resolve the same node-wide view, so
+// what is recorded against one of them is what the SG answers with, and it is
+// still there for the next ASP.
 func TestAssociationAndListenerShareTheSGsDestinationView(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -136,47 +140,54 @@ func TestAssociationAndListenerShareTheSGsDestinationView(t *testing.T) {
 
 	// srvConn was accepted by the listener setupConn created; recording through
 	// it must be visible to the node.
-	srvConn.SetDestinationState(0xabcdef, DestinationRestricted)
+	seedDestinationAvailability(srvConn, 0xabcdef, DestinationRestricted)
 	if srvConn.listener == nil {
 		t.Fatal("an accepted Association has no listener")
 	}
-	got, known := srvConn.listener.DestinationState(0xabcdef)
+	endpoint := listenerEndpoint(t, srvConn.listener)
+	got, known := endpoint.DestinationStatus(listenerStatusKey(srvConn.listener, 0xabcdef))
 	if !known {
 		t.Fatal("a state recorded on an accepted association is invisible to the SG")
 	}
-	if got != DestinationRestricted {
-		t.Errorf("DestinationState = %v, want %v", got, DestinationRestricted)
+	if got.State.Availability != DestinationRestricted {
+		t.Errorf("retained availability = %v, want %v", got.State.Availability, DestinationRestricted)
 	}
 
 	// An ASP keeps its own view: its destination states are what a peer
 	// told it, not a node-wide record, and pauseDestinations already scopes them
 	// that way.
-	cliConn.SetDestinationState(0x999999, DestinationAvailable)
-	if _, known := srvConn.listener.DestinationState(0x999999); known {
+	seedDestinationAvailability(cliConn, 0x999999, DestinationAvailable)
+	if _, known := endpoint.DestinationStatus(listenerStatusKey(srvConn.listener, 0x999999)); known {
 		t.Error("an ASP's own destination state leaked into the SG's view")
 	}
 }
 
-// The listener's setter has to work before any association exists — an operator
-// knows the SS7 network's state at startup, not only once an ASP turns up.
+// Recording the SS7 network's state has to work before any association exists —
+// an operator knows it at startup, not only once an ASP turns up.
 func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
-	// With an AssociationConfig, as Listen always builds it. The setter under
-	// test needs no accepted Association at all, which is the point — it is
-	// usable before anything has been accepted.
+	// With an AssociationConfig, as Listen always builds it. The publication
+	// path under test needs no accepted Association at all, which is the
+	// point — it is usable before anything has been accepted.
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	l := newSGPListener(NewListenerConfig(config))
+	endpoint := listenerEndpoint(t, l)
 
-	if _, known := l.DestinationState(0x111111); known {
+	if _, known := endpoint.DestinationStatus(listenerStatusKey(l, 0x111111)); known {
 		t.Error("an unset destination reported as known")
 	}
 
-	l.SetDestinationState(0x111111, DestinationCongested)
-	got, known := l.DestinationState(0x111111)
+	// A congestion statement carries the congestion dimension alone. RFC 4666
+	// Section 4.5.2.2 keeps the two statuses of a destination apart, so the
+	// destination stays available and is reported congested beside that.
+	if err := reportCongestion(endpoint, listenerDestinationScope(l), 0x111111, 0, 0, false); err != nil {
+		t.Fatalf("recording congestion before any association: %v", err)
+	}
+	got, known := endpoint.DestinationStatus(listenerStatusKey(l, 0x111111))
 	if !known {
 		t.Fatal("the state set before any association was lost")
 	}
-	if got != DestinationCongested {
-		t.Errorf("DestinationState = %v, want %v", got, DestinationCongested)
+	if !got.State.Congestion.Congested || got.State.Availability != DestinationAvailable {
+		t.Errorf("the SG holds %+v, want a congested destination that is still available", got.State)
 	}
 
 	// And the association accepted later sees it.
@@ -189,8 +200,32 @@ func TestListenerDestinationStateBeforeAnyAssociation(t *testing.T) {
 		networkAppearance:    appearance,
 		networkAppearanceSet: set,
 		pointCode:            0x111111,
-	}); !known || state != DestinationCongested {
-		t.Errorf("the shared view holds %v (known=%v), want %v",
-			state, known, DestinationCongested)
+	}); !known || !state.Congestion.Congested {
+		t.Errorf("the shared view holds %+v (known=%v), want a congested destination",
+			state, known)
 	}
+}
+
+// listenerDestinationScope is the wire scope a Listener's configured
+// Application Servers put on the SG's own SSNM statements: their Network
+// Appearance, and no Routing Context, so the record is an all-context baseline.
+func listenerDestinationScope(l *Listener) WireScope {
+	appearance, set := listenerNetworkAppearance(l)
+	return testWireScope(appearance, set)
+}
+
+// listenerStatusKey is the Endpoint query key for one destination in the scope
+// a Listener resolves: its Network Appearance, narrowed to the single
+// configured Routing Context when its Application Servers name exactly one.
+func listenerStatusKey(l *Listener, pointCode uint32) DestinationStatusKey {
+	appearance, set := listenerNetworkAppearance(l)
+	key := DestinationStatusKey{
+		NetworkAppearance:    appearance,
+		NetworkAppearanceSet: set,
+		PointCode:            pointCode,
+	}
+	if configured := asConfigRoutingContexts(l.AssociationConfig.ApplicationServers); len(configured) == 1 {
+		key.RoutingContext, key.RoutingContextSet = configured[0], true
+	}
+	return key
 }

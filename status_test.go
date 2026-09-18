@@ -155,8 +155,8 @@ func TestQueuedStatusesSurviveClose(t *testing.T) {
 //	be informed of the unavailability of any affected SS7 destinations through
 //	the use of MTP-PAUSE indication primitives."
 //
-// Nothing was reported: the status channel was closed in silence and
-// DestinationState went on answering with whatever the peer had last said,
+// Nothing was reported: the status channel was closed in silence and the
+// retained destination state went on answering with whatever the peer had said,
 // so an MTP3-User that had been told a destination was available kept being
 // told so long after the only route to it had gone.
 func TestClosingAnAssociationReportsItsDestinationsUnavailable(t *testing.T) {
@@ -167,15 +167,15 @@ func TestClosingAnAssociationReportsItsDestinationsUnavailable(t *testing.T) {
 	conn := dialRawPeer(t, ctx, peer, 3140, &HeartbeatInfo{Enabled: false})
 
 	// The peer has told us about three destinations.
-	conn.SetDestinationState(0x111111, DestinationAvailable)
-	conn.SetDestinationState(0x222222, DestinationRestricted)
-	conn.SetDestinationState(0x333333, DestinationUnavailable)
+	seedDestinationAvailability(conn, 0x111111, DestinationAvailable)
+	seedDestinationAvailability(conn, 0x222222, DestinationRestricted)
+	seedDestinationAvailability(conn, 0x333333, DestinationUnavailable)
 
-	paused := make(chan map[uint32]DestinationState, 1)
+	paused := make(chan map[uint32]DestinationAvailability, 1)
 	go func() {
-		got := map[uint32]DestinationState{}
+		got := map[uint32]DestinationAvailability{}
 		for st := range conn.SignallingStatus() {
-			got[st.PointCode] = st.State
+			got[st.PointCode] = st.State.Availability
 		}
 		paused <- got
 	}()
@@ -200,8 +200,8 @@ func TestClosingAnAssociationReportsItsDestinationsUnavailable(t *testing.T) {
 	// And the authoritative view must agree: a destination reachable only over
 	// this association is not reachable once it is gone.
 	for _, pc := range []uint32{0x111111, 0x222222, 0x333333} {
-		if got := conn.DestinationState(pc); got != DestinationUnavailable {
-			t.Errorf("DestinationState(%#x) = %v after Close, want %v", pc, got, DestinationUnavailable)
+		if got := retainedAvailability(conn, pc); got != DestinationUnavailable {
+			t.Errorf("retained availability for %#x = %v after Close, want %v", pc, got, DestinationUnavailable)
 		}
 	}
 }

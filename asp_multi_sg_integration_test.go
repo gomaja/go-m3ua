@@ -255,23 +255,27 @@ func exerciseASPMultiSGTransfer(
 ) {
 	t.Helper()
 	const pointCode = uint32(0x123456)
-	if err := sgpAssociations["sg-a"].ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, pointCode, DestinationUnavailable,
+	if err := reportAvailability(
+		sgpAssociations["sg-a"].endpoint, testWireScope(7, true, 1), pointCode, 0, DestinationUnavailable,
 	); err != nil {
 		t.Fatalf("report DUNA from sg-a: %v", err)
 	}
 	if !waitFor(func() bool {
-		return aspAssociations["sg-a"].DestinationStateForNetworkAndRoutingContext(7, 1, pointCode) == DestinationUnavailable
+		return retainedAvailabilityForNetworkAndRoutingContext(
+			aspAssociations["sg-a"], 7, 1, pointCode,
+		) == DestinationUnavailable
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-a DUNA")
 	}
-	if err := sgpAssociations["sg-b"].ReportDestinationStateForNetworkAndRoutingContext(
-		9, 42, pointCode, DestinationRestricted,
+	if err := reportAvailability(
+		sgpAssociations["sg-b"].endpoint, testWireScope(9, true, 42), pointCode, 0, DestinationRestricted,
 	); err != nil {
 		t.Fatalf("report DRST from sg-b: %v", err)
 	}
 	if !waitFor(func() bool {
-		return aspAssociations["sg-b"].DestinationStateForNetworkAndRoutingContext(9, 42, pointCode) == DestinationRestricted
+		return retainedAvailabilityForNetworkAndRoutingContext(
+			aspAssociations["sg-b"], 9, 42, pointCode,
+		) == DestinationRestricted
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-b DRST")
 	}
@@ -282,13 +286,15 @@ func exerciseASPMultiSGTransfer(
 	}
 	requireIntegrationData(t, sgpAssociations["sg-b"], request.ProtocolData)
 
-	if err := sgpAssociations["sg-a"].ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, pointCode, DestinationAvailable,
+	if err := reportAvailability(
+		sgpAssociations["sg-a"].endpoint, testWireScope(7, true, 1), pointCode, 0, DestinationAvailable,
 	); err != nil {
 		t.Fatalf("report DAVA from sg-a: %v", err)
 	}
 	if !waitFor(func() bool {
-		return aspAssociations["sg-a"].DestinationStateForNetworkAndRoutingContext(7, 1, pointCode) == DestinationAvailable
+		return retainedAvailabilityForNetworkAndRoutingContext(
+			aspAssociations["sg-a"], 7, 1, pointCode,
+		) == DestinationAvailable
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-a DAVA")
 	}

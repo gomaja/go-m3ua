@@ -302,15 +302,6 @@ type Association struct {
 	authorizationIdentifier    uint32
 	authorizationIdentifierSet bool
 
-	// peerCongestion is the congestion level the peer last reported about
-	// itself, from a SCON received at an SGP.
-	//
-	// It is kept apart from destinations because it means something different:
-	// RFC 4666 Section 3.4.4's ASP-to-peer SCON reports "the congestion level
-	// of the M3UA layer or the ASP", not the reachability of an SS7
-	// destination.
-	peerCongestion atomic.Uint32
-
 	// selectedRC is the Routing Context outbound DATA names, when the
 	// association carries more than one.
 	//
