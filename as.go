@@ -1442,13 +1442,37 @@ func (as *applicationServer) setASPStateGuarded(
 		}
 	}
 
+	notify, startDrain := as.recordASPState(c, st, recovery, ifAbsent)
+	if guard {
+		c.muState.Unlock()
+	}
+
+	notify()
+	if startDrain {
+		go as.drainRecoveryQueue()
+	}
+}
+
+// recordASPState writes one ASP's state into this Application Server and hands
+// the resulting Notify emission back to the caller instead of emitting it.
+//
+// The split is what lets a caller hold a lock across the record: emitting a
+// Notify writes to every ASP in the AS, and a socket write blocks when the peer
+// stops reading. Holding the AS lock — or the association state lock — across
+// that would stall the whole Application Server behind one peer.
+//
+// The returned closure is never nil, so a caller may run it unconditionally.
+// The second result asks the caller to start the recovery drain.
+func (as *applicationServer) recordASPState(
+	c *Association,
+	st State,
+	recovery time.Duration,
+	ifAbsent bool,
+) (func(), bool) {
 	as.mu.Lock()
 	if as.closed {
 		as.mu.Unlock()
-		if guard {
-			c.muState.Unlock()
-		}
-		return
+		return func() {}, false
 	}
 	current, known := as.asps[c]
 	if !known || !ifAbsent {
@@ -1468,13 +1492,48 @@ func (as *applicationServer) setASPStateGuarded(
 		as.draining = true
 	}
 	as.mu.Unlock()
-	if guard {
-		c.muState.Unlock()
-	}
+	return notify, startDrain
+}
 
-	notify()
-	if startDrain {
-		go as.drainRecoveryQueue()
+// commitASPStates records this ASP's state in every named Application Server
+// and returns the deferred emission for all of them.
+//
+// It exists so a caller that is about to make an ASP observably ASP-ACTIVE can
+// make the Application Server registry agree first, under the same association
+// state lock. The registry is what authorizes outbound traffic, so a state that
+// became observable ahead of it refused DATA the peer had already acknowledged.
+//
+// RFC 4666 Section 4.3.1 keeps the state of each ASP per Application Server, so
+// each key resolves its own value rather than inheriting one association-wide
+// answer.
+func (r *applicationServers) commitASPStates(c *Association, keys []ASKey, resolve func(ASKey) State) func() {
+	if r == nil || c == nil || len(keys) == 0 || resolve == nil {
+		return func() {}
+	}
+	r.mu.Lock()
+	recovery := r.recoveryTimer
+	r.mu.Unlock()
+
+	// A closed registry is decided one level down rather than here: get returns
+	// a closed Application Server for every key, and recordASPState records
+	// nothing into one.
+	notifications := make([]func(), 0, len(keys))
+	drains := make([]*applicationServer, 0, len(keys))
+	for _, key := range keys {
+		applicationServer := r.get(key)
+		notify, startDrain := applicationServer.recordASPState(c, resolve(key), recovery, false)
+		notifications = append(notifications, notify)
+		if startDrain {
+			drains = append(drains, applicationServer)
+		}
+	}
+	return func() {
+		for _, notify := range notifications {
+			notify()
+		}
+		for _, applicationServer := range drains {
+			go applicationServer.drainRecoveryQueue()
+		}
 	}
 }
 

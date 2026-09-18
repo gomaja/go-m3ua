@@ -1229,15 +1229,19 @@ func TestASPActivePublishesShortageAfterAdoptingTrafficMode(t *testing.T) {
 	if _, ok := activeMessages[0].(*messages.AspActiveAck); !ok {
 		t.Fatalf("first message = %T, want *messages.AspActiveAck", activeMessages[0])
 	}
-	assertNoNotifyStatus(t, (*withdrawingSent)[withdrawingBefore:], params.InsufficientAspResources)
-	assertNoNotifyStatus(t, (*inactiveSent)[inactiveBefore:], params.InsufficientAspResources)
+	// RFC 4666 Section 4.3.4.5 orders the advisory after the related Ack, which
+	// the handler has already written, and Sections 3.8.2 and 5.2.3 address it
+	// to the inactive ASPs rather than the one that just became active.
+	assertNotifyStatusCount(t, (*withdrawingSent)[withdrawingBefore:], params.InsufficientAspResources, 1)
+	assertNotifyStatusCount(t, (*inactiveSent)[inactiveBefore:], params.InsufficientAspResources, 1)
 
 	if err := active.handleStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("handleStateUpdate: %v", err)
 	}
 	assertNoNotifyStatus(t, (*activeSent)[activeBefore:], params.InsufficientAspResources)
-	assertNotifyStatus(t, (*withdrawingSent)[withdrawingBefore:], params.InsufficientAspResources)
-	assertNotifyStatus(t, (*inactiveSent)[inactiveBefore:], params.InsufficientAspResources)
+	// Restating the same transition must not advise a second time.
+	assertNotifyStatusCount(t, (*withdrawingSent)[withdrawingBefore:], params.InsufficientAspResources, 1)
+	assertNotifyStatusCount(t, (*inactiveSent)[inactiveBefore:], params.InsufficientAspResources, 1)
 	if got := applicationServer.State(); got != ASActive {
 		t.Fatalf("state after shortage publication = %v, want %v", got, ASActive)
 	}
@@ -1268,6 +1272,20 @@ func assertNotifyStatus(t *testing.T, sent []messages.M3UA, want uint32) {
 		}
 	}
 	t.Fatalf("Notify status %#x not found in %v", want, typeNames(sent))
+}
+
+func assertNotifyStatusCount(t *testing.T, sent []messages.M3UA, want uint32, count int) {
+	t.Helper()
+	found := 0
+	for _, message := range sent {
+		notify, ok := message.(*messages.Notify)
+		if ok && notify.Status != nil && notify.Status.Status() == want {
+			found++
+		}
+	}
+	if found != count {
+		t.Fatalf("Notify status %#x appeared %d times in %v, want %d", want, found, typeNames(sent), count)
+	}
 }
 
 func assertNoNotifyStatus(t *testing.T, sent []messages.M3UA, unwanted uint32) {

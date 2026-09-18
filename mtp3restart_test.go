@@ -542,8 +542,11 @@ func TestMTP3RestartStatusPrecedesAspActiveAck(t *testing.T) {
 		t.Fatalf("handle ASP Active: %v", err)
 	}
 	written := sent.snapshot()
-	if got := typeNames(written); !reflect.DeepEqual(got, []string{"Destination Unavailable", "ASP Active Ack"}) {
-		t.Fatalf("pre-Ack restart messages = %v, want [Destination Unavailable ASP Active Ack]", got)
+	// RFC 4666 Section 4.6 puts the restart's isolation state before the Ack
+	// that activates the ASP, and Section 4.3.4.5 puts the AS-state Notify
+	// after it.
+	if got := typeNames(written); !reflect.DeepEqual(got, []string{"Destination Unavailable", "ASP Active Ack", "Notify"}) {
+		t.Fatalf("restart messages = %v, want [Destination Unavailable ASP Active Ack Notify]", got)
 	}
 	assertRestartScope(t, written[0], destination)
 
