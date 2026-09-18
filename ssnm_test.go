@@ -1264,3 +1264,47 @@ func TestSignallingStatusResolvesTheDimensionInItsOwnRoutingContext(t *testing.T
 		Congestion:   CongestionState{Congested: true, Level: 2, LevelSet: true},
 	})
 }
+
+// TestDUPUStatusLeavesTheDestinationStateAlone pins the one status that reports
+// neither dimension. RFC 4666 Section 3.4.5 has DUPU report that a user part at
+// an otherwise reachable destination is unavailable, so it writes no record and
+// its status carries no claim about the destination — not even the claim that
+// would be read back from what an earlier DUNA left behind. The MTP3-User acts
+// on UserCause, and queries the destination separately if it needs it.
+func TestDUPUStatusLeavesTheDestinationStateAlone(t *testing.T) {
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
+	const pointCode = 0x222222
+
+	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, nil, params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+	)); err != nil {
+		t.Fatalf("handleDestinationUnavailable: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{Availability: DestinationUnavailable})
+
+	if err := conn.handleDestinationUserPartUnavailable(
+		messages.NewDestinationUserPartUnavailable(
+			nil, nil, params.NewAffectedPointCodeWithMask(0, pointCode),
+			params.NewUserCause(params.SCCP, params.Unequipped), nil,
+		),
+	); err != nil {
+		t.Fatalf("handleDestinationUserPartUnavailable: %v", err)
+	}
+
+	select {
+	case status := <-conn.SignallingStatus():
+		if !status.UserPartUnavailable {
+			t.Fatal("DUPU status did not report an unavailable user part")
+		}
+		if status.State != (DestinationNetworkState{}) {
+			t.Fatalf("DUPU status carried destination state %+v, want none", status.State)
+		}
+	default:
+		t.Fatal("no destination status was published for the DUPU")
+	}
+
+	// The DUNA still stands underneath it: DUPU changed nothing it is retained.
+	if got := retainedAvailability(conn, pointCode); got != DestinationUnavailable {
+		t.Fatalf("retained availability after the DUPU = %v, want %v", got, DestinationUnavailable)
+	}
+}
