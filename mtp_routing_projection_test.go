@@ -1647,3 +1647,69 @@ func TestDifferentOriginatingPointCodesAreDifferentFlows(t *testing.T) {
 		t.Fatalf("second MTPTransfer: %v", err)
 	}
 }
+
+// The congestion policy filters candidates the route could otherwise use. It
+// runs last and it runs on nothing else: a policy that permits every level
+// still cannot make an unavailable destination or an inactive Application
+// Server carry traffic.
+func TestCongestionPolicyCannotRescueAnUnusableCandidate(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.CongestionPolicy = func(uint8, uint8, bool) bool { return true }
+	useSignallingGateways(config, "sg-a")
+	endpoint, associations, captures := newUnreportedASPTransferFixture(t, config)
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 1, nil)}
+
+	applyASPDUNA(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+	_, err := endpoint.MTPTransfer(request)
+	var selection *MTPSelectionError
+	if !errors.As(err, &selection) || len(selection.Rejections) != 1 ||
+		selection.Rejections[0].Reason != MTPCandidateUnavailable {
+		t.Fatalf("unavailable candidate under a permissive policy = %v", err)
+	}
+
+	applyASPDAVA(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+	associations["sg-a/sgp-a1"].noteRoutingContextsUnacked(params.NewRoutingContext(1))
+	_, err = endpoint.MTPTransfer(request)
+	if !errors.As(err, &selection) || len(selection.Rejections) != 1 ||
+		selection.Rejections[0].Reason != MTPCandidateNotActive {
+		t.Fatalf("inactive candidate under a permissive policy = %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 0 {
+		t.Fatal("a permissive congestion policy carried traffic the route could not")
+	}
+}
+
+// A DUPU is about an MTP3-User at a destination, not about the destination. It
+// leaves the destination's own availability exactly where it was, which for a
+// destination nobody has reported on is unknown.
+func TestUserPartUnavailabilityIsNotADestinationState(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	useSignallingGateways(config, "sg-a")
+	endpoint, associations, captures := newUnreportedASPTransferFixture(t, config)
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 1, nil)}
+
+	if err := associations["sg-a/sgp-a1"].handleDestinationUserPartUnavailable(
+		messages.NewDestinationUserPartUnavailable(
+			params.NewNetworkAppearance(7), params.NewRoutingContext(1),
+			params.NewAffectedPointCode(pointCode), params.NewUserCause(3, 2), nil),
+	); err != nil {
+		t.Fatalf("handleDestinationUserPartUnavailable: %v", err)
+	}
+	if _, err := endpoint.MTPTransfer(request); !errors.Is(err, ErrDestinationStateUnknown) {
+		t.Fatalf("error after a DUPU = %v, want ErrDestinationStateUnknown", err)
+	}
+
+	// The destination's own availability still comes from the availability
+	// messages, and the DUPU neither installed nor blocks one.
+	applyASPDAVA(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+	if _, err := endpoint.MTPTransfer(request); err != nil {
+		t.Fatalf("MTPTransfer after the destination was reported available: %v", err)
+	}
+	if captures["sg-a/sgp-a1"].count() != 1 {
+		t.Fatalf("captured %d messages, want 1", captures["sg-a/sgp-a1"].count())
+	}
+}
