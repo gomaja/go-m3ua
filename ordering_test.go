@@ -51,7 +51,7 @@ func writeRetrying(t *testing.T, c *Association, b []byte, stream uint16) {
 
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		_, err := c.WriteToStream(b, stream)
+		_, err := writePayloadToStream(c, 1, stream, b)
 		if err == nil {
 			return
 		}
@@ -191,7 +191,7 @@ func TestSignallingIsAnsweredWhileDataFlows(t *testing.T) {
 	// is about dispatcher starvation rather than the EAGAIN limit above.
 	const burst = 150
 	for i := 0; i < burst; i++ {
-		if _, err := asps[0].asp.WriteToStream([]byte("flood"), 1); err != nil {
+		if _, err := writePayloadToStream(asps[0].asp, 1, 1, []byte("flood")); err != nil {
 			t.Fatalf("flood write %d: %v", i, err)
 		}
 	}
@@ -328,7 +328,6 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)
-	conn.cfg.OriginatingPointCode = 0x11111111
 
 	// newTestConn's dataChan holds 8; overflow it.
 	for i := 0; i < 64; i++ {
@@ -359,15 +358,17 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 		t.Fatalf("no SCON was sent on local congestion (sent %v)", typeNames(*sent))
 	}
 	// Affected Point Code is Mandatory (Section 3.4.4), and the congested node
-	// is this one.
+	// is this one — named by the Destination Point Code of the traffic being
+	// discarded, which is the node that traffic was travelling to (Section
+	// 3.3.1). The flood above is addressed to 0x22222222.
 	if scon.AffectedPointCode == nil {
 		t.Fatal("SCON carried no Affected Point Code, which the RFC makes Mandatory")
 	}
 	// The Affected PC field is 24 bits with an 8-bit Mask above it (Section
-	// 3.4.1), so the configured 0x11111111 cannot be carried whole: what goes
-	// on the wire is its low 24 bits, under a Mask of 0 naming this one node.
-	if got := scon.AffectedPointCode.AffectedPointCodes(); len(got) != 1 || got[0] != 0x111111 {
-		t.Errorf("SCON named point codes %#v, want [0x111111] (this node's)", got)
+	// 3.4.1), so 0x22222222 cannot be carried whole: what goes on the wire is
+	// its low 24 bits, under a Mask of 0 naming this one node.
+	if got := scon.AffectedPointCode.AffectedPointCodes(); len(got) != 1 || got[0] != 0x222222 {
+		t.Errorf("SCON named point codes %#v, want [0x222222] (this node's)", got)
 	}
 	if got := scon.AffectedPointCode.AffectedPointCodeMasks(); len(got) != 1 || got[0] != 0 {
 		t.Errorf("SCON Mask = %v, want [0]: one node, not a range", got)
@@ -382,7 +383,6 @@ func TestLocalCongestionSCONIsSentOncePerEpisode(t *testing.T) {
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)
-	conn.cfg.OriginatingPointCode = 0x11111111
 
 	drain := func() {
 		for {

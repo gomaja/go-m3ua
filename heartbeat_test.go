@@ -105,11 +105,7 @@ func TestHeartbeatTimerDefaultsToTwiceTheInterval(t *testing.T) {
 		{"both unset leaves BEATs off", 0, 0, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := newASPAssociationConfigForTest(
-				&HeartbeatInfo{Enabled: true, Interval: tt.interval, Timer: tt.timer},
-				0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-				[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
-			)
+			cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: true, Interval: tt.interval, Timer: tt.timer}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 			conn := newAssociation(RoleASP, cfg)
 
 			if got := conn.hb.Timer; got != tt.want {

@@ -75,14 +75,14 @@ func TestPeerAbortIsDetectedOnceTrafficResumes(t *testing.T) {
 	// accepted by the local stack; what must not happen is writes succeeding
 	// indefinitely onto an association that no longer exists.
 	if !waitFor(func() bool {
-		_, _ = conn.Write([]byte("after-abort"))
+		_, _ = writePayload(conn, 1, []byte("after-abort"))
 		return conn.State() != StateASPActive
 	}, 15*time.Second) {
 		t.Fatalf("state is still %v fifteen seconds after the peer aborted, with traffic flowing", conn.State())
 	}
 
-	if _, err := conn.Write([]byte("after-abort")); err == nil {
-		t.Error("Write still succeeds after the association was torn down")
+	if _, err := writePayload(conn, 1, []byte("after-abort")); err == nil {
+		t.Error("WriteData still succeeds after the association was torn down")
 	}
 }
 
@@ -125,7 +125,7 @@ func TestRedialAfterPeerAbortEstablishes(t *testing.T) {
 	peer.abort(t)
 	// Traffic-driven detection, as above.
 	if !waitFor(func() bool {
-		_, _ = first.Write([]byte("after-abort"))
+		_, _ = writePayload(first, 1, []byte("after-abort"))
 		return first.State() != StateASPActive
 	}, 15*time.Second) {
 		t.Fatalf("first Association is still %v after the abort", first.State())
@@ -138,8 +138,8 @@ func TestRedialAfterPeerAbortEstablishes(t *testing.T) {
 	if got := second.State(); got != StateASPActive {
 		t.Errorf("redialled Association state = %v, want %v", got, StateASPActive)
 	}
-	if _, err := second.Write([]byte("after-redial")); err != nil {
-		t.Errorf("Write on the redialled Association: %v", err)
+	if _, err := writePayload(second, 1, []byte("after-redial")); err != nil {
+		t.Errorf("WriteData on the redialled Association: %v", err)
 	}
 	if got := first.State(); got == StateASPActive {
 		t.Error("the aborted Association reports ASP-ACTIVE again; a dead Association must stay dead")

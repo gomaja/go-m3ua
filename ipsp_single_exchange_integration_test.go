@@ -94,7 +94,14 @@ func exerciseIPSPSingleExchangeIntegration(t *testing.T, sctpInitiator, aspsmIni
 	if sctpInitiator == "IPSP-B" {
 		associationA, associationB = acceptedAssociation, dialed
 	}
-	if associationA.State() != StateASPActive || associationB.State() != StateASPActive {
+	// Dial and Accept now return once each side's own configured ASP procedures
+	// are finished, and a peer that initiates neither exchange has nothing of
+	// its own to finish. RFC 4666 Section 5.6.2 still requires the Single
+	// Exchange to end with both peers ASP-ACTIVE, whichever side started each
+	// exchange, so that is what is waited for.
+	if !waitFor(func() bool {
+		return associationA.State() == StateASPActive && associationB.State() == StateASPActive
+	}, 5*time.Second) {
 		t.Fatalf("established states: IPSP-A=%s IPSP-B=%s", associationA.State(), associationB.State())
 	}
 
@@ -125,13 +132,16 @@ func exerciseIPSPSingleExchangeIntegration(t *testing.T, sctpInitiator, aspsmIni
 	}
 }
 
-func integrationIPSPConfig(opc, dpc uint32, initiateASPSM, initiateASPTM bool) *AssociationConfig {
-	config := NewAssociationConfig(opc, dpc, params.ServiceIndSCCP, 0, 0, 1)
+// The point-code parameters are kept for the call sites that still name which
+// two nodes an association joins, but no longer reach the configuration: RFC
+// 4666 Section 3.3.1 puts the whole MTP3 routing label in each DATA message, so
+// an Association holds no point codes of its own.
+func integrationIPSPConfig(_, _ uint32, initiateASPSM, initiateASPTM bool) *AssociationConfig {
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{
 		ExchangeModel: IPSPExchangeSingle,
-		InitiateASPSM: initiateASPSM,
-		InitiateASPTM: initiateASPTM,
 	}
+	config.ASPProcedures = ipspInitiationPolicy(initiateASPSM, initiateASPTM)
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeLoadshare)
 	config.NetworkAppearance = params.NewNetworkAppearance(7)
 	config.RoutingContexts = params.NewRoutingContext(1)
@@ -143,13 +153,15 @@ func integrationIPSPConfig(opc, dpc uint32, initiateASPSM, initiateASPTM bool) *
 
 func assertIPSPTransfer(t *testing.T, sender, receiver *Association, payload []byte) {
 	t.Helper()
-	if _, err := sender.Write(payload); err != nil {
+	// The DATA names the association's own Application Server: RFC 4666 Section
+	// 3.3.1 carries that scope in the message itself.
+	if _, err := writePayload(sender, 1, payload); err != nil {
 		t.Fatalf("write IPSP DATA %q: %v", payload, err)
 	}
 	data := make(chan *DataMessage, 1)
 	errs := make(chan error, 1)
 	go func() {
-		message, err := receiver.ReadData()
+		message, err := receiver.ReadData(context.Background())
 		if err != nil {
 			errs <- err
 			return
@@ -161,11 +173,11 @@ func assertIPSPTransfer(t *testing.T, sender, receiver *Association, payload []b
 		if string(message.ProtocolData.Data) != string(payload) {
 			t.Fatalf("received IPSP DATA %q, want %q", message.ProtocolData.Data, payload)
 		}
-		if !message.NetworkAppearanceSet || message.NetworkAppearance != 7 ||
-			!message.RoutingContextSet || message.RoutingContext != 1 {
+		if !message.Scope.NetworkAppearanceSet || message.Scope.NetworkAppearance != 7 ||
+			!message.Scope.RoutingContextSet || wireRoutingContext(message.Scope) != 1 {
 			t.Fatalf("received IPSP DATA scope = NA(%v,%d) RC(%v,%d)",
-				message.NetworkAppearanceSet, message.NetworkAppearance,
-				message.RoutingContextSet, message.RoutingContext)
+				message.Scope.NetworkAppearanceSet, message.Scope.NetworkAppearance,
+				message.Scope.RoutingContextSet, wireRoutingContext(message.Scope))
 		}
 	case err := <-errs:
 		t.Fatalf("read IPSP DATA: %v", err)

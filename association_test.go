@@ -58,23 +58,9 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		errChan     = make(chan error, 1)
 	)
 
-	srvCfg := newSGPAssociationConfigForTest(
-		srvHB,
-		0x22222222,                  // OriginatingPointCode
-		0x11111111,                  // DestinationPointCode
-		1,                           // AspIdentifier
-		params.TrafficModeLoadshare, // TrafficModeType
-		0,                           // NetworkAppearance
-		0,                           // CorrelationID
-		[]uint32{1, 2},              // RoutingContexts
-		params.ServiceIndSCCP,       // ServiceIndicator
-		0,                           // NetworkIndicator
-		0,                           // MessagePriority
-		1,                           // SignalingLinkSelection
-	)
+	srvCfg := newSGPAssociationConfigForTest(srvHB, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	// set nil on unnecessary parameters.
 	srvCfg.ASPIdentifier = nil
-	srvCfg.CorrelationID = nil
 
 	// setup SCTP peer on the specified IPs and Port.
 	raddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
@@ -108,22 +94,8 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		srvConnChan <- srvConn
 	}()
 
-	cliCfg := newASPAssociationConfigForTest(
-		cliHB,
-		0x11111111,                  // OriginatingPointCode
-		0x22222222,                  // DestinationPointCode
-		1,                           // AspIdentifier
-		params.TrafficModeLoadshare, // TrafficModeType
-		0,                           // NetworkAppearance
-		0,                           // CorrelationID
-		[]uint32{1, 2},              // RoutingContexts
-		params.ServiceIndSCCP,       // ServiceIndicator
-		0,                           // NetworkIndicator
-		0,                           // MessagePriority
-		1,                           // SignalingLinkSelection
-	)
+	cliCfg := newASPAssociationConfigForTest(cliHB, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	// set nil on unnecessary parameters.
-	cliCfg.CorrelationID = nil
 
 	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -150,12 +122,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 		// Two Routing Contexts are coordinated, so each DATA has to name the
 		// one identifying its traffic flow (RFC 4666 Section 3.3.1). These
 		// tests are not about distribution across Application Servers, so both
-		// ends pick the same one.
-		for _, c := range []*Association{cliConn, srvConn} {
-			if err := c.SelectRoutingContext(1); err != nil {
-				return nil, nil, err
-			}
-		}
+		// ends name the same one on every message; see writePayload.
 
 		return cliConn, srvConn, nil
 	case err := <-errChan:
@@ -220,16 +187,15 @@ func TestDuplicateAspUpIsAcked(t *testing.T) {
 	}
 
 	msg := []byte{0xde, 0xad, 0xbe, 0xef}
-	if _, err := cliConn.Write(msg); err != nil {
+	if _, err := writePayload(cliConn, 1, msg); err != nil {
 		t.Fatalf("write after duplicate ASP Up: %v", err)
 	}
 
-	buf := make([]byte, 1024)
-	n, err := srvConn.Read(buf)
+	received, err := srvConn.ReadData(context.Background())
 	if err != nil {
 		t.Fatalf("read after duplicate ASP Up: %v", err)
 	}
-	if diff := cmp.Diff(buf[:n], msg); diff != "" {
+	if diff := cmp.Diff(received.ProtocolData.Data, msg); diff != "" {
 		t.Error(diff)
 	}
 }
@@ -245,7 +211,7 @@ func TestHeartbeatKeepsAssociationAlive(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	hb := func() *HeartbeatInfo { return NewHeartbeatInfo(50*time.Millisecond, 2*time.Second, nil) }
+	hb := func() *HeartbeatInfo { return NewHeartbeatInfo(50*time.Millisecond, 2*time.Second) }
 	cliConn, srvConn, err := setupConnHB(t, ctx, 2907, hb(), hb())
 	if err != nil {
 		t.Fatal(err)
@@ -266,15 +232,14 @@ func TestHeartbeatKeepsAssociationAlive(t *testing.T) {
 	}
 
 	msg := []byte{0xde, 0xad, 0xbe, 0xef}
-	if _, err := cliConn.Write(msg); err != nil {
+	if _, err := writePayload(cliConn, 1, msg); err != nil {
 		t.Fatalf("write after heartbeat soak: %v", err)
 	}
-	buf := make([]byte, 1024)
-	n, err := srvConn.Read(buf)
+	received, err := srvConn.ReadData(context.Background())
 	if err != nil {
 		t.Fatalf("read after heartbeat soak: %v", err)
 	}
-	if diff := cmp.Diff(buf[:n], msg); diff != "" {
+	if diff := cmp.Diff(received.ProtocolData.Data, msg); diff != "" {
 		t.Error(diff)
 	}
 }
@@ -294,34 +259,33 @@ func TestReadWrite(t *testing.T) {
 	}()
 
 	msg := []byte{0xde, 0xad, 0xbe, 0xef}
-	buf := make([]byte, 1024)
 
 	t.Run("ASP-write", func(t *testing.T) {
-		if _, err := cliConn.Write(msg); err != nil {
+		if _, err := writePayload(cliConn, 1, msg); err != nil {
 			t.Fatal(err)
 		}
 
-		n, err := srvConn.Read(buf)
+		received, err := srvConn.ReadData(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if diff := cmp.Diff(buf[:n], msg); diff != "" {
+		if diff := cmp.Diff(received.ProtocolData.Data, msg); diff != "" {
 			t.Error(diff)
 		}
 	})
 
 	t.Run("SGP-write", func(t *testing.T) {
-		if _, err := srvConn.Write(msg); err != nil {
+		if _, err := writePayload(srvConn, 1, msg); err != nil {
 			t.Fatal(err)
 		}
 
-		n, err := cliConn.Read(buf)
+		received, err := cliConn.ReadData(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if diff := cmp.Diff(buf[:n], msg); diff != "" {
+		if diff := cmp.Diff(received.ProtocolData.Data, msg); diff != "" {
 			t.Error(diff)
 		}
 	})

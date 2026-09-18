@@ -100,26 +100,48 @@ func mcAddr(port int, ips ...string) *sctp.SCTPAddr {
 // mcSGPConfig is the SGP AssociationConfig used by the Listener. It is
 // deliberately shared across every accepted association.
 func mcSGPConfig() *AssociationConfig {
-	cfg := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)
+	cfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	cfg.ASPIdentifier = nil
-	cfg.CorrelationID = nil
 	return cfg
 }
 
-// mcASPConfig is an ASP AssociationConfig with its own originating point code, so
-// the two ASPs in these tests are distinguishable.
+// mcASPConfig is an ASP AssociationConfig identified by its own point code, so
+// the two ASPs in these tests are distinguishable. The same value is the
+// Originating Point Code their DATA travels under: RFC 4666 Section 3.3.1 puts
+// the whole MTP3 routing label in the message, so the point code is named per
+// write (see mcWrite) rather than held on the association.
 func mcASPConfig(opc uint32) *AssociationConfig {
-	cfg := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		opc, 0x22222222, opc, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, opc, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	return cfg
+}
+
+const (
+	// mcSGPPointCode is the SGP end's own point code in these tests, and
+	// mcASPPointCode the point code it addresses its ASPs by. Each ASP sends
+	// from the distinct point code mcASPConfig gave it, towards the SGP.
+	mcSGPPointCode = 0x22222222
+	mcASPPointCode = 0x11111111
+)
+
+// mcProtocolData is one DATA's complete MTP3 routing label and user octets.
+func mcProtocolData(opc, dpc uint32, payload string) params.ProtocolDataPayload {
+	return params.ProtocolDataPayload{
+		OriginatingPointCode:    opc,
+		DestinationPointCode:    dpc,
+		ServiceIndicator:        params.ServiceIndSCCP,
+		SignallingLinkSelection: 1,
+		Data:                    []byte(payload),
+	}
+}
+
+// mcWrite sends one DATA under an explicit routing label, for the Application
+// Server the association coordinates. The sender's point code travels on the
+// message, so traffic stays attributable to the end that sent it.
+func mcWrite(c *Association, opc, dpc uint32, payload string) (int, error) {
+	return c.WriteData(DataRequest{
+		AS:           associationScope(c, 1),
+		ProtocolData: mcProtocolData(opc, dpc, payload),
+	})
 }
 
 // mcListen starts an M3UA listener, skipping the test where SCTP is absent.
@@ -141,6 +163,7 @@ func mcListen(t *testing.T, laddr *sctp.SCTPAddr) *Listener {
 type mcASP struct {
 	asp *Association // the ASP role
 	sgp *Association // the SGP role
+	opc uint32       // the ASP's own point code, carried by its DATA
 }
 
 // mcConnect brings up n ASPs against ln, one at a time so each Accept is
@@ -211,7 +234,8 @@ func mcConnectWithASPIdentifierBase(
 
 	asps := make([]mcASP, 0, len(aspIPs))
 	for i, ip := range aspIPs {
-		asp, err := dialASP(ctx, "m3ua", mcAddr(port+1+i, ip), raddr, mcASPConfig(identifierBase+uint32(i)))
+		opc := identifierBase + uint32(i)
+		asp, err := dialASP(ctx, "m3ua", mcAddr(port+1+i, ip), raddr, mcASPConfig(opc))
 		if err != nil {
 			t.Fatalf("ASP #%d failed to establish: %v", i+1, err)
 		}
@@ -226,13 +250,9 @@ func mcConnectWithASPIdentifierBase(
 			// Both ends coordinate two Routing Contexts, so each has to name
 			// the one its DATA belongs to (Section 3.3.1). These tests are
 			// about the association, not about distribution across Application
-			// Servers, so both pick the same one.
-			for _, association := range []*Association{asp, a.association} {
-				if err := association.SelectRoutingContext(1); err != nil {
-					t.Fatalf("SelectRoutingContext: %v", err)
-				}
-			}
-			asps = append(asps, mcASP{asp: asp, sgp: a.association})
+			// Servers, so every write on both ends names the same one; see
+			// mcWrite.
+			asps = append(asps, mcASP{asp: asp, sgp: a.association, opc: opc})
 		case <-time.After(15 * time.Second):
 			t.Fatalf("Accept for ASP #%d never returned", i+1)
 		}
@@ -244,23 +264,11 @@ func mcConnectWithASPIdentifierBase(
 func readWithin(t *testing.T, association *Association, d time.Duration) (string, error) {
 	t.Helper()
 
-	type result struct {
-		s   string
-		err error
+	message, err := readPayload(association, d)
+	if err != nil {
+		return "", err
 	}
-	out := make(chan result, 1)
-	go func() {
-		buf := make([]byte, 4096)
-		n, err := association.Read(buf)
-		out <- result{string(buf[:n]), err}
-	}()
-
-	select {
-	case r := <-out:
-		return r.s, r.err
-	case <-time.After(d):
-		return "", fmt.Errorf("nothing arrived within %v", d)
-	}
+	return string(message.ProtocolData.Data), nil
 }
 
 // A second Accept must not disturb the association the first Accept returned.
@@ -300,7 +308,7 @@ func TestEachASPsTrafficArrivesOnItsOwnAssociation(t *testing.T) {
 
 	payloads := []string{"from-asp-1", "from-asp-2"}
 	for i, a := range asps {
-		if _, err := a.asp.Write([]byte(payloads[i])); err != nil {
+		if _, err := mcWrite(a.asp, a.opc, mcSGPPointCode, payloads[i]); err != nil {
 			t.Fatalf("ASP #%d write: %v", i+1, err)
 		}
 	}
@@ -328,7 +336,7 @@ func TestSGPWritesReachTheOwningASP(t *testing.T) {
 
 	payloads := []string{"to-asp-1", "to-asp-2"}
 	for i, a := range asps {
-		if _, err := a.sgp.Write([]byte(payloads[i])); err != nil {
+		if _, err := mcWrite(a.sgp, mcSGPPointCode, mcASPPointCode, payloads[i]); err != nil {
 			t.Fatalf("SGP association #%d write: %v", i+1, err)
 		}
 	}
@@ -361,7 +369,7 @@ func TestClosingOneAssociationLeavesTheOtherASPUsable(t *testing.T) {
 	if got := asps[1].sgp.State(); got != StateASPActive {
 		t.Errorf("SGP association #2 state = %v after closing #1, want %v", got, StateASPActive)
 	}
-	if _, err := asps[1].asp.Write([]byte("still-here")); err != nil {
+	if _, err := mcWrite(asps[1].asp, asps[1].opc, mcSGPPointCode, "still-here"); err != nil {
 		t.Fatalf("ASP #2 write after closing SGP association #1: %v", err)
 	}
 	got, err := readWithin(t, asps[1].sgp, 5*time.Second)
@@ -391,7 +399,7 @@ func TestConcurrentTrafficOnTwoASPsIsRaceFree(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for r := 0; r < rounds; r++ {
-				if _, err := fmt.Fprintf(a.asp, "asp%d-%d", i+1, r); err != nil {
+				if _, err := mcWrite(a.asp, a.opc, mcSGPPointCode, fmt.Sprintf("asp%d-%d", i+1, r)); err != nil {
 					t.Errorf("ASP #%d write %d: %v", i+1, r, err)
 					return
 				}
@@ -400,7 +408,7 @@ func TestConcurrentTrafficOnTwoASPsIsRaceFree(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for r := 0; r < rounds; r++ {
-				if _, err := fmt.Fprintf(a.sgp, "sgp%d-%d", i+1, r); err != nil {
+				if _, err := mcWrite(a.sgp, mcSGPPointCode, mcASPPointCode, fmt.Sprintf("sgp%d-%d", i+1, r)); err != nil {
 					t.Errorf("SGP association #%d write %d: %v", i+1, r, err)
 					return
 				}

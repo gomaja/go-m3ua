@@ -20,22 +20,25 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-func serve(association *m3ua.Association) {
+func serve(ctx context.Context, association *m3ua.Association) {
 	defer func() { _ = association.Close() }()
 
-	buf := make([]byte, m3ua.DefaultReadBufferSize)
 	for {
-		n, err := association.Read(buf)
+		message, err := association.ReadData(ctx)
 		if err != nil {
 			if errors.Is(err, m3ua.ErrNotEstablished) {
 				log.Printf("Closed M3UA association with: %s", association.RemoteAddr())
+				return
+			}
+			if ctx.Err() != nil {
 				return
 			}
 			log.Printf("Error reading from M3UA association: %s", err)
 			return
 		}
 
-		log.Printf("Read: %x", buf[:n])
+		log.Printf("Read %d octets for AS %+v on stream %d: %x",
+			len(message.ProtocolData.Data), message.AS, message.Stream, message.ProtocolData.Data)
 	}
 }
 
@@ -51,7 +54,7 @@ func acceptAssociations(ctx context.Context, listener *m3ua.Listener) error {
 			return err
 		}
 		log.Printf("Associated with: %s", association.RemoteAddr())
-		go serve(association)
+		go serve(ctx, association)
 	}
 }
 
@@ -67,14 +70,7 @@ func main() {
 		log.Fatal("accept-concurrency must be greater than zero")
 	}
 
-	config := m3ua.NewAssociationConfig(
-		0x22222222,            // OriginatingPointCode
-		0x11111111,            // DestinationPointCode
-		params.ServiceIndSCCP, // ServiceIndicator
-		0,                     // NetworkIndicator
-		0,                     // MessagePriority
-		1,                     // SignallingLinkSelection
-	).
+	config := m3ua.NewAssociationConfig().
 		EnableHeartbeat(*hbInt, *hbTimer).
 		SetTrafficModeType(params.TrafficModeLoadshare).
 		SetNetworkAppearance(0).

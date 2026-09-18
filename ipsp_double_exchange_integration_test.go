@@ -76,12 +76,8 @@ func exerciseIPSPDoubleExchangeIntegration(
 		trafficA = ipspIntegrationContextlessTraffic(10)
 		trafficB = ipspIntegrationContextlessTraffic(20)
 	}
-	configA := integrationIPSPDoubleExchangeConfig(
-		0x111111, 0x222222, aspsmExchange, initiateA, trafficA, trafficB,
-	)
-	configB := integrationIPSPDoubleExchangeConfig(
-		0x222222, 0x111111, aspsmExchange, initiateB, trafficB, trafficA,
-	)
+	configA := integrationIPSPDoubleExchangeConfig(aspsmExchange, initiateA, trafficA, trafficB)
+	configB := integrationIPSPDoubleExchangeConfig(aspsmExchange, initiateB, trafficB, trafficA)
 
 	listeningEndpoint, dialingEndpoint := endpointB, endpointA
 	listeningConfig, dialingConfig := configB, configA
@@ -156,7 +152,7 @@ func exerciseIPSPDoubleExchangeIntegration(
 	}
 	waitForIPSPState(t, associationA, IPSPState{TrafficToLocal: StateASPInactive, TrafficToPeer: StateASPActive})
 	waitForIPSPState(t, associationB, IPSPState{TrafficToLocal: StateASPActive, TrafficToPeer: StateASPInactive})
-	if _, err := associationB.Write([]byte("blocked-B-to-A")); !errors.Is(err, ErrNotEstablished) {
+	if _, err := writeToPeer(associationB, 11, []byte("blocked-B-to-A")); !errors.Is(err, ErrNotEstablished) {
 		t.Fatalf("B-to-A DATA after directional deactivation error = %v, want ErrNotEstablished", err)
 	}
 	assertIPSPDoubleExchangeTransfer(t, associationA, associationB, 20, 22, []byte("A-to-B-still-active"))
@@ -191,14 +187,18 @@ func exerciseOneIPSPTrafficDirection(
 	wantPeer := IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPActive}
 	blocked, sender, receiver := associationA, associationB, associationA
 	networkAppearance, routingContext := uint32(10), uint32(11)
+	// The blocked association's own peer-directed Routing Context, which is the
+	// opposite direction's: RFC 4666 Section 5.6.2 keeps the two independent.
+	blockedRoutingContext := uint32(22)
 	if !initiatedByA {
 		initiator, peer = associationB, associationA
 		blocked, sender, receiver = associationB, associationA, associationB
 		networkAppearance, routingContext = 20, 22
+		blockedRoutingContext = 11
 	}
 	waitForIPSPState(t, initiator, wantInitiator)
 	waitForIPSPState(t, peer, wantPeer)
-	if _, err := blocked.Write([]byte("inactive-direction")); !errors.Is(err, ErrNotEstablished) {
+	if _, err := writeToPeer(blocked, blockedRoutingContext, []byte("inactive-direction")); !errors.Is(err, ErrNotEstablished) {
 		t.Fatalf("DATA in inactive IPSP direction error = %v, want ErrNotEstablished", err)
 	}
 	assertIPSPDoubleExchangeTransfer(
@@ -217,17 +217,27 @@ func exerciseOneIPSPTrafficDirection(
 }
 
 func integrationIPSPDoubleExchangeConfig(
-	opc, dpc uint32,
 	aspsmExchange IPSPASPSMExchangeModel,
 	initiateASPSM bool,
 	trafficToLocal, trafficToPeer *IPSPTrafficConfig,
 ) *AssociationConfig {
-	config := NewAssociationConfig(opc, dpc, params.ServiceIndSCCP, 0, 0, 1)
+	config := NewAssociationConfig()
+	// RFC 4666 Section 5.6.2 lets either peer initiate: this IPSP starts the
+	// ASPSM exchange for its local direction only when the orientation under
+	// test says so, and always starts its own ASPTM.
+	aspUp := ASPProcedureExplicit
+	if initiateASPSM {
+		aspUp = ASPProcedureAutomatic
+	}
+	config.ASPProcedures = &ASPProcedurePolicy{
+		ASPUp:       aspUp,
+		ASPDown:     ASPProcedureAutomatic,
+		ASPActive:   ASPProcedureAutomatic,
+		ASPInactive: ASPProcedureAutomatic,
+	}
 	config.IPSP = &IPSPConfig{
 		ExchangeModel:  IPSPExchangeDouble,
 		ASPSMExchange:  aspsmExchange,
-		InitiateASPSM:  initiateASPSM,
-		InitiateASPTM:  true,
 		TrafficToLocal: trafficToLocal,
 		TrafficToPeer:  trafficToPeer,
 	}
@@ -271,13 +281,24 @@ func assertIPSPDoubleExchangeTransfer(
 	payload []byte,
 ) {
 	t.Helper()
-	if _, err := sender.Write(payload); err != nil {
+	// RFC 4666 Section 3.3.1 carries the scope per message: the sender names
+	// its peer-directed Application Server, which is the scope the receiver
+	// must then see on the wire.
+	if _, err := sender.WriteData(DataRequest{
+		AS: ASKey{
+			NetworkAppearance:    networkAppearance,
+			NetworkAppearanceSet: true,
+			RoutingContext:       routingContext,
+			RoutingContextSet:    true,
+		},
+		ProtocolData: testProtocolData(payload),
+	}); err != nil {
 		t.Fatalf("write IPSP DATA %q: %v", payload, err)
 	}
 	data := make(chan *DataMessage, 1)
 	errs := make(chan error, 1)
 	go func() {
-		message, err := receiver.ReadData()
+		message, err := receiver.ReadData(context.Background())
 		if err != nil {
 			errs <- err
 			return
@@ -289,11 +310,11 @@ func assertIPSPDoubleExchangeTransfer(
 		if string(message.ProtocolData.Data) != string(payload) {
 			t.Fatalf("received IPSP DATA %q, want %q", message.ProtocolData.Data, payload)
 		}
-		if !message.NetworkAppearanceSet || message.NetworkAppearance != networkAppearance ||
-			!message.RoutingContextSet || message.RoutingContext != routingContext {
+		if !message.Scope.NetworkAppearanceSet || message.Scope.NetworkAppearance != networkAppearance ||
+			!message.Scope.RoutingContextSet || wireRoutingContext(message.Scope) != routingContext {
 			t.Fatalf("received IPSP DATA scope = NA(%v,%d) RC(%v,%d), want NA(%d) RC(%d)",
-				message.NetworkAppearanceSet, message.NetworkAppearance,
-				message.RoutingContextSet, message.RoutingContext,
+				message.Scope.NetworkAppearanceSet, message.Scope.NetworkAppearance,
+				message.Scope.RoutingContextSet, wireRoutingContext(message.Scope),
 				networkAppearance, routingContext)
 		}
 	case err := <-errs:
@@ -310,13 +331,23 @@ func assertIPSPDoubleExchangeContextlessTransfer(
 	payload []byte,
 ) {
 	t.Helper()
-	if _, err := sender.Write(payload); err != nil {
+	// Section 3.3.1: "Where a Routing Key has not been coordinated between the
+	// SGP and ASP, sending of Routing Context is not required." The peer
+	// direction here coordinates none, so the scope is the Network Appearance
+	// alone.
+	if _, err := sender.WriteData(DataRequest{
+		AS: ASKey{
+			NetworkAppearance:    networkAppearance,
+			NetworkAppearanceSet: true,
+		},
+		ProtocolData: testProtocolData(payload),
+	}); err != nil {
 		t.Fatalf("write contextless IPSP DATA %q: %v", payload, err)
 	}
 	data := make(chan *DataMessage, 1)
 	errs := make(chan error, 1)
 	go func() {
-		message, err := receiver.ReadData()
+		message, err := receiver.ReadData(context.Background())
 		if err != nil {
 			errs <- err
 			return
@@ -334,10 +365,11 @@ func assertIPSPDoubleExchangeContextlessTransfer(
 	if string(message.ProtocolData.Data) != string(payload) {
 		t.Fatalf("received contextless IPSP DATA %q, want %q", message.ProtocolData.Data, payload)
 	}
-	if !message.NetworkAppearanceSet || message.NetworkAppearance != networkAppearance || message.RoutingContextSet {
+	if !message.Scope.NetworkAppearanceSet || message.Scope.NetworkAppearance != networkAppearance ||
+		message.Scope.RoutingContextSet {
 		t.Fatalf("received contextless IPSP DATA scope = NA(%v,%d) RC(%v,%d), want NA(%d) without RC",
-			message.NetworkAppearanceSet, message.NetworkAppearance,
-			message.RoutingContextSet, message.RoutingContext,
+			message.Scope.NetworkAppearanceSet, message.Scope.NetworkAppearance,
+			message.Scope.RoutingContextSet, wireRoutingContext(message.Scope),
 			networkAppearance)
 	}
 }

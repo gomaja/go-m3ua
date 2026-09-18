@@ -84,24 +84,13 @@ func (c *Association) aspProcedureMode(procedure aspProcedure) ASPProcedureMode 
 			return ASPProcedureExplicit
 		}
 	}
+	// An ASP with no policy keeps the historical lifecycle: Dial establishes
+	// traffic. An IPSP has no such default — RFC 4666 Section 5.6.2 lets either
+	// peer initiate each exchange — so its Association configuration is
+	// required to say, and validateAssociationConfigForRole refuses one that
+	// does not.
 	if c.role == RoleASP {
 		return ASPProcedureAutomatic
-	}
-	if c.role == RoleIPSP && c.cfg.IPSP != nil {
-		switch procedure {
-		case aspProcedureUp:
-			if c.cfg.IPSP.InitiateASPSM {
-				return ASPProcedureAutomatic
-			}
-			return ASPProcedureExplicit
-		case aspProcedureActive:
-			if c.cfg.IPSP.InitiateASPTM {
-				return ASPProcedureAutomatic
-			}
-			return ASPProcedureExplicit
-		case aspProcedureDown, aspProcedureInactive:
-			return ASPProcedureAutomatic
-		}
 	}
 	return ASPProcedureExplicit
 }

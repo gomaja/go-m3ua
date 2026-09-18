@@ -1159,11 +1159,7 @@ type distributionFixtureConfig struct {
 
 func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingContexts []uint32, configure func(*distributionFixtureConfig)) (*Listener, *applicationServer, *Association, *distributionCapture) {
 	t.Helper()
-	config := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false}, 1, 2, 0, trafficMode, 0, 0,
-		routingContexts, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	config.CorrelationID = nil
+	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 0, trafficMode, 0, routingContexts)
 	sgpConfig := &SGPConfig{}
 	applicationServerConfig := &ApplicationServerConfig{RecoveryTimer: time.Hour}
 	if configure != nil {
@@ -1193,8 +1189,11 @@ func addDistributionASP(t *testing.T, listener *Listener, state State, routingCo
 	t.Helper()
 	asp, _ := newTestConn(t, state, RoleSGP)
 	asp.cfg.RoutingContexts = params.NewRoutingContext(routingContexts...)
-	asp.cfg.CorrelationID = nil
 	asp.cfg.NetworkAppearance = listener.AssociationConfig.NetworkAppearance.Copy()
+	// A negotiated data stream, as an established association has: RFC 4666
+	// Section 1.4.7 rule 1 forbids DATA on stream 0, so an association that
+	// negotiated none has nowhere legal to deliver traffic.
+	asp.maxMessageStreamID = 4
 	asp.as = listener.as
 	asp.as.register(asp.configuredASKeys())
 	capture := new(distributionCapture)

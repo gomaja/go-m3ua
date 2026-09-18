@@ -30,7 +30,7 @@ func TestM3UAPPIDIsExportedAndUsedForSends(t *testing.T) {
 		t.Fatalf("M3UAPPID = %d, want the RFC-assigned value 3", M3UAPPID)
 	}
 
-	conn := newAssociation(RoleASP, NewAssociationConfig(1, 2, params.ServiceIndSCCP, 0, 0, 1))
+	conn := newAssociation(RoleASP, NewAssociationConfig())
 	if got := conn.sctpInfo.PPID; got != M3UAPPID {
 		t.Errorf("send template PPID = %d, want M3UAPPID (%d)", got, M3UAPPID)
 	}

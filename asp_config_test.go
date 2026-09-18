@@ -345,7 +345,7 @@ func TestAssociationConfigSnapshotsPeerSGPIdentity(t *testing.T) {
 		SignallingGateway:        "sg-a",
 		SignallingGatewayProcess: "sgp-a1",
 	}
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.PeerSGP = identity
 
 	snapshot := snapshotAssociationConfig(config)
@@ -362,7 +362,7 @@ func TestAssociationConfigSnapshotsPeerSGPIdentity(t *testing.T) {
 }
 
 func TestSGPAssociationRejectsPeerSGPIdentity(t *testing.T) {
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.PeerSGP = &SGPIdentity{
 		SignallingGateway:        "sg-a",
 		SignallingGatewayProcess: "sgp-a1",
@@ -377,7 +377,7 @@ func TestASPEndpointValidatesAssociationSGPIdentityAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
-	valid := NewAssociationConfig(0x111111, 0x123456, 3, 0, 0, 1)
+	valid := NewAssociationConfig()
 	valid.NetworkAppearance = params.NewNetworkAppearance(7)
 	valid.RoutingContexts = params.NewRoutingContext(1)
 	valid.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}

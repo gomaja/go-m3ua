@@ -9,9 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -29,7 +27,14 @@ import (
 // performs the conversion required for the SCTP ancillary data on the wire.
 const M3UAPPID uint32 = 3
 
-// Association is one M3UA association and satisfies net.Conn.
+// Association is one M3UA association.
+//
+// It is not a net.Conn and deliberately not a byte stream: M3UA is
+// message-oriented, and every DATA message carries its own MTP3 routing label,
+// Application Server scope and stream selection (RFC 4666 Section 3.3.1). The
+// I/O surface is WriteData and ReadData, which carry those per message. The
+// address, close and deadline operations remain, because they describe the
+// transport rather than the message.
 type Association struct {
 	// sctpConn is the SCTP association this Association owns.
 	//
@@ -310,15 +315,6 @@ type Association struct {
 	// selectedRC is the Routing Context outbound DATA names, when the
 	// association carries more than one.
 	//
-	// RFC 4666 Section 3.3.1 makes the parameter singular and says what it is
-	// for: "Where multiple Routing Keys and Routing Contexts are used across a
-	// common association, the Routing Context MUST be sent to identify the
-	// traffic flow". Which flow a payload belongs to is the caller's knowledge,
-	// not this package's, so with several configured the caller chooses through
-	// SelectRoutingContext. Guarded by muState.
-	selectedRC    uint32
-	selectedRCSet bool
-
 	destinations *destinations
 	// mtp3Restarts coordinates RFC 4666 Section 4.6 restart state for an SGP.
 	// It exists for both accepted and initiated SCTP associations so protocol
@@ -333,13 +329,21 @@ type Association struct {
 	// endpoint owns node-wide state and the complete Listener/Association
 	// lifecycle independently of SCTP association initiation.
 	endpoint *Endpoint
-	// readDeadline bounds Read, ReadPD and ReadData, as Unix nanoseconds with
+	// readDeadline bounds ReadData, as Unix nanoseconds with
 	// zero meaning none. See SetReadDeadline for why it is not pushed down to
 	// the SCTP socket.
 	readDeadline atomic.Int64
 	// dataOverflow records that the inbound DATA queue is full, so the
 	// condition is reported on its onset rather than per discarded payload.
 	dataOverflow atomic.Bool
+	// dataDiscarded counts inbound DATA payloads dropped because the queue was
+	// full. Cumulative for the life of the association, so an application can
+	// see loss it did not observe as it happened.
+	dataDiscarded atomic.Uint64
+	// epoch counts SCTP association restarts. Association.Epoch reports it as
+	// a one-based generation, so a hand-built Association still reports its
+	// first epoch rather than a zero that means nothing.
+	epoch atomic.Uint64
 	// malformedLogs bounds peer-triggered diagnostic logging per association.
 	malformedLogs malformedLogLimiter
 	// statusChan delivers SSNM destination state changes to the user. It is
@@ -755,366 +759,6 @@ func (c *Association) setUpSocket() error {
 	return nil
 }
 
-// DataMessage is one received DATA message: the MTP3 payload together with the
-// SS7 network and traffic flow the sending peer named for it.
-//
-// RFC 4666 Section 3.3.1 gives Network Appearance and Routing Context exactly
-// these jobs: Network Appearance identifies the SS7 network, while "Where
-// multiple Routing Keys and Routing Contexts are used across a common
-// association, the Routing Context MUST be sent to identify the traffic flow,
-// assisting in the internal distribution of Data messages" — so a receiver that
-// is handed the payload alone cannot perform the distribution those parameters
-// exist for, and cannot tell which network or flow to answer on either.
-type DataMessage struct {
-	// ProtocolData is the MTP3 payload and its routing label.
-	ProtocolData *params.ProtocolDataPayload
-
-	// NetworkAppearance is the SS7 network the DATA belongs to, valid only
-	// when NetworkAppearanceSet is true. Presence is separate because zero is
-	// a legitimate configured value and omission is permitted on a dedicated
-	// association.
-	NetworkAppearance    uint32
-	NetworkAppearanceSet bool
-
-	// RoutingContext is the traffic flow the DATA named, valid only when
-	// RoutingContextSet is true.
-	//
-	// The parameter is Conditional, so its absence is not a fault: "Where a
-	// Routing Key has not been coordinated between the SGP and ASP, sending of
-	// Routing Context is not required." A separate bool rather than a zero
-	// value, because 0 is a Routing Context a peer may legitimately use.
-	RoutingContext    uint32
-	RoutingContextSet bool
-}
-
-// Read reads data from the association.
-//
-// M3UA is message-oriented, so one Read yields the payload of one DATA message
-// and never joins two together. If b is too small for it, the payload is
-// truncated to fit and io.ErrShortBuffer is returned alongside the number of
-// bytes actually written: the remainder cannot be recovered, because the
-// message has already left the queue. Use ReadPD to take the payload whole
-// without sizing a buffer for it, or ReadData when Network Appearance or
-// Routing Context matters.
-//
-// Read used to return len(pd.Data) regardless of how much it had copied, so a
-// caller with a short buffer was told it had received more bytes than exist in
-// b — and the idiomatic b[:n] then panicked with a slice-bounds error, on data
-// chosen by the peer.
-func (c *Association) Read(b []byte) (n int, err error) {
-	d, err := c.ReadData()
-	if err != nil {
-		return 0, err
-	}
-
-	n = copy(b, d.ProtocolData.Data)
-	if n < len(d.ProtocolData.Data) {
-		return n, io.ErrShortBuffer
-	}
-	return n, nil
-}
-
-// ReadPD reads the next ProtocolDataPayload from the association.
-//
-// The Network Appearance and Routing Context the message named are not reported
-// here; use ReadData when the association carries more than one SS7 network or
-// traffic flow.
-func (c *Association) ReadPD() (pd *params.ProtocolDataPayload, err error) {
-	d, err := c.ReadData()
-	if err != nil {
-		return nil, err
-	}
-	return d.ProtocolData, nil
-}
-
-// ReadData reads the next DATA message from the association, reporting the
-// payload together with its Network Appearance and Routing Context.
-//
-// It is the read-side counterpart of the WithRoutingContext writes: an
-// application serving several networks or Routing Contexts over one association
-// needs this to distribute an inbound message to the right network and flow,
-// and to answer in the scope the request arrived on. Read and ReadPD take from
-// the same queue, so a caller that does not care about that scope can keep using
-// either.
-func (c *Association) ReadData() (*DataMessage, error) {
-	if !c.inboundDataActive() {
-		return nil, ErrNotEstablished
-	}
-
-	timeout, stop, expired := c.readTimeout()
-	if expired {
-		return nil, os.ErrDeadlineExceeded
-	}
-	defer stop()
-
-	select {
-	case d, ok := <-c.dataChan:
-		if !ok {
-			return nil, ErrNotEstablished
-		}
-		return d, nil
-	case <-timeout:
-		// Recoverable, unlike every other error here: the association is
-		// healthy and the caller may read again.
-		return nil, os.ErrDeadlineExceeded
-	case <-c.done:
-		return nil, ErrNotEstablished
-	}
-}
-
-// Write writes data to the association.
-//
-// A successful call returns len(b), as io.Writer requires: the payload is
-// wrapped in an M3UA DATA message before it goes out, but the count reported is
-// the caller's, not the message's.
-func (c *Association) Write(b []byte) (n int, err error) {
-	// Checked before choosing a stream: on an Association that never established,
-	// maxMessageStreamID is still zero and there is no stream to choose.
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	// One AssociationConfig, one SLS, so every Write shares a stream and stays ordered.
-	return c.WriteToStream(b, c.streamFor(c.cfg.SignallingLinkSelection))
-}
-
-// WriteWithRoutingContext writes data to the association, naming the traffic flow
-// it belongs to.
-//
-// This is the concurrency-safe form of SelectRoutingContext followed by Write.
-// RFC 4666 Section 3.3.1 makes the Routing Context a property of the message —
-// it identifies "the traffic flow" the payload belongs to — so on an association
-// carrying several flows it has to travel with the payload. Held on the Association
-// instead, a second goroutine's selection can land between this goroutine's
-// selection and its write, and the payload goes out naming the other flow.
-//
-// As with Write, a successful call returns len(b).
-func (c *Association) WriteWithRoutingContext(b []byte, rtCtx uint32) (n int, err error) {
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	return c.WriteToStreamWithRoutingContext(b, c.streamFor(c.cfg.SignallingLinkSelection), rtCtx)
-}
-
-// WriteToStream writes data to the association and specific stream.
-//
-// streamID must be between 1 and MaxMessageStreamID, inclusive. Stream 0
-// returns ErrNoDataStream; a value above the negotiated maximum returns an
-// *InvalidSCTPStreamIDError.
-//
-// As with Write, a successful call returns len(b): the count is the payload the
-// caller handed over, not the size of the M3UA message it was wrapped in.
-func (c *Association) WriteToStream(b []byte, streamID uint16) (n int, err error) {
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	return c.writeData(b, streamID, nil)
-}
-
-// WriteToStreamWithRoutingContext writes data on a specific stream, naming the
-// traffic flow it belongs to.
-//
-// See WriteWithRoutingContext for why the flow belongs on the message and
-// WriteToStream for the permitted stream range.
-func (c *Association) WriteToStreamWithRoutingContext(b []byte, streamID uint16, rtCtx uint32) (n int, err error) {
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	return c.writeData(b, streamID, &rtCtx)
-}
-
-// writeData is the shared body of the four payload writes. rtCtx names the
-// traffic flow for this one message, or is nil to fall back to the
-// association-wide selection.
-func (c *Association) writeData(b []byte, streamID uint16, rtCtx *uint32) (int, error) {
-	if err := c.checkDataStream(streamID); err != nil {
-		return 0, err
-	}
-	// NewData calls SetLength on each Param it is given, which writes to it, so
-	// no shared config Param may be handed over: the Network Appearance and
-	// Correlation ID are copies (resolveNetworkAppearanceScope returns an owned
-	// Param), and two goroutines sending concurrently never write to the same
-	// shared config Param.
-	rc, err := c.resolveRoutingContext(rtCtx)
-	if err != nil {
-		return 0, err
-	}
-	release, err := c.lockResolvedOutboundDataScope(rc)
-	if err != nil {
-		return 0, err
-	}
-	defer release()
-	d, err := messages.NewData(
-		c.networkAppearanceForRoutingContext(rc, false), rc, params.NewProtocolData(
-			c.cfg.OriginatingPointCode, c.cfg.DestinationPointCode,
-			c.cfg.ServiceIndicator, c.cfg.NetworkIndicator,
-			c.cfg.MessagePriority, c.cfg.SignallingLinkSelection, b,
-		), c.cfg.CorrelationID.Copy(),
-	).MarshalBinary()
-	if err != nil {
-		return 0, err
-	}
-
-	// taken by value to avoid race condition on the stream id
-	info := *c.sctpInfo
-	info.Stream = streamID
-	if _, err := c.writeSCTPData(d, &info); err != nil {
-		return 0, err
-	}
-
-	// io.Writer's contract: a successful Write reports the whole of b. The
-	// count used to be the encoded message length added to itself, which is
-	// both larger than b and unrelated to it.
-	return len(b), nil
-}
-
-// WritePD writes data with specific MTP3 Protocol Data to the association.
-//
-// A successful call reports the number of SS7 user octets carried inside
-// protocolData, so the count means the same thing as Write's.
-//
-// Marshalling the message writes the parameter's own length field, so one
-// *params.Param must not be shared by concurrent writes; build one per
-// goroutine (or per message) instead.
-func (c *Association) WritePD(protocolData *params.Param) (n int, err error) {
-	// As in Write: refuse before choosing a stream, since an unestablished
-	// Association has no negotiated stream count to choose from.
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	sls, userOctets, err := peelProtocolData(protocolData)
-	if err != nil {
-		return 0, fmt.Errorf("invalid protocol data: %w", err)
-	}
-
-	// The routing label travels with the message here rather than coming from
-	// AssociationConfig, so the stream follows this message's own SLS.
-	return c.writePD(protocolData, userOctets, c.streamFor(sls), nil)
-}
-
-// WritePDWithRoutingContext writes data with a specific mtp3 protocol data,
-// naming the traffic flow it belongs to.
-//
-// See WriteWithRoutingContext for why the flow belongs on the message. This is
-// the form to use when one association carries several Routing Contexts and
-// more than one goroutine writes to it. As with WritePD, each goroutine needs
-// its own *params.Param: marshalling writes the parameter's length field.
-func (c *Association) WritePDWithRoutingContext(protocolData *params.Param, rtCtx uint32) (n int, err error) {
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	sls, userOctets, err := peelProtocolData(protocolData)
-	if err != nil {
-		return 0, fmt.Errorf("invalid protocol data: %w", err)
-	}
-
-	return c.writePD(protocolData, userOctets, c.streamFor(sls), &rtCtx)
-}
-
-// WritePDToStream writes data with a specific mtp3 protocol data to the
-// association and specific stream.
-//
-// The stream range and errors are the same as WriteToStream.
-//
-// As with WritePD, a successful call reports the SS7 user octets carried.
-func (c *Association) WritePDToStream(protocolData *params.Param, streamID uint16) (n int, err error) {
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	// Peeled before the send so a Protocol Data with the wrong tag or a
-	// truncated value is refused rather than put on the wire, and so the
-	// reported count is the SS7 user octets carried. The stream is the
-	// caller's explicit choice here, so only the count is taken from the peel.
-	_, userOctets, err := peelProtocolData(protocolData)
-	if err != nil {
-		return 0, fmt.Errorf("invalid protocol data: %w", err)
-	}
-
-	return c.writePD(protocolData, userOctets, streamID, nil)
-}
-
-// WritePDToStreamWithRoutingContext writes data with a specific mtp3 protocol
-// data on a specific stream, naming the traffic flow it belongs to.
-//
-// See WriteWithRoutingContext for why the flow belongs on the message and
-// WriteToStream for the permitted stream range.
-func (c *Association) WritePDToStreamWithRoutingContext(protocolData *params.Param, streamID uint16, rtCtx uint32) (n int, err error) {
-	if c.State() != StateASPActive {
-		return 0, ErrNotEstablished
-	}
-
-	_, userOctets, err := peelProtocolData(protocolData)
-	if err != nil {
-		return 0, fmt.Errorf("invalid protocol data: %w", err)
-	}
-
-	return c.writePD(protocolData, userOctets, streamID, &rtCtx)
-}
-
-// peelProtocolData validates an outbound Protocol Data parameter and reports
-// the two things the send path needs from it: the Signalling Link Selection
-// that chooses the stream and the number of SS7 user octets it carries. Both
-// sit at fixed offsets in the serialized parameter, so reading them directly
-// spares decoding a ProtocolDataPayload — one allocation per message — that
-// the message construction itself never uses.
-func peelProtocolData(protocolData *params.Param) (sls uint8, userOctets int, err error) {
-	if protocolData.Tag != params.ProtocolData {
-		return 0, 0, params.ErrInvalidType
-	}
-	if len(protocolData.Data) < 12 {
-		return 0, 0, params.ErrTooShortToParse
-	}
-	return protocolData.Data[11], len(protocolData.Data) - 12, nil
-}
-
-// writePD is the shared body of the Protocol Data writes, taking the already
-// peeled user octet count so none of them has to parse it twice. rtCtx names
-// the traffic flow for this one message, or is nil to fall back to the
-// association-wide selection.
-func (c *Association) writePD(protocolData *params.Param, userOctets int, streamID uint16, rtCtx *uint32) (int, error) {
-	if err := c.checkDataStream(streamID); err != nil {
-		return 0, err
-	}
-
-	// Owned for the same reason as in writeData: NewData writes to every
-	// Param it is given, and the configuration's are shared across every send
-	// on this Association, so resolveNetworkAppearanceScope returns a Param
-	// the caller owns and the Correlation ID is copied.
-	rc, err := c.resolveRoutingContext(rtCtx)
-	if err != nil {
-		return 0, err
-	}
-	release, err := c.lockResolvedOutboundDataScope(rc)
-	if err != nil {
-		return 0, err
-	}
-	defer release()
-	d, err := messages.NewData(
-		c.networkAppearanceForRoutingContext(rc, false),
-		rc,           // the one context identifying this traffic flow
-		protocolData, // custom mtp3 protocol data OPC, DPC, SI, NI, MP, and SLS, flexible on active connections
-		c.cfg.CorrelationID.Copy(),
-	).MarshalBinary()
-	if err != nil {
-		return 0, err
-	}
-
-	// taken by value to avoid race condition on the stream id
-	info := *c.sctpInfo
-	info.Stream = streamID
-	if _, err := c.writeSCTPData(d, &info); err != nil {
-		return 0, err
-	}
-
-	return userOctets, nil
-}
-
 func (c *Association) writeSCTPData(data []byte, info *sctp.SndRcvInfo) (int, error) {
 	if c.dataWriter != nil {
 		return c.dataWriter(data, info)
@@ -1251,11 +895,12 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool) (n
 	if err := m3.MarshalTo(buf); err != nil {
 		return 0, fmt.Errorf("failed to create %T: %w", m3, err)
 	}
-	payloadData := isPayloadData(buf)
-	trafficScoped := payloadData || isSSNM(buf)
-	if enforceTrafficScope && payloadData && c.State() != StateASPActive {
-		return 0, ErrNotEstablished
+	// A caller-built DATA is admitted and classified exactly as WriteData's
+	// own messages are; only the reported count differs.
+	if isPayloadData(buf) {
+		return c.writeRawData(m3, buf, n, enforceTrafficScope)
 	}
+	trafficScoped := isSSNM(buf)
 
 	if c.signalWriter != nil {
 		if enforceTrafficScope && trafficScoped {
@@ -1268,12 +913,13 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool) (n
 		return c.signalWriter(m3)
 	}
 
-	// taken by value to avoid race condition on the stream id
+	// taken by value to avoid race condition on the stream id. Stream 0 is the
+	// template's, and every message that reaches here is a control message:
+	// RFC 4666 Section 1.4.7 rule 2 puts the ASPSM, MGMT and RKM classes on
+	// stream 0, and rule 3 permits the SSNM and ASPTM classes and BEAT, BEAT
+	// Ack and NTFY on any stream. DATA, which rule 1 forbids on stream 0, has
+	// already been handled above.
 	sctpInfo := *c.sctpInfo
-	sctpInfo.Stream, err = c.outboundSignalStream(buf)
-	if err != nil {
-		return 0, err
-	}
 	if enforceTrafficScope && trafficScoped {
 		release, err := c.lockOutboundTrafficScope(buf)
 		if err != nil {
@@ -1292,63 +938,7 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool) (n
 }
 
 func (c *Association) lockOutboundTrafficScope(raw []byte) (func(), error) {
-	if isPayloadData(raw) {
-		return c.lockOutboundDataScope(raw)
-	}
 	return c.lockOutboundSSNMScope(raw)
-}
-
-// lockOutboundDataScope validates the DATA traffic flow and, at an SGP, holds
-// that AS's delivery barrier across the socket write. ASP Inactive/Down first
-// removes the ASP from the AS and then waits for this lock, so its Ack cannot
-// overtake a direct public WriteSignal(DATA).
-func (c *Association) lockOutboundDataScope(raw []byte) (func(), error) {
-	decoded, err := messages.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid DATA: %w", err)
-	}
-	data, ok := decoded.(*messages.Data)
-	if !ok {
-		return nil, errors.New("transfer payload did not decode as DATA")
-	}
-	// In RFC 4666 Section 5.6.2 Double Exchange, this DATA belongs to the
-	// peer-directed traffic flow. Its Network Appearance is independent of the
-	// local-directed flow used by outbound SCON.
-	configuredNetworkAppearance, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(data.RoutingContext, false)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateOutboundNetworkAppearanceAgainst(
-		data.NetworkAppearance,
-		configuredNetworkAppearance,
-		allNetworkAppearances,
-	); err != nil {
-		return nil, err
-	}
-
-	configured := c.configuredRoutingContexts()
-	var rtCtx uint32
-	if data.RoutingContext == nil {
-		switch len(configured) {
-		case 0:
-			return c.lockResolvedOutboundDataScope(nil)
-		case 1:
-			rtCtx = configured[0]
-		default:
-			return nil, ErrMissingRoutingContext
-		}
-	} else {
-		routingContexts := data.RoutingContext.RoutingContexts()
-		if len(routingContexts) != 1 {
-			return nil, NewInvalidRoutingContextError(routingContexts...)
-		}
-		rtCtx = routingContexts[0]
-	}
-
-	if _, err := c.routingContextFor(rtCtx); err != nil {
-		return nil, err
-	}
-	return c.lockResolvedOutboundDataScope(params.NewRoutingContext(rtCtx))
 }
 
 func (c *Association) lockResolvedOutboundDataScope(routingContext *params.Param) (func(), error) {
@@ -1567,9 +1157,10 @@ func ssnmRoutingContext(message messages.M3UA) (*params.Param, bool) {
 }
 
 // lockOutboundApplicationServers admits direct traffic only while every named
-// Application Server is AS-ACTIVE. RFC 4666 Section 4.3.4.3 permits an SGP to
-// withhold traffic until n ASPs are ASP-ACTIVE; Association writes must honor
-// the same aggregate state as Endpoint distribution.
+// Application Server is AS-ACTIVE. An AS "becomes AS-ACTIVE right after n ASPs
+// reach the ASP-ACTIVE state during the startup phase" (RFC 4666 Section
+// 4.3.2), and Association writes must honor that same aggregate state as
+// Endpoint distribution does.
 func (c *Association) lockOutboundApplicationServers(routingContexts []uint32) (func(), error) {
 	if (c.role != RoleSGP && c.role != RoleIPSP) || c.as == nil {
 		return func() {}, nil
@@ -1672,45 +1263,11 @@ func (c *Association) writeNotifications() {
 	}
 }
 
-// outboundSignalStream chooses from the bytes that will actually be written,
-// not from interface methods a custom M3UA value could make disagree with its
-// encoded header. Management remains on stream 0. DATA follows the SLS in its
-// own Protocol Data, exactly as WritePD does, so mixing the two write APIs
-// cannot split one sequenced traffic flow across SCTP streams.
-func (c *Association) outboundSignalStream(raw []byte) (uint16, error) {
-	if len(raw) < 4 {
-		return 0, messages.ErrTooShortToParse
-	}
-	if !isPayloadData(raw) {
-		return 0, nil
-	}
-
-	decoded, err := messages.Parse(raw)
-	if err != nil {
-		if errors.Is(err, messages.ErrMissingParameter) {
-			return 0, ErrMissingProtocolData
-		}
-		return 0, fmt.Errorf("invalid DATA: %w", err)
-	}
-	data, ok := decoded.(*messages.Data)
-	if !ok {
-		return 0, errors.New("transfer payload did not decode as DATA")
-	}
-	if data.ProtocolData == nil {
-		return 0, ErrMissingProtocolData
-	}
-	pd, err := data.ProtocolData.ProtocolData()
-	if err != nil {
-		return 0, fmt.Errorf("invalid DATA Protocol Data: %w", err)
-	}
-
-	stream := c.streamFor(pd.SignallingLinkSelection)
-	if err := c.checkDataStream(stream); err != nil {
-		return 0, err
-	}
-	return stream, nil
-}
-
+// isPayloadData classifies from the bytes that will actually be written, not
+// from interface methods a custom M3UA value could make disagree with its
+// encoded header. DATA follows the SLS in its own Protocol Data, so mixing
+// WriteData and WriteSignal cannot split one sequenced traffic flow across SCTP
+// streams.
 func isPayloadData(raw []byte) bool {
 	return len(raw) >= 4 && raw[2] == messages.MsgClassTransfer &&
 		raw[3] == messages.MsgTypePayloadData
@@ -1846,7 +1403,7 @@ func (c *Association) SetDeadline(t time.Time) error {
 	return c.sctpConn.SetWriteDeadline(t)
 }
 
-// SetReadDeadline sets the deadline for future Read, ReadPD and ReadData calls.
+// SetReadDeadline sets the deadline for future ReadData calls.
 // A zero time removes it. An expired deadline makes those calls return
 // os.ErrDeadlineExceeded, which reports Timeout() true, and leaves the
 // association usable so the caller can read again.
@@ -1854,12 +1411,11 @@ func (c *Association) SetDeadline(t time.Time) error {
 // The deadline is kept here rather than pushed down to the SCTP socket. The only
 // reader of that socket is this package's own receive loop, which is meant to
 // wait indefinitely for the peer; a deadline reaching it did not bound the
-// caller's Read at all — Read has never consulted one — and instead expired the
-// receive loop, whose error path closes the association. Setting a read deadline
-// on an idle, healthy, ASP-ACTIVE association therefore tore it down, took the
-// state to ASP-DOWN, and turned every subsequent Read and Write into
-// ErrNotEstablished. That is the opposite of what net.Conn promises, where a
-// read timeout is recoverable.
+// caller's read at all and instead expired the receive loop, whose error path
+// closes the association. Setting a read deadline on an idle, healthy,
+// ASP-ACTIVE association therefore tore it down, took the state to ASP-DOWN,
+// and turned every subsequent read and write into ErrNotEstablished. A read
+// timeout is recoverable; losing the association is not.
 func (c *Association) SetReadDeadline(t time.Time) error {
 	c.setReadDeadline(t)
 	return nil
@@ -1892,7 +1448,7 @@ func (c *Association) readTimeout() (<-chan time.Time, func(), bool) {
 	return timer.C, func() { timer.Stop() }, false
 }
 
-// SetWriteDeadline sets the deadline for future Write calls.
+// SetWriteDeadline sets the deadline for future WriteData and WriteSignal calls.
 func (c *Association) SetWriteDeadline(t time.Time) error {
 	return c.sctpConn.SetWriteDeadline(t)
 }
@@ -2285,11 +1841,6 @@ func (c *Association) dynamicRoutingContexts(local bool) []uint32 {
 	return routingContexts
 }
 
-func (c *Association) networkAppearanceForRoutingContext(routingContext *params.Param, local bool) *params.Param {
-	networkAppearance, _, _ := c.resolveNetworkAppearanceScope(routingContext, local)
-	return networkAppearance
-}
-
 // resolveNetworkAppearanceScope resolves the Network Appearance outbound
 // traffic for the given Routing Contexts must carry. The returned Param is
 // owned by the caller — freshly built or copied, never the shared
@@ -2609,55 +2160,6 @@ func (c *Association) setResumeTo(s State) {
 	c.resumeTo = s
 }
 
-// SelectRoutingContext chooses which Routing Context outbound DATA names by
-// default.
-//
-// It sets association state, so it suits a caller that carries one traffic flow
-// per association. It is NOT a way to switch flows from message to message:
-// where several goroutines write to one Association, a second goroutine's selection can
-// land between this goroutine's selection and its write, and the payload goes
-// out naming the other flow — a silent mis-identification of exactly the thing
-// Section 3.3.1 requires the parameter to get right. Callers sending for more
-// than one flow use the WithRoutingContext writes, which carry the context on
-// the message it describes.
-//
-// It is needed only when several Routing Contexts are configured for the
-// association. RFC 4666 Section 3.3.1 declares the parameter singular —
-// "Routing Context: 32 bits (unsigned integer)" — and requires it to pick one
-// flow out of several: "Where multiple Routing Keys and Routing Contexts are
-// used across a common association, the Routing Context MUST be sent to
-// identify the traffic flow, assisting in the internal distribution of Data
-// messages." Sending the whole configured set instead identifies nothing.
-//
-// With one Routing Context configured there is nothing to choose and DATA uses
-// it; with none, the parameter is omitted, which the same section permits:
-// "Where a Routing Key has not been coordinated between the SGP and ASP,
-// sending of Routing Context is not required."
-//
-// The context must be one of those configured for this association.
-func (c *Association) SelectRoutingContext(rtCtx uint32) error {
-	configured := c.configuredRoutingContexts()
-	for _, rc := range configured {
-		if rc == rtCtx {
-			c.muState.Lock()
-			c.selectedRC, c.selectedRCSet = rtCtx, true
-			c.muState.Unlock()
-			return nil
-		}
-	}
-	return NewInvalidRoutingContextError(rtCtx)
-}
-
-// resolveRoutingContext returns the Routing Context parameter for one DATA:
-// the flow the caller named for that message, or the association-wide selection
-// when it named none.
-func (c *Association) resolveRoutingContext(rtCtx *uint32) (*params.Param, error) {
-	if rtCtx == nil {
-		return c.dataRoutingContext()
-	}
-	return c.routingContextFor(*rtCtx)
-}
-
 // routingContextFor returns the Routing Context parameter naming one traffic
 // flow, for a caller that has said which flow this message belongs to.
 //
@@ -2746,35 +2248,6 @@ func (c *Association) outboundRoutingContextActive(rtCtx uint32) bool {
 		return c.activeForRoutingContext(rtCtx) && !c.routingContextOverridden(rtCtx)
 	}
 	return c.routingContextAcked(rtCtx) && !c.routingContextOverridden(rtCtx)
-}
-
-// dataRoutingContext returns the Routing Context parameter to put on a DATA, or
-// nil if none is due.
-//
-// It reports an error only in the case the RFC leaves no default for: several
-// Routing Contexts coordinated on the association and none chosen, where any
-// choice this package made would be a guess at which traffic flow the payload
-// belongs to.
-func (c *Association) dataRoutingContext() (*params.Param, error) {
-	configured := c.configuredRoutingContexts()
-
-	switch {
-	case len(configured) == 0:
-		// Conditional, and no Routing Key has been coordinated: omit it. A
-		// zero-length parameter is not the same thing — it names no context
-		// while still claiming to.
-		return nil, nil
-	case len(configured) == 1:
-		return c.routingContextFor(configured[0])
-	}
-
-	c.muState.RLock()
-	rc, ok := c.selectedRC, c.selectedRCSet
-	c.muState.RUnlock()
-	if !ok {
-		return nil, ErrAmbiguousRoutingContext
-	}
-	return c.routingContextFor(rc)
 }
 
 // setState replaces the Association's state without going through the dispatcher.

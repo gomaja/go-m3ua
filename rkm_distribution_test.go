@@ -24,7 +24,7 @@ func TestSGPDistributionResolvesOmittedRoutingContextFromRegisteredRoutingKey(t 
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -80,6 +80,9 @@ func TestSGPDistributionResolvesOmittedRoutingContextFromRegisteredRoutingKey(t 
 		t.Fatal("registered Application Server is missing")
 	}
 	association.noteRoutingContextsActive([]uint32{routingContext})
+	// An established association has negotiated streams for DATA: RFC 4666
+	// Section 1.4.7 rule 1 leaves nowhere legal to send it otherwise.
+	association.maxMessageStreamID = 4
 	association.muState.Lock()
 	association.state = StateASPActive
 	association.muState.Unlock()
@@ -286,7 +289,7 @@ func TestSGPDistributesExplicitRoutingContextForDynamicallyRegisteredAllNetworkA
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -328,6 +331,9 @@ func TestSGPDistributesExplicitRoutingContextForDynamicallyRegisteredAllNetworkA
 		t.Fatal("registered Application Server is missing")
 	}
 	association.noteRoutingContextsActive([]uint32{routingContext})
+	// An established association has negotiated streams for DATA: RFC 4666
+	// Section 1.4.7 rule 1 leaves nowhere legal to send it otherwise.
+	association.maxMessageStreamID = 4
 	association.muState.Lock()
 	association.state = StateASPActive
 	association.muState.Unlock()

@@ -24,7 +24,7 @@ func TestRoutingKeyRegistryRegistrationStatusesAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 
 	request := RoutingKeyRegistrationRequest{LocalRoutingKeyIdentifier: 1, RoutingKey: provisionedKey}
 	result := registry.register(association, []RoutingKeyRegistrationRequest{request})[0]
@@ -68,7 +68,7 @@ func TestRoutingKeyRegistryReportsStaticMembershipAlreadyRegistered(t *testing.T
 			if err != nil {
 				t.Fatalf("newRoutingKeyRegistry: %v", err)
 			}
-			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			config := NewAssociationConfig()
 			config.NetworkAppearance = params.NewNetworkAppearance(10)
 			config.RoutingContexts = params.NewRoutingContext(7)
 			association := newAssociation(RoleSGP, config)
@@ -105,7 +105,7 @@ func TestRoutingKeyRegistryIgnoresUnsetNetworkAppearanceValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	requestKey := snapshotRoutingKey(provisionedKey)
 	requestKey.NetworkAppearance = 0
 	provisionedCanonical, err := canonicalizeRoutingKey(provisionedKey)
@@ -148,7 +148,7 @@ func TestRoutingKeyRegistryPartialBatchIsAtomicAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 
 	results := registry.register(association, []RoutingKeyRegistrationRequest{
 		{LocalRoutingKeyIdentifier: 1, RoutingKey: testRoutingKey(10, 100, 3, 5)},
@@ -200,7 +200,7 @@ func TestRoutingKeyRegistryRequestedRoutingContextAndAllocatorFailures(t *testin
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 
 	results := registry.register(association, []RoutingKeyRegistrationRequest{
 		{
@@ -244,7 +244,7 @@ func TestRoutingKeyRegistryRejectsAssociationRoutingContextAppearanceCollision(t
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 	association.cfg.RoutingContexts = params.NewRoutingContext(7)
 
@@ -278,7 +278,7 @@ func TestRoutingKeyRegistryAllowsSameRoutingContextAppearanceOnAnotherAssociatio
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.cfg.NetworkAppearance = params.NewNetworkAppearance(20)
 	association.cfg.RoutingContexts = params.NewRoutingContext(7)
 
@@ -304,7 +304,7 @@ func TestRoutingKeyRegistryRejectsConflictingTrafficModeForExistingKey(t *testin
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	requested := testRoutingKey(10, 100, 3)
 	requested.TrafficMode = params.TrafficModeBroadcast
 	requested.TrafficModeSet = true
@@ -336,8 +336,8 @@ func TestRoutingKeyRegistryAdoptsFirstTrafficModeForUnspecifiedProvisionedKey(t 
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	first := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
-	second := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	first := newAssociation(RoleSGP, NewAssociationConfig())
+	second := newAssociation(RoleSGP, NewAssociationConfig())
 	loadshare := snapshotRoutingKey(provisioned)
 	loadshare.TrafficMode = params.TrafficModeLoadshare
 	loadshare.TrafficModeSet = true
@@ -377,7 +377,7 @@ func TestRoutingKeyRegistryRejectsTrafficModeConflictingWithLiveApplicationServe
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
 	applicationServers := newApplicationServers(time.Hour)
-	incumbent := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	incumbent := newAssociation(RoleSGP, NewAssociationConfig())
 	incumbent.as = applicationServers
 	registered := registry.register(incumbent, []RoutingKeyRegistrationRequest{{
 		LocalRoutingKeyIdentifier: 1,
@@ -394,7 +394,7 @@ func TestRoutingKeyRegistryRejectsTrafficModeConflictingWithLiveApplicationServe
 
 	for _, requestedRoutingContext := range []bool{false, true} {
 		t.Run(fmt.Sprintf("requested Routing Context %t", requestedRoutingContext), func(t *testing.T) {
-			challenger := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			challenger := newAssociation(RoleSGP, NewAssociationConfig())
 			challenger.as = applicationServers
 			conflicting := snapshotRoutingKey(provisioned)
 			conflicting.TrafficMode = params.TrafficModeBroadcast
@@ -429,7 +429,7 @@ func TestRoutingKeyRegistryAdoptsTrafficModeIntoLiveApplicationServer(t *testing
 	}
 	applicationServers := newApplicationServers(time.Hour)
 	applicationServer := applicationServers.get(key)
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.as = applicationServers
 	requested := snapshotRoutingKey(provisioned)
 	requested.TrafficMode = params.TrafficModeLoadshare
@@ -466,7 +466,7 @@ func TestRoutingKeyRegistryIsolatesLiveTrafficModeConflictWithinBatch(t *testing
 			}
 			applicationServers := newApplicationServers(time.Hour)
 			applicationServers.get(key).setTrafficMode(params.TrafficModeLoadshare)
-			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association := newAssociation(RoleSGP, NewAssociationConfig())
 			association.as = applicationServers
 			conflicting := snapshotRoutingKey(provisioned)
 			conflicting.TrafficMode = params.TrafficModeBroadcast
@@ -503,7 +503,7 @@ func TestRoutingKeyRegistryReportsUnprovisionedWhenDynamicCreationIsDisabled(t *
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	result := registry.register(association, []RoutingKeyRegistrationRequest{{
 		LocalRoutingKeyIdentifier: 1,
 		RoutingKey:                testRoutingKey(10, 100, 3),
@@ -661,8 +661,8 @@ func TestRoutingKeyRegistryDeregistrationStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	owner := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
-	other := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	owner := newAssociation(RoleSGP, NewAssociationConfig())
+	other := newAssociation(RoleSGP, NewAssociationConfig())
 	registered := registry.register(owner, []RoutingKeyRegistrationRequest{{
 		LocalRoutingKeyIdentifier: 1,
 		RoutingKey:                testRoutingKey(10, 100, 3),
@@ -707,7 +707,7 @@ func TestRoutingKeyRegistryReplaysSuccessfulProvisionedDeregistration(t *testing
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	registered := registry.register(association, []RoutingKeyRegistrationRequest{{
 		LocalRoutingKeyIdentifier: 1,
 		RoutingKey:                routingKey,
@@ -729,7 +729,7 @@ func TestRoutingKeyRegistryReplaysSuccessfulProvisionedDeregistration(t *testing
 func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierWhenScopesConverge(t *testing.T) {
 	applicationServers := newApplicationServers(time.Hour)
 	newPeer := func(routingContext, identifier uint32) *Association {
-		association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleSGP, NewAssociationConfig())
 		association.as = applicationServers
 		association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
 		association.savePeerASPIdentifier(params.NewAspIdentifier(identifier))
@@ -784,7 +784,7 @@ func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierWhenScopesConverge(t *te
 func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierFromStaticApplicationServerMember(t *testing.T) {
 	applicationServers := newApplicationServers(time.Hour)
 	newStaticPeer := func(routingContext, identifier uint32) *Association {
-		association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleSGP, NewAssociationConfig())
 		association.as = applicationServers
 		association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
 		association.cfg.RoutingContexts = params.NewRoutingContext(routingContext)
@@ -838,7 +838,7 @@ func TestRoutingKeyRegistrySerializesASPIdentifierClaimsWithRegistration(t *test
 		}
 		endpoint := &Endpoint{as: applicationServers, routingKeys: registry}
 		newPeer := func(routingContext uint32) *Association {
-			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association := newAssociation(RoleSGP, NewAssociationConfig())
 			association.endpoint = endpoint
 			association.as = applicationServers
 			association.cfg.NetworkAppearance = params.NewNetworkAppearance(10)
@@ -927,7 +927,7 @@ func TestRoutingKeyRegistryDeregistrationAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	registered := registry.register(association, []RoutingKeyRegistrationRequest{{
 		LocalRoutingKeyIdentifier: 1,
 		RoutingKey:                testRoutingKey(10, 100, 3),
@@ -964,7 +964,7 @@ func TestRoutingKeyRegistryPoliciesRunOutsideStateLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -1012,7 +1012,7 @@ func TestRoutingKeyRegistryRegistrationPoliciesCanCloseAssociation(t *testing.T)
 				t.Fatalf("NewEndpoint: %v", err)
 			}
 			defer func() { _ = endpoint.Close() }()
-			association = newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association = newAssociation(RoleSGP, NewAssociationConfig())
 			association.as = endpoint.as
 			if !endpoint.trackAssociation(association) {
 				t.Fatal("trackAssociation returned false")
@@ -1058,7 +1058,7 @@ func TestRoutingKeyRegistryDeregistrationPolicyCanCloseAssociation(t *testing.T)
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association = newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association = newAssociation(RoleSGP, NewAssociationConfig())
 	association.as = endpoint.as
 	if !endpoint.trackAssociation(association) {
 		t.Fatal("trackAssociation returned false")
@@ -1240,7 +1240,7 @@ func TestRoutingKeyRegistryReauthorizesDeregistrationAfterTrafficModeAdoption(t 
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	firstAssociation := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	firstAssociation := newAssociation(RoleSGP, NewAssociationConfig())
 	registerRoutingKeyForTest(t, registry, firstAssociation, 1, provisionedKey)
 
 	deregistrationDone := make(chan RoutingKeyDeregistrationResult, 1)
@@ -1253,7 +1253,7 @@ func TestRoutingKeyRegistryReauthorizesDeregistrationAfterTrafficModeAdoption(t 
 		t.Fatal("Deregistration authorization was not called")
 	}
 
-	secondAssociation := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	secondAssociation := newAssociation(RoleSGP, NewAssociationConfig())
 	requestKey := snapshotRoutingKey(provisionedKey)
 	requestKey.TrafficMode = params.TrafficModeLoadshare
 	requestKey.TrafficModeSet = true
@@ -1275,7 +1275,7 @@ func TestRoutingKeyRegistryReauthorizesDeregistrationAfterTrafficModeAdoption(t 
 
 func newTrackedRoutingKeyAssociation(t *testing.T, endpoint *Endpoint) *Association {
 	t.Helper()
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.as = endpoint.as
 	if !endpoint.trackAssociation(association) {
 		t.Fatal("trackAssociation returned false")
@@ -1320,7 +1320,7 @@ func TestRoutingKeyRegistrySerializesConcurrentRegistrations(t *testing.T) {
 		waitGroup.Add(1)
 		go func(index int) {
 			defer waitGroup.Done()
-			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association := newAssociation(RoleSGP, NewAssociationConfig())
 			results <- registry.register(association, []RoutingKeyRegistrationRequest{{
 				LocalRoutingKeyIdentifier: uint32(index + 1),
 				RoutingKey:                testRoutingKey(10, uint32(100+index), params.ServiceIndSCCP),
@@ -1376,7 +1376,7 @@ func TestRoutingKeyRegistryReallocatesAfterConcurrentCommit(t *testing.T) {
 	results := make(chan RoutingKeyRegistrationResult, 2)
 	for index := range 2 {
 		go func(index int) {
-			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association := newAssociation(RoleSGP, NewAssociationConfig())
 			results <- registry.register(association, []RoutingKeyRegistrationRequest{{
 				LocalRoutingKeyIdentifier: uint32(index + 1),
 				RoutingKey:                testRoutingKey(10, uint32(100+index), params.ServiceIndSCCP),
@@ -1408,7 +1408,7 @@ func TestRoutingKeyRegistryAllowsOnlyOneAllNetworkAppearancesKeyPerAssociation(t
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	first := testRoutingKey(0, 100, params.ServiceIndSCCP)
 	first.NetworkAppearanceSet = false
 	second := testRoutingKey(0, 200, params.ServiceIndISUP)
@@ -1432,7 +1432,7 @@ func TestRoutingKeyRegistryAllowsOnlyOneAllNetworkAppearancesKeyPerAssociation(t
 		t.Fatalf("all-appearance traffic matches = %v, configured = %t, want Routing Context %d", matches, configured, results[0].RoutingContext)
 	}
 
-	otherAssociation := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	otherAssociation := newAssociation(RoleSGP, NewAssociationConfig())
 	explicit := testRoutingKey(10, 300, params.ServiceIndSCCP)
 	allAppearances := testRoutingKey(0, 400, params.ServiceIndISUP)
 	allAppearances.NetworkAppearanceSet = false
@@ -1462,7 +1462,7 @@ func TestRoutingKeyRegistryBoundsDeregistrationReplayState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	var firstRoutingContext uint32
 	for index := 0; index <= deregistrationReplayLimit; index++ {
 		registration := registry.register(association, []RoutingKeyRegistrationRequest{{
@@ -1502,7 +1502,7 @@ func TestRoutingKeyRegistryNormalizesInvalidAuthorizationResults(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newRoutingKeyRegistry: %v", err)
 			}
-			association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association := newAssociation(RoleSGP, NewAssociationConfig())
 			result := registry.register(association, []RoutingKeyRegistrationRequest{{
 				LocalRoutingKeyIdentifier: 1,
 				RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
@@ -1526,7 +1526,7 @@ func TestRoutingKeyRegistryAcceptsWideOriginatingPointCodeMask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	key := testRoutingKey(10, 100, params.ServiceIndSCCP)
 	key.Groups[0].OriginatingPointCodes = []PointCodeRange{{PointCode: 0x123456, Mask: 25}}
 

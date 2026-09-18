@@ -27,7 +27,7 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 	for index := range routingContexts {
 		routingContexts[index] = 100 + uint32(index)
 	}
-	config := m3ua.NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := m3ua.NewAssociationConfig()
 	config.SetSCTPNoDelay(sctpNoDelay).
 		SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).
 		SetTrafficModeType(params.TrafficModeLoadshare).
@@ -171,7 +171,7 @@ func readAssociation(ctx context.Context, transportIndex int, association *m3ua.
 		}
 	}()
 	for {
-		message, err := association.ReadData()
+		message, err := association.ReadData(ctx)
 		if err != nil {
 			if ctx.Err() != nil || control.isStopped() && errors.Is(err, m3ua.ErrNotEstablished) {
 				return
@@ -187,10 +187,10 @@ func readAssociation(ctx context.Context, transportIndex int, association *m3ua.
 		}
 		received, outcome := control.record(transportIndex, receivedMessage{
 			ProtocolData:         protocolDataFromM3UA(message.ProtocolData),
-			NetworkAppearance:    message.NetworkAppearance,
-			NetworkAppearanceSet: message.NetworkAppearanceSet,
-			RoutingContext:       message.RoutingContext,
-			RoutingContextSet:    message.RoutingContextSet,
+			NetworkAppearance:    message.Scope.NetworkAppearance,
+			NetworkAppearanceSet: message.Scope.NetworkAppearanceSet,
+			RoutingContext:       firstRoutingContext(message.Scope),
+			RoutingContextSet:    message.Scope.RoutingContextSet,
 		})
 		if outcome != recordUnique || !control.echoMode() {
 			continue
@@ -210,9 +210,7 @@ func writeEchoReply(association *m3ua.Association, identity messageIdentity, siz
 	identity.Kind = kindEchoReply
 	payload := buildPayload(identity, size)
 	tuple := reverseTuple(tupleFor(identity.Flow, identity.Association))
-	protocolDataParam := params.NewProtocolData(tuple.OriginatingPointCode, tuple.DestinationPointCode,
-		tuple.ServiceIndicator, tuple.NetworkIndicator, tuple.MessagePriority, tuple.SignallingLinkSelection, payload)
-	written, err := association.WritePDWithRoutingContext(protocolDataParam, tuple.RoutingContext)
+	written, err := association.WriteData(tuple.dataRequest(payload))
 	if err != nil {
 		return err
 	}
@@ -220,6 +218,16 @@ func writeEchoReply(association *m3ua.Association, identity messageIdentity, siz
 		return fmt.Errorf("echo reply wrote %d bytes, want %d", written, size)
 	}
 	return nil
+}
+
+// firstRoutingContext is the single Routing Context a DATA may name. RFC 4666
+// Section 3.3.1 defines exactly one for DATA, and the library refuses any other
+// count before delivery.
+func firstRoutingContext(scope m3ua.WireScope) uint32 {
+	if len(scope.RoutingContexts) == 0 {
+		return 0
+	}
+	return scope.RoutingContexts[0]
 }
 
 func protocolDataFromM3UA(payload *params.ProtocolDataPayload) protocolData {

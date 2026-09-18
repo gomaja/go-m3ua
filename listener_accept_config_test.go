@@ -239,7 +239,7 @@ func selectedAcceptConfig(networkAppearance uint32, heartbeatInterval time.Durat
 	config := mcSGPConfig()
 	config.RoutingContexts = params.NewRoutingContext(1)
 	config.NetworkAppearance = params.NewNetworkAppearance(networkAppearance)
-	config.HeartbeatInfo = NewHeartbeatInfo(heartbeatInterval, 2*heartbeatInterval, nil)
+	config.HeartbeatInfo = NewHeartbeatInfo(heartbeatInterval, 2*heartbeatInterval)
 	config.EstablishTimeout = 5 * time.Second
 	config.TAck = 100 * time.Millisecond
 	config.TAckRetries = 5

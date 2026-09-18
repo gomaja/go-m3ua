@@ -67,14 +67,7 @@ association. Role-specific setters must then match the Endpoint; this ASP
 example sets an ASP Identifier:
 
 ```go
-config := m3ua.NewAssociationConfig(
-    0x111111, // OriginatingPointCode
-    0x222222, // DestinationPointCode
-    params.ServiceIndSCCP, // ServiceIndicator
-    0,                     // NetworkIndicator
-    0,                     // MessagePriority
-    1,                     // SignallingLinkSelection
-)
+config := m3ua.NewAssociationConfig()
 config.
     EnableHeartbeat(3*time.Second, 10*time.Second).
     SetTrafficModeType(params.TrafficModeLoadshare).
@@ -83,10 +76,14 @@ config.
 config.SetASPIdentifier(1) // ASP-only
 ```
 
+The configuration holds no message defaults. Every DATA carries its own MTP3
+routing label, Application Server scope and Correlation Id, as RFC 4666 Section
+3.3.1 defines them, so there is nothing about a message for an association to
+hold.
+
 An IPSP Association must select an RFC 4666 Section 4.3 exchange model
-explicitly. Single Exchange and Double Exchange are supported. The ASPSM and
-ASPTM initiators are independent because RFC 4666 permits either IPSP to
-initiate either exchange:
+explicitly, and must state which procedures it initiates: RFC 4666 permits
+either IPSP to initiate either exchange, so there is no role-implied default.
 
 ```go
 ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleIPSP})
@@ -94,10 +91,12 @@ if err != nil {
     log.Fatal(err)
 }
 
-config.IPSP = &m3ua.IPSPConfig{
-    ExchangeModel: m3ua.IPSPExchangeSingle,
-    InitiateASPSM: true,
-    InitiateASPTM: false,
+config.IPSP = &m3ua.IPSPConfig{ExchangeModel: m3ua.IPSPExchangeSingle}
+config.ASPProcedures = &m3ua.ASPProcedurePolicy{
+    ASPUp:       m3ua.ASPProcedureAutomatic,
+    ASPDown:     m3ua.ASPProcedureAutomatic,
+    ASPActive:   m3ua.ASPProcedureExplicit,
+    ASPInactive: m3ua.ASPProcedureAutomatic,
 }
 ```
 
@@ -109,8 +108,6 @@ Sections 4.3 and 5.6.2:
 config.IPSP = &m3ua.IPSPConfig{
     ExchangeModel: m3ua.IPSPExchangeDouble,
     ASPSMExchange: m3ua.IPSPASPSMExchangeDouble,
-    InitiateASPSM: true,
-    InitiateASPTM: true,
     TrafficToLocal: &m3ua.IPSPTrafficConfig{
         TrafficModeType: params.NewTrafficModeType(params.TrafficModeLoadshare),
         NetworkAppearance: params.NewNetworkAppearance(10),
@@ -124,11 +121,11 @@ config.IPSP = &m3ua.IPSPConfig{
 }
 ```
 
-With the normal `IPSPASPSMExchangeDouble` procedure, `InitiateASPSM` requires
-`TrafficToLocal`, because that ASP Up establishes the direction in which the
-peer sends DATA to the local IPSP. The agreed
-`IPSPASPSMExchangeSingle` simplification may establish both directions with
-one ASP Up exchange. `InitiateASPTM` always requires `TrafficToLocal`.
+With the normal `IPSPASPSMExchangeDouble` procedure, an automatic `ASPUp`
+requires `TrafficToLocal`, because that ASP Up establishes the direction in
+which the peer sends DATA to the local IPSP. The agreed
+`IPSPASPSMExchangeSingle` simplification may establish both directions with one
+ASP Up exchange. An automatic `ASPActive` always requires `TrafficToLocal`.
 
 `TrafficToLocal` is the traffic the peer sends to this IPSP after this IPSP's
 ASP Up/ASP Active procedures succeed. `TrafficToPeer` is the traffic this IPSP
@@ -141,10 +138,10 @@ nil direction is disabled. `Association.IPSPState()` reports both directions.
 by RFC 4666 Section 4.3; ASPTM and DATA remain independently directional.
 See the [Double Exchange design](./docs/design/ipsp-double-exchange.md).
 
-`InitiateASPSM` and `InitiateASPTM` do not describe SCTP initiation. The same
-IPSP configuration works with `Dial` or with `Listen`/`Accept`; the remote IPSP
-uses its own Association policy. At least one IPSP must initiate each required
-exchange; both may initiate, and simultaneous exchanges are supported.
+`ASPProcedures` does not describe SCTP initiation. The same IPSP configuration
+works with `Dial` or with `Listen`/`Accept`; the remote IPSP uses its own
+Association policy. At least one IPSP must initiate each required exchange; both
+may initiate, and simultaneous exchanges are supported.
 
 `HeartbeatInfo` controls RFC 4666 M3UA BEAT/BEAT Ack liveness only. It is
 separate from SCTP HEARTBEAT path management, which remains transport/kernel
@@ -278,18 +275,56 @@ for indication := range endpoint.MTPIndications() {
 }
 ```
 
-Association-level reads remain the DATA receive API:
+Association-level `WriteData` and `ReadData` are the canonical DATA API. A
+request names its Application Server scope exactly and carries the whole MTP3
+routing label, so concurrent senders on one association never take each other's
+scope:
 
 ```go
+written, err := association.WriteData(m3ua.DataRequest{
+    AS: m3ua.ASKey{
+        NetworkAppearance:    7,
+        NetworkAppearanceSet: true,
+        RoutingContext:       1,
+        RoutingContextSet:    true,
+    },
+    ProtocolData: params.ProtocolDataPayload{
+        OriginatingPointCode:    0x111111,
+        DestinationPointCode:    0x222222,
+        ServiceIndicator:        params.ServiceIndSCCP,
+        SignallingLinkSelection: 1,
+        Data:                    payload,
+    },
+})
+```
 
-buf := make([]byte, m3ua.DefaultReadBufferSize)
-n, err := association.Read(buf)
+`written` is the SS7 user octets accepted by the local transport; RFC 4666
+defines no acknowledgement for DATA, so it is never a claim about delivery.
+Every failure is a `*m3ua.DataWriteError` whose `Outcome` is `DataNotSent` —
+nothing reached the transport, so a resend cannot duplicate — or
+`DataSendIndeterminate`, where submission had begun and the application owns the
+retry decision. `errors.Is` and `errors.As` still reach the cause.
+
+A zero `Stream` selects the negotiated stream this message's own Signalling
+Link Selection maps to, which is what keeps one SLS in sequence (Section 1.4.7);
+an explicit stream is validated against the negotiated maximum, and stream 0 is
+never used for DATA.
+
+```go
+message, err := association.ReadData(ctx)
 if err != nil {
     log.Fatal(err)
 }
 
-log.Printf("Successfully read M3UA data: %x", buf[:n])
+log.Printf("DATA for %+v arrived on stream %d: %x",
+    message.AS, message.Stream, message.ProtocolData.Data)
 ```
+
+Cancelling `ctx` ends that one read: the association stays open and nothing
+queued is discarded. `message.Scope` is the Network Appearance and Routing
+Context exactly as the peer sent them, `message.AS` is the Application Server
+they resolve to, and `message.Epoch` is the SCTP association epoch the message
+arrived in.
 
 See the [SGP example](./examples/sgp) for accepting SCTP associations.
 

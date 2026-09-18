@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
-	"github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-sctp"
 )
 
@@ -135,9 +134,8 @@ func TestDataOnADataStreamIsDeliveredNormally(t *testing.T) {
 	ln := mcListen(t, mcAddr(port, "127.0.0.1"))
 	asps := mcConnect(t, ctx, ln, mcAddr(port, "127.0.0.1"), []string{"127.0.0.2"}, port)
 
-	pd := params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("on-a-data-stream"))
-	if _, err := asps[0].asp.WritePD(pd); err != nil {
-		t.Fatalf("WritePD: %v", err)
+	if _, err := writePayload(asps[0].asp, 1, []byte("on-a-data-stream")); err != nil {
+		t.Fatalf("WriteData: %v", err)
 	}
 	got, err := readWithin(t, asps[0].sgp, 5*time.Second)
 	if err != nil {

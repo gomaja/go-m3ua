@@ -43,7 +43,7 @@ func TestSGPRegistrationAndDeregistrationProcedures(t *testing.T) {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -153,7 +153,7 @@ func TestRKMRegistrationDoesNotActivateNewApplicationServer(t *testing.T) {
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(10)
 	config.RoutingContexts = params.NewRoutingContext(5000)
 	association := newAssociation(RoleSGP, config)
@@ -230,7 +230,7 @@ func TestRKMRegistrationAfterUnscopedActivationRequiresNewASPActive(t *testing.T
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(10)
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
@@ -306,7 +306,7 @@ func TestRKMRegistrationAfterUnscopedActivationRequiresNewASPActive(t *testing.T
 }
 
 func TestRKMContextlessIPSPRemainsActiveAfterScopedOverride(t *testing.T) {
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	association := newAssociation(RoleIPSP, config)
 	association.muState.Lock()
@@ -363,7 +363,7 @@ func TestRKMAllocatorAvoidsConfiguredApplicationServerRoutingContexts(t *testing
 			}
 			defer func() { _ = endpoint.Close() }()
 
-			config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+			config := NewAssociationConfig()
 			config.NetworkAppearance = params.NewNetworkAppearance(10)
 			config.RoutingContexts = params.NewRoutingContext(1)
 			association := newAssociation(RoleSGP, config)
@@ -423,9 +423,9 @@ func TestAssociationRegistrationAndDeregistrationAPI(t *testing.T) {
 	}
 	defer func() { _ = aspEndpoint.Close() }()
 
-	asp := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	asp := newAssociation(RoleASP, NewAssociationConfig())
 	asp.endpoint = aspEndpoint
-	sgp := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	sgp := newAssociation(RoleSGP, NewAssociationConfig())
 	sgp.endpoint = sgpEndpoint
 	sgp.as = sgpEndpoint.as
 	for _, association := range []*Association{asp, sgp} {
@@ -492,7 +492,7 @@ func TestRKMRoleAndDisabledPolicyHandling(t *testing.T) {
 	}
 	message := messages.NewRegistrationRequest(request)
 
-	asp := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	asp := newAssociation(RoleASP, NewAssociationConfig())
 	if err := asp.handleRegistrationRequest(message); err == nil {
 		t.Fatal("ASP accepted a Registration Request")
 	} else {
@@ -507,7 +507,7 @@ func TestRKMRoleAndDisabledPolicyHandling(t *testing.T) {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	sgp := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	sgp := newAssociation(RoleSGP, NewAssociationConfig())
 	sgp.endpoint = endpoint
 	if err := sgp.handleRegistrationRequest(message); err == nil {
 		t.Fatal("SGP without RKM policy accepted a Registration Request")
@@ -533,7 +533,7 @@ func TestRKMResponderRejectsRequestsBeforeASPUpCompletes(t *testing.T) {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.signalWriter = func(message messages.M3UA) (int, error) {
 		t.Fatalf("wrote %T before ASP Up completed", message)
@@ -588,7 +588,7 @@ func TestRoutingKeyRegistrationAuthorizerReceivesRemotePeerRole(t *testing.T) {
 			}
 			defer func() { _ = endpoint.Close() }()
 
-			association := newAssociation(test.local, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+			association := newAssociation(test.local, NewAssociationConfig())
 			association.endpoint = endpoint
 			association.muState.Lock()
 			association.state = StateASPInactive
@@ -622,7 +622,7 @@ func TestRKMResponderAppliesImpliedAssociationNetworkAppearance(t *testing.T) {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(10)
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
@@ -667,7 +667,7 @@ func TestRKMResponderAppliesImpliedAssociationNetworkAppearance(t *testing.T) {
 }
 
 func TestRKMRequesterUsesImpliedNetworkAppearanceWithoutAddingItToRequest(t *testing.T) {
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(20)
 	association := newAssociation(RoleASP, config)
 	association.muState.Lock()
@@ -702,10 +702,13 @@ func TestRKMRequesterUsesImpliedNetworkAppearanceWithoutAddingItToRequest(t *tes
 }
 
 func TestRKMAllNetworkAppearancesAcceptsExplicitDataAppearance(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.addDynamicASKey(ASKey{RoutingContext: 9, RoutingContextSet: true}, RoutingKey{
 		Groups: []RoutingKeyGroup{{DestinationPointCode: 100}},
 	}, false)
+	// An established association has negotiated streams for DATA: RFC 4666
+	// Section 1.4.7 rule 1 leaves nowhere legal to send it otherwise.
+	association.maxMessageStreamID = 4
 	association.muState.Lock()
 	association.state = StateASPActive
 	association.muState.Unlock()
@@ -741,7 +744,7 @@ func TestRegisteredRoutingKeyTrafficModeOverridesAssociationDefault(t *testing.T
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
@@ -798,7 +801,7 @@ func TestRequestedTrafficModeAppliesToProvisionedRoutingKeyWithoutConfiguredMode
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.TrafficModeType = params.NewTrafficModeType(params.TrafficModeBroadcast)
 	association := newAssociation(RoleSGP, config)
 	association.endpoint = endpoint
@@ -832,7 +835,7 @@ func TestRequestedTrafficModeAppliesToProvisionedRoutingKeyWithoutConfiguredMode
 }
 
 func TestRKMRequesterAlreadyCanceledContextSendsNothing(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -858,7 +861,7 @@ func TestRKMRequesterAlreadyCanceledContextSendsNothing(t *testing.T) {
 }
 
 func TestRKMRequesterCollectsSplitResponses(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -924,7 +927,7 @@ func TestRKMRequesterCollectsSplitResponses(t *testing.T) {
 }
 
 func TestRKMRequesterSerializesConcurrentProcedures(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -991,7 +994,7 @@ func TestRKMRequesterSerializesConcurrentProcedures(t *testing.T) {
 
 func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 	t.Run("Registration", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1052,7 +1055,7 @@ func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 	})
 
 	t.Run("Deregistration", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1113,7 +1116,7 @@ func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 
 func TestRKMRequesterRechecksStateAfterSerialization(t *testing.T) {
 	t.Run("Registration", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1181,7 +1184,7 @@ func TestRKMRequesterRechecksStateAfterSerialization(t *testing.T) {
 	})
 
 	t.Run("Deregistration", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1247,7 +1250,7 @@ func TestRKMRequesterRechecksStateAfterSerialization(t *testing.T) {
 }
 
 func TestRKMResponseChannelPublicationIsRaceSafe(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -1298,7 +1301,7 @@ func TestRKMResponseChannelPublicationIsRaceSafe(t *testing.T) {
 
 func TestRKMRequesterRejectsUnexpectedResultsWithoutPartialScopeMutation(t *testing.T) {
 	t.Run("Registration", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1336,7 +1339,7 @@ func TestRKMRequesterRejectsUnexpectedResultsWithoutPartialScopeMutation(t *test
 	})
 
 	t.Run("Deregistration", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1411,7 +1414,7 @@ func setRegistrationResultWriter(
 }
 
 func TestRKMRequesterAcceptsWideOriginatingPointCodeMask(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -1464,7 +1467,7 @@ func TestRKMRequesterRejectsConflictingRegistrationResultScopesAtomically(t *tes
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	association := newAssociation(RoleIPSP, config)
 	association.as = endpoint.as
@@ -1507,7 +1510,7 @@ func TestRKMRequesterClassifiesDuplicateRegistrationResults(t *testing.T) {
 	}
 
 	t.Run("identical pending", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1540,7 +1543,7 @@ func TestRKMRequesterClassifiesDuplicateRegistrationResults(t *testing.T) {
 	})
 
 	t.Run("contradictory pending", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1570,7 +1573,7 @@ func TestRKMRequesterClassifiesDuplicateRegistrationResults(t *testing.T) {
 	})
 
 	t.Run("contradictory late", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1619,7 +1622,7 @@ func TestRKMRequesterClassifiesDuplicateRegistrationResults(t *testing.T) {
 }
 
 func TestRKMRequesterRejectsContradictoryPreviouslyDeliveredRegistrationResult(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	requests := map[uint32]RoutingKeyRegistrationRequest{
 		1: {LocalRoutingKeyIdentifier: 1, RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP)},
 		2: {LocalRoutingKeyIdentifier: 2, RoutingKey: testRoutingKey(20, 200, params.ServiceIndISUP)},
@@ -1661,7 +1664,7 @@ func TestRKMRequesterRejectsContradictoryPreviouslyDeliveredRegistrationResult(t
 
 func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingScope(t *testing.T) {
 	t.Run("Static", func(t *testing.T) {
-		config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+		config := NewAssociationConfig()
 		config.NetworkAppearance = params.NewNetworkAppearance(10)
 		config.RoutingContexts = params.NewRoutingContext(77)
 		association := newAssociation(RoleASP, config)
@@ -1682,7 +1685,7 @@ func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingScope(t *te
 	})
 
 	t.Run("Dynamic", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1708,7 +1711,7 @@ func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingScope(t *te
 }
 
 func TestRKMRequesterAllowsRegistrationResultForExistingASKey(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -1736,7 +1739,7 @@ func TestRKMRequesterAllowsRegistrationResultForExistingASKey(t *testing.T) {
 }
 
 func TestRKMRequesterRejectsConflictingRegistrationResultTrafficModesAtomically(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -1767,7 +1770,7 @@ func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingTrafficMode
 	request.TrafficModeSet = true
 
 	t.Run("Static", func(t *testing.T) {
-		config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+		config := NewAssociationConfig()
 		config.NetworkAppearance = params.NewNetworkAppearance(10)
 		config.RoutingContexts = params.NewRoutingContext(77)
 		config.TrafficModes = map[uint32]uint32{77: params.TrafficModeOverride}
@@ -1787,7 +1790,7 @@ func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingTrafficMode
 	})
 
 	t.Run("Dynamic", func(t *testing.T) {
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1814,7 +1817,7 @@ func TestRKMRequesterRejectsRegistrationResultConflictingWithExistingTrafficMode
 }
 
 func TestRKMLateRegistrationResponseRejectsConflictingScopesAtomically(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -1872,7 +1875,7 @@ func TestRKMLateRegistrationResponseRejectsConflictingScopesAtomically(t *testin
 func TestRKMRequesterWaitStopsOnContextAndAssociationClose(t *testing.T) {
 	newWaitingAssociation := func(t *testing.T) (*Association, <-chan struct{}) {
 		t.Helper()
-		association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+		association := newAssociation(RoleASP, NewAssociationConfig())
 		association.muState.Lock()
 		association.state = StateASPInactive
 		association.muState.Unlock()
@@ -1920,7 +1923,7 @@ func TestRKMRequesterWaitStopsOnContextAndAssociationClose(t *testing.T) {
 
 func TestRKMRequesterBoundsUnresolvedRegistrationOutcomes(t *testing.T) {
 	const unresolvedLimit = 1024
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	defer func() { _ = association.Close() }()
 	association.muState.Lock()
 	association.state = StateASPInactive
@@ -1987,7 +1990,7 @@ func TestRKMRequesterBoundsUnresolvedRegistrationOutcomes(t *testing.T) {
 
 func TestRKMRequesterBoundsUnresolvedDeregistrationOutcomes(t *testing.T) {
 	const unresolvedLimit = 1024
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	defer func() { _ = association.Close() }()
 	association.muState.Lock()
 	association.state = StateASPInactive
@@ -2048,7 +2051,7 @@ func TestRKMRequesterBoundsUnresolvedDeregistrationOutcomes(t *testing.T) {
 }
 
 func TestRKMRequesterSharesUnresolvedOutcomeBudget(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.rkmUnresolvedRegistrations = make(map[uint32]RoutingKeyRegistrationRequest, rkmUnresolvedOutcomeLimit/2)
 	association.rkmUnresolvedDeregistrationRCs = make(map[uint32]uint64, rkmUnresolvedOutcomeLimit/2)
 	for index := 0; index < rkmUnresolvedOutcomeLimit/2; index++ {
@@ -2073,7 +2076,7 @@ func TestRKMRequesterSharesUnresolvedOutcomeBudget(t *testing.T) {
 }
 
 func TestRKMRequesterIgnoresStaleRegistrationResponseAfterCancellation(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2151,7 +2154,7 @@ func TestRKMRequesterIgnoresStaleRegistrationResponseAfterCancellation(t *testin
 }
 
 func TestRKMRequesterIgnoresStaleDeregistrationResponseAfterCancellation(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2220,7 +2223,7 @@ func TestRKMRequesterIgnoresStaleDeregistrationResponseAfterCancellation(t *test
 }
 
 func TestRKMRequesterRejectsAmbiguousDeregistrationRetryAfterCancellation(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2284,7 +2287,7 @@ func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	association := newAssociation(RoleIPSP, config)
 	association.as = endpoint.as
@@ -2343,7 +2346,7 @@ func TestRKMLateSuccessfulDeregistrationRemovesDynamicKey(t *testing.T) {
 }
 
 func TestRKMLateSuccessfulDeregistrationPreservesReregisteredDynamicKey(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.notificationWriter = func(message messages.M3UA) (int, error) {
 		return message.MarshalLen(), nil
 	}
@@ -2427,7 +2430,7 @@ func TestRKMLateSuccessfulDeregistrationPreservesReregisteredDynamicKey(t *testi
 }
 
 func TestRKMLateDeregistrationCleanupSerializesWithRegistrationPublication(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.notificationWriter = func(message messages.M3UA) (int, error) {
 		return message.MarshalLen(), nil
 	}
@@ -2519,7 +2522,7 @@ func TestRKMLateDeregistrationCleanupSerializesWithRegistrationPublication(t *te
 }
 
 func TestRKMLateSuccessfulRegistrationAddsDynamicKey(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2570,7 +2573,7 @@ func TestRKMLateSuccessfulRegistrationAddsDynamicKey(t *testing.T) {
 }
 
 func TestRKMCanceledRegistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	request := RoutingKeyRegistrationRequest{
 		LocalRoutingKeyIdentifier: 1,
 		RoutingKey:                testRoutingKey(10, 100, params.ServiceIndSCCP),
@@ -2599,7 +2602,7 @@ func TestRKMCanceledRegistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
 }
 
 func TestRKMCanceledRegistrationRejectsConflictingDeliveredScopesAtomically(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	requests := map[uint32]RoutingKeyRegistrationRequest{
 		1: {
 			LocalRoutingKeyIdentifier: 1,
@@ -2639,7 +2642,7 @@ func TestRKMCanceledRegistrationRejectsConflictingDeliveredScopesAtomically(t *t
 }
 
 func TestRKMLateDeregistrationResponseIsAppliedAtomically(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2709,7 +2712,7 @@ func TestRKMLateDeregistrationResponseIsAppliedAtomically(t *testing.T) {
 }
 
 func TestRKMDeregistrationWriteFailureDoesNotMakeOutcomeUnknown(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2730,7 +2733,7 @@ func TestRKMDeregistrationWriteFailureDoesNotMakeOutcomeUnknown(t *testing.T) {
 }
 
 func TestRKMCanceledDeregistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.addDynamicASKey(ASKey{
 		RoutingContext:    100,
 		RoutingContextSet: true,
@@ -2756,7 +2759,7 @@ func TestRKMCanceledDeregistrationAppliesAlreadyDeliveredSuccess(t *testing.T) {
 }
 
 func TestRKMRequesterIgnoresDuplicateDeregistrationResults(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2808,7 +2811,7 @@ func TestRKMRequesterIgnoresDuplicateDeregistrationResults(t *testing.T) {
 }
 
 func TestRKMRequesterRejectsContradictoryPreviouslyDeliveredDeregistrationResult(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	responses, err := association.beginDeregistrationResponseCorrelation(map[uint32]int{100: 0, 200: 1})
 	if err != nil {
 		t.Fatalf("beginDeregistrationResponseCorrelation: %v", err)
@@ -2844,7 +2847,7 @@ func TestRKMRequesterRejectsContradictoryPreviouslyDeliveredDeregistrationResult
 }
 
 func TestRKMRequesterRejectsContradictoryDeregistrationResults(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2898,7 +2901,7 @@ func TestRKMRequesterRejectsContradictoryDeregistrationResults(t *testing.T) {
 }
 
 func TestRKMRequesterDropsStaleRegistrationResponseBeforeQueueing(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2979,7 +2982,7 @@ func TestRKMRequesterDropsStaleRegistrationResponseBeforeQueueing(t *testing.T) 
 }
 
 func TestLocalRoutingKeyIdentifierIssuedClassificationWraps(t *testing.T) {
-	association := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleASP, NewAssociationConfig())
 	association.rkmCorrelationMu.Lock()
 	association.rkmNextLocalID = 2
 	association.rkmCorrelationMu.Unlock()
@@ -3009,7 +3012,7 @@ func TestLocalRoutingKeyIdentifierIssuedClassificationWraps(t *testing.T) {
 }
 
 func TestDynamicRoutingKeyNetworkAppearanceScopesInboundSSNM(t *testing.T) {
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	routingKey := testRoutingKey(10, 100, 3)
 	association.addDynamicASKey(ASKey{
@@ -3032,7 +3035,7 @@ func TestDynamicRoutingKeyNetworkAppearanceScopesInboundSSNM(t *testing.T) {
 }
 
 func TestDynamicRoutingKeyNetworkAppearanceScopesMultiContextSSNM(t *testing.T) {
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.cfg.NetworkAppearance = params.NewNetworkAppearance(7)
 	for _, routingContext := range []uint32{9, 10} {
 		association.addDynamicASKey(ASKey{
@@ -3230,7 +3233,7 @@ func TestIPSPSingleExchangeRKMUsesSharedRoutingKeyScope(t *testing.T) {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	association := newAssociation(RoleIPSP, config)
 	association.endpoint = endpoint
@@ -3293,7 +3296,7 @@ func TestIPSPSingleExchangeRequesterCleansDynamicApplicationServer(t *testing.T)
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	association := newAssociation(RoleIPSP, config)
 	association.as = endpoint.as
@@ -3411,7 +3414,7 @@ func TestRKMResponderReplayCompletesASMutationAfterResponseWriteFailure(t *testi
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -3515,7 +3518,7 @@ func TestRKMRegistrationBatchRemainsReplayableUntilResponseWrite(t *testing.T) {
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.notificationQueue = make(chan mandatoryControl, registrationCount+1)
@@ -3635,7 +3638,7 @@ func TestRKMDeregistrationBatchRemainsReplayableUntilResponseWrite(t *testing.T)
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -3758,7 +3761,7 @@ func TestRKMRegistrationCloseRaceDoesNotRecreateMembership(t *testing.T) {
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.as = endpoint.as
 	association.muState.Lock()
 	association.state = StateASPInactive
@@ -3839,7 +3842,7 @@ func TestRKMRequesterRegistrationCloseRaceDoesNotRecreateMembership(t *testing.T
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	association := newAssociation(RoleIPSP, config)
 	association.as = endpoint.as
@@ -3930,7 +3933,7 @@ func TestRKMResponderProvisionedDeregistrationReplayCompletesLocalCleanup(t *tes
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -4014,7 +4017,7 @@ func TestRKMResponderDeregistrationPreservesStaticApplicationServerMembership(t 
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(10)
 	config.RoutingContexts = params.NewRoutingContext(7)
 	association := newAssociation(RoleSGP, config)
@@ -4057,7 +4060,7 @@ func TestRKMResponderDeregistrationPreservesStaticApplicationServerMembership(t 
 
 func TestRKMRequesterDeregistrationPreservesStaticApplicationServerMembership(t *testing.T) {
 	applicationServers := newApplicationServers(time.Hour)
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.NetworkAppearance = params.NewNetworkAppearance(10)
 	config.RoutingContexts = params.NewRoutingContext(7)
 	association := newAssociation(RoleASP, config)
@@ -4099,7 +4102,7 @@ func TestRKMResponderRejectsDuplicateBatchCorrelationValues(t *testing.T) {
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.muState.Lock()
 	association.state = StateASPInactive
@@ -4161,7 +4164,7 @@ func TestRKMResponderRejectsUnsupportedRoutingKeyParameterFields(t *testing.T) {
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -4249,7 +4252,7 @@ func TestRKMResponderAcceptsWideOriginatingPointCodeMask(t *testing.T) {
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	association := newAssociation(RoleSGP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()

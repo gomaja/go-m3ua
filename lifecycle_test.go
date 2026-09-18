@@ -29,12 +29,7 @@ import (
 
 // aspConfig builds an ASP AssociationConfig for the lifecycle tests.
 func aspConfig(hb *HeartbeatInfo) *AssociationConfig {
-	cfg := newASPAssociationConfigForTest(
-		hb,
-		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(hb, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	return cfg
 }
 
@@ -246,13 +241,8 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srvCfg := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)
+	srvCfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	srvCfg.ASPIdentifier = nil
-	srvCfg.CorrelationID = nil
 
 	raddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:2995")
 	if err != nil {
@@ -371,7 +361,7 @@ func TestAssociationConfigWithoutHeartbeatInfoDials(t *testing.T) {
 
 	peer := newRawPeer(t, 3042, handshakeOnly)
 
-	cfg := NewAssociationConfig(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1)
+	cfg := NewAssociationConfig()
 	cfg.SetTrafficModeType(params.TrafficModeLoadshare)
 	cfg.SetRoutingContexts(1, 2)
 	if cfg.HeartbeatInfo != nil {
@@ -395,7 +385,7 @@ func TestAssociationConfigWithoutHeartbeatInfoAccepts(t *testing.T) {
 	defer cancel()
 
 	const port = 3044
-	sgpConfig := NewAssociationConfig(0x22222222, 0x11111111, params.ServiceIndSCCP, 0, 0, 1)
+	sgpConfig := NewAssociationConfig()
 	sgpConfig.SetTrafficModeType(params.TrafficModeLoadshare)
 	sgpConfig.SetRoutingContexts(1, 2)
 	if sgpConfig.HeartbeatInfo != nil {
@@ -455,11 +445,7 @@ func TestListenRejectsInvalidNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ln, err := listenSGP("not-a-network", addr, NewListenerConfig(newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222, 0x11111111, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1, 2}, params.ServiceIndSCCP, 0, 0, 1,
-	)))
+	ln, err := listenSGP("not-a-network", addr, NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})))
 	if err == nil {
 		_ = ln.Close()
 		t.Fatal("Listen accepted an invalid network name")
@@ -521,30 +507,33 @@ func TestCloseIsIdempotentAndConcurrencySafe(t *testing.T) {
 	}
 
 	// A closed Association must refuse writes rather than panicking on a dead socket.
-	if _, err := cliConn.Write([]byte{0xde, 0xad}); err == nil {
-		t.Error("Write on a closed Association returned nil error")
+	if _, err := writePayload(cliConn, 1, []byte{0xde, 0xad}); err == nil {
+		t.Error("WriteData on a closed Association returned nil error")
 	}
 }
 
 // Writing before the association reaches ASP-ACTIVE must be refused, not
 // silently dropped: RFC 4666 only permits DATA in the ASP-ACTIVE state.
 //
-// This must not panic either. Write and WritePD used to choose a stream before
+// This must not panic either. The write paths used to choose a stream before
 // checking state, and chooseStreamID feeds maxMessageStreamID to rand.Intn,
 // which panics on 0 — the value every Association holds until a peer negotiates its
-// stream count.
+// stream count. That ordering still matters: these associations have no
+// negotiated stream, so a state check made after stream selection would report
+// the stream rather than the state.
 func TestWriteBeforeActiveIsRefused(t *testing.T) {
 	for _, st := range []State{StateASPDown, StateASPInactive} {
 		t.Run(st.String(), func(t *testing.T) {
 			conn, _ := newTestConn(t, st, RoleASP)
 
-			if _, err := conn.Write([]byte{0xde, 0xad, 0xbe, 0xef}); !errors.Is(err, ErrNotEstablished) {
-				t.Errorf("Write in %v error = %v, want ErrNotEstablished", st, err)
+			if _, err := writePayload(conn, 1, []byte{0xde, 0xad, 0xbe, 0xef}); !errors.Is(err, ErrNotEstablished) {
+				t.Errorf("WriteData in %v error = %v, want ErrNotEstablished", st, err)
 			}
 
-			pd := params.NewProtocolData(0x11111111, 0x22222222, 3, 0, 0, 1, []byte{0xde, 0xad})
-			if _, err := conn.WritePD(pd); !errors.Is(err, ErrNotEstablished) {
-				t.Errorf("WritePD in %v error = %v, want ErrNotEstablished", st, err)
+			// And with the stream named explicitly, so the refusal does not
+			// depend on which way the stream was arrived at.
+			if _, err := writePayloadToStream(conn, 1, 1, []byte{0xde, 0xad}); !errors.Is(err, ErrNotEstablished) {
+				t.Errorf("WriteData to an explicit stream in %v error = %v, want ErrNotEstablished", st, err)
 			}
 		})
 	}

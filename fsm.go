@@ -399,24 +399,44 @@ func (c *Association) notifyEstablished() {
 	}
 }
 
+// notifyReady signals Dial and Accept once the association has reached the
+// state its ASP procedure policy waits for — or has already gone past it.
+//
+// Reaching it is what matters, not being in it at the instant a transition is
+// published. RFC 4666 Section 5.6.2 lets either IPSP initiate either exchange,
+// so a peer's ASP Active can arrive while this end is still publishing the
+// ASP-INACTIVE its own ASP Up Ack produced. Requiring the two to be equal made
+// that ordinary interleaving lose the signal permanently: the ASP-INACTIVE
+// publication saw a state already advanced to ASP-ACTIVE, the ASP-ACTIVE
+// publication was measured against a readiness of ASP-INACTIVE, and Dial or
+// Accept then waited out its whole establishment budget on an association that
+// had in fact established.
 func (c *Association) notifyReady() {
 	if c == nil {
 		return
 	}
-	if (c.cfg == nil || c.cfg.ASPProcedures == nil) && c.isIPSPDoubleExchange() {
-		state := c.IPSPState()
-		// RFC 4666 Sections 4.3 and 5.6.2 permit one-way Double Exchange.
-		// Preserve the nil policy's historical readiness once either independent
-		// traffic direction has completed its automatic ASP procedures.
-		if state.TrafficToLocal == StateASPActive || state.TrafficToPeer == StateASPActive {
-			c.notifyEstablished()
-		}
-		return
-	}
-	if c.readinessState() != c.currentReadinessState() {
+	want, wanted := readinessRank(c.readinessState())
+	reached, reachable := readinessRank(c.currentReadinessState())
+	if !wanted || !reachable || reached < want {
 		return
 	}
 	c.notifyEstablished()
+}
+
+// readinessRank orders the three ASP states of RFC 4666 Section 4.3.1 by how
+// far the association has climbed. Any other state — the SCTP teardown states —
+// is not a readiness state at all and reports so.
+func readinessRank(state State) (int, bool) {
+	switch state {
+	case StateASPDown:
+		return 0, true
+	case StateASPInactive:
+		return 1, true
+	case StateASPActive:
+		return 2, true
+	default:
+		return 0, false
+	}
 }
 
 func (c *Association) readinessState() State {

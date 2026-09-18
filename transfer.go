@@ -82,17 +82,23 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 		return
 	}
 
-	// The traffic flow travels with the payload rather than being dropped here.
+	// Everything the application needs to distribute this message and to answer
+	// in the scope it arrived on travels with the payload: the exact wire scope,
+	// the Application Server it resolves to, the arrival stream, the peer's
+	// correlation, and the association and SCTP epoch that carried it.
 	// validateDataRoutingContext has already established that a present DATA
 	// Routing Context contains exactly one value.
-	msg := &DataMessage{ProtocolData: pd}
-	if data.NetworkAppearance != nil {
-		msg.NetworkAppearance = data.NetworkAppearance.NetworkAppearance()
-		msg.NetworkAppearanceSet = true
+	msg := &DataMessage{
+		ProtocolData: pd,
+		Scope:        receivedDataScope(data),
+		AS:           c.receivedASKey(data),
+		Stream:       c.receivedStreamID(),
+		Association:  c.ID(),
+		Epoch:        c.Epoch(),
 	}
-	if data.RoutingContext != nil {
-		msg.RoutingContext = data.RoutingContext.RoutingContexts()[0]
-		msg.RoutingContextSet = true
+	if data.CorrelationID != nil {
+		msg.CorrelationID = data.CorrelationID.CorrelationID()
+		msg.CorrelationIDSet = true
 	}
 
 	// Never block the dispatcher.
@@ -121,11 +127,23 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 	default:
 	}
 
+	// Counted for every discarded payload, because loss an application never
+	// saw is exactly what it needs to be able to measure afterwards.
+	c.dataDiscarded.Add(1)
+
 	// Report the onset of overflow once, not once per discarded payload: under
 	// sustained overflow the report would otherwise be the loudest thing in the
 	// log and would occupy the dispatcher it exists to keep free.
+	//
+	// The report names the destination whose traffic is being discarded, which
+	// is this congested node: RFC 4666 Section 3.3.1 makes the Destination Point
+	// Code of the message the point code it was travelling to, and Section 3.4.4
+	// makes the Affected Point Code of the SCON that follows Mandatory.
 	if !c.dataOverflow.Swap(true) {
-		c.sendErr(ErrDataQueueFull)
+		c.sendErr(&DataQueueOverflowError{
+			DestinationPointCode: pd.DestinationPointCode,
+			NetworkIndicator:     pd.NetworkIndicator,
+		})
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
 )
 
 // TestASPTMFromAspDownIsRefused covers Figure 3, the "ASP State Transition
@@ -188,19 +189,25 @@ func TestDataOnlyFlowsForAnAcknowledgedRoutingContext(t *testing.T) {
 	}
 	asp.setState(StateASPActive)
 
-	if err := asp.SelectRoutingContext(1); err != nil {
-		t.Fatalf("SelectRoutingContext(1): %v", err)
+	// The Routing Context travels on the message, so each write names the
+	// Application Server it belongs to and is admitted on that scope alone.
+	var writes int
+	asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+		writes++
+		return len(data), nil
 	}
-	if _, err := asp.dataRoutingContext(); err != nil {
+
+	if _, err := writePayload(asp, 1, []byte("acknowledged")); err != nil {
 		t.Errorf("DATA refused for the acknowledged Routing Context: %v", err)
 	}
 
-	if err := asp.SelectRoutingContext(2); err != nil {
-		t.Fatalf("SelectRoutingContext(2): %v", err)
-	}
-	if _, err := asp.dataRoutingContext(); err == nil {
+	if _, err := writePayload(asp, 2, []byte("unacknowledged")); err == nil {
 		t.Error("DATA would go out for a Routing Context the SGP never " +
 			"acknowledged in an ASP Active Ack")
+	}
+	if writes != 1 {
+		t.Errorf("%d DATA messages reached the transport, want only the one "+
+			"for the acknowledged Routing Context", writes)
 	}
 }
 

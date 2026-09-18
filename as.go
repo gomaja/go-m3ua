@@ -1842,8 +1842,9 @@ func notifyAlternateASPActive(target *Association, key ASKey, overriding *params
 
 // activeASPs returns the associations currently ASP-ACTIVE in an AS-ACTIVE AS,
 // in a stable order so a load-sharing choice is repeatable for the same key.
-// RFC 4666 Section 4.3.4.3 permits an SGP to withhold traffic until n ASPs are
-// active, so ASP-ACTIVE membership alone does not make an Association eligible.
+// An AS "becomes AS-ACTIVE right after n ASPs reach the ASP-ACTIVE state during
+// the startup phase" (RFC 4666 Section 4.3.2), so ASP-ACTIVE membership alone
+// does not make an Association eligible: the AS has to be carrying traffic too.
 //
 // The order is by ASP Identifier where one is configured, falling back to the
 // pointer as a tiebreak. Repeatability is what makes SLS-based load-sharing

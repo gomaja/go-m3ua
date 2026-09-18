@@ -6,6 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+
+	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-m3ua/messages/params"
 )
 
 const (
@@ -78,6 +81,31 @@ func tupleFor(flow uint8, association uint8) messageTuple {
 		MessagePriority:         (flow / 4) % 4,
 		SignallingLinkSelection: flow % 16,
 		RoutingContext:          100 + uint32(flow),
+	}
+}
+
+// dataRequest builds the typed per-message DATA this tuple describes. The
+// Application Server scope repeats the configured Network Appearance because a
+// request names its scope exactly; the stream is left unset so each message
+// follows the stream its own SLS maps to, which is what keeps one flow in
+// sequence.
+func (tuple messageTuple) dataRequest(payload []byte) m3ua.DataRequest {
+	return m3ua.DataRequest{
+		AS: m3ua.ASKey{
+			NetworkAppearance:    testNetworkAppearance,
+			NetworkAppearanceSet: true,
+			RoutingContext:       tuple.RoutingContext,
+			RoutingContextSet:    true,
+		},
+		ProtocolData: params.ProtocolDataPayload{
+			OriginatingPointCode:    tuple.OriginatingPointCode,
+			DestinationPointCode:    tuple.DestinationPointCode,
+			ServiceIndicator:        tuple.ServiceIndicator,
+			NetworkIndicator:        tuple.NetworkIndicator,
+			MessagePriority:         tuple.MessagePriority,
+			SignallingLinkSelection: tuple.SignallingLinkSelection,
+			Data:                    payload,
+		},
 	}
 }
 

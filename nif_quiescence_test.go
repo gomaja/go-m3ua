@@ -26,6 +26,9 @@ func TestPartialNIFIsolationWaitsForScopedDirectDataBeforeAspInactiveAck(t *test
 	}
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
+	// The in-flight DATA needs a stream to travel on; nothing was negotiated
+	// for this hand-built Association, and Section 1.4.7 rule 1 bars stream 0.
+	asp.maxMessageStreamID = 4
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 
 	writeStarted := make(chan struct{})
@@ -137,7 +140,13 @@ func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.
 
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := asp.WriteToStream([]byte("in flight"), 1)
+		// A dedicated association with no Routing Context: the empty scope
+		// names the contextless Application Server total isolation must also
+		// halt.
+		_, err := asp.WriteData(DataRequest{
+			ProtocolData: testProtocolData([]byte("in flight")),
+			Stream:       1,
+		})
 		writeDone <- err
 	}()
 	select {

@@ -129,7 +129,7 @@ as outliers. A run whose evidence a stall contaminated is reported
 so it reaches the report.
 
 - **Signal**: `send_duration.max_ns` from the fixture's sender record. The
-  fixture already records it: each `WritePDWithRoutingContext` call is timed
+  fixture already records it: each `WriteData` call is timed
   and fed to the send-duration histogram, whose `Max` is the exact observed
   maximum rather than a power-of-two bucket bound (only p50, p95 and p99 are
   bucket bounds). It measures the transport blocking the sender directly. The

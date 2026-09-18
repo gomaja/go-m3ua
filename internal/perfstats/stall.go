@@ -47,7 +47,7 @@ const (
 //
 // LongestSend is the fixture's sender-record send_duration.max_ns. The fixture
 // already records it: startSendWorkers times every
-// WritePDWithRoutingContext call and senderCounters.complete feeds the result
+// WriteData call and senderCounters.complete feeds the result
 // to the send-duration histogram, whose Max is the exact observed maximum and
 // not a power-of-two bucket bound (only p50, p95 and p99 are bucket bounds).
 //

@@ -18,6 +18,9 @@ func TestWriteSignalDataEnforcesSGPPerApplicationServerState(t *testing.T) {
 	secondApplicationServer := listener.as.get(associationConfigASKey(listener.AssociationConfig, 2))
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
+	// A DATA needs somewhere legal to travel: RFC 4666 Section 1.4.7 rule 1
+	// bars stream 0, and a hand-built Association negotiated no streams.
+	asp.maxMessageStreamID = 4
 	firstApplicationServer.setASPState(asp, StateASPActive, time.Hour)
 	secondApplicationServer.setASPState(asp, StateASPInactive, time.Hour)
 	sent.reset()
@@ -73,6 +76,7 @@ func TestDirectSGPTrafficRequiresActiveApplicationServer(t *testing.T) {
 			active, sent := asTestConn(t, registry, StateASPActive, test.routingContexts...)
 			waiting, _ := asTestConn(t, registry, StateASPInactive, test.routingContexts...)
 			active.noteRoutingContextsActive(test.routingContexts)
+			active.maxMessageStreamID = 4
 
 			for _, message := range []messages.M3UA{test.data, test.ssnm} {
 				before := len(*sent)
@@ -161,6 +165,7 @@ func TestDirectIPSPTrafficRequiresActiveApplicationServer(t *testing.T) {
 			})
 			t.Cleanup(registry.close)
 			active, waiting, sent, traffic := test.setup(t, registry)
+			active.maxMessageStreamID = 4
 			registry.aspStateChanged(active, StateASPActive)
 			registry.aspStateChanged(waiting, StateASPInactive)
 
@@ -294,6 +299,7 @@ func TestWriteSignalRejectsUnconfiguredNetworkAppearance(t *testing.T) {
 	listener, applicationServer, asp, sent := distributionFixture(t, params.TrafficModeLoadshare)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
+	asp.maxMessageStreamID = 4
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
@@ -332,6 +338,7 @@ func TestDirectWriteSignalDataParticipatesInInactiveBarrier(t *testing.T) {
 	listener, applicationServer, asp, _ := distributionFixture(t, params.TrafficModeLoadshare)
 	asp.noteRoutingContextsActive([]uint32{1})
 	asp.setState(StateASPActive)
+	asp.maxMessageStreamID = 4
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 
 	writeStarted := make(chan struct{})
@@ -387,20 +394,29 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 		call func(*Association) error
 	}{
 		{
-			name: "WriteToStreamWithRoutingContext",
+			// The stream this one message is to travel on, named by the caller.
+			name: "WriteData on an explicit stream",
 			call: func(connection *Association) error {
-				_, err := connection.WriteToStreamWithRoutingContext([]byte("payload"), 1, 1)
+				_, err := writePayloadToStream(connection, 1, 1, []byte("payload"))
 				return err
 			},
 		},
 		{
-			name: "WritePDToStreamWithRoutingContext",
+			// No stream named, so the message's own Signalling Link Selection
+			// chooses it, which is the RFC 4666 Section 1.4.7 assignment.
+			name: "WriteData on the stream its SLS selects",
 			call: func(connection *Association) error {
-				_, err := connection.WritePDToStreamWithRoutingContext(
-					params.NewProtocolData(1, 2, params.ServiceIndSCCP, 0, 0, 3, []byte("payload")),
-					1,
-					1,
-				)
+				_, err := writePayload(connection, 1, []byte("payload"))
+				return err
+			},
+		},
+		{
+			// A caller-built DATA handed to WriteSignal reaches the wire through
+			// the same admission and holds the same barrier, so it owes the Ack
+			// the same wait.
+			name: "WriteSignal carrying a DATA",
+			call: func(connection *Association) error {
+				_, err := connection.WriteSignal(distributionData(1, 3, "payload"))
 				return err
 			},
 		},
@@ -415,16 +431,30 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 
 			writeStarted := make(chan struct{})
 			releaseWrite := make(chan struct{})
-			asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
-				close(writeStarted)
+			var started atomic.Bool
+			holdTheWrite := func() {
+				if started.CompareAndSwap(false, true) {
+					close(writeStarted)
+				}
 				<-releaseWrite
+			}
+			asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+				holdTheWrite()
 				return len(data), nil
 			}
 			acknowledged := make(chan struct{})
 			var acked atomic.Bool
 			asp.signalWriter = func(message messages.M3UA) (int, error) {
-				if _, ok := message.(*messages.AspDownAck); ok && acked.CompareAndSwap(false, true) {
-					close(acknowledged)
+				switch message.(type) {
+				case *messages.Data:
+					// A DATA given to WriteSignal ends at the signal seam, so
+					// it is held there exactly as the typed write is held at
+					// the transport.
+					holdTheWrite()
+				case *messages.AspDownAck:
+					if acked.CompareAndSwap(false, true) {
+						close(acknowledged)
+					}
 				}
 				return message.MarshalLen(), nil
 			}
@@ -489,7 +519,13 @@ func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := asp.WriteToStream([]byte("unscoped"), 1)
+		// No Routing Key is coordinated on this association, so the message
+		// names the contextless Application Server: the empty scope, which RFC
+		// 4666 Section 3.3.1 puts on the wire as an omitted Routing Context.
+		_, err := asp.WriteData(DataRequest{
+			ProtocolData: testProtocolData([]byte("unscoped")),
+			Stream:       1,
+		})
 		writeDone <- err
 	}()
 	select {
@@ -599,7 +635,12 @@ func TestASPInactiveAckWaitsForUnscopedDirectData(t *testing.T) {
 
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := asp.WriteToStream([]byte("unscoped"), 1)
+		// As above: no coordinated Routing Key, so the empty scope names the
+		// contextless Application Server.
+		_, err := asp.WriteData(DataRequest{
+			ProtocolData: testProtocolData([]byte("unscoped")),
+			Stream:       1,
+		})
 		writeDone <- err
 	}()
 	select {

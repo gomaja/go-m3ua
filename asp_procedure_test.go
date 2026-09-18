@@ -17,7 +17,7 @@ func TestASPProcedurePolicyValidationAndSnapshot(t *testing.T) {
 		ASPActive:   ASPProcedureAutomatic,
 		ASPInactive: ASPProcedureAutomatic,
 	}
-	config := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	config := NewAssociationConfig()
 	config.ASPProcedures = automatic
 	if err := validateAssociationConfigForRole(RoleASP, config); err != nil {
 		t.Fatalf("valid ASP procedure policy: %v", err)
@@ -31,13 +31,13 @@ func TestASPProcedurePolicyValidationAndSnapshot(t *testing.T) {
 		t.Fatal("caller mutation changed snapshotted ASPProcedurePolicy")
 	}
 
-	incomplete := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	incomplete := NewAssociationConfig()
 	incomplete.ASPProcedures = &ASPProcedurePolicy{ASPUp: ASPProcedureAutomatic}
 	if err := validateAssociationConfigForRole(RoleASP, incomplete); !errors.Is(err, ErrInvalidRoleConfiguration) {
 		t.Fatalf("incomplete policy error = %v, want ErrInvalidRoleConfiguration", err)
 	}
 
-	sgp := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	sgp := NewAssociationConfig()
 	sgp.ASPIdentifier = nil
 	sgp.ASPProcedures = automatic
 	if err := validateAssociationConfigForRole(RoleSGP, sgp); !errors.Is(err, ErrInvalidRoleConfiguration) {
@@ -46,7 +46,7 @@ func TestASPProcedurePolicyValidationAndSnapshot(t *testing.T) {
 }
 
 func TestASPProcedurePolicyHistoricalDefaults(t *testing.T) {
-	asp := newAssociation(RoleASP, NewAssociationConfig(0, 0, 0, 0, 0, 0))
+	asp := newAssociation(RoleASP, NewAssociationConfig())
 	if asp.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic ||
 		asp.aspProcedureMode(aspProcedureActive) != ASPProcedureAutomatic ||
 		asp.aspProcedureMode(aspProcedureInactive) != ASPProcedureAutomatic ||
@@ -54,21 +54,30 @@ func TestASPProcedurePolicyHistoricalDefaults(t *testing.T) {
 		t.Fatal("nil ASP procedure policy did not preserve automatic ASP lifecycle")
 	}
 
-	ipspConfig := NewAssociationConfig(0, 0, 0, 0, 0, 0)
+	// An IPSP has no historical lifecycle of its own to fall back on: RFC 4666
+	// Section 5.6.2 lets either peer initiate each exchange, so the Association
+	// configuration has to say which side starts what. This is the policy an
+	// IPSP that initiates ASPSM but waits for its peer's ASPTM names.
+	ipspConfig := NewAssociationConfig()
 	ipspConfig.IPSP = &IPSPConfig{
 		ExchangeModel: IPSPExchangeSingle,
-		InitiateASPSM: true,
+	}
+	ipspConfig.ASPProcedures = &ASPProcedurePolicy{
+		ASPUp:       ASPProcedureAutomatic,
+		ASPDown:     ASPProcedureAutomatic,
+		ASPActive:   ASPProcedureExplicit,
+		ASPInactive: ASPProcedureAutomatic,
 	}
 	ipsp := newAssociation(RoleIPSP, ipspConfig)
 	if ipsp.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic {
-		t.Fatal("legacy InitiateASPSM=true did not select automatic ASP Up")
+		t.Fatal("automatic IPSP ASP Up policy did not select automatic ASP Up")
 	}
 	if ipsp.aspProcedureMode(aspProcedureActive) != ASPProcedureExplicit {
-		t.Fatal("legacy InitiateASPTM=false did not select explicit ASP Active")
+		t.Fatal("explicit IPSP ASP Active policy did not select explicit ASP Active")
 	}
 	if ipsp.aspProcedureMode(aspProcedureInactive) != ASPProcedureAutomatic ||
 		ipsp.aspProcedureMode(aspProcedureDown) != ASPProcedureAutomatic {
-		t.Fatal("legacy IPSP shutdown did not remain automatic")
+		t.Fatal("IPSP shutdown did not remain automatic")
 	}
 }
 
@@ -479,7 +488,7 @@ func TestIPSPDoubleExchangeASPTMRequiresLocalTrafficDirection(t *testing.T) {
 			config := newDoubleExchangeAssociationConfigForTest()
 			config.IPSP.TrafficToLocal = nil
 			config.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
-			config.IPSP.InitiateASPTM = false
+			config.ASPProcedures.ASPActive = ASPProcedureExplicit
 			association, sent := newDoubleExchangeIPSPWithConfigForTest(t, config)
 			association.setIPSPState(IPSPState{
 				TrafficToLocal: test.state,
@@ -505,30 +514,11 @@ func TestIPSPDoubleExchangeASPTMRequiresLocalTrafficDirection(t *testing.T) {
 }
 
 func TestAssociationReadinessFollowsASPProcedurePolicy(t *testing.T) {
-	t.Run("nil policy IPSP Double Exchange preserves directional readiness", func(t *testing.T) {
-		tests := []struct {
-			name  string
-			state IPSPState
-		}{
-			{"local direction", IPSPState{
-				TrafficToLocal: StateASPActive,
-				TrafficToPeer:  StateASPDown,
-			}},
-			{"peer direction", IPSPState{
-				TrafficToLocal: StateASPDown,
-				TrafficToPeer:  StateASPActive,
-			}},
-		}
-		for _, test := range tests {
-			t.Run(test.name, func(t *testing.T) {
-				association, _ := newDoubleExchangeIPSPForTest(t)
-				association.setIPSPState(test.state)
-
-				association.notifyReady()
-				requireAssociationReady(t, association)
-			})
-		}
-	})
+	// An IPSP Association with no ASP procedure policy no longer exists:
+	// validateAssociationConfigForRole refuses one at Dial, Listen and Accept,
+	// because RFC 4666 Section 5.6.2 lets either IPSP initiate either exchange
+	// and there is no role-implied default to fall back on. The readiness path
+	// that existed for it went with it.
 
 	t.Run("explicit ASP Up returns at ASP-DOWN", func(t *testing.T) {
 		association, _ := newTestConn(t, StateASPDown, RoleASP)

@@ -645,12 +645,12 @@ func TestASPInventoryWithoutRoutingKeepsDataAuthorization(t *testing.T) {
 		params.NewProtocolData(0x111111, 0x123456, params.ServiceIndSCCP, 0, 0, 1, []byte("provisioned")),
 		nil,
 	), nil)
-	delivered, err := association.ReadData()
+	delivered, err := association.ReadData(context.Background())
 	if err != nil {
 		t.Fatalf("ReadData: %v", err)
 	}
-	if !delivered.RoutingContextSet || delivered.RoutingContext != 1 {
-		t.Fatalf("delivered Routing Context = %d set=%v, want 1", delivered.RoutingContext, delivered.RoutingContextSet)
+	if !delivered.Scope.RoutingContextSet || wireRoutingContext(delivered.Scope) != 1 {
+		t.Fatalf("delivered Routing Context = %d set=%v, want 1", wireRoutingContext(delivered.Scope), delivered.Scope.RoutingContextSet)
 	}
 
 	// RFC 4666 Section 3.8.1 refuses DATA naming an unconfigured Routing
@@ -1107,13 +1107,13 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 				params.NewProtocolData(0x111111, 0x120000, params.ServiceIndSCCP, 0, 0, 1, []byte("core")),
 				nil,
 			), nil)
-			delivered, err := association.ReadData()
+			delivered, err := association.ReadData(context.Background())
 			if err != nil {
 				t.Fatalf("ReadData: %v", err)
 			}
-			if !delivered.RoutingContextSet || delivered.RoutingContext != 1 {
+			if !delivered.Scope.RoutingContextSet || wireRoutingContext(delivered.Scope) != 1 {
 				t.Fatalf("delivered Routing Context = %d set=%v, want 1",
-					delivered.RoutingContext, delivered.RoutingContextSet)
+					wireRoutingContext(delivered.Scope), delivered.Scope.RoutingContextSet)
 			}
 			for _, routingContext := range []uint32{2, 9} {
 				association.handleData(context.Background(), messages.NewData(

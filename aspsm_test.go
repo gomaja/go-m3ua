@@ -31,40 +31,31 @@ func newTestConn(t *testing.T, state State, role Role) (*Association, *[]message
 
 	var sent []messages.M3UA
 
-	cfg := newSGPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x22222222,                  // OriginatingPointCode
-		0x11111111,                  // DestinationPointCode
-		1,                           // AspIdentifier
-		params.TrafficModeLoadshare, // TrafficModeType
-		0,                           // NetworkAppearance
-		0,                           // CorrelationID
-		[]uint32{1, 2},              // RoutingContexts
-		params.ServiceIndSCCP,       // ServiceIndicator
-		0,                           // NetworkIndicator
-		0,                           // MessagePriority
-		1,                           // SignalingLinkSelection
-	)
-	cfg.CorrelationID = nil
+	cfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	cfg.NetworkAppearance = nil
 
 	conn := &Association{
 		// The transport is per-Association, so the send template lives here rather
 		// than on the shared Config; these tests write through signalWriter and
 		// never touch a socket, but StreamID() reads it.
-		sctpInfo:    &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
-		muState:     new(sync.RWMutex),
-		role:        role,
-		state:       state,
-		stateChan:   make(chan State, 8),
-		inboundChan: make(chan inbound, 8),
-		errChan:     make(chan error, 8),
-		established: make(chan struct{}, 1),
-		beatAckChan: make(chan struct{}, 1),
-		beatStart:   make(chan struct{}),
-		dataChan:    make(chan *DataMessage, 8),
-		done:        make(chan struct{}),
-		cfg:         cfg,
+		sctpInfo: &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
+		// An established association has negotiated streams for DATA. RFC 4666
+		// Section 1.4.7 rule 1 forbids stream 0 for DATA, so leaving this at
+		// zero would model an association that cannot carry traffic at all —
+		// which is a case tests state explicitly when they mean it.
+		maxMessageStreamID: 4,
+		muState:            new(sync.RWMutex),
+		role:               role,
+		state:              state,
+		stateChan:          make(chan State, 8),
+		inboundChan:        make(chan inbound, 8),
+		errChan:            make(chan error, 8),
+		established:        make(chan struct{}, 1),
+		beatAckChan:        make(chan struct{}, 1),
+		beatStart:          make(chan struct{}),
+		dataChan:           make(chan *DataMessage, 8),
+		done:               make(chan struct{}),
+		cfg:                cfg,
 		// Matches Dial/Accept: SSNM handling needs both, and a nil map would
 		// panic on the first destination update.
 		destinations: newDestinations(),
@@ -75,6 +66,15 @@ func newTestConn(t *testing.T, state State, role Role) (*Association, *[]message
 		// every event silently and then panic closing a nil channel.
 		stateEventChan: make(chan State, 16),
 		mgmtChan:       make(chan *ManagementIndication, 64),
+		// Mirroring newAssociation: a dynamically registered Routing Key is
+		// recorded by assignment, so a nil map here panics rather than
+		// registering.
+		dynamicPeerASKeys:         make(map[uint32]ASKey),
+		dynamicLocalASKeys:        make(map[uint32]ASKey),
+		dynamicPeerASKeyVersions:  make(map[uint32]uint64),
+		dynamicLocalASKeyVersions: make(map[uint32]uint64),
+		dynamicPeerTrafficModes:   make(map[uint32]uint32),
+		dynamicLocalTrafficModes:  make(map[uint32]uint32),
 	}
 	conn.signalWriter = func(m3 messages.M3UA) (int, error) {
 		sent = append(sent, m3)
@@ -1337,8 +1337,8 @@ func TestNotifyIsRejectedWhileASPDown(t *testing.T) {
 			if role == RoleIPSP {
 				association.cfg.IPSP = &IPSPConfig{
 					ExchangeModel: IPSPExchangeSingle,
-					InitiateASPTM: true,
 				}
+				association.cfg.ASPProcedures = ipspInitiationPolicy(false, true)
 			}
 
 			association.handleSignals(context.Background(), messages.NewNotify(

@@ -693,12 +693,7 @@ func drainSignallingStatuses(statuses <-chan *DestinationStatus) {
 func newFuzzConn(t testing.TB, role Role) *Association {
 	t.Helper()
 
-	cfg := newASPAssociationConfigForTest(
-		&HeartbeatInfo{Enabled: false},
-		0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-		[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
-	)
-	cfg.CorrelationID = nil
+	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 
 	conn := &Association{
 		muState:      new(sync.RWMutex),

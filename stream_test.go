@@ -163,6 +163,12 @@ func TestOutOfRangeDataStreamMapsToInvalidStreamError(t *testing.T) {
 // 0." A peer negotiating a single outbound stream therefore offers nowhere
 // legal to carry traffic, and the library must say so rather than quietly
 // breaking the rule — which it did, sending DATA on stream 0.
+//
+// DataRequest.Stream cannot name stream 0 — zero there asks for the stream this
+// message's own SLS maps to — so the subject is the association that has no
+// data stream at all: maxMessageStreamID 0, where every SLS derives stream 0.
+// That is the one way a DATA can still end up addressed to the forbidden
+// stream, and it must be refused rather than sent.
 func TestDataIsNeverSentOnStreamZero(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
@@ -171,29 +177,43 @@ func TestDataIsNeverSentOnStreamZero(t *testing.T) {
 	ln := mcListen(t, mcAddr(port, "127.0.0.1"))
 	asps := mcConnect(t, ctx, ln, mcAddr(port, "127.0.0.1"), []string{"127.0.0.2"}, port)
 
-	// Explicitly asking for stream 0 must be refused.
-	if _, err := asps[0].asp.WriteToStream([]byte("nope"), 0); !errors.Is(err, ErrNoDataStream) {
-		t.Errorf("WriteToStream(_, 0) error = %v, want ErrNoDataStream", err)
-	}
-	pd := params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("nope"))
-	if _, err := asps[0].asp.WritePDToStream(pd, 0); !errors.Is(err, ErrNoDataStream) {
-		t.Errorf("WritePDToStream(_, 0) error = %v, want ErrNoDataStream", err)
+	// An association that negotiated only stream 0 must refuse the send rather
+	// than choosing stream 0 for it.
+	asps[0].asp.maxMessageStreamID = 0
+	if _, err := writePayload(asps[0].asp, 1, []byte("nope")); !errors.Is(err, ErrNoDataStream) {
+		t.Errorf("WriteData with no data stream = %v, want ErrNoDataStream", err)
 	}
 
-	// And an association that negotiated only stream 0 must refuse Write too,
-	// rather than choosing stream 0 for it.
-	asps[0].asp.maxMessageStreamID = 0
-	if _, err := asps[0].asp.Write([]byte("nope")); !errors.Is(err, ErrNoDataStream) {
-		t.Errorf("Write with no data stream = %v, want ErrNoDataStream", err)
+	// Whatever SLS the routing label carries: the derived stream is 0 for all
+	// of them, and none may be put on the wire.
+	for _, sls := range []uint8{0, 1, 7, 255} {
+		pd := testProtocolData([]byte("nope"))
+		pd.SignallingLinkSelection = sls
+		_, err := asps[0].asp.WriteData(DataRequest{
+			AS:           associationScope(asps[0].asp, 1),
+			ProtocolData: pd,
+		})
+		if !errors.Is(err, ErrNoDataStream) {
+			t.Errorf("WriteData with SLS %d and no data stream = %v, want ErrNoDataStream", sls, err)
+		}
 	}
-	if _, err := asps[0].asp.WritePD(pd); !errors.Is(err, ErrNoDataStream) {
-		t.Errorf("WritePD with no data stream = %v, want ErrNoDataStream", err)
+
+	// An explicitly named stream is checked against the same negotiated
+	// maximum, so stream 1 on an association that has none is out of range
+	// rather than silently accepted.
+	if _, err := writePayloadToStream(asps[0].asp, 1, 1, []byte("nope")); err == nil {
+		t.Error("WriteData on stream 1 was accepted by an association with no data stream")
+	} else {
+		var streamErr *InvalidSCTPStreamIDError
+		if !errors.As(err, &streamErr) {
+			t.Errorf("WriteData on stream 1 with no data stream = %v, want *InvalidSCTPStreamIDError", err)
+		}
 	}
 }
 
-// End to end: messages sent through Write, which picks the stream itself, all
-// carry the Config's single SLS and must therefore arrive in order. With a
-// random stream per message they do not.
+// End to end: messages sent with the stream left to the library, which picks it
+// from the message's own SLS, all carry the same SLS and must therefore arrive
+// in order. With a random stream per message they do not.
 func TestWriteKeepsOrderForOneSLS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -205,10 +225,11 @@ func TestWriteKeepsOrderForOneSLS(t *testing.T) {
 	const n = 200
 	go func() {
 		for i := 0; i < n; i++ {
-			// Write, not WriteToStream: the library chooses the stream, and the
-			// Config carries one SLS, so every message shares it.
+			// DataRequest.Stream left at zero, not named explicitly: the
+			// library chooses the stream, and every message here carries the
+			// same SLS (testProtocolData), so they all share it.
 			for {
-				_, err := fmt.Fprintf(asps[0].asp, "%04d", i)
+				_, err := writePayload(asps[0].asp, 1, []byte(fmt.Sprintf("%04d", i)))
 				if err == nil {
 					break
 				}
@@ -223,14 +244,14 @@ func TestWriteKeepsOrderForOneSLS(t *testing.T) {
 			t.Fatalf("only %d of %d payloads arrived: %v", i, n, err)
 		}
 		if want := fmt.Sprintf("%04d", i); got != want {
-			t.Fatalf("payload %d read as %q, want %q: Write is spreading one SLS across streams", i, got, want)
+			t.Fatalf("payload %d read as %q, want %q: WriteData is spreading one SLS across streams", i, got, want)
 		}
 	}
 }
 
-// WritePD carries its own SLS per message — that is the whole point of the
-// per-message routing label — so the stream must follow the message's SLS, not
-// the Config's.
+// A DataRequest carries its own SLS per message — that is the whole point of
+// the per-message routing label — so the stream must follow the SLS the message
+// itself names, and every message naming that SLS must stay in sequence.
 func TestWritePDKeepsOrderPerSLS(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -243,12 +264,13 @@ func TestWritePDKeepsOrderPerSLS(t *testing.T) {
 	const sls = 7
 	go func() {
 		for i := 0; i < n; i++ {
-			pd := params.NewProtocolData(
-				0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, sls,
-				[]byte(fmt.Sprintf("%04d", i)),
-			)
+			pd := testProtocolData([]byte(fmt.Sprintf("%04d", i)))
+			pd.SignallingLinkSelection = sls
 			for {
-				_, err := asps[0].asp.WritePD(pd)
+				_, err := asps[0].asp.WriteData(DataRequest{
+					AS:           associationScope(asps[0].asp, 1),
+					ProtocolData: pd,
+				})
 				if err == nil {
 					break
 				}
@@ -272,7 +294,7 @@ func TestWritePDKeepsOrderPerSLS(t *testing.T) {
 }
 
 // WriteSignal accepts DATA directly, so it must make the same SLS-to-stream
-// choice as WritePD. Otherwise two DATA messages with the same routing-label
+// choice as WriteData. Otherwise two DATA messages with the same routing-label
 // SLS can land on different SCTP streams solely because the caller used two
 // exported write paths, forfeiting SCTP's in-stream sequencing guarantee.
 func TestWriteSignalUsesTheDatasOwnSLS(t *testing.T) {
@@ -288,19 +310,22 @@ func TestWriteSignalUsesTheDatasOwnSLS(t *testing.T) {
 		_ = sgpAssociation.Close()
 	}()
 
-	configStream := aspAssociation.streamFor(aspAssociation.cfg.SignallingLinkSelection)
+	// There is no association-wide SLS any more — every DATA carries its own in
+	// its routing label — so the reference the message must NOT be routed by is
+	// simply some other SLS's stream. messageSLS is picked to map elsewhere, so
+	// an implementation ignoring the message's own SLS lands on referenceStream
+	// and is caught.
+	const referenceSLS uint8 = 0
+	referenceStream := aspAssociation.streamFor(referenceSLS)
 	var messageSLS uint8
-	for candidate := 2; candidate < 256; candidate++ {
-		if aspAssociation.streamFor(uint8(candidate)) != configStream {
+	for candidate := 1; candidate < 256; candidate++ {
+		if aspAssociation.streamFor(uint8(candidate)) != referenceStream {
 			messageSLS = uint8(candidate)
 			break
 		}
 	}
-	if messageSLS == 0 && aspAssociation.streamFor(0) != configStream {
-		messageSLS = 0
-	}
 	wantStream := aspAssociation.streamFor(messageSLS)
-	if wantStream == configStream {
+	if wantStream == referenceStream {
 		t.Skipf("association negotiated only one DATA stream (%d)", wantStream)
 	}
 
@@ -324,11 +349,18 @@ func TestWriteSignalUsesTheDatasOwnSLS(t *testing.T) {
 		t.Fatalf("payload = %q, want %q", got.ProtocolData.Data, "write-signal-sls")
 	}
 	if gotStream := sgpAssociation.receivedStreamID(); gotStream != wantStream {
-		t.Errorf("DATA with SLS %d arrived on stream %d, want %d; config SLS %d maps to %d",
-			messageSLS, gotStream, wantStream, aspAssociation.cfg.SignallingLinkSelection, configStream)
+		t.Errorf("DATA with SLS %d arrived on stream %d, want %d; reference SLS %d maps to %d",
+			messageSLS, gotStream, wantStream, referenceSLS, referenceStream)
 	}
 }
 
+// The stream a caller-built message travels on is chosen from the bytes that
+// will actually be written, not from interface methods a custom M3UA value
+// could make disagree with its encoded header: WriteSignal classifies the
+// encoded frame, and a DATA frame is decoded back before its stream is read off
+// its own Protocol Data. Management stays on stream 0, and DATA follows the SLS
+// in its own routing label exactly as WriteData does, so mixing the two write
+// APIs cannot split one sequenced traffic flow across SCTP streams.
 func TestOutboundSignalStreamUsesProtocolDataSLS(t *testing.T) {
 	conn := &Association{maxMessageStreamID: 9}
 	for _, sls := range []uint8{0, 1, 7, 15, 255} {
@@ -339,47 +371,46 @@ func TestOutboundSignalStreamUsesProtocolDataSLS(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := conn.outboundSignalStream(raw)
+			if !isPayloadData(raw) {
+				t.Fatal("an encoded DATA was not classified as DATA, so it never reaches the DATA stream selection")
+			}
+			decoded, err := decodeOutboundData(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := conn.outboundDataStream(decoded)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if want := conn.streamFor(sls); got != want {
-				t.Errorf("outboundSignalStream(DATA SLS %d) = %d, want %d", sls, got, want)
+				t.Errorf("outbound stream for a DATA with SLS %d = %d, want %d", sls, got, want)
 			}
 		})
 	}
 
+	// A control message is never classified as DATA, so it keeps the send
+	// template's stream 0 (RFC 4666 Section 1.4.7 rule 2) and is never given a
+	// data stream.
 	heartbeat := messages.NewHeartbeat(params.NewHeartbeatData([]byte("beat")))
 	raw, err := heartbeat.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := conn.outboundSignalStream(raw); err != nil || got != 0 {
-		t.Errorf("outboundSignalStream(Heartbeat) = %d, %v; want stream 0, nil", got, err)
+	if isPayloadData(raw) {
+		t.Error("an encoded Heartbeat was classified as DATA; it would be moved off stream 0")
 	}
 }
 
-// readPDWithin is ReadPD with a deadline, so a stalled test reports rather than
-// hanging to the package timeout.
+// readPDWithin reads one DATA's Protocol Data within a budget, so a stalled
+// test reports rather than hanging to the package timeout.
 func readPDWithin(t *testing.T, c *Association, d time.Duration) (*params.ProtocolDataPayload, error) {
 	t.Helper()
 
-	type result struct {
-		pd  *params.ProtocolDataPayload
-		err error
+	message, err := readPayload(c, d)
+	if err != nil {
+		return nil, err
 	}
-	out := make(chan result, 1)
-	go func() {
-		pd, err := c.ReadPD()
-		out <- result{pd, err}
-	}()
-
-	select {
-	case r := <-out:
-		return r.pd, r.err
-	case <-time.After(d):
-		return nil, fmt.Errorf("nothing arrived within %v", d)
-	}
+	return message.ProtocolData, nil
 }
 
 func readDataWithin(t *testing.T, c *Association, d time.Duration) (*DataMessage, error) {
@@ -391,7 +422,7 @@ func readDataWithin(t *testing.T, c *Association, d time.Duration) (*DataMessage
 	}
 	out := make(chan result, 1)
 	go func() {
-		data, err := c.ReadData()
+		data, err := c.ReadData(context.Background())
 		out <- result{data: data, err: err}
 	}()
 

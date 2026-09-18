@@ -92,18 +92,10 @@ func TestDialRefusesASackDelayAboveTheCeiling(t *testing.T) {
 
 	const port = 3217
 	newASPConfig := func() *AssociationConfig {
-		return newASPAssociationConfigForTest(
-			&HeartbeatInfo{Enabled: false},
-			0x11111111, 0x22222222, 1, params.TrafficModeLoadshare, 0, 0,
-			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
-		)
+		return newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	}
 	newSGPConfig := func() *AssociationConfig {
-		return newSGPAssociationConfigForTest(
-			&HeartbeatInfo{Enabled: false},
-			0x22222222, 0x11111111, 0, params.TrafficModeLoadshare, 0, 0,
-			[]uint32{1}, params.ServiceIndSCCP, 0, 0, 1,
-		)
+		return newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 0, params.TrafficModeLoadshare, 0, []uint32{1})
 	}
 
 	srvAddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))

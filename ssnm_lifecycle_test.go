@@ -289,7 +289,7 @@ func TestSSNMPendingActivationKnowledgeDoesNotAuthorizeTraffic(t *testing.T) {
 	if destination := ssnmDestination(t, knowledge, 0x123456, 0); destination.Availability.State != DestinationAvailable {
 		t.Fatalf("admitted availability = %v, want Available", destination.Availability.State)
 	}
-	if _, err := association.Write([]byte{0x01}); !errors.Is(err, ErrNotEstablished) {
+	if _, err := writePayload(association, 1, []byte{0x01}); !errors.Is(err, ErrNotEstablished) {
 		t.Fatalf("DATA before the ASP Active Ack: error = %v, want ErrNotEstablished", err)
 	}
 

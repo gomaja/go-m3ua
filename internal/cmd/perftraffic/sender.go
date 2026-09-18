@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gomaja/go-m3ua"
-	"github.com/gomaja/go-m3ua/messages/params"
 )
 
 const schedulerQuantum = 100 * time.Microsecond
@@ -450,11 +449,10 @@ func startSendWorkers(associations []*m3ua.Association, config commandConfig, co
 				if job.reverse {
 					tuple = reverseTuple(tuple)
 				}
-				protocolDataParam := params.NewProtocolData(tuple.OriginatingPointCode, tuple.DestinationPointCode, tuple.ServiceIndicator, tuple.NetworkIndicator, tuple.MessagePriority, tuple.SignallingLinkSelection, payload)
 				sendStarted := time.Now()
-				written, sendErr := connection.WritePDWithRoutingContext(protocolDataParam, tuple.RoutingContext)
+				written, sendErr := connection.WriteData(tuple.dataRequest(payload))
 				if sendErr == nil && written != job.size {
-					sendErr = fmt.Errorf("WritePDWithRoutingContext wrote %d bytes, want %d", written, job.size)
+					sendErr = fmt.Errorf("WriteData wrote %d bytes, want %d", written, job.size)
 				}
 				if sendErr != nil && tracker != nil {
 					tracker.fail(globalIndex(job.identity))
@@ -841,7 +839,7 @@ func remainingUntil(deadline time.Time) time.Duration {
 // read failure before shutdown is a fatal fixture error.
 func readEchoReplies(ctx context.Context, transportIndex int, association *m3ua.Association, registry *echoRegistry) {
 	for {
-		message, err := association.ReadData()
+		message, err := association.ReadData(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -851,10 +849,10 @@ func readEchoReplies(ctx context.Context, transportIndex int, association *m3ua.
 		}
 		received := receivedMessage{
 			ProtocolData:         protocolDataFromM3UA(message.ProtocolData),
-			NetworkAppearance:    message.NetworkAppearance,
-			NetworkAppearanceSet: message.NetworkAppearanceSet,
-			RoutingContext:       message.RoutingContext,
-			RoutingContextSet:    message.RoutingContextSet,
+			NetworkAppearance:    message.Scope.NetworkAppearance,
+			NetworkAppearanceSet: message.Scope.NetworkAppearanceSet,
+			RoutingContext:       firstRoutingContext(message.Scope),
+			RoutingContextSet:    message.Scope.RoutingContextSet,
 		}
 		identity, err := parsePayload(received.ProtocolData.Data)
 		if err != nil {

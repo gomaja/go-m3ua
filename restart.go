@@ -121,6 +121,9 @@ func (c *Association) handleSCTPRestart() {
 	restartWhileDown := c.initiatesASPSM() && c.state == StateASPDown && c.stateEntered
 	c.muState.RUnlock()
 	// The SCTP association remains usable, but its peer state is a new epoch.
+	// Advance it before anything else, so a DATA delivered from here on is
+	// reported in the epoch it actually arrived in.
+	c.epoch.Add(1)
 	// Drain any retry already entering the writer and cancel every old T(ack)
 	// before ASP-DOWN can start the mandatory fresh ASP-Up procedure.
 	c.resetTAckEpoch()

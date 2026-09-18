@@ -11,24 +11,23 @@ import (
 	"os"
 	"testing"
 	"time"
-
-	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// Association is documented as satisfying net.Conn, where a read deadline bounds the
-// read and nothing else: the error reports Timeout() true and the connection
-// stays usable.
+// SetReadDeadline keeps the deadline contract a reader expects, where
+// a read deadline bounds the read and nothing else: the error reports Timeout()
+// true and the association stays usable.
 //
-// This one did neither. Read never consulted a deadline at all; the value was
-// pushed down to the SCTP socket, whose only reader is this package's receive
-// loop, and that loop's error path closes the association. So the idiomatic
+// This one did neither. The read never consulted a deadline at all; the value
+// was pushed down to the SCTP socket, whose only reader is this package's
+// receive loop, and that loop's error path closes the association. So the
+// idiomatic
 //
 //	conn.SetReadDeadline(time.Now().Add(d))
-//	n, err := conn.Read(buf)
+//	message, err := conn.ReadData(ctx)
 //
 // on an idle association destroyed it. Measured before the fix: a healthy
 // ASP-ACTIVE association went to ASP-DOWN with Err() "i/o timeout", and every
-// subsequent Read and Write returned ErrNotEstablished. Heartbeats are off
+// subsequent read and write returned ErrNotEstablished. Heartbeats are off
 // unless configured, so "idle" is the normal state of a quiet ASP.
 func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -51,30 +50,31 @@ func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 	// already in flight, so before the fix it only took hold once the receive
 	// loop cycled — which is exactly what this does, and is what made the
 	// destruction reproducible rather than occasional.
-	pd := params.NewProtocolData(
-		0x22222222, 0x11111111, params.ServiceIndSCCP, 0, 0, 1, []byte("wake"))
-	if _, err := srvConn.WritePDWithRoutingContext(pd, 1); err != nil {
+	if _, err := writePayload(srvConn, 1, []byte("wake")); err != nil {
 		t.Fatalf("peer write: %v", err)
 	}
-	if _, err := cliConn.ReadPD(); err != nil {
+	// context.Background(), here and below: the deadline, not the context, is
+	// what must end a read in this file.
+	if _, err := cliConn.ReadData(context.Background()); err != nil {
 		t.Fatalf("reading the first message: %v", err)
 	}
 
 	start := time.Now()
-	n, err := cliConn.Read(make([]byte, 32))
+	message, err := cliConn.ReadData(context.Background())
 	elapsed := time.Since(start)
 
 	if !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("Read after the deadline = (%d, %v), want os.ErrDeadlineExceeded", n, err)
+		t.Fatalf("ReadData after the deadline = (%v, %v), want os.ErrDeadlineExceeded", message, err)
 	}
-	// net.Conn's contract: a read timeout is a net.Error reporting Timeout().
+	// A read timeout is reported as a net.Error whose Timeout() is true, so a
+	// caller can tell it apart from a failure that ended the association.
 	var netErr net.Error
 	if !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Errorf("error %v does not report Timeout(); a caller cannot tell it "+
 			"apart from a real failure", err)
 	}
 	if elapsed > 5*time.Second {
-		t.Errorf("Read took %v to report the deadline", elapsed)
+		t.Errorf("ReadData took %v to report the deadline", elapsed)
 	}
 
 	// The association must be untouched. This is the assertion that fails
@@ -93,20 +93,20 @@ func TestReadDeadlineBoundsReadWithoutEndingTheAssociation(t *testing.T) {
 	if err := cliConn.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatalf("clearing the deadline: %v", err)
 	}
-	if _, err := srvConn.WritePDWithRoutingContext(pd, 1); err != nil {
+	if _, err := writePayload(srvConn, 1, []byte("wake")); err != nil {
 		t.Fatalf("peer write after the deadline: %v", err)
 	}
-	got, err := cliConn.ReadPD()
+	got, err := readPayload(cliConn, 5*time.Second)
 	if err != nil {
 		t.Fatalf("read after the deadline was cleared: %v", err)
 	}
-	if string(got.Data) != "wake" {
-		t.Errorf("payload = %q, want %q", got.Data, "wake")
+	if string(got.ProtocolData.Data) != "wake" {
+		t.Errorf("payload = %q, want %q", got.ProtocolData.Data, "wake")
 	}
 }
 
 // A deadline already in the past reports immediately rather than waiting, and a
-// zero time removes it. Both are net.Conn's stated behaviour and neither may
+// zero time removes it. Both are this package's stated behaviour and neither may
 // take the association with it.
 func TestReadDeadlineBoundaries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -126,22 +126,23 @@ func TestReadDeadlineBoundaries(t *testing.T) {
 			t.Fatalf("SetReadDeadline: %v", err)
 		}
 		start := time.Now()
-		if _, err := cliConn.Read(make([]byte, 8)); !errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Errorf("Read = %v, want os.ErrDeadlineExceeded", err)
+		if _, err := cliConn.ReadData(context.Background()); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Errorf("ReadData = %v, want os.ErrDeadlineExceeded", err)
 		}
 		if d := time.Since(start); d > time.Second {
 			t.Errorf("an already-expired deadline took %v to report", d)
 		}
 	})
 
-	t.Run("every read entry point honours it", func(t *testing.T) {
+	t.Run("the read entry point honours it even with a live context", func(t *testing.T) {
 		if err := cliConn.SetReadDeadline(time.Now().Add(-time.Second)); err != nil {
 			t.Fatalf("SetReadDeadline: %v", err)
 		}
-		if _, err := cliConn.ReadPD(); !errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Errorf("ReadPD = %v, want os.ErrDeadlineExceeded", err)
-		}
-		if _, err := cliConn.ReadData(); !errors.Is(err, os.ErrDeadlineExceeded) {
+		// ReadData is now the only way in, and a context that will never be
+		// cancelled leaves the deadline as the only thing that can end the
+		// read: what comes back is therefore the deadline's answer, not the
+		// context's.
+		if _, err := cliConn.ReadData(context.Background()); !errors.Is(err, os.ErrDeadlineExceeded) {
 			t.Errorf("ReadData = %v, want os.ErrDeadlineExceeded", err)
 		}
 	})
@@ -150,7 +151,7 @@ func TestReadDeadlineBoundaries(t *testing.T) {
 		if err := cliConn.SetDeadline(time.Now().Add(-time.Second)); err != nil {
 			t.Fatalf("SetDeadline: %v", err)
 		}
-		if _, err := cliConn.ReadData(); !errors.Is(err, os.ErrDeadlineExceeded) {
+		if _, err := cliConn.ReadData(context.Background()); !errors.Is(err, os.ErrDeadlineExceeded) {
 			t.Errorf("ReadData after SetDeadline = %v, want os.ErrDeadlineExceeded", err)
 		}
 	})
@@ -159,17 +160,15 @@ func TestReadDeadlineBoundaries(t *testing.T) {
 		if err := cliConn.SetReadDeadline(time.Time{}); err != nil {
 			t.Fatalf("SetReadDeadline: %v", err)
 		}
-		pd := params.NewProtocolData(
-			0x22222222, 0x11111111, params.ServiceIndSCCP, 0, 0, 1, []byte("ok"))
-		if _, err := srvConn.WritePDWithRoutingContext(pd, 1); err != nil {
+		if _, err := writePayload(srvConn, 1, []byte("ok")); err != nil {
 			t.Fatalf("peer write: %v", err)
 		}
-		got, err := cliConn.ReadPD()
+		got, err := readPayload(cliConn, 5*time.Second)
 		if err != nil {
-			t.Fatalf("ReadPD with no deadline: %v", err)
+			t.Fatalf("ReadData with no deadline: %v", err)
 		}
-		if string(got.Data) != "ok" {
-			t.Errorf("payload = %q, want %q", got.Data, "ok")
+		if string(got.ProtocolData.Data) != "ok" {
+			t.Errorf("payload = %q, want %q", got.ProtocolData.Data, "ok")
 		}
 	})
 
@@ -199,8 +198,8 @@ func TestReadDeadlineOnAnAcceptedAssociation(t *testing.T) {
 	if err := srvConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
-	if _, err := srvConn.Read(make([]byte, 16)); !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("Read = %v, want os.ErrDeadlineExceeded", err)
+	if _, err := srvConn.ReadData(context.Background()); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("ReadData = %v, want os.ErrDeadlineExceeded", err)
 	}
 	if state := srvConn.State(); state != StateASPActive {
 		t.Errorf("accepted association went to %v on a read deadline, want %v",
@@ -216,15 +215,14 @@ func TestReadDeadlineOnAnAcceptedAssociation(t *testing.T) {
 	if err := srvConn.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatalf("clearing the deadline: %v", err)
 	}
-	if _, err := cliConn.WritePDWithRoutingContext(params.NewProtocolData(
-		0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("up")), 1); err != nil {
+	if _, err := writePayload(cliConn, 1, []byte("up")); err != nil {
 		t.Fatalf("association write: %v", err)
 	}
-	got, err := srvConn.ReadPD()
+	got, err := readPayload(srvConn, 5*time.Second)
 	if err != nil {
-		t.Fatalf("ReadPD after the deadline was cleared: %v", err)
+		t.Fatalf("ReadData after the deadline was cleared: %v", err)
 	}
-	if string(got.Data) != "up" {
-		t.Errorf("payload = %q, want %q", got.Data, "up")
+	if string(got.ProtocolData.Data) != "up" {
+		t.Errorf("payload = %q, want %q", got.ProtocolData.Data, "up")
 	}
 }
