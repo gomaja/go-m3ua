@@ -1583,3 +1583,67 @@ func TestBroadcastWithinASignallingGatewayIncludesARestrictedSGP(t *testing.T) {
 		t.Fatalf("counts = sgp-a1:%d sgp-a2:%d, want 1 each", firstCapture.count(), secondCapture.count())
 	}
 }
+
+// Two requests with the same routing label but different Originating Point
+// Codes are different RFC 4666 Section 1.4.2.5 traffic flows. They are assigned
+// separately and neither waits behind the other.
+func TestDifferentOriginatingPointCodesAreDifferentFlows(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	config := validASPConfig()
+	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	config.Routing.MTPRoutes[0].OriginatingPointCodes = []uint32{0x111111, 0x222222}
+	useSignallingGateways(config, "sg-a")
+	endpoint, associations, _ := newASPTransferFixture(t, config)
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	associations["sg-a/sgp-a1"].dataWriter = func(raw []byte, _ *sctp.SndRcvInfo) (int, error) {
+		payload, err := capturedMTPTransferPayload(raw)
+		if err != nil {
+			return 0, err
+		}
+		switch payload {
+		case "first":
+			close(firstStarted)
+			<-releaseFirst
+		case "second":
+			close(secondStarted)
+		}
+		return len(raw), nil
+	}
+	send := func(originatingPointCode uint32, payload string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			_, err := endpoint.MTPTransfer(MTPTransferRequest{
+				ProtocolData: params.NewProtocolDataPayload(
+					originatingPointCode, pointCode, params.ServiceIndSCCP, 0, 0, 1, []byte(payload)),
+			})
+			done <- err
+		}()
+		return done
+	}
+
+	firstDone := send(0x111111, "first")
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("the first MTPTransfer did not reach the transport")
+	}
+	secondDone := send(0x222222, "second")
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		close(releaseFirst)
+		<-firstDone
+		<-secondDone
+		t.Fatal("a request with a different Originating Point Code waited behind another flow")
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first MTPTransfer: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second MTPTransfer: %v", err)
+	}
+}
