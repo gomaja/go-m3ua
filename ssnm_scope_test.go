@@ -154,7 +154,7 @@ func TestSSNMHonoursPerRoutingContextActiveState(t *testing.T) {
 						t.Errorf("silently ignored %s wrote %v", message.name, typeNames(*sent))
 					}
 					assertNoSSNMScopeStatus(t, conn)
-					if got := conn.DestinationState(ssnmScopePointCode); got != DestinationAvailable {
+					if got := retainedAvailability(conn, ssnmScopePointCode); got != DestinationAvailable {
 						t.Errorf("inactive-flow %s changed destination state to %v", message.name, got)
 					}
 				})
@@ -196,10 +196,9 @@ func TestSSNMHonoursPerRoutingContextActiveState(t *testing.T) {
 					if len(*sent) != 0 {
 						t.Errorf("rejected %s wrote %v", message.name, typeNames(*sent))
 					}
+					// Nothing was published, so nothing about the peer's
+					// congestion reached the application either.
 					assertNoSSNMScopeStatus(t, conn)
-					if got := conn.PeerCongestionLevel(); got != 0 {
-						t.Errorf("rejected %s changed peer congestion to %d", message.name, got)
-					}
 				})
 			}
 		}
@@ -446,7 +445,7 @@ func TestSCONConcernedDestinationDirectionAndStatus(t *testing.T) {
 			t.Fatalf("error = %v, want ErrInvalidParameterValue", err)
 		}
 		assertNoSSNMScopeStatus(t, conn)
-		if got := conn.DestinationState(ssnmScopePointCode); got != DestinationAvailable {
+		if got := retainedAvailability(conn, ssnmScopePointCode); got != DestinationAvailable {
 			t.Errorf("rejected SCON changed destination state to %v", got)
 		}
 	})
@@ -473,11 +472,8 @@ func TestSCONRejectsUndefinedCongestionLevels(t *testing.T) {
 						t.Fatalf("level %d error = %v, want ErrInvalidParameterValue", level, err)
 					}
 					assertNoSSNMScopeStatus(t, conn)
-					if got := conn.DestinationState(ssnmScopePointCode); got != DestinationAvailable {
-						t.Errorf("level %d changed destination state to %v", level, got)
-					}
-					if got := conn.PeerCongestionLevel(); got != 0 {
-						t.Errorf("level %d changed peer congestion to %d", level, got)
+					if got := retainedDestinationState(conn, ssnmScopePointCode); got != (DestinationNetworkState{}) {
+						t.Errorf("level %d changed destination state to %+v", level, got)
 					}
 				})
 			}
@@ -501,7 +497,7 @@ func TestSCONRejectsUndefinedCongestionLevels(t *testing.T) {
 					if err != nil {
 						t.Fatalf("defined congestion level %d: %v", level, err)
 					}
-					if got := nextStatus(t, conn).CongestionLevel; got != level {
+					if got := nextStatus(t, conn).State.Congestion.Level; got != level {
 						t.Errorf("reported level = %d, want %d", got, level)
 					}
 				})

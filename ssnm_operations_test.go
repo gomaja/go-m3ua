@@ -351,8 +351,11 @@ func TestSSNMOperationEndpointFanout(t *testing.T) {
 			RoutingContext: 2, RoutingContextSet: true,
 			PointCode: 0x123456, Mask: 4,
 		})
-		if !ok || status.State != DestinationCongested ||
-			!status.CongestionLevelSet || status.CongestionLevel != 2 {
+		// A SCON moves congestion alone, so the recorded availability stays
+		// the Available that RFC 4666 Section 4.5.2.2 keeps separate from it.
+		if !ok || status.State.Availability != DestinationAvailable ||
+			!status.State.Congestion.Congested ||
+			!status.State.Congestion.LevelSet || status.State.Congestion.Level != 2 {
 			t.Fatalf("recorded SCON status = %+v, %v", status, ok)
 		}
 		if second.ID() == 0 {
@@ -473,7 +476,8 @@ func TestSSNMOperationEndpointCongestionPresenceAndAbatement(t *testing.T) {
 		RoutingContext: 2, RoutingContextSet: true,
 		PointCode: destination.PointCode,
 	})
-	if !ok || status.State != DestinationCongested || status.CongestionLevelSet {
+	if !ok || status.State.Availability != DestinationAvailable ||
+		!status.State.Congestion.Congested || status.State.Congestion.LevelSet {
 		t.Fatalf("omitted congestion status = %+v, %v", status, ok)
 	}
 
@@ -497,8 +501,10 @@ func TestSSNMOperationEndpointCongestionPresenceAndAbatement(t *testing.T) {
 		RoutingContext: 2, RoutingContextSet: true,
 		PointCode: destination.PointCode,
 	})
-	if !ok || status.State != DestinationAvailable ||
-		!status.CongestionLevelSet || status.CongestionLevel != 0 {
+	// The explicit level zero abates congestion without touching availability.
+	if !ok || status.State.Availability != DestinationAvailable ||
+		status.State.Congestion.Congested ||
+		!status.State.Congestion.LevelSet || status.State.Congestion.Level != 0 {
 		t.Fatalf("abatement status = %+v, %v", status, ok)
 	}
 	if second.ID() == 0 {

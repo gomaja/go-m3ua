@@ -34,16 +34,28 @@ func TestSCONFromAnASPDoesNotRewriteTheSGsRoutingState(t *testing.T) {
 	}
 
 	// The SG's own view of the SS7 destination must be untouched.
-	if got := sgp.DestinationState(0x222222); got == DestinationCongested {
+	if got := retainedDestinationState(sgp, 0x222222); got.Congestion.Congested {
 		t.Error("an ASP's SCON marked an SS7 destination congested in the SG's " +
 			"own routing state; another ASP auditing that point code would be " +
 			"told of congestion the SG never observed")
 	}
 
-	// It is still recorded as what it is: the peer's congestion level.
-	if got := sgp.PeerCongestionLevel(); got != 2 {
-		t.Errorf("PeerCongestionLevel() = %d, want 2 — the ASP's report should "+
-			"be kept, just not as SS7 state", got)
+	// It is still reported as what it is: the peer's own congestion level,
+	// marked as describing the peer rather than the destination.
+	select {
+	case status := <-sgp.SignallingStatus():
+		if !status.PeerReported {
+			t.Error("an ASP's SCON was reported as SS7 destination state rather " +
+				"than as a report about the peer")
+		}
+		if !status.State.Congestion.Congested || status.State.Congestion.Level != 2 ||
+			!status.State.Congestion.LevelSet {
+			t.Errorf("reported peer congestion = %+v, want level 2 — the ASP's "+
+				"report should be kept, just not as SS7 state", status.State.Congestion)
+		}
+	default:
+		t.Error("an ASP's SCON was discarded instead of being reported as the " +
+			"peer's own congestion level")
 	}
 }
 
@@ -57,10 +69,34 @@ func TestSCONFromAnSGPDoesUpdateTheDestination(t *testing.T) {
 	)); err != nil {
 		t.Fatalf("handleSignallingCongestion: %v", err)
 	}
-	if got := asp.DestinationState(0x222222); got != DestinationCongested {
-		t.Errorf("destination state = %v after an SGP's SCON, want %v",
-			got, DestinationCongested)
+	// The SCON moves the congestion dimension only: RFC 4666 Section 4.5.2.2
+	// keeps availability a separate status, and no DUNA, DAVA or DRST has been
+	// received, so the destination stays reachable while it is congested.
+	got := retainedDestinationState(asp, 0x222222)
+	if !got.Congestion.Congested {
+		t.Errorf("destination congestion = %+v after an SGP's SCON, want congested",
+			got.Congestion)
 	}
+	if got.Availability != DestinationAvailable {
+		t.Errorf("destination availability = %v after an SGP's SCON, want %v",
+			got.Availability, DestinationAvailable)
+	}
+}
+
+// seedRetainedCongestion records a congestion report directly in an
+// Association's retained state, in the scope its own queries resolve. It is
+// what the removed local setters did for the dimension RFC 4666 Section 4.5.2.2
+// keeps separate from availability.
+func seedRetainedCongestion(c *Association, pointCode uint32, level uint8) {
+	scope := associationDestinationScope(c, nil)
+	_ = c.destinations.setCongestionRangesWithinBudget([]DestinationRange{{
+		NetworkAppearance:    scope.networkAppearance,
+		NetworkAppearanceSet: scope.networkAppearanceSet,
+		RoutingContext:       scope.routingContext,
+		RoutingContextSet:    scope.routingContextSet,
+		PointCode:            pointCode,
+		State:                congestedState(level),
+	}})
 }
 
 // TestSCONWithCongestionLevelZeroIsNotCongestion covers the Congestion Level
@@ -81,7 +117,7 @@ func TestSCONWithCongestionLevelZeroIsNotCongestion(t *testing.T) {
 	asp, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 
 	// Congested first, so clearing is observable.
-	asp.SetDestinationState(0x222222, DestinationCongested)
+	seedRetainedCongestion(asp, 0x222222, 2)
 
 	if err := asp.handleSignallingCongestion(messages.NewSignallingCongestion(
 		nil, nil, params.NewAffectedPointCodeWithMask(0, 0x222222),
@@ -89,7 +125,7 @@ func TestSCONWithCongestionLevelZeroIsNotCongestion(t *testing.T) {
 	)); err != nil {
 		t.Fatalf("handleSignallingCongestion: %v", err)
 	}
-	if got := asp.DestinationState(0x222222); got == DestinationCongested {
+	if got := retainedDestinationState(asp, 0x222222); got.Congestion.Congested {
 		t.Error("a SCON carrying Congestion Level 0 (\"No Congestion or " +
 			"Undefined\") left the destination congested")
 	}
@@ -107,9 +143,9 @@ func TestSCONWithoutCongestionIndicationsIsStillCongestion(t *testing.T) {
 	)); err != nil {
 		t.Fatalf("handleSignallingCongestion: %v", err)
 	}
-	if got := asp.DestinationState(0x222222); got != DestinationCongested {
-		t.Errorf("destination state = %v, want %v: an ITU-style SCON carries no "+
-			"level and still means congestion", got, DestinationCongested)
+	if got := retainedDestinationState(asp, 0x222222); !got.Congestion.Congested {
+		t.Errorf("destination congestion = %+v, want congested: an ITU-style SCON "+
+			"carries no level and still means congestion", got.Congestion)
 	}
 }
 
@@ -142,7 +178,7 @@ func TestDAUDForAnUnknownPointCodeIsAnsweredWithDUNA(t *testing.T) {
 // DAVA.
 func TestDAUDForAKnownAvailablePointCodeIsAnsweredWithDAVA(t *testing.T) {
 	sgp, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
-	sgp.SetDestinationState(0x999999, DestinationAvailable)
+	seedDestinationAvailability(sgp, 0x999999, DestinationAvailable)
 
 	if err := sgp.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		nil, nil, params.NewAffectedPointCodeWithMask(0, 0x999999), nil,

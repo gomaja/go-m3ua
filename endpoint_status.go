@@ -85,12 +85,11 @@ type DestinationStatusKey struct {
 }
 
 // DestinationStatusSnapshot is one SGP destination record used to answer
-// RFC 4666 Section 4.5.3 destination audits.
+// RFC 4666 Section 4.5.3 destination audits. State carries both dimensions the
+// audit has to answer, whichever of them was reported last.
 type DestinationStatusSnapshot struct {
-	Key                DestinationStatusKey
-	State              DestinationState
-	CongestionLevel    uint8
-	CongestionLevelSet bool
+	Key   DestinationStatusKey
+	State DestinationNetworkState
 }
 
 // AssociationStatus returns one Endpoint-owned Association status by its
@@ -393,8 +392,15 @@ func (e *Endpoint) MTPRouteStatuses() []MTPRouteStatus {
 	return statuses
 }
 
-// DestinationStatus returns the newest SGP destination record covering the
-// requested range in the exact Network Appearance and Routing Context scope.
+// DestinationStatus returns an SGP destination's state in the exact Network
+// Appearance and Routing Context scope requested, composed from the newest
+// record covering that range in each dimension.
+//
+// The two dimensions resolve independently, so they need not come from the same
+// record — a SCON naming one point code does not hide the DUNA a broader range
+// carries — and the key returned is therefore the range that was asked about
+// rather than any one record's. DestinationStatuses enumerates the records
+// themselves.
 func (e *Endpoint) DestinationStatus(key DestinationStatusKey) (DestinationStatusSnapshot, bool) {
 	if e == nil || e.role != RoleSGP || e.destinations == nil ||
 		key.PointCode > 0x00ffffff || key.Mask > 24 {
@@ -406,16 +412,16 @@ func (e *Endpoint) DestinationStatus(key DestinationStatusKey) (DestinationStatu
 		routingContext:       key.RoutingContext,
 		routingContextSet:    key.RoutingContextSet,
 	}
-	record, ok := e.destinations.lookupRecord(scope, key.PointCode, key.Mask)
+	state, ok := e.destinations.lookupRange(scope, key.PointCode, key.Mask)
 	if !ok {
 		return DestinationStatusSnapshot{}, false
 	}
-	rangeValue := destinationRecordRangeForScope(record, scope)
-	return destinationSnapshotFromRange(rangeValue), true
+	return DestinationStatusSnapshot{Key: key, State: state}, true
 }
 
 // DestinationStatuses returns every retained SGP destination record in
-// deterministic traffic-scope and point-code order.
+// deterministic traffic-scope and point-code order, each with both dimensions
+// resolved from the records sharing its exact key.
 func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot {
 	if e == nil || e.role != RoleSGP || e.destinations == nil {
 		return nil
@@ -428,28 +434,39 @@ func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot {
 	}
 	e.destinations.mu.RUnlock()
 
+	// Availability and congestion are separate statements (RFC 4666 Section
+	// 4.5.2.2) and are retained in separate records, so a key's snapshot takes
+	// the newest record for each dimension rather than the newest record.
 	type sequencedStatus struct {
-		status   DestinationStatusSnapshot
-		sequence uint64
+		status          DestinationStatusSnapshot
+		availabilitySeq uint64
+		congestionSeq   uint64
 	}
 	latest := make(map[DestinationStatusKey]sequencedStatus, len(records))
-	keepNewest := func(rangeValue DestinationRange, sequence uint64) {
-		status := destinationSnapshotFromRange(rangeValue)
-		current, exists := latest[status.Key]
-		if !exists || sequence > current.sequence {
-			latest[status.Key] = sequencedStatus{status: status, sequence: sequence}
+	keepNewest := func(rangeValue DestinationRange, dimensions destinationDimensions, sequence uint64) {
+		key := destinationStatusKeyFromRange(rangeValue)
+		current := latest[key]
+		current.status.Key = key
+		if dimensions.carries(destinationAvailabilityDimension) && sequence > current.availabilitySeq {
+			current.availabilitySeq = sequence
+			current.status.State.Availability = rangeValue.State.Availability
 		}
+		if dimensions.carries(destinationCongestionDimension) && sequence > current.congestionSeq {
+			current.congestionSeq = sequence
+			current.status.State.Congestion = rangeValue.State.Congestion
+		}
+		latest[key] = current
 	}
 	for _, record := range records {
 		if len(record.routingContexts) == 0 {
-			keepNewest(record.rangeValue, record.sequence)
+			keepNewest(record.rangeValue, record.dimensions, record.sequence)
 			continue
 		}
 		for _, routingContext := range record.routingContexts {
 			rangeValue := record.rangeValue
 			rangeValue.RoutingContext = routingContext
 			rangeValue.RoutingContextSet = true
-			keepNewest(rangeValue, record.sequence)
+			keepNewest(rangeValue, record.dimensions, record.sequence)
 		}
 	}
 	statuses := make([]DestinationStatusSnapshot, 0, len(latest))
@@ -462,19 +479,14 @@ func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot {
 	return statuses
 }
 
-func destinationSnapshotFromRange(rangeValue DestinationRange) DestinationStatusSnapshot {
-	return DestinationStatusSnapshot{
-		Key: DestinationStatusKey{
-			NetworkAppearance:    rangeValue.NetworkAppearance,
-			NetworkAppearanceSet: rangeValue.NetworkAppearanceSet,
-			RoutingContext:       rangeValue.RoutingContext,
-			RoutingContextSet:    rangeValue.RoutingContextSet,
-			PointCode:            rangeValue.PointCode,
-			Mask:                 rangeValue.Mask,
-		},
-		State:              rangeValue.State,
-		CongestionLevel:    rangeValue.CongestionLevel,
-		CongestionLevelSet: rangeValue.CongestionLevelSet,
+func destinationStatusKeyFromRange(rangeValue DestinationRange) DestinationStatusKey {
+	return DestinationStatusKey{
+		NetworkAppearance:    rangeValue.NetworkAppearance,
+		NetworkAppearanceSet: rangeValue.NetworkAppearanceSet,
+		RoutingContext:       rangeValue.RoutingContext,
+		RoutingContextSet:    rangeValue.RoutingContextSet,
+		PointCode:            rangeValue.PointCode,
+		Mask:                 rangeValue.Mask,
 	}
 }
 

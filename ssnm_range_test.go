@@ -16,7 +16,7 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func affectedPointCodeOf(message messages.M3UA) *params.Param {
+func affectedPointCodeParamOf(message messages.M3UA) *params.Param {
 	switch value := message.(type) {
 	case *messages.DestinationUnavailable:
 		return value.AffectedPointCode
@@ -31,12 +31,96 @@ func affectedPointCodeOf(message messages.M3UA) *params.Param {
 	}
 }
 
-func requireDestinationStateForScope(t *testing.T, conn *Association, networkAppearance, routingContext, pointCode uint32, want DestinationState) {
+func requireDestinationStateForScope(t *testing.T, conn *Association, networkAppearance, routingContext, pointCode uint32, want DestinationAvailability) {
 	t.Helper()
-	if got := conn.DestinationStateForNetworkAndRoutingContext(networkAppearance, routingContext, pointCode); got != want {
+	if got := retainedAvailabilityForNetworkAndRoutingContext(conn, networkAppearance, routingContext, pointCode); got != want {
 		t.Fatalf("state for NA=%d RC=%d PC=%#x = %v, want %v",
 			networkAppearance, routingContext, pointCode, got, want)
 	}
+}
+
+// destinationScopeKey is one exact Network Appearance and Routing Context
+// scope, the scope the removed per-scope setters and queries resolved.
+func destinationScopeKey(networkAppearance, routingContext uint32) destinationKey {
+	return destinationKey{
+		networkAppearance:    networkAppearance,
+		networkAppearanceSet: true,
+		routingContext:       routingContext,
+		routingContextSet:    true,
+	}
+}
+
+// seedDestinationRangeInScope records one availability range in an exact
+// Network Appearance and Routing Context.
+func seedDestinationRangeInScope(
+	store *destinations,
+	networkAppearance, routingContext, pointCode uint32,
+	mask uint8,
+	state DestinationNetworkState,
+) {
+	store.setRanges([]DestinationRange{{
+		NetworkAppearance:    networkAppearance,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+		PointCode:            pointCode,
+		Mask:                 mask,
+		State:                state,
+	}})
+}
+
+// seedDestinationRangeForNetwork records one availability range as an
+// all-Routing-Context baseline in an explicit Network Appearance.
+func seedDestinationRangeForNetwork(
+	store *destinations,
+	networkAppearance, pointCode uint32,
+	mask uint8,
+	state DestinationNetworkState,
+) {
+	store.setRanges([]DestinationRange{{
+		NetworkAppearance:    networkAppearance,
+		NetworkAppearanceSet: true,
+		PointCode:            pointCode,
+		Mask:                 mask,
+		State:                state,
+	}})
+}
+
+// seedDestinationCongestionInScope records a congestion range. RFC 4666
+// Section 4.5.2.2 keeps congestion separate from availability, so the record
+// has to be written in the congestion dimension alone or it would restate a
+// reachability nothing reported.
+func seedDestinationCongestionInScope(
+	store *destinations,
+	networkAppearance, routingContext, pointCode uint32,
+	mask uint8,
+	state DestinationNetworkState,
+) {
+	_ = store.setCongestionRangesWithinBudget([]DestinationRange{{
+		NetworkAppearance:    networkAppearance,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+		PointCode:            pointCode,
+		Mask:                 mask,
+		State:                state,
+	}})
+}
+
+// destinationRangesInScope reads back every range retained in one exact
+// Network Appearance and Routing Context, in update order.
+func destinationRangesInScope(store *destinations, networkAppearance, routingContext uint32) []DestinationRange {
+	return store.rangesForScope(destinationScopeKey(networkAppearance, routingContext))
+}
+
+// destinationStateInScope reads a destination's retained state in one exact
+// Network Appearance and Routing Context, and whether it is one this node has
+// been told about at all.
+func destinationStateInScope(
+	store *destinations,
+	networkAppearance, routingContext, pointCode uint32,
+) (DestinationNetworkState, bool) {
+	return store.lookupRange(destinationScopeKey(networkAppearance, routingContext), pointCode, 0)
 }
 
 func TestDestinationStatusPreservesAffectedPointCodeMask(t *testing.T) {
@@ -169,17 +253,17 @@ func TestNewestMatchingDestinationRangeWins(t *testing.T) {
 
 func TestEquivalentDestinationRangeUpdateReplacesItsCanonicalPrefix(t *testing.T) {
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x1234aa, 8, DestinationUnavailable)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123455, 8, DestinationRestricted)
+	seedDestinationRangeInScope(
+		conn.destinations, 7, 1, 0x1234aa, 8, availabilityState(DestinationUnavailable))
+	seedDestinationRangeInScope(
+		conn.destinations, 7, 1, 0x123455, 8, availabilityState(DestinationRestricted))
 
-	ranges := conn.DestinationRangesForNetworkAndRoutingContext(7, 1)
+	ranges := destinationRangesInScope(conn.destinations, 7, 1)
 	if len(ranges) != 1 {
 		t.Fatalf("equivalent range records = %#v, want one latest record", ranges)
 	}
 	if ranges[0].PointCode != 0x123455 || ranges[0].Mask != 8 ||
-		ranges[0].State != DestinationRestricted {
+		ranges[0].State != availabilityState(DestinationRestricted) {
 		t.Errorf("latest range = %#v, want PC 0x123455 Mask 8 Restricted", ranges[0])
 	}
 	requireDestinationStateForScope(t, conn, 7, 1, 0x1234ff, DestinationRestricted)
@@ -187,10 +271,10 @@ func TestEquivalentDestinationRangeUpdateReplacesItsCanonicalPrefix(t *testing.T
 
 func TestDestinationRangeSettersNormalizePointCodesTo24Bits(t *testing.T) {
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 0)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(
-		0, 0, 0xff123456, 3, DestinationUnavailable)
+	seedDestinationRangeInScope(
+		conn.destinations, 0, 0, 0xff123456, 3, availabilityState(DestinationUnavailable))
 
-	ranges := conn.DestinationRangesForNetworkAndRoutingContext(0, 0)
+	ranges := destinationRangesInScope(conn.destinations, 0, 0)
 	if len(ranges) != 1 {
 		t.Fatalf("ranges = %#v, want one", ranges)
 	}
@@ -229,7 +313,7 @@ func TestDestinationStateIsScopedByNetworkAndRoutingContext(t *testing.T) {
 	requireDestinationStateForScope(t, conn, 8, 1, pointCode, DestinationRestricted)
 	requireDestinationStateForScope(t, conn, 8, 2, pointCode, DestinationAvailable)
 
-	if got := conn.DestinationStateForNetwork(7, pointCode); got != DestinationAvailable {
+	if got := retainedAvailabilityForNetwork(conn, 7, pointCode); got != DestinationAvailable {
 		t.Errorf("legacy multi-RC query = %v, want baseline/default Available", got)
 	}
 
@@ -242,7 +326,7 @@ func TestDestinationStateIsScopedByNetworkAndRoutingContext(t *testing.T) {
 			t.Fatal(err)
 		}
 		requireDestinationStateForScope(t, single, 7, 9, pointCode, DestinationUnavailable)
-		ranges := single.DestinationRangesForNetworkAndRoutingContext(7, 9)
+		ranges := destinationRangesInScope(single.destinations, 7, 9)
 		if len(ranges) != 1 || !ranges[0].RoutingContextSet || ranges[0].RoutingContext != 9 {
 			t.Errorf("omitted-RC range scope = %#v, want sole Routing Context 9", ranges)
 		}
@@ -253,19 +337,19 @@ func TestDestinationScopePresenceIsDistinctFromExplicitZero(t *testing.T) {
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, nil)
 	const pointCode = uint32(0x234567)
-	conn.SetDestinationStateForNetworkAndRoutingContext(
-		0, 1, pointCode, DestinationUnavailable)
+	seedDestinationRangeInScope(
+		conn.destinations, 0, 1, pointCode, 0, availabilityState(DestinationUnavailable))
 
-	if got := conn.DestinationState(pointCode); got != DestinationAvailable {
+	if got := retainedAvailability(conn, pointCode); got != DestinationAvailable {
 		t.Errorf("absent-NA query = %v, want Available; explicit NA 0 must remain distinct", got)
 	}
 	requireDestinationStateForScope(t, conn, 0, 1, pointCode, DestinationUnavailable)
 
 	t.Run("Routing Context", func(t *testing.T) {
 		multi, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 0, 1)
-		multi.SetDestinationStateForNetworkAndRoutingContext(
-			0, 0, pointCode, DestinationUnavailable)
-		if got := multi.DestinationStateForNetwork(0, pointCode); got != DestinationAvailable {
+		seedDestinationRangeInScope(
+			multi.destinations, 0, 0, pointCode, 0, availabilityState(DestinationUnavailable))
+		if got := retainedAvailabilityForNetwork(multi, 0, pointCode); got != DestinationAvailable {
 			t.Errorf("unscoped RC query = %v, want Available; explicit RC 0 must remain distinct", got)
 		}
 		requireDestinationStateForScope(t, multi, 0, 0, pointCode, DestinationUnavailable)
@@ -274,52 +358,61 @@ func TestDestinationScopePresenceIsDistinctFromExplicitZero(t *testing.T) {
 
 func TestDestinationRangeSnapshotsPreserveScopeAndUpdateOrder(t *testing.T) {
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
-	conn.SetDestinationRangeForNetwork(7, 0x120001, 14, DestinationUnavailable)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, 0x1234aa, 8, DestinationRestricted)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, 0x123456, 0, DestinationAvailable)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 2, 0x123456, 0, DestinationCongested)
+	seedDestinationRangeForNetwork(
+		conn.destinations, 7, 0x120001, 14, availabilityState(DestinationUnavailable))
+	seedDestinationRangeInScope(
+		conn.destinations, 7, 1, 0x1234aa, 8, availabilityState(DestinationRestricted))
+	seedDestinationRangeInScope(
+		conn.destinations, 7, 1, 0x123456, 0, availabilityState(DestinationAvailable))
+	seedDestinationCongestionInScope(
+		conn.destinations, 7, 2, 0x123456, 0, congestedState(2))
 
-	got := conn.DestinationRangesForNetworkAndRoutingContext(7, 1)
+	got := destinationRangesInScope(conn.destinations, 7, 1)
 	want := []DestinationRange{
 		{
 			NetworkAppearance: 7, NetworkAppearanceSet: true,
-			PointCode: 0x120001, Mask: 14, State: DestinationUnavailable,
+			PointCode: 0x120001, Mask: 14, State: availabilityState(DestinationUnavailable),
 		},
 		{
 			NetworkAppearance: 7, NetworkAppearanceSet: true,
 			RoutingContext: 1, RoutingContextSet: true,
-			PointCode: 0x1234aa, Mask: 8, State: DestinationRestricted,
+			PointCode: 0x1234aa, Mask: 8, State: availabilityState(DestinationRestricted),
 		},
 		{
 			NetworkAppearance: 7, NetworkAppearanceSet: true,
 			RoutingContext: 1, RoutingContextSet: true,
-			PointCode: 0x123456, Mask: 0, State: DestinationAvailable,
+			PointCode: 0x123456, Mask: 0, State: availabilityState(DestinationAvailable),
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("DestinationRangesForNetworkAndRoutingContext() = %#v, want %#v", got, want)
+		t.Errorf("ranges for NA 7 RC 1 = %#v, want %#v", got, want)
 	}
 }
 
 func TestListenerDestinationRangesProvideAllRCBaselineAndScopedOverride(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 7, []uint32{1, 2})
 	listener := newSGPListener(NewListenerConfig(config))
-	listener.SetDestinationRangeForNetwork(7, 0x1234aa, 8, DestinationUnavailable)
-	listener.SetDestinationStateForNetworkAndRoutingContext(7, 2, 0x123456, DestinationAvailable)
+	store := listenerEndpoint(t, listener).destinations
+	seedDestinationRangeForNetwork(store, 7, 0x1234aa, 8, availabilityState(DestinationUnavailable))
+	seedDestinationRangeInScope(store, 7, 2, 0x123456, 0, availabilityState(DestinationAvailable))
 
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); !known || state != DestinationUnavailable {
+	if state, known := destinationStateInScope(store, 7, 1, 0x123456); !known ||
+		state.Availability != DestinationUnavailable {
 		t.Errorf("RC1 state = %v (known=%v), want Unavailable", state, known)
 	}
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 2, 0x123456); !known || state != DestinationAvailable {
+	if state, known := destinationStateInScope(store, 7, 2, 0x123456); !known ||
+		state.Availability != DestinationAvailable {
 		t.Errorf("RC2 state = %v (known=%v), want Available", state, known)
 	}
 
-	listener.SetDestinationRangeForNetwork(7, 0x123456, 0, DestinationRestricted)
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 2, 0x123456); !known || state != DestinationRestricted {
+	seedDestinationRangeForNetwork(store, 7, 0x123456, 0, availabilityState(DestinationRestricted))
+	if state, known := destinationStateInScope(store, 7, 2, 0x123456); !known ||
+		state.Availability != DestinationRestricted {
 		t.Errorf("newer baseline state = %v (known=%v), want Restricted", state, known)
 	}
-	listener.SetDestinationStateForNetworkAndRoutingContext(7, 2, 0x123456, DestinationAvailable)
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 2, 0x123456); !known || state != DestinationAvailable {
+	seedDestinationRangeInScope(store, 7, 2, 0x123456, 0, availabilityState(DestinationAvailable))
+	if state, known := destinationStateInScope(store, 7, 2, 0x123456); !known ||
+		state.Availability != DestinationAvailable {
 		t.Errorf("newest scoped state = %v (known=%v), want Available", state, known)
 	}
 }
@@ -330,8 +423,9 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 			conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			const pointCode = uint32(0x123457)
-			conn.SetDestinationRangeForNetworkAndRoutingContext(
-				7, 1, pointCode, mask, DestinationRestricted,
+			seedDestinationRangeInScope(
+				conn.destinations, 7, 1, pointCode, mask,
+				availabilityState(DestinationRestricted),
 			)
 			if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 				params.NewNetworkAppearance(7), nil,
@@ -345,7 +439,7 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 			if (*sent)[0].MessageTypeName() != "Destination Restricted" {
 				t.Fatalf("DAUD response = %s, want Destination Restricted", (*sent)[0].MessageTypeName())
 			}
-			apc := affectedPointCodeOf((*sent)[0])
+			apc := affectedPointCodeParamOf((*sent)[0])
 			if apc == nil {
 				t.Fatal("DAUD response omitted Affected Point Code")
 			}
@@ -364,7 +458,7 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parse DAUD response wire: %v", err)
 			}
-			decodedAffectedPointCode := affectedPointCodeOf(decoded)
+			decodedAffectedPointCode := affectedPointCodeParamOf(decoded)
 			if decodedAffectedPointCode == nil {
 				t.Fatal("wire response omitted Affected Point Code")
 			}
@@ -380,8 +474,8 @@ func TestDAUDSplitsRoutingContextsByResolvedState(t *testing.T) {
 	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	conn.noteRoutingContextsActive([]uint32{1, 2})
 	const pointCode = uint32(0x234567)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, pointCode, 3, DestinationUnavailable)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 2, pointCode, 3, DestinationAvailable)
+	seedDestinationRangeInScope(conn.destinations, 7, 1, pointCode, 3, availabilityState(DestinationUnavailable))
+	seedDestinationRangeInScope(conn.destinations, 7, 2, pointCode, 3, availabilityState(DestinationAvailable))
 
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		params.NewNetworkAppearance(7), params.NewRoutingContext(1, 2),
@@ -398,13 +492,13 @@ func TestDAUDSplitsRoutingContextsByResolvedState(t *testing.T) {
 			t.Errorf("response %d Routing Contexts = %v, want [%d]",
 				index, routingContext.RoutingContexts(), wantRC)
 		}
-		if masks := affectedPointCodeOf((*sent)[index]).AffectedPointCodeMasks(); !reflect.DeepEqual(masks, []uint8{3}) {
+		if masks := affectedPointCodeParamOf((*sent)[index]).AffectedPointCodeMasks(); !reflect.DeepEqual(masks, []uint8{3}) {
 			t.Errorf("response %d masks = %v, want [3]", index, masks)
 		}
 	}
 
 	*sent = nil
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 2, pointCode, 3, DestinationUnavailable)
+	seedDestinationRangeInScope(conn.destinations, 7, 2, pointCode, 3, availabilityState(DestinationUnavailable))
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		params.NewNetworkAppearance(7), params.NewRoutingContext(1, 2),
 		params.NewAffectedPointCodeWithMask(3, pointCode), nil,
@@ -424,8 +518,13 @@ func TestDAUDCongestedRangePreservesMaskOnBothReplies(t *testing.T) {
 	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	const pointCode = uint32(0x456789)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(
-		7, 1, pointCode, 14, DestinationCongested)
+	// Congestion without an explicit level: the record the removed conflated
+	// state stood for. Availability is untouched, so the audit answers SCON for
+	// the congestion and DAVA for the reachability RFC 4666 Section 4.5.2.2
+	// keeps separate from it.
+	seedDestinationCongestionInScope(
+		conn.destinations, 7, 1, pointCode, 14,
+		DestinationNetworkState{Congestion: congestionStateFor(0, false)})
 
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		params.NewNetworkAppearance(7), nil,
@@ -437,7 +536,7 @@ func TestDAUDCongestedRangePreservesMaskOnBothReplies(t *testing.T) {
 		t.Fatalf("responses = %v, want [Signalling Congestion Destination Available]", got)
 	}
 	for index, response := range *sent {
-		if masks := affectedPointCodeOf(response).AffectedPointCodeMasks(); !reflect.DeepEqual(masks, []uint8{14}) {
+		if masks := affectedPointCodeParamOf(response).AffectedPointCodeMasks(); !reflect.DeepEqual(masks, []uint8{14}) {
 			t.Errorf("response %d masks = %v, want [14]", index, masks)
 		}
 	}
@@ -460,7 +559,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 		name      string
 		pointCode uint32
 		mask      uint8
-		state     DestinationState
+		state     DestinationAvailability
 	}{
 		{name: "range", pointCode: 0x456789, mask: 14, state: DestinationRestricted},
 		{name: "exact control", pointCode: 0x654321, mask: 0, state: DestinationAvailable},
@@ -473,7 +572,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 				RoutingContextSet:    true,
 				PointCode:            test.pointCode,
 				Mask:                 test.mask,
-				State:                test.state,
+				State:                availabilityState(test.state),
 			}})
 			if _, err := aspAssociation.WriteSignal(messages.NewDestinationStateAudit(
 				nil, params.NewRoutingContext(1),
@@ -485,7 +584,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 			select {
 			case status := <-aspAssociation.SignallingStatus():
 				if status.PointCode != test.pointCode || status.Mask != test.mask ||
-					status.State != test.state || !status.RoutingContextSet ||
+					status.State.Availability != test.state || !status.RoutingContextSet ||
 					!reflect.DeepEqual(status.RoutingContexts, []uint32{1}) {
 					t.Errorf("wire status = %+v, want RC 1 point code %#x/%d %v",
 						status, test.pointCode, test.mask, test.state)
@@ -501,8 +600,8 @@ func TestDAUDRangeLookupDoesNotLetAnExactOverrideInventAWholeRangeState(t *testi
 	conn, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	const pointCode = uint32(0x123456)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, pointCode, 8, DestinationUnavailable)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(7, 1, pointCode, 0, DestinationAvailable)
+	seedDestinationRangeInScope(conn.destinations, 7, 1, pointCode, 8, availabilityState(DestinationUnavailable))
+	seedDestinationRangeInScope(conn.destinations, 7, 1, pointCode, 0, availabilityState(DestinationAvailable))
 
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		params.NewNetworkAppearance(7), nil,
@@ -602,15 +701,15 @@ func TestSSNMMultiRoutingContextUpdateIsAtomic(t *testing.T) {
 
 func TestPausePreservesDestinationRangeScope(t *testing.T) {
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-	conn.SetDestinationRangeForNetworkAndRoutingContext(
-		7, 2, 0x5678ab, 8, DestinationAvailable)
+	seedDestinationRangeInScope(
+		conn.destinations, 7, 2, 0x5678ab, 8, availabilityState(DestinationAvailable))
 
 	conn.pauseDestinations()
 	status := nextStatus(t, conn)
 	if status.PointCode != 0x5678ab || status.Mask != 8 ||
 		status.NetworkAppearance != 7 || !status.NetworkAppearanceSet ||
 		!status.RoutingContextSet || !reflect.DeepEqual(status.RoutingContexts, []uint32{2}) ||
-		status.State != DestinationUnavailable {
+		status.State.Availability != DestinationUnavailable {
 		t.Errorf("pause status = %+v, want scoped 0x5678ab/8 unavailable", status)
 	}
 	requireDestinationStateForScope(t, conn, 7, 2, 0x5678ff, DestinationUnavailable)

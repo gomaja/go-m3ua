@@ -69,9 +69,9 @@ func TestInboundSSNMBatchedScopesRemainLinear(t *testing.T) {
 			scope.routingContext = routingContext
 			scope.routingContextSet = true
 			state, known := connection.destinations.lookup(scope)
-			if !known || state != DestinationUnavailable {
+			if !known || state.Availability != DestinationUnavailable {
 				t.Errorf("RC %d PC %#x = (%v, known=%v), want Unavailable and known",
-					routingContext, pointCode, state, known)
+					routingContext, pointCode, state.Availability, known)
 			}
 		}
 	}
@@ -107,9 +107,9 @@ func TestInboundSSNMBatchedScopesCanonicalizeAndRespectNewerSubset(t *testing.T)
 			scope.routingContext = routingContext
 			scope.routingContextSet = true
 			state, known := connection.destinations.lookup(scope)
-			if !known || state != DestinationUnavailable {
+			if !known || state.Availability != DestinationUnavailable {
 				t.Errorf("initial DUNA RC %d PC %#x = (%v, known=%v), want Unavailable and known",
-					routingContext, pointCode, state, known)
+					routingContext, pointCode, state.Availability, known)
 			}
 		}
 	}
@@ -127,7 +127,7 @@ func TestInboundSSNMBatchedScopesCanonicalizeAndRespectNewerSubset(t *testing.T)
 	}
 	for _, test := range []struct {
 		routingContext uint32
-		want           DestinationState
+		want           DestinationAvailability
 	}{
 		{routingContext: 0, want: DestinationUnavailable},
 		{routingContext: 1, want: DestinationAvailable},
@@ -137,9 +137,9 @@ func TestInboundSSNMBatchedScopesCanonicalizeAndRespectNewerSubset(t *testing.T)
 		scope.routingContext = test.routingContext
 		scope.routingContextSet = true
 		state, known := connection.destinations.lookup(scope)
-		if !known || state != test.want {
+		if !known || state.Availability != test.want {
 			t.Errorf("subset DAVA RC %d = (%v, known=%v), want %v and known",
-				test.routingContext, state, known, test.want)
+				test.routingContext, state.Availability, known, test.want)
 		}
 	}
 }

@@ -11,15 +11,25 @@ import (
 )
 
 func TestListenerDestinationUpdatesNotifyOnlyConcernedActiveASPs(t *testing.T) {
+	// Congestion is a dimension of its own (RFC 4666 Section 4.5.2.2), so it is
+	// stated through SCON rather than through a destination availability value.
 	tests := []struct {
-		name  string
-		state DestinationState
-		kind  any
+		name   string
+		report func(endpoint *Endpoint) error
+		kind   any
 	}{
-		{"unavailable", DestinationUnavailable, (*messages.DestinationUnavailable)(nil)},
-		{"available", DestinationAvailable, (*messages.DestinationAvailable)(nil)},
-		{"restricted", DestinationRestricted, (*messages.DestinationRestricted)(nil)},
-		{"congested", DestinationCongested, (*messages.SignallingCongestion)(nil)},
+		{"unavailable", func(endpoint *Endpoint) error {
+			return reportAvailability(endpoint, testWireScope(7, true, 1), 0x123456, 8, DestinationUnavailable)
+		}, (*messages.DestinationUnavailable)(nil)},
+		{"available", func(endpoint *Endpoint) error {
+			return reportAvailability(endpoint, testWireScope(7, true, 1), 0x123456, 8, DestinationAvailable)
+		}, (*messages.DestinationAvailable)(nil)},
+		{"restricted", func(endpoint *Endpoint) error {
+			return reportAvailability(endpoint, testWireScope(7, true, 1), 0x123456, 8, DestinationRestricted)
+		}, (*messages.DestinationRestricted)(nil)},
+		{"congested", func(endpoint *Endpoint) error {
+			return reportCongestion(endpoint, testWireScope(7, true, 1), 0x123456, 8, 2, true)
+		}, (*messages.SignallingCongestion)(nil)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -40,17 +50,15 @@ func TestListenerDestinationUpdatesNotifyOnlyConcernedActiveASPs(t *testing.T) {
 			firstSent.reset()
 			secondSent.reset()
 
-			if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-				7, 1, 0x123456, 8, test.state,
-			); err != nil {
-				t.Fatalf("set destination state: %v", err)
+			if err := test.report(listenerEndpoint(t, listener)); err != nil {
+				t.Fatalf("publish destination state: %v", err)
 			}
 			firstMessages := ssnmMessages(firstSent.snapshot())
 			if len(firstMessages) != 1 {
 				t.Fatalf("concerned ASP received %d SSNM messages, want 1", len(firstMessages))
 			}
 			if !sameSSNMKind(firstMessages[0], test.kind) {
-				t.Fatalf("destination state %v emitted %T, want %T", test.state, firstMessages[0], test.kind)
+				t.Fatalf("%s report emitted %T, want %T", test.name, firstMessages[0], test.kind)
 			}
 			networkAppearance, routingContext, affectedPointCode := ssnmScope(t, firstMessages[0])
 			if networkAppearance == nil || networkAppearance.NetworkAppearance() != 7 {
@@ -85,8 +93,10 @@ func TestAllContextDestinationUpdateDeduplicatesAnASPAndNamesItsActiveScopes(t *
 	secondApplicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
-	if err := listener.ReportDestinationRangeForNetwork(7, 0x123456, 4, DestinationUnavailable); err != nil {
-		t.Fatalf("set destination state: %v", err)
+	if err := reportAvailability(
+		listenerEndpoint(t, listener), testWireScope(7, true), 0x123456, 4, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("publish destination state: %v", err)
 	}
 	got := ssnmMessages(sent.snapshot())
 	if len(got) != 1 {
@@ -121,8 +131,10 @@ func TestAllContextDestinationUpdateScopesTargetsByNetworkAppearance(t *testing.
 	firstSent.reset()
 	secondSent.reset()
 
-	if err := listener.ReportDestinationRangeForNetwork(10, 0x123456, 4, DestinationUnavailable); err != nil {
-		t.Fatalf("set destination state: %v", err)
+	if err := reportAvailability(
+		listenerEndpoint(t, listener), testWireScope(10, true), 0x123456, 4, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("publish destination state: %v", err)
 	}
 	if got := len(ssnmMessages(firstSent.snapshot())); got != 1 {
 		t.Fatalf("matching Network Appearance ASP received %d SSNM messages, want 1", got)
@@ -149,8 +161,10 @@ func TestDestinationUpdateScopesSameASPRoutingContextByNetworkAppearance(t *test
 	}
 	sent.reset()
 
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(10, 1, 0x123456, 4, DestinationUnavailable); err != nil {
-		t.Fatalf("set destination state: %v", err)
+	if err := reportAvailability(
+		listenerEndpoint(t, listener), testWireScope(10, true, 1), 0x123456, 4, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("publish destination state: %v", err)
 	}
 	got := ssnmMessages(sent.snapshot())
 	if len(got) != 1 {
@@ -182,17 +196,18 @@ func TestDestinationUpdateContinuesAfterOneASPWriteFails(t *testing.T) {
 
 	writeFailure := errors.New("injected SSNM write failure")
 	first.signalWriter = func(messages.M3UA) (int, error) { return 0, writeFailure }
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 0, DestinationUnavailable,
+	endpoint := listenerEndpoint(t, listener)
+	if err := reportAvailability(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, DestinationUnavailable,
 	); !errors.Is(err, writeFailure) {
-		t.Fatalf("set destination state error = %v, want injected write failure", err)
+		t.Fatalf("publish destination state error = %v, want injected write failure", err)
 	}
 	if got := len(ssnmMessages(secondSent.snapshot())); got != 1 {
 		t.Fatalf("healthy ASP received %d SSNM messages after peer failure, want 1", got)
 	}
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(
-		7, 1, 0x123456,
-	); !known || state != DestinationUnavailable {
+	if state, known := destinationStateInScope(
+		endpoint.destinations, 7, 1, 0x123456,
+	); !known || state.Availability != DestinationUnavailable {
 		t.Fatalf("recorded destination = (%v, %v), want (Unavailable, true)", state, known)
 	}
 }
@@ -206,13 +221,14 @@ func TestDestinationUpdateRejectsUnknownStateAtomically(t *testing.T) {
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
-	err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 0, DestinationState(255),
+	endpoint := listenerEndpoint(t, listener)
+	err := reportAvailability(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, DestinationAvailability(255),
 	)
 	if !errors.Is(err, ErrInvalidParameterValue) {
 		t.Fatalf("unknown destination state error = %v, want ErrInvalidParameterValue", err)
 	}
-	if _, known := listener.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); known {
+	if _, known := destinationStateInScope(endpoint.destinations, 7, 1, 0x123456); known {
 		t.Fatal("unknown destination state was recorded")
 	}
 	if got := len(ssnmMessages(sent.snapshot())); got != 0 {
@@ -234,18 +250,16 @@ func TestAcceptedAssociationDestinationUpdateUsesListenerWideBroadcast(t *testin
 	second.setState(StateASPActive)
 	applicationServer.setASPState(first, StateASPActive, time.Hour)
 	applicationServer.setASPState(second, StateASPActive, time.Hour)
-	listener.destinations = newDestinations()
-	first.destinations = listener.destinations
-	second.destinations = listener.destinations
-	first.listener = listener
-	second.listener = listener
 	firstSent.reset()
 	secondSent.reset()
 
-	if err := first.ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, 0x123456, DestinationUnavailable,
+	// Publication is owner-level now, so one statement reaches every concerned
+	// active ASP the Endpoint owns rather than only the Association it was made
+	// on.
+	if err := reportAvailability(
+		listenerEndpoint(t, listener), testWireScope(7, true, 1), 0x123456, 0, DestinationUnavailable,
 	); err != nil {
-		t.Fatalf("set destination state through accepted Association: %v", err)
+		t.Fatalf("publish destination state through the owning Endpoint: %v", err)
 	}
 	if got := len(ssnmMessages(firstSent.snapshot())); got != 1 {
 		t.Fatalf("calling ASP received %d SSNM messages, want 1", got)
@@ -256,10 +270,10 @@ func TestAcceptedAssociationDestinationUpdateUsesListenerWideBroadcast(t *testin
 }
 
 func TestDialedSGPDestinationUpdateReportsToItsActiveASP(t *testing.T) {
-	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+	endpoint, _, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
 
-	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 4, DestinationUnavailable,
+	if err := reportAvailability(
+		endpoint, testWireScope(7, true, 1), 0x123456, 4, DestinationUnavailable,
 	); err != nil {
 		t.Fatalf("report destination from dialing SGP: %v", err)
 	}
@@ -286,11 +300,11 @@ func TestDialedSGPDestinationUpdateReportsToItsActiveASP(t *testing.T) {
 }
 
 func TestDialedSGPDestinationUpdateUsesEndpointApplicationServerScope(t *testing.T) {
-	endpoint, first, firstSent, second, secondSent := multiAssociationDialedSGPFixture(t)
+	endpoint, _, firstSent, second, secondSent := multiAssociationDialedSGPFixture(t)
 	defer func() { _ = endpoint.Close() }()
 
-	if err := first.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 2, 0x123456, 4, DestinationUnavailable,
+	if err := reportAvailability(
+		endpoint, testWireScope(7, true, 2), 0x123456, 4, DestinationUnavailable,
 	); err != nil {
 		t.Fatalf("report sibling Application Server destination: %v", err)
 	}
@@ -307,23 +321,34 @@ func TestDialedSGPDestinationUpdateUsesEndpointApplicationServerScope(t *testing
 	if state, known := second.destinations.lookupRange(
 		destinationKey{networkAppearance: 7, networkAppearanceSet: true, routingContext: 2, routingContextSet: true},
 		0x123456, 4,
-	); !known || state != DestinationUnavailable {
+	); !known || state.Availability != DestinationUnavailable {
 		t.Fatalf("shared destination state = (%v, %v), want (Unavailable, true)", state, known)
 	}
 }
 
-func TestDialedSGPDestinationSetterUsesEndpointApplicationServerScope(t *testing.T) {
+func TestDialedSGPDestinationRecordIsOwnedByTheEndpoint(t *testing.T) {
 	endpoint, first, _, second, _ := multiAssociationDialedSGPFixture(t)
 	defer func() { _ = endpoint.Close() }()
 
-	first.SetDestinationRangeForNetworkAndRoutingContext(
-		7, 2, 0x234567, 4, DestinationRestricted,
+	// The per-Association setters are gone; the record lives in the Endpoint's
+	// store, so a sibling Association's Application Server scope resolves it and
+	// so does the owner's own view.
+	seedDestinationRangeInScope(
+		first.destinations, 7, 2, 0x234567, 4, availabilityState(DestinationRestricted),
 	)
 	if state, known := second.destinations.lookupRange(
 		destinationKey{networkAppearance: 7, networkAppearanceSet: true, routingContext: 2, routingContextSet: true},
 		0x234567, 4,
-	); !known || state != DestinationRestricted {
+	); !known || state.Availability != DestinationRestricted {
 		t.Fatalf("shared destination state = (%v, %v), want (Restricted, true)", state, known)
+	}
+	status, ok := endpoint.DestinationStatus(DestinationStatusKey{
+		NetworkAppearance: 7, NetworkAppearanceSet: true,
+		RoutingContext: 2, RoutingContextSet: true,
+		PointCode: 0x234567, Mask: 4,
+	})
+	if !ok || status.State.Availability != DestinationRestricted {
+		t.Fatalf("owner view of the shared record = %+v, %v", status, ok)
 	}
 }
 
@@ -331,11 +356,13 @@ func TestDialedSGPDestinationUpdateRejectsUnknownExactApplicationServer(t *testi
 	endpoint, first, firstSent, _, secondSent := multiAssociationDialedSGPFixture(t)
 	defer func() { _ = endpoint.Close() }()
 
-	err := first.ReportDestinationRangeForNetworkAndRoutingContext(
-		8, 2, 0x345678, 4, DestinationUnavailable,
+	// Routing Context 2 exists, but only in Network Appearance 7, so the exact
+	// Application Server named here is the unknown one.
+	err := reportAvailability(
+		endpoint, testWireScope(8, true, 2), 0x345678, 4, DestinationUnavailable,
 	)
-	if !errors.Is(err, ErrInvalidRoutingContext) {
-		t.Fatalf("unknown exact Application Server error = %v, want ErrInvalidRoutingContext", err)
+	if !errors.Is(err, ErrInvalidNetworkAppearance) {
+		t.Fatalf("unknown exact Application Server error = %v, want ErrInvalidNetworkAppearance", err)
 	}
 	if _, known := first.destinations.lookupRange(
 		destinationKey{networkAppearance: 8, networkAppearanceSet: true, routingContext: 2, routingContextSet: true},
@@ -383,20 +410,36 @@ func multiAssociationDialedSGPFixture(t *testing.T) (*Endpoint, *Association, *d
 }
 
 func TestClosedDialedSGPRejectsDestinationReports(t *testing.T) {
-	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+	endpoint, association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
 	if err := association.Close(); err != nil {
 		t.Fatalf("close dialing SGP Association: %v", err)
 	}
 	capture.reset()
 
-	err := association.ReportDestinationStateForNetworkAndRoutingContext(
-		7, 1, 0x123456, DestinationUnavailable,
-	)
-	if !errors.Is(err, ErrAssociationClosed) {
-		t.Fatalf("closed dialing SGP destination report error = %v, want ErrAssociationClosed", err)
+	// A closed Association is no longer a concerned active ASP, so a statement
+	// made while it is the only one reaches nobody.
+	if err := reportAvailability(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, DestinationUnavailable,
+	); err != nil {
+		t.Fatalf("publish with no active ASP left: %v", err)
 	}
-	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); got != DestinationAvailable {
-		t.Fatalf("closed dialing SGP destination state = %v after rejected report, want available", got)
+	if got := len(ssnmMessages(capture.snapshot())); got != 0 {
+		t.Fatalf("closed dialing SGP received %d destination reports, want 0", got)
+	}
+
+	// Publication is owner-level, so the refusal the closed Association used to
+	// give now comes from the closed Endpoint, and it is still atomic.
+	if err := endpoint.Close(); err != nil {
+		t.Fatalf("close SGP Endpoint: %v", err)
+	}
+	err := reportAvailability(
+		endpoint, testWireScope(7, true, 1), 0x654321, 0, DestinationUnavailable,
+	)
+	if !errors.Is(err, ErrEndpointClosed) {
+		t.Fatalf("closed SGP Endpoint destination report error = %v, want ErrEndpointClosed", err)
+	}
+	if got := retainedAvailabilityForNetworkAndRoutingContext(association, 7, 1, 0x654321); got != DestinationAvailable {
+		t.Fatalf("closed SGP Endpoint destination state = %v after rejected report, want available", got)
 	}
 	if got := len(ssnmMessages(capture.snapshot())); got != 0 {
 		t.Fatalf("closed dialing SGP emitted %d destination reports, want 0", got)
@@ -404,10 +447,10 @@ func TestClosedDialedSGPRejectsDestinationReports(t *testing.T) {
 }
 
 func TestDialedSGPDestinationUpdateRejectsUnconfiguredRoutingContextAtomically(t *testing.T) {
-	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+	endpoint, association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
 
-	err := association.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 2, 0x123456, 4, DestinationUnavailable,
+	err := reportAvailability(
+		endpoint, testWireScope(7, true, 2), 0x123456, 4, DestinationUnavailable,
 	)
 	if !errors.Is(err, ErrInvalidRoutingContext) {
 		t.Fatalf("unconfigured Routing Context error = %v, want ErrInvalidRoutingContext", err)
@@ -429,43 +472,59 @@ func TestDialedSGPDestinationUpdateRejectsUnconfiguredRoutingContextAtomically(t
 	}
 }
 
-func TestDialedSGPDestinationRecoveryClearsCongestionBeforeDAVA(t *testing.T) {
-	association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
+func TestDialedSGPDestinationRecoveryLeavesCongestionToSCON(t *testing.T) {
+	endpoint, association, capture := dialedSGPProactiveSSNMFixture(t, 7, 1)
 
-	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 0, DestinationCongested,
+	if err := reportCongestion(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, 2, true,
 	); err != nil {
 		t.Fatalf("report congestion from dialing SGP: %v", err)
 	}
 	capture.reset()
-	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 0, DestinationAvailable,
+	if err := reportAvailability(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, DestinationAvailable,
 	); err != nil {
 		t.Fatalf("report recovery from dialing SGP: %v", err)
 	}
 
+	// RFC 4666 Section 4.5.2.2 keeps the two statuses apart: a recovery states
+	// reachability only, so it emits the DAVA alone and abates no congestion.
+	// Abatement is an explicit SCON at level zero.
 	reports := ssnmMessages(capture.snapshot())
-	if len(reports) != 2 {
-		t.Fatalf("dialing SGP recovery emitted %d messages, want SCON(0), DAVA", len(reports))
+	if len(reports) != 1 {
+		t.Fatalf("dialing SGP recovery emitted %d messages, want one DAVA", len(reports))
 	}
-	scon, ok := reports[0].(*messages.SignallingCongestion)
-	if !ok || scon.CongestionIndications == nil || scon.CongestionIndications.CongestionLevel() != 0 {
-		t.Fatalf("first recovery message = %#v, want SCON with level 0", reports[0])
+	if _, ok := reports[0].(*messages.DestinationAvailable); !ok {
+		t.Fatalf("recovery message = %T, want DAVA", reports[0])
 	}
-	if _, ok := reports[1].(*messages.DestinationAvailable); !ok {
-		t.Fatalf("second recovery message = %T, want DAVA", reports[1])
+	state := retainedStateForNetworkAndRoutingContext(association, 7, 1, 0x123456)
+	if state.Availability != DestinationAvailable || !state.Congestion.Congested ||
+		!state.Congestion.LevelSet || state.Congestion.Level != 2 {
+		t.Fatalf("retained state after recovery = %+v, want Available and still congested at level 2", state)
 	}
 }
 
-func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routingContexts ...uint32) (*Association, *distributionCapture) {
+// dialedSGPProactiveSSNMFixture is one SCTP-initiating SGP Association attached
+// to the Endpoint that owns its destination state, since publication is
+// owner-level.
+func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routingContexts ...uint32) (*Endpoint, *Association, *distributionCapture) {
 	t.Helper()
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
 	association, _ := newTestConn(t, StateASPActive, RoleSGP)
 	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(networkAppearance))
 	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(routingContexts...))
+	association.as, association.nif, association.destinations, association.mtp3Restarts = endpoint.sgpRegistry()
+	association.as.register(association.configuredASKeys())
+	if !endpoint.trackAssociation(association) {
+		t.Fatal("failed to attach SCTP-initiating Association")
+	}
 	association.noteRoutingContextsActive(routingContexts)
-	association.as = newApplicationServers(time.Hour)
 	for _, routingContext := range routingContexts {
-		applicationServer := association.as.get(ASKey{
+		applicationServer := endpoint.as.get(ASKey{
 			NetworkAppearance:    networkAppearance,
 			NetworkAppearanceSet: true,
 			RoutingContext:       routingContext,
@@ -474,19 +533,22 @@ func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routi
 		applicationServer.setTrafficMode(params.TrafficModeLoadshare)
 		applicationServer.setASPState(association, StateASPActive, time.Hour)
 	}
-	association.mtp3Restarts = &mtp3RestartRegistry{}
 	capture := new(distributionCapture)
 	association.signalWriter = capture.write
-	return association, capture
+	return endpoint, association, capture
 }
 
-func TestDestinationSetterMethodCompatibility(t *testing.T) {
-	assertDestinationSetter := func(func(uint32, DestinationState)) {}
-	assertDestinationSetter(new(Listener).SetDestinationState)
-	assertDestinationSetter(new(Association).SetDestinationState)
+// The per-Listener and per-Association destination setters are gone: the SGP
+// Endpoint owns destination state and publishes both of its dimensions. This
+// pins the shape of the two calls that replaced them.
+func TestDestinationPublicationMethodCompatibility(t *testing.T) {
+	assertAvailabilityPublisher := func(func(DestinationAvailabilityRequest) error) {}
+	assertAvailabilityPublisher(new(Endpoint).ReportDestinationAvailability)
+	assertCongestionPublisher := func(func(SignallingCongestionRequest) error) {}
+	assertCongestionPublisher(new(Endpoint).SignallingCongestion)
 }
 
-func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
+func TestDestinationPublicationDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
 	listener, _, blocked, _ := distributionFixture(
 		t, params.TrafficModeLoadshare,
 	)
@@ -509,12 +571,12 @@ func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
 		<-writeRelease
 		return message.MarshalLen(), nil
 	}
-	returned := make(chan struct{})
+	endpoint := listenerEndpoint(t, listener)
+	returned := make(chan error, 1)
 	go func() {
-		listener.SetDestinationRangeForNetworkAndRoutingContext(
-			7, 1, 0x123456, 0, DestinationUnavailable,
+		returned <- reportAvailability(
+			endpoint, testWireScope(7, true, 1), 0x123456, 0, DestinationUnavailable,
 		)
-		close(returned)
 	}()
 	select {
 	case <-writeEntered:
@@ -522,21 +584,23 @@ func TestDestinationSetterDoesNotBlockHealthyPeersBehindOneASP(t *testing.T) {
 		close(writeRelease)
 		t.Fatal("blocked ASP never entered its control write")
 	}
-	select {
-	case <-returned:
-	case <-time.After(100 * time.Millisecond):
+	// Publication waits for the whole fan-out, but the fan-out is concurrent and
+	// the record is committed before any of it: the healthy peer is served and
+	// the state readable while the blocked ASP is still inside its write.
+	if !waitFor(func() bool { return len(ssnmMessages(healthySent.snapshot())) == 1 }, time.Second) {
 		close(writeRelease)
-		t.Fatal("nonblocking destination setter waited for a blocked ASP")
+		t.Fatalf("healthy ASP received %d messages while peer was blocked, want 1",
+			len(ssnmMessages(healthySent.snapshot())))
 	}
-	if got := len(ssnmMessages(healthySent.snapshot())); got != 1 {
-		close(writeRelease)
-		t.Fatalf("healthy ASP received %d messages while peer was blocked, want 1", got)
-	}
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(7, 1, 0x123456); !known || state != DestinationUnavailable {
+	if state, known := destinationStateInScope(endpoint.destinations, 7, 1, 0x123456); !known ||
+		state.Availability != DestinationUnavailable {
 		close(writeRelease)
 		t.Fatalf("state committed before enqueue = (%v, %v), want (Unavailable, true)", state, known)
 	}
 	close(writeRelease)
+	if err := <-returned; err != nil {
+		t.Fatalf("publish destination state: %v", err)
+	}
 }
 
 func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
@@ -550,8 +614,9 @@ func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 0, DestinationCongested,
+	endpoint := listenerEndpoint(t, listener)
+	if err := reportCongestion(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, 2, true,
 	); err != nil {
 		t.Fatalf("report congestion: %v", err)
 	}
@@ -563,22 +628,36 @@ func TestDestinationCongestionAndAbatementWireOrder(t *testing.T) {
 		t.Fatalf("ordinary congestion report = %T, want SCON", congested[0])
 	}
 
+	// Abatement is its own statement: an explicit SCON at level zero, which says
+	// nothing about reachability (RFC 4666 Sections 3.4.4 and 4.5.2.2).
 	sent.reset()
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 0, DestinationAvailable,
+	if err := reportCongestion(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, 0, true,
 	); err != nil {
 		t.Fatalf("report congestion abatement: %v", err)
 	}
 	abated := ssnmMessages(sent.snapshot())
-	if len(abated) != 2 {
-		t.Fatalf("congestion abatement emitted %d messages, want SCON(0), DAVA", len(abated))
+	if len(abated) != 1 {
+		t.Fatalf("congestion abatement emitted %d messages, want one SCON(0)", len(abated))
 	}
 	scon, ok := abated[0].(*messages.SignallingCongestion)
 	if !ok || scon.CongestionIndications == nil || scon.CongestionIndications.CongestionLevel() != 0 {
-		t.Fatalf("first abatement message = %#v, want SCON with level 0", abated[0])
+		t.Fatalf("abatement message = %#v, want SCON with level 0", abated[0])
 	}
-	if _, ok := abated[1].(*messages.DestinationAvailable); !ok {
-		t.Fatalf("second abatement message = %T, want DAVA", abated[1])
+
+	// A recovery states reachability alone, so it emits the DAVA by itself.
+	sent.reset()
+	if err := reportAvailability(
+		endpoint, testWireScope(7, true, 1), 0x123456, 0, DestinationAvailable,
+	); err != nil {
+		t.Fatalf("report recovery: %v", err)
+	}
+	recovered := ssnmMessages(sent.snapshot())
+	if len(recovered) != 1 {
+		t.Fatalf("recovery emitted %d messages, want one DAVA", len(recovered))
+	}
+	if _, ok := recovered[0].(*messages.DestinationAvailable); !ok {
+		t.Fatalf("recovery message = %T, want DAVA", recovered[0])
 	}
 }
 
@@ -594,8 +673,20 @@ func TestProactiveSSNMQueueOverflowClosesAssociation(t *testing.T) {
 	asp.notificationQueue = make(chan mandatoryControl, 1)
 	asp.notificationOnce.Do(func() {})
 
-	listener.SetDestinationStateForNetworkAndRoutingContext(7, 1, 0x111111, DestinationUnavailable)
-	listener.SetDestinationStateForNetworkAndRoutingContext(7, 1, 0x222222, DestinationUnavailable)
+	// Publication waits for its control write and this Association's worker is
+	// deliberately never started, so both statements are made off the test
+	// goroutine. The queue holds one entry, so the second one overruns it.
+	endpoint := listenerEndpoint(t, listener)
+	var publications sync.WaitGroup
+	for _, pointCode := range []uint32{0x111111, 0x222222} {
+		publications.Add(1)
+		go func(pointCode uint32) {
+			defer publications.Done()
+			_ = reportAvailability(
+				endpoint, testWireScope(7, true, 1), pointCode, 0, DestinationUnavailable)
+		}(pointCode)
+	}
+	defer publications.Wait()
 	select {
 	case <-asp.Done():
 	case <-time.After(time.Second):
@@ -617,22 +708,23 @@ func TestDestinationReportValidatesScopeBeforeConcurrentCommit(t *testing.T) {
 	applicationServer.setASPState(asp, StateASPActive, time.Hour)
 	sent.reset()
 
+	endpoint := listenerEndpoint(t, listener)
 	var waitGroup sync.WaitGroup
 	errorsSeen := make(chan error, 200)
 	for iteration := 0; iteration < 100; iteration++ {
 		waitGroup.Add(2)
 		go func(pointCode uint32) {
 			defer waitGroup.Done()
-			if err := listener.ReportDestinationStateForNetworkAndRoutingContext(
-				7, 1, pointCode, DestinationUnavailable,
+			if err := reportAvailability(
+				endpoint, testWireScope(7, true, 1), pointCode, 0, DestinationUnavailable,
 			); err != nil {
 				errorsSeen <- err
 			}
 		}(uint32(0x100000 + iteration))
 		go func(pointCode uint32) {
 			defer waitGroup.Done()
-			err := listener.ReportDestinationStateForNetworkAndRoutingContext(
-				7, 2, pointCode, DestinationUnavailable,
+			err := reportAvailability(
+				endpoint, testWireScope(7, true, 2), pointCode, 0, DestinationUnavailable,
 			)
 			if !errors.Is(err, ErrInvalidRoutingContext) {
 				errorsSeen <- err
@@ -645,8 +737,8 @@ func TestDestinationReportValidatesScopeBeforeConcurrentCommit(t *testing.T) {
 		t.Errorf("unexpected concurrent report result: %v", err)
 	}
 	for iteration := 0; iteration < 100; iteration++ {
-		if _, known := listener.DestinationStateForNetworkAndRoutingContext(
-			7, 2, uint32(0x200000+iteration),
+		if _, known := destinationStateInScope(
+			endpoint.destinations, 7, 2, uint32(0x200000+iteration),
 		); known {
 			t.Fatalf("invalid RC 2 destination %#x was committed", 0x200000+iteration)
 		}
@@ -685,9 +777,13 @@ func TestQueuedProactiveSSNMPrecedesAspInactiveAck(t *testing.T) {
 		}
 		return message.MarshalLen(), nil
 	}
-	listener.SetDestinationStateForNetworkAndRoutingContext(
-		7, 1, 0x123456, DestinationUnavailable,
-	)
+	// Publication waits for the control write this ASP is holding open, so it is
+	// made off the test goroutine.
+	published := make(chan error, 1)
+	go func() {
+		published <- reportAvailability(
+			listenerEndpoint(t, listener), testWireScope(7, true, 1), 0x123456, 0, DestinationUnavailable)
+	}()
 	select {
 	case <-writeEntered:
 	case <-time.After(time.Second):
@@ -708,6 +804,9 @@ func TestQueuedProactiveSSNMPrecedesAspInactiveAck(t *testing.T) {
 	case <-time.After(30 * time.Millisecond):
 	}
 	close(writeRelease)
+	if err := <-published; err != nil {
+		t.Fatalf("publish destination state: %v", err)
+	}
 	if err := <-inactiveDone; err != nil {
 		t.Fatalf("handle ASP Inactive: %v", err)
 	}

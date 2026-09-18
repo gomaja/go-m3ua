@@ -335,9 +335,7 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 		RoutingContextSet:    true,
 		PointCode:            0x123400,
 		Mask:                 8,
-		State:                DestinationCongested,
-		CongestionLevel:      2,
-		CongestionLevelSet:   true,
+		State:                congestedState(2),
 	}
 	second := DestinationRange{
 		NetworkAppearance:    20,
@@ -345,9 +343,15 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 		RoutingContext:       1,
 		RoutingContextSet:    true,
 		PointCode:            0x123456,
-		State:                DestinationUnavailable,
+		State:                availabilityState(DestinationUnavailable),
 	}
-	endpoint.destinations.setRanges([]DestinationRange{second, first})
+	// RFC 4666 Section 4.5.2.2 keeps the two statuses apart, so the congested
+	// range is recorded as a congestion statement and leaves the destination
+	// reachable.
+	endpoint.destinations.setRanges([]DestinationRange{second})
+	if err := endpoint.destinations.setCongestionRangesWithinBudget([]DestinationRange{first}); err != nil {
+		t.Fatalf("recording the congested range: %v", err)
+	}
 
 	key := DestinationStatusKey{
 		NetworkAppearance:    10,
@@ -360,9 +364,14 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 	if !ok {
 		t.Fatal("DestinationStatus did not find a destination covered by the stored range")
 	}
-	if status.Key.PointCode != first.PointCode || status.Key.Mask != first.Mask ||
-		status.State != DestinationCongested || !status.CongestionLevelSet ||
-		status.CongestionLevel != 2 {
+	// The snapshot answers in the exact scope that was asked about, and the
+	// congestion it carries can only have come from the 0x123400/8 record, which
+	// is what proves the covering range was the one consulted.
+	if status.Key.NetworkAppearance != 10 || !status.Key.NetworkAppearanceSet ||
+		status.Key.RoutingContext != 1 || !status.Key.RoutingContextSet ||
+		status.State.Availability != DestinationAvailable ||
+		!status.State.Congestion.Congested || !status.State.Congestion.LevelSet ||
+		status.State.Congestion.Level != 2 {
 		t.Fatalf("DestinationStatus = %+v", status)
 	}
 	if _, ok := endpoint.DestinationStatus(DestinationStatusKey{
@@ -382,6 +391,10 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 	if statuses[0].Key.NetworkAppearance != 10 || statuses[1].Key.NetworkAppearance != 20 {
 		t.Fatalf("DestinationStatuses order/scope = %+v", statuses)
 	}
+	// The retained record still names the exact range it was recorded for.
+	if statuses[0].Key.PointCode != first.PointCode || statuses[0].Key.Mask != first.Mask {
+		t.Fatalf("DestinationStatuses lost the stored range identity: %+v", statuses[0])
+	}
 }
 
 func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
@@ -396,10 +409,10 @@ func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
 		NetworkAppearanceSet: true,
 		PointCode:            0x123456,
 		Mask:                 4,
-		State:                DestinationUnavailable,
+		State:                availabilityState(DestinationUnavailable),
 	}
 	endpoint.destinations.setScopedRanges([]uint32{1, 2}, []DestinationRange{rangeValue})
-	rangeValue.State = DestinationAvailable
+	rangeValue.State = availabilityState(DestinationAvailable)
 	endpoint.destinations.setScopedRanges([]uint32{1}, []DestinationRange{rangeValue})
 
 	want := []DestinationStatusSnapshot{
@@ -409,7 +422,7 @@ func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
 				RoutingContext: 1, RoutingContextSet: true,
 				PointCode: 0x123456, Mask: 4,
 			},
-			State: DestinationAvailable,
+			State: availabilityState(DestinationAvailable),
 		},
 		{
 			Key: DestinationStatusKey{
@@ -417,7 +430,7 @@ func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
 				RoutingContext: 2, RoutingContextSet: true,
 				PointCode: 0x123456, Mask: 4,
 			},
-			State: DestinationUnavailable,
+			State: availabilityState(DestinationUnavailable),
 		},
 	}
 	if got := endpoint.DestinationStatuses(); !reflect.DeepEqual(got, want) {

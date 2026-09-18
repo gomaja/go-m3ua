@@ -213,13 +213,13 @@ func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) 
 	if got := typeNames(*sent); len(got) != 1 || got[0] != "ASP Up" {
 		t.Errorf("signals after restart = %v, want [ASP Up]", got)
 	}
-	if got := conn.DestinationStateForNetwork(8, available.pointCode); got != DestinationUnavailable {
+	if got := retainedAvailabilityForNetwork(conn, 8, available.pointCode); got != DestinationUnavailable {
 		t.Errorf("affected destination state = %v, want %v", got, DestinationUnavailable)
 	}
 	select {
 	case status := <-conn.SignallingStatus():
 		if status.PointCode != available.pointCode || status.NetworkAppearance != 8 ||
-			!status.NetworkAppearanceSet || status.State != DestinationUnavailable {
+			!status.NetworkAppearanceSet || status.State.Availability != DestinationUnavailable {
 			t.Errorf("MTP-PAUSE equivalent = %+v, want Network Appearance 8 point code %#x unavailable",
 				status, available.pointCode)
 		}

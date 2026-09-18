@@ -27,7 +27,7 @@ func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 		restartDestination(1, 0x333333, 0),
 		restartDestination(1, 0x444400, 8),
 	}
-	restart, err := listener.BeginMTP3Restart(affected...)
+	restart, err := listener.endpoint.BeginMTP3Restart(affected...)
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
@@ -56,16 +56,22 @@ func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 	}
 
 	firstSent.reset()
-	if err := restart.Update(affected[0], DestinationAvailable); err != nil {
+	if err := restart.Update(affected[0], availabilityState(DestinationAvailable)); err != nil {
 		t.Fatalf("stage available: %v", err)
 	}
-	if err := restart.Update(affected[1], DestinationRestricted); err != nil {
+	if err := restart.Update(affected[1], availabilityState(DestinationRestricted)); err != nil {
 		t.Fatalf("stage restricted: %v", err)
 	}
-	if err := restart.Update(affected[2], DestinationUnavailable); err != nil {
+	if err := restart.Update(affected[2], availabilityState(DestinationUnavailable)); err != nil {
 		t.Fatalf("stage unavailable: %v", err)
 	}
-	if err := restart.Update(affected[3], DestinationCongested); err != nil {
+	// Congestion with no level: RFC 4666 Section 3.4.4 makes the Congestion
+	// Indications parameter optional, and an absent one still reports
+	// congestion. The destination stays reachable, so the SCON is followed by
+	// the DAVA that confirms it.
+	if err := restart.Update(affected[3], DestinationNetworkState{
+		Congestion: congestionStateFor(0, false),
+	}); err != nil {
 		t.Fatalf("stage congested: %v", err)
 	}
 	if got := len(ssnmMessages(firstSent.snapshot())); got != 0 {
@@ -95,17 +101,15 @@ func TestMTP3RestartPublishesIsolationAndFinalState(t *testing.T) {
 		t.Fatalf("unconcerned ASP received %d completion messages, want 0", got)
 	}
 
-	for index, want := range []DestinationState{
-		DestinationAvailable,
-		DestinationRestricted,
-		DestinationUnavailable,
-		DestinationCongested,
+	for index, want := range []DestinationNetworkState{
+		availabilityState(DestinationAvailable),
+		availabilityState(DestinationRestricted),
+		availabilityState(DestinationUnavailable),
+		{Congestion: congestionStateFor(0, false)},
 	} {
-		state, known := listener.DestinationStateForNetworkAndRoutingContext(
-			7, 1, affected[index].PointCode,
-		)
+		state, known := restartDestinationState(t, listener, 1, affected[index].PointCode)
 		if !known || state != want {
-			t.Errorf("destination %#x after completion = (%v, %v), want (%v, true)",
+			t.Errorf("destination %#x after completion = (%+v, %v), want (%+v, true)",
 				affected[index].PointCode, state, known, want)
 		}
 	}
@@ -117,23 +121,23 @@ func TestMTP3RestartStagesOrdinaryDestinationReports(t *testing.T) {
 	sent.reset()
 	destination := restartDestination(1, 0x123456, 0)
 
-	restart, err := listener.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
 	sent.reset()
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
+	if err := reportAvailability(
+		listener.endpoint, testWireScope(7, true, 1),
+		destination.PointCode, destination.Mask, DestinationAvailable,
 	); err != nil {
 		t.Fatalf("report during restart: %v", err)
 	}
 	if got := len(ssnmMessages(sent.snapshot())); got != 0 {
 		t.Fatalf("ordinary report emitted %d SSNM messages during restart", got)
 	}
-	if state, known := listener.DestinationStateForNetworkAndRoutingContext(
-		7, 1, destination.PointCode,
-	); !known || state != DestinationUnavailable {
-		t.Fatalf("effective state during restart = (%v, %v), want (Unavailable, true)", state, known)
+	if state, known := restartDestinationState(t, listener, 1, destination.PointCode); !known ||
+		state.Availability != DestinationUnavailable {
+		t.Fatalf("effective state during restart = (%+v, %v), want (Unavailable, true)", state, known)
 	}
 
 	if err := restart.Complete(); err != nil {
@@ -148,24 +152,27 @@ func TestMTP3RestartStagesOrdinaryDestinationReports(t *testing.T) {
 	}
 }
 
+// A dialed SGP Association belongs to no Listener, and the restart procedure is
+// owned by the Endpoint, so the isolation and the recovery still reach it.
 func TestDialingSGPAssociationRunsMTP3RestartProcedure(t *testing.T) {
 	listener, applicationServer, association, sent := restartFixture(t, 1)
 	association.listener = nil
-	association.mtp3Restarts = &mtp3RestartRegistry{}
-	association.destinations = newDestinations()
+	association.mtp3Restarts = listener.endpoint.mtp3Restarts
+	association.destinations = listener.endpoint.destinations
 	restartActivateASP(applicationServer, association, 1)
 	sent.reset()
 	destination := restartDestination(1, 0x123456, 0)
 
-	restart, err := association.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin dialing SGP MTP3 restart: %v", err)
 	}
 	assertOnlySSNMKind(t, sent.snapshot(), (*messages.DestinationUnavailable)(nil))
 	sent.reset()
 
-	if err := association.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
+	if err := reportAvailability(
+		listener.endpoint, testWireScope(7, true, 1),
+		destination.PointCode, destination.Mask, DestinationAvailable,
 	); err != nil {
 		t.Fatalf("report during dialing SGP restart: %v", err)
 	}
@@ -176,8 +183,9 @@ func TestDialingSGPAssociationRunsMTP3RestartProcedure(t *testing.T) {
 		t.Fatalf("complete dialing SGP MTP3 restart: %v", err)
 	}
 	assertOnlySSNMKind(t, sent.snapshot(), (*messages.DestinationAvailable)(nil))
-	if got := association.DestinationStateForNetworkAndRoutingContext(7, 1, destination.PointCode); got != DestinationAvailable {
-		t.Fatalf("destination state after dialing SGP restart = %v, want available", got)
+	if got, known := restartDestinationState(t, listener, 1, destination.PointCode); !known ||
+		got.Availability != DestinationAvailable {
+		t.Fatalf("destination state after dialing SGP restart = (%+v, %v), want available", got, known)
 	}
 
 	if err := listener.Close(); err != nil {
@@ -187,7 +195,16 @@ func TestDialingSGPAssociationRunsMTP3RestartProcedure(t *testing.T) {
 
 func TestASPAssociationRejectsMTP3RestartProcedure(t *testing.T) {
 	association, _ := newTestConn(t, StateASPActive, RoleASP)
-	restart, err := association.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleASP): %v", err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	association.endpoint = endpoint
+
+	// The restart belongs to the Endpoint that owns the association, and an ASP
+	// Endpoint has no SS7 destinations to restart.
+	restart, err := association.endpoint.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
 	if restart != nil || !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("ASP BeginMTP3Restart = (%v, %v), want (nil, ErrUnsupportedRole)", restart, err)
 	}
@@ -199,7 +216,7 @@ func TestASPListenerRejectsMTP3RestartProcedure(t *testing.T) {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
 	listener := newListener(endpoint, NewListenerConfig(mcASPConfig(1)))
-	restart, err := listener.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
+	restart, err := listenerEndpoint(t, listener).BeginMTP3Restart(restartDestination(1, 0x123456, 0))
 	if restart != nil || !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("ASP Listener BeginMTP3Restart = (%v, %v), want (nil, ErrUnsupportedRole)", restart, err)
 	}
@@ -216,14 +233,14 @@ func TestSGPRestartHandlesRemainValidUntilEndpointClose(t *testing.T) {
 	restartActivateASP(applicationServer, association, 1)
 	destination := restartDestination(1, 0x123456, 0)
 
-	restart, err := association.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin SGP MTP3 restart: %v", err)
 	}
 	if err := association.Close(); err != nil {
 		t.Fatalf("close SGP Association: %v", err)
 	}
-	if err := restart.Update(destination, DestinationAvailable); err != nil {
+	if err := restart.Update(destination, availabilityState(DestinationAvailable)); err != nil {
 		t.Fatalf("update after Association.Close: %v", err)
 	}
 	if err := listener.endpoint.Close(); err != nil {
@@ -245,14 +262,14 @@ func TestEndpointCloseSerializesWithRestartCompletion(t *testing.T) {
 	restartActivateASP(applicationServer, association, 1)
 	destination := restartDestination(1, 0x123456, 0)
 
-	restart, err := association.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin SGP MTP3 restart: %v", err)
 	}
-	if err := restart.Update(destination, DestinationAvailable); err != nil {
+	if err := restart.Update(destination, availabilityState(DestinationAvailable)); err != nil {
 		t.Fatalf("stage available destination: %v", err)
 	}
-	restart.target.publish = func([]DestinationRange, bool, bool, bool) error { return nil }
+	restart.target.publish = func([]stagedDestination, bool, bool) *SSNMDeliveryError { return nil }
 
 	closeResult := make(chan error, 1)
 	completeResult := make(chan error, 1)
@@ -291,7 +308,7 @@ func TestEndpointInvalidatesRestartStateBeforeClosingAssociations(t *testing.T) 
 	}
 	restartActivateASP(applicationServer, association, 1)
 	destination := restartDestination(1, 0x123456, 0)
-	restart, err := association.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin SGP MTP3 restart: %v", err)
 	}
@@ -339,13 +356,20 @@ func TestAcceptedSGPAssociationUsesListenerMTP3RestartState(t *testing.T) {
 	restartActivateASP(applicationServer, association, 1)
 	destination := restartDestination(1, 0x123456, 0)
 
-	restart, err := association.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("accepted SGP begin MTP3 restart: %v", err)
 	}
-	if overlapping, overlapErr := listener.BeginMTP3Restart(destination); overlapping != nil ||
+	// One registry backs the Endpoint, the Listener that accepted the
+	// Association, and the Association itself, so a second overlapping
+	// procedure is refused wherever it is started from.
+	if association.mtp3Restarts != listener.endpoint.mtp3Restarts ||
+		listener.mtp3Restarts != listener.endpoint.mtp3Restarts {
+		t.Fatal("accepted Association and Listener do not share the Endpoint restart state")
+	}
+	if overlapping, overlapErr := listener.endpoint.BeginMTP3Restart(destination); overlapping != nil ||
 		!errors.Is(overlapErr, ErrMTP3RestartInProgress) {
-		t.Fatalf("Listener overlapping restart = (%v, %v), want (nil, ErrMTP3RestartInProgress)",
+		t.Fatalf("overlapping restart = (%v, %v), want (nil, ErrMTP3RestartInProgress)",
 			overlapping, overlapErr)
 	}
 	if err := restart.Complete(); err != nil {
@@ -353,20 +377,26 @@ func TestAcceptedSGPAssociationUsesListenerMTP3RestartState(t *testing.T) {
 	}
 }
 
-func TestSGPAssociationMTP3RestartRequiresEstablishedOpenAssociation(t *testing.T) {
-	association := newAssociation(RoleSGP, mcSGPConfig())
+// The restart procedure belongs to the SGP Endpoint, so what it requires open is
+// the Endpoint. An Association that never established no longer carries a
+// procedure of its own that could be refused.
+func TestSGPEndpointMTP3RestartRequiresAnOpenEndpoint(t *testing.T) {
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	if err != nil {
+		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
+	}
 	destination := restartDestination(1, 0x123456, 0)
 
-	if restart, err := association.BeginMTP3Restart(destination); restart != nil ||
-		!errors.Is(err, ErrNotEstablished) {
-		t.Fatalf("unestablished BeginMTP3Restart = (%v, %v), want (nil, ErrNotEstablished)", restart, err)
+	restart, err := endpoint.BeginMTP3Restart(destination)
+	if restart == nil || err != nil {
+		t.Fatalf("BeginMTP3Restart on an open SGP Endpoint = (%v, %v), want a handle", restart, err)
 	}
-	if err := association.Close(); err != nil {
-		t.Fatalf("close unestablished SGP Association: %v", err)
+	if err := endpoint.Close(); err != nil {
+		t.Fatalf("close SGP Endpoint: %v", err)
 	}
-	if restart, err := association.BeginMTP3Restart(destination); restart != nil ||
-		!errors.Is(err, ErrAssociationClosed) {
-		t.Fatalf("closed BeginMTP3Restart = (%v, %v), want (nil, ErrAssociationClosed)", restart, err)
+	if restart, err := endpoint.BeginMTP3Restart(destination); restart != nil ||
+		!errors.Is(err, ErrEndpointClosed) {
+		t.Fatalf("closed BeginMTP3Restart = (%v, %v), want (nil, ErrEndpointClosed)", restart, err)
 	}
 }
 
@@ -374,19 +404,20 @@ func TestMTP3RestartForcesDAUDUnavailableUntilCompletion(t *testing.T) {
 	listener, applicationServer, asp, sent := restartFixture(t, 1)
 	restartActivateASP(applicationServer, asp, 1)
 	destination := restartDestination(1, 0x123456, 0)
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
+	if err := reportAvailability(
+		listener.endpoint, testWireScope(7, true, 1),
+		destination.PointCode, destination.Mask, DestinationAvailable,
 	); err != nil {
 		t.Fatalf("seed available destination: %v", err)
 	}
 	sent.reset()
 
-	restart, err := listener.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
 	sent.reset()
-	if err := restart.Update(destination, DestinationAvailable); err != nil {
+	if err := restart.Update(destination, availabilityState(DestinationAvailable)); err != nil {
 		t.Fatalf("stage available: %v", err)
 	}
 	listener.destinations.setRanges([]DestinationRange{{
@@ -396,7 +427,7 @@ func TestMTP3RestartForcesDAUDUnavailableUntilCompletion(t *testing.T) {
 		RoutingContextSet:    true,
 		PointCode:            destination.PointCode &^ 0xff,
 		Mask:                 8,
-		State:                DestinationAvailable,
+		State:                availabilityState(DestinationAvailable),
 	}})
 	audit := messages.NewDestinationStateAudit(
 		params.NewNetworkAppearance(7), params.NewRoutingContext(1),
@@ -434,11 +465,11 @@ func TestMTP3RestartCompletionUsesCurrentActiveSnapshot(t *testing.T) {
 	restartActivateASP(applicationServer, first, 1)
 	destination := restartDestination(1, 0x123456, 0)
 
-	restart, err := listener.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
-	if err := restart.Update(destination, DestinationAvailable); err != nil {
+	if err := restart.Update(destination, availabilityState(DestinationAvailable)); err != nil {
 		t.Fatalf("stage available: %v", err)
 	}
 	first.noteRoutingContextsInactive([]uint32{1})
@@ -466,7 +497,7 @@ func TestMTP3RestartFanoutContinuesAfterPeerFailure(t *testing.T) {
 	failure := errors.New("injected restart write failure")
 	failing.signalWriter = func(messages.M3UA) (int, error) { return 0, failure }
 
-	restart, err := listener.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
+	restart, err := listener.endpoint.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
 	if restart == nil {
 		t.Fatal("failed fanout lost the active restart handle")
 	}
@@ -487,23 +518,24 @@ func TestMTP3RestartValidationOverlapAndIdempotence(t *testing.T) {
 	sent.reset()
 
 	invalid := restartDestination(2, 0x123456, 0)
-	if restart, err := listener.BeginMTP3Restart(invalid); restart != nil || !errors.Is(err, ErrInvalidRoutingContext) {
+	if restart, err := listener.endpoint.BeginMTP3Restart(invalid); restart != nil ||
+		!errors.Is(err, ErrInvalidRoutingContext) {
 		t.Fatalf("invalid begin = (%v, %v), want (nil, ErrInvalidRoutingContext)", restart, err)
 	}
 	if got := len(ssnmMessages(sent.snapshot())); got != 0 {
 		t.Fatalf("invalid begin emitted %d SSNM messages", got)
 	}
-	if _, known := listener.DestinationStateForNetworkAndRoutingContext(7, 2, invalid.PointCode); known {
+	if _, known := restartDestinationState(t, listener, 2, invalid.PointCode); known {
 		t.Fatal("invalid begin committed destination state")
 	}
 
 	destination := restartDestination(1, 0x123456, 8)
-	restart, err := listener.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
 	writesAfterBegin := len(ssnmMessages(sent.snapshot()))
-	if overlapping, err := listener.BeginMTP3Restart(
+	if overlapping, err := listener.endpoint.BeginMTP3Restart(
 		restartDestination(1, 0x123400, 4),
 	); overlapping != nil || !errors.Is(err, ErrMTP3RestartInProgress) {
 		t.Fatalf("overlapping begin = (%v, %v), want (nil, ErrMTP3RestartInProgress)", overlapping, err)
@@ -522,7 +554,9 @@ func TestMTP3RestartValidationOverlapAndIdempotence(t *testing.T) {
 	if got := len(ssnmMessages(sent.snapshot())); got != writesAfterComplete {
 		t.Fatalf("second completion emitted %d messages", got-writesAfterComplete)
 	}
-	if err := restart.Update(destination, DestinationAvailable); !errors.Is(err, ErrStaleMTP3Restart) {
+	if err := restart.Update(
+		destination, availabilityState(DestinationAvailable),
+	); !errors.Is(err, ErrStaleMTP3Restart) {
 		t.Fatalf("update through completed handle = %v, want ErrStaleMTP3Restart", err)
 	}
 }
@@ -530,7 +564,7 @@ func TestMTP3RestartValidationOverlapAndIdempotence(t *testing.T) {
 func TestMTP3RestartStatusPrecedesAspActiveAck(t *testing.T) {
 	listener, _, asp, sent := restartFixture(t, 1)
 	destination := restartDestination(1, 0x123456, 0)
-	restart, err := listener.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
@@ -542,8 +576,11 @@ func TestMTP3RestartStatusPrecedesAspActiveAck(t *testing.T) {
 		t.Fatalf("handle ASP Active: %v", err)
 	}
 	written := sent.snapshot()
-	if got := typeNames(written); !reflect.DeepEqual(got, []string{"Destination Unavailable", "ASP Active Ack"}) {
-		t.Fatalf("pre-Ack restart messages = %v, want [Destination Unavailable ASP Active Ack]", got)
+	// RFC 4666 Section 4.6 puts the restart's isolation state before the Ack
+	// that activates the ASP, and Section 4.3.4.5 puts the AS-state Notify
+	// after it.
+	if got := typeNames(written); !reflect.DeepEqual(got, []string{"Destination Unavailable", "ASP Active Ack", "Notify"}) {
+		t.Fatalf("restart messages = %v, want [Destination Unavailable ASP Active Ack Notify]", got)
 	}
 	assertRestartScope(t, written[0], destination)
 
@@ -554,7 +591,7 @@ func TestMTP3RestartStatusPrecedesAspActiveAck(t *testing.T) {
 
 func TestMTP3RestartPreAckWriteFailureWithholdsAck(t *testing.T) {
 	listener, _, asp, _ := restartFixture(t, 1)
-	restart, err := listener.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
+	restart, err := listener.endpoint.BeginMTP3Restart(restartDestination(1, 0x123456, 0))
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
@@ -584,29 +621,40 @@ func TestMTP3RestartPreAckWriteFailureWithholdsAck(t *testing.T) {
 func TestMTP3RestartHandlesRemainValidAfterListenerClose(t *testing.T) {
 	listener, _, _, _ := restartFixture(t, 1)
 	destination := restartDestination(1, 0x123456, 0)
-	restart, err := listener.BeginMTP3Restart(destination)
+	restart, err := listener.endpoint.BeginMTP3Restart(destination)
 	if err != nil {
 		t.Fatalf("begin MTP3 restart: %v", err)
 	}
 	if err := listener.Close(); err != nil {
 		t.Fatalf("close Listener: %v", err)
 	}
-	if next, err := listener.BeginMTP3Restart(destination); next != nil || !errors.Is(err, ErrAssociationClosed) {
-		t.Fatalf("begin after close = (%v, %v), want (nil, ErrAssociationClosed)", next, err)
+	// The procedure is the Endpoint's, so closing one Listener neither ends it
+	// nor releases the affected scope to a second one.
+	if next, err := listener.endpoint.BeginMTP3Restart(destination); next != nil ||
+		!errors.Is(err, ErrMTP3RestartInProgress) {
+		t.Fatalf("begin after close = (%v, %v), want (nil, ErrMTP3RestartInProgress)", next, err)
 	}
-	if err := restart.Update(destination, DestinationAvailable); err != nil {
+	if err := restart.Update(destination, availabilityState(DestinationAvailable)); err != nil {
 		t.Fatalf("update after Listener.Close: %v", err)
 	}
 	if err := restart.Complete(); err != nil {
 		t.Fatalf("complete after Listener.Close: %v", err)
 	}
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
-	); !errors.Is(err, ErrAssociationClosed) {
-		t.Fatalf("report after close = %v, want ErrAssociationClosed", err)
+	// Publication is owner-level too: it survives the Listener and is refused
+	// only once the Endpoint that owns the destination state is closed.
+	scope := testWireScope(7, true, 1)
+	if err := reportAvailability(
+		listener.endpoint, scope, destination.PointCode, destination.Mask, DestinationAvailable,
+	); err != nil {
+		t.Fatalf("report after Listener.Close: %v", err)
 	}
 	if err := listener.endpoint.Close(); err != nil {
 		t.Fatalf("Endpoint.Close: %v", err)
+	}
+	if err := reportAvailability(
+		listener.endpoint, scope, destination.PointCode, destination.Mask, DestinationAvailable,
+	); !errors.Is(err, ErrEndpointClosed) {
+		t.Fatalf("report after Endpoint.Close = %v, want ErrEndpointClosed", err)
 	}
 }
 
@@ -614,11 +662,11 @@ func TestMTP3RestartReportRacingCompletionCannotBeLost(t *testing.T) {
 	listener, _, _, _ := restartFixture(t, 1)
 	destination := restartDestination(1, 0x123456, 0)
 	for iteration := 0; iteration < 200; iteration++ {
-		restart, err := listener.BeginMTP3Restart(destination)
+		restart, err := listener.endpoint.BeginMTP3Restart(destination)
 		if err != nil {
 			t.Fatalf("iteration %d begin: %v", iteration, err)
 		}
-		if err := restart.Update(destination, DestinationUnavailable); err != nil {
+		if err := restart.Update(destination, availabilityState(DestinationUnavailable)); err != nil {
 			t.Fatalf("iteration %d seed unavailable update: %v", iteration, err)
 		}
 		start := make(chan struct{})
@@ -628,8 +676,9 @@ func TestMTP3RestartReportRacingCompletionCannotBeLost(t *testing.T) {
 		go func() {
 			defer waitGroup.Done()
 			<-start
-			reportErr = listener.ReportDestinationRangeForNetworkAndRoutingContext(
-				7, 1, destination.PointCode, destination.Mask, DestinationAvailable,
+			reportErr = reportAvailability(
+				listener.endpoint, testWireScope(7, true, 1),
+				destination.PointCode, destination.Mask, DestinationAvailable,
 			)
 		}()
 		go func() {
@@ -642,11 +691,9 @@ func TestMTP3RestartReportRacingCompletionCannotBeLost(t *testing.T) {
 		if reportErr != nil || completeErr != nil {
 			t.Fatalf("iteration %d errors = (%v, %v)", iteration, reportErr, completeErr)
 		}
-		state, known := listener.DestinationStateForNetworkAndRoutingContext(
-			7, 1, destination.PointCode,
-		)
-		if !known || state != DestinationAvailable {
-			t.Fatalf("iteration %d final state = (%v, %v), want (Available, true)", iteration, state, known)
+		state, known := restartDestinationState(t, listener, 1, destination.PointCode)
+		if !known || state.Availability != DestinationAvailable {
+			t.Fatalf("iteration %d final state = (%+v, %v), want (Available, true)", iteration, state, known)
 		}
 	}
 }
@@ -654,8 +701,8 @@ func TestMTP3RestartReportRacingCompletionCannotBeLost(t *testing.T) {
 func TestDestinationStateSSNMOmitsEmptyRoutingContext(t *testing.T) {
 	messagesToWrite := destinationStateSSNMs(DestinationRange{
 		PointCode: 0x123456,
-		State:     DestinationUnavailable,
-	}, nil, DestinationUnavailable, false)
+		State:     availabilityState(DestinationUnavailable),
+	}, nil, destinationAvailabilityDimension)
 	if len(messagesToWrite) != 1 {
 		t.Fatalf("built %d messages, want one", len(messagesToWrite))
 	}
@@ -672,8 +719,7 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 	f.Add(uint32(0x123456), uint8(0), uint32(1), uint8(DestinationAvailable), true, true)
 	f.Add(uint32(0xffffff), uint8(24), uint32(2), uint8(255), true, false)
 	f.Fuzz(func(t *testing.T, pointCode uint32, mask uint8, routingContext uint32, rawState uint8, routingContextSet, networkAppearanceSet bool) {
-		config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 0, params.TrafficModeLoadshare, 7, []uint32{1})
-		listener := newSGPListener(NewListenerConfig(config))
+		listener, _, _, _ := restartFixture(t, 1)
 		destination := AffectedDestination{
 			NetworkAppearance:    7,
 			NetworkAppearanceSet: networkAppearanceSet,
@@ -682,7 +728,7 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 			PointCode:            pointCode,
 			Mask:                 mask,
 		}
-		restart, err := listener.BeginMTP3Restart(destination)
+		restart, err := listener.endpoint.BeginMTP3Restart(destination)
 		if routingContextSet && routingContext != 1 {
 			if restart != nil || !errors.Is(err, ErrInvalidRoutingContext) {
 				t.Fatalf("invalid Routing Context begin = (%v, %v)", restart, err)
@@ -692,9 +738,9 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 		if err != nil || restart == nil {
 			t.Fatalf("valid begin = (%v, %v)", restart, err)
 		}
-		state := DestinationState(rawState)
+		state := DestinationNetworkState{Availability: DestinationAvailability(rawState)}
 		updateErr := restart.Update(destination, state)
-		if validDestinationState(state) {
+		if validDestinationNetworkState(state) {
 			if updateErr != nil {
 				t.Fatalf("valid update: %v", updateErr)
 			}
@@ -708,6 +754,26 @@ func FuzzMTP3RestartProcedure(f *testing.F) {
 			t.Fatalf("idempotent complete: %v", err)
 		}
 	})
+}
+
+// restartDestinationState is the SG's own view of one destination in the exact
+// Network Appearance and Routing Context scope these fixtures use. The Endpoint
+// owns that state, so its destination status is what the removed per-Listener
+// and per-Association queries reported.
+func restartDestinationState(
+	t *testing.T,
+	listener *Listener,
+	routingContext, pointCode uint32,
+) (DestinationNetworkState, bool) {
+	t.Helper()
+	status, known := listenerEndpoint(t, listener).DestinationStatus(DestinationStatusKey{
+		NetworkAppearance:    7,
+		NetworkAppearanceSet: true,
+		RoutingContext:       routingContext,
+		RoutingContextSet:    true,
+		PointCode:            pointCode,
+	})
+	return status.State, known
 }
 
 func restartFixture(t *testing.T, routingContexts ...uint32) (*Listener, *applicationServer, *Association, *distributionCapture) {

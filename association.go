@@ -302,15 +302,6 @@ type Association struct {
 	authorizationIdentifier    uint32
 	authorizationIdentifierSet bool
 
-	// peerCongestion is the congestion level the peer last reported about
-	// itself, from a SCON received at an SGP.
-	//
-	// It is kept apart from destinations because it means something different:
-	// RFC 4666 Section 3.4.4's ASP-to-peer SCON reports "the congestion level
-	// of the M3UA layer or the ASP", not the reachability of an SS7
-	// destination.
-	peerCongestion atomic.Uint32
-
 	// selectedRC is the Routing Context outbound DATA names, when the
 	// association carries more than one.
 	//
@@ -2413,6 +2404,11 @@ func (c *Association) noteRoutingContextsActiveLocked(rcs []uint32) {
 // Application Servers to be ASP-ACTIVE; an older queued ASP-INACTIVE entry
 // action must not erase that newer scope before StateASPActive is committed.
 func (c *Association) commitPeerRoutingContextsActive(rcs []uint32) bool {
+	// Resolved before the state lock is taken. Reading the configured inventory
+	// takes the association's own configuration locks, and the registry commit
+	// below is the only thing that may reach out from under muState.
+	keys := c.configuredASKeys()
+
 	c.muState.Lock()
 	select {
 	case <-c.done:
@@ -2425,7 +2421,20 @@ func (c *Association) commitPeerRoutingContextsActive(rcs []uint32) bool {
 	c.muAckedRCs.Unlock()
 	stateChanged := c.state != StateASPActive
 	c.state = StateASPActive
+	// The Application Server registry authorizes outbound traffic, and it is
+	// committed here rather than left to the dispatcher's later
+	// applicationServers.aspStateChanged. Publishing the state first made the
+	// ASP observably ASP-ACTIVE while the AS that admits its DATA had not been
+	// told, so an application writing on that observation was refused with
+	// ErrRoutingContextNotActive for traffic the peer had already acknowledged.
+	//
+	// Only the recording happens under muState. The Notify emission it produces
+	// can block on a socket write, so it is run once the lock is released, and
+	// still after the acknowledgement the handler already wrote, which is the
+	// ordering RFC 4666 Section 4.3.4.5 requires.
+	notify := c.as.commitASPStates(c, keys, c.peerASPStateForKey)
 	c.muState.Unlock()
+	notify()
 	if stateChanged {
 		c.notifyASPRouteStateChanged()
 		return true
@@ -2537,6 +2546,21 @@ func (c *Association) activeForASKey(key ASKey) bool {
 		return !c.activeRCsScoped || c.contextlessASActive
 	}
 	return c.activeForRoutingContext(key.RoutingContext)
+}
+
+// peerASPStateForKey is this peer ASP's state in one Application Server once
+// the association itself is ASP-ACTIVE.
+//
+// RFC 4666 Section 4.3.1 keeps the state per AS: an ASP Active naming a subset
+// of the Routing Contexts activates the ASP in those Application Servers only,
+// and leaves it ASP-INACTIVE in the rest. It is the same narrowing
+// applicationServers.aspStateChanged applies, so the state committed with the
+// transition and the state restated after it agree.
+func (c *Association) peerASPStateForKey(key ASKey) State {
+	if c.activeForASKey(key) {
+		return StateASPActive
+	}
+	return StateASPInactive
 }
 
 // routingContextOverridden reports whether an alternate ASP holds this context.

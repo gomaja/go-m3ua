@@ -10,15 +10,15 @@ func TestAcceptedSGPDestinationReportsStopAtTheRecordBudget(t *testing.T) {
 	restartActivateASP(applicationServer, asp, 1)
 	listener.destinationRegistry().setRecordLimit(1)
 
-	if err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123456, 0, DestinationUnavailable,
+	if err := reportAvailability(
+		listenerEndpoint(t, listener), testWireScope(7, true, 1), 0x123456, 0, DestinationUnavailable,
 	); err != nil {
 		t.Fatalf("first destination report: %v", err)
 	}
 	sent.reset()
 
-	err := listener.ReportDestinationRangeForNetworkAndRoutingContext(
-		7, 1, 0x123457, 0, DestinationUnavailable,
+	err := reportAvailability(
+		listenerEndpoint(t, listener), testWireScope(7, true, 1), 0x123457, 0, DestinationUnavailable,
 	)
 	if !errors.Is(err, ErrSSNMDestinationRecordLimit) {
 		t.Errorf("destination report beyond the budget: error = %v, want ErrSSNMDestinationRecordLimit", err)

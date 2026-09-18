@@ -45,6 +45,37 @@ func apc(pcs ...uint32) *params.Param {
 	return params.NewAffectedPointCode(pcs...)
 }
 
+// seedDestinationNetworkState records both dimensions of a destination in an
+// Association's retained state. Availability and congestion are separate
+// statements (RFC 4666 Section 4.5.2.2) and are stored as separate records, so
+// seeding a congested destination takes one of each.
+func seedDestinationNetworkState(c *Association, pointCode uint32, state DestinationNetworkState) {
+	scope := associationDestinationScope(c, nil)
+	rangeValue := DestinationRange{
+		NetworkAppearance:    scope.networkAppearance,
+		NetworkAppearanceSet: scope.networkAppearanceSet,
+		RoutingContext:       scope.routingContext,
+		RoutingContextSet:    scope.routingContextSet,
+		PointCode:            pointCode,
+		State:                state,
+	}
+	c.destinations.setRanges([]DestinationRange{rangeValue})
+	_ = c.destinations.setCongestionRangesWithinBudget([]DestinationRange{rangeValue})
+}
+
+// retainedSnapshot is the exact, Mask-zero destination records an Association
+// holds in the scope its own queries resolve, optionally in an explicit Network
+// Appearance.
+func retainedSnapshot(c *Association, networkAppearance *params.Param) map[uint32]DestinationNetworkState {
+	return c.destinations.snapshotForScope(associationDestinationScope(c, networkAppearance))
+}
+
+// retainedRanges is every range an Association holds in that same scope,
+// including the ones a Mask-zero snapshot cannot represent.
+func retainedRanges(c *Association) []DestinationRange {
+	return c.destinations.rangesForScope(associationDestinationScope(c, nil))
+}
+
 // nextStatus returns the next SSNM status, or fails if none arrives.
 func nextStatus(t *testing.T, c *Association) *DestinationStatus {
 	t.Helper()
@@ -71,10 +102,10 @@ func TestDUNAMarksDestinationUnavailable(t *testing.T) {
 		t.Fatalf("handleDestinationUnavailable() error = %v, want nil", err)
 	}
 
-	if got := conn.DestinationState(0x1234); got != DestinationUnavailable {
-		t.Errorf("DestinationState(0x1234) = %v, want %v", got, DestinationUnavailable)
+	if got := retainedAvailability(conn, 0x1234); got != DestinationUnavailable {
+		t.Errorf("retained availability for 0x1234 = %v, want %v", got, DestinationUnavailable)
 	}
-	if s := nextStatus(t, conn); s.PointCode != 0x1234 || s.State != DestinationUnavailable {
+	if s := nextStatus(t, conn); s.PointCode != 0x1234 || s.State.Availability != DestinationUnavailable {
 		t.Errorf("status = %+v, want point code 0x1234 Unavailable", s)
 	}
 	// SSNM is not acknowledged.
@@ -92,7 +123,7 @@ func TestDAVARestoresDestination(t *testing.T) {
 		messages.NewDestinationUnavailable(nil, nil, apc(0x1234), nil)); err != nil {
 		t.Fatal(err)
 	}
-	if got := conn.DestinationState(0x1234); got != DestinationUnavailable {
+	if got := retainedAvailability(conn, 0x1234); got != DestinationUnavailable {
 		t.Fatalf("setup: state = %v, want %v", got, DestinationUnavailable)
 	}
 
@@ -100,8 +131,8 @@ func TestDAVARestoresDestination(t *testing.T) {
 		messages.NewDestinationAvailable(nil, nil, apc(0x1234), nil)); err != nil {
 		t.Fatalf("handleDestinationAvailable() error = %v, want nil", err)
 	}
-	if got := conn.DestinationState(0x1234); got != DestinationAvailable {
-		t.Errorf("DestinationState after DAVA = %v, want %v", got, DestinationAvailable)
+	if got := retainedAvailability(conn, 0x1234); got != DestinationAvailable {
+		t.Errorf("retained availability after DAVA = %v, want %v", got, DestinationAvailable)
 	}
 }
 
@@ -111,8 +142,8 @@ func TestDAVARestoresDestination(t *testing.T) {
 func TestUnreportedDestinationIsAvailable(t *testing.T) {
 	conn, _ := ssnmConn(t)
 
-	if got := conn.DestinationState(0xdeadbeef); got != DestinationAvailable {
-		t.Errorf("DestinationState of an unreported point code = %v, want %v", got, DestinationAvailable)
+	if got := retainedAvailability(conn, 0xdeadbeef); got != DestinationAvailable {
+		t.Errorf("retained availability of an unreported point code = %v, want %v", got, DestinationAvailable)
 	}
 }
 
@@ -129,11 +160,11 @@ func TestSSNMAppliesToEveryAffectedPointCode(t *testing.T) {
 	}
 
 	for _, pc := range pcs {
-		if got := conn.DestinationState(pc); got != DestinationUnavailable {
-			t.Errorf("DestinationState(%#x) = %v, want %v", pc, got, DestinationUnavailable)
+		if got := retainedAvailability(conn, pc); got != DestinationUnavailable {
+			t.Errorf("retained availability for %#x = %v, want %v", pc, got, DestinationUnavailable)
 		}
 	}
-	if got := len(conn.DestinationStates()); got != len(pcs) {
+	if got := len(retainedSnapshot(conn, nil)); got != len(pcs) {
 		t.Errorf("tracked %d destinations, want %d", got, len(pcs))
 	}
 }
@@ -149,11 +180,14 @@ func TestSCONReportsCongestion(t *testing.T) {
 			nil, nil, apc(0x1234), nil, params.NewCongestionIndications(2), nil)); err != nil {
 			t.Fatalf("handleSignallingCongestion() error = %v, want nil", err)
 		}
-		if got := conn.DestinationState(0x1234); got != DestinationCongested {
-			t.Errorf("state = %v, want %v", got, DestinationCongested)
+		// Congestion is a status of its own (RFC 4666 Section 4.5.2.2): the
+		// destination is reported congested and stays reachable.
+		if got := retainedDestinationState(conn, 0x1234); !got.Congestion.Congested ||
+			got.Availability != DestinationAvailable {
+			t.Errorf("state = %+v, want a congested destination that is still available", got)
 		}
-		if s := nextStatus(t, conn); s.CongestionLevel != 2 {
-			t.Errorf("congestion level = %d, want 2", s.CongestionLevel)
+		if s := nextStatus(t, conn); s.State.Congestion.Level != 2 {
+			t.Errorf("congestion level = %d, want 2", s.State.Congestion.Level)
 		}
 	})
 
@@ -164,8 +198,8 @@ func TestSCONReportsCongestion(t *testing.T) {
 			nil, nil, apc(0x1234), nil, nil, nil)); err != nil {
 			t.Fatalf("handleSignallingCongestion() error = %v, want nil (the parameter is optional)", err)
 		}
-		if got := conn.DestinationState(0x1234); got != DestinationCongested {
-			t.Errorf("state = %v, want %v", got, DestinationCongested)
+		if got := retainedDestinationState(conn, 0x1234); !got.Congestion.Congested {
+			t.Errorf("state = %+v, want the destination reported congested", got)
 		}
 	})
 }
@@ -183,8 +217,8 @@ func TestDUPULeavesDestinationReachable(t *testing.T) {
 		t.Fatalf("handleDestinationUserPartUnavailable() error = %v, want nil", err)
 	}
 
-	if got := conn.DestinationState(0x1234); got != DestinationAvailable {
-		t.Errorf("DestinationState after DUPU = %v, want %v: the destination is still reachable",
+	if got := retainedAvailability(conn, 0x1234); got != DestinationAvailable {
+		t.Errorf("retained availability after DUPU = %v, want %v: the destination is still reachable",
 			got, DestinationAvailable)
 	}
 
@@ -205,7 +239,7 @@ func TestDRSTMarksDestinationRestricted(t *testing.T) {
 		messages.NewDestinationRestricted(nil, nil, apc(0x1234), nil)); err != nil {
 		t.Fatalf("handleDestinationRestricted() error = %v, want nil", err)
 	}
-	if got := conn.DestinationState(0x1234); got != DestinationRestricted {
+	if got := retainedAvailability(conn, 0x1234); got != DestinationRestricted {
 		t.Errorf("state = %v, want %v", got, DestinationRestricted)
 	}
 }
@@ -304,7 +338,7 @@ func TestSGPRejectsAspBoundSSNM(t *testing.T) {
 			if err := tt.call(conn); !errors.As(err, &unexpected) {
 				t.Fatalf("error = %v, want *UnexpectedMessageError at an SGP", err)
 			}
-			if got := conn.DestinationState(0x1234); got != DestinationAvailable {
+			if got := retainedAvailability(conn, 0x1234); got != DestinationAvailable {
 				t.Errorf("an SGP applied a peer's %s: state = %v, want it untouched", tt.name, got)
 			}
 		})
@@ -334,21 +368,22 @@ func TestASPRejectsDAUD(t *testing.T) {
 func TestDAUDIsAnsweredFromDestinationState(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
-		state DestinationState
+		state DestinationNetworkState
 		want  []string
 	}{
-		{"unavailable", DestinationUnavailable, []string{"Destination Unavailable"}},
-		{"restricted", DestinationRestricted, []string{"Destination Restricted"}},
-		{"available", DestinationAvailable, []string{"Destination Available"}},
-		// Congested is still reachable, so the audit is answered with a DAVA —
-		// but RFC 4666 Section 4.5.3 has the SCON go first: "For national
-		// networks, the SGP SHOULD additionally respond with a SCON message (if
-		// the destination is congested) before the DAVA or DRST."
-		{"congested", DestinationCongested, []string{"Signalling Congestion", "Destination Available"}},
+		{"unavailable", availabilityState(DestinationUnavailable), []string{"Destination Unavailable"}},
+		{"restricted", availabilityState(DestinationRestricted), []string{"Destination Restricted"}},
+		{"available", availabilityState(DestinationAvailable), []string{"Destination Available"}},
+		// Congestion is a status of its own, so a congested destination is
+		// still available and the audit answers both dimensions: RFC 4666
+		// Section 4.5.3 has the SCON go first — "For national networks, the SGP
+		// SHOULD additionally respond with a SCON message (if the destination
+		// is congested) before the DAVA or DRST."
+		{"congested", congestedState(2), []string{"Signalling Congestion", "Destination Available"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
-			conn.SetDestinationState(0x1234, tt.state)
+			seedDestinationNetworkState(conn, 0x1234, tt.state)
 
 			if err := conn.handleDestinationStateAudit(
 				messages.NewDestinationStateAudit(nil, nil, apc(0x1234), nil)); err != nil {
@@ -372,8 +407,8 @@ func TestDAUDIsAnsweredFromDestinationState(t *testing.T) {
 // A DAUD naming several point codes must be answered for every one of them.
 func TestDAUDAnswersEveryAuditedPointCode(t *testing.T) {
 	conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
-	conn.SetDestinationState(0x1111, DestinationUnavailable)
-	conn.SetDestinationState(0x2222, DestinationAvailable)
+	seedDestinationAvailability(conn, 0x1111, DestinationUnavailable)
+	seedDestinationAvailability(conn, 0x2222, DestinationAvailable)
 
 	if err := conn.handleDestinationStateAudit(
 		messages.NewDestinationStateAudit(nil, nil, apc(0x1111, 0x2222), nil)); err != nil {
@@ -410,7 +445,7 @@ func TestSSNMOutsideActiveIsRejected(t *testing.T) {
 				messages.NewDestinationUnavailable(nil, nil, apc(0x1234), nil)); !errors.As(err, &unexpected) {
 				t.Fatalf("error = %v in %v, want *UnexpectedMessageError", err, st)
 			}
-			if got := conn.DestinationState(0x1234); got != DestinationAvailable {
+			if got := retainedAvailability(conn, 0x1234); got != DestinationAvailable {
 				t.Errorf("applied a DUNA received in %v: state = %v, want it untouched", st, got)
 			}
 		})
@@ -468,8 +503,8 @@ func TestSSNMFloodDoesNotWedgeDispatcher(t *testing.T) {
 	}
 
 	// State is authoritative regardless of whether the user drained anything.
-	if got := conn.DestinationState(999); got != DestinationUnavailable {
-		t.Errorf("DestinationState(999) = %v, want %v; state must survive a dropped notification",
+	if got := retainedAvailability(conn, 999); got != DestinationUnavailable {
+		t.Errorf("retained availability for 999 = %v, want %v; state must survive a dropped notification",
 			got, DestinationUnavailable)
 	}
 }
@@ -522,11 +557,15 @@ func TestSSNMIsDispatchedNotRejectedAsUnsupported(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		msg  messages.M3UA
-		want DestinationState
+		want DestinationNetworkState
 	}{
-		{"DUNA", messages.NewDestinationUnavailable(nil, nil, params.NewAffectedPointCode(0x1234), nil), DestinationUnavailable},
-		{"DRST", messages.NewDestinationRestricted(nil, nil, params.NewAffectedPointCode(0x1234), nil), DestinationRestricted},
-		{"SCON", messages.NewSignallingCongestion(nil, nil, params.NewAffectedPointCode(0x1234), nil, nil, nil), DestinationCongested},
+		{"DUNA", messages.NewDestinationUnavailable(nil, nil, params.NewAffectedPointCode(0x1234), nil), availabilityState(DestinationUnavailable)},
+		{"DRST", messages.NewDestinationRestricted(nil, nil, params.NewAffectedPointCode(0x1234), nil), availabilityState(DestinationRestricted)},
+		// A SCON without Congestion Indications reports congestion at no
+		// stated level, and moves that dimension alone (RFC 4666 Section
+		// 4.5.2.2), so the destination stays available.
+		{"SCON", messages.NewSignallingCongestion(nil, nil, params.NewAffectedPointCode(0x1234), nil, nil, nil),
+			DestinationNetworkState{Congestion: congestionStateFor(0, false)}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := ssnmConn(t)
@@ -552,8 +591,8 @@ func TestSSNMIsDispatchedNotRejectedAsUnsupported(t *testing.T) {
 			}
 
 			// And the message must actually have been acted on.
-			if got := conn.DestinationState(0x1234); got != tt.want {
-				t.Errorf("DestinationState after %s = %v, want %v: the message was not dispatched to its handler",
+			if got := retainedDestinationState(conn, 0x1234); got != tt.want {
+				t.Errorf("retained state after %s = %+v, want %+v: the message was not dispatched to its handler",
 					tt.name, got, tt.want)
 			}
 		})
@@ -644,14 +683,14 @@ func FuzzSSNMHandlers(f *testing.F) {
 
 			// Whatever happened, the destination table must remain readable and
 			// self-consistent — a corrupt one silently misroutes traffic.
-			for pc, state := range tt.conn.DestinationStates() {
-				if state > DestinationCongested {
-					t.Fatalf("%s produced an out-of-range state %d for point code %#x", tt.name, state, pc)
+			for pc, state := range retainedSnapshot(tt.conn, nil) {
+				if !validDestinationNetworkState(state) {
+					t.Fatalf("%s produced an out-of-range state %+v for point code %#x", tt.name, state, pc)
 				}
 			}
-			for _, destinationRange := range tt.conn.DestinationRanges() {
-				if destinationRange.State > DestinationCongested {
-					t.Fatalf("%s produced an out-of-range state %d for range %#x/%d",
+			for _, destinationRange := range retainedRanges(tt.conn) {
+				if !validDestinationNetworkState(destinationRange.State) {
+					t.Fatalf("%s produced an out-of-range state %+v for range %#x/%d",
 						tt.name, destinationRange.State, destinationRange.PointCode, destinationRange.Mask)
 				}
 				if destinationRange.PointCode > 0x00ffffff {
@@ -759,7 +798,7 @@ func TestSSNMIsAcceptedBeforeTheAspActiveAck(t *testing.T) {
 			if err := tt.send(conn); err != nil {
 				t.Fatalf("%s during activation was rejected: %v", tt.name, err)
 			}
-			if got := conn.DestinationState(0x111111); got == DestinationAvailable && tt.name != "SCON" {
+			if got := retainedAvailability(conn, 0x111111); got == DestinationAvailable && tt.name != "SCON" {
 				t.Errorf("%s during activation left the destination %v", tt.name, got)
 			}
 		})
@@ -798,8 +837,8 @@ func TestSCONFromAnASPIsAcceptedAtAnSGP(t *testing.T) {
 	// SG's own destination map let any ASP fabricate congestion that every
 	// other ASP would then be told about when it audited (Section 4.5.3). See
 	// TestSCONFromAnASPDoesNotRewriteTheSGsRoutingState.
-	if got := conn.DestinationState(0x222222); got == DestinationCongested {
-		t.Errorf("an ASP's SCON set the SG's own destination state to %v", got)
+	if got := retainedDestinationState(conn, 0x222222); got.Congestion.Congested {
+		t.Errorf("an ASP's SCON set the SG's own destination state to %+v", got)
 	}
 
 	// It is still surfaced to the user, marked as the peer's report.
@@ -978,17 +1017,17 @@ func TestDestinationStateIsScopedByNetworkAppearance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := conn.DestinationStateForNetwork(8, pointCode); got != DestinationUnavailable {
+	if got := retainedAvailabilityForNetwork(conn, 8, pointCode); got != DestinationUnavailable {
 		t.Errorf("network 8 state = %v, want unavailable", got)
 	}
-	if got := conn.DestinationStateForNetwork(9, pointCode); got != DestinationRestricted {
+	if got := retainedAvailabilityForNetwork(conn, 9, pointCode); got != DestinationRestricted {
 		t.Errorf("network 9 state = %v, want restricted", got)
 	}
-	if got := conn.DestinationState(pointCode); got != DestinationAvailable {
+	if got := retainedAvailability(conn, pointCode); got != DestinationAvailable {
 		t.Errorf("configured network 7 state = %v, want untouched/available", got)
 	}
-	states := conn.DestinationStatesForNetwork(8)
-	if got := states[pointCode]; got != DestinationUnavailable {
+	states := retainedSnapshot(conn, params.NewNetworkAppearance(8))
+	if got := states[pointCode].Availability; got != DestinationUnavailable {
 		t.Errorf("network 8 snapshot state = %v, want unavailable", got)
 	}
 }
@@ -1002,7 +1041,7 @@ func TestDestinationStateIsScopedByNetworkAppearance(t *testing.T) {
 // asked after.
 func TestDAUDForACongestedDestinationSendsSCONBeforeDAVA(t *testing.T) {
 	conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
-	conn.SetDestinationState(0x333333, DestinationCongested)
+	seedDestinationNetworkState(conn, 0x333333, congestedState(2))
 
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		nil, nil, params.NewAffectedPointCode(0x333333), nil,
@@ -1024,7 +1063,7 @@ func TestDAUDForAnAvailableDestinationSendsOnlyDAVA(t *testing.T) {
 	// different case, answered with DUNA under Section 4.5.3: "An SG SHOULD
 	// respond with a DUNA message when DAUD was received with an unknown
 	// Signalling Point Code."
-	conn.SetDestinationState(0x444444, DestinationAvailable)
+	seedDestinationAvailability(conn, 0x444444, DestinationAvailable)
 
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 		nil, nil, params.NewAffectedPointCode(0x444444), nil,
@@ -1044,18 +1083,21 @@ func TestDAUDForAnAvailableDestinationSendsOnlyDAVA(t *testing.T) {
 func TestDAUDResponsesKeepTheRequestedRoutingContext(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
-		state DestinationState
+		state DestinationNetworkState
 		want  int
 	}{
-		{name: "unavailable", state: DestinationUnavailable, want: 1},
-		{name: "restricted", state: DestinationRestricted, want: 1},
-		{name: "available", state: DestinationAvailable, want: 1},
-		{name: "congested", state: DestinationCongested, want: 2},
+		{name: "unavailable", state: availabilityState(DestinationUnavailable), want: 1},
+		{name: "restricted", state: availabilityState(DestinationRestricted), want: 1},
+		{name: "available", state: availabilityState(DestinationAvailable), want: 1},
+		// A congested destination is answered in both dimensions: the SCON
+		// that reports the congestion, then the DAVA that says it is still
+		// reachable (RFC 4666 Section 4.5.3).
+		{name: "congested", state: congestedState(2), want: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, sent := newSSNMTestConn(t, StateASPActive, RoleSGP)
 			const pointCode = 0x515151
-			conn.SetDestinationState(pointCode, tt.state)
+			seedDestinationNetworkState(conn, pointCode, tt.state)
 
 			if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(
 				nil, params.NewRoutingContext(1),
@@ -1077,5 +1119,192 @@ func TestDAUDResponsesKeepTheRequestedRoutingContext(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSignallingStatusCarriesBothDimensionsAfterEachMessage pins what an
+// MTP3-User is told: each SSNM message moves one dimension, and the status it
+// produces reports the other as this node currently holds it rather than as its
+// zero value. RFC 4666 Section 4.5.3 has the two answered together, so a
+// receiver that is told only the dimension that moved cannot reconstruct the
+// destination's state without auditing for it.
+func TestSignallingStatusCarriesBothDimensionsAfterEachMessage(t *testing.T) {
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
+	const pointCode = 0x222222
+	affected := params.NewAffectedPointCodeWithMask(0, pointCode)
+
+	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, nil, affected, nil,
+	)); err != nil {
+		t.Fatalf("handleDestinationUnavailable: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{Availability: DestinationUnavailable})
+
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, nil, params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+		params.NewCongestionIndications(2), nil,
+	)); err != nil {
+		t.Fatalf("handleSignallingCongestion: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{
+		Availability: DestinationUnavailable,
+		Congestion:   CongestionState{Congested: true, Level: 2, LevelSet: true},
+	})
+
+	if err := conn.handleDestinationAvailable(messages.NewDestinationAvailable(
+		nil, nil, params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+	)); err != nil {
+		t.Fatalf("handleDestinationAvailable: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{
+		Availability: DestinationAvailable,
+		Congestion:   CongestionState{Congested: true, Level: 2, LevelSet: true},
+	})
+}
+
+func assertStatusState(t *testing.T, conn *Association, want DestinationNetworkState) {
+	t.Helper()
+	select {
+	case status := <-conn.SignallingStatus():
+		if status.State != want {
+			t.Fatalf("status state = %+v, want %+v", status.State, want)
+		}
+	default:
+		t.Fatal("no destination status was published")
+	}
+}
+
+// TestSignallingStatusFillsEachDimensionFromItsOwnRecord covers the case a
+// single covering record cannot answer: a broad DUNA and a narrow SCON are two
+// statements about the same point code, and the status has to take each
+// dimension from the record that actually made that statement.
+func TestSignallingStatusFillsEachDimensionFromItsOwnRecord(t *testing.T) {
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
+	const pointCode = 0x123456
+
+	// The mask, not the value, is what makes this range cover the point code:
+	// RFC 4666 Section 3.4.1's Affected Point Code wildcards the low-order bits,
+	// so 0x123456/8 and 0x123456/0 are two different records and the first
+	// covers the second.
+	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, nil, params.NewAffectedPointCodeWithMask(8, pointCode), nil,
+	)); err != nil {
+		t.Fatalf("handleDestinationUnavailable for the covering range: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{Availability: DestinationUnavailable})
+
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, nil, params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+		params.NewCongestionIndications(2), nil,
+	)); err != nil {
+		t.Fatalf("handleSignallingCongestion for one point code: %v", err)
+	}
+	// The congestion record names only this point code and says nothing about
+	// reachability; the availability still comes from the range that covers it.
+	assertStatusState(t, conn, DestinationNetworkState{
+		Availability: DestinationUnavailable,
+		Congestion:   CongestionState{Congested: true, Level: 2, LevelSet: true},
+	})
+}
+
+// TestSignallingStatusLeavesTheUntouchedDimensionUnsetAcrossRoutingContexts
+// covers a message naming several Application Servers, which need not agree
+// about the destination. One status carries one value, so the dimension the
+// message did not move is left unset rather than taken from whichever context
+// happened to come first.
+func TestSignallingStatusLeavesTheUntouchedDimensionUnsetAcrossRoutingContexts(t *testing.T) {
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+	conn.noteRoutingContextsActive([]uint32{1, 2})
+	const pointCode = 0x123456
+
+	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, params.NewRoutingContext(1), params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+	)); err != nil {
+		t.Fatalf("handleDestinationUnavailable for Routing Context 1: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{Availability: DestinationUnavailable})
+
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, params.NewRoutingContext(1, 2), params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+		params.NewCongestionIndications(2), nil,
+	)); err != nil {
+		t.Fatalf("handleSignallingCongestion across two Routing Contexts: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{
+		Congestion: CongestionState{Congested: true, Level: 2, LevelSet: true},
+	})
+}
+
+// TestSignallingStatusResolvesTheDimensionInItsOwnRoutingContext pins that the
+// dimension a message did not move is read back in the Application Server the
+// message named. RFC 4666 Section 4.3.1 keeps state per AS, so another context's
+// DUNA is not an answer about this one.
+func TestSignallingStatusResolvesTheDimensionInItsOwnRoutingContext(t *testing.T) {
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+	conn.noteRoutingContextsActive([]uint32{1, 2})
+	const pointCode = 0x123456
+
+	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, params.NewRoutingContext(1), params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+	)); err != nil {
+		t.Fatalf("handleDestinationUnavailable for Routing Context 1: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{Availability: DestinationUnavailable})
+
+	if err := conn.handleSignallingCongestion(messages.NewSignallingCongestion(
+		nil, params.NewRoutingContext(2), params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+		params.NewCongestionIndications(2), nil,
+	)); err != nil {
+		t.Fatalf("handleSignallingCongestion for Routing Context 2: %v", err)
+	}
+	// Routing Context 2 has heard nothing about reachability, so it resolves to
+	// the initial assumption rather than to Routing Context 1's DUNA.
+	assertStatusState(t, conn, DestinationNetworkState{
+		Availability: DestinationAvailable,
+		Congestion:   CongestionState{Congested: true, Level: 2, LevelSet: true},
+	})
+}
+
+// TestDUPUStatusLeavesTheDestinationStateAlone pins the one status that reports
+// neither dimension. RFC 4666 Section 3.4.5 has DUPU report that a user part at
+// an otherwise reachable destination is unavailable, so it writes no record and
+// its status carries no claim about the destination — not even the claim that
+// would be read back from what an earlier DUNA left behind. The MTP3-User acts
+// on UserCause, and queries the destination separately if it needs it.
+func TestDUPUStatusLeavesTheDestinationStateAlone(t *testing.T) {
+	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
+	const pointCode = 0x222222
+
+	if err := conn.handleDestinationUnavailable(messages.NewDestinationUnavailable(
+		nil, nil, params.NewAffectedPointCodeWithMask(0, pointCode), nil,
+	)); err != nil {
+		t.Fatalf("handleDestinationUnavailable: %v", err)
+	}
+	assertStatusState(t, conn, DestinationNetworkState{Availability: DestinationUnavailable})
+
+	if err := conn.handleDestinationUserPartUnavailable(
+		messages.NewDestinationUserPartUnavailable(
+			nil, nil, params.NewAffectedPointCodeWithMask(0, pointCode),
+			params.NewUserCause(params.SCCP, params.Unequipped), nil,
+		),
+	); err != nil {
+		t.Fatalf("handleDestinationUserPartUnavailable: %v", err)
+	}
+
+	select {
+	case status := <-conn.SignallingStatus():
+		if !status.UserPartUnavailable {
+			t.Fatal("DUPU status did not report an unavailable user part")
+		}
+		if status.State != (DestinationNetworkState{}) {
+			t.Fatalf("DUPU status carried destination state %+v, want none", status.State)
+		}
+	default:
+		t.Fatal("no destination status was published for the DUPU")
+	}
+
+	// The DUNA still stands underneath it: DUPU changed nothing it is retained.
+	if got := retainedAvailability(conn, pointCode); got != DestinationUnavailable {
+		t.Fatalf("retained availability after the DUPU = %v, want %v", got, DestinationUnavailable)
 	}
 }

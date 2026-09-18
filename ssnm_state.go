@@ -277,7 +277,7 @@ func (r SSNMReport) retainsCongestion() bool {
 	return r.Kind == SSNMSignallingCongestionReport && !r.PeerReported
 }
 
-func (r SSNMReport) availabilityState() DestinationState {
+func (r SSNMReport) availabilityState() DestinationAvailability {
 	switch r.Kind {
 	case SSNMDestinationUnavailableReport:
 		return DestinationUnavailable
@@ -291,7 +291,7 @@ func (r SSNMReport) availabilityState() DestinationState {
 // SSNMAvailability is the retained availability and restriction dimension of
 // one destination, with the provenance of the report that installed it.
 type SSNMAvailability struct {
-	State       DestinationState
+	State       DestinationAvailability
 	Kind        SSNMReportKind
 	Source      SSNMReportSource
 	Scope       WireScope

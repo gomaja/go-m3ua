@@ -1109,8 +1109,10 @@ func TestIPSPDoubleExchangeSSNMOmissionUsesThePeerTrafficNetworkAppearance(t *te
 	)); err != nil {
 		t.Fatalf("incoming SCON with omitted Network Appearance: %v", err)
 	}
-	if got := association.DestinationStateForNetworkAndRoutingContext(20, 22, pointCode); got != DestinationCongested {
-		t.Fatalf("destination state in TrafficToPeer Network Appearance = %v, want Congested", got)
+	// The SCON moves only the congestion dimension, so what proves the scope is
+	// congestion retained in the TrafficToPeer Network Appearance.
+	if got := retainedStateForNetworkAndRoutingContext(association, 20, 22, pointCode); !got.Congestion.Congested {
+		t.Fatalf("destination state in TrafficToPeer Network Appearance = %+v, want congested", got)
 	}
 }
 

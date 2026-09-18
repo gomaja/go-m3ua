@@ -532,7 +532,7 @@ func requireMTPIndication(
 	mtpRoute MTPRouteID,
 	pointCode uint32,
 	mask uint8,
-	availability DestinationState,
+	availability DestinationAvailability,
 	congested bool,
 	congestionLevel uint8,
 	congestionLevelSet bool,

@@ -32,6 +32,17 @@ type SignallingCongestionRequest struct {
 	Info                    string
 }
 
+// DestinationAvailabilityRequest is an SGP's own statement about whether one or
+// more SS7 destinations are reachable: the RFC 4666 Sections 3.4.1, 3.4.2 and
+// 3.4.6 DUNA, DAVA and DRST procedures. It carries the availability dimension
+// only; congestion is reported through SignallingCongestion.
+type DestinationAvailabilityRequest struct {
+	Scope        WireScope
+	Destinations []PointCodeRange
+	Availability DestinationAvailability
+	Info         string
+}
+
 // DestinationUserPartUnavailableRequest is an RFC 4666 Section 3.4.5 DUPU
 // request from an SGP to its concerned active ASPs.
 type DestinationUserPartUnavailableRequest struct {
@@ -178,39 +189,259 @@ func (e *Endpoint) SignallingCongestion(request SignallingCongestionRequest) err
 	if err != nil {
 		return err
 	}
+	return publishEndpointDestinationState(e, request.Scope, request.Destinations,
+		DestinationNetworkState{
+			Congestion: congestionStateFor(request.CongestionLevel, request.CongestionLevelSet),
+		},
+		destinationCongestionDimension,
+		func(routingContext, affectedPointCode *params.Param) messages.M3UA {
+			return messages.NewSignallingCongestion(
+				parameters.networkAppearance.Copy(),
+				routingContext,
+				affectedPointCode,
+				nil,
+				congestion.Copy(),
+				parameters.info.Copy(),
+			)
+		})
+}
 
-	storageScope := request.Scope
-	if !storageScope.NetworkAppearanceSet {
-		storageScope.NetworkAppearance, storageScope.NetworkAppearanceSet, err =
-			resolveEndpointSSNMNetworkAppearance(e, request.Scope)
-		if err != nil {
-			return err
-		}
+// ReportDestinationAvailability publishes this SGP's own view of one or more SS7
+// destinations' reachability to every concerned active ASP the Endpoint owns,
+// and records it as the state a later RFC 4666 Section 4.5.3 audit is answered
+// from.
+//
+// The SG's own report is authoritative for that record: Sections 3.4.1 and
+// 3.4.2 have the SG state what it "has determined", and Section 4.5.3 has it
+// answer an audit from exactly that. The report moves the availability
+// dimension alone; Section 4.5.2.2 keeps congestion separate, so a destination
+// returning to service does not silently become uncongested and a congested one
+// does not become unreachable.
+//
+// Destinations inside an MTP3 restart are staged instead of published, in the
+// availability dimension only, and are released by MTP3Restart.Complete
+// (Section 4.6).
+//
+// A fan-out that fails for some ASPs returns an *SSNMDeliveryError naming both
+// outcomes; the successful associations are never replayed.
+func (e *Endpoint) ReportDestinationAvailability(request DestinationAvailabilityRequest) error {
+	if e == nil || e.role != RoleSGP {
+		return ErrUnsupportedRole
 	}
-	ranges := destinationRangesForSSNM(
-		storageScope, request.Destinations,
-		request.CongestionLevel, request.CongestionLevelSet,
-	)
-	// An SG that cannot retain the report must not deliver it either: the audit
-	// it owes its ASPs afterwards would contradict what it had just sent.
-	if request.Scope.RoutingContextSet {
-		err = e.destinations.setScopedCongestionRangesWithinBudget(request.Scope.RoutingContexts, ranges)
-	} else {
-		err = e.destinations.setCongestionRangesWithinBudget(ranges)
+	if !e.beginOperation() {
+		return ErrEndpointClosed
 	}
+	defer e.endOperation()
+
+	if !validDestinationAvailability(request.Availability) {
+		return fmt.Errorf("%w: destination availability %d",
+			ErrInvalidParameterValue, request.Availability)
+	}
+	parameters, err := prepareEndpointSSNM(e, request.Scope, request.Destinations, request.Info)
 	if err != nil {
 		return err
 	}
-	return fanoutEndpointSSNM(e, request.Scope, func(routingContext *params.Param) messages.M3UA {
-		return messages.NewSignallingCongestion(
-			parameters.networkAppearance.Copy(),
-			routingContext,
-			parameters.affectedPointCode.Copy(),
-			nil,
-			congestion.Copy(),
-			parameters.info.Copy(),
-		)
-	})
+	availability := request.Availability
+	return publishEndpointDestinationState(e, request.Scope, request.Destinations,
+		DestinationNetworkState{Availability: availability},
+		destinationAvailabilityDimension,
+		func(routingContext, affectedPointCode *params.Param) messages.M3UA {
+			// The scope on the wire is the exact scope the caller named. An
+			// omitted Network Appearance is omitted here too: RFC 4666 Section
+			// 1.4.2.1 makes it a local value, and the resolved appearance is
+			// what keys the record, not what the peer is told.
+			switch availability {
+			case DestinationUnavailable:
+				return messages.NewDestinationUnavailable(
+					parameters.networkAppearance.Copy(), routingContext,
+					affectedPointCode, parameters.info.Copy(),
+				)
+			case DestinationRestricted:
+				return messages.NewDestinationRestricted(
+					parameters.networkAppearance.Copy(), routingContext,
+					affectedPointCode, parameters.info.Copy(),
+				)
+			default:
+				return messages.NewDestinationAvailable(
+					parameters.networkAppearance.Copy(), routingContext,
+					affectedPointCode, parameters.info.Copy(),
+				)
+			}
+		})
+}
+
+// endpointSSNMGroup is one Routing Context scope together with the destinations
+// that are still publishable in it. A destination inside an MTP3 restart is
+// staged rather than published, and the restart is scoped, so two Routing
+// Contexts of the same request can end up with different destination lists.
+type endpointSSNMGroup struct {
+	routingContexts []uint32
+	destinations    []PointCodeRange
+}
+
+// appendEndpointSSNMGroup coalesces Routing Contexts that end up with the same
+// publishable destinations, so a request that no restart has split still goes
+// out as one message naming every context it asked for.
+func appendEndpointSSNMGroup(
+	groups []endpointSSNMGroup,
+	group endpointSSNMGroup,
+	scoped bool,
+) []endpointSSNMGroup {
+	if !scoped {
+		return append(groups, group)
+	}
+	for index := range groups {
+		if !samePointCodeRanges(groups[index].destinations, group.destinations) {
+			continue
+		}
+		groups[index].routingContexts = append(groups[index].routingContexts, group.routingContexts...)
+		return groups
+	}
+	return append(groups, group)
+}
+
+func samePointCodeRanges(first, second []PointCodeRange) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// publishEndpointDestinationState is the owner-level publication path shared by
+// the SGP's availability and congestion statements. It records the dimension
+// being reported, holds back whatever an MTP3 restart has isolated, and fans the
+// rest out to the concerned active ASPs of every Listener and dialed
+// Association the Endpoint owns.
+func publishEndpointDestinationState(
+	endpoint *Endpoint,
+	scope WireScope,
+	destinations []PointCodeRange,
+	state DestinationNetworkState,
+	dimensions destinationDimensions,
+	build func(routingContext, affectedPointCode *params.Param) messages.M3UA,
+) error {
+	storageScope := scope
+	if !storageScope.NetworkAppearanceSet {
+		networkAppearance, networkAppearanceSet, err :=
+			resolveEndpointSSNMNetworkAppearance(endpoint, scope)
+		if err != nil {
+			return err
+		}
+		storageScope.NetworkAppearance, storageScope.NetworkAppearanceSet =
+			networkAppearance, networkAppearanceSet
+	}
+
+	restarts := endpoint.mtp3Restarts
+	if restarts != nil {
+		// Held across the stage-or-publish decision and the write, which is what
+		// keeps a destination from being published by this call and completed by
+		// a concurrent MTP3Restart.Complete at the same time.
+		restarts.procedureMu.RLock()
+		defer restarts.procedureMu.RUnlock()
+	}
+
+	groups, retained := stageOrGroupEndpointSSNM(
+		endpoint, restarts, storageScope, scope, destinations, state, dimensions,
+	)
+	// An SG that cannot retain the report must not deliver it either: the audit
+	// it owes its ASPs afterwards would contradict what it had just sent.
+	if retained != nil {
+		return retained
+	}
+
+	failure := &SSNMDeliveryError{}
+	for _, group := range groups {
+		if len(group.destinations) == 0 {
+			continue
+		}
+		affectedPointCode, err := buildAffectedPointCodes(group.destinations)
+		if err != nil {
+			return err
+		}
+		groupScope := scope
+		if len(group.routingContexts) > 0 {
+			groupScope.RoutingContexts = group.routingContexts
+			groupScope.RoutingContextSet = true
+		}
+		mergeSSNMDeliveryOutcome(failure, fanoutEndpointSSNM(
+			endpoint, groupScope, func(routingContext *params.Param) messages.M3UA {
+				return build(routingContext, affectedPointCode.Copy())
+			},
+		))
+	}
+	return ssnmDeliveryResult(failure)
+}
+
+// stageOrGroupEndpointSSNM records the publishable part of a statement and
+// stages the part an MTP3 restart has isolated, returning the groups still to be
+// published.
+func stageOrGroupEndpointSSNM(
+	endpoint *Endpoint,
+	restarts *mtp3RestartRegistry,
+	storageScope, scope WireScope,
+	destinations []PointCodeRange,
+	state DestinationNetworkState,
+	dimensions destinationDimensions,
+) ([]endpointSSNMGroup, error) {
+	routingContexts := []uint32{0}
+	scoped := scope.RoutingContextSet && len(scope.RoutingContexts) > 0
+	if scoped {
+		routingContexts = scope.RoutingContexts
+	}
+
+	groups := make([]endpointSSNMGroup, 0, len(routingContexts))
+	records := make([]DestinationRange, 0, len(destinations)*len(routingContexts))
+	for _, routingContext := range routingContexts {
+		group := endpointSSNMGroup{destinations: make([]PointCodeRange, 0, len(destinations))}
+		if scoped {
+			group.routingContexts = []uint32{routingContext}
+		}
+		for _, destination := range destinations {
+			rangeValue := normalizeDestinationRange(DestinationRange{
+				NetworkAppearance:    storageScope.NetworkAppearance,
+				NetworkAppearanceSet: storageScope.NetworkAppearanceSet,
+				RoutingContext:       routingContext,
+				RoutingContextSet:    scoped,
+				PointCode:            destination.PointCode,
+				Mask:                 destination.Mask,
+				State:                state,
+			})
+			if stageAnyMTP3RestartRangeLocked(restarts, stagedDestination{
+				rangeValue: rangeValue,
+				dimensions: dimensions,
+			}) {
+				continue
+			}
+			group.destinations = append(group.destinations, destination)
+			records = append(records, rangeValue)
+		}
+		groups = appendEndpointSSNMGroup(groups, group, scoped)
+	}
+
+	if len(records) == 0 {
+		return groups, nil
+	}
+	endpoint.destinations.mu.Lock()
+	if endpoint.destinations.state == nil {
+		endpoint.destinations.state = make(map[destinationKey]destinationRecord)
+	}
+	refused := 0
+	for _, rangeValue := range records {
+		if !endpoint.destinations.storeLocked(destinationRecord{
+			rangeValue: rangeValue,
+			dimensions: dimensions,
+		}) {
+			refused++
+		}
+	}
+	err := endpoint.destinations.recordLimitErrorLocked(refused)
+	endpoint.destinations.mu.Unlock()
+	return groups, err
 }
 
 // DestinationUserPartUnavailable originates RFC 4666 Section 3.4.5 DUPU from
@@ -237,7 +468,7 @@ func (e *Endpoint) DestinationUserPartUnavailable(request DestinationUserPartUna
 	if err != nil {
 		return err
 	}
-	return fanoutEndpointSSNM(e, request.Scope, func(routingContext *params.Param) messages.M3UA {
+	return ssnmDeliveryResult(fanoutEndpointSSNM(e, request.Scope, func(routingContext *params.Param) messages.M3UA {
 		return messages.NewDestinationUserPartUnavailable(
 			parameters.networkAppearance.Copy(),
 			routingContext,
@@ -245,7 +476,7 @@ func (e *Endpoint) DestinationUserPartUnavailable(request DestinationUserPartUna
 			params.NewUserCause(request.User, request.Cause),
 			parameters.info.Copy(),
 		)
-	})
+	}))
 }
 
 func (c *Association) prepareASPSSNM(
@@ -549,37 +780,19 @@ func resolveEndpointSSNMNetworkAppearance(
 	return networkAppearance, networkAppearanceSet, nil
 }
 
-// destinationRangesForSSNM builds the records for a locally originated
-// congestion report. State is left to the store, which resolves it from the
-// availability the destination already has.
-func destinationRangesForSSNM(
-	scope WireScope,
-	destinations []PointCodeRange,
-	congestionLevel uint8,
-	congestionLevelSet bool,
-) []DestinationRange {
-	ranges := make([]DestinationRange, len(destinations))
-	for index, destination := range destinations {
-		ranges[index] = DestinationRange{
-			NetworkAppearance:    scope.NetworkAppearance,
-			NetworkAppearanceSet: scope.NetworkAppearanceSet,
-			PointCode:            destination.PointCode,
-			Mask:                 destination.Mask,
-			CongestionLevel:      congestionLevel,
-			CongestionLevelSet:   congestionLevelSet,
-		}
-	}
-	return ranges
-}
-
+// fanoutEndpointSSNM writes one built message to every concerned active ASP and
+// reports the outcome for all of them. The result is always non-nil, so a caller
+// combining several fan-outs keeps the successful associations of each; callers
+// turn it into an error with ssnmDeliveryResult.
 func fanoutEndpointSSNM(
 	endpoint *Endpoint,
 	scope WireScope,
 	build func(*params.Param) messages.M3UA,
-) error {
+) *SSNMDeliveryError {
+	deliveryError := &SSNMDeliveryError{}
 	targets := endpointActiveSSNMTargets(endpoint, scope)
 	if len(targets) == 0 {
-		return nil
+		return deliveryError
 	}
 	type delivery struct {
 		association *Association
@@ -614,7 +827,6 @@ func fanoutEndpointSSNM(
 	}
 	waitGroup.Wait()
 
-	deliveryError := &SSNMDeliveryError{}
 	for index, err := range results {
 		associationID := deliveries[index].association.ID()
 		if err == nil {
@@ -625,9 +837,6 @@ func fanoutEndpointSSNM(
 			Association: associationID,
 			Cause:       err,
 		})
-	}
-	if len(deliveryError.Failed) == 0 {
-		return nil
 	}
 	return deliveryError
 }
