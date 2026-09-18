@@ -654,8 +654,9 @@ func TestFailedTargetIsNotRetriedThroughAnotherApplicationServer(t *testing.T) {
 }
 
 // Looking a route up is a read. It never audits, never probes and never
-// resends: RFC 4666 Section 4.5.2 scheduling of DAUD belongs to the
-// application, which owns when and how often it asks.
+// resends. RFC 4666 Section 4.5.3 makes auditing something "an ASP may
+// optionally initiate", so when and how often a DAUD goes out belongs to the
+// application.
 func TestRouteLookupSendsNothingOfItsOwn(t *testing.T) {
 	const pointCode = uint32(0x123456)
 	config := validASPConfig()
@@ -1257,9 +1258,11 @@ func TestPrimaryBackupReturnsToARecoveredScopeWithoutANewReport(t *testing.T) {
 }
 
 // An MTP-TRANSFER request's Correlation Id reaches every DATA it produces. RFC
-// 4666 Section 3.3.1 makes it the parameter that correlates a message across
-// paths, so a broadcast that dropped it on one path would break exactly the
-// case it exists for.
+// 4666 Section 3.3.1 has it "uniquely identify the MSU carried in the Protocol
+// Data within an AS", and Section 4.3.4.3 has a broadcast use it so a newly
+// active ASP can "synchronize its processing of traffic in each traffic flow
+// with the other ASPs", so a broadcast that dropped it on one path would break
+// the case it exists for.
 func TestMTPTransferCarriesTheCorrelationIDOnEveryPath(t *testing.T) {
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
@@ -1585,8 +1588,13 @@ func TestBroadcastWithinASignallingGatewayIncludesARestrictedSGP(t *testing.T) {
 }
 
 // Two requests with the same routing label but different Originating Point
-// Codes are different RFC 4666 Section 1.4.2.5 traffic flows. They are assigned
-// separately and neither waits behind the other.
+// Codes are different traffic flows here. RFC 4666 Section 1.4.2.5 has the ASP
+// choose an SGP "by observing the Destination Point Code (and possibly other
+// elements of the outgoing message, such as the SLS value)" without fixing
+// which; taking the whole routing label, Originating Point Code included, is
+// this library's choice, and a Routing Key may be "the DPC/OPC combination"
+// (Section 1.4.2.1). They are assigned separately and neither waits behind the
+// other.
 func TestDifferentOriginatingPointCodesAreDifferentFlows(t *testing.T) {
 	const pointCode = uint32(0x123456)
 	config := validASPConfig()
@@ -1711,5 +1719,52 @@ func TestUserPartUnavailabilityIsNotADestinationState(t *testing.T) {
 	}
 	if captures["sg-a/sgp-a1"].count() != 1 {
 		t.Fatalf("captured %d messages, want 1", captures["sg-a/sgp-a1"].count())
+	}
+}
+
+// The rejection a candidate reports is the first thing that disqualified it,
+// in the contract's order: binding and authorization, then active state, then
+// the destination's availability, and only then the congestion policy. A
+// candidate the peers never reported on is refused for that, not for a
+// congestion level derived from a report about a different dimension.
+func TestRejectionReasonReportsAvailabilityBeforeCongestion(t *testing.T) {
+	const pointCode = uint32(0x123456)
+	refuseEveryCongestedLevel := func(uint8, uint8, bool) bool { return false }
+
+	unknown := validASPConfig()
+	unknown.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	unknown.Routing.CongestionPolicy = refuseEveryCongestedLevel
+	useSignallingGateways(unknown, "sg-a")
+	endpoint, associations, _ := newUnreportedASPTransferFixture(t, unknown)
+	// A congestion report installs the congestion dimension and says nothing
+	// about availability, so this candidate is both congested and unreported.
+	applyASPSCON(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0, params.NewCongestionIndications(2))
+
+	_, err := endpoint.MTPTransfer(MTPTransferRequest{
+		ProtocolData: transferProtocolData(pointCode, 1, nil),
+	})
+	var selection *MTPSelectionError
+	if !errors.As(err, &selection) || len(selection.Rejections) != 1 ||
+		selection.Rejections[0].Reason != MTPCandidateStateUnknown {
+		t.Fatalf("unknown and congested candidate = %v, want a state-unknown rejection", err)
+	}
+	if !errors.Is(err, ErrDestinationStateUnknown) {
+		t.Fatalf("unknown and congested candidate error = %v, want ErrDestinationStateUnknown", err)
+	}
+
+	unavailable := validASPConfig()
+	unavailable.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
+	unavailable.Routing.CongestionPolicy = refuseEveryCongestedLevel
+	useSignallingGateways(unavailable, "sg-a")
+	second, secondAssociations, _ := newUnreportedASPTransferFixture(t, unavailable)
+	applyASPSCON(t, secondAssociations["sg-a/sgp-a1"], 7, 1, pointCode, 0, params.NewCongestionIndications(2))
+	applyASPDUNA(t, secondAssociations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
+
+	_, err = second.MTPTransfer(MTPTransferRequest{
+		ProtocolData: transferProtocolData(pointCode, 1, nil),
+	})
+	if !errors.As(err, &selection) || len(selection.Rejections) != 1 ||
+		selection.Rejections[0].Reason != MTPCandidateUnavailable {
+		t.Fatalf("unavailable and congested candidate = %v, want an unavailable rejection", err)
 	}
 }

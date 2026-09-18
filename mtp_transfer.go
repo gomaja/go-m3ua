@@ -531,11 +531,12 @@ func (r *aspRoutes) selectTransfer(
 // transferTargetsUseStickyLoadshare reports whether this route's selection
 // modes are the ones that keep a traffic flow on the route it was assigned.
 //
-// Only loadsharing does. RFC 4666 Appendix A.2.2 makes loadsharing the mode in
-// which a flow must stay where it was put, so a remembered assignment is reused
-// there and every other mode is decided again from the current candidates --
-// which is what lets a primary come back the moment it can carry traffic again,
-// without waiting for anything else to move.
+// Only loadsharing does. RFC 4666 Appendix A.2.2 has the distribution of
+// MTP3-User messages over the SGPs "done in such a way to minimize message
+// missequencing", which a flow that moves between paths does not, so a
+// remembered assignment is reused there. Every other mode is decided again
+// from the current candidates, which is what lets a primary come back the
+// moment it can carry traffic again without waiting for anything else to move.
 func (r *aspRoutes) transferTargetsUseStickyLoadshare(targets []aspTransferTarget) bool {
 	if r.config.signallingGatewaySelection != RouteSelectionLoadshare {
 		return false
