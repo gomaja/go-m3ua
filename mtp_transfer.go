@@ -685,9 +685,6 @@ func (r *aspRoutes) transferCandidatesLocked(
 		}
 		candidate := aspTransferGateway{config: gateway}
 		for _, sgp := range gateway.sgps {
-			if !sgp.carries(mtpRoute.id) {
-				continue
-			}
 			identity := SGPIdentity{
 				SignallingGateway:        gateway.id,
 				SignallingGatewayProcess: sgp.id,
@@ -728,6 +725,12 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 	congestionDecision aspCongestionDecision,
 	store *ssnmState,
 ) (aspTransferSGP, bool, []MTPCandidateRejection) {
+	candidates := sgp.candidatesFor(mtpRoute)
+	if len(candidates) == 0 {
+		// This SGP serves none of the route's Application Servers, so it is not
+		// a candidate and has nothing to refuse.
+		return aspTransferSGP{}, false, nil
+	}
 	associations := make([]*Association, 0, len(r.associationsBySGP[identity]))
 	for association := range r.associationsBySGP[identity] {
 		associations = append(associations, association)
@@ -736,7 +739,7 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 		return r.associationOrder[associations[first]] < r.associationOrder[associations[second]]
 	})
 	rejections := make([]MTPCandidateRejection, 0)
-	for _, candidate := range sgp.candidatesFor(mtpRoute) {
+	for _, candidate := range candidates {
 		rejection := MTPCandidateRejection{
 			Path:              candidate.path,
 			SGP:               identity,
