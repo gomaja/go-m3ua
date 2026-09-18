@@ -912,29 +912,6 @@ func TestMTPTransferFlowCacheIsBounded(t *testing.T) {
 	}
 }
 
-func TestTransferRouteGenerationWrapEvictsRouteAssignments(t *testing.T) {
-	routes, err := newASPRoutes(validASPConfig())
-	if err != nil {
-		t.Fatalf("newASPRoutes: %v", err)
-	}
-	const mtpRoute = MTPRouteID("sccp-a")
-	key := aspTransferFlowKey{mtpRoute: mtpRoute}
-	routes.transferRouteGeneration[mtpRoute] = ^uint64(0)
-	routes.rememberTransferFlowLocked(key, []aspTransferTarget{{}}, aspCongestionDecision{}, 0)
-	if len(routes.transferFlows) != 1 {
-		t.Fatalf("flow cache entries before wrap = %d, want 1", len(routes.transferFlows))
-	}
-
-	routes.advanceTransferRouteGenerationLocked(mtpRoute)
-	if routes.transferRouteGeneration[mtpRoute] != 1 {
-		t.Fatalf("route generation after wrap = %d, want 1", routes.transferRouteGeneration[mtpRoute])
-	}
-	if len(routes.transferFlows) != 0 || routes.transferFlowLRU.Len() != 0 {
-		t.Fatalf("flow cache after wrap = map:%d LRU:%d, want 0/0",
-			len(routes.transferFlows), routes.transferFlowLRU.Len())
-	}
-}
-
 func TestMTPTransferOrdersScopeLossAfterInFlightWrite(t *testing.T) {
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup

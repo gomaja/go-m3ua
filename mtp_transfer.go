@@ -285,10 +285,16 @@ type aspTransferTarget struct {
 	routeStatus       aspSelectionStatus
 }
 
+// aspTransferAssignment is one remembered traffic-flow assignment.
+//
+// It is valid while the Endpoint still has the targets, the knowledge that
+// chose them has not moved, and the congestion decision is the same. The store
+// revision covers the second: it advances on every change the SSNM store
+// accepted, so an assignment made at one revision is known to have been made
+// against knowledge that has not changed while the revision has not.
 type aspTransferAssignment struct {
 	key                aspTransferFlowKey
 	targets            []aspTransferTarget
-	routeGeneration    uint64
 	storeRevision      uint64
 	congestionDecision aspCongestionDecision
 }
@@ -442,11 +448,8 @@ func (r *aspRoutes) selectTransfer(
 	cachedEligible := false
 	if element := r.transferFlows[flowKey]; element != nil {
 		assignment := element.Value.(*aspTransferAssignment)
-		cachedEligible = r.transferTargetsEligibleLocked(
-			assignment.targets, mtpRoute.id, request.ProtocolData, congestionDecision, store,
-		)
+		cachedEligible = r.transferTargetsStillHeldLocked(assignment.targets)
 		if cachedEligible &&
-			assignment.routeGeneration == r.transferRouteGeneration[mtpRoute.id] &&
 			assignment.storeRevision == storeRevision &&
 			assignment.congestionDecision == congestionDecision &&
 			r.transferTargetsUseStickyLoadshare(assignment.targets) {
@@ -514,7 +517,6 @@ func (r *aspRoutes) selectTransfer(
 	if cachedElement != nil {
 		assignment := cachedElement.Value.(*aspTransferAssignment)
 		if cachedEligible && sameASPTransferTargets(assignment.targets, targets) {
-			assignment.routeGeneration = r.transferRouteGeneration[mtpRoute.id]
 			assignment.storeRevision = storeRevision
 			assignment.congestionDecision = congestionDecision
 			r.transferFlowLRU.MoveToFront(cachedElement)
@@ -526,6 +528,14 @@ func (r *aspRoutes) selectTransfer(
 	return append([]aspTransferTarget(nil), targets...), nil
 }
 
+// transferTargetsUseStickyLoadshare reports whether this route's selection
+// modes are the ones that keep a traffic flow on the route it was assigned.
+//
+// Only loadsharing does. RFC 4666 Appendix A.2.2 makes loadsharing the mode in
+// which a flow must stay where it was put, so a remembered assignment is reused
+// there and every other mode is decided again from the current candidates --
+// which is what lets a primary come back the moment it can carry traffic again,
+// without waiting for anything else to move.
 func (r *aspRoutes) transferTargetsUseStickyLoadshare(targets []aspTransferTarget) bool {
 	if r.config.signallingGatewaySelection != RouteSelectionLoadshare {
 		return false
@@ -551,6 +561,13 @@ func sameASPTransferTargets(first, second []aspTransferTarget) bool {
 	return true
 }
 
+// previousASPTransferMember keeps a loadshared traffic flow on the Association
+// it was assigned to, where that Association still carries the candidate.
+//
+// The member comes from the current candidate, so the wire scope it carries is
+// the current one: an Application Server re-registered into a different Routing
+// Context keeps the flow where it was and sends it in the label the SGP assigns
+// now.
 func previousASPTransferMember(
 	targets []aspTransferTarget,
 	sgp aspTransferSGP,
@@ -560,7 +577,7 @@ func previousASPTransferMember(
 			continue
 		}
 		for _, member := range sgp.members {
-			if member.association == target.association && member.as == target.as {
+			if member.association == target.association {
 				return member, true
 			}
 		}
@@ -923,40 +940,20 @@ func hashASPTransferFlow(key aspTransferFlowKey, salt string) uint64 {
 	return hash.Sum64()
 }
 
-// transferTargetsEligibleLocked re-checks a remembered assignment against the
-// state that decided it. A target whose Association, binding, availability or
-// congestion moved is no longer the assignment that was made.
-func (r *aspRoutes) transferTargetsEligibleLocked(
-	targets []aspTransferTarget,
-	mtpRoute MTPRouteID,
-	protocolData *params.ProtocolDataPayload,
-	congestionDecision aspCongestionDecision,
-	store *ssnmState,
-) bool {
+// transferTargetsStillHeldLocked re-checks a remembered assignment against the
+// membership that decided it.
+//
+// It asks only whether every target is still this Endpoint's to use. What the
+// peers have since said about the destination is the store revision the caller
+// compares, and the congestion policy's answer is the decision it compares, so
+// neither is re-derived here.
+func (r *aspRoutes) transferTargetsStillHeldLocked(targets []aspTransferTarget) bool {
 	if len(targets) == 0 {
 		return false
 	}
 	for _, target := range targets {
 		identity, attached := r.associations[target.association]
 		if !attached || identity != target.identity || !aspAssociationEligibleForAS(target.association, target.as) {
-			return false
-		}
-		sgp, provisioned := r.config.sgpByIdentity[target.identity]
-		if !provisioned || !sgp.carries(mtpRoute) {
-			return false
-		}
-		status := store.destinationKnowledge(SSNMPartition{
-			Kind:              SSNMCanonicalPartition,
-			SignallingGateway: target.identity.SignallingGateway,
-			ApplicationServer: target.applicationServer,
-		}, protocolData.DestinationPointCode)
-		if usable, _ := status.usable(r.config.allowUnknownDestinations); !usable {
-			return false
-		}
-		if status != target.routeStatus {
-			return false
-		}
-		if !congestionDecision.permits(status) {
 			return false
 		}
 	}
@@ -1011,7 +1008,6 @@ func (r *aspRoutes) rememberTransferFlowLocked(
 	assignment := &aspTransferAssignment{
 		key:                key,
 		targets:            append([]aspTransferTarget(nil), targets...),
-		routeGeneration:    r.transferRouteGeneration[key.mtpRoute],
 		storeRevision:      storeRevision,
 		congestionDecision: congestionDecision,
 	}
@@ -1020,22 +1016,6 @@ func (r *aspRoutes) rememberTransferFlowLocked(
 	for r.transferFlowLRU.Len() > r.config.transferFlowCacheEntries {
 		r.removeTransferFlowLocked(r.transferFlowLRU.Back())
 	}
-}
-
-func (r *aspRoutes) advanceTransferRouteGenerationLocked(mtpRoute MTPRouteID) {
-	r.transferRouteGeneration[mtpRoute]++
-	if r.transferRouteGeneration[mtpRoute] != 0 {
-		return
-	}
-	for element := r.transferFlowLRU.Front(); element != nil; {
-		next := element.Next()
-		assignment := element.Value.(*aspTransferAssignment)
-		if assignment.key.mtpRoute == mtpRoute {
-			r.removeTransferFlowLocked(element)
-		}
-		element = next
-	}
-	r.transferRouteGeneration[mtpRoute] = 1
 }
 
 func (r *aspRoutes) removeTransferFlowLocked(element *list.Element) {
