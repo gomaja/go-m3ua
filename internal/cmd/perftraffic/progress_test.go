@@ -37,7 +37,7 @@ func TestProgressHTTPHonorsCancellation(testContext *testing.T) {
 	go func() { done <- observeProgress(ctx, time.Now(), server.URL) }()
 	select {
 	case <-entered:
-	case <-time.After(2 * time.Second):
+	case <-time.After(progressWaitGrace):
 		testContext.Fatal("progress request did not start")
 	}
 	cancel()
@@ -46,7 +46,7 @@ func TestProgressHTTPHonorsCancellation(testContext *testing.T) {
 		if observation.Error == "" || observation.Snapshot != nil || observation.After < observation.Before {
 			testContext.Fatalf("canceled observation = %+v", observation)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(progressWaitGrace):
 		testContext.Fatal("progress request ignored cancellation")
 	}
 }
@@ -59,7 +59,7 @@ func TestProgressSamplerStopsWithoutLeaking(testContext *testing.T) {
 		if len(observations) != 0 {
 			testContext.Fatal("already canceled sampler performed work")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(progressWaitGrace):
 		testContext.Fatal("sampler did not stop")
 	}
 }
@@ -76,27 +76,66 @@ func TestWorkerWaitDoesNotRetainCanceledWindowDeadline(testContext *testing.T) {
 		if drained {
 			testContext.Fatal("canceled workers reported drained")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(progressWaitGrace):
 		testContext.Fatal("worker wait retained the original ten-minute deadline")
 	}
 }
 
+// A window that opened one sample interval ago has its first observation due
+// immediately, which removes the only wall-clock bound the sampler itself
+// imposes on starting a request: the near-boundary observation is abandoned
+// when the goroutine wakes more than progressFinalLead late, and ten
+// milliseconds of scheduling slack is not something a shared runner supplies.
+// Closing the window half a second into the run keeps that first observation
+// the only one, because the per-request timeout outlives the window, and it
+// keeps the window shorter than that timeout, so a request that ran its full
+// timeout stays distinguishable from one cut short to the remaining window.
+//
+// The recorded interval brackets the timeout rather than reproducing it: it is
+// taken from immediately after the deadline is set, which costs nothing
+// measurable, to after the transport reports the deadline, which a loaded
+// runner stretches by a few hundred milliseconds. The floor and the ceiling
+// are set wide enough to absorb that and still leave a shortened or an
+// abandoned timeout nowhere to hide.
+const (
+	samplerStartLead      = progressSampleInterval
+	samplerWindow         = samplerStartLead + 500*time.Millisecond
+	samplerTimeoutFloor   = progressRequestTimeout - 100*time.Millisecond
+	samplerTimeoutCeiling = progressRequestTimeout + time.Second
+	progressWaitGrace     = 30 * time.Second
+)
+
 func TestProgressSamplerPreservesRequestCancellationAndTimeout(testContext *testing.T) {
 	for _, cancelCaller := range []bool{false, true} {
 		testContext.Run(fmt.Sprintf("caller-cancel-%t", cancelCaller), func(testContext *testing.T) {
-			entered := make(chan struct{}, 2)
+			var requests atomic.Int32
+			entered := make(chan struct{}, 1)
+			release := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
-				entered <- struct{}{}
-				<-request.Context().Done()
+				requests.Add(1)
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				select {
+				case <-request.Context().Done():
+				case <-release:
+				}
 			}))
-			defer server.Close()
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			started := time.Now()
-			done := sampleProgress(ctx, started, 500*time.Millisecond, server.URL)
+			// Every failure below leaves a request parked in the handler and
+			// server.Close waits for it, so the release has to precede the
+			// close on every path out of the subtest.
+			defer func() {
+				cancel()
+				close(release)
+				server.Close()
+			}()
+			started := time.Now().Add(-samplerStartLead)
+			done := sampleProgress(ctx, started, samplerWindow, server.URL)
 			select {
 			case <-entered:
-			case <-time.After(2 * time.Second):
+			case <-time.After(progressWaitGrace):
 				testContext.Fatal("sampler request did not start")
 			}
 			if cancelCaller {
@@ -107,16 +146,21 @@ func TestProgressSamplerPreservesRequestCancellationAndTimeout(testContext *test
 				if len(observations) != 1 || observations[0].Error == "" || observations[0].Snapshot != nil {
 					testContext.Fatalf("failed request was not preserved: %+v", observations)
 				}
-				if !cancelCaller && observations[0].After-observations[0].Before < time.Second {
+				if cancelCaller && observations[0].After >= samplerStartLead+progressRequestTimeout {
+					testContext.Fatalf("caller cancellation did not reach the request: %+v", observations[0])
+				}
+				if !cancelCaller && (observations[0].After < samplerStartLead+progressRequestTimeout ||
+					observations[0].After-observations[0].Before < samplerTimeoutFloor) {
 					testContext.Fatalf("request timeout was shortened: %+v", observations[0])
 				}
-			case <-time.After(2 * time.Second):
+				if !cancelCaller && observations[0].After-observations[0].Before > samplerTimeoutCeiling {
+					testContext.Fatalf("request outlived the per-request timeout: %+v", observations[0])
+				}
+			case <-time.After(progressWaitGrace):
 				testContext.Fatal("sampler ignored cancellation or request timeout")
 			}
-			select {
-			case <-entered:
-				testContext.Fatal("sampler issued another request after the boundary")
-			default:
+			if count := requests.Load(); count != 1 {
+				testContext.Fatalf("sampler issued %d requests across the boundary, want exactly one", count)
 			}
 		})
 	}
@@ -134,7 +178,7 @@ func TestProgressSamplerDoesNotStartAfterWindow(testContext *testing.T) {
 		if len(observations) != 0 || requests.Load() != 0 {
 			testContext.Fatalf("expired window started requests: %+v", observations)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(progressWaitGrace):
 		testContext.Fatal("expired sampler did not terminate")
 	}
 }

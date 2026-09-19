@@ -33,9 +33,15 @@ func TestSenderCohortPreservesBoundaryCrossingProgress(testContext *testing.T) {
 	go acceptAndRead(ctx, listener, 1, control, fatal)
 	handler := control.handler()
 	var requests atomic.Int32
+	// The second progress request is the sampler's first observation, due one
+	// sample interval into the window. Holding it for longer than the window
+	// has left to run is what makes it straddle the boundary, and holding it
+	// for well under progressRequestTimeout is what keeps it from being cut
+	// off instead. Both margins are hundreds of milliseconds wide so that a
+	// late goroutine on a loaded runner cannot decide the outcome.
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/progress" && requests.Add(1) == 2 {
-			timer := time.NewTimer(100 * time.Millisecond)
+			timer := time.NewTimer(700 * time.Millisecond)
 			defer timer.Stop()
 			select {
 			case <-timer.C:
@@ -49,7 +55,7 @@ func TestSenderCohortPreservesBoundaryCrossingProgress(testContext *testing.T) {
 	config := commandConfig{
 		SCTPAddress: listener.Addr().String(), Associations: 1,
 		PeerControl: server.URL, Cohort: "crossing-progress", Seed: 7,
-		Rate: 100, Workload: workload128, Duration: 500 * time.Millisecond,
+		Rate: 100, Workload: workload128, Duration: progressSampleInterval + 500*time.Millisecond,
 		Drain: 2 * time.Second, Outstanding: maxOutstanding,
 	}
 	result, err := runSender(ctx, config)
@@ -75,7 +81,7 @@ func TestSenderCohortPreservesBoundaryCrossingProgress(testContext *testing.T) {
 	if result.Sender.SenderWindow == nil || result.Sender.SenderWindow.Status != "bounded" {
 		testContext.Fatalf("boundary crossing invalidated accounting: %+v", result.Sender.SenderWindow)
 	}
-	if result.Receiver.Delivery.Unique != 50 || result.Receiver.Delivery.Missing != 0 {
+	if result.Receiver.Delivery.Unique != 150 || result.Receiver.Delivery.Missing != 0 {
 		testContext.Fatalf("delivery = %+v", result.Receiver.Delivery)
 	}
 }
