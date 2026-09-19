@@ -372,8 +372,12 @@ separate cohort, 30 s measurement window, 2 s drain, deterministic seed per
 pair.
 
 All 40 runs were loss-free and fixture-valid: `fixture_verdict: pass`, zero
-missing, duplicate, invalid, reordered and late-after-stop, zero cap refusals,
-zero send errors, 1,200,000 validated deliveries per window.
+missing, duplicate, invalid, reordered and late-after-stop, zero cap refusals
+and zero send errors. Every run uniquely validated all 1,200,000 scheduled
+messages. A small tail landed in the two-second drain rather than inside the
+measurement window — median 25 messages for the baseline and 12 for the
+candidate, at most 256 — which is why the in-window count below is a few
+messages short of the schedule while the missing count is zero.
 
 `internal/cmd/perfratio`, geometric mean of the run-level log ratios with a
 two-sided 95% Student-t interval on 19 degrees of freedom:
@@ -413,7 +417,8 @@ properties of the code, not of the machine.
 
 | | Baseline `35647ff` | Candidate `64113c7` |
 | --- | --- | --- |
-| Validated deliveries per 30 s window | 1,200,000 (median 1,199,980) | 1,200,000 (median 1,199,990) |
+| Uniquely validated, of 1,200,000 scheduled | 1,200,000 in all 20 runs | 1,200,000 in all 20 runs |
+| Validated inside the measurement window (median) | 1,199,976 | 1,199,988 |
 | Missing / duplicate / invalid / reordered / late | 0 / 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 / 0 |
 | Cap refusals, send errors | 0, 0 | 0, 0 |
 | Sender-window achieved-rate lower bound | 39,985.6 – 39,987.3 /s | 39,985.0 – 39,987.1 /s |
@@ -657,14 +662,65 @@ cover rather than assuming it covers all of them.
 
 ## Gate results
 
-All on the exact candidate head. Linux gates ran in the prepared privileged
-container; host gates ran on darwin/arm64 with Go 1.25.4.
+Every gate below ran at commit `f46faa3ba5faa14fb0bcf4442d47892dfe71665f`, the
+head that carries the fixture fix and this record. Because a gate result belongs
+to the commit it was measured at, the results themselves land in the next
+commit, whose only difference from `f46faa3` is this section: it adds no Go
+code, so nothing it changes can alter a Go gate. Linux gates ran in the prepared
+privileged container; host gates ran on darwin/arm64.
 
-The gate set is below. Because a gate result belongs to a commit, the results
-are recorded in a follow-up commit whose only difference from the gated head is
-this table; the gated head is named beside them.
+### Linux, container `i44-a`, Go 1.25.14 linux/arm64, prepared SCTP test network
 
-GATE_TABLE
+| Gate | Command | Exit |
+| --- | --- | --- |
+| build | `go build ./...` | 0 |
+| vet | `go vet ./...` | 0 |
+| test | `go test ./... -count=1 -timeout=900s` | 0 — root package `ok` in 175.0 s |
+| race | `go test ./... -count=1 -race -timeout=1800s` | 0 — root package `ok` in 452.5 s, zero `WARNING: DATA RACE` |
+| GOMAXPROCS=1 | `GOMAXPROCS=1 go test ./... -count=1 -timeout=1800s` | 0 — root package `ok` in 370.8 s |
+| bench | `go test ./... -run '^$' -bench . -benchmem -timeout=900s` | 0 |
+| examples | `go build ./examples/...` | 0 |
+| fuzz | `FUZZTIME=10000x FUZZMINIMIZETIME=1x FUZZ_PARALLEL=1 scripts/fuzz-smoke.sh` | 0 — 28 targets discovered and executed, 10,000 inputs each, no failing input |
+| cross vet | `GOOS=linux GOARCH={386,arm,s390x,mips} CGO_ENABLED=0 go vet ./...` | 0, 0, 0, 0 |
+| cross compile | `GOOS={darwin,freebsd,windows,linux} GOARCH={amd64,amd64,amd64,386} CGO_ENABLED=0 go test ./... -run '^$' -count=0 -exec=true` | 0, 0, 0, 0 |
+| vulnerability | `govulncheck ./...` (v1.6.0, Go 1.25.14) | 0 — **No vulnerabilities found** |
+
+### Host, darwin/arm64, Go 1.25.4
+
+| Gate | Command | Exit |
+| --- | --- | --- |
+| format | `git ls-files -z '*.go' \| xargs -0 gofmt -l` | 0 unformatted files |
+| whitespace | `git diff-tree --check --root --no-commit-id -r HEAD` | 0 |
+| module tidiness | `go mod tidy` then `git diff --exit-code -- go.mod go.sum` | 0, 0 |
+| vet | `go vet ./...` | 0 |
+| staticcheck | `staticcheck ./...` (2026.2.1 / 0.8.1; CI pins v0.7.0) | 0 |
+| golangci-lint | `golangci-lint run --timeout=10m ./...` (2.13.2; CI pins v2.12.2) | 0 |
+| actionlint | `actionlint` | 0 |
+| secret detection | `gitleaks detect --no-banner --redact --source .` | 0 |
+| scoped gopls diagnostics | `gopls check ./internal/cmd/perftraffic/result.go ./internal/cmd/perftraffic/acceptance_input_test.go` | 0 — the two files this campaign changed |
+| unsupported-host portability | `go test ./... -short -count=1 -timeout=900s` on darwin | 0 |
+| vulnerability | `govulncheck ./...` | **3** — see below |
+
+The host `govulncheck` exit is a property of the host toolchain, not of the
+module. All 18 reachable findings are Go standard-library issues in **go1.25.4**,
+each already fixed in a 1.25.x patch between 1.25.5 and 1.25.13, and every
+reported call trace starts in `internal/cmd/perftraffic`,
+`internal/cmd/perfcapacity` or `examples/sgp` — the fixtures and examples, not
+the library packages. Run on the toolchain CI uses, Go 1.25.14, the same command
+reports **no vulnerabilities at all**. Nothing here is a dependency finding:
+`govulncheck` also lists 6 vulnerabilities in imported packages and 11 in
+required modules, and reports that this code does not call any of them.
+
+### Periodic security reporting is preserved
+
+`.github/workflows/security.yml` keeps its weekly schedule
+(`cron: "17 3 * * 1"`) and all four jobs — `dependency-review`,
+`dependency-scanning`, `sast` and `secret-detection`. The only change to it
+since the assessed baseline `d097e19` is three `github/codeql-action` version
+bumps from `v4.37.6` to `v4.37.9`, landed by the independent dependency PR #9
+that #44 places outside this work. `.github/workflows/go.yml` is byte-identical
+to the baseline. This campaign redesigned no workflow and changed no schedule;
+its two commits touch `internal/cmd/perftraffic` and `docs/` only.
 
 ### Unmeasured gates
 
