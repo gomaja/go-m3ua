@@ -87,23 +87,27 @@ func main() {
 				SignallingGatewayProcessSelection: map[m3ua.SignallingGatewayID]m3ua.RouteSelectionMode{
 					peer.SignallingGateway: m3ua.RouteSelectionPrimaryBackup,
 				},
+				Paths: []m3ua.MTPRoutePath{
+					{
+						ID:                 "via-sg-1",
+						SignallingGateway:  peer.SignallingGateway,
+						ApplicationServers: []m3ua.RemoteASID{"as-core"},
+					},
+				},
 				MTPRoutes: []m3ua.MTPRouteConfig{
 					{
 						ID:                    "sccp",
 						DestinationPointCode:  0x222222,
 						ServiceIndicators:     []uint8{params.ServiceIndSCCP},
 						OriginatingPointCodes: []uint32{0x111111},
+						Paths:                 []m3ua.MTPRoutePathID{"via-sg-1"},
 					},
 				},
-				Routes: []m3ua.MTPRouteBinding{
-					{
-						MTPRoute: "sccp",
-						AS: m3ua.SGASKey{
-							SignallingGateway: peer.SignallingGateway,
-							ApplicationServer: "as-core",
-						},
-					},
-				},
+				// The Signalling Gateway has reported nothing about the
+				// destination when the first request is made, and this example
+				// has no discovery of its own, so it opts in to sending before
+				// a report arrives rather than failing closed.
+				AllowUnknownDestinations: true,
 			},
 		},
 	})
@@ -150,8 +154,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("MTP-TRANSFER failed: %s", err)
 		}
-		log.Printf("MTP-TRANSFER sent %d user octets through %d Association(s)",
-			result.UserDataOctets, result.TransmittedAssociations)
+		for _, path := range result.SuccessfulPaths {
+			log.Printf("MTP-TRANSFER sent %d user octets to Application Server %q of SGP %q",
+				result.UserDataOctets, path.ApplicationServer, path.SGP.SignallingGatewayProcess)
+		}
 		time.Sleep(3 * time.Second)
 	}
 }

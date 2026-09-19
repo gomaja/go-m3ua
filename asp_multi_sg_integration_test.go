@@ -327,7 +327,12 @@ func requireIntegrationData(t *testing.T, association *Association, wanted *para
 }
 
 func expectedConcurrentMTPTransferError(err error) bool {
+	// The fixture starts with nothing reported about the destination, and the
+	// route-change worker moves it in and out of unavailability, so a request
+	// may legitimately find the state unknown, unavailable, or the scope
+	// momentarily inactive.
 	if err == nil || errors.Is(err, ErrNoMTPRoute) || errors.Is(err, ErrEndpointClosed) ||
+		errors.Is(err, ErrDestinationStateUnknown) ||
 		errors.Is(err, ErrRoutingContextNotActive) || errors.Is(err, ErrNotEstablished) {
 		return true
 	}

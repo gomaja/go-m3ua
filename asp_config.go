@@ -103,13 +103,18 @@ func validRouteSelectionMode(mode RouteSelectionMode) bool {
 type ASPCongestionPolicy func(messagePriority, congestionLevel uint8, levelSet bool) bool
 
 // MTPRouteConfig describes the MTP routing-label fields used to select one
-// local route, as required by RFC 4666 Sections 1.4.2.5 and 5.5.1.1.1.
+// local route, as required by RFC 4666 Sections 1.4.2.5 and 5.5.1.1.1, and the
+// provisioned path candidates that carry it.
 type MTPRouteConfig struct {
 	ID                    MTPRouteID
 	DestinationPointCode  uint32
 	Mask                  uint8
 	ServiceIndicators     []uint8
 	OriginatingPointCodes []uint32
+	// Paths names the provisioned MTPRoutePath candidates this route may use,
+	// in preference order. One route may name several Signalling Gateways and
+	// several Application Servers, and several routes may name one path.
+	Paths []MTPRoutePathID
 }
 
 // RemoteASConfig binds one Application Server served by one SGP to the wire
@@ -141,23 +146,37 @@ type SignallingGatewayConfig struct {
 	SGPs []SignallingGatewayProcessConfig
 }
 
-// MTPRouteBinding carries one local MTP Route over one canonical Signalling
-// Gateway and Application Server. Several bindings may name one Application
-// Server, and several may name one MTP Route.
-type MTPRouteBinding struct {
-	MTPRoute MTPRouteID
-	AS       SGASKey
+// MTPRoutePathID is the local name of one provisioned outbound path candidate.
+type MTPRoutePathID string
+
+// MTPRoutePath is one provisioned outbound candidate: the ordered Application
+// Servers of one Signalling Gateway that may carry a local MTP Route.
+//
+// A path is provisioned once and referenced by name, so several routes share
+// one candidate instead of repeating the wire scope that names it. The wire
+// scope stays with the SGP that uses it: RFC 4666 Section 1.4.2.1 makes a
+// Routing Context "an index into a sending node's Message Distribution Table",
+// so two SGPs of one Signalling Gateway may label one Application Server
+// differently and the path names the canonical Application Server instead.
+//
+// ApplicationServers is a preference order, applied within each SGP of the
+// Signalling Gateway. The first one an SGP can currently carry is the one that
+// SGP uses; the rest are its failback.
+type MTPRoutePath struct {
+	ID                 MTPRoutePathID
+	SignallingGateway  SignallingGatewayID
+	ApplicationServers []RemoteASID
 }
 
 // ASPRoutingConfig is the optional outbound route inventory of one ASP
 // Endpoint. It selects library-managed MTP-TRANSFER: the Endpoint matches an
-// MTP routing label to a route, then chooses among the Signalling Gateways and
-// SGPs that carry it.
+// MTP routing label to a route, then chooses among the provisioned path
+// candidates that carry it.
 //
-// A route may only name an Application Server that every SGP serving it binds
-// statically. A dynamically bound Application Server has no wire Routing
-// Context until RFC 4666 Section 4.4.1 registration assigns one, so a route
-// through it would be a configuration that never carries traffic.
+// A path may name an Application Server an SGP binds dynamically. The wire
+// Routing Context of such an Application Server is the one the SGP assigns
+// during RFC 4666 Section 4.4.1 registration, so it is resolved per Association
+// when a request is selected rather than provisioned here.
 type ASPRoutingConfig struct {
 	// SignallingGatewaySelection chooses among the Signalling Gateways that
 	// carry one route.
@@ -166,13 +185,23 @@ type ASPRoutingConfig struct {
 	// Signalling Gateway. Every Signalling Gateway that carries a route needs
 	// an entry.
 	SignallingGatewayProcessSelection map[SignallingGatewayID]RouteSelectionMode
-	// MTPRoutes is the local MTP routing-label inventory.
+	// Paths is the provisioned outbound candidate inventory. Routes reference
+	// these by name.
+	Paths []MTPRoutePath
+	// MTPRoutes is the local MTP routing-label inventory. Every MTP Route needs
+	// at least one path.
 	MTPRoutes []MTPRouteConfig
-	// Routes binds those routes to the canonical Application Servers that
-	// carry them. Every MTP Route needs at least one binding.
-	Routes []MTPRouteBinding
-	// CongestionPolicy filters candidate routes by reported congestion.
+	// CongestionPolicy filters candidate paths by reported congestion.
 	CongestionPolicy ASPCongestionPolicy
+	// AllowUnknownDestinations lets a candidate whose destination state this
+	// Endpoint has never been told carry traffic.
+	//
+	// It is off by default, so a destination no Signalling Gateway has reported
+	// fails closed with ErrDestinationStateUnknown instead of being presumed
+	// reachable. Turning it on never fabricates an availability report and
+	// never overrides one: a destination a peer reported unavailable stays
+	// unavailable, and a congestion policy still applies.
+	AllowUnknownDestinations bool
 	// TransferFlowCacheEntries bounds stable traffic-flow assignments. Zero
 	// selects DefaultTransferFlowCacheEntries.
 	TransferFlowCacheEntries int
@@ -220,12 +249,27 @@ type ASPConfig struct {
 	MaxSSNMDestinationRecords int
 }
 
+// aspRouteCandidate is one provisioned (path, Application Server) pair a route
+// may use. The wire scope it resolves to belongs to the SGP that carries it.
+type aspRouteCandidate struct {
+	path              MTPRoutePathID
+	applicationServer RemoteASID
+}
+
+// aspRouteGateway is the ordered candidate list one MTP Route has through one
+// Signalling Gateway, flattened from the route's paths in reference order.
+type aspRouteGateway struct {
+	id         SignallingGatewayID
+	candidates []aspRouteCandidate
+}
+
 type aspMTPRoute struct {
 	id                    MTPRouteID
 	destinationPointCode  uint32
 	mask                  uint8
 	serviceIndicators     []uint8
 	originatingPointCodes []uint32
+	gateways              []aspRouteGateway
 }
 
 // aspRemoteAS is one provisioned Application Server as served by one SGP.
@@ -237,12 +281,6 @@ type aspRemoteAS struct {
 	routingKeySet bool
 }
 
-type aspSGPRoute struct {
-	mtpRoute          MTPRouteID
-	applicationServer RemoteASID
-	as                ASKey
-}
-
 type aspSGPConfig struct {
 	id                 SignallingGatewayProcessID
 	applicationServers []aspRemoteAS
@@ -251,7 +289,24 @@ type aspSGPConfig struct {
 	// Application Server it was provisioned for. SSNM arrives labelled with
 	// the scope, while the knowledge it carries is owned by the identity.
 	asByStaticKey map[ASKey]RemoteASID
-	routes        []aspSGPRoute
+	// routeCandidates is the ordered subset of each MTP Route's candidates this
+	// SGP can serve at all. Which of them it can serve now is an Association
+	// question, answered when a request is selected.
+	routeCandidates map[MTPRouteID][]aspRouteCandidate
+	// routeOrder lists those MTP Routes in configuration order, so every walk
+	// over this SGP's routes is deterministic.
+	routeOrder []MTPRouteID
+}
+
+// candidatesFor reports the ordered Application Server candidates this SGP may
+// use for one MTP Route.
+func (sgp aspSGPConfig) candidatesFor(mtpRoute MTPRouteID) []aspRouteCandidate {
+	return sgp.routeCandidates[mtpRoute]
+}
+
+// carries reports whether this SGP is provisioned to serve one MTP Route.
+func (sgp aspSGPConfig) carries(mtpRoute MTPRouteID) bool {
+	return len(sgp.routeCandidates[mtpRoute]) > 0
 }
 
 type aspSignallingGatewayConfig struct {
@@ -262,6 +317,7 @@ type aspSignallingGatewayConfig struct {
 
 type aspRoutingConfig struct {
 	routingConfigured                       bool
+	allowUnknownDestinations                bool
 	signallingGatewaySelection              RouteSelectionMode
 	mtpRoutes                               []aspMTPRoute
 	mtpRouteByID                            map[MTPRouteID]int
@@ -277,6 +333,16 @@ type aspRoutingConfig struct {
 	maxSSNMDestinationRecords               int
 }
 
+// mtpRoute reports one compiled MTP Route. The compiled inventory is written
+// once, before any Association can reach it, so it needs no lock.
+func (c aspRoutingConfig) mtpRoute(id MTPRouteID) (aspMTPRoute, bool) {
+	index, exists := c.mtpRouteByID[id]
+	if !exists || index < 0 || index >= len(c.mtpRoutes) {
+		return aspMTPRoute{}, false
+	}
+	return c.mtpRoutes[index], true
+}
+
 // staticASKeyFor reports the statically provisioned wire scope one SGP uses
 // for one canonical Application Server.
 func (c aspRoutingConfig) staticASKeyFor(identity SGPIdentity, id RemoteASID) (ASKey, bool) {
@@ -285,6 +351,29 @@ func (c aspRoutingConfig) staticASKeyFor(identity SGPIdentity, id RemoteASID) (A
 		return ASKey{}, false
 	}
 	return applicationServer.asKey, true
+}
+
+// asKeysFor resolves the wire scopes one Association may use for one canonical
+// Application Server of the SGP it is attached to, in a deterministic order.
+//
+// A statically provisioned Application Server carries the scope its
+// configuration named. A dynamically bound one carries the Routing Context the
+// SGP assigned during RFC 4666 Section 4.4.1 registration, so it has no scope
+// at all until that registration succeeded and the scope belongs to the
+// Association that registered it, not to this inventory.
+func (c aspRoutingConfig) asKeysFor(
+	association *Association,
+	identity SGPIdentity,
+	id RemoteASID,
+) []ASKey {
+	applicationServer, exists := c.remoteASFor(identity, id)
+	if !exists {
+		return nil
+	}
+	if applicationServer.asKeyStatic {
+		return []ASKey{applicationServer.asKey}
+	}
+	return association.dynamicASKeysForRemoteAS(id)
 }
 
 func (c aspRoutingConfig) remoteASFor(identity SGPIdentity, id RemoteASID) (aspRemoteAS, bool) {
@@ -439,6 +528,7 @@ func compileSGPApplicationServers(
 		applicationServers: make([]aspRemoteAS, 0, len(sgp.ApplicationServers)),
 		asByID:             make(map[RemoteASID]int, len(sgp.ApplicationServers)),
 		asByStaticKey:      make(map[ASKey]RemoteASID, len(sgp.ApplicationServers)),
+		routeCandidates:    make(map[MTPRouteID][]aspRouteCandidate),
 	}
 	staticKeys := compiled.asByStaticKey
 	dynamicKeys := make([]canonicalRoutingKey, 0, len(sgp.ApplicationServers))
@@ -532,6 +622,7 @@ func compileRoutingInventory(routing *ASPRoutingConfig, snapshot *aspRoutingConf
 		return invalidASPConfig("negative transfer flow cache size %d", routing.TransferFlowCacheEntries)
 	}
 	snapshot.routingConfigured = true
+	snapshot.allowUnknownDestinations = routing.AllowUnknownDestinations
 	snapshot.signallingGatewaySelection = routing.SignallingGatewaySelection
 	snapshot.congestionPolicy = routing.CongestionPolicy
 	snapshot.transferFlowCacheEntries = routing.TransferFlowCacheEntries
@@ -550,7 +641,11 @@ func compileRoutingInventory(routing *ASPRoutingConfig, snapshot *aspRoutingConf
 	if err := applySGPSelection(routing, snapshot); err != nil {
 		return err
 	}
-	return bindMTPRoutes(routing, snapshot)
+	paths, err := compileRoutePaths(routing.Paths, snapshot)
+	if err != nil {
+		return err
+	}
+	return bindMTPRoutePaths(routing, paths, snapshot)
 }
 
 func compileMTPRoutes(mtpRoutes []MTPRouteConfig, snapshot *aspRoutingConfig) error {
@@ -576,6 +671,9 @@ func compileMTPRoutes(mtpRoutes []MTPRouteConfig, snapshot *aspRoutingConfig) er
 		}
 		if duplicateOrInvalidPointCode(mtpRoute.OriginatingPointCodes) {
 			return invalidASPConfig("MTP Route %q contains duplicate or invalid Originating Point Codes", mtpRoute.ID)
+		}
+		if len(mtpRoute.Paths) == 0 {
+			return invalidASPConfig("MTP Route %q names no path", mtpRoute.ID)
 		}
 		compiled := aspMTPRoute{
 			id:                    mtpRoute.ID,
@@ -610,86 +708,187 @@ func applySGPSelection(routing *ASPRoutingConfig, snapshot *aspRoutingConfig) er
 	return nil
 }
 
-func bindMTPRoutes(routing *ASPRoutingConfig, snapshot *aspRoutingConfig) error {
-	type sgpRouteKey struct {
-		identity SGPIdentity
-		mtpRoute MTPRouteID
+// compileRoutePaths compiles the provisioned outbound candidate inventory.
+//
+// A path names canonical Application Servers rather than wire scopes, so a
+// dynamically bound Application Server is provisioned here exactly like a
+// statically bound one. RFC 4666 Section 4.4.1 has the SGP assign its Routing
+// Context during registration, and that label is resolved per Association when
+// a request is selected.
+func compileRoutePaths(
+	paths []MTPRoutePath,
+	snapshot *aspRoutingConfig,
+) (map[MTPRoutePathID]aspRoutePath, error) {
+	if len(paths) == 0 {
+		return nil, invalidASPConfig("no route paths configured")
 	}
-	bound := make(map[MTPRouteBinding]struct{}, len(routing.Routes))
-	boundPerSGP := make(map[sgpRouteKey]RemoteASID, len(routing.Routes))
-	routedGateways := make(map[SignallingGatewayID]struct{}, len(routing.Routes))
-	mappedMTPRoutes := make(map[MTPRouteID]struct{}, len(routing.MTPRoutes))
-	for _, binding := range routing.Routes {
-		if _, exists := snapshot.mtpRouteByID[binding.MTPRoute]; !exists {
-			return invalidASPConfig("route binding references unknown MTP Route %q", binding.MTPRoute)
+	compiled := make(map[MTPRoutePathID]aspRoutePath, len(paths))
+	for _, path := range paths {
+		if path.ID == "" {
+			return nil, invalidASPConfig("empty route path ID")
 		}
-		if _, duplicate := bound[binding]; duplicate {
-			return invalidASPConfig("duplicate route binding for MTP Route %q and Application Server %q of Signalling Gateway %q",
-				binding.MTPRoute, binding.AS.ApplicationServer, binding.AS.SignallingGateway)
+		if _, exists := compiled[path.ID]; exists {
+			return nil, invalidASPConfig("duplicate route path %q", path.ID)
 		}
-		bound[binding] = struct{}{}
+		gateway, provisioned := snapshot.signallingGateway(path.SignallingGateway)
+		if !provisioned {
+			return nil, invalidASPConfig(
+				"route path %q references unprovisioned Signalling Gateway %q",
+				path.ID, path.SignallingGateway)
+		}
+		if len(path.ApplicationServers) == 0 {
+			return nil, invalidASPConfig("route path %q names no Application Server", path.ID)
+		}
+		named := make(map[RemoteASID]struct{}, len(path.ApplicationServers))
+		for _, applicationServer := range path.ApplicationServers {
+			if _, duplicate := named[applicationServer]; duplicate {
+				return nil, invalidASPConfig(
+					"route path %q names Application Server %q twice", path.ID, applicationServer)
+			}
+			named[applicationServer] = struct{}{}
+			if !gatewayServes(gateway, applicationServer) {
+				return nil, invalidASPConfig(
+					"route path %q names Application Server %q, which no SGP of Signalling Gateway %q serves",
+					path.ID, applicationServer, path.SignallingGateway)
+			}
+		}
+		compiled[path.ID] = aspRoutePath{
+			id:                 path.ID,
+			signallingGateway:  path.SignallingGateway,
+			applicationServers: append([]RemoteASID(nil), path.ApplicationServers...),
+		}
+	}
+	return compiled, nil
+}
 
-		gatewayIndex := -1
-		for index, gateway := range snapshot.signallingGateways {
-			if gateway.id == binding.AS.SignallingGateway {
-				gatewayIndex = index
-				break
-			}
-		}
-		if gatewayIndex < 0 {
-			return invalidASPConfig("route binding references unprovisioned Signalling Gateway %q", binding.AS.SignallingGateway)
-		}
-		serving := 0
-		for sgpIndex := range snapshot.signallingGateways[gatewayIndex].sgps {
-			sgp := &snapshot.signallingGateways[gatewayIndex].sgps[sgpIndex]
-			asIndex, served := sgp.asByID[binding.AS.ApplicationServer]
-			if !served {
-				continue
-			}
-			serving++
-			applicationServer := sgp.applicationServers[asIndex]
-			if !applicationServer.asKeyStatic {
-				return invalidASPConfig(
-					"route binding for MTP Route %q names dynamically bound Application Server %q of SGP %q in Signalling Gateway %q",
-					binding.MTPRoute, binding.AS.ApplicationServer, sgp.id, binding.AS.SignallingGateway)
-			}
-			identity := SGPIdentity{
-				SignallingGateway:        binding.AS.SignallingGateway,
-				SignallingGatewayProcess: sgp.id,
-			}
-			routeKey := sgpRouteKey{identity: identity, mtpRoute: binding.MTPRoute}
-			if owner, exists := boundPerSGP[routeKey]; exists {
-				return invalidASPConfig(
-					"SGP %q in Signalling Gateway %q carries MTP Route %q through both Application Servers %q and %q",
-					sgp.id, binding.AS.SignallingGateway, binding.MTPRoute, owner, binding.AS.ApplicationServer)
-			}
-			boundPerSGP[routeKey] = binding.AS.ApplicationServer
-			sgp.routes = append(sgp.routes, aspSGPRoute{
-				mtpRoute:          binding.MTPRoute,
-				applicationServer: binding.AS.ApplicationServer,
-				as:                applicationServer.asKey,
-			})
-			snapshot.sgpByIdentity[identity] = *sgp
-		}
-		if serving == 0 {
-			return invalidASPConfig(
-				"route binding references Application Server %q, which no SGP of Signalling Gateway %q serves",
-				binding.AS.ApplicationServer, binding.AS.SignallingGateway)
-		}
-		routedGateways[binding.AS.SignallingGateway] = struct{}{}
-		mappedMTPRoutes[binding.MTPRoute] = struct{}{}
-	}
-	for _, mtpRoute := range snapshot.mtpRoutes {
-		if _, exists := mappedMTPRoutes[mtpRoute.id]; !exists {
-			return invalidASPConfig("MTP Route %q has no Application Server binding", mtpRoute.id)
+// aspRoutePath is one compiled outbound candidate.
+type aspRoutePath struct {
+	id                 MTPRoutePathID
+	signallingGateway  SignallingGatewayID
+	applicationServers []RemoteASID
+}
+
+func (c aspRoutingConfig) signallingGateway(id SignallingGatewayID) (aspSignallingGatewayConfig, bool) {
+	for _, gateway := range c.signallingGateways {
+		if gateway.id == id {
+			return gateway, true
 		}
 	}
-	for signallingGateway := range routedGateways {
-		if _, configured := routing.SignallingGatewayProcessSelection[signallingGateway]; !configured {
-			return invalidASPConfig("Signalling Gateway %q carries routes without an SGP selection mode", signallingGateway)
+	return aspSignallingGatewayConfig{}, false
+}
+
+func gatewayServes(gateway aspSignallingGatewayConfig, applicationServer RemoteASID) bool {
+	for _, sgp := range gateway.sgps {
+		if _, served := sgp.asByID[applicationServer]; served {
+			return true
+		}
+	}
+	return false
+}
+
+// bindMTPRoutePaths resolves each route's referenced candidates into the
+// ordered per-Signalling-Gateway and per-SGP candidate lists selection reads.
+func bindMTPRoutePaths(
+	routing *ASPRoutingConfig,
+	paths map[MTPRoutePathID]aspRoutePath,
+	snapshot *aspRoutingConfig,
+) error {
+	referenced := make(map[MTPRoutePathID]struct{}, len(paths))
+	for index, mtpRoute := range routing.MTPRoutes {
+		gateways, err := bindOneMTPRoutePaths(mtpRoute, paths, snapshot, referenced)
+		if err != nil {
+			return err
+		}
+		snapshot.mtpRoutes[index].gateways = gateways
+		for _, gateway := range gateways {
+			if _, configured := routing.SignallingGatewayProcessSelection[gateway.id]; !configured {
+				return invalidASPConfig(
+					"Signalling Gateway %q carries routes without an SGP selection mode", gateway.id)
+			}
+		}
+	}
+	for id := range paths {
+		if _, used := referenced[id]; !used {
+			return invalidASPConfig("route path %q is referenced by no MTP Route", id)
 		}
 	}
 	return nil
+}
+
+func bindOneMTPRoutePaths(
+	mtpRoute MTPRouteConfig,
+	paths map[MTPRoutePathID]aspRoutePath,
+	snapshot *aspRoutingConfig,
+	referenced map[MTPRoutePathID]struct{},
+) ([]aspRouteGateway, error) {
+	gateways := make([]aspRouteGateway, 0, len(mtpRoute.Paths))
+	index := make(map[SignallingGatewayID]int, len(mtpRoute.Paths))
+	named := make(map[MTPRoutePathID]struct{}, len(mtpRoute.Paths))
+	type canonical struct {
+		signallingGateway SignallingGatewayID
+		applicationServer RemoteASID
+	}
+	bound := make(map[canonical]struct{}, len(mtpRoute.Paths))
+	for _, id := range mtpRoute.Paths {
+		path, provisioned := paths[id]
+		if !provisioned {
+			return nil, invalidASPConfig("MTP Route %q references unprovisioned route path %q", mtpRoute.ID, id)
+		}
+		if _, duplicate := named[id]; duplicate {
+			return nil, invalidASPConfig("MTP Route %q references route path %q twice", mtpRoute.ID, id)
+		}
+		named[id] = struct{}{}
+		referenced[id] = struct{}{}
+		position, exists := index[path.signallingGateway]
+		if !exists {
+			position = len(gateways)
+			index[path.signallingGateway] = position
+			gateways = append(gateways, aspRouteGateway{id: path.signallingGateway})
+		}
+		for _, applicationServer := range path.applicationServers {
+			key := canonical{signallingGateway: path.signallingGateway, applicationServer: applicationServer}
+			if _, duplicate := bound[key]; duplicate {
+				return nil, invalidASPConfig(
+					"MTP Route %q reaches Application Server %q of Signalling Gateway %q through two paths",
+					mtpRoute.ID, applicationServer, path.signallingGateway)
+			}
+			bound[key] = struct{}{}
+			candidate := aspRouteCandidate{path: id, applicationServer: applicationServer}
+			gateways[position].candidates = append(gateways[position].candidates, candidate)
+			recordSGPRouteCandidate(snapshot, path.signallingGateway, mtpRoute.ID, candidate)
+		}
+	}
+	return gateways, nil
+}
+
+// recordSGPRouteCandidate gives every SGP that serves one candidate's
+// Application Server its own ordered view of the route.
+func recordSGPRouteCandidate(
+	snapshot *aspRoutingConfig,
+	signallingGateway SignallingGatewayID,
+	mtpRoute MTPRouteID,
+	candidate aspRouteCandidate,
+) {
+	for gatewayIndex := range snapshot.signallingGateways {
+		if snapshot.signallingGateways[gatewayIndex].id != signallingGateway {
+			continue
+		}
+		for sgpIndex := range snapshot.signallingGateways[gatewayIndex].sgps {
+			sgp := &snapshot.signallingGateways[gatewayIndex].sgps[sgpIndex]
+			if _, served := sgp.asByID[candidate.applicationServer]; !served {
+				continue
+			}
+			if len(sgp.routeCandidates[mtpRoute]) == 0 {
+				sgp.routeOrder = append(sgp.routeOrder, mtpRoute)
+			}
+			sgp.routeCandidates[mtpRoute] = append(sgp.routeCandidates[mtpRoute], candidate)
+			snapshot.sgpByIdentity[SGPIdentity{
+				SignallingGateway:        signallingGateway,
+				SignallingGatewayProcess: sgp.id,
+			}] = *sgp
+		}
+		return
+	}
 }
 
 func invalidASPConfig(format string, values ...any) error {

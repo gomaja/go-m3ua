@@ -112,7 +112,6 @@ type aspRoutes struct {
 	stateRecordCount                 int
 	derived                          map[aspDerivedRangeKey]aspDestinationStatus
 	sequence                         uint64
-	transferRouteGeneration          map[MTPRouteID]uint64
 	transferFlows                    map[aspTransferFlowKey]*list.Element
 	transferFlowLRU                  *list.List
 	// transferSequences serializes concurrent MTP-TRANSFER requests sharing
@@ -149,7 +148,6 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		stateRecordsPerRoute:             make(map[aspRouteStateBudgetKey]int),
 		stateRecordsPerSignallingGateway: make(map[SignallingGatewayID]int),
 		derived:                          make(map[aspDerivedRangeKey]aspDestinationStatus),
-		transferRouteGeneration:          make(map[MTPRouteID]uint64, len(snapshot.mtpRoutes)),
 		transferFlows:                    make(map[aspTransferFlowKey]*list.Element),
 		transferFlowLRU:                  list.New(),
 		transferSequences:                make(map[aspTransferFlowKey]*aspTransferFlowLock),
@@ -237,8 +235,8 @@ func (r *aspRoutes) detach(association *Association) {
 					continue
 				}
 				for _, sgp := range gateway.sgps {
-					for _, route := range sgp.routes {
-						affectedMTPRoutes[route.mtpRoute] = struct{}{}
+					for _, mtpRoute := range sgp.routeOrder {
+						affectedMTPRoutes[mtpRoute] = struct{}{}
 					}
 				}
 				break
@@ -260,12 +258,37 @@ func (r *aspRoutes) eligibleAssociationRoutesLocked(
 	if !exists {
 		return eligible
 	}
-	for _, route := range sgp.routes {
-		if aspAssociationEligibleForAS(association, route.as) {
-			eligible[route.mtpRoute] = struct{}{}
+	for _, mtpRoute := range sgp.routeOrder {
+		if _, _, carried := r.config.eligibleCandidate(association, identity, mtpRoute); carried {
+			eligible[mtpRoute] = struct{}{}
 		}
 	}
 	return eligible
+}
+
+// eligibleCandidate reports the first candidate of one MTP Route that one
+// Association can carry now, and the wire scope it carries it in.
+//
+// The order is the route's own: candidates come from the route's paths in
+// reference order, and within a path from its Application Server preference
+// order, so the first one that is bound and active is the one that SGP uses.
+func (c aspRoutingConfig) eligibleCandidate(
+	association *Association,
+	identity SGPIdentity,
+	mtpRoute MTPRouteID,
+) (aspRouteCandidate, ASKey, bool) {
+	sgp, provisioned := c.sgpByIdentity[identity]
+	if !provisioned {
+		return aspRouteCandidate{}, ASKey{}, false
+	}
+	for _, candidate := range sgp.candidatesFor(mtpRoute) {
+		for _, key := range c.asKeysFor(association, identity, candidate.applicationServer) {
+			if aspAssociationEligibleForAS(association, key) {
+				return candidate, key, true
+			}
+		}
+	}
+	return aspRouteCandidate{}, ASKey{}, false
 }
 
 func changedASPAssociationRoutes(
@@ -375,11 +398,11 @@ func (r *aspRoutes) apply(
 		if status == nil || status.UserPartUnavailable {
 			continue
 		}
-		for _, route := range sgp.routes {
-			if !aspRouteASMatchesStatus(association, route.as, status) {
+		for _, routeID := range sgp.routeOrder {
+			if !r.config.routeCandidateMatchesStatus(association, identity, routeID, status) {
 				continue
 			}
-			mtpRoute, ok := r.mtpRoute(route.mtpRoute)
+			mtpRoute, ok := r.mtpRoute(routeID)
 			if !ok {
 				continue
 			}
@@ -389,7 +412,7 @@ func (r *aspRoutes) apply(
 			}
 			key := aspRouteRangeKey{
 				signallingGateway: identity.SignallingGateway,
-				mtpRoute:          route.mtpRoute,
+				mtpRoute:          routeID,
 				pointCode:         pointCode,
 				mask:              mask,
 			}
@@ -430,7 +453,7 @@ func (r *aspRoutes) apply(
 				newRecordCount++
 			}
 			pendingKeys = append(pendingKeys, key)
-			affectedMTPRoutes[route.mtpRoute] = struct{}{}
+			affectedMTPRoutes[routeID] = struct{}{}
 		}
 	}
 
@@ -603,11 +626,7 @@ func lessASPRouteRangeKey(first, second aspRouteRangeKey) bool {
 }
 
 func (r *aspRoutes) mtpRoute(id MTPRouteID) (aspMTPRoute, bool) {
-	index, exists := r.config.mtpRouteByID[id]
-	if !exists || index < 0 || index >= len(r.config.mtpRoutes) {
-		return aspMTPRoute{}, false
-	}
-	return r.config.mtpRoutes[index], true
+	return r.config.mtpRoute(id)
 }
 
 func (r *aspRoutes) validateAssociationConfig(config *AssociationConfig) error {
@@ -745,7 +764,6 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 				continue
 			}
 		}
-		r.advanceTransferRouteGenerationLocked(mtpRoute.id)
 		updated := r.recomputeMTPRouteLocked(mtpRoute)
 		routeIndications := r.derivedStatusIndicationsLocked(mtpRoute, updated)
 		indications = append(indications, routeIndications...)
@@ -1181,8 +1199,7 @@ func (r *aspRoutes) signallingGatewayRouteCapabilityLocked(
 	configured := false
 	capable := false
 	for _, sgp := range gateway.sgps {
-		route, exists := aspSGPRouteForMTPRoute(sgp, mtpRoute)
-		if !exists {
+		if !sgp.carries(mtpRoute) {
 			continue
 		}
 		configured = true
@@ -1191,7 +1208,7 @@ func (r *aspRoutes) signallingGatewayRouteCapabilityLocked(
 			SignallingGatewayProcess: sgp.id,
 		}
 		for association := range r.associationsBySGP[identity] {
-			if aspAssociationEligibleForAS(association, route.as) {
+			if _, _, eligible := r.config.eligibleCandidate(association, identity, mtpRoute); eligible {
 				capable = true
 				break
 			}
@@ -1304,27 +1321,76 @@ func aspMTPRouteCoversRange(mtpRoute aspMTPRoute, pointCode uint32, mask uint8) 
 	return aspRangeCovers(mtpRoute.destinationPointCode, mtpRoute.mask, pointCode, mask)
 }
 
-func aspSGPRouteForMTPRoute(sgp aspSGPConfig, mtpRoute MTPRouteID) (aspSGPRoute, bool) {
-	for _, route := range sgp.routes {
-		if route.mtpRoute == mtpRoute {
-			return route, true
+// routeCandidateMatchesStatus reports whether one SSNM status names a wire
+// scope this Association carries one of the route's candidates in.
+func (c aspRoutingConfig) routeCandidateMatchesStatus(
+	association *Association,
+	identity SGPIdentity,
+	mtpRoute MTPRouteID,
+	status *DestinationStatus,
+) bool {
+	sgp, provisioned := c.sgpByIdentity[identity]
+	if !provisioned {
+		return false
+	}
+	for _, candidate := range sgp.candidatesFor(mtpRoute) {
+		for _, key := range c.asKeysFor(association, identity, candidate.applicationServer) {
+			if aspRouteASMatchesStatus(association, key, status) {
+				return true
+			}
 		}
 	}
-	return aspSGPRoute{}, false
+	return false
+}
+
+// dynamicASKeysForRemoteAS reports the wire scopes an RFC 4666 Section 4.4.1
+// registration bound to one canonical Application Server on this Association,
+// in ascending Routing Context order.
+func (c *Association) dynamicASKeysForRemoteAS(id RemoteASID) []ASKey {
+	if c == nil || id == "" {
+		return nil
+	}
+	c.muCanonicalAS.RLock()
+	routingContexts := make([]uint32, 0, len(c.canonicalRemoteAS))
+	for routingContext, bound := range c.canonicalRemoteAS {
+		if bound == id {
+			routingContexts = append(routingContexts, routingContext)
+		}
+	}
+	c.muCanonicalAS.RUnlock()
+	if len(routingContexts) == 0 {
+		return nil
+	}
+	sort.Slice(routingContexts, func(first, second int) bool {
+		return routingContexts[first] < routingContexts[second]
+	})
+	keys := make([]ASKey, 0, len(routingContexts))
+	for _, routingContext := range routingContexts {
+		keys = append(keys, asKeyForConfigRoutingContext(c.cfg, routingContext))
+	}
+	return keys
+}
+
+// aspAssociationBoundToAS reports whether one Association is configured for, or
+// has registered, one Application Server scope. It is the binding and
+// authorization question, asked before the active-state one.
+func aspAssociationBoundToAS(association *Association, key ASKey) bool {
+	if association == nil {
+		return false
+	}
+	for _, configuredKey := range association.configuredASKeys() {
+		if configuredKey == key {
+			return true
+		}
+	}
+	return false
 }
 
 func aspAssociationEligibleForAS(association *Association, key ASKey) bool {
 	if association == nil || association.State() != StateASPActive {
 		return false
 	}
-	configured := false
-	for _, configuredKey := range association.configuredASKeys() {
-		if configuredKey == key {
-			configured = true
-			break
-		}
-	}
-	if !configured {
+	if !aspAssociationBoundToAS(association, key) {
 		return false
 	}
 	if !key.RoutingContextSet {
