@@ -1,11 +1,13 @@
 # RFC 4666 conformance matrix
 
-Audit date: 2026-08-31.
+Audit date: 2026-08-31. Rechecked 2026-09-19.
 
 This matrix tracks the go-m3ua v1.2.0 conformance program against the current
 [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html). The governing document,
 errata, IANA, and security decisions are defined in the
-[standards contract](standards.md).
+[standards contract](standards.md). Role, direction and state coverage per
+procedure, and the concrete optional-procedure exclusions, are in
+[procedure coverage](procedure-coverage.md).
 
 ## Status vocabulary
 
@@ -60,7 +62,7 @@ Section 4 below.
 | [3.5 ASPSM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.5) | Mandatory | Implemented | ASPUP, ASPUP_ACK, ASPDOWN, ASPDOWN_ACK, BEAT, and BEAT_ACK codecs and message-specific validation are implemented. Role procedures are assessed under Section 4.3. |
 | [3.6 RKM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.6) | Optional | Implemented | REG REQ, REG RSP, DEREG REQ, and DEREG RSP have strict typed codecs; mandatory cardinality, repeated groups/results, status cross-fields, ordering, lengths, masks, and malformed nesting have unit and fuzz coverage. Unknown nested Routing Key fields receive Registration Status 9 rather than being discarded, and contradictory duplicate results are rejected. Held Errata 4475 remains classified only as documented in the standards contract. |
 | [3.7 ASPTM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.7) | Mandatory | Implemented | ASPAC, ASPAC_ACK, ASPIA, and ASPIA_ACK codecs, parameters, ordering, cardinality, and validation are implemented. Role procedures are assessed under Section 4.3. |
-| [3.8 MGMT](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.8) | Mandatory | Implemented | Error and Notify codecs, diagnostic octets, parameter scope, cardinality, unknown-extension handling, and inactive-ASP targeting for `Insufficient ASP Resources Active in AS` are implemented. Held Errata 2065 is a documented project interpretation. |
+| [3.8 MGMT](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.8) | Mandatory | Implemented | Error and Notify codecs, diagnostic octets, parameter scope, cardinality, unknown-extension handling, and inactive-ASP targeting for `Insufficient ASP Resources Active in AS` are implemented. Every Section 3.8.1 Error code is decoded and named on receipt; two are never generated, and [procedure coverage](procedure-coverage.md#optional-procedures-concrete-exclusions) says which and why. Held Errata 2065 is a documented project interpretation. |
 
 ## Procedures
 

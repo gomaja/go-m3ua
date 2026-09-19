@@ -1,6 +1,7 @@
 # M3UA standards and security contract
 
-Audit date: 2026-08-31.
+Audit date: 2026-08-31. RFC 4666 relationships, errata and the SIGTRAN working
+group rechecked 2026-09-19; see [Recheck log](#recheck-log).
 
 This document defines which authorities govern go-m3ua v1.2.0 and where the
 library boundary ends. The implementation status for each RFC 4666 area is in
@@ -100,7 +101,7 @@ the SACK section. Errata
 applied.
 
 go-m3ua v1.2.0 depends on
-[`github.com/gomaja/go-sctp` v1.0.2](https://github.com/gomaja/go-sctp/releases/tag/v1.0.2),
+[`github.com/gomaja/go-sctp` v1.0.4](https://github.com/gomaja/go-sctp/releases/tag/v1.0.4),
 which uses operating-system SCTP sockets rather than implementing the SCTP
 packet state machine. INIT, COOKIE, SACK, verification-tag, retransmission, and
 path procedures therefore belong to the deployed kernel's RFC 9260
@@ -227,3 +228,23 @@ as a secure modernization, not as literal RFC 3788 conformance. The library
 must not embed keys, create implicit trust, downgrade protection, or claim that
 SCTP checksum, cookie, multihoming, or heartbeat behavior provides
 confidentiality or peer authentication.
+
+## Recheck log
+
+Standards decisions are rechecked when a subsystem is revisited, not once. RFC
+4666 was rechecked on 2026-09-19 against both databases and the errata registry,
+with every endpoint called in that session:
+
+| Source | Result |
+| --- | --- |
+| [`https://www.rfc-editor.org/rfc/rfc4666.json`](https://www.rfc-editor.org/rfc/rfc4666.json) | `pub_status` Proposed Standard; `obsoletes` RFC 3332; `obsoleted_by` empty; `updates` empty; `updated_by` empty. |
+| [Datatracker incoming relationships](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4666&limit=100&format=json) | 16 incoming relationships: 10 `refnorm`, 5 `refinfo`, 1 `became_rfc`. No `obs` and no `updates`. |
+| [Datatracker document record](https://datatracker.ietf.org/api/v1/doc/document/rfc4666/?format=json) | `std_level` Proposed Standard, IETF stream. Note that this endpoint does not carry relationship fields, so it is not used for them. |
+| [RFC 4666 errata](https://www.rfc-editor.org/errata_search.php?rfc=4666) | Three reports, zero Verified: 2065 and 4475 Held for Document Update, 2518 Rejected. Unchanged from the 2026-08-31 audit. |
+| [SIGTRAN working group](https://datatracker.ietf.org/wg/sigtran/documents/) | Concluded; no active M3UA Internet-Draft. |
+
+The two databases agree on every point above. The RFC Editor and the Datatracker
+are separate databases, so agreement is the evidence and a disagreement would be
+reported rather than averaged; the one disagreement this project has found is the
+RFC 4301 relationship discrepancy recorded above, which concerns a supporting
+document rather than M3UA.
