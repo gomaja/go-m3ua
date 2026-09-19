@@ -38,6 +38,14 @@ type MTPTransferRequest struct {
 // Presuming it reachable would send traffic on the strength of nothing, so the
 // default is to refuse. ASPRoutingConfig.AllowUnknownDestinations is the
 // explicit opt-in for a deployment that would rather try.
+//
+// Endpoint.MTPDestinationStatus answers a different question and may report the
+// same destination Available, because RFC 4666 Appendix A.2.2 defines an SG's
+// capability as the absence of an inaccessibility report rather than the
+// presence of an availability one. That is the MTP3-User's aggregate status
+// over every route; this is one candidate's selection. The disagreement is
+// confined to a destination whose Signalling Gateway is established, activated
+// and silent, and is documented on MTPDestinationStatus.
 var ErrDestinationStateUnknown = errors.New("m3ua: destination state is unknown")
 
 // MTPTransferPath is one concrete target an MTP-TRANSFER request was admitted
