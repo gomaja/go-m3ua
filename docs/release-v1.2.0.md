@@ -58,7 +58,10 @@ The release candidate is gated at its exact commit by:
 - exact-head pull-request review with no unresolved conversation.
 
 The commands and CI jobs are recorded in the
-[compliance and ecosystem audit](compliance.md#current-validation-commands).
+[compliance and ecosystem audit](compliance.md#current-validation-commands), and
+the exact-head cross-slice evidence — including the gates that were measured,
+the ones that were not, and what the unmeasured ones would need — is in the
+[acceptance campaign record](acceptance-v1.2.0.md).
 
 ## Deployment security boundary
 
