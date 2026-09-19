@@ -347,40 +347,61 @@ func (l *Listener) resolveAcceptedAssociationConfig(
 	return associationConfig, nil
 }
 
-// Accept waits for and returns the next M3UA association.
-// After establishment, DATA can be read through Association.Read; M3UA control
-// procedures continue in background goroutines.
+// Accept waits for and returns the next M3UA association. After establishment,
+// DATA is read with Association.ReadData; M3UA control procedures continue in
+// background goroutines.
 //
 // Accept does not return until the M3UA handshake for that peer has completed,
-// or until it gives up on it after ten seconds. A single accept loop therefore
-// serves peers strictly one at a time, and one silent peer holds up every other
-// ASP waiting behind it for the whole of that budget.
+// or until it gives up on it after AssociationConfig.EstablishTimeout. A single
+// accept loop therefore serves peers strictly one at a time, and one silent peer
+// holds up every other ASP waiting behind it for the whole of that budget.
+//
+// Two of its errors mean opposite things, and an accept loop that does not
+// separate them stops serving without saying so. A peer-specific failure after
+// SCTP accept and before M3UA establishment is an *AssociationEstablishmentError
+// and concerns that one peer: the listening socket is still good and the loop
+// must carry on. Anything else — the listening socket failing, the Listener
+// being closed, ctx ending — is permanent for this loop and ends it.
 //
 // Accept is safe for concurrent use, so an endpoint expecting several SCTP
 // associations should run several Accepts rather than one loop:
 //
-//	for i := 0; i < concurrency; i++ {
+//	for range concurrency {
 //		go func() {
 //			for {
-//				association, err := l.Accept(ctx)
+//				association, err := listener.Accept(acceptCtx)
 //				if err != nil {
-//					return
+//					var establishment *m3ua.AssociationEstablishmentError
+//					if errors.As(err, &establishment) {
+//						log.Printf("rejected %s: %v", establishment.RemoteAddr, establishment)
+//						continue // one peer failed; the Listener is still serving.
+//					}
+//					return // the Listener or acceptCtx ended this loop.
 //				}
-//				go serve(association)
+//				go func() {
+//					defer func() { _ = association.Close() }()
+//					serve(association)
+//				}()
 //			}
 //		}()
 //	}
+//
+// The accepted Association is the caller's to close. Closing it closes that one
+// association and nothing else, so a handler that returns without closing leaks
+// its goroutines and its SCTP association until the Listener or the Endpoint is
+// closed. Association.ShutdownContext is the same teardown with the RFC 4666
+// Section 4.9 withdrawal procedures in front of it.
 //
 // Nothing in Accept writes to shared AssociationConfig, and each accepted
 // Association owns its SCTP association; TestConcurrentAcceptsAreIndependent
 // covers this.
 //
-// Cancelling ctx does not interrupt an Accept that is blocked waiting for a peer
-// to connect — only Close does. Once a peer has connected, ctx bounds the
-// handshake, alongside AssociationConfig.EstablishTimeout.
-//
-// A failure after SCTP accept and before M3UA establishment is returned as an
-// AssociationEstablishmentError. An SCTP listener failure is returned directly.
+// ctx is the accepted association's lifetime, not just its handshake.
+// Cancelling it does not interrupt an Accept that is blocked waiting for a peer
+// to connect — only Close does — but it does close every association this
+// Accept has already produced, because that ctx is the one their monitors run
+// under. An accept loop that wants to stop accepting without dropping live
+// traffic closes the Listener instead of cancelling ctx.
 func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	role, err := l.endpoint.associationRole()
 	if err != nil {
@@ -467,7 +488,27 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	}
 }
 
-// Close closes the listener.
+// Close closes the listener and every Association it accepted.
+//
+// This is the middle of three ownership scopes. Association.Close closes one
+// association; this closes the associations this Listener produced, because
+// nothing else owns them; Endpoint.Close closes every Listener and Association
+// the Endpoint owns, including the ones Endpoint.Dial created. Close does not
+// touch the owning Endpoint, its shared Application Server, NIF, destination or
+// MTP3 restart state, or associations another Listener or Dial created.
+//
+// It closes the SCTP listening socket first, then any SCTP association accepted
+// but not yet promoted to an M3UA Association, then each tracked Association.
+// A blocked Accept returns once the listening socket is closed. Close does not
+// wait for an Accept already past SCTP accept: that one fails on its own and
+// returns an *AssociationEstablishmentError.
+//
+// Close releases SCTP without sending ASP Inactive or ASP Down, which is RFC
+// 4666 Section 4.9 option (b). An application that needs the option (a)
+// withdrawal calls Association.ShutdownContext on each association first.
+//
+// Close is idempotent, and every caller receives the same result: the first
+// non-nil error from the listening socket or from any association it closed.
 func (l *Listener) Close() error {
 	// Take the accepted associations down with the listener. Closing only the
 	// SCTP listener left every Association it had produced running: their

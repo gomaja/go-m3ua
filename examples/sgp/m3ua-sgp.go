@@ -12,6 +12,9 @@ import (
 	"errors"
 	"flag"
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -42,6 +45,14 @@ func serve(ctx context.Context, association *m3ua.Association) {
 	}
 }
 
+// acceptAssociations serves one accept worker until the Listener stops.
+//
+// Two of Accept's errors mean opposite things. An AssociationEstablishmentError
+// concerns one peer and leaves the Listener serving, so the loop continues;
+// anything else — the listening socket failing, the Listener closing, ctx
+// ending — is permanent for this worker and returns. Returning on both would
+// retire a worker for every peer that failed to establish, until the SGP
+// silently stopped accepting.
 func acceptAssociations(ctx context.Context, listener *m3ua.Listener) error {
 	for {
 		association, err := listener.Accept(ctx)
@@ -102,16 +113,38 @@ func main() {
 	}
 	log.Printf("Waiting for an SCTP association on: %s", listener.Addr())
 
-	ctx := context.Background()
+	// ctx is each accepted association's lifetime, not just its handshake, so
+	// cancelling it here closes every association this SGP is serving. That is
+	// what an interrupt should do; stopping only the accepting would be
+	// listener.Close.
+	//
+	// Safe here because an SGP has no withdrawal to run: RFC 4666 Section 4.9
+	// gives it SCTP Shutdown and nothing else, so ShutdownContext on an SGP
+	// Association is Close. An ASP must not copy this — see the ASP example,
+	// where the signal context and the association's lifetime are separate so
+	// that ASP Inactive and ASP Down can still be sent.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	listenerFailures := make(chan error, *acceptConcurrency)
 	for range *acceptConcurrency {
 		go func() {
 			listenerFailures <- acceptAssociations(ctx, listener)
 		}()
 	}
-	err = <-listenerFailures
-	if closeErr := listener.Close(); closeErr != nil {
-		log.Printf("Failed to close M3UA Listener: %s", closeErr)
+
+	select {
+	case err = <-listenerFailures:
+		log.Printf("M3UA accept worker stopped: %s", err)
+	case <-ctx.Done():
+		log.Print("Shutting down")
 	}
-	log.Fatalf("M3UA Listener failed: %s", err)
+
+	// Closing the Endpoint closes the Listener, every Association it accepted,
+	// and the shared SGP state none of them owns individually. Closing only the
+	// Listener would leave the Application Server registry, the destination
+	// state and the MTP3 restart coordinator behind.
+	if closeErr := endpoint.Close(); closeErr != nil {
+		log.Printf("Failed to close M3UA Endpoint: %s", closeErr)
+	}
 }

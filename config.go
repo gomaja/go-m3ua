@@ -105,8 +105,9 @@ type SCTPConfig struct {
 	// not an MTU: it must accommodate the largest single M3UA message a peer
 	// may send. RFC 4666 Section 1.3.2.1 is explicit that "The M3UA layer does
 	// not impose a 272-octet signalling information field (SIF) length limit
-	// as specified by the SS7 MTP Level 2 protocol. Larger information blocks
-	// can be accommodated directly by M3UA/SCTP", and the message length field
+	// as specified by the SS7 MTP Level 2 protocol [...]. Larger information
+	// blocks can be accommodated directly by M3UA/SCTP", and the message length
+	// field
 	// is 32-bit, so there is no protocol-level maximum to size against. Raise
 	// this if a peer is known to send larger blocks than the default allows.
 	ReadBufferSize int
@@ -168,9 +169,10 @@ const DefaultBroadcastFlowIdentifierBytes = 256
 // DefaultTAckRetries is how many times an unacknowledged ASPSM/ASPTM request is
 // resent before the attempt is reported as failed.
 //
-// RFC 4666 says to resend "until it receives the Ack", which is unbounded; a
-// bound turns a peer that will never answer into a reportable error instead of
-// an indefinite silent retry against a network already in trouble.
+// RFC 4666 says to resend "until it receives an ASP Up Ack message", and the
+// same for ASP Down, ASP Active and ASP Inactive, which is unbounded; a bound
+// turns a peer that will never answer into a reportable error instead of an
+// indefinite silent retry against a network already in trouble.
 const DefaultTAckRetries = 5
 
 // BroadcastFlowIdentifier adds application semantics to the default Broadcast

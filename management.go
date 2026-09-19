@@ -353,11 +353,14 @@ func (c *Association) overriddenByAlternateAsp(n *messages.Notify) bool {
 // records a partial override.
 //
 // It reports whether the whole association must go to ASP-INACTIVE. RFC 4666
-// Errata ID 2065 is precisely about this: a Notify that names one Routing
-// Context out of several "allows the first ASP to become inactive only for that
-// particular Application Server, rather than all of them". Standing the
-// association down for a context nobody overrode takes traffic off Application
-// Servers this ASP is still the active one for.
+// Errata ID 2065 is precisely about this: its report argues that a Notify
+// naming one Routing Context out of several should make the first ASP inactive
+// for that Application Server alone, because "without this AS1 Routing Context
+// ASP1 will become INACTIVE for both AS1 and AS2, which is not desired here".
+// The erratum is Held for Document Update rather than Verified, so following it
+// is an interoperability decision, not a correction to the published text.
+// Standing the association down for a context nobody overrode takes traffic off
+// Application Servers this ASP is still the active one for.
 //
 // A Notify naming every context the association carries is the
 // whole-association case and keeps the state move. A missing context has the

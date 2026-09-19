@@ -47,6 +47,122 @@ This package uses github.com/gomaja/go-sctp for the underlying SCTP transport.
 
 Specification: https://www.rfc-editor.org/rfc/rfc4666.html
 
+# Ownership and shutdown
+
+Three scopes own resources, and each closes exactly its own.
+
+  - Association.Close closes one association: its SCTP association, its
+    goroutines, and its streams. It deregisters that association from the
+    Listener that accepted it and from the Endpoint that owns it. The Listener
+    keeps listening and sibling associations keep carrying traffic. Peers still
+    see it through M3UA, because an ASP leaving an Application Server can change
+    that AS's state and produce a Notify to the others; that is RFC 4666 Section
+    4.3.2, not teardown reaching sideways.
+
+  - Listener.Close closes the listening socket and every Association that
+    Listener accepted, because nothing else owns them. It leaves the Endpoint
+    and its shared Application Server, NIF, destination and MTP3 restart state
+    alone, and does not touch associations another Listener or Endpoint.Dial
+    created.
+
+  - Endpoint.Close closes every Listener and Association the Endpoint owns,
+    dialled and accepted alike, and then the shared state none of them owns
+    individually: Application Server timers and recovery queues first, any MTP3
+    restart in progress, then the transports, then the MTPIndications channel
+    and every open SSNM subscription.
+
+All three release SCTP without sending ASP Inactive or ASP Down, which is RFC
+4666 Section 4.9 option (b). Option (a) is Association.ShutdownContext, which
+performs the procedures AssociationConfig.ASPProcedures marks automatic and then
+closes. Nothing calls it for the application: an ASP that wants its peers told
+before it goes calls it on each association before closing their owner.
+
+The ctx passed to Dial and Accept is the association's lifetime, not its
+handshake. Cancelling it closes the associations it produced, and that makes it
+the wrong context to derive from an interrupt signal if the application also
+wants ShutdownContext to work: the association's monitor closes it as soon as
+the context is done, so the withdrawal finds an association already in ASP-DOWN,
+sends nothing, and returns nil. An application that wants option (a) gives the
+association a context of its own and cancels it only after ShutdownContext has
+returned.
+
+# Callbacks and snapshots
+
+Application callbacks — ListenerConfig.SelectAssociationConfig,
+AssociationConfig.AuthorizeASP, ASPRoutingConfig.CongestionPolicy and the
+RoutingKeyManagementConfig authorizers and allocator — run without any Endpoint,
+Listener, Association or registry lock held, and may run concurrently for
+independent associations. A callback that blocks delays only the work that is
+waiting on it; it cannot deadlock the library against itself. None of them may
+assume how often it is called: congestion policy in particular is evaluated per
+candidate during selection.
+
+What crosses that boundary is copied in both directions. Configuration passed to
+NewEndpoint, Dial and Listen is deep-copied, so a later mutation of the caller's
+struct, slice or map changes nothing already running; an Association's
+configuration is immutable once it exists. Values returned to the application are
+owned by the application: status snapshots, SSNM snapshots and events,
+ManagementIndications, MTPIndications and DataMessage payloads each own their
+slices and their SCTP addresses, and may be retained or modified freely.
+
+The exception is deliberate and narrow. Association.LocalAddr and
+Association.RemoteAddr return the transport's own address values, because they
+are the net.Addr accessors of the underlying association; treat them as
+read-only. AssociationSnapshot.LocalAddr and AssociationSnapshot.RemoteAddr are
+owned copies of the same addresses for callers that need to retain them.
+
+# Peer identity, addresses and authentication
+
+Nothing an M3UA peer says about itself is authenticated. ASPIdentity.RemoteAddr,
+AcceptInfo.RemoteAddr and Association.PeerASPIdentifier are what the transport
+observed and what the peer asserted, in that order of trustworthiness: the
+address is where the packets came from, and the ASP Identifier is a number the
+peer chose to send. AuthorizeASP is therefore an authorization hook over an
+unauthenticated identity, and useful precisely because it runs after SCTP accept
+and before any M3UA message is parsed. Peer authentication belongs below this
+package; see the Security section.
+
+An SCTP association is multi-homed, so its addresses are lists. AcceptInfo and
+AssociationSnapshot carry *sctp.SCTPAddr values whose IPAddrs hold every address
+the peer confirmed for that association, not one representative address. A
+selector matching a peer by address matches against the whole list, because
+which of those addresses a given SCTP packet arrives from is a transport
+decision that can change during the association's life without M3UA noticing.
+
+# Signalling domain isolation
+
+Two labels that look global are not. RFC 4666 Section 3.3.1 makes a Network
+Appearance "of local significance only, coordinated between the SGP and ASP",
+and Section 1.4.2.1 makes a Routing Context "an index into a sending node's
+Message Distribution Table". The same Routing Context value means different
+things on two Signalling Gateways, and two SGPs of one Signalling Gateway may
+label one Application Server differently.
+
+The API keeps those apart rather than flattening them. ASKey is the exact wire
+scope on one Association — a Network Appearance and a Routing Context, each with
+its own presence bit, because zero is a legitimate value for either. WireScope is
+the scope exactly as a peer sent it, before resolution. SGASKey and SSNMPartition
+are the canonical identity — one Signalling Gateway and one Application Server —
+that retained knowledge belongs to, so a report learned through one SGP survives
+that SGP's association and is never confused with a same-numbered scope on
+another Signalling Gateway. A bare Routing Context is not accepted as an identity
+anywhere it would be ambiguous; the operation fails closed instead of guessing.
+
+# Derived MTP status and per-path selection
+
+An ASP that provisions ASPConfig.Routing gets two different answers about a
+destination, and they are allowed to differ. MTPIndications, MTPDestinationStatus
+and MTPDestinationStatuses are the MTP3-User's aggregate view over every
+provisioned route, where RFC 4666 Appendix A.2.2 defines a Signalling Gateway's
+capability negatively: established, activated, and no report of inaccessibility
+or MTP restart. A destination nobody has reported on satisfies that, so the
+aggregate reads Available. MTPTransfer decides about one candidate, reading the
+canonical SSNM store where an absent availability record is absence, and refuses
+with ErrDestinationStateUnknown unless
+ASPRoutingConfig.AllowUnknownDestinations opts back into the Appendix A.2.2
+reading. They disagree only for an established, activated, silent Signalling
+Gateway.
+
 # Security
 
 RFC 4666 Section 6 carries one normative requirement, and it points elsewhere:

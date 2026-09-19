@@ -42,6 +42,28 @@ type MTPDestination struct {
 
 // MTPDestinationStatus is the ASP's derived view of one MTP destination over
 // every provisioned Signalling Gateway route.
+//
+// It is the MTP3-User's aggregate view, and it reads a silent Signalling
+// Gateway as one that can carry traffic. RFC 4666 Appendix A.2.2 defines
+// capability negatively: an SG "is capable of transferring traffic to a
+// provisioned SS7 destination X if an SCTP association with at least one SGP
+// of the SG is established, the SGP has returned an acknowledgement to the ASP
+// to indicate that the ASP is actively handling traffic for that destination X,
+// the SGP has not indicated that the destination X is inaccessible, and the SGP
+// has not indicated MTP Restart." A destination no SG has reported on satisfies
+// every clause of that sentence, so the aggregate reports it Available and no
+// MTP-PAUSE is raised for a destination nobody has said anything about.
+//
+// Endpoint.MTPTransfer answers the narrower question differently, and
+// deliberately: per-path selection reads the canonical SSNM store, where an
+// absent availability record is absent rather than favourable, and refuses the
+// candidate with ErrDestinationStateUnknown unless
+// ASPRoutingConfig.AllowUnknownDestinations opts back into the Appendix A.2.2
+// reading. The two answers can therefore disagree for exactly one case — a
+// destination with an established, activated, silent Signalling Gateway — where
+// this snapshot says Available and a transfer to it is refused. Neither is
+// derived from the other: this one is the aggregate MTP3-User status of
+// Section 4.5.2.2, and that one is a decision about one candidate.
 type MTPDestinationStatus struct {
 	Destination        MTPDestination
 	Availability       DestinationAvailability
@@ -64,6 +86,21 @@ type MTPIndication struct {
 
 // MTPIndications returns the ASP Endpoint's derived MTP3-User indication
 // stream. It is closed by Endpoint.Close, not by an individual Association.
+//
+// It reports changes in the derived status described by MTPDestinationStatus,
+// which is the aggregate over every provisioned Signalling Gateway route and
+// not the per-candidate decision MTPTransfer makes. An MTP-RESUME is not a
+// promise that the next MTPTransfer will be admitted.
+//
+// Every ASP Endpoint has this channel, whatever its ASPConfig; an SGP or IPSP
+// Endpoint has none and receives nil, where a receive blocks forever.
+//
+// Having the channel is not the same as having something to put on it. These
+// indications are derived from provisioned MTP Routes, so an ASP that left
+// ASPConfig.Routing nil, or supplied no ASPConfig at all, holds an open channel
+// that stays empty for the Endpoint's whole life and is then closed by
+// Endpoint.Close. Such an application owns outbound selection itself and
+// consumes Endpoint.SubscribeSSNM instead of waiting here.
 func (e *Endpoint) MTPIndications() <-chan *MTPIndication {
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return nil
@@ -86,6 +123,11 @@ func (e *Endpoint) MTPDestinationStatus(destination MTPDestination) (MTPDestinat
 // Endpoint's canonical, non-overlapping destination ranges. It is the
 // authoritative resynchronization source after an MTPIndication reports
 // ResyncRequired. The returned slice is owned by the caller.
+//
+// Like MTPDestinationStatus, these are derived aggregate statuses.
+// Endpoint.SSNMKnowledge is the other view: what each Signalling Gateway
+// actually reported, per canonical Application Server, with absence
+// distinguishable from a report.
 func (e *Endpoint) MTPDestinationStatuses() []MTPDestinationStatus {
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return nil

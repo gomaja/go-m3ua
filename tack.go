@@ -104,7 +104,8 @@ func (c *Association) tackInterval() time.Duration {
 // the matching acknowledgement, the association closes, or the retry budget is
 // exhausted.
 //
-// Retransmission is deliberately bounded. The RFC's "until it receives the Ack"
+// Retransmission is deliberately bounded. The RFC's "until it receives an ASP
+// Up Ack message", and its ASP Down, ASP Active and ASP Inactive counterparts,
 // is unbounded, but an ASP that resends forever against a peer that will never
 // answer just adds load to a network already in trouble; the budget converts a
 // silent hang into a reportable failure. TAckRetries configures it.

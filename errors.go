@@ -66,8 +66,9 @@ var (
 	// Context that is inactive for this association.
 	//
 	// RFC 4666 Section 4.3.4.3 has the SGP answer "For the Application Servers
-	// for which the ASP can be activated", so a partial acknowledgement leaves
-	// the rest inactive and traffic for them has nowhere to go.
+	// for which the ASP can be successfully activated", so a partial
+	// acknowledgement leaves the rest inactive and traffic for them has nowhere
+	// to go.
 	ErrRoutingContextNotActive = errors.New("routing context is not active for this association")
 
 	// ErrInvalidParameterValue is used when a parameter is well formed but
@@ -91,7 +92,7 @@ var (
 
 	// ErrNoMatchingRoutingKey reports locally originated SS7 traffic that does
 	// not match any provisioned or dynamically registered Routing Key. RFC 4666
-	// Sections 1.2.1 and 4.4.1 make the Routing Key the SGP's AS selection rule;
+	// Sections 1.2 and 4.4.1 make the Routing Key the SGP's AS selection rule;
 	// falling back to an arbitrary AS would misroute the MSU.
 	ErrNoMatchingRoutingKey = errors.New("no Routing Key matches the MTP3 traffic")
 
@@ -99,8 +100,21 @@ var (
 	// parameter, which RFC 4666 Section 3.8.2 lists as Mandatory.
 	ErrMissingStatus = errors.New("notify without Status parameter")
 
-	// ErrASPIdentifierRequired is used by an SGP in response to an ASP Up message that
-	// does not contain an ASP Identifier parameter when the SGP requires one.
+	// ErrASPIdentifierRequired is the RFC 4666 Section 3.8.1 "ASP Identifier
+	// Required" Error, which an SGP sends when it requires an ASP Identifier in
+	// ASP Up and the peer omitted it.
+	//
+	// This package never raises it. There is no configuration that makes the
+	// ASP Identifier mandatory at an SGP, so no ASP Up is refused for omitting
+	// one; an SGP that needs its peers identified constrains them through
+	// ListenerConfig.SelectAssociationConfig and AssociationConfig.AuthorizeASP
+	// instead, and reads what the peer did send with
+	// Association.PeerASPIdentifier. The sentinel names the Error code for a
+	// received Error carrying it, and pairs with the encoder that would emit
+	// it.
+	//
+	// Duplicate ASP Identifiers are a separate rule and are enforced: see
+	// ErrInvalidASPIdentifier.
 	ErrASPIdentifierRequired = errors.New("ASP Identifier required")
 
 	// ErrInvalidASPIdentifier is returned when another ASP supporting the same

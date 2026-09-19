@@ -296,7 +296,9 @@ func (c *Association) heartbeat(ctx context.Context) {
 //
 // RFC 4666 Section 4.3.4.3 states "Independently of the RC, the SGP MUST send
 // an ASP Active Ack message in response to a received ASP Active message from
-// the ASP, if the ASP is already marked in the ASP-ACTIVE state." Withholding
+// the ASP, if the ASP is already marked in the APS-ACTIVE state." The published
+// text reads APS-ACTIVE, which is a typo for ASP-ACTIVE that no erratum
+// corrects; it is quoted here as published. Withholding
 // the Ack because the ASP is already ASP-ACTIVE leaves the peer retransmitting
 // on T(ack) forever — the same interop deadlock ASP Up suffered.
 //
@@ -507,7 +509,7 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	// ASP-INACTIVE is where the first Ack lands, but not the only place an Ack
 	// is legitimate. Activation is per Routing Context — Section 4.3.4.3 has the
 	// SGP answer "For the Application Servers for which the ASP can be
-	// activated" — so an SGP that could serve one context now and another later
+	// successfully activated" — so an SGP that could serve one context now and another later
 	// sends a second Ack while this ASP is already ASP-ACTIVE. Requiring
 	// ASP-INACTIVE threw that second Ack away, leaving the context it granted
 	// unusable.
@@ -521,9 +523,10 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 		return NewUnexpectedMessageError(aspAcAck)
 	}
 
-	// Section 4.3.4.3: the SGP answers with the traffic mode in force for the
-	// AS, so an Ack naming a mode we cannot operate in is not agreement — it
-	// means the two ends would run different traffic handling for the same AS.
+	// Section 4.3.4.3 has the SGP respond with ASP Active Ack messages
+	// "reflecting any Traffic Mode Type value present in the related ASP Active
+	// message", so an Ack naming a mode we cannot operate in is not agreement —
+	// it means the two ends would run different traffic handling for the same AS.
 	if err := c.validateAspActiveAckTrafficMode(aspAcAck); err != nil {
 		return err
 	}
@@ -682,9 +685,9 @@ func (c *Association) answerRoutingContexts(requested *params.Param, unservedAs,
 		//
 		// That is the no-RK case, not the dedicated-association case where local
 		// configuration intentionally carries a single AS without assigning it a
-		// numeric Routing Context. AssociationConfig.RoutingContexts nil, and the empty
-		// parameter produced by the public constructors from an empty slice, both
-		// represent that contextless AS. The only "no AS" shape this API can
+		// numeric Routing Context. An empty AssociationConfig.ApplicationServers
+		// inventory, and an ASConfig whose ASKey leaves RoutingContextSet false,
+		// both represent that contextless AS. The only "no AS" shape this API can
 		// express after ASP Up is an explicit authorizer that returned no
 		// membership.
 		if len(ours) == 0 {
@@ -698,8 +701,9 @@ func (c *Association) answerRoutingContexts(requested *params.Param, unservedAs,
 		return c.configuredRoutingContextParam(), nil
 	}
 
-	// An explicit context never creates its own Routing Key. With no static RK
-	// configured (and RKM unsupported), the ASP is not authorized for any AS.
+	// An explicit context never creates its own Routing Key. With neither a
+	// provisioned Routing Key nor one this peer registered through RKM, the ASP
+	// is not authorized for any AS.
 	if len(ours) == 0 {
 		return nil, unservedAs(asked...)
 	}
@@ -731,9 +735,13 @@ func (c *Association) answerRoutingContexts(requested *params.Param, unservedAs,
 
 // validateRoutingContextShape distinguishes an omitted optional Routing
 // Context parameter from a parameter that is present but contains no complete
-// 32-bit value. RFC 4666 Section 3.8.1 calls the latter an Invalid Routing
-// Context; it must never inherit the omitted parameter's "all configured ASes"
-// meaning.
+// 32-bit value. RFC 4666 Section 3.8.1 reserves "Invalid Routing Context" for
+// "an invalid (unconfigured) Routing Context value" and gives a wrong length
+// field its own "Parameter Field Error"; this library answers the malformed
+// shape with Invalid Routing Context as well, because the parameter names a
+// traffic scope and the peer needs to be told its scope was not understood.
+// Either way it must never inherit the omitted parameter's "all configured
+// ASes" meaning.
 func validateRoutingContextShape(peer *params.Param) error {
 	if peer != nil && len(peer.RoutingContexts()) == 0 {
 		return NewInvalidRoutingContextError()
@@ -757,10 +765,10 @@ func (c *Association) validateLocalRoutingContext(peer *params.Param) error {
 
 func validateRoutingContextAgainst(peer *params.Param, configured []uint32) error {
 	// A parameter that is present and decodes to nothing is not the same as one
-	// that was omitted. Section 3.8.1: "The 'Invalid Routing Context' error is
-	// sent if a message is received with an invalid or unconfigured routing
-	// context value" — an empty value, or one that is not a whole number of
-	// 32-bit words, is invalid on its face. It was previously read as though the
+	// that was omitted. Section 3.8.1: "The "Invalid Routing Context" error is
+	// sent if a message is received from a peer with an invalid (unconfigured)
+	// Routing Context value" — an empty value, or one that is not a whole number
+	// of 32-bit words, is invalid on its face. It was previously read as though the
 	// peer had sent no context at all, so a DATA carrying a malformed Routing
 	// Context was delivered to the application as unattributed traffic, and a
 	// malformed one on an ASPTM or SSNM message was silently accepted.
@@ -787,10 +795,12 @@ func validateRoutingContextAgainst(peer *params.Param, configured []uint32) erro
 	}
 
 	// The offending contexts travel with the error. Section 3.8.1 requires the
-	// Error message to quote them — "For this error, the invalid or
-	// unconfigured Routing Context value(s) MUST be included in the Routing
-	// Context parameter" — and only the value the peer sent will do; answering
-	// with our own configured set tells it nothing about what it got wrong.
+	// Error message to carry them — "For this error, the invalid Routing
+	// Context(s) MUST be included in the Error message" — and only the value the
+	// peer sent will do; answering with our own configured set tells it nothing
+	// about what it got wrong. They are carried in the Routing Context
+	// parameter, which is the field Section 3.8.1's Error message format has
+	// for them.
 	var offending []uint32
 	for _, rc := range theirs {
 		if _, ok := ours[rc]; !ok {
@@ -1057,8 +1067,9 @@ func (c *Association) stateForAcknowledgedRoutingContexts() State {
 // RFC 4666 Section 3.5.5 states "The receiver MUST respond with a BEAT Ack
 // message", and Section 4.3.4.6 repeats "Upon receiving a Heartbeat message,
 // the M3UA peer MUST respond with a Heartbeat Ack message". Neither is
-// qualified by ASP state, and Section 4.3.4.6 closes with "Note: Heartbeat-
-// related events are not shown in Figure 3 'ASP state transition diagram'".
+// qualified by ASP state, and Section 4.3.4.6 closes with "Note:
+// Heartbeat-related events are not shown in Figure 3 'ASP state transition
+// diagram'".
 // The BEAT Ack is therefore unconditional: withholding it because the ASP is
 // momentarily ASP-INACTIVE lets the peer's T(beat) expire and tears down an
 // otherwise healthy association.
@@ -1144,7 +1155,7 @@ func (c *Association) stateForActiveRoutingContexts() State {
 // It does nothing outside Override mode: in Loadshare and Broadcast, "receipt
 // of an ASP Active message at an SGP or IPSP causes direction of traffic to the
 // ASP sending the ASP Active message, in addition to all the other ASPs that
-// are active", so nobody is displaced.
+// are currently active in the AS", so nobody is displaced.
 func (c *Association) overrideOtherASPs(activated []uint32) {
 	if c.as == nil {
 		return

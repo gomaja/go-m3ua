@@ -67,14 +67,23 @@ association. Role-specific setters must then match the Endpoint; this ASP
 example sets an ASP Identifier:
 
 ```go
-config := m3ua.NewAssociationConfig()
-config.
+config := m3ua.NewAssociationConfig().
     EnableHeartbeat(3*time.Second, 10*time.Second).
-    SetTrafficModeType(params.TrafficModeLoadshare).
-    SetNetworkAppearance(7).
-    SetRoutingContexts(1)
+    SetApplicationServers(m3ua.ASConfig{
+        ASKey: m3ua.ASKey{
+            NetworkAppearance: 7, NetworkAppearanceSet: true,
+            RoutingContext: 1, RoutingContextSet: true,
+        },
+        TrafficMode: params.TrafficModeLoadshare,
+    })
 config.SetASPIdentifier(1) // ASP-only
 ```
+
+`ApplicationServers` is the whole of the association's membership. Each entry
+names one Application Server by the exact `ASKey` a message must name, and
+carries the Traffic Mode agreed for that one Application Server — not for the
+association. An empty inventory is the contextless Application Server of RFC
+4666 Section 3.6.1.
 
 The configuration holds no message defaults. Every DATA carries its own MTP3
 routing label, Application Server scope and Correlation Id, as RFC 4666 Section
@@ -109,17 +118,29 @@ config.IPSP = &m3ua.IPSPConfig{
     ExchangeModel: m3ua.IPSPExchangeDouble,
     ASPSMExchange: m3ua.IPSPASPSMExchangeDouble,
     TrafficToLocal: &m3ua.IPSPTrafficConfig{
-        TrafficModeType: params.NewTrafficModeType(params.TrafficModeLoadshare),
-        NetworkAppearance: params.NewNetworkAppearance(10),
-        RoutingContexts: params.NewRoutingContext(11),
+        ApplicationServers: []m3ua.ASConfig{{
+            ASKey: m3ua.ASKey{
+                NetworkAppearance: 10, NetworkAppearanceSet: true,
+                RoutingContext: 11, RoutingContextSet: true,
+            },
+            TrafficMode: params.TrafficModeLoadshare,
+        }},
     },
     TrafficToPeer: &m3ua.IPSPTrafficConfig{
-        TrafficModeType: params.NewTrafficModeType(params.TrafficModeLoadshare),
-        NetworkAppearance: params.NewNetworkAppearance(20),
-        RoutingContexts: params.NewRoutingContext(22),
+        ApplicationServers: []m3ua.ASConfig{{
+            ASKey: m3ua.ASKey{
+                NetworkAppearance: 20, NetworkAppearanceSet: true,
+                RoutingContext: 22, RoutingContextSet: true,
+            },
+            TrafficMode: params.TrafficModeLoadshare,
+        }},
     },
 }
 ```
+
+Each direction declares its own Application Server inventory and nothing else;
+RFC 4666 Section 5.6.2 keeps the two directions independent, so neither reads
+the other's membership, Network Appearance or Traffic Mode.
 
 With the normal `IPSPASPSMExchangeDouble` procedure, an automatic `ASPUp`
 requires `TrafficToLocal`, because that ASP Up establishes the direction in
@@ -129,9 +150,9 @@ ASP Up exchange. An automatic `ASPActive` always requires `TrafficToLocal`.
 
 `TrafficToLocal` is the traffic the peer sends to this IPSP after this IPSP's
 ASP Up/ASP Active procedures succeed. `TrafficToPeer` is the traffic this IPSP
-sends after the peer's ASP Up/ASP Active procedures succeed. A non-nil traffic
-direction with no `RoutingContexts` represents a configured contextless AS; a
-nil direction is disabled. `Association.IPSPState()` reports both directions.
+sends after the peer's ASP Up/ASP Active procedures succeed. A non-nil direction
+with an empty inventory is the contextless Application Server in that direction;
+a nil direction is disabled. `Association.IPSPState()` reports both directions.
 
 `IPSPASPSMExchangeDouble` is the normal independent ASPSM exchange.
 `IPSPASPSMExchangeSingle` enables only the agreed ASPSM simplification described
@@ -177,7 +198,12 @@ outbound route inventory, and leaving it nil hands outbound candidate selection
 to the application. An Application Server's name is local to its Signalling
 Gateway, while the Routing Context and Network Appearance that label it are
 peer-specific `ASKey` values bound per SGP; neither is a global route
-identifier:
+identifier.
+
+A route names path candidates rather than peers directly. `Paths` provisions
+each candidate once — one Signalling Gateway and its Application Servers in
+preference order — and `MTPRouteConfig.Paths` references them by name, so
+several routes can share one candidate:
 
 ```go
 peer := m3ua.SGPIdentity{
@@ -206,18 +232,17 @@ endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
             SignallingGatewayProcessSelection: map[m3ua.SignallingGatewayID]m3ua.RouteSelectionMode{
                 peer.SignallingGateway: m3ua.RouteSelectionPrimaryBackup,
             },
+            Paths: []m3ua.MTPRoutePath{{
+                ID: "via-sg-a",
+                SignallingGateway: peer.SignallingGateway,
+                ApplicationServers: []m3ua.RemoteASID{"as-core"},
+            }},
             MTPRoutes: []m3ua.MTPRouteConfig{{
                 ID: "sccp",
                 DestinationPointCode: 0x220000,
                 Mask: 16,
                 ServiceIndicators: []uint8{params.ServiceIndSCCP},
-            }},
-            Routes: []m3ua.MTPRouteBinding{{
-                MTPRoute: "sccp",
-                AS: m3ua.SGASKey{
-                    SignallingGateway: peer.SignallingGateway,
-                    ApplicationServer: "as-core",
-                },
+                Paths: []m3ua.MTPRoutePathID{"via-sg-a"},
             }},
         },
     },
@@ -225,6 +250,7 @@ endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
 if err != nil {
     log.Fatal(err)
 }
+defer func() { _ = endpoint.Close() }()
 
 config.PeerSGP = &peer
 remote, err := sctp.ResolveSCTPAddr("sctp", PEER_ADDRESS)
@@ -232,21 +258,25 @@ if err != nil {
     log.Fatal(err)
 }
 
-ctx := context.Background()
-ctx, cancel := context.WithCancel(ctx)
+// ctx is the association's lifetime, not just its handshake: cancelling it
+// closes the association.
+ctx, cancel := context.WithCancel(context.Background())
 defer cancel()
 
 association, err := endpoint.Dial(ctx, "m3ua", nil, remote, config)
 if err != nil {
     log.Fatalf("Failed to establish M3UA association: %s", err)
 }
-defer func() { _ = association.Close() }()
 ```
 
+`endpoint.Close` is the one deferred close an ASP needs: it closes every
+Association the Endpoint owns along with the shared state none of them owns
+individually. See [Ownership and shutdown](#ownership-and-shutdown) below.
+
 For an ASP with provisioned routes, submit the RFC 4666 MTP-TRANSFER request to
-the Endpoint. It resolves the MTP Route, aggregates route state across SGs,
-selects the SGP and Association, applies that peer's `ASKey`, and derives the
-SCTP stream from the Protocol Data SLS:
+the Endpoint. It resolves the MTP Route, selects the path candidate, SGP and
+Association, applies that peer's `ASKey`, and derives the SCTP stream from the
+Protocol Data SLS:
 
 ```go
 result, err := endpoint.MTPTransfer(m3ua.MTPTransferRequest{
@@ -258,7 +288,34 @@ result, err := endpoint.MTPTransfer(m3ua.MTPTransferRequest{
 if err != nil {
     log.Fatalf("MTP-TRANSFER failed: %s", err)
 }
-log.Printf("sent through %d Association(s)", result.TransmittedAssociations)
+for _, path := range result.SuccessfulPaths {
+    log.Printf("%d user octets reached AS %q of SGP %q on association %d",
+        result.UserDataOctets, path.ApplicationServer,
+        path.SGP.SignallingGatewayProcess, path.Association)
+}
+```
+
+`SuccessfulPaths` names every target the payload reached, in selection order. It
+reports what this node sent, not what the far end received: RFC 4666 defines no
+acknowledgement for DATA.
+
+When no candidate can carry the request, the error is an `*MTPSelectionError`
+listing every candidate the route tried and why each was refused, in the route's
+own candidate order. That is what an alternate-path recovery decision is made
+from:
+
+```go
+var selection *m3ua.MTPSelectionError
+if errors.As(err, &selection) {
+    for _, rejection := range selection.Rejections {
+        log.Printf("%s via %q: %s", rejection.ApplicationServer, rejection.Path, rejection.Reason)
+    }
+    if errors.Is(err, m3ua.ErrDestinationStateUnknown) {
+        // Every candidate was refused only because no Signalling Gateway has
+        // reported this destination. Audit it, or set
+        // ASPRoutingConfig.AllowUnknownDestinations to send anyway.
+    }
+}
 ```
 
 Consume Endpoint-wide derived MTP-PAUSE, MTP-RESUME, and MTP-STATUS
@@ -274,6 +331,40 @@ for indication := range endpoint.MTPIndications() {
     log.Printf("%s: %#v", indication.Kind, indication.Destination)
 }
 ```
+
+These indications are the MTP3-User's *derived* view over every provisioned
+route, and they read a silent Signalling Gateway as one that can carry traffic,
+because RFC 4666 Appendix A.2.2 defines capability negatively: established,
+activated, and no report of inaccessibility or MTP restart. `MTPTransfer`
+decides about one candidate and reads the canonical SSNM store, where an absent
+availability record is absence, so it refuses with `ErrDestinationStateUnknown`
+unless `AllowUnknownDestinations` is set. The two disagree for exactly one case
+— an established, activated, silent Signalling Gateway — and neither is derived
+from the other.
+
+### Application-managed routing
+
+Leaving `ASPConfig.Routing` nil keeps the peer and Application Server inventory,
+the procedures and the authorization, and hands outbound candidate selection to
+the application. Nothing has to be invented to get there: no dummy MTP Route, no
+adopting `Endpoint.MTPTransfer`. The application discovers what it can reach
+from the SSNM knowledge the Endpoint retains, and sends on the association it
+chose:
+
+```go
+endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Role: m3ua.RoleASP,
+    ASP: &m3ua.ASPConfig{SignallingGateways: gateways}, // Routing left nil.
+})
+```
+
+`Endpoint.SubscribeSSNM` is the discovery source, and is described under
+[Layer Management and SSNM operations](#layer-management-and-ssnm-operations).
+`Endpoint.MTPIndications` is not the discovery source here. Every ASP Endpoint
+has that channel, whatever its `ASPConfig`, so it is non-nil — but nothing ever
+arrives on it, because these indications are derived from provisioned MTP
+Routes and this ASP has none. A receive blocks until `Endpoint.Close` closes
+the channel, so treat it as idle rather than as something to wait on.
 
 Association-level `WriteData` and `ReadData` are the canonical DATA API. A
 request names its Application Server scope exactly and carries the whole MTP3
@@ -321,19 +412,40 @@ log.Printf("DATA for %+v arrived on stream %d: %x",
 ```
 
 Cancelling `ctx` ends that one read: the association stays open and nothing
-queued is discarded. `message.Scope` is the Network Appearance and Routing
-Context exactly as the peer sent them, `message.AS` is the Application Server
-they resolve to, and `message.Epoch` is the SCTP association epoch the message
-arrived in.
+queued is discarded.
 
-See the [SGP example](./examples/sgp) for accepting SCTP associations.
+Inbound DATA is classified from three separate things, and keeping them separate
+is the point. `message.Scope` is the Network Appearance and Routing Context
+exactly as the peer put them on the wire, presence bits included, which is what
+an answer sent back in the same scope must use. `message.AS` is the Application
+Server they resolved to, which is what distributing work by Application Server
+must use. `message.Epoch` is the SCTP association epoch, which changes when the
+peer restarts the association, so traffic from before a restart is
+distinguishable from traffic after one:
+
+```go
+switch {
+case !message.Scope.RoutingContextSet:
+    // The peer omitted the Routing Context, so this is the single contextless
+    // Application Server the association coordinates.
+    handleContextless(message)
+case message.AS == coreAS:
+    handleCore(message)
+default:
+    log.Printf("DATA for unexpected AS %+v (wire scope %+v)", message.AS, message.Scope)
+}
+```
 
 An endpoint that accepts SCTP associations uses `ListenerConfig` to select a
-separate immutable `AssociationConfig` per association before M3UA parsing:
+separate immutable `AssociationConfig` per association before M3UA parsing. The
+selector runs after SCTP accept and before any M3UA message is parsed, so it is
+where an accepted peer is bound to its authorized policy:
 
 ```go
 listenerConfig := m3ua.NewListenerConfig(defaultAssociationConfig)
 listenerConfig.SelectAssociationConfig = func(info m3ua.AcceptInfo) (*m3ua.AssociationConfig, error) {
+    // info.RemoteAddr holds every address the peer confirmed for this
+    // multi-homed SCTP association, not one representative address.
     return configForPeer(info.RemoteAddr)
 }
 
@@ -341,7 +453,94 @@ endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
 if err != nil {
     log.Fatal(err)
 }
+defer func() { _ = endpoint.Close() }()
+
 listener, err := endpoint.Listen("m3ua", local, listenerConfig)
+```
+
+Accept in as many goroutines as the endpoint expects peers. Two of `Accept`'s
+errors mean opposite things: an `*AssociationEstablishmentError` concerns one
+peer and the Listener is still serving, while anything else is permanent for
+that loop. A loop that returns on both stops accepting without saying so:
+
+```go
+for range concurrency {
+    go func() {
+        for {
+            association, err := listener.Accept(acceptCtx)
+            if err != nil {
+                var establishment *m3ua.AssociationEstablishmentError
+                if errors.As(err, &establishment) {
+                    log.Printf("rejected %s: %v", establishment.RemoteAddr, establishment)
+                    continue
+                }
+                return
+            }
+            go func() {
+                defer func() { _ = association.Close() }()
+                serve(association)
+            }()
+        }
+    }()
+}
+```
+
+See the [SGP example](./examples/sgp) for the whole program.
+
+### Ownership and shutdown
+
+Three scopes own resources, and each closes exactly its own:
+
+| Call | Closes | Leaves alone |
+| --- | --- | --- |
+| `Association.Close` | that one association, its goroutines and its SCTP association | its Listener, its Endpoint, every sibling association |
+| `Listener.Close` | the listening socket and every Association *that Listener accepted* | the Endpoint, its shared AS/NIF/destination/restart state, associations from `Dial` or another Listener |
+| `Endpoint.Close` | every Listener and every Association the Endpoint owns, dialled and accepted alike, then the shared state | nothing it owns |
+
+Closing one association is still visible to peers through M3UA, because an ASP
+leaving an Application Server can change that AS's state and produce a Notify to
+the others. That is RFC 4666 Section 4.3.2 behaviour, not teardown reaching
+sideways.
+
+All three release SCTP without sending ASP Inactive or ASP Down, which is RFC
+4666 Section 4.9 option (b). Option (a) is `Association.ShutdownContext`, which
+performs the procedures `AssociationConfig.ASPProcedures` marks automatic and
+then closes. Nothing calls it for the application:
+
+```go
+shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+if err := association.ShutdownContext(shutdownCtx); err != nil {
+    log.Printf("graceful withdrawal did not complete: %s", err)
+}
+// SCTP is released either way; Endpoint.Close then has nothing left to do
+// for this association.
+_ = endpoint.Close()
+```
+
+The `ctx` passed to `Dial` and `Accept` is the association's lifetime, not just
+its handshake. Cancelling it closes the associations it produced, so an accept
+loop that wants to stop accepting without dropping live traffic closes the
+Listener instead.
+
+That also makes it the wrong context to derive from an interrupt signal when the
+application wants a graceful withdrawal. The association's monitor closes it as
+soon as the context is done, so `ShutdownContext` finds an association already
+in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns nil — option
+(a) silently becomes option (b). Give the association a context of its own and
+cancel it only after the withdrawal has returned:
+
+```go
+notifyCtx, stopNotify := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stopNotify()
+
+associationCtx, closeAssociation := context.WithCancel(context.Background())
+defer closeAssociation()
+
+association, err := endpoint.Dial(associationCtx, "m3ua", nil, remote, config)
+...
+<-notifyCtx.Done()            // The signal stops the work, not the association.
+_ = association.ShutdownContext(shutdownCtx) // Written while associationCtx is live.
 ```
 
 ## Routing Key Management
@@ -450,9 +649,69 @@ if err := association.ASPActive(ctx, asKey); err != nil {
 
 An active ASP uses `Association.DestinationStateAudit` and optional
 `Association.SignallingCongestion`. An SGP uses
-`Endpoint.SignallingCongestion` and `Endpoint.DestinationUserPartUnavailable`
-to update shared state and fan out to the concerned active ASPs. Partial fan-out
-returns `*SSNMDeliveryError` with stable successful and failed Association IDs.
+`Endpoint.ReportDestinationAvailability` for DUNA, DAVA and DRST,
+`Endpoint.SignallingCongestion` for SCON, and
+`Endpoint.DestinationUserPartUnavailable` for DUPU; each records the shared state
+a later RFC 4666 Section 4.5.3 audit is answered from and fans out to the
+concerned active ASPs. Partial fan-out returns `*SSNMDeliveryError` with stable
+successful and failed Association IDs.
+
+### Consuming SSNM knowledge
+
+`Endpoint.SubscribeSSNM` returns what the Endpoint currently knows together with
+a subscription delivering every later change. The two are atomic with respect to
+each other: no report is in both, and none is in neither, so there is no window
+in which a change is lost between reading a snapshot and starting to listen.
+
+```go
+snapshot, subscription, err := endpoint.SubscribeSSNM()
+if err != nil {
+    return err
+}
+defer func() { _ = subscription.Close() }()
+
+apply(snapshot) // The application's starting view, owned by the application.
+
+for {
+    event, err := subscription.Next(ctx)
+    if err != nil {
+        return err
+    }
+    if event.ContinuityLost {
+        // The bounded queue refused this consumer's backlog. The stream is no
+        // longer a complete history, so replace the view rather than patch it.
+        resynced, err := subscription.Resync()
+        if err != nil {
+            return err
+        }
+        apply(resynced)
+        continue
+    }
+    applyDelta(event)
+}
+```
+
+Knowledge is owned by canonical identity, not by the label that carried it:
+`event.Partition` names one Signalling Gateway and one Application Server, while
+`event.Report.Scope` is the exact Network Appearance and Routing Context the
+peer put on the wire. A `Routing Context` value on one Signalling Gateway means
+something else on another, so a report learned through one SGP survives that
+SGP's association and is never confused with a same-numbered scope elsewhere.
+
+Every event's `Revision` is strictly greater than the snapshot's and strictly
+increases, and `event.Epoch` is the binding generation, so knowledge from before
+a source reset is never mistaken for knowledge after one.
+
+The store is bounded in every dimension a peer can grow — records per partition,
+per peer and per Endpoint, bytes, partitions, subscribers and queue depth — and
+it **refuses** rather than evicting. `SSNMSnapshot.RecordsRefused`,
+`ReportsRefused` and `PartitionsInvalidated` count what a bound refused, and
+`LastResourceLoss` says what happened most recently. A subscription that falls
+behind is told so with `ContinuityLost` instead of being handed a stream with a
+silent hole in it. `Endpoint.SSNMKnowledge` returns the same snapshot without
+opening a subscription.
+
+### Management indications
 
 `Association.ManagementIndications` reports M-NOTIFY, M-ERROR,
 M-SCTP_RELEASE, and M-SCTP_RESTART. Each indication owns its slices and carries
@@ -460,8 +719,9 @@ its `AssociationID`, exact `ASKeys`, affected destination masks and scope, and
 local cause where applicable. A full bounded queue closes the Association with
 `ErrIndicationQueueFull` rather than silently losing a mandatory event.
 
-See the [Endpoint management and SSNM design](./docs/design/endpoint-management-and-ssnm.md)
-and [v1.2 migration guide](./docs/migration-v1.2.md).
+See the [Endpoint management and SSNM design](./docs/design/endpoint-management-and-ssnm.md),
+the [procedure coverage](./docs/procedure-coverage.md), and the
+[v1.2 migration guide](./docs/migration-v1.2.md).
 
 ## Supported Features
 
@@ -530,9 +790,10 @@ SCTP behavior from RFC 9260 where it affects the M3UA transport. See the
 
 The v1.2 API intentionally uses RFC entity and primitive names. See the
 [v1.2 migration guide](docs/migration-v1.2.md) for the breaking role,
-configuration, and ASP routing changes.
+configuration, I/O, destination, restart and Routing Key Management changes.
 
 - [Migrating to v1.2](docs/migration-v1.2.md)
+- [Procedure coverage and optional-procedure exclusions](docs/procedure-coverage.md)
 - [v1.2.0 release notes](docs/release-v1.2.0.md)
 
 ## LICENSE

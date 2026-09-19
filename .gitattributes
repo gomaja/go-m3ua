@@ -1,0 +1,3 @@
+# The exported-API inventory is compared line by line, so a CRLF checkout would
+# make every entry miss and report the whole surface as undeclared.
+testdata/exported-api.txt text eol=lf

@@ -411,6 +411,29 @@ func runAssociationIsolation(associations []*Association, isolate func(*Associat
 }
 
 // Close closes every Listener and Association owned by the Endpoint.
+//
+// It is the outermost of three ownership scopes: Association.Close closes one
+// association, Listener.Close closes the associations that Listener accepted,
+// and Close here closes everything the Endpoint owns — every Listener, every
+// accepted Association, and every Association Dial created — along with the
+// shared state none of them owns individually.
+//
+// The order matters and is fixed. Close stops new operations and cancels the
+// Endpoint's operation context, quiesces Application Server timers and recovery
+// queues before the transports they would otherwise write to, invalidates any
+// MTP3 restart in progress, closes the Listeners, closes the Associations,
+// waits for in-flight Endpoint operations to finish, closes the MTPIndications
+// channel, and terminates every open SSNM subscription with ErrEndpointClosed.
+//
+// Close releases SCTP without sending ASP Inactive or ASP Down, which is RFC
+// 4666 Section 4.9 option (b). For option (a), call Association.ShutdownContext
+// on each association first.
+//
+// Close is idempotent, and every caller receives the same result: the first
+// non-nil error from any Listener or Association it closed. Afterwards Dial,
+// Listen, MTPTransfer, SubscribeSSNM, the SSNM operations and BeginMTP3Restart
+// report ErrEndpointClosed; the status snapshots remain callable and report an
+// Endpoint that owns nothing.
 func (e *Endpoint) Close() error {
 	if e == nil {
 		return nil

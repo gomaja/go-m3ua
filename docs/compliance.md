@@ -1,6 +1,6 @@
 # go-m3ua compliance and ecosystem audit
 
-Audit date: 2026-08-31.
+Audit date: 2026-08-31. Standards and API statements rechecked 2026-09-19.
 
 ## Specification baseline
 
@@ -38,8 +38,14 @@ RFC 4666 Sections 1.4.4.1, 3.8.2, 4.3.2, 4.3.4.3, 4.3.4.5, 5.1.4, and 5.2.3:
 The ASP Endpoint implements the route function described by RFC 4666 Sections
 1.3.2.5, 1.4.2.5, 4.5.2.2, and 5.5.1.1.1:
 
-- MTP Routes are local routing-table identities; each SGP route maps one to
-  the peer-specific Network Appearance and Routing Context in an `ASKey`.
+- MTP Routes are local routing-table identities and name provisioned
+  `MTPRoutePath` candidates; each candidate names a Signalling Gateway and its
+  canonical Application Servers, and the peer-specific Network Appearance and
+  Routing Context in an `ASKey` is resolved per SGP at selection time.
+- Outbound routing is optional. `ASPConfig.Routing` left nil keeps peer and
+  Application Server inventory, procedures and authorization, and gives the
+  application outbound candidate selection with no dummy route and no adoption
+  of `Endpoint.MTPTransfer`.
 - SSNM state is retained per originating SG and aggregated before MTP-PAUSE,
   MTP-RESUME, or MTP-STATUS is delivered to the MTP3-User.
 - Peer-controlled SSNM work and retained route state have configurable
@@ -164,8 +170,8 @@ golangci-lint, the race detector, 10,000 generated inputs per fuzz target, modul
 tidiness, actionlint, govulncheck, and gitleaks. The fuzz gate discovered and
 executed all 20 exported targets.
 
-A privileged Linux/arm64 container with kernel SCTP support and go-sctp v1.0.2
-then passed:
+A privileged Linux/arm64 container with kernel SCTP support and the pinned
+go-sctp release then passed:
 
 - `go test ./... -count=1 -timeout=900s`;
 - `go test ./... -race -count=1 -timeout=900s`;

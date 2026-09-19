@@ -20,8 +20,10 @@ const (
 	// ProtocolDropParameter accepts the message but discards the offending
 	// optional parameter.
 	ProtocolDropParameter = messages.ProtocolDropParameter
-	// ProtocolUseLocalDefault is reserved for future classified violations whose
-	// safe action is to infer a configured local value.
+	// ProtocolUseLocalDefault names the decision to complete a violating message
+	// from a configured local value. No classified violation currently has a
+	// local value to fall back on, so no decoder acts on it: a tolerator that
+	// returns it gets the same strict rejection as ProtocolReject.
 	ProtocolUseLocalDefault = messages.ProtocolUseLocalDefault
 )
 
