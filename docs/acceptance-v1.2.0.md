@@ -193,9 +193,9 @@ The full suite on the candidate head, on Linux, against the kernel SCTP stack:
 
 ```
 go test ./... -count=1 -timeout=900s          exit 0
-  5655 tests passed, 0 failed, 7 skipped
+  5656 tests passed, 0 failed, 7 skipped
 go test ./... -count=1 -race -timeout=1800s   exit 0
-  ok github.com/gomaja/go-m3ua 450.697s; 0 "WARNING: DATA RACE"
+  ok github.com/gomaja/go-m3ua 452.545s; 0 "WARNING: DATA RACE"
 ```
 
 **No socket-backed test was skipped.** All seven skips are accounted for, and
