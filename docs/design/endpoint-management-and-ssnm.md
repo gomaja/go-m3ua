@@ -2,7 +2,7 @@
 
 RFC 4666 remains the current M3UA specification. The RFC Editor and IETF
 Datatracker both list it as a Proposed Standard that obsoletes RFC 3332, with no
-RFC that updates or obsoletes it as of 2026-08-31. The SIGTRAN working group is
+RFC that updates or obsoletes it as of 2026-09-19. The SIGTRAN working group is
 concluded and lists no active Internet-Draft that replaces M3UA.
 
 The RFC Editor lists no Verified errata. Errata 2065 and 4475 are Held for
@@ -162,16 +162,27 @@ type DestinationStatusKey struct {
     Mask                 uint8
 }
 
+type DestinationNetworkState struct {
+    Availability DestinationAvailability
+    Congestion   CongestionState
+}
+
 type DestinationStatusSnapshot struct {
-    Key                DestinationStatusKey
-    State              DestinationState
-    CongestionLevel    uint8
-    CongestionLevelSet bool
+    Key   DestinationStatusKey
+    State DestinationNetworkState
 }
 
 func (e *Endpoint) DestinationStatus(DestinationStatusKey) (DestinationStatusSnapshot, bool)
 func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot
 ```
+
+`DestinationNetworkState` carries both dimensions because an audit has to answer
+both, whichever of them was reported last. The single `DestinationState` enum
+this replaces could not: it had one `DestinationCongested` value, so a
+congestion report silently made a destination reachable and a DAVA silently made
+it uncongested. `DestinationAvailability` is what DUNA, DAVA and DRST move, and
+`CongestionState` is what SCON moves, with `LevelSet` separating an omitted
+Congestion Indications parameter from an explicit level zero.
 
 Role-invalid status queries return no result and never consult a peer.
 
@@ -245,13 +256,26 @@ procedures are the application's responsibility; after the selected automatic
 steps, SCTP is released. `Close` remains RFC 4666 Section 4.9 option (b): SCTP
 release without M3UA withdrawal messages.
 
+That distinction propagates to the two wider ownership scopes, which is worth
+stating because it is the part applications get wrong. `Listener.Close` closes
+the listening socket and every Association that Listener accepted;
+`Endpoint.Close` closes every Listener and Association the Endpoint owns,
+dialled and accepted alike, together with the shared Application Server, NIF,
+destination and MTP3 restart state that none of them owns individually. Neither
+performs a withdrawal: both use option (b) on every association. An application
+that wants option (a) calls `ShutdownContext` on each association first. An
+`Association.Close` on its own closes only that association and deregisters it;
+its Listener keeps listening and its siblings keep carrying traffic, although
+its departure from an Application Server is still visible to peers as the
+Section 4.3.2 AS state change it is.
+
 ## Typed SSNM operations
 
 The public API models the wire scope directly while preventing callers from
 constructing malformed parameter combinations.
 
 ```go
-type SSNMScope struct {
+type WireScope struct {
     NetworkAppearance    uint32
     NetworkAppearanceSet bool
     RoutingContexts      []uint32
@@ -264,13 +288,20 @@ type PointCodeRange struct {
 }
 
 type DestinationStateAuditRequest struct {
-    Scope        SSNMScope
+    Scope        WireScope
     Destinations []PointCodeRange
     Info         string
 }
 
+type DestinationAvailabilityRequest struct {
+    Scope        WireScope
+    Destinations []PointCodeRange
+    Availability DestinationAvailability
+    Info         string
+}
+
 type SignallingCongestionRequest struct {
-    Scope        SSNMScope
+    Scope        WireScope
     Destinations []PointCodeRange
 
     CongestionLevel    uint8
@@ -282,7 +313,7 @@ type SignallingCongestionRequest struct {
 }
 
 type DestinationUserPartUnavailableRequest struct {
-    Scope       SSNMScope
+    Scope       WireScope
     Destination PointCodeRange
     User        uint16
     Cause       uint16
@@ -290,14 +321,34 @@ type DestinationUserPartUnavailableRequest struct {
 }
 ```
 
+The type is named `WireScope` rather than `SSNMScope` because the rename carries
+a distinction the old name hid. `WireScope` is the exact Network Appearance and
+Routing Context a peer put on the wire, before any resolution into local
+membership. It is not an identity: RFC 4666 Section 1.4.2.1 makes a Routing
+Context "an index into a sending node's Message Distribution Table", so the same
+value on two Signalling Gateways names different Application Servers. What
+retained knowledge is owned by is `SSNMPartition`, below. Both presence bits are
+load bearing: zero is a legitimate explicit value for either parameter, and a
+Routing Context list may legitimately be empty, so neither value nor length
+substitutes for the flag.
+
 The operations are:
 
 ```go
 func (a *Association) DestinationStateAudit(DestinationStateAuditRequest) error
 func (a *Association) SignallingCongestion(SignallingCongestionRequest) error
+func (e *Endpoint) ReportDestinationAvailability(DestinationAvailabilityRequest) error
 func (e *Endpoint) SignallingCongestion(SignallingCongestionRequest) error
 func (e *Endpoint) DestinationUserPartUnavailable(DestinationUserPartUnavailableRequest) error
 ```
+
+`Endpoint.ReportDestinationAvailability` is the SGP's DUNA, DAVA and DRST
+publication (Sections 3.4.1, 3.4.2 and 3.4.6). It moves the availability
+dimension alone, records the state a later Section 4.5.3 audit is answered from,
+and stages destinations inside an MTP3 restart instead of publishing them. It
+replaces the per-Association and per-Listener `SetDestinationState` and
+`ReportDestinationState` families, because an SGP's view of the SS7 network is
+shared by every ASP it serves and was never a property of one association.
 
 `Association.DestinationStateAudit` is ASP-to-SGP (RFC 4666 Sections 3.4.3 and
 4.5.3). `Association.SignallingCongestion` is the optional ASP-to-SGP report;
@@ -319,6 +370,80 @@ each association without holding Endpoint or AS locks. Partial failures are
 returned with the failed `AssociationID` values; successful peers are never
 replayed automatically.
 
+## Route-independent SSNM knowledge
+
+The SSNM operations above are how a node *originates* a report. What a node
+*retains* from the reports it receives is a separate store, deliberately not
+keyed by anything on the wire.
+
+```go
+type SSNMPartitionKind uint8
+
+const (
+    SSNMCanonicalPartition SSNMPartitionKind = iota + 1
+    SSNMStandalonePartition
+)
+
+type SSNMPartition struct {
+    Kind              SSNMPartitionKind
+    SignallingGateway SignallingGatewayID
+    ApplicationServer RemoteASID
+    Association       AssociationID // standalone partitions only
+}
+
+func (e *Endpoint) SSNMKnowledge() SSNMSnapshot
+func (e *Endpoint) SubscribeSSNM() (SSNMSnapshot, *SSNMSubscription, error)
+
+func (s *SSNMSubscription) Next(context.Context) (SSNMEvent, error)
+func (s *SSNMSubscription) Resync() (SSNMSnapshot, error)
+func (s *SSNMSubscription) Close() error
+```
+
+Three decisions are worth recording.
+
+**Ownership is canonical, not wire.** A partition is one Signalling Gateway and
+one Application Server. Section 1.4.2.1 makes a Routing Context an index into
+the *sending* node's distribution table, so two SGPs of one Signalling Gateway
+may label one Application Server differently and the same value at another
+Signalling Gateway means something else. Keying retained knowledge by the label
+would have merged two networks' reports whenever the numbers collided, and lost
+a Signalling Gateway's knowledge whenever the association that happened to carry
+it closed. A standalone partition covers an Association with no provisioned peer
+identity, which is how an Endpoint without peer inventory still retains what it
+is told.
+
+**The snapshot and the subscription are atomic with respect to each other.**
+`SubscribeSSNM` takes the snapshot and registers the subscription in one
+critical section, so no report is both in the snapshot and in the stream, and
+none is in neither. Reading a snapshot and then subscribing would have left a
+window in which a change belonged to nobody, which is the kind of gap that shows
+up as an unexplained stale destination months later.
+
+**Bounds refuse; they do not evict.** The store is bounded in every dimension a
+peer controls — records per partition, per peer and per Endpoint, accounted
+bytes, partitions, subscribers and per-subscription queue depth. Reaching one
+refuses the record or the report and counts it in
+`SSNMSnapshot.RecordsRefused`, `ReportsRefused` or `PartitionsInvalidated`, with
+`LastResourceLoss` naming the most recent. A subscription that falls behind is
+told so with `SSNMEvent.ContinuityLost` and recovers with `Resync`. Silent
+eviction would have handed the application a view that looked complete and was
+not, which is worse than refusing: a peer chooses every Affected Point Code it
+reports, so unbounded retention is peer-controlled memory, and silent eviction
+is peer-controlled misinformation.
+
+`Epoch` is the binding generation, numbered across the whole store. A partition
+that loses its last binding is retired; the next binding starts a new epoch, so
+knowledge from before a source reset is never mistaken for knowledge after one.
+`Revision` increases strictly across a subscription's events and is always
+greater than the snapshot it started from.
+
+Reports admitted during the Section 4.5.1 activation window are retained but
+authorize nothing on their own: `SSNMPartitionKnowledge.TrafficAuthorized` is
+true only once at least one binding has completed activation, because Section
+4.3.4.3 says "The ASP SHOULD NOT send Data or SSNM messages for the related
+Routing Context(s) before receiving an ASP Active Ack message, or it will risk
+message loss."
+
 ## Management indications and overflow
 
 `ManagementIndication` gains:
@@ -333,8 +458,15 @@ Cause               error
 `ASKeys` is the complete explicit or configuration-implied scope. It preserves
 Network Appearance and contextless AS identity instead of projecting to bare
 Routing Context. `AffectedDestinations` retains masks and scope. `Cause` is set
-for local M-ERROR and M-SCTP_RELEASE. Existing compatibility fields remain
-derived projections.
+for local M-ERROR and M-SCTP_RELEASE.
+
+The projections they replaced are removed rather than kept alongside. The old
+`RoutingContext` and `RoutingContextSet` fields reported only the first Routing
+Context of an indication that may name several, and `AffectedPointCodes`
+reported only the first unmasked destination. A field that is right for the
+one-element case and silently wrong otherwise is worse than no field: it reads
+as complete. The indication owns its slices, so an application may retain or
+modify them.
 
 The bounded `StateChanges` and `ManagementIndications` streams remain
 association-scoped. Overflow closes that association with
