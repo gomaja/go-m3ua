@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-sctp"
 )
@@ -117,6 +118,96 @@ func TestWriteDataAllocatedBytes(t *testing.T) {
 			if bytesPerWrite > budget {
 				t.Errorf("WriteData allocates %.0f bytes per %d-octet message, budget is %.0f",
 					bytesPerWrite, payloadSize, budget)
+			}
+		})
+	}
+}
+
+// The two budgets above measure WriteData, which serializes DATA with the
+// association's own encoder. They therefore say nothing at all about the other
+// DATA encoder this library ships — messages.Data.MarshalTo, the codec path
+// that WriteSignal and the SGP distribution engine send through. Forcing that
+// encoder down its staged branch leaves both budgets reading exactly what they
+// read before, so a ceiling, however tight, could never have caught it.
+//
+// Data.MarshalTo has two branches. A Data carrying extension parameters is
+// staged in a private payload buffer so a parameter that fails to marshal
+// leaves the destination untouched; a Data without them marshals straight into
+// the destination, which is what keeps a relayed DATA free of a second
+// message-sized buffer and a copy of every payload octet. The two tests below
+// pin that split at its source, one branch each.
+//
+// The assertion is an exact allocation count, which is usually the brittle
+// choice — a count tuned to today's inlining fails on a Go release that
+// changes it. It is not brittle here because the count is zero. Zero is not a
+// measured figure with headroom, it is the categorical claim that the branch
+// creates no heap object at all, and nothing but a new allocation in the code
+// under test can move it. The staged branch's own count is its opposite
+// number: the one buffer it exists to allocate, which is what makes the
+// measurement capable of telling the branches apart.
+//
+// What the fast path costs is pinned here; what it means for the caller —
+// that Header.Payload afterwards aliases the destination, so b may not be
+// recycled while the Data is retained — is pinned in the messages package by
+// TestDataMarshalToAliasesTheDestinationAsDocumented. Staging destroys both,
+// and both are worth failing on separately.
+func allocationDataMessage(payloadSize int, others []*params.Param) *messages.Data {
+	message := messages.NewData(
+		params.NewNetworkAppearance(7),
+		params.NewRoutingContext(1),
+		params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1,
+			make([]byte, payloadSize)),
+		nil,
+	)
+	message.Others = others
+	message.SetLength()
+	return message
+}
+
+// marshalAllocations reports the allocations one MarshalTo into an already
+// sized destination costs. The first call is outside the measurement so that
+// nothing lazily built on the way in is charged to the steady state.
+func marshalAllocations(t *testing.T, message *messages.Data) float64 {
+	t.Helper()
+
+	destination := make([]byte, message.MarshalLen())
+	marshal := func() {
+		if err := message.MarshalTo(destination); err != nil {
+			t.Fatalf("MarshalTo: %v", err)
+		}
+	}
+	marshal()
+	return testing.AllocsPerRun(1000, marshal)
+}
+
+func TestDataMarshalToWithoutExtensionParametersStagesNothing(t *testing.T) {
+	for _, payloadSize := range []int{128, 4096} {
+		t.Run(payloadName(payloadSize), func(t *testing.T) {
+			allocs := marshalAllocations(t, allocationDataMessage(payloadSize, nil))
+			t.Logf("allocations per marshal: %.0f", allocs)
+			if allocs != 0 {
+				t.Errorf("Data.MarshalTo allocates %.0f times for a %d-octet message with "+
+					"no extension parameters, want 0; the fast path marshals straight into "+
+					"the destination and must stage nothing", allocs, payloadSize)
+			}
+		})
+	}
+}
+
+func TestDataMarshalToWithExtensionParametersStagesOneBuffer(t *testing.T) {
+	for _, payloadSize := range []int{128, 4096} {
+		t.Run(payloadName(payloadSize), func(t *testing.T) {
+			message := allocationDataMessage(payloadSize,
+				[]*params.Param{params.NewInfoString("x")})
+			allocs := marshalAllocations(t, message)
+			t.Logf("allocations per marshal: %.0f", allocs)
+			if allocs != 1 {
+				t.Errorf("Data.MarshalTo allocates %.0f times for a %d-octet message "+
+					"carrying an extension parameter, want 1 for the staged payload "+
+					"buffer; if it is 0 the measurement can no longer tell the staged "+
+					"path from the fast path that "+
+					"TestDataMarshalToWithoutExtensionParametersStagesNothing pins",
+					allocs, payloadSize)
 			}
 		})
 	}
