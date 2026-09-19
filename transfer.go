@@ -19,8 +19,8 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 		return
 	}
 
-	// RFC 4666 Section 1.4.7 rule 1: "DATA messages MUST NOT be sent on stream
-	// 0." The rule binds both ends, and the ASPSM handlers already enforce the
+	// RFC 4666 Section 1.4.7 rule 1: "The DATA message MUST NOT be sent on
+	// stream 0." The rule binds both ends, and the ASPSM handlers already enforce the
 	// mirror of it from the same recorded arrival stream; leaving this
 	// direction unchecked meant a peer that broke the rule was rewarded with
 	// delivery.
