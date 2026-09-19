@@ -10,9 +10,13 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"log"
 	"math"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gomaja/go-m3ua"
@@ -120,13 +124,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to resolve SGP SCTP address: %s", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+
+	// ctx is the association's lifetime, not just its handshake: cancelling it
+	// closes the association. An interrupt therefore ends the traffic loop and
+	// the association together.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
 	association, err := endpoint.Dial(ctx, "m3ua", nil, remote, associationConfig)
 	if err != nil {
 		log.Fatalf("Failed to establish M3UA Association: %s", err)
 	}
-	defer func() { _ = association.Close() }()
+	// The Association is not closed here. endpoint.Close closes every
+	// Association the Endpoint owns, and shutdown below withdraws this one
+	// through the RFC 4666 Section 4.9 option (a) procedures first.
 
 	go func() {
 		for indication := range endpoint.MTPIndications() {
@@ -144,6 +155,10 @@ func main() {
 		}
 	}()
 
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+traffic:
 	for {
 		result, err := endpoint.MTPTransfer(m3ua.MTPTransferRequest{
 			MTPRoute: "sccp",
@@ -151,13 +166,41 @@ func main() {
 				0x111111, 0x222222, params.ServiceIndSCCP, 0, 0, 1, payload,
 			),
 		})
-		if err != nil {
-			log.Fatalf("MTP-TRANSFER failed: %s", err)
+		if err == nil {
+			for _, path := range result.SuccessfulPaths {
+				log.Printf("MTP-TRANSFER sent %d user octets to Application Server %q of SGP %q",
+					result.UserDataOctets, path.ApplicationServer, path.SGP.SignallingGatewayProcess)
+			}
+		} else {
+			// No candidate could carry the request. The selection error names
+			// every candidate the route tried and why each was refused, which
+			// is what an alternate-path decision is made from.
+			var selection *m3ua.MTPSelectionError
+			if errors.As(err, &selection) {
+				for _, rejection := range selection.Rejections {
+					log.Printf("MTP Route %q refused %q via path %q: %s",
+						selection.MTPRoute, rejection.ApplicationServer,
+						rejection.Path, rejection.Reason)
+				}
+			} else {
+				log.Printf("MTP-TRANSFER failed: %s", err)
+			}
 		}
-		for _, path := range result.SuccessfulPaths {
-			log.Printf("MTP-TRANSFER sent %d user octets to Application Server %q of SGP %q",
-				result.UserDataOctets, path.ApplicationServer, path.SGP.SignallingGatewayProcess)
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			break traffic
 		}
-		time.Sleep(3 * time.Second)
+	}
+
+	// RFC 4666 Section 4.9 option (a): tell the SGP traffic is stopping and
+	// that this ASP is going down before the association disappears. Close
+	// alone is option (b), which endpoint.Close then performs on whatever is
+	// left.
+	shutdown, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	if err := association.ShutdownContext(shutdown); err != nil {
+		log.Printf("Graceful withdrawal did not complete: %s", err)
 	}
 }

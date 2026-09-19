@@ -213,9 +213,10 @@ type Association struct {
 	// ASP Active Ack.
 	//
 	// Activation is per Routing Context: Section 4.3.4.3 has the SGP answer
-	// "For the Application Servers for which the ASP can be activated", so a
-	// partial Ack leaves the rest inactive. Tracking one state for the whole
-	// association sent DATA for contexts the SGP had never agreed to carry.
+	// "For the Application Servers for which the ASP can be successfully
+	// activated", so a partial Ack leaves the rest inactive. Tracking one state
+	// for the whole association sent DATA for contexts the SGP had never agreed
+	// to carry.
 	//
 	// muAckedRCs rather than muState: the entry actions that reset this run
 	// inside handleStateUpdate, which already holds muState, and sync.RWMutex
@@ -287,9 +288,11 @@ type Association struct {
 	// a dedicated association where no Routing Context was coordinated.
 	unscopedDeliveryMu sync.Mutex
 	// localIPSPSSNMDeliveryMu is the independent Double Exchange barrier for
-	// local-directed SCON. RFC 4666 Section 5.6.2 gives DATA and SCON opposite
-	// traffic directions, so withdrawing one direction must not wait for the
-	// other while still draining messages already admitted in its own direction.
+	// local-directed SCON. RFC 4666 Section 3.4.4 lets an M3UA layer send SCON
+	// "indicating that the congestion level of the M3UA layer or the ASP has
+	// changed", which travels against the DATA the Section 5.6.2 exchange
+	// established, so withdrawing one direction must not wait for the other
+	// while still draining messages already admitted in its own direction.
 	localIPSPSSNMDeliveryMu sync.Mutex
 	// authorizedRCs is the immutable per-peer subset of the listener's Routing
 	// Context inventory resolved when ASP Up is received. Before resolution, an
@@ -1016,8 +1019,10 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	if !known {
 		return func() {}, nil
 	}
-	// RFC 4666 Section 5.6.2 defines SCON as flowing opposite DATA between
-	// IPSPs, so Double Exchange validates it against the local-directed flow.
+	// A peer's SCON reports its own M3UA or ASP congestion (RFC 4666 Section
+	// 3.4.4), so it travels against the DATA direction the Section 5.6.2
+	// exchange established; Double Exchange validates it against the
+	// local-directed flow.
 	localScope := c.isIPSPDoubleExchange()
 	configuredNetworkAppearance, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(routingContext, localScope)
 	if err != nil {
@@ -1285,10 +1290,28 @@ func isSSNM(raw []byte) bool {
 	return len(raw) >= 4 && raw[2] == messages.MsgClassSSNM
 }
 
-// Close closes the M3UA association.
+// Close closes this one M3UA association and nothing else.
+//
+// It is the innermost of three ownership scopes. Close releases this
+// association's SCTP association and its goroutines, and deregisters it from
+// the Listener that accepted it and from the Endpoint that owns it; the
+// Listener keeps listening, the Endpoint keeps running, and sibling
+// associations keep carrying traffic. Listener.Close closes the associations
+// that Listener accepted, and Endpoint.Close closes every Listener and
+// Association the Endpoint owns.
+//
+// Closing one association is still visible to its peers through M3UA, because
+// an ASP leaving an Application Server is an AS state change: the remaining
+// ASPs may receive a Notify and the AS may change state. That is RFC 4666
+// Section 4.3.2 behaviour, not teardown reaching sideways.
+//
+// Close releases SCTP without sending ASP Inactive or ASP Down, which is RFC
+// 4666 Section 4.9 option (b). ShutdownContext is option (a).
 //
 // Err then reports ErrAssociationClosed, unless the association had already
-// ended for some other reason, in which case that reason is kept.
+// ended for some other reason, in which case that reason is kept. Close is
+// idempotent; only the first call performs the teardown and reports its error,
+// and later calls return nil.
 func (c *Association) Close() error {
 	return c.closeWith(ErrAssociationClosed)
 }
@@ -2308,8 +2331,11 @@ func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 //
 // RFC 4666 Section 4.3.4.3 makes the receiving ASP "consider itself now in the
 // ASP-INACTIVE state" when overridden, and Errata ID 2065 is about the scope of
-// that: an ASP serving several Application Servers becomes inactive "only for
-// that particular Application Server, rather than all of them". The ASP state
+// that: its report argues that without the Routing Context an ASP serving
+// several Application Servers would go inactive for all of them rather than
+// for the one overridden. Errata 2065 is Held for Document Update, not
+// Verified, so this is an interoperability decision rather than a correction to
+// the published text. The ASP state
 // machine here is per association rather than per Routing Context, so the
 // association-wide move is kept only for an override that covers everything it
 // carries; a partial override is recorded here instead, which stops traffic for
@@ -2591,8 +2617,11 @@ func (c *Association) peerRoutingContextOverridden(rc uint32) bool {
 // Close is (b), which is why it stays abrupt. Shutdown is (a): the peer is told
 // traffic is stopping and that this ASP is going down before the association
 // disappears underneath it, so it can move traffic rather than discover the
-// loss from a vanished socket. DEREG is not sent, since this library does not
-// support dynamic registration and the RFC makes it optional in any case.
+// loss from a vanished socket. DEREG is not sent: the RFC makes it optional,
+// and an ASP that deregisters its Routing Keys on the way down loses the
+// registration it would otherwise reuse on reconnect. An application that does
+// want the Routing Keys withdrawn calls DeregisterApplicationServers itself
+// before shutting down.
 //
 // Each request completes its T(ack) procedure before the next is sent. Use
 // ShutdownContext to bound the operation more tightly than the configured
@@ -2603,6 +2632,16 @@ func (c *Association) Shutdown() error {
 
 // ShutdownContext is Shutdown with caller-controlled cancellation.
 // Cancellation stops the outstanding T(ack) request and still releases SCTP.
+//
+// It performs only the procedures AssociationConfig.ASPProcedures configures as
+// ASPProcedureAutomatic, because an explicitly managed application owns the
+// order and the timing of its own withdrawal. With an all-explicit policy,
+// ShutdownContext is Close. An SGP Association has no withdrawal procedures to
+// run and closes immediately.
+//
+// Neither Listener.Close nor Endpoint.Close calls it. An application that wants
+// RFC 4666 Section 4.9 option (a) on every association calls ShutdownContext on
+// each of them before closing their owner.
 func (c *Association) ShutdownContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("nil shutdown context")
