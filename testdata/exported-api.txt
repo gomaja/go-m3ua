@@ -1,0 +1,883 @@
+const ASActive
+const ASDown
+const ASInactive
+const ASPProcedureAutomatic
+const ASPProcedureExplicit
+const ASPending
+const DataNotSent
+const DataSendIndeterminate
+const DefaultBroadcastFlowCacheEntries
+const DefaultBroadcastFlowIdentifierBytes
+const DefaultDataQueueSize
+const DefaultEstablishTimeout
+const DefaultInitTimeout
+const DefaultMTPIndicationQueueSize
+const DefaultMaxAffectedPointCodesPerSSNM
+const DefaultMaxSSNMDestinationRecords
+const DefaultMaxSSNMPartitionRecords
+const DefaultMaxSSNMPartitions
+const DefaultMaxSSNMPeerRecords
+const DefaultMaxSSNMStateRecords
+const DefaultMaxSSNMStateRecordsPerRoute
+const DefaultMaxSSNMStateStoreBytes
+const DefaultMaxSSNMStateStoreRecords
+const DefaultMaxSSNMSubscribers
+const DefaultReadBufferSize
+const DefaultRecoveryQueueBytes
+const DefaultRecoveryQueueMessages
+const DefaultRecoveryQueueTotalBytes
+const DefaultRecoveryQueueTotalMessages
+const DefaultRecoveryTimer
+const DefaultSSNMSubscriptionQueueSize
+const DefaultTAck
+const DefaultTAckRetries
+const DefaultTransferFlowCacheEntries
+const DeregistrationASPActiveForRoutingContext
+const DeregistrationInvalidRoutingContext
+const DeregistrationNotRegistered
+const DeregistrationPermissionDenied
+const DeregistrationStatusUnknown
+const DeregistrationSuccessfullyDeregistered
+const DestinationAvailable
+const DestinationRestricted
+const DestinationUnavailable
+const IPSPASPSMExchangeDouble
+const IPSPASPSMExchangeSingle
+const IPSPExchangeDouble
+const IPSPExchangeSingle
+const M3UAPPID
+const MTPCandidateCongested
+const MTPCandidateNotActive
+const MTPCandidateNotBound
+const MTPCandidateStateUnknown
+const MTPCandidateUnavailable
+const MTPPauseIndication
+const MTPResumeIndication
+const MTPStatusIndication
+const ManagementError
+const ManagementNotify
+const ManagementSCTPRelease
+const ManagementSCTPRestart
+const ProtocolAccept
+const ProtocolDropParameter
+const ProtocolReject
+const ProtocolUseLocalDefault
+const RegistrationCannotSupportUniqueRouting
+const RegistrationInsufficientResources
+const RegistrationInvalidDestinationPointCode
+const RegistrationInvalidNetworkAppearance
+const RegistrationInvalidRoutingKey
+const RegistrationPermissionDenied
+const RegistrationRoutingKeyAlreadyRegistered
+const RegistrationRoutingKeyChangeRefused
+const RegistrationRoutingKeyNotCurrentlyProvisioned
+const RegistrationStatusUnknown
+const RegistrationSuccessfullyRegistered
+const RegistrationUnsupportedRoutingKeyParameterField
+const RegistrationUnsupportedTrafficHandlingMode
+const RoleASP
+const RoleIPSP
+const RoleSGP
+const RouteSelectionBroadcast
+const RouteSelectionLoadshare
+const RouteSelectionPrimaryBackup
+const SSNMBindingActivatedEvent
+const SSNMBindingAdmittedEvent
+const SSNMBindingRetiredEvent
+const SSNMCanonicalPartition
+const SSNMContinuityLostEvent
+const SSNMDestinationAvailableReport
+const SSNMDestinationRestrictedReport
+const SSNMDestinationStateAuditReport
+const SSNMDestinationUnavailableReport
+const SSNMDestinationUserPartUnavailableReport
+const SSNMLocalReport
+const SSNMPartitionInvalidatedEvent
+const SSNMPartitionRetiredEvent
+const SSNMPeerReport
+const SSNMReportEvent
+const SSNMResourceLossEvent
+const SSNMSignallingCongestionReport
+const SSNMStandalonePartition
+const StateASPActive
+const StateASPDown
+const StateASPInactive
+const StateSCTPCDI
+const StateSCTPRI
+const ViolationInvalidOptionalInfoString
+field ASActivationPolicy.RequiredActiveASPs
+field ASActivationPolicy.SmoothStart
+field ASConfig.ASKey
+field ASConfig.TrafficMode
+field ASKey.NetworkAppearance
+field ASKey.NetworkAppearanceSet
+field ASKey.RoutingContext
+field ASKey.RoutingContextSet
+field ASPConfig.MTPIndicationQueueSize
+field ASPConfig.MaxAffectedPointCodesPerSSNM
+field ASPConfig.MaxSSNMDestinationRecords
+field ASPConfig.MaxSSNMStateRecords
+field ASPConfig.MaxSSNMStateRecordsPerRoute
+field ASPConfig.MaxSSNMStateRecordsPerSignallingGateway
+field ASPConfig.Routing
+field ASPConfig.SignallingGateways
+field ASPIdentity.ASPIdentifier
+field ASPIdentity.ASPIdentifierSet
+field ASPIdentity.RemoteAddr
+field ASPProcedurePolicy.ASPActive
+field ASPProcedurePolicy.ASPDown
+field ASPProcedurePolicy.ASPInactive
+field ASPProcedurePolicy.ASPUp
+field ASPRoutingConfig.AllowUnknownDestinations
+field ASPRoutingConfig.CongestionPolicy
+field ASPRoutingConfig.MTPRoutes
+field ASPRoutingConfig.Paths
+field ASPRoutingConfig.SignallingGatewayProcessSelection
+field ASPRoutingConfig.SignallingGatewaySelection
+field ASPRoutingConfig.TransferFlowCacheEntries
+field ASPStatus.Key
+field ASPStatus.LocalASPIdentifier
+field ASPStatus.LocalASPIdentifierSet
+field ASPStatus.LocalState
+field ASPStatus.LocalStateSet
+field ASPStatus.PeerASPIdentifier
+field ASPStatus.PeerASPIdentifierSet
+field ASPStatus.PeerState
+field ASPStatus.PeerStateSet
+field ASPStatusKey.AS
+field ASPStatusKey.Association
+field AcceptInfo.LocalAddr
+field AcceptInfo.RemoteAddr
+field AffectedDestination.Mask
+field AffectedDestination.NetworkAppearance
+field AffectedDestination.NetworkAppearanceSet
+field AffectedDestination.PointCode
+field AffectedDestination.RoutingContext
+field AffectedDestination.RoutingContextSet
+field ApplicationServerConfig.ActivationPolicies
+field ApplicationServerConfig.DefaultActivationPolicy
+field ApplicationServerConfig.RecoveryTimer
+field ApplicationServerStatus.AS
+field ApplicationServerStatus.ActiveASPs
+field ApplicationServerStatus.RequiredActiveASPs
+field ApplicationServerStatus.State
+field ApplicationServerStatus.TrafficMode
+field AssociationConfig.<embedded *HeartbeatInfo>
+field AssociationConfig.<embedded *SCTPConfig>
+field AssociationConfig.ASPIdentifier
+field AssociationConfig.ASPProcedures
+field AssociationConfig.ApplicationServers
+field AssociationConfig.AuthorizeASP
+field AssociationConfig.Compatibility
+field AssociationConfig.DataQueueSize
+field AssociationConfig.EstablishTimeout
+field AssociationConfig.IPSP
+field AssociationConfig.PeerSGP
+field AssociationConfig.TAck
+field AssociationConfig.TAckRetries
+field AssociationEstablishmentError.Err
+field AssociationEstablishmentError.RemoteAddr
+field AssociationSnapshot.Association
+field AssociationSnapshot.IPSPState
+field AssociationSnapshot.LocalAddr
+field AssociationSnapshot.PeerASPIdentifier
+field AssociationSnapshot.PeerASPIdentifierSet
+field AssociationSnapshot.RemoteAddr
+field AssociationSnapshot.Role
+field AssociationSnapshot.SCTP
+field AssociationSnapshot.SCTPError
+field AssociationSnapshot.State
+field AssociationStatus.FragmentationPoint
+field AssociationStatus.InboundStreams
+field AssociationStatus.OutboundStreams
+field AssociationStatus.PendingDataChunks
+field AssociationStatus.PrimaryCongestionWindow
+field AssociationStatus.PrimaryMTU
+field AssociationStatus.PrimaryRetransmissionTimeout
+field AssociationStatus.PrimarySmoothedRTT
+field AssociationStatus.ReceiverWindow
+field AssociationStatus.State
+field AssociationStatus.UnackedDataChunks
+field CompatibilityPolicy.Tolerator
+field CongestionState.Congested
+field CongestionState.Level
+field CongestionState.LevelSet
+field DataMessage.AS
+field DataMessage.Association
+field DataMessage.CorrelationID
+field DataMessage.CorrelationIDSet
+field DataMessage.Epoch
+field DataMessage.ProtocolData
+field DataMessage.Scope
+field DataMessage.Stream
+field DataQueueOverflowError.DestinationPointCode
+field DataQueueOverflowError.NetworkIndicator
+field DataQueueStats.Capacity
+field DataQueueStats.Congested
+field DataQueueStats.Discarded
+field DataQueueStats.Queued
+field DataRequest.AS
+field DataRequest.CorrelationID
+field DataRequest.CorrelationIDSet
+field DataRequest.ProtocolData
+field DataRequest.Stream
+field DataWriteError.AS
+field DataWriteError.Err
+field DataWriteError.Outcome
+field DataWriteError.Stream
+field DestinationAvailabilityRequest.Availability
+field DestinationAvailabilityRequest.Destinations
+field DestinationAvailabilityRequest.Info
+field DestinationAvailabilityRequest.Scope
+field DestinationNetworkState.Availability
+field DestinationNetworkState.Congestion
+field DestinationRange.Mask
+field DestinationRange.NetworkAppearance
+field DestinationRange.NetworkAppearanceSet
+field DestinationRange.PointCode
+field DestinationRange.RoutingContext
+field DestinationRange.RoutingContextSet
+field DestinationRange.State
+field DestinationStateAuditRequest.Destinations
+field DestinationStateAuditRequest.Info
+field DestinationStateAuditRequest.Scope
+field DestinationStatus.ConcernedDestination
+field DestinationStatus.ConcernedDestinationSet
+field DestinationStatus.Mask
+field DestinationStatus.NetworkAppearance
+field DestinationStatus.NetworkAppearanceSet
+field DestinationStatus.PeerReported
+field DestinationStatus.PointCode
+field DestinationStatus.ResyncRequired
+field DestinationStatus.RoutingContextSet
+field DestinationStatus.RoutingContexts
+field DestinationStatus.State
+field DestinationStatus.UserCause
+field DestinationStatus.UserPartUnavailable
+field DestinationStatusKey.Mask
+field DestinationStatusKey.NetworkAppearance
+field DestinationStatusKey.NetworkAppearanceSet
+field DestinationStatusKey.PointCode
+field DestinationStatusKey.RoutingContext
+field DestinationStatusKey.RoutingContextSet
+field DestinationStatusSnapshot.Key
+field DestinationStatusSnapshot.State
+field DestinationUserPartUnavailableRequest.Cause
+field DestinationUserPartUnavailableRequest.Destination
+field DestinationUserPartUnavailableRequest.Info
+field DestinationUserPartUnavailableRequest.Scope
+field DestinationUserPartUnavailableRequest.User
+field EndpointConfig.ASP
+field EndpointConfig.ApplicationServers
+field EndpointConfig.Role
+field EndpointConfig.RoutingKeyManagement
+field EndpointConfig.SGP
+field EndpointConfig.SSNMState
+field HeartbeatInfo.Enabled
+field HeartbeatInfo.Interval
+field HeartbeatInfo.Timer
+field IPSPConfig.ASPSMExchange
+field IPSPConfig.ExchangeModel
+field IPSPConfig.TrafficToLocal
+field IPSPConfig.TrafficToPeer
+field IPSPState.TrafficToLocal
+field IPSPState.TrafficToPeer
+field IPSPTrafficConfig.ApplicationServers
+field InvalidSCTPStreamIDError.ID
+field InvalidVersionError.Ver
+field Listener.<embedded *AssociationConfig>
+field ListenerConfig.DefaultAssociationConfig
+field ListenerConfig.SelectAssociationConfig
+field MTPCandidateRejection.ApplicationServer
+field MTPCandidateRejection.Path
+field MTPCandidateRejection.Reason
+field MTPCandidateRejection.SGP
+field MTPDestination.MTPRoute
+field MTPDestination.Mask
+field MTPDestination.PointCode
+field MTPDestinationStatus.Availability
+field MTPDestinationStatus.Congested
+field MTPDestinationStatus.CongestionLevel
+field MTPDestinationStatus.CongestionLevelSet
+field MTPDestinationStatus.Destination
+field MTPIndication.Destination
+field MTPIndication.Kind
+field MTPIndication.ResyncRequired
+field MTPRouteConfig.DestinationPointCode
+field MTPRouteConfig.ID
+field MTPRouteConfig.Mask
+field MTPRouteConfig.OriginatingPointCodes
+field MTPRouteConfig.Paths
+field MTPRouteConfig.ServiceIndicators
+field MTPRoutePath.ApplicationServers
+field MTPRoutePath.ID
+field MTPRoutePath.SignallingGateway
+field MTPRouteStatus.Associations
+field MTPRouteStatus.Destinations
+field MTPRouteStatus.MTPRoute
+field MTPSelectionError.MTPRoute
+field MTPSelectionError.Rejections
+field MTPTransferError.Failures
+field MTPTransferError.SuccessfulPaths
+field MTPTransferFailure.Err
+field MTPTransferFailure.Target
+field MTPTransferPath.AS
+field MTPTransferPath.ApplicationServer
+field MTPTransferPath.Association
+field MTPTransferPath.Epoch
+field MTPTransferPath.Path
+field MTPTransferPath.SGP
+field MTPTransferRequest.CorrelationID
+field MTPTransferRequest.CorrelationIDSet
+field MTPTransferRequest.MTPRoute
+field MTPTransferRequest.ProtocolData
+field MTPTransferResult.SuccessfulPaths
+field MTPTransferResult.UserDataOctets
+field ManagementIndication.ASKeys
+field ManagementIndication.ASPIdentifier
+field ManagementIndication.ASPIdentifierSet
+field ManagementIndication.AffectedDestinations
+field ManagementIndication.Association
+field ManagementIndication.Cause
+field ManagementIndication.Description
+field ManagementIndication.ErrorCode
+field ManagementIndication.Kind
+field ManagementIndication.NetworkAppearance
+field ManagementIndication.NetworkAppearanceSet
+field ManagementIndication.RoutingContexts
+field ManagementIndication.StatusInfo
+field ManagementIndication.StatusType
+field NetworkAppearanceError.Appearance
+field ParameterFaultError.Cause
+field ParameterFaultError.Code
+field ParameterFaultError.Raw
+field PointCodeRange.Mask
+field PointCodeRange.PointCode
+field ProvisionedRoutingKey.RoutingContext
+field ProvisionedRoutingKey.RoutingKey
+field RemoteASConfig.ASKey
+field RemoteASConfig.ID
+field RemoteASConfig.RoutingKey
+field RoutingContextAllocationRequest.InUseRoutingContexts
+field RoutingContextAllocationRequest.Registration
+field RoutingContextError.Code
+field RoutingContextError.Contexts
+field RoutingKey.Groups
+field RoutingKey.NetworkAppearance
+field RoutingKey.NetworkAppearanceSet
+field RoutingKey.TrafficMode
+field RoutingKey.TrafficModeSet
+field RoutingKeyDeregistrationRequest.Peer
+field RoutingKeyDeregistrationRequest.Provisioned
+field RoutingKeyDeregistrationRequest.RoutingContext
+field RoutingKeyDeregistrationRequest.RoutingKey
+field RoutingKeyDeregistrationResult.ASKey
+field RoutingKeyDeregistrationResult.RoutingContext
+field RoutingKeyDeregistrationResult.Status
+field RoutingKeyGroup.DestinationPointCode
+field RoutingKeyGroup.OriginatingPointCodes
+field RoutingKeyGroup.ServiceIndicators
+field RoutingKeyManagementConfig.AllocateRoutingContext
+field RoutingKeyManagementConfig.AllowDynamicRoutingKeys
+field RoutingKeyManagementConfig.AuthorizeDeregistration
+field RoutingKeyManagementConfig.AuthorizeRegistration
+field RoutingKeyManagementConfig.MaxDynamicRoutingKeys
+field RoutingKeyManagementConfig.ProvisionedRoutingKeys
+field RoutingKeyManagementConfig.RemoveUnusedRoutingKeys
+field RoutingKeyPeer.ASPIdentifier
+field RoutingKeyPeer.ASPIdentifierSet
+field RoutingKeyPeer.RemoteAddr
+field RoutingKeyPeer.Role
+field RoutingKeyRegistration.RemoteAS
+field RoutingKeyRegistration.RequestedRoutingContext
+field RoutingKeyRegistration.RoutingContextRequested
+field RoutingKeyRegistration.RoutingKey
+field RoutingKeyRegistrationRequest.LocalRoutingKeyIdentifier
+field RoutingKeyRegistrationRequest.NetworkAppearanceImplied
+field RoutingKeyRegistrationRequest.Peer
+field RoutingKeyRegistrationRequest.RequestedRoutingContext
+field RoutingKeyRegistrationRequest.RoutingContextRequested
+field RoutingKeyRegistrationRequest.RoutingKey
+field RoutingKeyRegistrationResult.ASKey
+field RoutingKeyRegistrationResult.LocalRoutingKeyIdentifier
+field RoutingKeyRegistrationResult.RemoteAS
+field RoutingKeyRegistrationResult.RoutingContext
+field RoutingKeyRegistrationResult.Status
+field SCTPConfig.<embedded *SCTPNoDelayInfo>
+field SCTPConfig.<embedded *SCTPSACKInfo>
+field SCTPConfig.InitTimeout
+field SCTPConfig.ReadBufferSize
+field SCTPNoDelayInfo.Enabled
+field SCTPNoDelayInfo.NoDelay
+field SCTPSACKInfo.Enabled
+field SCTPSACKInfo.SackDelay
+field SCTPSACKInfo.SackFrequency
+field SGASKey.ApplicationServer
+field SGASKey.SignallingGateway
+field SGPConfig.BroadcastFlowCacheEntries
+field SGPConfig.BroadcastFlowIdentifier
+field SGPConfig.BroadcastFlowIdentifierBytes
+field SGPConfig.MaxSSNMDestinationRecords
+field SGPConfig.RecoveryQueueBytes
+field SGPConfig.RecoveryQueueMessages
+field SGPConfig.RecoveryQueueTotalBytes
+field SGPConfig.RecoveryQueueTotalMessages
+field SGPIdentity.SignallingGateway
+field SGPIdentity.SignallingGatewayProcess
+field SSNMAvailability.Association
+field SSNMAvailability.Epoch
+field SSNMAvailability.Kind
+field SSNMAvailability.Revision
+field SSNMAvailability.Scope
+field SSNMAvailability.Source
+field SSNMAvailability.State
+field SSNMBinding.Association
+field SSNMBinding.Pending
+field SSNMCongestion.Association
+field SSNMCongestion.Congested
+field SSNMCongestion.Epoch
+field SSNMCongestion.Level
+field SSNMCongestion.LevelSet
+field SSNMCongestion.Revision
+field SSNMCongestion.Scope
+field SSNMCongestion.Source
+field SSNMDeliveryError.Failed
+field SSNMDeliveryError.Successful
+field SSNMDeliveryFailure.Association
+field SSNMDeliveryFailure.Cause
+field SSNMDestinationKnowledge.Availability
+field SSNMDestinationKnowledge.AvailabilitySet
+field SSNMDestinationKnowledge.Congestion
+field SSNMDestinationKnowledge.CongestionSet
+field SSNMDestinationKnowledge.Destination
+field SSNMEvent.Binding
+field SSNMEvent.ContinuityLost
+field SSNMEvent.Epoch
+field SSNMEvent.Kind
+field SSNMEvent.Partition
+field SSNMEvent.Reason
+field SSNMEvent.Report
+field SSNMEvent.ReportSet
+field SSNMEvent.Revision
+field SSNMEvent.States
+field SSNMPartition.ApplicationServer
+field SSNMPartition.Association
+field SSNMPartition.Kind
+field SSNMPartition.SignallingGateway
+field SSNMPartitionKnowledge.Bindings
+field SSNMPartitionKnowledge.Destinations
+field SSNMPartitionKnowledge.Epoch
+field SSNMPartitionKnowledge.Partition
+field SSNMPartitionKnowledge.TrafficAuthorized
+field SSNMReport.Association
+field SSNMReport.ConcernedDestination
+field SSNMReport.ConcernedDestinationSet
+field SSNMReport.CongestionLevel
+field SSNMReport.CongestionLevelSet
+field SSNMReport.Destinations
+field SSNMReport.Epoch
+field SSNMReport.Kind
+field SSNMReport.Partition
+field SSNMReport.PeerReported
+field SSNMReport.Revision
+field SSNMReport.Scope
+field SSNMReport.Source
+field SSNMReport.UserCause
+field SSNMReport.UserCauseSet
+field SSNMSnapshot.LastResourceLoss
+field SSNMSnapshot.Partitions
+field SSNMSnapshot.PartitionsInvalidated
+field SSNMSnapshot.RecordsRefused
+field SSNMSnapshot.ReportsRefused
+field SSNMSnapshot.Revision
+field SSNMStateConfig.MaxAffectedPointCodes
+field SSNMStateConfig.MaxBytes
+field SSNMStateConfig.MaxPartitions
+field SSNMStateConfig.MaxRecords
+field SSNMStateConfig.MaxRecordsPerPartition
+field SSNMStateConfig.MaxRecordsPerPeer
+field SSNMStateConfig.MaxSubscribers
+field SSNMStateConfig.SubscriptionQueueSize
+field SignallingCongestionRequest.ConcernedDestination
+field SignallingCongestionRequest.ConcernedDestinationSet
+field SignallingCongestionRequest.CongestionLevel
+field SignallingCongestionRequest.CongestionLevelSet
+field SignallingCongestionRequest.Destinations
+field SignallingCongestionRequest.Info
+field SignallingCongestionRequest.Scope
+field SignallingGatewayConfig.ID
+field SignallingGatewayConfig.SGPs
+field SignallingGatewayProcessConfig.ApplicationServers
+field SignallingGatewayProcessConfig.ID
+field TrafficDistribution.Delivered
+field TrafficDistribution.Queued
+field UnexpectedMessageError.Msg
+field UnexpectedMessageError.Raw
+field UnsupportedClassError.Msg
+field UnsupportedClassError.Raw
+field UnsupportedMessageError.Msg
+field UnsupportedMessageError.Raw
+field WireScope.NetworkAppearance
+field WireScope.NetworkAppearanceSet
+field WireScope.RoutingContextSet
+field WireScope.RoutingContexts
+func AcceptInvalidOptionalInfoString
+func DisableLogging
+func EnableLogging
+func NewAssociationConfig
+func NewEndpoint
+func NewHeartbeatInfo
+func NewInvalidNetworkAppearanceError
+func NewInvalidRoutingContextError
+func NewInvalidSCTPStreamIDError
+func NewInvalidVersionError
+func NewListenerConfig
+func NewNoConfiguredASError
+func NewParameterFaultErrorFor
+func NewUnexpectedMessageError
+func NewUnsupportedClassError
+func NewUnsupportedClassErrorFor
+func NewUnsupportedMessageError
+func NewUnsupportedMessageErrorFor
+func SetLogger
+method ASState.String
+method Association.ASPActive
+method Association.ASPDown
+method Association.ASPInactive
+method Association.ASPUp
+method Association.ActivateRoutingContexts
+method Association.ApplicationServerState
+method Association.ApplicationServerStateForAS
+method Association.AssociationStatus
+method Association.Close
+method Association.DataQueueStats
+method Association.DeactivateRoutingContexts
+method Association.DeregisterApplicationServers
+method Association.DestinationStateAudit
+method Association.DistributeData
+method Association.Done
+method Association.Epoch
+method Association.Err
+method Association.ForgetDestinations
+method Association.ID
+method Association.IPSPState
+method Association.LocalAddr
+method Association.ManagementIndications
+method Association.MaxMessageStreamID
+method Association.PeerASPIdentifier
+method Association.ReadData
+method Association.RegisterRoutingKeys
+method Association.RemoteAddr
+method Association.Role
+method Association.SetASAvailable
+method Association.SetASAvailableForAS
+method Association.SetDeadline
+method Association.SetNIFAvailable
+method Association.SetReadDeadline
+method Association.SetSCTPNoDelay
+method Association.SetSCTPSACK
+method Association.SetWriteDeadline
+method Association.Shutdown
+method Association.ShutdownContext
+method Association.SignallingCongestion
+method Association.SignallingStatus
+method Association.State
+method Association.StateChanges
+method Association.StreamID
+method Association.WriteData
+method Association.WriteSignal
+method AssociationConfig.EnableHeartbeat
+method AssociationConfig.SetASPIdentifier
+method AssociationConfig.SetApplicationServers
+method AssociationConfig.SetSCTPNoDelay
+method AssociationConfig.SetSCTPSACK
+method AssociationEstablishmentError.Error
+method AssociationEstablishmentError.Unwrap
+method DataQueueOverflowError.Error
+method DataQueueOverflowError.Is
+method DataSendOutcome.String
+method DataWriteError.Error
+method DataWriteError.Unwrap
+method DestinationAvailability.String
+method Endpoint.ASPStatus
+method Endpoint.ASPStatuses
+method Endpoint.ApplicationServerStatus
+method Endpoint.ApplicationServerStatuses
+method Endpoint.AssociationStatus
+method Endpoint.AssociationStatuses
+method Endpoint.BeginMTP3Restart
+method Endpoint.Close
+method Endpoint.DestinationStatus
+method Endpoint.DestinationStatuses
+method Endpoint.DestinationUserPartUnavailable
+method Endpoint.Dial
+method Endpoint.Done
+method Endpoint.Listen
+method Endpoint.MTPDestinationStatus
+method Endpoint.MTPDestinationStatuses
+method Endpoint.MTPIndications
+method Endpoint.MTPRouteStatus
+method Endpoint.MTPRouteStatuses
+method Endpoint.MTPTransfer
+method Endpoint.ReportDestinationAvailability
+method Endpoint.Role
+method Endpoint.SSNMKnowledge
+method Endpoint.SignallingCongestion
+method Endpoint.SubscribeSSNM
+method InvalidSCTPStreamIDError.Error
+method InvalidVersionError.Error
+method Listener.ASPsForTraffic
+method Listener.ASPsForTrafficForAS
+method Listener.Accept
+method Listener.ActiveASPs
+method Listener.ActiveASPsForAS
+method Listener.Addr
+method Listener.ApplicationServerState
+method Listener.ApplicationServerStateForAS
+method Listener.Close
+method Listener.DistributeData
+method Listener.Role
+method Listener.SetASAvailable
+method Listener.SetASAvailableForAS
+method Listener.SetNIFAvailable
+method MTP3Restart.Complete
+method MTP3Restart.Completed
+method MTP3Restart.Outstanding
+method MTP3Restart.Update
+method MTPIndicationKind.String
+method MTPSelectionError.Error
+method MTPSelectionError.Unwrap
+method MTPSelectionReason.String
+method MTPTransferError.Error
+method MTPTransferError.Unwrap
+method ManagementIndicationKind.String
+method NetworkAppearanceError.Error
+method NetworkAppearanceError.Is
+method ParameterFaultError.Error
+method ParameterFaultError.Unwrap
+method Role.String
+method RoutingContextError.Error
+method RoutingContextError.Is
+method SSNMDeliveryError.Error
+method SSNMDeliveryError.Unwrap
+method SSNMEventKind.String
+method SSNMPartitionKind.String
+method SSNMReportKind.String
+method SSNMReportSource.String
+method SSNMSubscription.Close
+method SSNMSubscription.Next
+method SSNMSubscription.Resync
+method State.String
+method UnexpectedMessageError.Error
+method UnsupportedClassError.Error
+method UnsupportedMessageError.Error
+type ASActivationPolicy struct
+type ASConfig struct
+type ASKey struct
+type ASPAuthorizer
+type ASPConfig struct
+type ASPCongestionPolicy
+type ASPIdentity struct
+type ASPProcedureMode
+type ASPProcedurePolicy struct
+type ASPRoutingConfig struct
+type ASPStatus struct
+type ASPStatusKey struct
+type ASState
+type AcceptInfo struct
+type AffectedDestination struct
+type ApplicationServerConfig struct
+type ApplicationServerStatus struct
+type Association struct
+type AssociationConfig struct
+type AssociationConfigSelector
+type AssociationEstablishmentError struct
+type AssociationID
+type AssociationSnapshot struct
+type AssociationStatus struct
+type BroadcastFlowIdentifier
+type CompatibilityPolicy struct
+type CongestionState struct
+type DataMessage struct
+type DataQueueOverflowError struct
+type DataQueueStats struct
+type DataRequest struct
+type DataSendOutcome
+type DataWriteError struct
+type DeregistrationStatus
+type DestinationAvailability
+type DestinationAvailabilityRequest struct
+type DestinationNetworkState struct
+type DestinationRange struct
+type DestinationStateAuditRequest struct
+type DestinationStatus struct
+type DestinationStatusKey struct
+type DestinationStatusSnapshot struct
+type DestinationUserPartUnavailableRequest struct
+type Endpoint struct
+type EndpointConfig struct
+type HeartbeatInfo struct
+type IPSPASPSMExchangeModel
+type IPSPConfig struct
+type IPSPExchangeModel
+type IPSPState struct
+type IPSPTrafficConfig struct
+type InvalidSCTPStreamIDError struct
+type InvalidVersionError struct
+type Listener struct
+type ListenerConfig struct
+type MTP3Restart struct
+type MTPCandidateRejection struct
+type MTPDestination struct
+type MTPDestinationStatus struct
+type MTPIndication struct
+type MTPIndicationKind
+type MTPRouteConfig struct
+type MTPRouteID
+type MTPRoutePath struct
+type MTPRoutePathID
+type MTPRouteStatus struct
+type MTPSelectionError struct
+type MTPSelectionReason
+type MTPTransferError struct
+type MTPTransferFailure struct
+type MTPTransferPath struct
+type MTPTransferRequest struct
+type MTPTransferResult struct
+type ManagementIndication struct
+type ManagementIndicationKind
+type NetworkAppearanceError struct
+type ParameterFaultError struct
+type PointCodeRange struct
+type ProtocolDecision
+type ProtocolTolerator
+type ProtocolViolation
+type ProtocolViolationKind
+type ProvisionedRoutingKey struct
+type RegistrationStatus
+type RemoteASConfig struct
+type RemoteASID
+type Role
+type RouteSelectionMode
+type RoutingContextAllocationRequest struct
+type RoutingContextAllocator
+type RoutingContextError struct
+type RoutingKey struct
+type RoutingKeyDeregistrationAuthorizer
+type RoutingKeyDeregistrationRequest struct
+type RoutingKeyDeregistrationResult struct
+type RoutingKeyGroup struct
+type RoutingKeyManagementConfig struct
+type RoutingKeyPeer struct
+type RoutingKeyRegistration struct
+type RoutingKeyRegistrationAuthorizer
+type RoutingKeyRegistrationRequest struct
+type RoutingKeyRegistrationResult struct
+type SCTPConfig struct
+type SCTPNoDelayInfo struct
+type SCTPSACKInfo struct
+type SGASKey struct
+type SGPConfig struct
+type SGPIdentity struct
+type SSNMAvailability struct
+type SSNMBinding struct
+type SSNMCongestion struct
+type SSNMDeliveryError struct
+type SSNMDeliveryFailure struct
+type SSNMDestinationKnowledge struct
+type SSNMEvent struct
+type SSNMEventKind
+type SSNMPartition struct
+type SSNMPartitionKind
+type SSNMPartitionKnowledge struct
+type SSNMReport struct
+type SSNMReportKind
+type SSNMReportSource
+type SSNMSnapshot struct
+type SSNMStateConfig struct
+type SSNMSubscription struct
+type SignallingCongestionRequest struct
+type SignallingGatewayConfig struct
+type SignallingGatewayID
+type SignallingGatewayProcessConfig struct
+type SignallingGatewayProcessID
+type State
+type ToleratorFunc
+type TrafficDistribution struct
+type UnexpectedMessageError struct
+type UnsupportedClassError struct
+type UnsupportedMessageError struct
+type WireScope struct
+var ErrASPIdentifierRequired
+var ErrASPRouteStateLimit
+var ErrAmbiguousMTPRoute
+var ErrAssociationClosed
+var ErrBroadcastFlowIdentifierTooLong
+var ErrContextlessApplicationServer
+var ErrDataQueueFull
+var ErrDeregistrationOutcomeUnknown
+var ErrDestinationStateUnknown
+var ErrEmptyMTP3Restart
+var ErrEndpointClosed
+var ErrFailedToEstablish
+var ErrFailedToPeelOff
+var ErrFailedToWriteSignal
+var ErrHeartbeatExpired
+var ErrIndicationQueueFull
+var ErrInitTimeout
+var ErrInvalidASPConfig
+var ErrInvalidASPIdentifier
+var ErrInvalidApplicationServerConfig
+var ErrInvalidMTPTransfer
+var ErrInvalidNetworkAppearance
+var ErrInvalidParameterValue
+var ErrInvalidRoleConfiguration
+var ErrInvalidRoutingContext
+var ErrInvalidSSNMStateConfig
+var ErrInvalidState
+var ErrMTP3RestartInProgress
+var ErrMTP3RestartScope
+var ErrMTPTransferOutsideRoute
+var ErrManagementBlocking
+var ErrMessageTooLarge
+var ErrMissingAffectedPointCode
+var ErrMissingProtocolData
+var ErrMissingRoutingContext
+var ErrMissingSGPIdentity
+var ErrMissingStatus
+var ErrMissingUserCause
+var ErrNilAssociationConfig
+var ErrNoActiveASP
+var ErrNoConfiguredAS
+var ErrNoDataStream
+var ErrNoMTPRoute
+var ErrNoMatchingMTPRoute
+var ErrNoMatchingRoutingKey
+var ErrNotEstablished
+var ErrNotificationQueueFull
+var ErrPartialDataWrite
+var ErrProtocolDataTooLarge
+var ErrRKMOutcomeLimit
+var ErrRecoveryQueueFull
+var ErrRoutingContextNotActive
+var ErrRoutingNotConfigured
+var ErrSCTPNotAlive
+var ErrSGPRouteScopeMismatch
+var ErrSSNMDestinationRecordLimit
+var ErrSSNMOversizedReport
+var ErrSSNMResourceLoss
+var ErrSSNMStateLimit
+var ErrSSNMSubscriberLimit
+var ErrSSNMSubscriptionBusy
+var ErrSSNMSubscriptionClosed
+var ErrSackDelayTooLarge
+var ErrStaleMTP3Restart
+var ErrTAckExpired
+var ErrTimeout
+var ErrUnknownApplicationServerScope
+var ErrUnknownMTPRoute
+var ErrUnknownRemoteAS
+var ErrUnknownSGP
+var ErrUnsupportedIPSPExchangeModel
+var ErrUnsupportedRole
+var ErrUnsupportedTrafficMode
