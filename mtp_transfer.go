@@ -212,7 +212,7 @@ type aspTransferFlowKey struct {
 type aspSelectionStatus struct {
 	epoch              uint64
 	availabilitySet    bool
-	availability       DestinationState
+	availability       DestinationAvailability
 	congestionSet      bool
 	congested          bool
 	congestionLevel    uint8
