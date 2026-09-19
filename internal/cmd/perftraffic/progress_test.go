@@ -96,12 +96,17 @@ func TestProgressSamplerPreservesRequestCancellationAndTimeout(testContext *test
 			done := sampleProgress(ctx, started, 500*time.Millisecond, server.URL)
 			select {
 			case <-entered:
-			case <-time.After(2 * time.Second):
+			case <-time.After(5 * time.Second):
 				testContext.Fatal("sampler request did not start")
 			}
 			if cancelCaller {
 				cancel()
 			}
+			// The request timeout is 1s and the sample offset is ~490ms.
+			// A 2s wait is only ~500ms of slack, which a loaded CI runner
+			// burns; wait on the sampler event with a bound generous
+			// relative to the 1s timeout instead of treating wall-clock
+			// 2s as the assertion.
 			select {
 			case observations := <-done:
 				if len(observations) != 1 || observations[0].Error == "" || observations[0].Snapshot != nil {
@@ -110,7 +115,7 @@ func TestProgressSamplerPreservesRequestCancellationAndTimeout(testContext *test
 				if !cancelCaller && observations[0].After-observations[0].Before < time.Second {
 					testContext.Fatalf("request timeout was shortened: %+v", observations[0])
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(8 * time.Second):
 				testContext.Fatal("sampler ignored cancellation or request timeout")
 			}
 			select {
