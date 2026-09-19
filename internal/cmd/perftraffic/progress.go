@@ -11,6 +11,17 @@ import (
 	"time"
 )
 
+// The sampler takes one observation per second and one more just before the
+// measurement window closes. The final lead is deliberately short so the last
+// observation brackets the boundary as tightly as possible; a sampler that
+// wakes later than that skips the observation rather than sampling a window
+// that has already closed.
+const (
+	progressSampleInterval = time.Second
+	progressFinalLead      = 10 * time.Millisecond
+	progressRequestTimeout = time.Second
+)
+
 type receiverProgress struct {
 	Spec       runSpec        `json:"spec"`
 	Generation uint64         `json:"generation"`
@@ -247,7 +258,7 @@ func sampleProgress(ctx context.Context, started time.Time, duration time.Durati
 				if time.Since(started) >= duration {
 					return
 				}
-				requestContext, cancel := context.WithTimeout(ctx, time.Second)
+				requestContext, cancel := context.WithTimeout(ctx, progressRequestTimeout)
 				observation := observeProgress(requestContext, started, baseURL)
 				cancel()
 				observations = append(observations, observation)
@@ -261,9 +272,9 @@ func progressOffsets(duration time.Duration) []time.Duration {
 	if duration <= 0 || duration > maxRunWindow {
 		return nil
 	}
-	finalOffset := duration - min(10*time.Millisecond, duration/2)
-	offsets := make([]time.Duration, 0, int(duration/time.Second)+1)
-	for offset := time.Second; offset < duration; offset += time.Second {
+	finalOffset := duration - min(progressFinalLead, duration/2)
+	offsets := make([]time.Duration, 0, int(duration/progressSampleInterval)+1)
+	for offset := progressSampleInterval; offset < duration; offset += progressSampleInterval {
 		if finalOffset > 0 && finalOffset < offset {
 			offsets = append(offsets, finalOffset)
 			finalOffset = 0
