@@ -125,13 +125,26 @@ func main() {
 		log.Fatalf("Failed to resolve SGP SCTP address: %s", err)
 	}
 
-	// ctx is the association's lifetime, not just its handshake: cancelling it
-	// closes the association. An interrupt therefore ends the traffic loop and
-	// the association together.
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	// Two contexts, because they bound two different things and merging them
+	// defeats the withdrawal below.
+	//
+	// The context given to Dial is the association's lifetime, not just its
+	// handshake: the association's monitor selects on it and closes the SCTP
+	// association as soon as it is done. Hand it the signal context and an
+	// interrupt tears the association down immediately, leaving ShutdownContext
+	// with an association already in ASP-DOWN — so it sends neither ASP Inactive
+	// nor ASP Down, returns nil, and the graceful withdrawal silently becomes
+	// the abrupt close it was meant to replace.
+	//
+	// So the signal context stops the traffic loop, and the association's own
+	// context is cancelled only after the withdrawal has had its chance.
+	notifyCtx, stopNotify := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopNotify()
 
-	association, err := endpoint.Dial(ctx, "m3ua", nil, remote, associationConfig)
+	associationCtx, closeAssociation := context.WithCancel(context.Background())
+	defer closeAssociation()
+
+	association, err := endpoint.Dial(associationCtx, "m3ua", nil, remote, associationConfig)
 	if err != nil {
 		log.Fatalf("Failed to establish M3UA Association: %s", err)
 	}
@@ -189,15 +202,20 @@ traffic:
 
 		select {
 		case <-ticker.C:
-		case <-ctx.Done():
+		case <-notifyCtx.Done():
 			break traffic
 		}
 	}
 
 	// RFC 4666 Section 4.9 option (a): tell the SGP traffic is stopping and
-	// that this ASP is going down before the association disappears. Close
-	// alone is option (b), which endpoint.Close then performs on whatever is
-	// left.
+	// that this ASP is going down before the association disappears. This runs
+	// while associationCtx is still live, which is the whole reason it is a
+	// separate context. Close alone is option (b), which the deferred
+	// endpoint.Close then performs on whatever is left.
+	//
+	// The timeout is its own context rather than a child of associationCtx: a
+	// withdrawal that overruns should end the withdrawal, not the association
+	// it is being written on.
 	shutdown, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShutdown()
 	if err := association.ShutdownContext(shutdown); err != nil {

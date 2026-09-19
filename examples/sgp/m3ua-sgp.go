@@ -117,6 +117,12 @@ func main() {
 	// cancelling it here closes every association this SGP is serving. That is
 	// what an interrupt should do; stopping only the accepting would be
 	// listener.Close.
+	//
+	// Safe here because an SGP has no withdrawal to run: RFC 4666 Section 4.9
+	// gives it SCTP Shutdown and nothing else, so ShutdownContext on an SGP
+	// Association is Close. An ASP must not copy this — see the ASP example,
+	// where the signal context and the association's lifetime are separate so
+	// that ASP Inactive and ASP Down can still be sent.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 

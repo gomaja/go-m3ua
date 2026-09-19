@@ -455,6 +455,131 @@ func TestExampleApplicationManagedRoutingNeedsNoRouteInventory(t *testing.T) {
 	}
 }
 
+// TestMTPIndicationsNilnessMatchesItsDocumentation pins the rule the GoDoc and
+// the README both state, because prose cannot be checked and this claim has
+// been wrong twice: first as "nil for an ASP that left Routing nil", then as
+// "non-nil for an ASP with an ASPConfig".
+//
+// It is neither. Every ASP Endpoint has the channel, an ASPConfig or not; no
+// SGP or IPSP Endpoint has one. What varies is whether anything is ever put on
+// it, which is a different question and is covered above.
+func TestMTPIndicationsNilnessMatchesItsDocumentation(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		config EndpointConfig
+		wantCh bool
+	}{
+		{"ASP with routes", EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(true)}, true},
+		{"ASP without routes", EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(false)}, true},
+		{"ASP without an ASPConfig", EndpointConfig{Role: RoleASP}, true},
+		{"SGP", EndpointConfig{Role: RoleSGP}, false},
+		{"IPSP", EndpointConfig{Role: RoleIPSP}, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			endpoint, err := NewEndpoint(testCase.config)
+			if err != nil {
+				t.Fatalf("NewEndpoint() error = %v", err)
+			}
+			indications := endpoint.MTPIndications()
+			if got := indications != nil; got != testCase.wantCh {
+				t.Fatalf("MTPIndications() non-nil = %t, want %t", got, testCase.wantCh)
+			}
+			if !testCase.wantCh {
+				_ = endpoint.Close()
+				return
+			}
+
+			// Open and empty: a receive finds nothing while the Endpoint runs.
+			select {
+			case indication, open := <-indications:
+				t.Fatalf("received %+v (channel open: %t) from an idle Endpoint", indication, open)
+			default:
+			}
+
+			// Closed by Endpoint.Close, which is what ends a range over it.
+			if err := endpoint.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			select {
+			case _, open := <-indications:
+				if open {
+					t.Error("MTPIndications delivered a value after Endpoint.Close")
+				}
+			case <-time.After(time.Second):
+				t.Error("MTPIndications was not closed by Endpoint.Close")
+			}
+		})
+	}
+}
+
+// TestGracefulWithdrawalNeedsALiveAssociationContext pins the contract the ASP
+// example depends on, and the defect it used to have.
+//
+// The association's monitor selects on the context given to Dial and closes the
+// association as soon as it is done. An application that hands Dial its signal
+// context and then calls ShutdownContext on the way out gets no withdrawal at
+// all: the association is already ASP-DOWN, so neither ASP Inactive nor ASP
+// Down is sent, and ShutdownContext returns nil rather than reporting that it
+// did nothing. RFC 4666 Section 4.9 option (a) silently becomes option (b).
+func TestGracefulWithdrawalNeedsALiveAssociationContext(t *testing.T) {
+	t.Run("after the lifetime context ended", func(t *testing.T) {
+		association, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+		association.noteRoutingContextsAcked(params.NewRoutingContext(1))
+		signalled, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		// What the monitor does with a cancelled lifetime context.
+		_ = association.closeWith(signalled.Err())
+		before := len(*sent)
+
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+		defer cancelShutdown()
+		// It returns nil, so an application that only checks the error is told
+		// the withdrawal succeeded. Nothing was sent.
+		if err := association.ShutdownContext(shutdownCtx); err != nil {
+			t.Fatalf("ShutdownContext() error = %v", err)
+		}
+		if got := (*sent)[before:]; len(got) != 0 {
+			t.Errorf("a withdrawal on a closed association sent %v, want nothing", got)
+		}
+		if err := association.Err(); !errors.Is(err, context.Canceled) {
+			t.Errorf("Err() = %v, want the cancellation that closed it", err)
+		}
+		if state := association.State(); state != StateASPDown {
+			t.Errorf("State() = %v, want %v", state, StateASPDown)
+		}
+	})
+
+	t.Run("while the lifetime context is live", func(t *testing.T) {
+		// The example's shape: the signal ends the traffic loop, the
+		// association's own context is still live, and the withdrawal is
+		// written before anything is cancelled.
+		association, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+		association.noteRoutingContextsAcked(params.NewRoutingContext(1))
+		if state := association.State(); state != StateASPActive {
+			t.Fatalf("State() = %v, want %v", state, StateASPActive)
+		}
+
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancelShutdown()
+		// No peer answers the T(ack), so this reports the expiry rather than
+		// succeeding. What matters is that the withdrawal reached the wire at
+		// all, which is exactly what the closed association above could not do.
+		_ = association.ShutdownContext(shutdownCtx)
+
+		var withdrew bool
+		for _, message := range *sent {
+			if message.MessageClass() == messages.MsgClassASPTM &&
+				message.MessageType() == messages.MsgTypeAspInactive {
+				withdrew = true
+			}
+		}
+		if !withdrew {
+			t.Errorf("a withdrawal on a live association sent %v, want an ASP Inactive", *sent)
+		}
+	})
+}
+
 // TestExampleAlternatePathRecoveryReportsEveryRefusal is the alternate-path
 // example. Selection reports each candidate and its reason in the route's own
 // candidate order, and Unwrap separates "nothing is known about the

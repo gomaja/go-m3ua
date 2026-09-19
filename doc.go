@@ -78,7 +78,13 @@ closes. Nothing calls it for the application: an ASP that wants its peers told
 before it goes calls it on each association before closing their owner.
 
 The ctx passed to Dial and Accept is the association's lifetime, not its
-handshake. Cancelling it closes the associations it produced.
+handshake. Cancelling it closes the associations it produced, and that makes it
+the wrong context to derive from an interrupt signal if the application also
+wants ShutdownContext to work: the association's monitor closes it as soon as
+the context is done, so the withdrawal finds an association already in ASP-DOWN,
+sends nothing, and returns nil. An application that wants option (a) gives the
+association a context of its own and cancels it only after ShutdownContext has
+returned.
 
 # Callbacks and snapshots
 

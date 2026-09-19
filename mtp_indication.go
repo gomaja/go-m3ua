@@ -92,12 +92,15 @@ type MTPIndication struct {
 // not the per-candidate decision MTPTransfer makes. An MTP-RESUME is not a
 // promise that the next MTPTransfer will be admitted.
 //
-// It is nil for any Endpoint that is not an ASP with an ASPConfig, and a
-// receive from a nil channel blocks forever. An ASP that left
-// ASPConfig.Routing nil has the channel but nothing ever arrives on it: these
-// indications are derived from provisioned MTP Routes, and that ASP has none.
-// Such an application owns outbound selection itself and consumes
-// Endpoint.SubscribeSSNM instead.
+// Every ASP Endpoint has this channel, whatever its ASPConfig; an SGP or IPSP
+// Endpoint has none and receives nil, where a receive blocks forever.
+//
+// Having the channel is not the same as having something to put on it. These
+// indications are derived from provisioned MTP Routes, so an ASP that left
+// ASPConfig.Routing nil, or supplied no ASPConfig at all, holds an open channel
+// that stays empty for the Endpoint's whole life and is then closed by
+// Endpoint.Close. Such an application owns outbound selection itself and
+// consumes Endpoint.SubscribeSSNM instead of waiting here.
 func (e *Endpoint) MTPIndications() <-chan *MTPIndication {
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return nil

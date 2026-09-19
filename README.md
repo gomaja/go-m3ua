@@ -360,8 +360,11 @@ endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
 
 `Endpoint.SubscribeSSNM` is the discovery source, and is described under
 [Layer Management and SSNM operations](#layer-management-and-ssnm-operations).
-`Endpoint.MTPIndications` is nil for such an Endpoint, because there is no
-provisioned route inventory to derive an aggregate from.
+`Endpoint.MTPIndications` is not the discovery source here. Every ASP Endpoint
+has that channel, whatever its `ASPConfig`, so it is non-nil — but nothing ever
+arrives on it, because these indications are derived from provisioned MTP
+Routes and this ASP has none. A receive blocks until `Endpoint.Close` closes
+the channel, so treat it as idle rather than as something to wait on.
 
 Association-level `WriteData` and `ReadData` are the canonical DATA API. A
 request names its Application Server scope exactly and carries the whole MTP3
@@ -519,6 +522,26 @@ The `ctx` passed to `Dial` and `Accept` is the association's lifetime, not just
 its handshake. Cancelling it closes the associations it produced, so an accept
 loop that wants to stop accepting without dropping live traffic closes the
 Listener instead.
+
+That also makes it the wrong context to derive from an interrupt signal when the
+application wants a graceful withdrawal. The association's monitor closes it as
+soon as the context is done, so `ShutdownContext` finds an association already
+in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns nil — option
+(a) silently becomes option (b). Give the association a context of its own and
+cancel it only after the withdrawal has returned:
+
+```go
+notifyCtx, stopNotify := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stopNotify()
+
+associationCtx, closeAssociation := context.WithCancel(context.Background())
+defer closeAssociation()
+
+association, err := endpoint.Dial(associationCtx, "m3ua", nil, remote, config)
+...
+<-notifyCtx.Done()            // The signal stops the work, not the association.
+_ = association.ShutdownContext(shutdownCtx) // Written while associationCtx is live.
+```
 
 ## Routing Key Management
 
