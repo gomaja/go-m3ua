@@ -565,7 +565,7 @@ The rule is **satisfiable on real data**: probes at 1,000 and 2,000 messages per
 second reached `not-growing`, which the `perfstats` README expected to be
 unreachable at the approved rates and did not claim was unreachable everywhere.
 It is also **falsifiable in the other direction**: the failure-load run above
-produced an interval of `[401,815.7, 401,871.0]` messages, decided `growing`.
+produced an interval of `[303,944.7, 304,004.6]` messages, decided `growing`.
 The rule can return all three answers on measured data.
 
 What it cannot do is resolve the region in between at useful offered rates. The
