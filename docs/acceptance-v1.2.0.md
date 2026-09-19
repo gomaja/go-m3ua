@@ -664,10 +664,12 @@ cover rather than assuming it covers all of them.
 
 Every gate below ran at commit `f46faa3ba5faa14fb0bcf4442d47892dfe71665f`, the
 head that carries the fixture fix and this record. Because a gate result belongs
-to the commit it was measured at, the results themselves land in the next
-commit, whose only difference from `f46faa3` is this section: it adds no Go
-code, so nothing it changes can alter a Go gate. Linux gates ran in the prepared
-privileged container; host gates ran on darwin/arm64.
+to the commit it was measured at, the results are recorded afterwards; every
+commit after `f46faa3` on this branch changes this document only and adds no Go
+code, so none of them can alter a Go gate. `go build ./...`, `go vet ./...`,
+`go test ./... -count=1`, `gofmt -l`, `staticcheck ./...`, `golangci-lint run`
+and `actionlint` were re-run on the later head and were green there too. Linux
+gates ran in the prepared privileged container; host gates ran on darwin/arm64.
 
 ### Linux, container `i44-a`, Go 1.25.14 linux/arm64, prepared SCTP test network
 
