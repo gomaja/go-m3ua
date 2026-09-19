@@ -48,6 +48,23 @@ const exportedAPIInventory = "testdata/exported-api.txt"
 // updateExportedAPIInventory is the environment variable that rewrites it.
 const updateExportedAPIInventory = "M3UA_UPDATE_EXPORT_INVENTORY"
 
+// inventoryLines reads the checked-in inventory as lines, tolerating a CRLF
+// checkout. Git converts line endings on Windows unless told otherwise, and a
+// trailing carriage return makes every entry miss, which reports the whole
+// exported surface as undeclared rather than naming a real change. The
+// .gitattributes entry keeps the file LF; this makes the test correct even
+// where that is overridden.
+func inventoryLines(t *testing.T) []string {
+	t.Helper()
+
+	raw, err := os.ReadFile(exportedAPIInventory)
+	if err != nil {
+		t.Fatalf("reading %s: %v", exportedAPIInventory, err)
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	return strings.Split(strings.TrimSpace(text), "\n")
+}
+
 // packageSurface is the exported declaration set of one package directory,
 // read from its non-test source.
 type packageSurface struct {
@@ -214,11 +231,7 @@ func TestExportedSurfaceMatchesTheCheckedInInventory(t *testing.T) {
 			exportedAPIInventory, len(surface.lines))
 	}
 
-	raw, err := os.ReadFile(exportedAPIInventory)
-	if err != nil {
-		t.Fatalf("reading %s: %v", exportedAPIInventory, err)
-	}
-	approved := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	approved := inventoryLines(t)
 	sort.Strings(approved)
 
 	approvedSet := make(map[string]struct{}, len(approved))
@@ -723,11 +736,7 @@ func TestMessagesInventoryStillGuardsTheCodec(t *testing.T) {
 }
 
 func TestInventoryFileIsSortedAndUnique(t *testing.T) {
-	raw, err := os.ReadFile(exportedAPIInventory)
-	if err != nil {
-		t.Fatalf("reading %s: %v", exportedAPIInventory, err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	lines := inventoryLines(t)
 	seen := make(map[string]struct{}, len(lines))
 	for index, line := range lines {
 		if index > 0 && lines[index-1] > line {
