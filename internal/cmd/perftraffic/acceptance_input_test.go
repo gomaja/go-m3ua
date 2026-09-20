@@ -23,7 +23,7 @@ func TestSenderRecordKeepsTheAcceptanceRequiredCountersAtZero(t *testing.T) {
 		t.Fatalf("unmarshal run record: %v", err)
 	}
 
-	for _, field := range []string{"capped", "send_errors"} {
+	for _, field := range []string{"capped", "send_errors", "sent", "submitted"} {
 		raw, ok := decoded[field]
 		if !ok {
 			t.Errorf("run record omits %q when it is zero; internal/cmd/perfcapacity requires it and rejects the record as invalid input", field)

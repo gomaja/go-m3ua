@@ -161,6 +161,18 @@ func TestEchoRequestsMustEqualSubmissions(testContext *testing.T) {
 	}
 }
 
+func TestZeroSubmissionFailedProbeRemainsValidEvidence(testContext *testing.T) {
+	run := strings.Replace(passingRunJSON(), `"fixture_verdict":"pass"`, `"fixture_verdict":"invalid"`, 1)
+	run = strings.Replace(run, `"sent":1200,"submitted":1200`, `"sent":0,"submitted":0`, 1)
+	run = strings.Replace(run, `"send_errors":0`, `"send_errors":1200`, 1)
+	run = strings.Replace(run, `"unique":1200,"unique_measurement":1200`, `"unique":0,"unique_measurement":0`, 1)
+	run = strings.Replace(run, `"missing":0`, `"missing":1200`, 1)
+	evidence, _, err := evidenceFromFixture(json.RawMessage(run), 10)
+	if err != nil || evidence.FixtureValid || evidence.Counters.SendErrors != 1200 {
+		testContext.Fatalf("all-failed probe rejected or credited: %+v, %v", evidence, err)
+	}
+}
+
 func TestDeliveryPartitionMustEqualUniqueWithoutOverflow(testContext *testing.T) {
 	for _, replacement := range []string{
 		`"unique_measurement":0,"unique_drain":0`,
