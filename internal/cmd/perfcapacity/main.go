@@ -36,6 +36,11 @@ const (
 
 const maximumJSONInputBytes = 16 * 1024 * 1024
 
+const (
+	echoEvidenceScope    = "round-trip scheduled-request-to-validated-reply on the sender monotonic clock; never one-way latency"
+	echoEvidenceDeadline = 2 * time.Second
+)
+
 type request struct {
 	Initial     *int      `json:"initial"`
 	Maximum     *int      `json:"maximum"`
@@ -261,13 +266,15 @@ type fixtureEvidence struct {
 	Delivery                  *deliveryEvidence     `json:"delivery"`
 	SenderWindow              *senderWindowEvidence `json:"sender_window"`
 	Echo                      *struct {
-		OutstandingLimit      *int    `json:"outstanding_limit"`
-		Requests              *uint64 `json:"requests"`
-		Validated             *uint64 `json:"validated"`
-		Capped                *uint64 `json:"capped"`
-		DeadlineExceeded      *uint64 `json:"deadline_exceeded"`
-		Invalid               *uint64 `json:"invalid"`
-		OutstandingAfterDrain *uint64 `json:"outstanding_after_drain"`
+		Scope                 *string        `json:"scope"`
+		Deadline              *time.Duration `json:"deadline_ns"`
+		OutstandingLimit      *int           `json:"outstanding_limit"`
+		Requests              *uint64        `json:"requests"`
+		Validated             *uint64        `json:"validated"`
+		Capped                *uint64        `json:"capped"`
+		DeadlineExceeded      *uint64        `json:"deadline_exceeded"`
+		Invalid               *uint64        `json:"invalid"`
+		OutstandingAfterDrain *uint64        `json:"outstanding_after_drain"`
 	} `json:"echo"`
 	ReceiverEcho *struct {
 		Replies        *uint64 `json:"replies"`
@@ -1130,9 +1137,12 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 
 	switch mode {
 	case "echo":
-		if record.Echo == nil || record.Echo.OutstandingLimit == nil || record.Echo.Requests == nil || record.Echo.Validated == nil || record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil ||
+		if record.Echo == nil || record.Echo.Scope == nil || record.Echo.Deadline == nil || record.Echo.OutstandingLimit == nil || record.Echo.Requests == nil || record.Echo.Validated == nil || record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil ||
 			record.Echo.Invalid == nil || record.Echo.OutstandingAfterDrain == nil {
-			return errors.New("echo runs require outstanding_limit, requests, validated, capped, deadline_exceeded, invalid and outstanding_after_drain counters")
+			return errors.New("echo runs require scope, deadline_ns, outstanding_limit, requests, validated, capped, deadline_exceeded, invalid and outstanding_after_drain counters")
+		}
+		if *record.Echo.Scope != echoEvidenceScope || *record.Echo.Deadline != echoEvidenceDeadline {
+			return errors.New("echo scope and deadline_ns must match the producer contract")
 		}
 		if *record.Echo.OutstandingLimit != *record.Spec.Outstanding {
 			return errors.New("echo outstanding_limit must equal workload spec.outstanding")
@@ -1198,6 +1208,16 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	case "throughput", "echo", "bidirectional":
 	default:
 		return workloadIdentity{}, errors.New("unsupported workload mode")
+	}
+	switch *spec.Direction {
+	case "asp-to-sgp", "sgp-to-asp":
+	default:
+		return workloadIdentity{}, errors.New("unsupported workload direction")
+	}
+	switch *spec.Initiation {
+	case "asp-dial", "sgp-dial":
+	default:
+		return workloadIdentity{}, errors.New("unsupported workload initiation")
 	}
 	instrumentation := "http-progress"
 	if spec.SharedClock != nil {

@@ -16,7 +16,7 @@ func echoRunAtRateJSON(rate int) string {
 	expected := rate * 120
 	sender := strings.Replace(runAtRateJSON(passingRunJSON(), rate), `"mode":"throughput"`, `"mode":"echo"`, 1)
 	return strings.Replace(sender, `"sender_window"`,
-		fmt.Sprintf(`"echo":{"scope":"round-trip","deadline_ns":2000000000,"outstanding_limit":8192,"requests":%d,"validated":%d,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, expected, expected), 1)
+		fmt.Sprintf(`"echo":{"scope":"round-trip scheduled-request-to-validated-reply on the sender monotonic clock; never one-way latency","deadline_ns":2000000000,"outstanding_limit":8192,"requests":%d,"validated":%d,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, expected, expected), 1)
 }
 
 func TestRunRejectsContradictoryDuplicatedSettings(testContext *testing.T) {
@@ -182,6 +182,50 @@ func TestEchoOutstandingLimitMustMatchWorkload(testContext *testing.T) {
 	}
 }
 
+func TestEchoMetadataMustMatchProducerContract(testContext *testing.T) {
+	for _, mutation := range []struct {
+		name        string
+		old         string
+		replacement string
+	}{
+		{name: "missing scope", old: `"scope":"round-trip scheduled-request-to-validated-reply on the sender monotonic clock; never one-way latency",`, replacement: ""},
+		{name: "empty scope", old: `"scope":"round-trip scheduled-request-to-validated-reply on the sender monotonic clock; never one-way latency"`, replacement: `"scope":""`},
+		{name: "wrong scope", old: `"scope":"round-trip scheduled-request-to-validated-reply on the sender monotonic clock; never one-way latency"`, replacement: `"scope":"one-way"`},
+		{name: "missing deadline", old: `"deadline_ns":2000000000,`, replacement: ""},
+		{name: "null deadline", old: `"deadline_ns":2000000000`, replacement: `"deadline_ns":null`},
+		{name: "short deadline", old: `"deadline_ns":2000000000`, replacement: `"deadline_ns":1999999999`},
+		{name: "long deadline", old: `"deadline_ns":2000000000`, replacement: `"deadline_ns":2000000001`},
+	} {
+		testContext.Run(mutation.name, func(testContext *testing.T) {
+			run := strings.Replace(echoRunJSON(), mutation.old, mutation.replacement, 1)
+			if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+				testContext.Fatal("accepted echo metadata outside the producer contract")
+			}
+		})
+	}
+}
+
+func TestDirectionAndInitiationMustBeProducerIdentifiers(testContext *testing.T) {
+	for _, mutation := range []struct {
+		name string
+		run  string
+	}{
+		{name: "unknown direction", run: strings.Replace(passingRunJSON(), `"direction":"asp-to-sgp"`, `"direction":"sideways"`, 1)},
+		{name: "unknown initiation", run: strings.ReplaceAll(passingRunJSON(), `"initiation":"asp-dial"`, `"initiation":"peer-dial"`)},
+	} {
+		testContext.Run(mutation.name, func(testContext *testing.T) {
+			if _, _, err := evidenceFromFixture(json.RawMessage(mutation.run), 10); err == nil {
+				testContext.Fatal("accepted identifier outside the producer contract")
+			}
+		})
+	}
+
+	reverse := strings.Replace(passingRunJSON(), `"direction":"asp-to-sgp"`, `"direction":"sgp-to-asp"`, 1)
+	if _, _, err := evidenceFromFixture(json.RawMessage(reverse), 10); err != nil {
+		testContext.Fatalf("rejected producer reverse direction: %v", err)
+	}
+}
+
 func TestZeroSubmissionFailedProbeRemainsValidEvidence(testContext *testing.T) {
 	run := strings.Replace(passingRunJSON(), `"fixture_verdict":"pass"`, `"fixture_verdict":"invalid"`, 1)
 	run = strings.Replace(run, `"sent":1200,"submitted":1200`, `"sent":0,"submitted":0`, 1)
@@ -275,7 +319,7 @@ func TestEchoWorkloadRequiresEchoEvidence(testContext *testing.T) {
 }
 
 func TestEchoEvidenceMustMatchWorkload(testContext *testing.T) {
-	echo := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"outstanding_limit":8192,"requests":1200,"validated":1200,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, 1)
+	echo := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"scope":"round-trip scheduled-request-to-validated-reply on the sender monotonic clock; never one-way latency","deadline_ns":2000000000,"outstanding_limit":8192,"requests":1200,"validated":1200,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, 1)
 	for _, mode := range []string{"throughput", "bidirectional", "unknown"} {
 		run := strings.Replace(echo, `"mode":"throughput"`, `"mode":"`+mode+`"`, 1)
 		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
