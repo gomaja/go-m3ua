@@ -19,7 +19,10 @@ import (
 	"io"
 	"math"
 	"os"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
@@ -184,18 +187,27 @@ func evaluate(decoded request) (response, error) {
 // superset; every evidence field this command relies on is checked for
 // presence explicitly.
 type fixtureEvidence struct {
-	Spec           *fixtureSpec `json:"spec"`
-	Expected       *uint64      `json:"expected"`
-	FixtureVerdict *string      `json:"fixture_verdict"`
-	Capped         *uint64      `json:"capped"`
-	SendErrors     *uint64      `json:"send_errors"`
-	Delivery       *struct {
-		Unique        *uint64 `json:"unique"`
-		Missing       *uint64 `json:"missing"`
-		Duplicate     *uint64 `json:"duplicate"`
-		Invalid       *uint64 `json:"invalid"`
-		Reordered     *uint64 `json:"reordered"`
-		LateAfterStop *uint64 `json:"late_after_stop"`
+	Side                     *string      `json:"side"`
+	Spec                     *fixtureSpec `json:"spec"`
+	Expected                 *uint64      `json:"expected"`
+	Scheduled                *uint64      `json:"scheduled"`
+	Sent                     *uint64      `json:"sent"`
+	Submitted                *uint64      `json:"submitted"`
+	FixtureVerdict           *string      `json:"fixture_verdict"`
+	Capped                   *uint64      `json:"capped"`
+	SendErrors               *uint64      `json:"send_errors"`
+	OutstandingAtWindowStart *uint64      `json:"outstanding_at_window_start"`
+	OutstandingAfterDrain    *uint64      `json:"outstanding_after_drain"`
+	FatalError               string       `json:"fatal_error"`
+	Delivery                 *struct {
+		Unique            *uint64 `json:"unique"`
+		UniqueMeasurement *uint64 `json:"unique_measurement"`
+		UniqueDrain       *uint64 `json:"unique_drain"`
+		Missing           *uint64 `json:"missing"`
+		Duplicate         *uint64 `json:"duplicate"`
+		Invalid           *uint64 `json:"invalid"`
+		Reordered         *uint64 `json:"reordered"`
+		LateAfterStop     *uint64 `json:"late_after_stop"`
 	} `json:"delivery"`
 	SenderWindow *struct {
 		Status        *string `json:"status"`
@@ -207,9 +219,17 @@ type fixtureEvidence struct {
 		} `json:"backlog_change"`
 	} `json:"sender_window"`
 	Echo *struct {
-		Capped           *uint64 `json:"capped"`
-		DeadlineExceeded *uint64 `json:"deadline_exceeded"`
+		Validated             *uint64 `json:"validated"`
+		Capped                *uint64 `json:"capped"`
+		DeadlineExceeded      *uint64 `json:"deadline_exceeded"`
+		Invalid               *uint64 `json:"invalid"`
+		OutstandingAfterDrain *uint64 `json:"outstanding_after_drain"`
 	} `json:"echo"`
+	ReceiverEcho *struct {
+		Replies        *uint64 `json:"replies"`
+		ReplyErrors    *uint64 `json:"reply_errors"`
+		RepliesDropped *uint64 `json:"replies_dropped"`
+	} `json:"receiver_echo"`
 	SendDuration *struct {
 		Max *time.Duration `json:"max_ns"`
 	} `json:"send_duration"`
@@ -348,21 +368,8 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if record.Expected == nil || *record.Expected != *record.Spec.Expected {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("record expected must equal workload spec.expected")
 	}
-	if record.FixtureVerdict == nil {
-		return perfstats.RunEvidence{}, runIdentity{}, errors.New("fixture_verdict is required")
-	}
-	if (workload.Mode == "echo") != (record.Echo != nil) {
-		return perfstats.RunEvidence{}, runIdentity{}, errors.New("workload echo mode and echo evidence must agree")
-	}
-	if record.Capped == nil || record.SendErrors == nil {
-		return perfstats.RunEvidence{}, runIdentity{}, errors.New("capped and send_errors are required")
-	}
-	if record.Delivery == nil || record.Delivery.Unique == nil || record.Delivery.Missing == nil || record.Delivery.Duplicate == nil ||
-		record.Delivery.Invalid == nil || record.Delivery.Reordered == nil || record.Delivery.LateAfterStop == nil {
-		return perfstats.RunEvidence{}, runIdentity{}, errors.New("delivery counters are required")
-	}
-	if *record.FixtureVerdict == "pass" && *record.Delivery.Unique != *record.Expected {
-		return perfstats.RunEvidence{}, runIdentity{}, errors.New("passing fixture delivery.unique must equal the expected workload")
+	if err := validateFixtureValidity(&record, workload.Mode); err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
 	if record.SendDuration == nil || record.SendDuration.Max == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("send_duration.max_ns is required as the transport-stall signal")
@@ -393,9 +400,6 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 		},
 	}
 	if record.Echo != nil {
-		if record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil {
-			return perfstats.RunEvidence{}, runIdentity{}, errors.New("echo runs require capped and deadline_exceeded counters")
-		}
 		evidence.Counters.Capped += *record.Echo.Capped
 		evidence.Counters.DeadlineExceeded = *record.Echo.DeadlineExceeded
 	}
@@ -412,6 +416,77 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 		Upper: *window.BacklogChange.Upper,
 	}
 	return evidence, identity, nil
+}
+
+func validateFixtureValidity(record *fixtureEvidence, mode string) error {
+	if record.Side == nil || *record.Side != "sender" {
+		return errors.New("run evidence must be a sender record")
+	}
+	if record.FixtureVerdict == nil {
+		return errors.New("fixture_verdict is required")
+	}
+	if *record.FixtureVerdict != "pass" && *record.FixtureVerdict != "invalid" {
+		return errors.New("fixture_verdict must be pass or invalid")
+	}
+	if record.Scheduled == nil || record.Sent == nil || record.Submitted == nil || record.Capped == nil || record.SendErrors == nil ||
+		record.OutstandingAtWindowStart == nil || record.OutstandingAfterDrain == nil {
+		return errors.New("sender submission and outstanding counters are required")
+	}
+	if record.Delivery == nil || record.Delivery.Unique == nil || record.Delivery.UniqueMeasurement == nil || record.Delivery.UniqueDrain == nil ||
+		record.Delivery.Missing == nil || record.Delivery.Duplicate == nil || record.Delivery.Invalid == nil ||
+		record.Delivery.Reordered == nil || record.Delivery.LateAfterStop == nil {
+		return errors.New("delivery counters are required")
+	}
+	if *record.Scheduled != *record.Expected || *record.Sent != *record.Submitted ||
+		!sumEquals(*record.Scheduled, *record.Submitted, *record.SendErrors, *record.Capped) {
+		return errors.New("sender submission counters do not reconcile with the expected workload")
+	}
+	if !sumEquals(*record.Delivery.Unique, *record.Delivery.UniqueMeasurement, *record.Delivery.UniqueDrain) {
+		return errors.New("delivery unique_measurement and unique_drain do not reconcile with delivery.unique")
+	}
+	if *record.FixtureVerdict == "pass" && !sumEquals(*record.Expected, *record.Delivery.Unique, *record.Delivery.Missing) {
+		return errors.New("delivery unique and missing do not reconcile with the expected workload")
+	}
+
+	fixtureInvalid := record.FatalError != "" || *record.Capped != 0 || *record.SendErrors != 0 ||
+		*record.Delivery.Unique != *record.Expected || *record.Delivery.Missing != 0 || *record.Delivery.Duplicate != 0 ||
+		*record.Delivery.Invalid != 0 || *record.Delivery.Reordered != 0 || *record.Delivery.LateAfterStop != 0 ||
+		*record.OutstandingAtWindowStart != 0 || *record.OutstandingAfterDrain != 0
+
+	switch mode {
+	case "echo":
+		if record.Echo == nil || record.Echo.Validated == nil || record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil ||
+			record.Echo.Invalid == nil || record.Echo.OutstandingAfterDrain == nil {
+			return errors.New("echo runs require validated, capped, deadline_exceeded, invalid and outstanding_after_drain counters")
+		}
+		if record.ReceiverEcho != nil {
+			return errors.New("sender records must not carry receiver_echo evidence")
+		}
+		fixtureInvalid = fixtureInvalid || *record.Echo.Validated != *record.Expected || *record.Echo.Capped != 0 ||
+			*record.Echo.DeadlineExceeded != 0 || *record.Echo.Invalid != 0 || *record.Echo.OutstandingAfterDrain != 0
+	case "throughput":
+		if record.Echo != nil || record.ReceiverEcho != nil {
+			return errors.New("throughput sender records must not carry echo evidence")
+		}
+	case "bidirectional":
+		return errors.New("bidirectional capacity evidence requires a complete cohort contract")
+	}
+
+	if (*record.FixtureVerdict == "invalid") != fixtureInvalid {
+		return errors.New("fixture_verdict contradicts the fixture validity counters")
+	}
+	return nil
+}
+
+func sumEquals(total uint64, parts ...uint64) bool {
+	sum := uint64(0)
+	for _, part := range parts {
+		if part > math.MaxUint64-sum {
+			return false
+		}
+		sum += part
+	}
+	return sum == total
 }
 
 func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, error) {
@@ -577,10 +652,11 @@ func scanJSONValue(decoder *json.Decoder) error {
 			if !isString {
 				return errors.New("object key is not a string")
 			}
-			if _, exists := keys[key]; exists {
+			foldedKey := foldJSONKey(key)
+			if _, exists := keys[foldedKey]; exists {
 				return fmt.Errorf("duplicate object key %q", key)
 			}
-			keys[key] = struct{}{}
+			keys[foldedKey] = struct{}{}
 			if err := scanJSONValue(decoder); err != nil {
 				return err
 			}
@@ -604,6 +680,29 @@ func scanJSONValue(decoder *json.Decoder) error {
 		return errors.New("mismatched JSON delimiter")
 	}
 	return nil
+}
+
+func foldJSONKey(key string) string {
+	var folded strings.Builder
+	folded.Grow(len(key))
+	for _, character := range key {
+		if character < utf8.RuneSelf {
+			if 'a' <= character && character <= 'z' {
+				character -= 'a' - 'A'
+			}
+		} else {
+			for {
+				next := unicode.SimpleFold(character)
+				if next <= character {
+					character = next
+					break
+				}
+				character = next
+			}
+		}
+		folded.WriteRune(character)
+	}
+	return folded.String()
 }
 
 func writeInvalidResponse(output io.Writer, err error) {
