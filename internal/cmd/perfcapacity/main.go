@@ -363,6 +363,9 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
+	if workload.Outstanding != environment.OutstandingLimit || workload.Initiation != environment.Initiation {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("run environment outstanding_limit and initiation must agree with the workload spec")
+	}
 	identity := runIdentity{workload: workload, environment: environment}
 
 	evidence := perfstats.RunEvidence{
