@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	bidirectionalDuration = 120_000_000_000
-	bidirectionalStart    = 1_000_000_000_000
-	bidirectionalEnd      = bidirectionalStart + bidirectionalDuration
+	bidirectionalDuration int64 = 120_000_000_000
+	bidirectionalStart    int64 = 1_000_000_000_000
+	bidirectionalEnd            = bidirectionalStart + bidirectionalDuration
 )
 
 func bidirectionalClockJSON() string {
