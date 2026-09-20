@@ -183,16 +183,37 @@ validated, capped, deadline, invalid and post-drain outstanding counters; reques
 must equal sender submissions. Non-echo sender
 records must not carry echo evidence.
 
-Bidirectional capacity evidence is currently invalid input. Its reverse sender
-and receiver records are siblings of the forward records in the fixture's
-cohort result, not fields of the sender record accepted by this CLI. Qualifying
-that mode requires a separately defined complete-cohort input and decision rule;
-the forward sender record alone must not be treated as bidirectional evidence.
+Bidirectional entries use the fixture's actual `measurement` cohort object as
+`run`, not the outer combined result and not a forward sender alone. The cohort
+must carry `sender`, `receiver`, `reverse_sender`, and `reverse_receiver`. The
+forward pair uses bidirectional ASP-to-SGP specifications; the reverse pair uses
+the producer's throughput SGP-to-ASP specification and `-reverse` cohort suffix.
+Both sender manifests must identify the same clean environment and revision.
+
+All four records must carry one exact, verified same-host `CLOCK_MONOTONIC`
+domain and measurement window. Each sender must also carry the producer's
+bounded one-millisecond watchdog proof for translating that window's drain
+deadline. Sender-window delivery bounds must match the corresponding receiver
+boundary counters, contain the receiver's measurement-delivery count, and, for
+a bounded window, come from a resolution-safe capture after the window ended.
+Each direction is decided separately from both its sender and receiver validity;
+both must pass, so receiver failures or backlog shrinkage in one direction
+cannot be hidden by the other. Completed loss remains a failed probe, while a
+missing reverse record or contradictory cohort verdict is invalid input.
+Per-direction achieved-rate bounds exclude drain deliveries and are
+reported with each decision. The outer rate and selected rate remain
+per-direction offered rates; the response reports their overflow-checked
+two-direction aggregate offered rate separately from achieved rate. Neither a
+capacity result nor those observations replace a separate absolute
+achieved-throughput target.
+
 Cohort and seed may vary between independent runs. Offered rate may vary during
 the search; associations, duration, drain, outstanding limit, payload, mode,
 direction, initiation and peer-control endpoint must otherwise stay fixed.
 The manifest must also preserve socket options, flow count, outstanding limit,
-initiation and accounting scope. Its required strings must be nonempty.
+initiation and accounting scope. Its required strings must be nonempty. Shared
+clock and HTTP-progress instrumentation are distinct campaign identities and
+must not be mixed.
 
 A pass covers only the search and repetition rules; it does not establish
 environmental validity, latency or CPU budgets, or independent-peer behavior.

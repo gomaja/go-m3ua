@@ -305,7 +305,8 @@ func TestFoldJSONKeyMatchesEncodingJSONUnicodeFolding(testContext *testing.T) {
 
 func FuzzRunNeverPanicsAndAlwaysWritesJSON(fuzzContext *testing.F) {
 	fuzzContext.Add([]byte(`{}`))
-	fuzzContext.Add([]byte(fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, passingRunJSON())))
+	fuzzContext.Add(fmt.Appendf(nil, `{"initial":10,"probes":[{"rate":10,"run":%s}]}`, passingRunJSON()))
+	fuzzContext.Add(fmt.Appendf(nil, `{"initial":10,"probes":[{"rate":10,"run":%s}]}`, bidirectionalRunJSON(10, -1, 0, -1, 0)))
 	fuzzContext.Add([]byte(`{"initial":10,"probes":null,"repetitions":null}`))
 	fuzzContext.Add([]byte{0xff, 0x00, '{', '}'})
 	fuzzContext.Fuzz(func(testContext *testing.T, input []byte) {
