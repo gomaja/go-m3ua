@@ -782,9 +782,18 @@ func validateRoutingContextAgainst(peer *params.Param, configured []uint32) erro
 	if peer == nil {
 		return nil
 	}
+	if len(peer.Data) == 4 {
+		theirs := peer.RoutingContext()
+		for _, ours := range configured {
+			if theirs == ours {
+				return nil
+			}
+		}
+		return NewInvalidRoutingContextError(theirs)
+	}
 	theirs := peer.RoutingContexts()
 
-	ours := make(map[uint32]struct{})
+	ours := make(map[uint32]struct{}, len(configured))
 	for _, rc := range configured {
 		ours[rc] = struct{}{}
 	}
