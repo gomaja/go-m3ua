@@ -243,6 +243,7 @@ func TestLossCountersFailEvenWithCleanInterval(testContext *testing.T) {
 
 func TestEchoCapAndDeadlineCountersAreLosses(testContext *testing.T) {
 	echoRun := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"capped":0,"deadline_exceeded":2},"sender_window"`, 1)
+	echoRun = strings.Replace(echoRun, `"mode":"throughput"`, `"mode":"echo"`, 1)
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, echoRun)
 	_, decoded := runRequest(testContext, input)
 	if decoded.ProbeDecisions[0].Decision != "fail" {

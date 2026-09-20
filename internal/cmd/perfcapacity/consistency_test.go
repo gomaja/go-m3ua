@@ -49,3 +49,24 @@ func TestPassingRunRequiresExpectedValidatedDeliveries(testContext *testing.T) {
 		}
 	}
 }
+
+func TestEchoWorkloadRequiresEchoEvidence(testContext *testing.T) {
+	run := strings.Replace(passingRunJSON(), `"mode":"throughput"`, `"mode":"echo"`, 1)
+	if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+		testContext.Fatal("accepted echo workload without echo counters")
+	}
+}
+
+func TestEchoEvidenceMustMatchWorkload(testContext *testing.T) {
+	echo := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"capped":0,"deadline_exceeded":0},"sender_window"`, 1)
+	for _, mode := range []string{"throughput", "bidirectional", "unknown"} {
+		run := strings.Replace(echo, `"mode":"throughput"`, `"mode":"`+mode+`"`, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+			testContext.Fatalf("accepted echo evidence for %s", mode)
+		}
+	}
+	echo = strings.Replace(echo, `"mode":"throughput"`, `"mode":"echo"`, 1)
+	if _, _, err := evidenceFromFixture(json.RawMessage(echo), 10); err != nil {
+		testContext.Fatal(err)
+	}
+}

@@ -351,6 +351,9 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if record.FixtureVerdict == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("fixture_verdict is required")
 	}
+	if (workload.Mode == "echo") != (record.Echo != nil) {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("workload echo mode and echo evidence must agree")
+	}
 	if record.Capped == nil || record.SendErrors == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("capped and send_errors are required")
 	}
@@ -431,6 +434,11 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	}
 	if *spec.Payload == "" || *spec.Mode == "" || *spec.Direction == "" || *spec.Initiation == "" {
 		return workloadIdentity{}, errors.New("spec payload, mode, direction and initiation must not be empty")
+	}
+	switch *spec.Mode {
+	case "throughput", "echo", "bidirectional":
+	default:
+		return workloadIdentity{}, errors.New("unsupported workload mode")
 	}
 	return workloadIdentity{
 		Associations: *spec.Associations,

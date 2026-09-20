@@ -166,6 +166,7 @@ must match rate multiplied by duration using the fixture's integer arithmetic.
 The record-level `expected` must match `spec.expected`, and a passing fixture
 must report that many unique validated deliveries. Duplicated outstanding
 limits and initiation fields must agree between the specification and manifest.
+Echo-mode runs must include echo counters; other modes must not carry them.
 Cohort and seed may vary between independent runs. Offered rate may vary during
 the search; associations, duration, drain, outstanding limit, payload, mode,
 direction, initiation and peer-control endpoint must otherwise stay fixed.
