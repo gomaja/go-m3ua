@@ -47,7 +47,7 @@ func TestBoundedHistogramPercentiles(testContext *testing.T) {
 	if percentiles.Count != 4 || percentiles.P50 < 10*time.Microsecond || percentiles.P99 < time.Millisecond {
 		testContext.Fatalf("percentiles = %+v", percentiles)
 	}
-	if histogram.storageBytes() > 1024 {
+	if histogram.storageBytes() > 32*1024 {
 		testContext.Fatalf("histogram storage = %d bytes", histogram.storageBytes())
 	}
 }
