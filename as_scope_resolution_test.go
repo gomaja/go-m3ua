@@ -147,6 +147,8 @@ func TestMTPTransferHonorsDUNAWithOmittedNetworkAppearance(test *testing.T) {
 		test.Fatal("Endpoint refused the mixed-network Association")
 	}
 	sendDAVA(test, association, 7, 1, 123)
+	drainMTPIndications(endpoint.MTPIndications())
+	drainSignallingStatuses(association.SignallingStatus())
 	request := MTPTransferRequest{ProtocolData: transferProtocolData(123, 1, []byte("payload"))}
 	if _, err := endpoint.MTPTransfer(request); err != nil {
 		test.Fatalf("initial available transfer: %v", err)
@@ -157,6 +159,86 @@ func TestMTPTransferHonorsDUNAWithOmittedNetworkAppearance(test *testing.T) {
 	_, err := endpoint.MTPTransfer(request)
 	if !errors.Is(err, ErrNoMTPRoute) || capture.submissions() != 1 {
 		test.Fatalf("transfer after DUNA: error=%v submissions=%d", err, capture.submissions())
+	}
+	status, known := endpoint.MTPDestinationStatus(MTPDestination{MTPRoute: "core", PointCode: 123})
+	if !known || status.Availability != DestinationUnavailable {
+		test.Errorf("aggregate after DUNA: status=%+v known=%t", status, known)
+	}
+	select {
+	case indication := <-endpoint.MTPIndications():
+		if indication.Kind != MTPPauseIndication || indication.Destination.Availability != DestinationUnavailable {
+			test.Errorf("indication after DUNA: %+v", indication)
+		}
+	default:
+		test.Error("DUNA did not emit MTP-PAUSE")
+	}
+	statuses := endpoint.MTPDestinationStatuses()
+	if len(statuses) != 1 || statuses[0] != status {
+		test.Errorf("aggregate snapshot after DUNA: %+v", statuses)
+	}
+	select {
+	case status := <-association.SignallingStatus():
+		if status.NetworkAppearanceSet || !status.RoutingContextSet || !reflect.DeepEqual(status.RoutingContexts, []uint32{1}) {
+			test.Errorf("DUNA wire scope changed: %+v", status)
+		}
+	default:
+		test.Error("DUNA did not emit a signalling status")
+	}
+	if err := association.handleDestinationAvailable(messages.NewDestinationAvailable(nil, params.NewRoutingContext(1), params.NewAffectedPointCode(123), nil)); err != nil {
+		test.Fatalf("DAVA: %v", err)
+	}
+	requireMTPIndication(test, endpoint.MTPIndications(), MTPResumeIndication, "core", 123, 0, DestinationAvailable, false, 0, false)
+	if _, err := endpoint.MTPTransfer(request); err != nil || capture.submissions() != 2 {
+		test.Fatalf("transfer after DAVA: error=%v submissions=%d", err, capture.submissions())
+	}
+}
+
+func TestASPRouteStatusResolvesNetworkAppearanceByRoutingContext(test *testing.T) {
+	for _, appearance := range []uint32{0, 7} {
+		for _, explicit := range []bool{false, true} {
+			for _, dynamic := range []bool{false, true} {
+				for _, contexts := range [][]uint32{{1}, {1, 3}} {
+					name := fmt.Sprintf("appearance=%d/explicit=%t/dynamic=%t/contexts=%v", appearance, explicit, dynamic, contexts)
+					test.Run(name, func(test *testing.T) {
+						_, association := newMixedNetworkScopeAssociation(test, appearance, dynamic)
+						status := &DestinationStatus{RoutingContexts: contexts, RoutingContextSet: true}
+						if explicit {
+							status.NetworkAppearance, status.NetworkAppearanceSet = appearance, true
+						}
+						for _, candidate := range []ASKey{*staticASKey(appearance, 1), *staticASKey(appearance, 3), *staticASKey(appearance+1, 5), *staticASKey(appearance+1, 1), {RoutingContext: 1, RoutingContextSet: true}} {
+							want := candidate.NetworkAppearanceSet && candidate.NetworkAppearance == appearance && (candidate.RoutingContext == 1 || len(contexts) == 2 && candidate.RoutingContext == 3)
+							if got := aspRouteASMatchesStatus(association, candidate, status); got != want {
+								test.Errorf("candidate=%+v matched=%t, want %t", candidate, got, want)
+							}
+						}
+						if status.NetworkAppearanceSet != explicit || !reflect.DeepEqual(status.RoutingContexts, contexts) {
+							test.Errorf("status wire scope changed: %+v", status)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestASPRouteStatusResolvesOmittedRoutingContext(test *testing.T) {
+	for _, scenario := range []struct {
+		name    string
+		servers []ASConfig
+		key     ASKey
+		want    bool
+	}{
+		{name: "contextless", key: ASKey{}, want: true},
+		{name: "single", servers: []ASConfig{{ASKey: *staticASKey(0, 1)}}, key: *staticASKey(0, 1), want: true},
+		{name: "wrong-appearance", servers: []ASConfig{{ASKey: *staticASKey(0, 1)}}, key: *staticASKey(7, 1)},
+		{name: "ambiguous", servers: []ASConfig{{ASKey: *staticASKey(7, 1)}, {ASKey: *staticASKey(8, 3)}}, key: *staticASKey(7, 1)},
+	} {
+		test.Run(scenario.name, func(test *testing.T) {
+			association := &Association{cfg: &AssociationConfig{ApplicationServers: scenario.servers}}
+			if got := aspRouteASMatchesStatus(association, scenario.key, &DestinationStatus{}); got != scenario.want {
+				test.Errorf("matched=%t, want %t", got, scenario.want)
+			}
+		})
 	}
 }
 
@@ -272,6 +354,17 @@ func FuzzSSNMScopedNetworkAppearance(fuzz *testing.F) {
 		}
 		if got := association.ssnmASKeys(scope); !reflect.DeepEqual(got, []ASKey{first, second}) {
 			test.Fatalf("resolved=%+v, want %+v", got, []ASKey{first, second})
+		}
+		status := &DestinationStatus{NetworkAppearance: scope.NetworkAppearance, NetworkAppearanceSet: explicit,
+			RoutingContexts: scope.RoutingContexts, RoutingContextSet: true}
+		for _, candidate := range []ASKey{first, second} {
+			if !aspRouteASMatchesStatus(association, candidate, status) {
+				test.Fatalf("resolved status did not match candidate %+v", candidate)
+			}
+			candidate.NetworkAppearance++
+			if aspRouteASMatchesStatus(association, candidate, status) {
+				test.Fatalf("resolved status matched wrong appearance %+v", candidate)
+			}
 		}
 	})
 }

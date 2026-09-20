@@ -1262,28 +1262,14 @@ func aspRouteASMatchesStatus(association *Association, key ASKey, status *Destin
 	if association == nil || status == nil {
 		return false
 	}
-	networkAppearance := status.NetworkAppearance
-	networkAppearanceSet := status.NetworkAppearanceSet
-	if !networkAppearanceSet && association.cfg != nil {
-		networkAppearance, networkAppearanceSet = asConfigNetworkAppearance(association.cfg.ApplicationServers)
+	scope := WireScope{
+		NetworkAppearance:    status.NetworkAppearance,
+		NetworkAppearanceSet: status.NetworkAppearanceSet,
+		RoutingContexts:      status.RoutingContexts,
+		RoutingContextSet:    status.RoutingContextSet,
 	}
-	if key.NetworkAppearanceSet != networkAppearanceSet || key.NetworkAppearance != networkAppearance {
-		return false
-	}
-
-	routingContexts := status.RoutingContexts
-	routingContextSet := status.RoutingContextSet
-	if !routingContextSet {
-		routingContexts, routingContextSet = association.destinationRoutingContexts(nil)
-	}
-	if key.RoutingContextSet != routingContextSet {
-		return false
-	}
-	if !routingContextSet {
-		return true
-	}
-	for _, routingContext := range routingContexts {
-		if routingContext == key.RoutingContext {
+	for _, resolved := range association.ssnmASKeys(scope) {
+		if key == resolved {
 			return true
 		}
 	}
