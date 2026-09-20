@@ -46,7 +46,7 @@ func sharedClockFixture(testContext *testing.T) (*receiverControl, *fakeMeasurem
 	domain := sharedClockDomain{Clock: "CLOCK_MONOTONIC", BootID: "test-boot", TimeNamespace: "time:[123]", Resolution: 1}
 	clock := &fakeMeasurementClock{domain: domain}
 	clock.now.Store(int64(99 * time.Second))
-	specification := runSpec{Cohort: "aligned", Seed: 7, Associations: 1, Rate: 100, Expected: 1000, Duration: 10 * time.Second, Payload: workload128, Outstanding: maxOutstanding, Clock: &sharedClockWindow{Domain: domain, Start: int64(100 * time.Second), End: int64(110 * time.Second)}}
+	specification := runSpec{Cohort: "aligned", Seed: 7, Associations: 1, Rate: 100, Expected: 1000, Duration: 10 * time.Second, Drain: time.Second, Payload: workload128, Outstanding: maxOutstanding, Clock: &sharedClockWindow{Domain: domain, Start: int64(100 * time.Second), End: int64(110 * time.Second)}}
 	control := newReceiverControl(1, maxOutstanding)
 	control.clock = clock
 	control.cpuStatPath = writeCPUStatFixture(testContext, "usage_usec 1\nnr_throttled 0\n")

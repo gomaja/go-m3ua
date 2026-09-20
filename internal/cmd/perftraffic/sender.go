@@ -42,6 +42,8 @@ type cohortResult struct {
 type sendJob struct {
 	identity  messageIdentity
 	scheduled time.Time
+	clock     *sharedRunClock
+	offset    time.Duration
 	size      int
 	reverse   bool
 }
@@ -330,6 +332,8 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		return stopFailedProgress(config.PeerControl, specification, initialObservation, errors.New("receiver progress is not an empty active cohort"))
 	}
 	started := time.Now()
+	drainDeadline := started.Add(duration + effectiveDrain)
+	var watchdogEvidence *sharedClockWatchdog
 	if clock == nil {
 		initialObservation.Before = initialBefore.Sub(started)
 		initialObservation.After = 0
@@ -339,10 +343,14 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 			!clockEnvelopeContains(initialObservation.Clock.Before, initialObservation.Clock.After, initialProgress.Clock.Captured, clock.window.Domain.Resolution) || initialProgress.Clock.Domain != clock.window.Domain {
 			return stopFailedProgress(config.PeerControl, specification, initialObservation, errors.New("shared clock start boundary or envelope failed"))
 		}
-		started = started.Add(-elapsed)
+		var deadlineErr error
+		drainDeadline, watchdogEvidence, deadlineErr = clock.watchdog(time.Now)
+		if deadlineErr != nil {
+			return stopFailedProgress(config.PeerControl, specification, initialObservation, deadlineErr)
+		}
 	}
 	for _, association := range associations {
-		if deadlineErr := association.SetWriteDeadline(started.Add(duration + effectiveDrain)); deadlineErr != nil {
+		if deadlineErr := association.SetWriteDeadline(drainDeadline); deadlineErr != nil {
 			_ = postJSON(ctx, config.PeerControl+"/stop", nil)
 			return runRecord{}, runRecord{}, fmt.Errorf("set association write deadline: %w", deadlineErr)
 		}
@@ -357,7 +365,7 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	counters := newSenderCounters(config.Outstanding)
 	queues, workersDone := startSendWorkers(associations, config, counters, tracker)
 	sampleDone := make(chan struct{})
-	go sampleSender(started, counters, sampleDone)
+	go sampleSharedSender(started, counters, sampleDone, clock)
 	progressDone := sampleSharedProgress(ctx, started, duration, config.PeerControl, clock)
 	dispatchScheduled(ctx, config, cohort, duration, started, expected, queues, counters, tracker, clock)
 	outstandingAtEnd := counters.outstandingCount()
@@ -367,7 +375,6 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		close(queue)
 	}
 	drainStarted := time.Now()
-	drainDeadline := started.Add(duration + effectiveDrain)
 	boundaryContext, cancelBoundary := context.WithDeadline(ctx, drainDeadline)
 	observations = append(observations, observeSharedProgress(boundaryContext, started, config.PeerControl, clock))
 	cancelBoundary()
@@ -406,6 +413,14 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		}
 	}
 	drainDuration := time.Since(drainStarted)
+	if clock != nil {
+		elapsed, clockErr := clock.elapsed()
+		if clockErr != nil {
+			counters.setFatal(clockErr.Error())
+		} else {
+			drainDuration = max(elapsed-duration, 0)
+		}
+	}
 	if stopErr != nil {
 		counters.setFatal(fmt.Sprintf("stop receiver: %v", stopErr))
 	}
@@ -436,7 +451,7 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	if clock != nil {
 		peer, clockErr := readPeerClock(diagnosticsContext, config.PeerControl, clock.source)
 		domain, domainErr := clock.source.Domain()
-		sender.ClockEvidence = &sharedClockEvidence{Before: clock.window.Domain, After: domain}
+		sender.ClockEvidence = &sharedClockEvidence{Before: clock.window.Domain, After: domain, Watchdog: watchdogEvidence}
 		sender.ClockEvidence.Verified = clockErr == nil && domainErr == nil && domain == clock.window.Domain && peer.Domain == domain && receiver.ClockEvidence != nil && receiver.ClockEvidence.Verified && receiver.ClockEvidence.Before == domain && receiver.ClockEvidence.After == domain
 		if !sender.ClockEvidence.Verified {
 			sender.FatalError = "shared clock post-run domain verification failed"
@@ -468,7 +483,11 @@ func startSendWorkers(associations []*m3ua.Association, config commandConfig, co
 		go func(connection *m3ua.Association, jobs <-chan sendJob) {
 			defer workers.Done()
 			for job := range jobs {
-				dispatchTime := time.Now()
+				dispatchLag, clockErr := job.dispatchDelay()
+				if clockErr != nil {
+					counters.complete(clockErr, 0, 0)
+					continue
+				}
 				payload := buildPayload(job.identity, job.size)
 				tuple := tupleFor(job.identity.Flow, job.identity.Association)
 				if job.reverse {
@@ -476,13 +495,17 @@ func startSendWorkers(associations []*m3ua.Association, config commandConfig, co
 				}
 				sendStarted := time.Now()
 				written, sendErr := connection.WriteData(tuple.dataRequest(payload))
+				sendDuration := time.Since(sendStarted)
+				if job.clock != nil {
+					sendErr = errors.Join(sendErr, job.clock.withinDrain(job.offset+dispatchLag))
+				}
 				if sendErr == nil && written != job.size {
 					sendErr = fmt.Errorf("WriteData wrote %d bytes, want %d", written, job.size)
 				}
 				if sendErr != nil && tracker != nil {
 					tracker.fail(globalIndex(job.identity))
 				}
-				counters.complete(sendErr, dispatchTime.Sub(job.scheduled), time.Since(sendStarted))
+				counters.complete(sendErr, dispatchLag, sendDuration)
 			}
 		}(association, queues[index])
 	}
@@ -550,6 +573,7 @@ func dispatchScheduled(ctx context.Context, config commandConfig, cohort string,
 			}
 			job := sendJob{
 				identity: identity, scheduled: started.Add(offset),
+				clock: clock, offset: offset,
 				size: config.Workload.size(index), reverse: config.Direction == directionSGPToASP,
 			}
 			counters.schedule()
@@ -572,6 +596,12 @@ func dispatchScheduled(ctx context.Context, config commandConfig, cohort string,
 			}
 			index++
 		}
+	}
+	if clock != nil {
+		if err := clock.waitUntil(ctx, clock.window.End); err != nil {
+			counters.setFatal(err.Error())
+		}
+		return
 	}
 	remaining := time.Until(started.Add(duration))
 	if remaining > 0 {
@@ -655,15 +685,33 @@ func (counters *senderCounters) outstandingCount() uint64 {
 }
 
 func sampleSender(started time.Time, counters *senderCounters, done <-chan struct{}) {
+	sampleSharedSender(started, counters, done, nil)
+}
+
+func sampleSharedSender(started time.Time, counters *senderCounters, done <-chan struct{}, clock *sharedRunClock) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case now := <-ticker.C:
 			counters.mutex.Lock()
+			offset := now.Sub(started)
+			if clock != nil {
+				var err error
+				offset, err = clock.elapsed()
+				if err != nil {
+					counters.fatal = err.Error()
+					counters.mutex.Unlock()
+					return
+				}
+			}
+			if offset < 0 {
+				counters.mutex.Unlock()
+				continue
+			}
 			if len(counters.series) < 601 {
 				counters.series = append(counters.series, seriesPoint{
-					OffsetMillis: uint64(now.Sub(started) / time.Millisecond),
+					OffsetMillis: uint64(offset / time.Millisecond),
 					Scheduled:    counters.scheduled,
 					Sent:         counters.submitted,
 					Submitted:    counters.submitted,

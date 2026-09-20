@@ -71,9 +71,10 @@ The cohort result carries per-direction records: `sender`/`receiver` cover
 ASP-to-SGP and `reverse_sender`/`reverse_receiver` cover SGP-to-ASP, each
 with its own counters, series, sender-window bounds and backlog interval. The
 cohort passes only when all four records are loss-free and fixture-valid.
-Each direction's measurement window is anchored by its own driving side; the
+In the default HTTP-interval mode, each direction's measurement window is anchored by its own driving side; the
 two windows start within one control round-trip of each other and are not
-claimed to be identical. The reverse sender record's CPU and allocation
+claimed to be identical. With `-same-host-clock`, both directions instead use
+the same declared future start and end. The reverse sender record's CPU and allocation
 observations cover the same whole process as the SGP's forward receiver
 record, not a separate allowance.
 
@@ -252,7 +253,7 @@ interpreting it. Failed, inconsistent or incomplete observations yield
 `inconclusive`, not a measured zero or a passing result. Raw observations remain
 in `sender.progress_observations` even when analysis cannot use them.
 
-The receiver's first-arrival-based `delivery.unique_measurement` and
+In the default HTTP-interval mode, the receiver's first-arrival-based `delivery.unique_measurement` and
 `validated_per_second` remain explicitly receiver-window diagnostics, not
 sender-aligned acceptance measurements. Older fixture results must not be mixed
 with these bounds as if the measurement definitions were identical.
@@ -282,6 +283,30 @@ sender schedules traffic. Missing the start during preparation invalidates the
 run. Both domains are checked again after the run. This is a controlled-host
 measurement assumption, not cryptographic proof that remote hosts are shared.
 Container placement must independently establish the common Linux host.
+
+Shared integer timestamps are authoritative for scheduled dispatch lag,
+measurement-end waits, diagnostic sample offsets, and receiver drain duration.
+Go timers are wake-up hints followed by another shared-clock read; no translated
+Go start timestamp defines these measurements. Samples before the future start
+are omitted, and both sides retain at most 601 diagnostic series points.
+The send-call duration remains a separate process-local Go monotonic interval.
+
+Socket and context watchdogs require Go deadlines. Their translation brackets
+`time.Now()` between two shared reads and places the watchdog conservatively
+after the shared end-plus-drain boundary. The bracket width plus twice the clock
+resolution must be at most 1 ms, otherwise preparation fails. The sender retains
+the bracket, target, translation-lateness bound, and budget in
+`clock_evidence.watchdog`. This bounds translation uncertainty, not OS wake-up
+latency. Sender write completion and receiver delivery commit must independently
+fit within the shared drain boundary including clock resolution; an uncertain
+or late completion invalidates the run rather than receiving extra drain credit.
+The shared drain duration includes final control/stop observation time and can
+therefore exceed the delivery allowance without extending that allowance.
+Go's Linux runtime uses `CLOCK_MONOTONIC` for its monotonic reading
+([Go 1.25.10 arm64 runtime](https://github.com/golang/go/blob/go1.25.10/src/runtime/sys_linux_arm64.s));
+[`time.Time.Add`](https://pkg.go.dev/time#Time.Add) preserves the local monotonic
+reading used by these watchdogs. Host and time-namespace identity checks remain
+mandatory; translating a timestamp does not establish a shared clock domain.
 
 Receiver progress timestamps and unique counters are captured under the same
 commit mutex. HTTP envelopes remain consistency checks, but HTTP transit time

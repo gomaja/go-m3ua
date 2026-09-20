@@ -14,6 +14,8 @@ import (
 
 const sharedClockLead = 2 * time.Second
 
+const sharedClockWatchdogBudget = time.Millisecond
+
 type sharedClockDomain struct {
 	Clock         string `json:"clock"`
 	BootID        string `json:"boot_id"`
@@ -48,9 +50,18 @@ type sharedClockSnapshot struct {
 }
 
 type sharedClockEvidence struct {
-	Before   sharedClockDomain `json:"before"`
-	After    sharedClockDomain `json:"after"`
-	Verified bool              `json:"verified"`
+	Before   sharedClockDomain    `json:"before"`
+	After    sharedClockDomain    `json:"after"`
+	Verified bool                 `json:"verified"`
+	Watchdog *sharedClockWatchdog `json:"watchdog,omitempty"`
+}
+
+type sharedClockWatchdog struct {
+	Before          int64 `json:"before_ns"`
+	After           int64 `json:"after_ns"`
+	Target          int64 `json:"target_ns"`
+	MaximumLateness int64 `json:"maximum_lateness_ns"`
+	Budget          int64 `json:"budget_ns"`
 }
 
 type sharedClockRequest struct {
@@ -61,6 +72,73 @@ type sharedClockRequest struct {
 type sharedRunClock struct {
 	source measurementClock
 	window sharedClockWindow
+	drain  time.Duration
+}
+
+func (window sharedClockWindow) validDrain(drain time.Duration) bool {
+	return drain >= 0 && drain <= maxRunWindow && window.End > 0 && window.Domain.valid() && window.End <= math.MaxInt64-int64(drain)-window.Domain.Resolution
+}
+
+func (clock *sharedRunClock) watchdog(goNow func() time.Time) (time.Time, *sharedClockWatchdog, error) {
+	if !clock.window.validDrain(clock.drain) {
+		return time.Time{}, nil, errors.New("invalid shared drain deadline")
+	}
+	before, err := clock.source.Now()
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+	local := goNow()
+	after, err := clock.source.Now()
+	resolution := clock.window.Domain.Resolution
+	target := clock.window.End + int64(clock.drain)
+	if err != nil || before <= 0 || after < before || after >= target || after-before > int64(sharedClockWatchdogBudget)-2*resolution {
+		return time.Time{}, nil, errors.New("shared clock watchdog translation exceeds its uncertainty budget or deadline")
+	}
+	evidence := &sharedClockWatchdog{Before: before, After: after, Target: target, MaximumLateness: after - before + 2*resolution, Budget: int64(sharedClockWatchdogBudget)}
+	return local.Add(time.Duration(target - before + resolution)), evidence, nil
+}
+
+func (clock *sharedRunClock) waitUntil(ctx context.Context, target int64) error {
+	var previous int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		now, err := clock.source.Now()
+		if err != nil || now <= 0 || now < previous {
+			return errors.New("shared wait clock failed or regressed")
+		}
+		if now >= target {
+			return nil
+		}
+		previous = now
+		timer := time.NewTimer(time.Duration(target - now))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (clock *sharedRunClock) withinDrain(dispatched time.Duration) error {
+	now, err := clock.source.Now()
+	if err != nil || !clock.window.validDrain(clock.drain) || now < clock.window.Start || time.Duration(now-clock.window.Start) < dispatched || now > clock.window.End+int64(clock.drain)-clock.window.Domain.Resolution {
+		return errors.New("shared clock completion is outside the drain deadline")
+	}
+	return nil
+}
+
+func (job sendJob) dispatchDelay() (time.Duration, error) {
+	if job.clock == nil {
+		return time.Since(job.scheduled), nil
+	}
+	elapsed, err := job.clock.elapsed()
+	if err != nil || elapsed < job.offset {
+		return 0, errors.New("shared dispatch clock failed or precedes schedule")
+	}
+	return elapsed - job.offset, nil
 }
 
 func sameRunSpec(first, second runSpec) bool {
@@ -151,11 +229,11 @@ func prepareSharedRunClock(ctx context.Context, config commandConfig, specificat
 	if config.clockWindow != nil {
 		window = *config.clockWindow
 	}
-	if !window.valid(specification.Duration) || window.Domain != peer.Domain || now+window.Domain.Resolution >= window.Start || window.Start-now > int64(sharedClockLead) {
+	if !window.valid(specification.Duration) || !window.validDrain(specification.Drain) || window.Domain != peer.Domain || now+window.Domain.Resolution >= window.Start || window.Start-now > int64(sharedClockLead) {
 		return nil, errors.New("shared clock window is invalid or already started")
 	}
 	specification.Clock = &window
-	return &sharedRunClock{source: source, window: window}, nil
+	return &sharedRunClock{source: source, window: window, drain: specification.Drain}, nil
 }
 
 func (clock *sharedRunClock) elapsed() (time.Duration, error) {

@@ -37,6 +37,7 @@ type receiverControl struct {
 	mutex                sync.Mutex
 	clock                measurementClock
 	lastClock            int64
+	stoppedClock         int64
 	measurementLower     uint64
 	measurementUpper     uint64
 	clockEvidence        *sharedClockEvidence
@@ -192,7 +193,7 @@ func (control *receiverControl) reset(specification runSpec) error {
 	if specification.Clock != nil {
 		domain, err := control.clock.Domain()
 		now, readErr := control.clock.Now()
-		if err != nil || readErr != nil || !specification.Clock.valid(specification.Duration) || specification.Clock.Domain != domain || now <= 0 || now >= specification.Clock.Start-domain.Resolution || specification.Clock.Start-now > int64(sharedClockLead) || specification.Mode == modeEcho {
+		if err != nil || readErr != nil || !specification.Clock.valid(specification.Duration) || !specification.Clock.validDrain(specification.Drain) || specification.Clock.Domain != domain || now <= 0 || now >= specification.Clock.Start-domain.Resolution || specification.Clock.Start-now > int64(sharedClockLead) || specification.Mode == modeEcho {
 			return fmt.Errorf("%w: shared clock domain or future window mismatch", errInvalidRunSpec)
 		}
 	}
@@ -237,6 +238,7 @@ func (control *receiverControl) reset(specification runSpec) error {
 	}
 	control.spec = copyRunSpec(specification)
 	control.lastClock = 0
+	control.stoppedClock = 0
 	control.measurementLower = 0
 	control.measurementUpper = 0
 	control.clockEvidence = nil
@@ -278,7 +280,6 @@ func (control *receiverControl) start() error {
 			control.mutex.Unlock()
 			return errors.New("shared clock changed or measurement window already started")
 		}
-		control.started = control.started.Add(time.Duration(control.spec.Clock.Start - now))
 		control.clockEvidence = &sharedClockEvidence{Before: domain}
 	}
 	control.allocBefore = readRuntimeCounters()
@@ -360,6 +361,14 @@ func (control *receiverControl) stop() error {
 		return errors.New("receiver is not measuring")
 	}
 	control.stopped = control.now()
+	if control.spec.Clock != nil {
+		var clockErr error
+		control.stoppedClock, clockErr = control.sharedNowLocked()
+		if clockErr != nil {
+			control.phase = receiverStopped
+			return clockErr
+		}
+	}
 	var err error
 	control.cpuAfter, err = readCPUStat(control.cpuStatPath)
 	if err != nil && control.cpuError == "" {
@@ -459,11 +468,16 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 		return arrival{identity: identity, generation: generation}, recordNotUnique
 	}
 	if control.spec.Clock != nil {
-		now, err := control.sharedNowLocked()
-		if err != nil {
+		sharedReceived, clockErr := control.sharedNowLocked()
+		if clockErr != nil || sharedReceived > control.spec.Clock.End+int64(control.spec.Drain)-control.spec.Clock.Domain.Resolution {
+			control.ledger.snapshotData.Unique--
+			control.ledger.snapshotData.Invalid++
+			if clockErr == nil {
+				control.fatal = "delivery exceeds shared drain deadline"
+			}
 			return arrival{identity: identity, generation: generation}, recordInvalid
 		}
-		control.classifySharedDeliveryLocked(now)
+		control.classifySharedDeliveryLocked(sharedReceived)
 		return arrival{identity: identity, generation: generation}, recordUnique
 	}
 	if received.Before(control.firstArrival.Add(control.spec.Duration)) {
@@ -604,7 +618,9 @@ func (control *receiverControl) result() runRecord {
 	record.Reverse = control.reverseSender
 	record.ReverseReceiver = control.reverseReceiver
 	record.ReverseError = control.reverseError
-	if !control.started.IsZero() && !control.stopped.IsZero() {
+	if control.spec.Clock != nil {
+		record.DrainDuration = time.Duration(max(control.stoppedClock-control.spec.Clock.End, 0))
+	} else if !control.started.IsZero() && !control.stopped.IsZero() {
 		measurementEnd := control.firstArrival.Add(control.spec.Duration)
 		if control.firstArrival.IsZero() {
 			measurementEnd = control.started.Add(control.spec.Duration)
@@ -646,6 +662,13 @@ func (control *receiverControl) sample(now time.Time) {
 	offset := time.Duration(0)
 	if now.After(origin) {
 		offset = now.Sub(origin)
+	}
+	if control.spec.Clock != nil {
+		sharedNow, err := control.sharedNowLocked()
+		if err != nil || sharedNow < control.spec.Clock.Start {
+			return
+		}
+		offset = time.Duration(sharedNow - control.spec.Clock.Start)
 	}
 	scheduled := scheduledAt(control.spec.Rate, offset, control.spec.Duration, control.spec.Expected)
 	missing := uint64(0)

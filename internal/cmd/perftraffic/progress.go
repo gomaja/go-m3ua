@@ -266,6 +266,24 @@ func sampleSharedProgress(ctx context.Context, started time.Time, duration time.
 		observations := make([]progressObservation, 0, len(offsets))
 		defer func() { done <- observations }()
 		for _, offset := range offsets {
+			if clock != nil {
+				if err := clock.waitUntil(ctx, clock.window.Start+int64(offset)); err != nil {
+					observations = append(observations, progressObservation{Error: err.Error()})
+					return
+				}
+				elapsed, err := clock.elapsed()
+				if err != nil {
+					observations = append(observations, progressObservation{Error: err.Error()})
+					return
+				}
+				if elapsed >= duration {
+					return
+				}
+				requestContext, cancel := context.WithTimeout(ctx, progressRequestTimeout)
+				observations = append(observations, observeSharedProgress(requestContext, started, baseURL, clock))
+				cancel()
+				continue
+			}
 			timer := time.NewTimer(max(time.Until(started.Add(offset)), 0))
 			select {
 			case <-ctx.Done():
