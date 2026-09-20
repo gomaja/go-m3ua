@@ -187,19 +187,21 @@ func evaluate(decoded request) (response, error) {
 // superset; every evidence field this command relies on is checked for
 // presence explicitly.
 type fixtureEvidence struct {
-	Side                     *string      `json:"side"`
-	Spec                     *fixtureSpec `json:"spec"`
-	Expected                 *uint64      `json:"expected"`
-	Scheduled                *uint64      `json:"scheduled"`
-	Sent                     *uint64      `json:"sent"`
-	Submitted                *uint64      `json:"submitted"`
-	FixtureVerdict           *string      `json:"fixture_verdict"`
-	Capped                   *uint64      `json:"capped"`
-	SendErrors               *uint64      `json:"send_errors"`
-	OutstandingAtWindowStart *uint64      `json:"outstanding_at_window_start"`
-	OutstandingAfterDrain    *uint64      `json:"outstanding_after_drain"`
-	FatalError               string       `json:"fatal_error"`
-	Delivery                 *struct {
+	MeasurementDuration       *time.Duration `json:"measurement_duration_ns"`
+	NegotiatedOutboundStreams []int          `json:"negotiated_outbound_streams"`
+	Side                      *string        `json:"side"`
+	Spec                      *fixtureSpec   `json:"spec"`
+	Expected                  *uint64        `json:"expected"`
+	Scheduled                 *uint64        `json:"scheduled"`
+	Sent                      *uint64        `json:"sent"`
+	Submitted                 *uint64        `json:"submitted"`
+	FixtureVerdict            *string        `json:"fixture_verdict"`
+	Capped                    *uint64        `json:"capped"`
+	SendErrors                *uint64        `json:"send_errors"`
+	OutstandingAtWindowStart  *uint64        `json:"outstanding_at_window_start"`
+	OutstandingAfterDrain     *uint64        `json:"outstanding_after_drain"`
+	FatalError                string         `json:"fatal_error"`
+	Delivery                  *struct {
 		Unique            *uint64 `json:"unique"`
 		UniqueMeasurement *uint64 `json:"unique_measurement"`
 		UniqueDrain       *uint64 `json:"unique_drain"`
@@ -210,7 +212,8 @@ type fixtureEvidence struct {
 		LateAfterStop     *uint64 `json:"late_after_stop"`
 	} `json:"delivery"`
 	SenderWindow *struct {
-		Status        *string `json:"status"`
+		Duration      *time.Duration `json:"duration_ns"`
+		Status        *string        `json:"status"`
 		BacklogChange *struct {
 			Status      string   `json:"status"`
 			SampleCount int      `json:"sample_count"`
@@ -365,6 +368,15 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	workload, err := workloadFromSpec(record.Spec, declaredRate)
 	if err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, err
+	}
+	if record.MeasurementDuration == nil || *record.MeasurementDuration != workload.Duration {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("measurement_duration_ns must equal the workload duration")
+	}
+	if record.SenderWindow != nil && (record.SenderWindow.Duration == nil || *record.SenderWindow.Duration != workload.Duration) {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("sender_window.duration_ns must equal the workload duration")
+	}
+	if len(record.NegotiatedOutboundStreams) != workload.Associations {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("negotiated_outbound_streams must identify every workload association")
 	}
 	if record.Expected == nil || *record.Expected != *record.Spec.Expected {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("record expected must equal workload spec.expected")

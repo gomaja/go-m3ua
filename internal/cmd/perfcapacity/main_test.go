@@ -30,7 +30,7 @@ func manifestJSON() string {
 }
 
 func specJSON(rate int) string {
-	return fmt.Sprintf(`"spec":{"cohort":"cohort-a","seed":7,"associations":8,"expected":%d,`+
+	return fmt.Sprintf(`"measurement_duration_ns":120000000000,"negotiated_outbound_streams":[8,8,8,8,8,8,8,8],"spec":{"cohort":"cohort-a","seed":7,"associations":8,"expected":%d,`+
 		`"duration_ns":120000000000,"drain_ns":2000000000,"rate":%d,"outstanding":8192,`+
 		`"payload":"128","mode":"throughput","direction":"asp-to-sgp","initiation":"asp-dial",`+
 		`"peer_control":"http://127.0.0.1:8080"},"expected":%d`, rate*120, rate, rate*120)
@@ -51,21 +51,21 @@ func passingRunJSON() string {
 	return `{"side":"sender",` + specJSON(10) + `,"scheduled":1200,"sent":1200,"submitted":1200,` +
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}}`
+		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}}`
 }
 
 func failingRunJSON() string {
 	return `{"side":"sender",` + specJSON(10) + `,"scheduled":1200,"sent":1200,"submitted":1200,` +
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
+		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
 }
 
 func straddlingRunJSON() string {
 	return `{"side":"sender",` + specJSON(10) + `,"scheduled":1200,"sent":1200,"submitted":1200,` +
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"status":"bounded","backlog_change":{"status":"unresolved","sample_count":120,"mean_change_lower":-3.4,"mean_change_upper":3.53}}}`
+		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"unresolved","sample_count":120,"mean_change_lower":-3.4,"mean_change_upper":3.53}}}`
 }
 
 func requestJSON(initial int, schedule []struct {
@@ -221,7 +221,7 @@ func TestFourRepetitionsDoNotValidate(testContext *testing.T) {
 
 func TestMissingWindowEvidenceNeverPasses(testContext *testing.T) {
 	noWindow := strings.Replace(passingRunJSON(),
-		`,"sender_window":{"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}`, "", 1)
+		`,"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}`, "", 1)
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, noWindow)
 	status, decoded := runRequest(testContext, input)
 	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" {
@@ -334,7 +334,7 @@ func stalledRunJSON() string {
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(1200000000) + `,` +
 		`"fixture_verdict":"invalid","capped":200,"send_errors":0,` +
 		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":200,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
+		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
 }
 
 func TestDetectedTransportStallIsReportedInconclusiveAndNamed(testContext *testing.T) {

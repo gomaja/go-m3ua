@@ -173,6 +173,30 @@ func TestZeroSubmissionFailedProbeRemainsValidEvidence(testContext *testing.T) {
 	}
 }
 
+func TestRunMeasurementMetadataMustMatchSpecification(testContext *testing.T) {
+	complete := passingRunJSON()
+	if _, _, err := evidenceFromFixture(json.RawMessage(complete), 10); err != nil {
+		testContext.Fatal(err)
+	}
+	for _, mutation := range []struct{ name, old, replacement string }{
+		{"duration mismatch", `"measurement_duration_ns":120000000000`, `"measurement_duration_ns":60000000000`},
+		{"duration missing", `"measurement_duration_ns":120000000000,`, ""},
+		{"duration null", `"measurement_duration_ns":120000000000`, `"measurement_duration_ns":null`},
+		{"window mismatch", `"sender_window":{"duration_ns":120000000000,`, `"sender_window":{"duration_ns":60000000000,`},
+		{"window missing", `"sender_window":{"duration_ns":120000000000,`, `"sender_window":{`},
+		{"streams mismatch", `"negotiated_outbound_streams":[8,8,8,8,8,8,8,8]`, `"negotiated_outbound_streams":[8]`},
+		{"streams missing", `"negotiated_outbound_streams":[8,8,8,8,8,8,8,8],`, ""},
+		{"streams null", `"negotiated_outbound_streams":[8,8,8,8,8,8,8,8]`, `"negotiated_outbound_streams":null`},
+	} {
+		testContext.Run(mutation.name, func(testContext *testing.T) {
+			run := strings.Replace(complete, mutation.old, mutation.replacement, 1)
+			if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+				testContext.Fatal("accepted contradictory or missing measurement metadata")
+			}
+		})
+	}
+}
+
 func TestDeliveryPartitionMustEqualUniqueWithoutOverflow(testContext *testing.T) {
 	for _, replacement := range []string{
 		`"unique_measurement":0,"unique_drain":0`,

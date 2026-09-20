@@ -163,6 +163,10 @@ measured longest send call reaches the report whether or not it decided the run.
 
 The measured `spec.rate` must match the outer declared rate, and `spec.expected`
 must match rate multiplied by duration using the fixture's integer arithmetic.
+The top-level `measurement_duration_ns` and any `sender_window.duration_ns`
+must match `spec.duration_ns`. Sender records must include one
+`negotiated_outbound_streams` entry per declared association, so a different
+measured connection count cannot be relabeled as the campaign topology.
 The record-level `expected` must match `spec.expected`, and sender scheduling
 and submission totals must reconcile. Delivery unique plus missing must equal
 expected for every completed record, including failed probes; an invalid record
