@@ -279,8 +279,10 @@ configuration and observations:
   `duplicate`, `invalid`, `reordered`, and `late_after_stop` counts;
 - bounded one-second series and bounded histogram-derived send-duration and
   scheduled-to-worker dispatch-lag percentiles (p50/p95/p99/max), where each
-  percentile is the upper bound of its power-of-two bucket: a conservative
-  over-estimate within a factor of two of the true value;
+  percentile is a conservative bucket upper bound, capped by the observed
+  maximum. Durations below 128 ns are exact; larger durations use 64 buckets
+  per power-of-two interval, limiting over-estimation to 1/64 of the value.
+  Each histogram retains less than 32 KiB and recording does not allocate;
 - raw cgroup v2 `cpu.stat` maps, `usage_usec` delta, and CPU seconds per final
   unique validated delivery;
 - runtime allocation counters spanning the cohort through drain, including
