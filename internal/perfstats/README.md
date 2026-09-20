@@ -155,11 +155,19 @@ The response states the environment the campaign ran in, in `environments`:
 the toolchain, platform, `GOMAXPROCS`, go-sctp module and version, the
 fixture's own `vcs_revision`, and `assessed_baseline_revision`, the baseline
 commit required by issue #36. The last two are different commits and are never
-interchangeable. Distinct environments are listed in first-appearance order
-rather than merged, so a campaign whose runs did not all come from one
-environment shows that instead of presenting one it cannot support. Each run
-decision also reports its `stall`, so the measured longest send call reaches
-the report whether or not it decided the run.
+interchangeable. Every probe and repetition must name the same clean candidate
+revision, assessed baseline, workload and fixture-provided environment.
+Missing fields, dirty builds and mixed identities are invalid input rather
+than a capacity result. Each run decision also reports its `stall`, so the
+measured longest send call reaches the report whether or not it decided the run.
+
+The measured `spec.rate` must match the outer declared rate, and `spec.expected`
+must match rate multiplied by duration using the fixture's integer arithmetic.
+Cohort and seed may vary between independent runs. Offered rate may vary during
+the search; associations, duration, drain, outstanding limit, payload, mode,
+direction, initiation and peer-control endpoint must otherwise stay fixed.
+The manifest must also preserve socket options, flow count, outstanding limit,
+initiation and accounting scope. Its required strings must be nonempty.
 
 A pass covers only the search and repetition rules; it does not establish
 environmental validity, latency or CPU budgets, or independent-peer behavior.
