@@ -2,30 +2,6 @@ package perfstats
 
 import "math"
 
-// This file fixes the sustained-backlog decision method BEFORE any capacity
-// campaign run. The rule is pure interval arithmetic over the sender-window
-// backlog-change interval and admits no numeric tolerance. It compares that
-// interval against the instrument's own resolution, BacklogResolution, which
-// is derived below from how the fixture counts and not from any run's outcome:
-// an interval that spans that resolution is indeterminate, not "approximately
-// stable".
-//
-// BacklogResolution is predeclared for the same reason the comparisons are.
-// Tuning it after observing campaign results is forbidden: raising it so that
-// a growing or unresolved row reports not-growing, and lowering it so that an
-// inconvenient row reports growing, are both the post-hoc threshold change
-// budgets section 5 forbids, exactly as adding a percentage allowance for
-// boundary uncertainty or repeating until pass would be. The only admissible
-// reason to change it is a change in how the fixture counts, and that change
-// must be stated in the derivation below. Do not add any further allowance
-// here.
-//
-// Inputs come from the perftraffic fixture's sender-window accounting: the
-// first-to-last-quarter mean backlog-change interval, the transport-stall
-// evidence predeclared in stall.go, and the fixture-validity and loss
-// counters. A capacity or throughput row may pass only with a not-growing
-// interval, an unstalled run, a loss-free run and a valid fixture.
-
 type BacklogVerdict string
 
 const (
@@ -39,57 +15,13 @@ const (
 	DeliveryFailuresReason       = "delivery-or-submission-failures"
 	BacklogEvidenceMissingReason = "backlog-evidence-missing-or-invalid"
 	BacklogGrowingReason         = "backlog-growing"
-	BacklogUnresolvedReason      = "backlog-change-interval-spans-instrument-resolution"
+	BacklogUnresolvedReason      = "backlog-change-interval-spans-zero"
 )
 
-// BacklogResolution is the least count of the instrument that produces the
-// backlog-change interval, expressed in that interval's own unit: messages.
-// It is one message, derived from the perftraffic fixture's counting and from
-// nothing else:
-//
-//  1. The measured quantity is a count of messages. analyzeProgress brackets
-//     the work outstanding at a progress snapshot as
-//     [max(0, offered(before)-unique), offered(after)-unique], where offered()
-//     and unique are uint64 message counts. The fixture offers, transports and
-//     validates whole messages and holds no sub-message state, so it has
-//     nothing to record between "n outstanding" and "n+1 outstanding".
-//  2. The offered schedule is quantised to whole messages by construction.
-//     offeredAt is floor(elapsed*rate/second)+1, the same integer expression
-//     dispatchScheduled uses to decide how many messages are due, so two
-//     instants inside one message-emission period are indistinguishable to it
-//     and its least count is exactly one message.
-//  3. describeBacklogChange differences means of those counts: it sums a
-//     quarter of the samples' bounds on each side and divides by the number of
-//     samples in a quarter. Dividing by a positive integer rescales the bounds
-//     but cannot manufacture a distinction the counted quantity does not
-//     carry. The bounds describe a level difference and not a rate: "the
-//     backlog grew" means at least one more message is outstanding at the end
-//     of the window than at its start, and below that the two levels are the
-//     same count.
-//
-// So the smallest backlog change this instrument can tell apart from no change
-// is one message. The value is a property of the fixture's counting alone: it
-// does not depend on the offered rate, the run duration, the sample count or
-// any observed interval, and no campaign result was consulted to obtain it.
-//
-// The sampling method's own uncertainty is deliberately not used as the
-// resolution. Each sample's bracket is as wide as the offered schedule
-// advances during one progress round trip, and describeBacklogChange already
-// carries that width into the interval: it is exactly Upper - Lower. Using it
-// as the threshold as well would make the rule self-referential, because
-// Upper <= Upper - Lower is only Lower <= 0, and would leave indeterminate
-// with nothing to cover. The measurement window length and the number of
-// samples in a quarter scale the arithmetic but likewise put no floor on how
-// finely two message counts can differ. The threshold has to be a property of
-// the instrument that does not vary with the run, and the message granularity
-// is the only such property the fixture has.
-//
-// The fixture's own coarse series diagnostic, assessBacklog, independently
-// treats a first-to-last-quarter mean difference of at most one outstanding
-// message as "not growing". That corroborates the least count; its additional
-// 1.10 proportional allowance is exactly the kind of percentage tolerance this
-// rule forbids and is deliberately not adopted here.
-const BacklogResolution = 1.0
+// BacklogThreshold is zero: a difference between means of integer counts can
+// be fractional. Measurement uncertainty belongs in the interval bounds, not
+// in an additional tolerance that can admit demonstrated positive growth.
+const BacklogThreshold = 0.0
 
 // BacklogInterval is the sender-window first-to-last-quarter mean
 // backlog-change interval [Lower, Upper] in messages.
@@ -110,29 +42,18 @@ func (interval BacklogInterval) Valid() bool {
 	return interval.Lower <= interval.Upper
 }
 
-// Verdict applies the predeclared interval rule against the instrument's
-// resolution: not-growing iff Upper <= BacklogResolution, growing iff
-// Lower > BacklogResolution, otherwise indeterminate. Invalid evidence is
-// indeterminate; it is never resolved in favor of either side.
-//
-// The comparison is against BacklogResolution rather than zero because the
-// quantity being bounded is a difference of message counts whose least count
-// is one message. Comparing it against zero demands a strict negative about a
-// quantity whose correct steady-state value is exactly zero: a genuinely flat
-// run's interval brackets zero from both sides, so not-growing would be
-// unreachable for exactly the runs the rule exists to accept. That is not a
-// strict rule, it is an unfalsifiable one.
-//
-// The two comparisons cannot both hold. Lower <= Upper on valid evidence, so
-// Upper <= BacklogResolution implies Lower <= BacklogResolution.
+// Verdict reports nonincrease only when the whole valid interval is at or
+// below zero, and growth only when it is strictly above zero. An interval
+// spanning zero remains indeterminate. This finite-run comparison does not
+// establish stability outside the observed measurement window.
 func (interval BacklogInterval) Verdict() BacklogVerdict {
 	if !interval.Valid() {
 		return BacklogIndeterminate
 	}
-	if interval.Upper <= BacklogResolution {
+	if interval.Upper <= BacklogThreshold {
 		return BacklogNotGrowing
 	}
-	if interval.Lower > BacklogResolution {
+	if interval.Lower > BacklogThreshold {
 		return BacklogGrowing
 	}
 	return BacklogIndeterminate
