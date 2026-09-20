@@ -178,9 +178,11 @@ probe records remain accepted evidence of a failed run, while a claimed pass
 with those failures is invalid input. Duplicate JSON member names are rejected
 using the same case-insensitive matching that `encoding/json` uses for struct
 fields. Duplicated outstanding limits and initiation fields must agree between
-the specification and manifest. Echo-mode sender records must include requests,
-validated, capped, deadline, invalid and post-drain outstanding counters; requests
-must equal sender submissions. Non-echo sender
+the specification and manifest. Payload must be one of the producer workloads:
+`128`, `512`, `4096` or `mix`. Echo-mode sender records must include their
+outstanding limit plus requests, validated, capped, deadline, invalid and
+post-drain outstanding counters; the echo outstanding limit must equal
+`spec.outstanding`, and requests must equal sender submissions. Non-echo sender
 records must not carry echo evidence.
 
 Bidirectional entries use the fixture's actual `measurement` cohort object as

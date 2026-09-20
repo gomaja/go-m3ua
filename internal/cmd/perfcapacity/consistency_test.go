@@ -161,6 +161,27 @@ func TestEchoRequestsMustEqualSubmissions(testContext *testing.T) {
 	}
 }
 
+func TestEchoOutstandingLimitMustMatchWorkload(testContext *testing.T) {
+	const field = `"outstanding_limit":8192,`
+	for _, replacement := range []string{"", `"outstanding_limit":null,`, `"outstanding_limit":0,`, `"outstanding_limit":8191,`, `"outstanding_limit":8193,`} {
+		run := echoRunJSON()
+		index := strings.LastIndex(run, field)
+		if index < 0 {
+			testContext.Fatal("echo fixture is missing its outstanding limit")
+		}
+		run = run[:index] + replacement + run[index+len(field):]
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+			testContext.Fatalf("accepted contradictory echo outstanding limit: %s", replacement)
+		}
+	}
+
+	run := strings.Replace(echoRunJSON(), `"outstanding":8192`, `"outstanding":4096`, 1)
+	run = strings.ReplaceAll(run, `"outstanding_limit":8192`, `"outstanding_limit":4096`)
+	if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err != nil {
+		testContext.Fatalf("rejected consistent nondefault echo outstanding limit: %v", err)
+	}
+}
+
 func TestZeroSubmissionFailedProbeRemainsValidEvidence(testContext *testing.T) {
 	run := strings.Replace(passingRunJSON(), `"fixture_verdict":"pass"`, `"fixture_verdict":"invalid"`, 1)
 	run = strings.Replace(run, `"sent":1200,"submitted":1200`, `"sent":0,"submitted":0`, 1)
@@ -254,7 +275,7 @@ func TestEchoWorkloadRequiresEchoEvidence(testContext *testing.T) {
 }
 
 func TestEchoEvidenceMustMatchWorkload(testContext *testing.T) {
-	echo := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"requests":1200,"validated":1200,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, 1)
+	echo := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"outstanding_limit":8192,"requests":1200,"validated":1200,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, 1)
 	for _, mode := range []string{"throughput", "bidirectional", "unknown"} {
 		run := strings.Replace(echo, `"mode":"throughput"`, `"mode":"`+mode+`"`, 1)
 		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
@@ -300,5 +321,20 @@ func TestBidirectionalCapacityRequiresASeparateCohortContract(testContext *testi
 	direct := strings.Replace(passingRunJSON(), `"mode":"throughput"`, `"mode":"bidirectional"`, 1)
 	if _, _, err := evidenceFromFixture(json.RawMessage(direct), 10); err == nil {
 		testContext.Fatal("accepted a bidirectional sender without cohort evidence")
+	}
+}
+
+func TestPayloadMustBeAProducerWorkload(testContext *testing.T) {
+	for _, payload := range []string{"128", "512", "4096", "mix"} {
+		run := strings.Replace(passingRunJSON(), `"payload":"128"`, `"payload":"`+payload+`"`, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err != nil {
+			testContext.Fatalf("rejected supported payload %q: %v", payload, err)
+		}
+	}
+	for _, payload := range []string{"0", "129", "128 ", "MIX", "random"} {
+		run := strings.Replace(passingRunJSON(), `"payload":"128"`, `"payload":"`+payload+`"`, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+			testContext.Fatalf("accepted unsupported payload %q", payload)
+		}
 	}
 }
