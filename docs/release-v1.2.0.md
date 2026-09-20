@@ -1,7 +1,8 @@
 # go-m3ua v1.2.0
 
-These notes describe the v1.2.0 release candidate. They do not assert that a
-tag or release artifact exists; publication is a separate release action.
+These notes describe the published v1.2.0 API and its intended protocol scope.
+Publication does not imply that every planned acceptance criterion has passed;
+see the [acceptance status](acceptance-v1.2.0.md) for outstanding work.
 
 ## Protocol scope
 
@@ -45,7 +46,7 @@ listed in
 
 ## Validation
 
-The release candidate is gated at its exact commit by:
+Changes are subject to exact-commit validation using:
 
 - build, unit, integration, vet, staticcheck, and golangci-lint checks;
 - Go 1.23, 1.24, and 1.25 Linux tests plus the Go 1.25 race detector;
@@ -59,9 +60,8 @@ The release candidate is gated at its exact commit by:
 
 The commands and CI jobs are recorded in the
 [compliance and ecosystem audit](compliance.md#current-validation-commands), and
-the exact-head cross-slice evidence — including the gates that were measured,
-the ones that were not, and what the unmeasured ones would need — is in the
-[acceptance campaign record](acceptance-v1.2.0.md).
+the distinction between existing evidence and outstanding acceptance is in the
+[acceptance status](acceptance-v1.2.0.md).
 
 ## Deployment security boundary
 
@@ -83,7 +83,7 @@ this library alone is not an RFC 3788 deployment-conformance claim.
 
 - RFC 4666 remains a Proposed Standard, obsoletes RFC 3332, and has no published
   update or replacement in the RFC Editor or Datatracker records checked for
-  this release candidate.
+  the original release validation.
 - RFC 4666 has no Verified erratum. Errata 2065 and 4475 are Held for Document
   Update, and Errata 2518 is Rejected; their dispositions are documented without
   silently treating them as normative corrections.
