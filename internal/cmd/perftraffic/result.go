@@ -55,14 +55,18 @@ type seriesPoint struct {
 }
 
 type runRecord struct {
-	Side                      string                `json:"side"`
-	Spec                      runSpec               `json:"spec"`
-	Expected                  uint64                `json:"expected"`
-	Scheduled                 uint64                `json:"scheduled,omitempty"`
-	Sent                      uint64                `json:"sent,omitempty"`
-	Submitted                 uint64                `json:"submitted,omitempty"`
-	SendErrors                uint64                `json:"send_errors,omitempty"`
-	Capped                    uint64                `json:"capped,omitempty"`
+	Side      string  `json:"side"`
+	Spec      runSpec `json:"spec"`
+	Expected  uint64  `json:"expected"`
+	Scheduled uint64  `json:"scheduled,omitempty"`
+	Sent      uint64  `json:"sent,omitempty"`
+	Submitted uint64  `json:"submitted,omitempty"`
+	// send_errors and capped are always serialized, including at zero. The
+	// acceptance CLI at internal/cmd/perfcapacity requires both and treats an
+	// absent counter as invalid input rather than as zero, and a loss-free run
+	// is exactly the run whose counters are zero.
+	SendErrors                uint64                `json:"send_errors"`
+	Capped                    uint64                `json:"capped"`
 	OutstandingAtWindowStart  uint64                `json:"outstanding_at_window_start"`
 	OutstandingAtWindowEnd    uint64                `json:"outstanding_at_window_end"`
 	OutstandingAfterDrain     uint64                `json:"outstanding_after_drain"`
