@@ -163,6 +163,9 @@ measured longest send call reaches the report whether or not it decided the run.
 
 The measured `spec.rate` must match the outer declared rate, and `spec.expected`
 must match rate multiplied by duration using the fixture's integer arithmetic.
+The record-level `expected` must match `spec.expected`, and a passing fixture
+must report that many unique validated deliveries. Duplicated outstanding
+limits and initiation fields must agree between the specification and manifest.
 Cohort and seed may vary between independent runs. Offered rate may vary during
 the search; associations, duration, drain, outstanding limit, payload, mode,
 direction, initiation and peer-control endpoint must otherwise stay fixed.

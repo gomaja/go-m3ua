@@ -33,7 +33,7 @@ func specJSON(rate int) string {
 	return fmt.Sprintf(`"spec":{"cohort":"cohort-a","seed":7,"associations":8,"expected":%d,`+
 		`"duration_ns":120000000000,"drain_ns":2000000000,"rate":%d,"outstanding":8192,`+
 		`"payload":"128","mode":"throughput","direction":"asp-to-sgp","initiation":"asp-dial",`+
-		`"peer_control":"http://127.0.0.1:8080"}`, rate*120, rate)
+		`"peer_control":"http://127.0.0.1:8080"},"expected":%d`, rate*120, rate, rate*120)
 }
 
 func replaceManifestField(run, old, replacement string) string {
@@ -49,19 +49,19 @@ func sendDurationJSON(maximumNanoseconds int64) string {
 
 func passingRunJSON() string {
 	return `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
-		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
+		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
 		`"sender_window":{"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}}`
 }
 
 func failingRunJSON() string {
 	return `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
-		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
+		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
 		`"sender_window":{"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
 }
 
 func straddlingRunJSON() string {
 	return `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
-		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
+		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
 		`"sender_window":{"status":"bounded","backlog_change":{"status":"unresolved","sample_count":120,"mean_change_lower":-3.4,"mean_change_upper":3.53}}}`
 }
 
@@ -97,7 +97,9 @@ func repetitionsJSON(rate, count int, run string) string {
 }
 
 func runAtRateJSON(run string, rate int) string {
-	return strings.Replace(run, specJSON(10), specJSON(rate), 1)
+	run = strings.Replace(run, specJSON(10), specJSON(rate), 1)
+	run = strings.Replace(run, `"unique":1200`, fmt.Sprintf(`"unique":%d`, rate*120), 1)
+	return strings.Replace(run, `"unique_measurement":1200`, fmt.Sprintf(`"unique_measurement":%d`, rate*120), 1)
 }
 
 func runRequest(testContext *testing.T, input string) (int, response) {
@@ -213,7 +215,7 @@ func TestFourRepetitionsDoNotValidate(testContext *testing.T) {
 
 func TestMissingWindowEvidenceNeverPasses(testContext *testing.T) {
 	noWindow := `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
-		`"delivery":{"unique":1000,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0}}`
+		`"delivery":{"unique":1200,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0}}`
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, noWindow)
 	status, decoded := runRequest(testContext, input)
 	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" {

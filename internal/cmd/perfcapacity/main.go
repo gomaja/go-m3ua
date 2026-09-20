@@ -185,10 +185,12 @@ func evaluate(decoded request) (response, error) {
 // presence explicitly.
 type fixtureEvidence struct {
 	Spec           *fixtureSpec `json:"spec"`
+	Expected       *uint64      `json:"expected"`
 	FixtureVerdict *string      `json:"fixture_verdict"`
 	Capped         *uint64      `json:"capped"`
 	SendErrors     *uint64      `json:"send_errors"`
 	Delivery       *struct {
+		Unique        *uint64 `json:"unique"`
 		Missing       *uint64 `json:"missing"`
 		Duplicate     *uint64 `json:"duplicate"`
 		Invalid       *uint64 `json:"invalid"`
@@ -343,15 +345,21 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
+	if record.Expected == nil || *record.Expected != *record.Spec.Expected {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("record expected must equal workload spec.expected")
+	}
 	if record.FixtureVerdict == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("fixture_verdict is required")
 	}
 	if record.Capped == nil || record.SendErrors == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("capped and send_errors are required")
 	}
-	if record.Delivery == nil || record.Delivery.Missing == nil || record.Delivery.Duplicate == nil ||
+	if record.Delivery == nil || record.Delivery.Unique == nil || record.Delivery.Missing == nil || record.Delivery.Duplicate == nil ||
 		record.Delivery.Invalid == nil || record.Delivery.Reordered == nil || record.Delivery.LateAfterStop == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("delivery counters are required")
+	}
+	if *record.FixtureVerdict == "pass" && *record.Delivery.Unique != *record.Expected {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("passing fixture delivery.unique must equal the expected workload")
 	}
 	if record.SendDuration == nil || record.SendDuration.Max == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("send_duration.max_ns is required as the transport-stall signal")

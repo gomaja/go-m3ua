@@ -31,3 +31,21 @@ func TestRunAcceptsConsistentNondefaultDuplicatedSettings(testContext *testing.T
 		testContext.Fatal(err)
 	}
 }
+
+func TestRunRejectsContradictoryExpectedCount(testContext *testing.T) {
+	for _, replacement := range []string{`},"expected":1000`, `},"expected":null`, `}`} {
+		run := strings.Replace(passingRunJSON(), `},"expected":1200`, replacement, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+			testContext.Fatalf("accepted missing or contradictory expected count: %s", replacement)
+		}
+	}
+}
+
+func TestPassingRunRequiresExpectedValidatedDeliveries(testContext *testing.T) {
+	for _, replacement := range []string{`"unique":1000`, `"unique":1201`, `"unique":null`} {
+		run := strings.Replace(passingRunJSON(), `"unique":1200`, replacement, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+			testContext.Fatalf("accepted invalid delivered count: %s", replacement)
+		}
+	}
+}
