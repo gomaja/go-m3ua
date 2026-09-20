@@ -6,6 +6,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
 
 const (
@@ -80,7 +82,8 @@ func TestBidirectionalCohortUsesBothDirections(testContext *testing.T) {
 		testContext.Fatalf("probe decisions = %+v, want one passing bidirectional probe", decoded.ProbeDecisions)
 	}
 	probe := decoded.ProbeDecisions[0]
-	if probe.AggregateOfferedRate != 20 || probe.AggregateAchievedRateLower != 20 || probe.AggregateAchievedRateUpper != 20 ||
+	if probe.AggregateOfferedRate != 20 || probe.AggregateAchievedRateLower == nil || *probe.AggregateAchievedRateLower != 20 ||
+		probe.AggregateAchievedRateUpper == nil || *probe.AggregateAchievedRateUpper != 20 ||
 		len(probe.Directions) != 2 || probe.Directions[0].Direction != "asp-to-sgp" || probe.Directions[1].Direction != "sgp-to-asp" {
 		testContext.Fatalf("bidirectional detail = %+v, want both directions and aggregate offered rate 20", probe)
 	}
@@ -142,6 +145,107 @@ func TestBidirectionalInconclusiveDirectionStopsTheProbe(testContext *testing.T)
 	}
 	if decoded.ProbeDecisions[0].Directions[0].Decision != "pass" || decoded.ProbeDecisions[0].Directions[1].Decision != "inconclusive" {
 		testContext.Fatalf("direction decisions = %+v, want forward pass and reverse inconclusive", decoded.ProbeDecisions[0].Directions)
+	}
+}
+
+func TestBidirectionalAggregateZeroBoundsRemainPresent(testContext *testing.T) {
+	zero := &achievedRateBounds{}
+	reverse := perfstats.RunEvidence{}
+	for _, test := range []struct {
+		name      string
+		decision  probeDecision
+		wantBound bool
+	}{
+		{
+			name: "bidirectional zero is evidence",
+			decision: decideFixtureRun(fixtureRun{
+				reverse: &reverse, aggregateOfferedRate: 20,
+				forwardAchieved: zero, reverseAchieved: zero, aggregateAchieved: zero,
+			}, 10),
+			wantBound: true,
+		},
+		{name: "unidirectional aggregate is absent", decision: decideFixtureRun(fixtureRun{}, 10)},
+	} {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			encoded, err := json.Marshal(test.decision)
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				testContext.Fatal(err)
+			}
+			for _, field := range []string{"aggregate_achieved_rate_lower", "aggregate_achieved_rate_upper"} {
+				value, present := fields[field]
+				if present != test.wantBound {
+					testContext.Fatalf("%s presence = %v in %s, want %v", field, present, encoded, test.wantBound)
+				}
+				if present && string(value) != "0" {
+					testContext.Fatalf("%s = %s, want explicit zero", field, value)
+				}
+			}
+			if test.wantBound {
+				var directions []map[string]json.RawMessage
+				if err := json.Unmarshal(fields["directions"], &directions); err != nil {
+					testContext.Fatal(err)
+				}
+				for _, direction := range directions {
+					for _, field := range []string{"achieved_rate_lower", "achieved_rate_upper"} {
+						if value, present := direction[field]; !present || string(value) != "0" {
+							testContext.Fatalf("directional %s = %s, present %v, want explicit zero", field, value, present)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestBidirectionalTransportStallTakesPrecedence(testContext *testing.T) {
+	for _, test := range []struct {
+		name           string
+		run            string
+		stalledSender  string
+		wantDirections [2]string
+		mutateCohort   func(map[string]any)
+	}{
+		{
+			name:           "cohort error",
+			run:            bidirectionalRunJSON(10, -1, 0, -2, -1),
+			stalledSender:  "sender",
+			wantDirections: [2]string{"inconclusive", "pass"},
+			mutateCohort: func(cohort map[string]any) {
+				cohort["verdict"] = "invalid"
+				cohort["error"] = "cohort failed after measurement"
+			},
+		},
+		{
+			name:           "other direction independently fails",
+			run:            bidirectionalRunJSON(10, 1, 2, -2, -1),
+			stalledSender:  "reverse_sender",
+			wantDirections: [2]string{"fail", "inconclusive"},
+			mutateCohort:   func(map[string]any) {},
+		},
+	} {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			mutated := mutateBidirectionalJSON(testContext, test.run, func(cohort map[string]any) {
+				sendDuration := cohort[test.stalledSender].(map[string]any)["send_duration"].(map[string]any)
+				sendDuration["max_ns"] = float64(1_200_000_000)
+				test.mutateCohort(cohort)
+			})
+			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, mutated)
+			status, decoded := runRequest(testContext, input)
+			if status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 {
+				testContext.Fatalf("stalled cohort rejected: status %d result %+v", status, decoded)
+			}
+			probe := decoded.ProbeDecisions[0]
+			if probe.Decision != "inconclusive" || probe.Reason != "bidirectional-direction-inconclusive" {
+				testContext.Fatalf("stalled cohort decision = %+v, want transport-contaminated inconclusive", probe)
+			}
+			if len(probe.Directions) != 2 || probe.Directions[0].Decision != test.wantDirections[0] || probe.Directions[1].Decision != test.wantDirections[1] {
+				testContext.Fatalf("direction decisions = %+v, want %v", probe.Directions, test.wantDirections)
+			}
+		})
 	}
 }
 
@@ -384,14 +488,78 @@ func TestBoundedBidirectionalWindowRequiresPostWindowReceiverCapture(testContext
 		testContext.Fatalf("exact resolution-safe capture rejected: status %d result %+v", status, decoded)
 	}
 
-	unbounded := mutateBidirectionalJSON(testContext, valid, func(cohort map[string]any) {
-		cohort["sender"].(map[string]any)["sender_window"].(map[string]any)["status"] = "unavailable"
-		cohort["receiver"].(map[string]any)["shared_clock_boundary"].(map[string]any)["captured_ns"] = float64(bidirectionalStart)
-	})
-	input = fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, unbounded)
-	status, decoded = runRequest(testContext, input)
-	if status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].Decision != "inconclusive" {
-		testContext.Fatalf("non-bounded incomplete evidence rejected: status %d result %+v", status, decoded)
+	for _, senderName := range []string{"sender", "reverse_sender"} {
+		testContext.Run(senderName+" unavailable", func(testContext *testing.T) {
+			unavailable := mutateBidirectionalJSON(testContext, valid, func(cohort map[string]any) {
+				setUnavailableSenderWindow(cohort[senderName].(map[string]any))
+			})
+			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, unavailable)
+			status, decoded := runRequest(testContext, input)
+			if status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].Decision != "inconclusive" {
+				testContext.Fatalf("producer-shaped unavailable sender window rejected: status %d result %+v", status, decoded)
+			}
+			probe := decoded.ProbeDecisions[0]
+			unavailableDirection := 0
+			boundedDirection := 1
+			if senderName == "reverse_sender" {
+				unavailableDirection, boundedDirection = boundedDirection, unavailableDirection
+			}
+			if probe.Directions[unavailableDirection].AchievedRateLower != nil || probe.Directions[unavailableDirection].AchievedRateUpper != nil ||
+				probe.AggregateAchievedRateLower != nil || probe.AggregateAchievedRateUpper != nil {
+				testContext.Fatalf("unavailable sender window reported unknown achieved-rate bounds as measured zero: %+v", probe)
+			}
+			if probe.Directions[boundedDirection].AchievedRateLower == nil || probe.Directions[boundedDirection].AchievedRateUpper == nil {
+				testContext.Fatalf("bounded direction lost its achieved-rate evidence: %+v", probe)
+			}
+		})
+	}
+}
+
+func setUnavailableSenderWindow(sender map[string]any) {
+	sender["validated_per_second"] = float64(0)
+	window := sender["sender_window"].(map[string]any)
+	window["status"] = "inconclusive"
+	window["reason"] = "missing shared clock snapshot or request envelope"
+	for _, field := range []string{"delivered_lower", "delivered_upper", "outstanding_lower", "outstanding_upper", "rate_lower", "rate_upper"} {
+		window[field] = float64(0)
+	}
+	window["backlog_change"] = map[string]any{
+		"status": "", "sample_count": float64(0), "mean_change_lower": float64(0), "mean_change_upper": float64(0),
+	}
+}
+
+func TestBidirectionalUnavailableWindowRejectsContradictions(testContext *testing.T) {
+	valid := bidirectionalRunJSON(10, -1, 0, -2, -1)
+	for _, test := range []struct {
+		name   string
+		mutate func(sender, receiver map[string]any)
+	}{
+		{name: "unknown status", mutate: func(sender, _ map[string]any) {
+			sender["sender_window"].(map[string]any)["status"] = "unavailable"
+		}},
+		{name: "missing reason", mutate: func(sender, _ map[string]any) {
+			delete(sender["sender_window"].(map[string]any), "reason")
+		}},
+		{name: "nonzero unavailable accounting", mutate: func(sender, _ map[string]any) {
+			sender["sender_window"].(map[string]any)["rate_upper"] = float64(1)
+		}},
+		{name: "contradictory receiver rate", mutate: func(_ map[string]any, receiver map[string]any) {
+			receiver["validated_per_second"] = float64(9)
+		}},
+	} {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			mutated := mutateBidirectionalJSON(testContext, valid, func(cohort map[string]any) {
+				sender := cohort["sender"].(map[string]any)
+				receiver := cohort["receiver"].(map[string]any)
+				setUnavailableSenderWindow(sender)
+				test.mutate(sender, receiver)
+			})
+			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, mutated)
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || decoded.Decision != "invalid-input" {
+				testContext.Fatalf("contradictory unavailable window accepted: status %d result %+v", status, decoded)
+			}
+		})
 	}
 }
 
@@ -587,10 +755,11 @@ func TestBidirectionalCohortAllowsBoundedDrainWithoutCreditingIt(testContext *te
 	if status == invalidInputExitStatus || decoded.Decision == "invalid-input" || decoded.ProbeDecisions[0].Decision != "pass" {
 		testContext.Fatalf("bounded drain rejected or credited incorrectly: status %d result %+v", status, decoded)
 	}
-	if decoded.ProbeDecisions[0].Directions[0].AchievedRateLower >= 10 {
+	if decoded.ProbeDecisions[0].Directions[0].AchievedRateLower == nil || *decoded.ProbeDecisions[0].Directions[0].AchievedRateLower >= 10 {
 		testContext.Fatalf("drain delivery was credited to achieved rate: %+v", decoded.ProbeDecisions[0].Directions[0])
 	}
-	if decoded.ProbeDecisions[0].AggregateAchievedRateLower >= float64(decoded.ProbeDecisions[0].AggregateOfferedRate) {
+	if decoded.ProbeDecisions[0].AggregateAchievedRateLower == nil ||
+		*decoded.ProbeDecisions[0].AggregateAchievedRateLower >= float64(decoded.ProbeDecisions[0].AggregateOfferedRate) {
 		testContext.Fatalf("aggregate drain delivery was credited to achieved rate: %+v", decoded.ProbeDecisions[0])
 	}
 }

@@ -204,11 +204,17 @@ Each direction is decided separately from both its sender and receiver validity;
 both must pass, so receiver failures or backlog shrinkage in one direction
 cannot be hidden by the other. Completed loss remains a failed probe, while a
 missing reverse record or contradictory cohort verdict is invalid input.
-Per-direction achieved-rate bounds exclude drain deliveries and are
-reported with each decision. The outer rate and selected rate remain
-per-direction offered rates; the response reports their overflow-checked
-two-direction aggregate offered rate separately from achieved rate. Neither a
-capacity result nor those observations replace a separate absolute
+Per-direction achieved-rate bounds exclude drain deliveries. A bounded zero is
+reported explicitly as measured zero. When the producer reports its
+`inconclusive` unavailable-window accounting instead, that direction's bounds
+are omitted because zero-valued unavailable accounting does not prove zero
+throughput. Aggregate achieved-rate bounds are reported only when both
+directions have bounded evidence; the overflow-checked aggregate offered rate
+remains separate and is still reported. A detected transport stall in either
+direction makes the cohort decision inconclusive ahead of cohort or directional
+failures, while the per-direction decisions retain those failures as diagnostic
+evidence. The outer rate and selected rate remain per-direction offered rates.
+Neither a capacity result nor those observations replace a separate absolute
 achieved-throughput target.
 
 Cohort and seed may vary between independent runs. Offered rate may vary during

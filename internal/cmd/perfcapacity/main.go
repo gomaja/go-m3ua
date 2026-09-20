@@ -57,8 +57,8 @@ type rateRun struct {
 type probeDecision struct {
 	Rate                       int                         `json:"rate"`
 	AggregateOfferedRate       uint64                      `json:"aggregate_offered_rate,omitempty"`
-	AggregateAchievedRateLower float64                     `json:"aggregate_achieved_rate_lower,omitempty"`
-	AggregateAchievedRateUpper float64                     `json:"aggregate_achieved_rate_upper,omitempty"`
+	AggregateAchievedRateLower *float64                    `json:"aggregate_achieved_rate_lower,omitempty"`
+	AggregateAchievedRateUpper *float64                    `json:"aggregate_achieved_rate_upper,omitempty"`
 	Decision                   string                      `json:"decision"`
 	Backlog                    string                      `json:"backlog"`
 	Reason                     string                      `json:"reason,omitempty"`
@@ -72,8 +72,8 @@ type directionDecision struct {
 	Backlog           string                      `json:"backlog"`
 	Reason            string                      `json:"reason,omitempty"`
 	Stall             *perfstats.StallObservation `json:"stall,omitempty"`
-	AchievedRateLower float64                     `json:"achieved_rate_lower"`
-	AchievedRateUpper float64                     `json:"achieved_rate_upper"`
+	AchievedRateLower *float64                    `json:"achieved_rate_lower,omitempty"`
+	AchievedRateUpper *float64                    `json:"achieved_rate_upper,omitempty"`
 }
 
 // runEnvironment is what the acceptance output states about where a campaign
@@ -214,15 +214,29 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	}
 	reverse := perfstats.DecideRun(*fixture.reverse)
 	result.AggregateOfferedRate = fixture.aggregateOfferedRate
-	result.AggregateAchievedRateLower = fixture.aggregateAchievedLower
-	result.AggregateAchievedRateUpper = fixture.aggregateAchievedUpper
-	result.Directions = []directionDecision{
-		{Direction: "asp-to-sgp", Decision: string(forward.Decision), Backlog: string(forward.Backlog), Reason: forward.Reason,
-			Stall: forward.Stall, AchievedRateLower: fixture.forwardAchievedLower, AchievedRateUpper: fixture.forwardAchievedUpper},
-		{Direction: "sgp-to-asp", Decision: string(reverse.Decision), Backlog: string(reverse.Backlog), Reason: reverse.Reason,
-			Stall: reverse.Stall, AchievedRateLower: fixture.reverseAchievedLower, AchievedRateUpper: fixture.reverseAchievedUpper},
+	if fixture.aggregateAchieved != nil {
+		result.AggregateAchievedRateLower = &fixture.aggregateAchieved.lower
+		result.AggregateAchievedRateUpper = &fixture.aggregateAchieved.upper
 	}
+	forwardDirection := directionDecision{
+		Direction: "asp-to-sgp", Decision: string(forward.Decision), Backlog: string(forward.Backlog), Reason: forward.Reason, Stall: forward.Stall,
+	}
+	if fixture.forwardAchieved != nil {
+		forwardDirection.AchievedRateLower = &fixture.forwardAchieved.lower
+		forwardDirection.AchievedRateUpper = &fixture.forwardAchieved.upper
+	}
+	reverseDirection := directionDecision{
+		Direction: "sgp-to-asp", Decision: string(reverse.Decision), Backlog: string(reverse.Backlog), Reason: reverse.Reason, Stall: reverse.Stall,
+	}
+	if fixture.reverseAchieved != nil {
+		reverseDirection.AchievedRateLower = &fixture.reverseAchieved.lower
+		reverseDirection.AchievedRateUpper = &fixture.reverseAchieved.upper
+	}
+	result.Directions = []directionDecision{forwardDirection, reverseDirection}
 	switch {
+	case forward.Stall != nil && forward.Stall.Stalled() || reverse.Stall != nil && reverse.Stall.Stalled():
+		result.Decision = string(perfstats.Inconclusive)
+		result.Reason = "bidirectional-direction-inconclusive"
 	case fixture.cohortError:
 		result.Decision = string(perfstats.Fail)
 		result.Reason = "bidirectional-cohort-error"
@@ -303,6 +317,7 @@ type deliveryEvidence struct {
 
 type senderWindowEvidence struct {
 	Status           *string        `json:"status"`
+	Reason           *string        `json:"reason"`
 	Duration         *time.Duration `json:"duration_ns"`
 	DeliveredLower   *uint64        `json:"delivered_lower"`
 	DeliveredUpper   *uint64        `json:"delivered_upper"`
@@ -416,17 +431,19 @@ type workloadIdentity struct {
 }
 
 type fixtureRun struct {
-	forward                perfstats.RunEvidence
-	reverse                *perfstats.RunEvidence
-	identity               runIdentity
-	aggregateOfferedRate   uint64
-	forwardAchievedLower   float64
-	forwardAchievedUpper   float64
-	reverseAchievedLower   float64
-	reverseAchievedUpper   float64
-	aggregateAchievedLower float64
-	aggregateAchievedUpper float64
-	cohortError            bool
+	forward              perfstats.RunEvidence
+	reverse              *perfstats.RunEvidence
+	identity             runIdentity
+	aggregateOfferedRate uint64
+	forwardAchieved      *achievedRateBounds
+	reverseAchieved      *achievedRateBounds
+	aggregateAchieved    *achievedRateBounds
+	cohortError          bool
+}
+
+type achievedRateBounds struct {
+	lower float64
+	upper float64
 }
 
 type campaignEnvironment struct {
@@ -610,7 +627,7 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 		evidence.Counters.DeadlineExceeded = *record.Echo.DeadlineExceeded
 	}
 	if record.Spec.SharedClock != nil {
-		if _, _, err := validateSharedSenderRecord(record); err != nil {
+		if _, err := validateSharedSenderRecord(record); err != nil {
 			return perfstats.RunEvidence{}, runIdentity{}, err
 		}
 	}
@@ -721,11 +738,11 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 		!equalDelivery(cohort.ReverseSender.Delivery, cohort.ReverseReceiver.Delivery) {
 		return fixtureRun{}, errors.New("sender and receiver delivery evidence does not match")
 	}
-	forwardLower, forwardUpper, err := validateBidirectionalWindowPair(cohort.Sender, cohort.Receiver)
+	forwardAchieved, err := validateBidirectionalWindowPair(cohort.Sender, cohort.Receiver)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("forward window: %w", err)
 	}
-	reverseLower, reverseUpper, err := validateBidirectionalWindowPair(cohort.ReverseSender, cohort.ReverseReceiver)
+	reverseAchieved, err := validateBidirectionalWindowPair(cohort.ReverseSender, cohort.ReverseReceiver)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("reverse window: %w", err)
 	}
@@ -739,13 +756,20 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if _, ok := checkedAdd(forwardSpec.Expected, reverseSpec.Expected); !ok {
 		return fixtureRun{}, errors.New("aggregate expected count overflows uint64")
 	}
-	aggregateDeliveredLower, ok := checkedAdd(*cohort.Sender.SenderWindow.DeliveredLower, *cohort.ReverseSender.SenderWindow.DeliveredLower)
-	if !ok {
-		return fixtureRun{}, errors.New("aggregate measurement-window lower count overflows uint64")
-	}
-	aggregateDeliveredUpper, ok := checkedAdd(*cohort.Sender.SenderWindow.DeliveredUpper, *cohort.ReverseSender.SenderWindow.DeliveredUpper)
-	if !ok {
-		return fixtureRun{}, errors.New("aggregate measurement-window upper count overflows uint64")
+	var aggregateAchieved *achievedRateBounds
+	if forwardAchieved != nil && reverseAchieved != nil {
+		aggregateDeliveredLower, ok := checkedAdd(*cohort.Sender.SenderWindow.DeliveredLower, *cohort.ReverseSender.SenderWindow.DeliveredLower)
+		if !ok {
+			return fixtureRun{}, errors.New("aggregate measurement-window lower count overflows uint64")
+		}
+		aggregateDeliveredUpper, ok := checkedAdd(*cohort.Sender.SenderWindow.DeliveredUpper, *cohort.ReverseSender.SenderWindow.DeliveredUpper)
+		if !ok {
+			return fixtureRun{}, errors.New("aggregate measurement-window upper count overflows uint64")
+		}
+		aggregateAchieved = &achievedRateBounds{
+			lower: float64(aggregateDeliveredLower) / forwardSpec.Workload.Duration.Seconds(),
+			upper: float64(aggregateDeliveredUpper) / forwardSpec.Workload.Duration.Seconds(),
+		}
 	}
 	for _, pair := range [][2]uint64{
 		{*cohort.Sender.Delivery.UniqueMeasurement, *cohort.ReverseSender.Delivery.UniqueMeasurement},
@@ -757,12 +781,9 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	}
 	return fixtureRun{
 		forward: forwardEvidence, reverse: &reverseEvidence, identity: forwardIdentity,
-		aggregateOfferedRate: aggregateOffered,
-		forwardAchievedLower: forwardLower, forwardAchievedUpper: forwardUpper,
-		reverseAchievedLower: reverseLower, reverseAchievedUpper: reverseUpper,
-		aggregateAchievedLower: float64(aggregateDeliveredLower) / forwardSpec.Workload.Duration.Seconds(),
-		aggregateAchievedUpper: float64(aggregateDeliveredUpper) / forwardSpec.Workload.Duration.Seconds(),
-		cohortError:            cohort.Error != "",
+		aggregateOfferedRate: aggregateOffered, forwardAchieved: forwardAchieved,
+		reverseAchieved: reverseAchieved, aggregateAchieved: aggregateAchieved,
+		cohortError: cohort.Error != "",
 	}, nil
 }
 
@@ -830,6 +851,11 @@ func validateBidirectionalReceiver(record *fixtureEvidence, declaredRate int) (s
 		*record.Delivery.UniqueMeasurement > *record.ClockBoundary.MeasurementUpper ||
 		*record.ClockBoundary.MeasurementUpper > *record.Delivery.Unique {
 		return specIdentity{}, errors.New("receiver shared_clock_boundary counts are invalid")
+	}
+	wantRate := float64(*record.ClockBoundary.MeasurementLower) / record.Spec.Duration.Seconds()
+	if record.ValidatedPerSecond == nil || math.IsNaN(*record.ValidatedPerSecond) || math.IsInf(*record.ValidatedPerSecond, 0) ||
+		*record.ValidatedPerSecond != wantRate {
+		return specIdentity{}, errors.New("receiver validated_per_second must equal shared_clock_boundary.measurement_lower over the measurement duration")
 	}
 	return spec, nil
 }
@@ -909,69 +935,89 @@ func validateMeasuredDurations(record *fixtureEvidence) error {
 	return nil
 }
 
-func validateSharedSenderRecord(record *fixtureEvidence) (float64, float64, error) {
+func validateSharedSenderRecord(record *fixtureEvidence) (*achievedRateBounds, error) {
 	clock, err := clockFromSpec(record.Spec)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	if err := validateClockEvidence(record.ClockEvidence, clock); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	if err := validateSenderWatchdog(record.ClockEvidence.Watchdog, clock, record.Spec.Drain); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	if record.SenderWindow == nil || record.SenderWindow.Status == nil || record.SenderWindow.Duration == nil ||
 		record.SenderWindow.DeliveredLower == nil || record.SenderWindow.DeliveredUpper == nil ||
 		record.SenderWindow.OutstandingLower == nil || record.SenderWindow.OutstandingUpper == nil ||
 		record.SenderWindow.RateLower == nil || record.SenderWindow.RateUpper == nil {
-		return 0, 0, errors.New("shared-clock sender_window accounting fields are required")
+		return nil, errors.New("shared-clock sender_window accounting fields are required")
 	}
 	if err := validateMeasuredDurations(record); err != nil {
-		return 0, 0, err
+		return nil, err
 	}
 	window := record.SenderWindow
-	if *window.Duration != *record.Spec.Duration || *window.DeliveredLower > *window.DeliveredUpper || *window.DeliveredUpper > *record.Expected ||
+	if *window.Duration != *record.Spec.Duration {
+		return nil, errors.New("sender_window duration does not match the workload duration")
+	}
+	if *window.Status == "inconclusive" {
+		if window.Reason == nil || *window.Reason == "" || *window.DeliveredLower != 0 || *window.DeliveredUpper != 0 ||
+			*window.OutstandingLower != 0 || *window.OutstandingUpper != 0 || *window.RateLower != 0 || *window.RateUpper != 0 ||
+			record.ValidatedPerSecond == nil || *record.ValidatedPerSecond != 0 || window.BacklogChange == nil ||
+			window.BacklogChange.Status != "" || window.BacklogChange.SampleCount != 0 || window.BacklogChange.Lower == nil ||
+			window.BacklogChange.Upper == nil || *window.BacklogChange.Lower != 0 || *window.BacklogChange.Upper != 0 {
+			return nil, errors.New("inconclusive sender_window does not match unavailable producer accounting")
+		}
+		return nil, nil
+	}
+	if *window.Status != "bounded" {
+		return nil, errors.New("sender_window status must be bounded or inconclusive")
+	}
+	if window.Reason != nil && *window.Reason != "" {
+		return nil, errors.New("bounded sender_window must not carry an unavailable reason")
+	}
+	if *window.DeliveredLower > *window.DeliveredUpper || *window.DeliveredUpper > *record.Expected ||
 		!sumEquals(*record.Expected, *window.DeliveredUpper, *window.OutstandingLower) ||
 		!sumEquals(*record.Expected, *window.DeliveredLower, *window.OutstandingUpper) {
-		return 0, 0, errors.New("sender_window delivery and outstanding bounds are inconsistent")
+		return nil, errors.New("sender_window delivery and outstanding bounds are inconsistent")
 	}
 	durationSeconds := record.Spec.Duration.Seconds()
 	wantLower := float64(*window.DeliveredLower) / durationSeconds
 	wantUpper := float64(*window.DeliveredUpper) / durationSeconds
 	if math.IsNaN(*window.RateLower) || math.IsNaN(*window.RateUpper) || math.IsInf(*window.RateLower, 0) || math.IsInf(*window.RateUpper, 0) ||
 		*window.RateLower != wantLower || *window.RateUpper != wantUpper || *window.RateLower > *window.RateUpper {
-		return 0, 0, errors.New("sender_window achieved-rate bounds are inconsistent")
+		return nil, errors.New("sender_window achieved-rate bounds are inconsistent")
 	}
 	if record.ValidatedPerSecond == nil || *record.ValidatedPerSecond != *window.RateLower {
-		return 0, 0, errors.New("validated_per_second must equal sender_window.rate_lower")
+		return nil, errors.New("validated_per_second must equal sender_window.rate_lower")
 	}
-	return *window.RateLower, *window.RateUpper, nil
+	return &achievedRateBounds{lower: *window.RateLower, upper: *window.RateUpper}, nil
 }
 
-func validateBidirectionalWindowPair(sender, receiver *fixtureEvidence) (float64, float64, error) {
-	lower, upper, err := validateSharedSenderRecord(sender)
+func validateBidirectionalWindowPair(sender, receiver *fixtureEvidence) (*achievedRateBounds, error) {
+	bounds, err := validateSharedSenderRecord(sender)
 	if err != nil {
-		return 0, 0, err
+		return nil, err
+	}
+	if bounds == nil {
+		return nil, nil
 	}
 	boundary := receiver.ClockBoundary
 	if boundary == nil || boundary.Captured == nil || boundary.MeasurementLower == nil || boundary.MeasurementUpper == nil ||
 		*boundary.MeasurementLower != *sender.SenderWindow.DeliveredLower ||
 		*boundary.MeasurementUpper != *sender.SenderWindow.DeliveredUpper {
-		return 0, 0, errors.New("sender_window bounds do not match receiver shared_clock_boundary")
+		return nil, errors.New("sender_window bounds do not match receiver shared_clock_boundary")
 	}
-	if *sender.SenderWindow.Status == "bounded" {
-		clock, err := clockFromSpec(sender.Spec)
-		if err != nil {
-			return 0, 0, err
-		}
-		if *boundary.Captured < clock.End+clock.Resolution {
-			return 0, 0, errors.New("bounded sender window requires a resolution-safe post-window receiver capture")
-		}
+	clock, err := clockFromSpec(sender.Spec)
+	if err != nil {
+		return nil, err
 	}
-	if receiver.ValidatedPerSecond == nil || *receiver.ValidatedPerSecond != lower {
-		return 0, 0, errors.New("receiver validated_per_second must equal the conservative achieved rate")
+	if *boundary.Captured < clock.End+clock.Resolution {
+		return nil, errors.New("bounded sender window requires a resolution-safe post-window receiver capture")
 	}
-	return lower, upper, nil
+	if receiver.ValidatedPerSecond == nil || *receiver.ValidatedPerSecond != bounds.lower {
+		return nil, errors.New("receiver validated_per_second must equal the conservative achieved rate")
+	}
+	return bounds, nil
 }
 
 func validateCohortVerdict(cohort *fixtureCohort) error {
