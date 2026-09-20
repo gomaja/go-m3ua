@@ -222,6 +222,7 @@ type fixtureEvidence struct {
 		} `json:"backlog_change"`
 	} `json:"sender_window"`
 	Echo *struct {
+		OutstandingLimit      *int    `json:"outstanding_limit"`
 		Requests              *uint64 `json:"requests"`
 		Validated             *uint64 `json:"validated"`
 		Capped                *uint64 `json:"capped"`
@@ -483,9 +484,12 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 
 	switch mode {
 	case "echo":
-		if record.Echo == nil || record.Echo.Requests == nil || record.Echo.Validated == nil || record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil ||
+		if record.Echo == nil || record.Echo.OutstandingLimit == nil || record.Echo.Requests == nil || record.Echo.Validated == nil || record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil ||
 			record.Echo.Invalid == nil || record.Echo.OutstandingAfterDrain == nil {
-			return errors.New("echo runs require requests, validated, capped, deadline_exceeded, invalid and outstanding_after_drain counters")
+			return errors.New("echo runs require outstanding_limit, requests, validated, capped, deadline_exceeded, invalid and outstanding_after_drain counters")
+		}
+		if *record.Echo.OutstandingLimit != *record.Spec.Outstanding {
+			return errors.New("echo outstanding_limit must equal workload spec.outstanding")
 		}
 		if *record.Echo.Requests != *record.Submitted {
 			return errors.New("echo requests must equal sender submissions")
@@ -540,6 +544,11 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	}
 	if *spec.Payload == "" || *spec.Mode == "" || *spec.Direction == "" || *spec.Initiation == "" {
 		return workloadIdentity{}, errors.New("spec payload, mode, direction and initiation must not be empty")
+	}
+	switch *spec.Payload {
+	case "128", "512", "4096", "mix":
+	default:
+		return workloadIdentity{}, errors.New("unsupported payload workload")
 	}
 	switch *spec.Mode {
 	case "throughput", "echo", "bidirectional":
