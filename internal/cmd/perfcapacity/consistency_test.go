@@ -197,6 +197,43 @@ func TestRunMeasurementMetadataMustMatchSpecification(testContext *testing.T) {
 	}
 }
 
+func TestNegotiatedStreamInventoryMustBeValidAndStable(testContext *testing.T) {
+	const inventory = `"negotiated_outbound_streams":[8,8,8,8,8,8,8,8]`
+	for _, streams := range []string{"[0,8,8,8,8,8,8,8]", "[8,8,8,8,8,8,8,-1]"} {
+		run := strings.Replace(passingRunJSON(), inventory, `"negotiated_outbound_streams":`+streams, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+			testContext.Fatalf("accepted invalid stream inventory %s", streams)
+		}
+	}
+	_, original, err := evidenceFromFixture(json.RawMessage(passingRunJSON()), 10)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	for _, streams := range []string{"[2,2,2,2,2,2,2,2]", "[8,8,8,8,8,8,8,4]"} {
+		run := strings.Replace(passingRunJSON(), inventory, `"negotiated_outbound_streams":`+streams, 1)
+		_, changed, parseErr := evidenceFromFixture(json.RawMessage(run), 10)
+		if parseErr != nil {
+			testContext.Fatal(parseErr)
+		}
+		var campaign campaignIdentity
+		if err := campaign.add(original); err != nil {
+			testContext.Fatal(err)
+		}
+		if err := campaign.add(changed); err == nil {
+			testContext.Fatalf("mixed negotiated stream inventories with %s", streams)
+		}
+	}
+}
+
+func TestSingleDirectionSenderMayOmitReverseControl(testContext *testing.T) {
+	for _, run := range []string{passingRunJSON(), echoRunJSON()} {
+		run = strings.Replace(run, `,"peer_control":"http://127.0.0.1:8080"`, "", 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err != nil {
+			testContext.Fatalf("rejected sender without optional reverse control: %v", err)
+		}
+	}
+}
+
 func TestDeliveryPartitionMustEqualUniqueWithoutOverflow(testContext *testing.T) {
 	for _, replacement := range []string{
 		`"unique_measurement":0,"unique_drain":0`,

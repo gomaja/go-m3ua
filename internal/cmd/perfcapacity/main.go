@@ -304,12 +304,14 @@ type campaignEnvironment struct {
 type runIdentity struct {
 	workload    workloadIdentity
 	environment campaignEnvironment
+	streams     string
 }
 
 type campaignIdentity struct {
 	set         bool
 	workload    workloadIdentity
 	environment campaignEnvironment
+	streams     string
 }
 
 func (campaign *campaignIdentity) add(run runIdentity) error {
@@ -317,6 +319,7 @@ func (campaign *campaignIdentity) add(run runIdentity) error {
 		campaign.set = true
 		campaign.workload = run.workload
 		campaign.environment = run.environment
+		campaign.streams = run.streams
 		return nil
 	}
 	if run.environment.reported.VCSRevision != campaign.environment.reported.VCSRevision {
@@ -329,6 +332,9 @@ func (campaign *campaignIdentity) add(run runIdentity) error {
 	}
 	if run.workload != campaign.workload {
 		return errors.New("run workload does not match campaign workload")
+	}
+	if run.streams != campaign.streams {
+		return errors.New("negotiated outbound streams do not match campaign inventory")
 	}
 	if run.environment != campaign.environment {
 		return errors.New("run environment does not match campaign environment")
@@ -378,6 +384,15 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if len(record.NegotiatedOutboundStreams) != workload.Associations {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("negotiated_outbound_streams must identify every workload association")
 	}
+	for _, count := range record.NegotiatedOutboundStreams {
+		if count <= 0 {
+			return perfstats.RunEvidence{}, runIdentity{}, errors.New("negotiated_outbound_streams counts must be positive")
+		}
+	}
+	streams, err := json.Marshal(record.NegotiatedOutboundStreams)
+	if err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("encode negotiated stream inventory: %w", err)
+	}
 	if record.Expected == nil || *record.Expected != *record.Spec.Expected {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("record expected must equal workload spec.expected")
 	}
@@ -397,7 +412,7 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if workload.Outstanding != environment.OutstandingLimit || workload.Initiation != environment.Initiation {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("run environment outstanding_limit and initiation must agree with the workload spec")
 	}
-	identity := runIdentity{workload: workload, environment: environment}
+	identity := runIdentity{workload: workload, environment: environment, streams: string(streams)}
 
 	evidence := perfstats.RunEvidence{
 		FixtureValid: *record.FixtureVerdict == "pass",
