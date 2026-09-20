@@ -180,10 +180,12 @@ using the same case-insensitive matching that `encoding/json` uses for struct
 fields. Duplicated outstanding limits and initiation fields must agree between
 the specification and manifest. Payload must be one of the producer workloads:
 `128`, `512`, `4096` or `mix`. Echo-mode sender records must include their
-outstanding limit plus requests, validated, capped, deadline, invalid and
-post-drain outstanding counters; the echo outstanding limit must equal
-`spec.outstanding`, and requests must equal sender submissions. Non-echo sender
-records must not carry echo evidence.
+fixed round-trip scope and two-second deadline, outstanding limit, requests,
+validated, capped, deadline, invalid and post-drain outstanding counters; the
+echo outstanding limit must equal `spec.outstanding`, and requests must equal
+sender submissions. Direction must be `asp-to-sgp` or `sgp-to-asp`; initiation
+must be `asp-dial` or `sgp-dial`. Non-echo sender records must not carry echo
+evidence.
 
 Bidirectional capacity evidence is currently invalid input. Its reverse sender
 and receiver records are siblings of the forward records in the fixture's
