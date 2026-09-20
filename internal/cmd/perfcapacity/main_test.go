@@ -24,9 +24,21 @@ func manifestJSON() string {
 	return `"manifest":{"go_version":"go1.25.4","go_os":"linux","go_arch":"amd64",` +
 		`"vcs_revision":"c370d891f0f7f0c6a1f4cf1f0f6cf0c0f0f0c0f0","vcs_modified":false,` +
 		`"assessed_baseline_revision":"d097e191d879efc95e36c0254814933f01aa9aee",` +
-		`"sctp_module":"github.com/gomaja/go-sctp","sctp_version":"v1.0.4","gomaxprocs":4,` +
+		`"sctp_module":"github.com/gomaja/go-sctp","sctp_version":"v1.0.6","gomaxprocs":4,` +
 		`"sctp_nodelay":true,"sctp_sack_delay_ms":0,"sctp_sack_frequency":1,"flow_count":32,` +
 		`"outstanding_limit":8192,"initiation":"asp-dial","accounting_scope":"whole-process"}`
+}
+
+func specJSON(rate int) string {
+	return fmt.Sprintf(`"spec":{"cohort":"cohort-a","seed":7,"associations":8,"expected":%d,`+
+		`"duration_ns":120000000000,"drain_ns":2000000000,"rate":%d,"outstanding":8192,`+
+		`"payload":"128","mode":"throughput","direction":"asp-to-sgp","initiation":"asp-dial",`+
+		`"peer_control":"http://127.0.0.1:8080"}`, rate*120, rate)
+}
+
+func replaceManifestField(run, old, replacement string) string {
+	manifest := strings.Replace(manifestJSON(), old, replacement, 1)
+	return strings.Replace(run, manifestJSON(), manifest, 1)
 }
 
 // sendDurationJSON is the fixture's send-call duration summary. max_ns is the
@@ -36,19 +48,19 @@ func sendDurationJSON(maximumNanoseconds int64) string {
 }
 
 func passingRunJSON() string {
-	return `{` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
+	return `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
 		`"sender_window":{"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}}`
 }
 
 func failingRunJSON() string {
-	return `{` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
+	return `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
 		`"sender_window":{"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
 }
 
 func straddlingRunJSON() string {
-	return `{` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
+	return `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
 		`"sender_window":{"status":"bounded","backlog_change":{"status":"unresolved","sample_count":120,"mean_change_lower":-3.4,"mean_change_upper":3.53}}}`
 }
@@ -68,7 +80,7 @@ func requestJSON(initial int, schedule []struct {
 		if probe.passing {
 			run = passingRunJSON()
 		}
-		fmt.Fprintf(&builder, `{"rate":%d,"run":%s}`, probe.rate, run)
+		fmt.Fprintf(&builder, `{"rate":%d,"run":%s}`, probe.rate, runAtRateJSON(run, probe.rate))
 	}
 	builder.WriteString(`],"repetitions":[`)
 	builder.WriteString(repetitions)
@@ -79,9 +91,13 @@ func requestJSON(initial int, schedule []struct {
 func repetitionsJSON(rate, count int, run string) string {
 	entries := make([]string, 0, count)
 	for index := 0; index < count; index++ {
-		entries = append(entries, fmt.Sprintf(`{"rate":%d,"run":%s}`, rate, run))
+		entries = append(entries, fmt.Sprintf(`{"rate":%d,"run":%s}`, rate, runAtRateJSON(run, rate)))
 	}
 	return strings.Join(entries, ",")
+}
+
+func runAtRateJSON(run string, rate int) string {
+	return strings.Replace(run, specJSON(10), specJSON(rate), 1)
 }
 
 func runRequest(testContext *testing.T, input string) (int, response) {
@@ -179,7 +195,7 @@ func TestRepetitionAtTheWrongRateDoesNotValidate(testContext *testing.T) {
 }
 
 func TestFailingRepetitionFailsTheCapacity(testContext *testing.T) {
-	runs := repetitionsJSON(37, 4, passingRunJSON()) + `,{"rate":37,"run":` + failingRunJSON() + `}`
+	runs := repetitionsJSON(37, 4, passingRunJSON()) + `,{"rate":37,"run":` + runAtRateJSON(failingRunJSON(), 37) + `}`
 	input := requestJSON(10, capacity37Schedule, runs)
 	status, decoded := runRequest(testContext, input)
 	if status != failingExitStatus || decoded.Decision != "fail" {
@@ -196,7 +212,7 @@ func TestFourRepetitionsDoNotValidate(testContext *testing.T) {
 }
 
 func TestMissingWindowEvidenceNeverPasses(testContext *testing.T) {
-	noWindow := `{` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
+	noWindow := `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1000,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0}}`
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, noWindow)
 	status, decoded := runRequest(testContext, input)
@@ -287,7 +303,7 @@ func FuzzRunNeverPanicsAndAlwaysWritesJSON(fuzzContext *testing.F) {
 // never dropped, never widened away, and never charged to the candidate as a
 // submission failure.
 func stalledRunJSON() string {
-	return `{` + manifestJSON() + `,` + sendDurationJSON(1200000000) + `,` +
+	return `{` + specJSON(10) + `,` + manifestJSON() + `,` + sendDurationJSON(1200000000) + `,` +
 		`"fixture_verdict":"invalid","capped":4231,"send_errors":0,` +
 		`"delivery":{"unique":95769,"unique_measurement":95769,"unique_drain":0,"missing":4231,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
 		`"sender_window":{"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
@@ -322,7 +338,7 @@ func TestAcceptanceOutputStatesTheEnvironment(testContext *testing.T) {
 	run(strings.NewReader(input), &output)
 	for _, want := range []string{
 		`"environments"`, `"go_version":"go1.25.4"`, `"go_os":"linux"`, `"go_arch":"amd64"`,
-		`"gomaxprocs":4`, `"sctp_module":"github.com/gomaja/go-sctp"`, `"sctp_version":"v1.0.4"`,
+		`"gomaxprocs":4`, `"sctp_module":"github.com/gomaja/go-sctp"`, `"sctp_version":"v1.0.6"`,
 	} {
 		if !strings.Contains(output.String(), want) {
 			testContext.Fatalf("acceptance output does not state %s: %s", want, output.String())
@@ -342,17 +358,139 @@ func TestIncompleteRunRecordsAreInvalidInput(testContext *testing.T) {
 		{name: "null send duration maximum", run: strings.Replace(passingRunJSON(), `"max_ns":262144`, `"max_ns":null`, 1)},
 		{name: "negative send duration maximum", run: strings.Replace(passingRunJSON(), `"max_ns":262144`, `"max_ns":-1`, 1)},
 		{name: "no manifest", run: strings.Replace(passingRunJSON(), manifestJSON()+",", "", 1)},
+		{name: "dirty candidate", run: replaceManifestField(passingRunJSON(), `"vcs_modified":false`, `"vcs_modified":true`)},
+		{name: "no candidate revision", run: strings.Replace(passingRunJSON(), `"vcs_revision":"c370d891f0f7f0c6a1f4cf1f0f6cf0c0f0f0c0f0",`, "", 1)},
+		{name: "empty candidate revision", run: strings.Replace(passingRunJSON(), `"vcs_revision":"c370d891f0f7f0c6a1f4cf1f0f6cf0c0f0f0c0f0"`, `"vcs_revision":""`, 1)},
 		{name: "no assessed baseline", run: strings.Replace(passingRunJSON(), `"assessed_baseline_revision":"d097e191d879efc95e36c0254814933f01aa9aee",`, "", 1)},
 		{name: "empty assessed baseline", run: strings.Replace(passingRunJSON(), `"assessed_baseline_revision":"d097e191d879efc95e36c0254814933f01aa9aee"`, `"assessed_baseline_revision":""`, 1)},
 		{name: "no go version", run: strings.Replace(passingRunJSON(), `"go_version":"go1.25.4",`, "", 1)},
+		{name: "empty go version", run: replaceManifestField(passingRunJSON(), `"go_version":"go1.25.4"`, `"go_version":""`)},
+		{name: "empty go os", run: replaceManifestField(passingRunJSON(), `"go_os":"linux"`, `"go_os":""`)},
+		{name: "empty go arch", run: replaceManifestField(passingRunJSON(), `"go_arch":"amd64"`, `"go_arch":""`)},
 		{name: "no gomaxprocs", run: strings.Replace(passingRunJSON(), `"gomaxprocs":4,`, "", 1)},
-		{name: "no sctp version", run: strings.Replace(passingRunJSON(), `"sctp_version":"v1.0.4",`, "", 1)},
+		{name: "zero gomaxprocs", run: replaceManifestField(passingRunJSON(), `"gomaxprocs":4`, `"gomaxprocs":0`)},
+		{name: "empty sctp module", run: replaceManifestField(passingRunJSON(), `"sctp_module":"github.com/gomaja/go-sctp"`, `"sctp_module":""`)},
+		{name: "no sctp version", run: strings.Replace(passingRunJSON(), `"sctp_version":"v1.0.6",`, "", 1)},
+		{name: "empty sctp version", run: replaceManifestField(passingRunJSON(), `"sctp_version":"v1.0.6"`, `"sctp_version":""`)},
+		{name: "no socket option", run: replaceManifestField(passingRunJSON(), `"sctp_nodelay":true,`, "")},
+		{name: "no sack delay", run: replaceManifestField(passingRunJSON(), `"sctp_sack_delay_ms":0,`, "")},
+		{name: "no sack frequency", run: replaceManifestField(passingRunJSON(), `"sctp_sack_frequency":1,`, "")},
+		{name: "no flow count", run: replaceManifestField(passingRunJSON(), `"flow_count":32,`, "")},
+		{name: "zero flow count", run: replaceManifestField(passingRunJSON(), `"flow_count":32`, `"flow_count":0`)},
+		{name: "no outstanding limit", run: replaceManifestField(passingRunJSON(), `"outstanding_limit":8192,`, "")},
+		{name: "zero outstanding limit", run: replaceManifestField(passingRunJSON(), `"outstanding_limit":8192`, `"outstanding_limit":0`)},
+		{name: "empty initiation", run: replaceManifestField(passingRunJSON(), `"initiation":"asp-dial"`, `"initiation":""`)},
+		{name: "empty accounting scope", run: replaceManifestField(passingRunJSON(), `"accounting_scope":"whole-process"`, `"accounting_scope":""`)},
+		{name: "no measured rate", run: strings.Replace(passingRunJSON(), `"rate":10,`, "", 1)},
+		{name: "null measured rate", run: strings.Replace(passingRunJSON(), `"rate":10`, `"rate":null`, 1)},
+		{name: "inconsistent expected", run: strings.Replace(passingRunJSON(), `"expected":1200`, `"expected":1201`, 1)},
+		{name: "no workload", run: strings.Replace(passingRunJSON(), `,"payload":"128"`, "", 1)},
+		{name: "empty workload", run: strings.Replace(passingRunJSON(), `"payload":"128"`, `"payload":""`, 1)},
 	}
 	for _, test := range tests {
 		testContext.Run(test.name, func(testContext *testing.T) {
 			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, test.run)
 			status, decoded := runRequest(testContext, input)
 			if status != invalidInputExitStatus || decoded.Decision != "invalid-input" {
+				testContext.Fatalf("status %d decision %+v, want invalid-input", status, decoded)
+			}
+		})
+	}
+}
+
+func TestOuterRateMustMatchMeasuredFixtureRate(testContext *testing.T) {
+	run := strings.Replace(passingRunJSON(), `"rate":10`, `"rate":999999`, 1)
+	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, run)
+	status, decoded := runRequest(testContext, input)
+	if status != invalidInputExitStatus || decoded.Decision != "invalid-input" || !strings.Contains(decoded.Error, "declared rate") {
+		testContext.Fatalf("status %d decision %+v, want invalid-input", status, decoded)
+	}
+}
+
+func TestCampaignIdentityMustRemainStable(testContext *testing.T) {
+	tests := []struct {
+		name      string
+		run       string
+		wantError string
+	}{
+		{
+			name:      "candidate revision",
+			wantError: "candidate vcs_revision",
+			run: strings.Replace(runAtRateJSON(passingRunJSON(), 20),
+				`"vcs_revision":"c370d891f0f7f0c6a1f4cf1f0f6cf0c0f0f0c0f0"`,
+				`"vcs_revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`, 1),
+		},
+		{
+			name:      "assessed baseline revision",
+			wantError: "assessed_baseline_revision",
+			run: strings.Replace(runAtRateJSON(passingRunJSON(), 20),
+				`"assessed_baseline_revision":"d097e191d879efc95e36c0254814933f01aa9aee"`,
+				`"assessed_baseline_revision":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"`, 1),
+		},
+		{
+			name:      "go arch",
+			wantError: "run environment",
+			run:       replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"go_arch":"amd64"`, `"go_arch":"arm64"`),
+		},
+		{
+			name:      "workload",
+			wantError: "workload",
+			run:       strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"payload":"128"`, `"payload":"4096"`, 1),
+		},
+		{name: "associations", wantError: "workload", run: strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"associations":8`, `"associations":4`, 1)},
+		{name: "duration", wantError: "workload", run: strings.Replace(strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"duration_ns":120000000000`, `"duration_ns":60000000000`, 1), `"expected":2400`, `"expected":1200`, 1)},
+		{name: "drain", wantError: "workload", run: strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"drain_ns":2000000000`, `"drain_ns":3000000000`, 1)},
+		{name: "outstanding", wantError: "workload", run: strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"outstanding":8192`, `"outstanding":4096`, 1)},
+		{name: "mode", wantError: "workload", run: strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"mode":"throughput"`, `"mode":"echo"`, 1)},
+		{name: "direction", wantError: "workload", run: strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"direction":"asp-to-sgp"`, `"direction":"sgp-to-asp"`, 1)},
+		{name: "spec initiation", wantError: "workload", run: strings.Replace(runAtRateJSON(passingRunJSON(), 20), specJSON(20), strings.Replace(specJSON(20), `"initiation":"asp-dial"`, `"initiation":"sgp-dial"`, 1), 1)},
+		{name: "peer control", wantError: "workload", run: strings.Replace(runAtRateJSON(passingRunJSON(), 20), `"peer_control":"http://127.0.0.1:8080"`, `"peer_control":"http://127.0.0.1:8081"`, 1)},
+		{name: "nodelay", wantError: "run environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"sctp_nodelay":true`, `"sctp_nodelay":false`)},
+		{name: "sack delay", wantError: "run environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"sctp_sack_delay_ms":0`, `"sctp_sack_delay_ms":20`)},
+		{name: "sack frequency", wantError: "run environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"sctp_sack_frequency":1`, `"sctp_sack_frequency":2`)},
+		{name: "flow count", wantError: "run environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"flow_count":32`, `"flow_count":16`)},
+		{name: "outstanding limit", wantError: "run environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"outstanding_limit":8192`, `"outstanding_limit":4096`)},
+		{name: "manifest initiation", wantError: "run environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"initiation":"asp-dial"`, `"initiation":"sgp-dial"`)},
+		{name: "accounting scope", wantError: "run environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 20), `"accounting_scope":"whole-process"`, `"accounting_scope":"sender-only"`)},
+	}
+	for _, test := range tests {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+				passingRunJSON(), test.run)
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || decoded.Decision != "invalid-input" || !strings.Contains(decoded.Error, test.wantError) {
+				testContext.Fatalf("status %d decision %+v, want invalid-input", status, decoded)
+			}
+		})
+	}
+}
+
+func TestCampaignAllowsPerRunCohortSeedRateAndExpected(testContext *testing.T) {
+	second := runAtRateJSON(passingRunJSON(), 20)
+	second = strings.Replace(second, `"cohort":"cohort-a"`, `"cohort":"cohort-b"`, 1)
+	second = strings.Replace(second, `"seed":7`, `"seed":9`, 1)
+	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`, passingRunJSON(), second)
+	status, decoded := runRequest(testContext, input)
+	if status == invalidInputExitStatus || decoded.Decision == "invalid-input" {
+		testContext.Fatalf("status %d decision %+v, want cohort, seed, rate and derived expected to vary", status, decoded)
+	}
+}
+
+func TestRepetitionMustMatchCampaignIdentity(testContext *testing.T) {
+	tests := []struct {
+		name      string
+		run       string
+		wantError string
+	}{
+		{name: "workload", run: strings.Replace(strings.Replace(runAtRateJSON(passingRunJSON(), 37), `"duration_ns":120000000000`, `"duration_ns":60000000000`, 1), `"expected":4440`, `"expected":2220`, 1), wantError: "workload"},
+		{name: "environment", run: replaceManifestField(runAtRateJSON(passingRunJSON(), 37), `"flow_count":32`, `"flow_count":16`), wantError: "run environment"},
+	}
+	for _, test := range tests {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			repetitions := repetitionsJSON(37, 4, passingRunJSON()) + `,{"rate":37,"run":` + test.run + `}`
+			input := requestJSON(10, capacity37Schedule, repetitions)
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || decoded.Decision != "invalid-input" || !strings.Contains(decoded.Error, test.wantError) {
 				testContext.Fatalf("status %d decision %+v, want invalid-input", status, decoded)
 			}
 		})
@@ -367,23 +505,6 @@ func TestUnstalledRunsStillReportTheirLongestSend(testContext *testing.T) {
 	run(strings.NewReader(input), &output)
 	if !strings.Contains(output.String(), `"longest_send_ns":262144`) {
 		testContext.Fatalf("the measured longest send is missing from the report: %s", output.String())
-	}
-}
-
-// A campaign whose runs did not all come from one environment states every one
-// of them rather than presenting a single environment it cannot support.
-func TestDistinctEnvironmentsAreAllStated(testContext *testing.T) {
-	other := strings.Replace(passingRunJSON(), `"sctp_version":"v1.0.4"`, `"sctp_version":"v1.0.2"`, 1)
-	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`, passingRunJSON(), other)
-	_, decoded := runRequest(testContext, input)
-	if len(decoded.Environments) != 2 {
-		testContext.Fatalf("environments = %+v, want both environments stated", decoded.Environments)
-	}
-	if decoded.Environments[0].SCTPVersion != "v1.0.4" || decoded.Environments[1].SCTPVersion != "v1.0.2" {
-		testContext.Fatalf("environments = %+v, want first-appearance order", decoded.Environments)
-	}
-	if decoded.Environments[0].AssessedBaselineRevision != "d097e191d879efc95e36c0254814933f01aa9aee" {
-		testContext.Fatalf("environment does not state the assessed baseline: %+v", decoded.Environments[0])
 	}
 }
 

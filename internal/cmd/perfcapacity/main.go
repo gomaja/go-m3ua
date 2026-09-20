@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"time"
 
@@ -130,13 +131,15 @@ func evaluate(decoded request) (response, error) {
 	}
 
 	result := response{ProbeDecisions: []probeDecision{}, RepetitionDecisions: []probeDecision{}}
-	environments := newEnvironmentSet()
+	var campaign campaignIdentity
 	for index, probe := range decoded.Probes {
-		evidence, environment, err := evidenceFromFixture(probe.Run)
+		evidence, identity, err := evidenceFromFixture(probe.Run, *probe.Rate)
 		if err != nil {
 			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
 		}
-		environments.add(environment)
+		if err := campaign.add(identity); err != nil {
+			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
+		}
 		decision := perfstats.DecideRun(evidence)
 		result.ProbeDecisions = append(result.ProbeDecisions, probeDecision{
 			Rate: *probe.Rate, Decision: string(decision.Decision), Backlog: string(decision.Backlog),
@@ -152,11 +155,13 @@ func evaluate(decoded request) (response, error) {
 	var repetitionRates []int
 	var repetitionDecisions []perfstats.Decision
 	for index, repetition := range decoded.Repetitions {
-		evidence, environment, err := evidenceFromFixture(repetition.Run)
+		evidence, identity, err := evidenceFromFixture(repetition.Run, *repetition.Rate)
 		if err != nil {
 			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
 		}
-		environments.add(environment)
+		if err := campaign.add(identity); err != nil {
+			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
+		}
 		decision := perfstats.DecideRun(evidence)
 		result.RepetitionDecisions = append(result.RepetitionDecisions, probeDecision{
 			Rate: *repetition.Rate, Decision: string(decision.Decision), Backlog: string(decision.Backlog),
@@ -166,7 +171,7 @@ func evaluate(decoded request) (response, error) {
 		repetitionDecisions = append(repetitionDecisions, decision.Decision)
 	}
 
-	result.Environments = environments.ordered
+	result.Environments = campaign.environments()
 	capacity := perfstats.DecideCapacity(search, repetitionRates, repetitionDecisions)
 	result.Decision = string(capacity.Decision)
 	result.SelectedRate = capacity.SelectedRate
@@ -179,9 +184,10 @@ func evaluate(decoded request) (response, error) {
 // superset; every evidence field this command relies on is checked for
 // presence explicitly.
 type fixtureEvidence struct {
-	FixtureVerdict *string `json:"fixture_verdict"`
-	Capped         *uint64 `json:"capped"`
-	SendErrors     *uint64 `json:"send_errors"`
+	Spec           *fixtureSpec `json:"spec"`
+	FixtureVerdict *string      `json:"fixture_verdict"`
+	Capped         *uint64      `json:"capped"`
+	SendErrors     *uint64      `json:"send_errors"`
 	Delivery       *struct {
 		Missing       *uint64 `json:"missing"`
 		Duplicate     *uint64 `json:"duplicate"`
@@ -205,38 +211,110 @@ type fixtureEvidence struct {
 	SendDuration *struct {
 		Max *time.Duration `json:"max_ns"`
 	} `json:"send_duration"`
-	Manifest *struct {
-		GoVersion                *string `json:"go_version"`
-		GoOS                     *string `json:"go_os"`
-		GoArch                   *string `json:"go_arch"`
-		GOMAXPROCS               *int    `json:"gomaxprocs"`
-		SCTPModule               *string `json:"sctp_module"`
-		SCTPVersion              *string `json:"sctp_version"`
-		VCSRevision              string  `json:"vcs_revision"`
-		VCSModified              *bool   `json:"vcs_modified"`
-		AssessedBaselineRevision *string `json:"assessed_baseline_revision"`
-	} `json:"manifest"`
+	Manifest *fixtureManifest `json:"manifest"`
 }
 
-// environmentSet collects the distinct environments a campaign ran in, in
-// first-appearance order. A campaign whose runs did not all come from one
-// environment reports every one of them rather than presenting a single
-// environment it cannot support.
-type environmentSet struct {
-	seen    map[runEnvironment]struct{}
-	ordered []runEnvironment
+type fixtureSpec struct {
+	Cohort       *string        `json:"cohort"`
+	Seed         *uint64        `json:"seed"`
+	Associations *int           `json:"associations"`
+	Expected     *uint64        `json:"expected"`
+	Duration     *time.Duration `json:"duration_ns"`
+	Drain        time.Duration  `json:"drain_ns"`
+	Rate         *uint64        `json:"rate"`
+	Outstanding  *int           `json:"outstanding"`
+	Payload      *string        `json:"payload"`
+	Mode         *string        `json:"mode"`
+	Direction    *string        `json:"direction"`
+	Initiation   *string        `json:"initiation"`
+	PeerControl  string         `json:"peer_control"`
 }
 
-func newEnvironmentSet() *environmentSet {
-	return &environmentSet{seen: make(map[runEnvironment]struct{})}
+type fixtureManifest struct {
+	GoVersion                *string `json:"go_version"`
+	GoOS                     *string `json:"go_os"`
+	GoArch                   *string `json:"go_arch"`
+	VCSRevision              *string `json:"vcs_revision"`
+	VCSModified              *bool   `json:"vcs_modified"`
+	AssessedBaselineRevision *string `json:"assessed_baseline_revision"`
+	SCTPModule               *string `json:"sctp_module"`
+	SCTPVersion              *string `json:"sctp_version"`
+	GOMAXPROCS               *int    `json:"gomaxprocs"`
+	SCTPNoDelay              *bool   `json:"sctp_nodelay"`
+	SCTPSACKDelay            *uint32 `json:"sctp_sack_delay_ms"`
+	SCTPSACKFrequency        *uint32 `json:"sctp_sack_frequency"`
+	FlowCount                *int    `json:"flow_count"`
+	OutstandingLimit         *int    `json:"outstanding_limit"`
+	Initiation               *string `json:"initiation"`
+	AccountingScope          *string `json:"accounting_scope"`
 }
 
-func (set *environmentSet) add(environment runEnvironment) {
-	if _, exists := set.seen[environment]; exists {
-		return
+// workloadIdentity excludes the per-run cohort and seed, the offered rate,
+// and expected, which is derived from that rate and the fixed duration. Every
+// other run specification field must remain identical within one campaign.
+type workloadIdentity struct {
+	Associations int
+	Duration     time.Duration
+	Drain        time.Duration
+	Outstanding  int
+	Payload      string
+	Mode         string
+	Direction    string
+	Initiation   string
+	PeerControl  string
+}
+
+type campaignEnvironment struct {
+	reported          runEnvironment
+	SCTPNoDelay       bool
+	SCTPSACKDelay     uint32
+	SCTPSACKFrequency uint32
+	FlowCount         int
+	OutstandingLimit  int
+	Initiation        string
+	AccountingScope   string
+}
+
+type runIdentity struct {
+	workload    workloadIdentity
+	environment campaignEnvironment
+}
+
+type campaignIdentity struct {
+	set         bool
+	workload    workloadIdentity
+	environment campaignEnvironment
+}
+
+func (campaign *campaignIdentity) add(run runIdentity) error {
+	if !campaign.set {
+		campaign.set = true
+		campaign.workload = run.workload
+		campaign.environment = run.environment
+		return nil
 	}
-	set.seen[environment] = struct{}{}
-	set.ordered = append(set.ordered, environment)
+	if run.environment.reported.VCSRevision != campaign.environment.reported.VCSRevision {
+		return fmt.Errorf("candidate vcs_revision %q does not match campaign revision %q",
+			run.environment.reported.VCSRevision, campaign.environment.reported.VCSRevision)
+	}
+	if run.environment.reported.AssessedBaselineRevision != campaign.environment.reported.AssessedBaselineRevision {
+		return fmt.Errorf("assessed_baseline_revision %q does not match campaign baseline %q",
+			run.environment.reported.AssessedBaselineRevision, campaign.environment.reported.AssessedBaselineRevision)
+	}
+	if run.workload != campaign.workload {
+		return errors.New("run workload does not match campaign workload")
+	}
+	if run.environment != campaign.environment {
+		return errors.New("run environment does not match campaign environment")
+	}
+	return nil
+}
+
+func (campaign campaignIdentity) environments() []runEnvironment {
+	if !campaign.set {
+		return nil
+	}
+	return []runEnvironment{campaign.environment.reported}
 }
 
 // evidenceFromFixture maps one per-run fixture sender record to the
@@ -250,34 +328,42 @@ func (set *environmentSet) add(environment runEnvironment) {
 // contaminated it, and a record without a manifest cannot say where it ran or
 // which baseline it was assessed against; neither may be silently treated as
 // absent.
-func evidenceFromFixture(raw json.RawMessage) (perfstats.RunEvidence, runEnvironment, error) {
+func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEvidence, runIdentity, error) {
 	if len(raw) == 0 {
-		return perfstats.RunEvidence{}, runEnvironment{}, errors.New("run evidence is required")
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("run evidence is required")
 	}
 	var record fixtureEvidence
 	if err := json.Unmarshal(raw, &record); err != nil {
-		return perfstats.RunEvidence{}, runEnvironment{}, fmt.Errorf("decode run evidence: %w", err)
+		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("decode run evidence: %w", err)
+	}
+	if record.Spec == nil {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("spec is required to identify the measured run")
+	}
+	workload, err := workloadFromSpec(record.Spec, declaredRate)
+	if err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
 	if record.FixtureVerdict == nil {
-		return perfstats.RunEvidence{}, runEnvironment{}, errors.New("fixture_verdict is required")
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("fixture_verdict is required")
 	}
 	if record.Capped == nil || record.SendErrors == nil {
-		return perfstats.RunEvidence{}, runEnvironment{}, errors.New("capped and send_errors are required")
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("capped and send_errors are required")
 	}
 	if record.Delivery == nil || record.Delivery.Missing == nil || record.Delivery.Duplicate == nil ||
 		record.Delivery.Invalid == nil || record.Delivery.Reordered == nil || record.Delivery.LateAfterStop == nil {
-		return perfstats.RunEvidence{}, runEnvironment{}, errors.New("delivery counters are required")
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("delivery counters are required")
 	}
 	if record.SendDuration == nil || record.SendDuration.Max == nil {
-		return perfstats.RunEvidence{}, runEnvironment{}, errors.New("send_duration.max_ns is required as the transport-stall signal")
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("send_duration.max_ns is required as the transport-stall signal")
 	}
 	if *record.SendDuration.Max < 0 {
-		return perfstats.RunEvidence{}, runEnvironment{}, errors.New("send_duration.max_ns must not be negative")
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("send_duration.max_ns must not be negative")
 	}
-	environment, err := environmentFromManifest(record)
+	environment, err := environmentFromManifest(record.Manifest)
 	if err != nil {
-		return perfstats.RunEvidence{}, runEnvironment{}, err
+		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
+	identity := runIdentity{workload: workload, environment: environment}
 
 	evidence := perfstats.RunEvidence{
 		FixtureValid: *record.FixtureVerdict == "pass",
@@ -294,7 +380,7 @@ func evidenceFromFixture(raw json.RawMessage) (perfstats.RunEvidence, runEnviron
 	}
 	if record.Echo != nil {
 		if record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil {
-			return perfstats.RunEvidence{}, runEnvironment{}, errors.New("echo runs require capped and deadline_exceeded counters")
+			return perfstats.RunEvidence{}, runIdentity{}, errors.New("echo runs require capped and deadline_exceeded counters")
 		}
 		evidence.Counters.Capped += *record.Echo.Capped
 		evidence.Counters.DeadlineExceeded = *record.Echo.DeadlineExceeded
@@ -305,41 +391,92 @@ func evidenceFromFixture(raw json.RawMessage) (perfstats.RunEvidence, runEnviron
 		window.BacklogChange == nil || window.BacklogChange.Status == "insufficient-samples" ||
 		window.BacklogChange.SampleCount < 8 ||
 		window.BacklogChange.Lower == nil || window.BacklogChange.Upper == nil {
-		return evidence, environment, nil
+		return evidence, identity, nil
 	}
 	evidence.Interval = &perfstats.BacklogInterval{
 		Lower: *window.BacklogChange.Lower,
 		Upper: *window.BacklogChange.Upper,
 	}
-	return evidence, environment, nil
+	return evidence, identity, nil
 }
 
-// environmentFromManifest reads the environment fields the acceptance output
-// must state. Every one of them is required: an output that cannot name the
-// toolchain, platform, parallelism, transport version and assessed baseline of
-// the runs it decided is not an acceptance record.
-func environmentFromManifest(record fixtureEvidence) (runEnvironment, error) {
-	manifest := record.Manifest
+func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, error) {
+	if spec.Rate == nil {
+		return workloadIdentity{}, errors.New("spec.rate is required and cannot be null")
+	}
+	if uint64(declaredRate) != *spec.Rate {
+		return workloadIdentity{}, fmt.Errorf("declared rate %d does not match measured spec.rate %d", declaredRate, *spec.Rate)
+	}
+	if spec.Cohort == nil || *spec.Cohort == "" || spec.Seed == nil || spec.Associations == nil ||
+		spec.Expected == nil || spec.Duration == nil || spec.Outstanding == nil ||
+		spec.Payload == nil || spec.Mode == nil || spec.Direction == nil || spec.Initiation == nil {
+		return workloadIdentity{}, errors.New("spec cohort, seed, associations, expected, duration_ns, rate, outstanding, payload, mode, direction and initiation are required")
+	}
+	if *spec.Associations <= 0 || *spec.Expected == 0 || *spec.Duration <= 0 || spec.Drain < 0 || *spec.Outstanding <= 0 {
+		return workloadIdentity{}, errors.New("spec associations, expected, duration_ns and outstanding must be positive and drain_ns must not be negative")
+	}
+	if uint64(*spec.Duration) > math.MaxUint64 / *spec.Rate || uint64(*spec.Duration)**spec.Rate/uint64(time.Second) != *spec.Expected {
+		return workloadIdentity{}, errors.New("spec.expected does not match the measured rate and duration")
+	}
+	if *spec.Payload == "" || *spec.Mode == "" || *spec.Direction == "" || *spec.Initiation == "" {
+		return workloadIdentity{}, errors.New("spec payload, mode, direction and initiation must not be empty")
+	}
+	return workloadIdentity{
+		Associations: *spec.Associations,
+		Duration:     *spec.Duration,
+		Drain:        spec.Drain,
+		Outstanding:  *spec.Outstanding,
+		Payload:      *spec.Payload,
+		Mode:         *spec.Mode,
+		Direction:    *spec.Direction,
+		Initiation:   *spec.Initiation,
+		PeerControl:  spec.PeerControl,
+	}, nil
+}
+
+// environmentFromManifest requires and normalizes every fixture-provided
+// environment field. Dirty builds cannot provide exact-head evidence.
+func environmentFromManifest(manifest *fixtureManifest) (campaignEnvironment, error) {
 	if manifest == nil {
-		return runEnvironment{}, errors.New("manifest is required to state the run environment")
+		return campaignEnvironment{}, errors.New("manifest is required to state the run environment")
 	}
-	if manifest.GoVersion == nil || manifest.GoOS == nil || manifest.GoArch == nil || manifest.GOMAXPROCS == nil ||
-		manifest.SCTPModule == nil || manifest.SCTPVersion == nil || manifest.VCSModified == nil {
-		return runEnvironment{}, errors.New("manifest go_version, go_os, go_arch, gomaxprocs, sctp_module, sctp_version and vcs_modified are required")
+	if manifest.GoVersion == nil || manifest.GoOS == nil || manifest.GoArch == nil || manifest.VCSRevision == nil ||
+		manifest.VCSModified == nil || manifest.AssessedBaselineRevision == nil || manifest.SCTPModule == nil ||
+		manifest.SCTPVersion == nil || manifest.GOMAXPROCS == nil || manifest.SCTPNoDelay == nil ||
+		manifest.SCTPSACKDelay == nil || manifest.SCTPSACKFrequency == nil || manifest.FlowCount == nil ||
+		manifest.OutstandingLimit == nil || manifest.Initiation == nil || manifest.AccountingScope == nil {
+		return campaignEnvironment{}, errors.New("manifest environment fields are all required")
 	}
-	if manifest.AssessedBaselineRevision == nil || *manifest.AssessedBaselineRevision == "" {
-		return runEnvironment{}, errors.New("manifest assessed_baseline_revision is required and names the baseline commit, not the fixture head")
+	if *manifest.GoVersion == "" || *manifest.GoOS == "" || *manifest.GoArch == "" || *manifest.VCSRevision == "" ||
+		*manifest.AssessedBaselineRevision == "" || *manifest.SCTPModule == "" || *manifest.SCTPVersion == "" ||
+		*manifest.Initiation == "" || *manifest.AccountingScope == "" {
+		return campaignEnvironment{}, errors.New("manifest string environment fields must not be empty")
 	}
-	return runEnvironment{
-		GoVersion:                *manifest.GoVersion,
-		GoOS:                     *manifest.GoOS,
-		GoArch:                   *manifest.GoArch,
-		GOMAXPROCS:               *manifest.GOMAXPROCS,
-		SCTPModule:               *manifest.SCTPModule,
-		SCTPVersion:              *manifest.SCTPVersion,
-		VCSRevision:              manifest.VCSRevision,
-		VCSModified:              *manifest.VCSModified,
-		AssessedBaselineRevision: *manifest.AssessedBaselineRevision,
+	if *manifest.VCSModified {
+		return campaignEnvironment{}, errors.New("manifest vcs_modified must be false for exact-head acceptance")
+	}
+	if *manifest.GOMAXPROCS <= 0 || *manifest.SCTPSACKFrequency == 0 || *manifest.FlowCount <= 0 || *manifest.OutstandingLimit <= 0 {
+		return campaignEnvironment{}, errors.New("manifest gomaxprocs, sctp_sack_frequency, flow_count and outstanding_limit must be positive")
+	}
+	return campaignEnvironment{
+		reported: runEnvironment{
+			GoVersion:                *manifest.GoVersion,
+			GoOS:                     *manifest.GoOS,
+			GoArch:                   *manifest.GoArch,
+			GOMAXPROCS:               *manifest.GOMAXPROCS,
+			SCTPModule:               *manifest.SCTPModule,
+			SCTPVersion:              *manifest.SCTPVersion,
+			VCSRevision:              *manifest.VCSRevision,
+			VCSModified:              *manifest.VCSModified,
+			AssessedBaselineRevision: *manifest.AssessedBaselineRevision,
+		},
+		SCTPNoDelay:       *manifest.SCTPNoDelay,
+		SCTPSACKDelay:     *manifest.SCTPSACKDelay,
+		SCTPSACKFrequency: *manifest.SCTPSACKFrequency,
+		FlowCount:         *manifest.FlowCount,
+		OutstandingLimit:  *manifest.OutstandingLimit,
+		Initiation:        *manifest.Initiation,
+		AccountingScope:   *manifest.AccountingScope,
 	}, nil
 }
 
