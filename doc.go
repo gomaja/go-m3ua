@@ -202,9 +202,9 @@ Concretely, so that a deployment is not left to guess:
 Two related choices this package does make are documented where they are
 implemented, and a security review will want to know about them: an ASP's SCON
 is recorded apart from the SGP's own destination state, so a peer cannot inject
-SS7 congestion into what other ASPs are told when they audit (it is delivered on
-Association.SignallingStatus with PeerReported set and retained as nobody's
-destination state); and an ASP Active from a peer in ASP-DOWN is
+SS7 congestion into what other ASPs are told when they audit (it is delivered by
+Endpoint.SubscribeSSNM as an SSNMReport with PeerReported set, without changing
+retained destination state); and an ASP Active from a peer in ASP-DOWN is
 refused rather than acknowledged, so an association that has not completed
 ASPSM cannot be driven into carrying traffic.
 */

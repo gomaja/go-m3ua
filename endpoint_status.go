@@ -443,7 +443,7 @@ func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot {
 		congestionSeq   uint64
 	}
 	latest := make(map[DestinationStatusKey]sequencedStatus, len(records))
-	keepNewest := func(rangeValue DestinationRange, dimensions destinationDimensions, sequence uint64) {
+	keepNewest := func(rangeValue destinationRange, dimensions destinationDimensions, sequence uint64) {
 		key := destinationStatusKeyFromRange(rangeValue)
 		current := latest[key]
 		current.status.Key = key
@@ -479,7 +479,7 @@ func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot {
 	return statuses
 }
 
-func destinationStatusKeyFromRange(rangeValue DestinationRange) DestinationStatusKey {
+func destinationStatusKeyFromRange(rangeValue destinationRange) DestinationStatusKey {
 	return DestinationStatusKey{
 		NetworkAppearance:    rangeValue.NetworkAppearance,
 		NetworkAppearanceSet: rangeValue.NetworkAppearanceSet,

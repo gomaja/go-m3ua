@@ -370,7 +370,7 @@ func (r *aspRoutes) rebuildRouteStateIndexLocked() {
 
 func (r *aspRoutes) apply(
 	association *Association,
-	statuses []*DestinationStatus,
+	statuses []*destinationStatus,
 	update aspRouteUpdate,
 ) error {
 	if r == nil || association == nil || len(statuses) == 0 {
@@ -395,7 +395,7 @@ func (r *aspRoutes) apply(
 	affectedMTPRoutes := make(map[MTPRouteID]struct{})
 
 	for _, status := range statuses {
-		if status == nil || status.UserPartUnavailable {
+		if status == nil {
 			continue
 		}
 		for _, routeID := range sgp.routeOrder {
@@ -1258,7 +1258,7 @@ func (r *aspRoutes) indexedRouteStateForRangeLocked(
 	return availability, availabilitySet, congestion, congestionSet
 }
 
-func aspRouteASMatchesStatus(association *Association, key ASKey, status *DestinationStatus) bool {
+func aspRouteASMatchesStatus(association *Association, key ASKey, status *destinationStatus) bool {
 	if association == nil || status == nil {
 		return false
 	}
@@ -1327,7 +1327,7 @@ func (c aspRoutingConfig) routeCandidateMatchesStatus(
 	association *Association,
 	identity SGPIdentity,
 	mtpRoute MTPRouteID,
-	status *DestinationStatus,
+	status *destinationStatus,
 ) bool {
 	sgp, provisioned := c.sgpByIdentity[identity]
 	if !provisioned {

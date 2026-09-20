@@ -339,31 +339,18 @@ type Association struct {
 	epoch atomic.Uint64
 	// malformedLogs bounds peer-triggered diagnostic logging per association.
 	malformedLogs malformedLogLimiter
-	// statusChan delivers SSNM destination state changes to the user. It is
-	// buffered; an overflow is represented by a ResyncRequired status.
-	statusChan chan *DestinationStatus
-	// muStatus guards statusChan's closure. Close closes the channel so a
-	// caller ranging over SignallingStatus() terminates instead of parking
-	// forever, and a send racing that close would otherwise panic.
-	muStatus sync.Mutex
-	// statusClosed records that statusChan has been closed, since a closed
-	// channel cannot be detected from the sending side.
-	statusClosed bool
 	// stateEventChan delivers ASP state transitions to the user. An overflow
 	// closes the association so Layer Management cannot mistake a partial event
 	// history for a complete one.
 	stateEventChan chan State
-	// muStateEvent guards stateEventChan's closure, as muStatus does for
-	// statusChan.
-	muStateEvent sync.Mutex
+	muStateEvent   sync.Mutex
 	// stateEventClosed records that stateEventChan has been closed.
 	stateEventClosed bool
 	// mgmtChan delivers the M3UA-to-Layer-Management indications of RFC 4666
 	// Section 1.6.3. An overflow closes the association rather than dropping an
 	// unrecoverable indication.
 	mgmtChan chan *ManagementIndication
-	// muMgmt guards mgmtChan's closure, as muStatus does for statusChan.
-	muMgmt sync.Mutex
+	muMgmt   sync.Mutex
 	// mgmtClosed records that mgmtChan has been closed.
 	mgmtClosed bool
 	// indicationOverflow ensures one state or management queue overflow starts
@@ -471,12 +458,9 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		beatStart:    make(chan struct{}),
 		destinations: newDestinations(),
 		tack:         newTAckRetransmitter(),
-		statusChan:   make(chan *DestinationStatus, 64),
 		// Sized for the handful of transitions an association makes in its
 		// lifetime rather than for an unbounded stream.
-		stateEventChan: make(chan State, 16),
-		// A peer under stress can emit Notifies steadily, so this is sized like
-		// statusChan rather than like the state channel.
+		stateEventChan:            make(chan State, 16),
 		mgmtChan:                  make(chan *ManagementIndication, 64),
 		notificationQueue:         make(chan mandatoryControl, defaultNotificationQueueSize),
 		cfg:                       cfg,
@@ -1379,12 +1363,7 @@ func (c *Association) closeWith(cause error) error {
 		if previousState != StateASPDown {
 			c.notifyStateChange(StateASPDown)
 		}
-		// The association is the only route to whatever the peer had reported
-		// on, so those destinations are now unavailable and the MTP3-User is
-		// told before the channel closes behind them.
 		c.pauseDestinations()
-		// Ends any range over SignallingStatus(); see closeStatus.
-		c.closeStatus()
 		// Ends any range over StateChanges(); see closeStateChanges.
 		c.closeStateChanges()
 		c.notifyManagement(&ManagementIndication{

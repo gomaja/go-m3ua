@@ -131,7 +131,7 @@ func TestSGPCongestionReportKeepsDAUDAnsweredWithDUNA(t *testing.T) {
 
 // retainedDestinationRanges is the lossless snapshot of what an Association has
 // retained in the scope its own queries resolve.
-func retainedDestinationRanges(c *Association) []DestinationRange {
+func retainedDestinationRanges(c *Association) []destinationRange {
 	return c.destinations.rangesForScope(associationDestinationScope(c, nil))
 }
 
@@ -185,13 +185,7 @@ func TestInboundSCONRetainsCongestionLevelInRetainedRanges(t *testing.T) {
 	}
 }
 
-// The Congestion Indications parameter is optional (RFC 4666 Section 3.4.4),
-// and level 0 is "No Congestion or Undefined". Without a presence bit, a status
-// carrying an explicit level 0, a status carrying no level at all, and a DAVA
-// were three different reports that arrived on SignallingStatus looking the
-// same, so an MTP3-User could not tell congestion abatement from a destination
-// coming back.
-func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
+func TestTypedSSNMReportsDistinguishCongestionLevelPresence(t *testing.T) {
 	for _, tt := range []struct {
 		name             string
 		send             func(*Association) error
@@ -243,25 +237,31 @@ func TestSignallingStatusDistinguishesCongestionLevelPresence(t *testing.T) {
 			if err := tt.send(conn); err != nil {
 				t.Fatalf("send: %v", err)
 			}
-			status := nextStatus(t, conn)
+			status := nextSSNMReport(t, conn)
 			// The status reports both dimensions, so a SCON leaves availability
 			// at whatever the last DUNA, DAVA or DRST said — here the initial
 			// reachable assumption (RFC 4666 Section 4.5.2.2).
-			if status.State.Availability != tt.wantAvailability {
+			if retainedAvailability(conn, 0x1234) != tt.wantAvailability {
 				t.Errorf("status.State.Availability = %v, want %v",
-					status.State.Availability, tt.wantAvailability)
+					retainedAvailability(conn, 0x1234), tt.wantAvailability)
 			}
-			if status.State.Congestion.Congested != tt.wantCongested {
+			if tt.name == "DAVA" {
+				if status.Kind != SSNMDestinationAvailableReport || status.CongestionLevelSet {
+					t.Fatalf("DAVA report = %+v", status)
+				}
+				return
+			}
+			if reportedSSNMCongestion(t, status).Congested != tt.wantCongested {
 				t.Errorf("status.State.Congestion.Congested = %v, want %v",
-					status.State.Congestion.Congested, tt.wantCongested)
+					reportedSSNMCongestion(t, status).Congested, tt.wantCongested)
 			}
-			if status.State.Congestion.LevelSet != tt.wantSet {
+			if reportedSSNMCongestion(t, status).LevelSet != tt.wantSet {
 				t.Errorf("status.State.Congestion.LevelSet = %v, want %v",
-					status.State.Congestion.LevelSet, tt.wantSet)
+					reportedSSNMCongestion(t, status).LevelSet, tt.wantSet)
 			}
-			if status.State.Congestion.Level != tt.wantLevel {
+			if reportedSSNMCongestion(t, status).Level != tt.wantLevel {
 				t.Errorf("status.State.Congestion.Level = %d, want %d",
-					status.State.Congestion.Level, tt.wantLevel)
+					reportedSSNMCongestion(t, status).Level, tt.wantLevel)
 			}
 		})
 	}
@@ -275,13 +275,13 @@ func TestPeerReportedCongestionCarriesLevelPresence(t *testing.T) {
 		nil, nil, apc(0x222222), nil, params.NewCongestionIndications(0), nil)); err != nil {
 		t.Fatalf("SCON from an ASP was rejected at an SGP: %v", err)
 	}
-	status := nextStatus(t, conn)
+	status := nextSSNMReport(t, conn)
 	if !status.PeerReported {
 		t.Fatalf("status.PeerReported = false, want true")
 	}
-	if !status.State.Congestion.LevelSet || status.State.Congestion.Level != 0 {
+	if !reportedSSNMCongestion(t, status).LevelSet || reportedSSNMCongestion(t, status).Level != 0 {
 		t.Errorf("status congestion = %d/%v, want an explicit zero",
-			status.State.Congestion.Level, status.State.Congestion.LevelSet)
+			reportedSSNMCongestion(t, status).Level, reportedSSNMCongestion(t, status).LevelSet)
 	}
 }
 
@@ -356,7 +356,7 @@ func boundedSSNMConn(t *testing.T, records int) *Association {
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	conn, _ := ssnmConn(t)
+	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	conn.role = RoleASP
 	// The Endpoint provisions sg-a/sgp-a1 for one Application Server, so the
 	// Association has to name that Application Server's wire scope.
@@ -372,6 +372,7 @@ func boundedSSNMConn(t *testing.T, records int) *Association {
 	if got := conn.destinationRecordLimit(); got != records {
 		t.Fatalf("configured record limit = %d, want %d", got, records)
 	}
+	observeSSNM(t, conn)
 	return conn
 }
 
@@ -435,16 +436,16 @@ func TestRefusedSSNMRecordIsStillReported(t *testing.T) {
 	if err := duna(conn, 1); err != nil {
 		t.Fatalf("DUNA within the budget: %v", err)
 	}
-	if status := nextStatus(t, conn); status.PointCode != 1 {
-		t.Fatalf("status point code = %#x, want 1", status.PointCode)
+	if status := nextSSNMReport(t, conn); status.Destinations[0].PointCode != 1 {
+		t.Fatalf("status point code = %#x, want 1", status.Destinations[0].PointCode)
 	}
 	if err := duna(conn, 2); !errors.Is(err, ErrSSNMDestinationRecordLimit) {
 		t.Fatalf("DUNA beyond the budget: error = %v, want ErrSSNMDestinationRecordLimit", err)
 	}
-	status := nextStatus(t, conn)
-	if status.PointCode != 2 || status.State.Availability != DestinationUnavailable {
+	status := nextSSNMReport(t, conn)
+	if status.Destinations[0].PointCode != 2 || reportedSSNMAvailability(t, status) != DestinationUnavailable {
 		t.Errorf("status = %#x/%v, want the refused destination reported as unavailable",
-			status.PointCode, status.State.Availability)
+			status.Destinations[0].PointCode, reportedSSNMAvailability(t, status))
 	}
 }
 
@@ -567,9 +568,9 @@ func TestSCONResolvesAvailabilityThroughCoveringRangesOnly(t *testing.T) {
 // given a limit uses the package default rather than refusing everything.
 func TestDestinationStoreWithoutAConfiguredLimitUsesTheDefault(t *testing.T) {
 	store := &destinations{}
-	ranges := make([]DestinationRange, DefaultMaxSSNMDestinationRecords+1)
+	ranges := make([]destinationRange, DefaultMaxSSNMDestinationRecords+1)
 	for index := range ranges {
-		ranges[index] = DestinationRange{PointCode: uint32(index)}
+		ranges[index] = destinationRange{PointCode: uint32(index)}
 	}
 	if err := store.setRangesWithinBudget(ranges); !errors.Is(err, ErrSSNMDestinationRecordLimit) {
 		t.Fatalf("error = %v, want ErrSSNMDestinationRecordLimit", err)
@@ -639,7 +640,7 @@ func TestSGPDestinationReportsStopAtTheRecordBudget(t *testing.T) {
 // This is a shape guard rather than a benchmark: the budget is two orders of
 // magnitude above the measured cost, and a per-point-code scan overruns it.
 func TestSCONCostStaysLinearInAffectedPointCodes(t *testing.T) {
-	conn, _ := ssnmConn(t)
+	conn, _ := newUnobservedSSNMTestConn(t, StateASPActive, RoleASP)
 	affected := make([]uint32, DefaultMaxAffectedPointCodesPerSSNM)
 	for index := range affected {
 		affected[index] = uint32(index) + 1<<20

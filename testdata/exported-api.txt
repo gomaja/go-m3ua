@@ -231,29 +231,9 @@ field DestinationAvailabilityRequest.Info
 field DestinationAvailabilityRequest.Scope
 field DestinationNetworkState.Availability
 field DestinationNetworkState.Congestion
-field DestinationRange.Mask
-field DestinationRange.NetworkAppearance
-field DestinationRange.NetworkAppearanceSet
-field DestinationRange.PointCode
-field DestinationRange.RoutingContext
-field DestinationRange.RoutingContextSet
-field DestinationRange.State
 field DestinationStateAuditRequest.Destinations
 field DestinationStateAuditRequest.Info
 field DestinationStateAuditRequest.Scope
-field DestinationStatus.ConcernedDestination
-field DestinationStatus.ConcernedDestinationSet
-field DestinationStatus.Mask
-field DestinationStatus.NetworkAppearance
-field DestinationStatus.NetworkAppearanceSet
-field DestinationStatus.PeerReported
-field DestinationStatus.PointCode
-field DestinationStatus.ResyncRequired
-field DestinationStatus.RoutingContextSet
-field DestinationStatus.RoutingContexts
-field DestinationStatus.State
-field DestinationStatus.UserCause
-field DestinationStatus.UserPartUnavailable
 field DestinationStatusKey.Mask
 field DestinationStatusKey.NetworkAppearance
 field DestinationStatusKey.NetworkAppearanceSet
@@ -580,7 +560,6 @@ method Association.SetWriteDeadline
 method Association.Shutdown
 method Association.ShutdownContext
 method Association.SignallingCongestion
-method Association.SignallingStatus
 method Association.State
 method Association.StateChanges
 method Association.StreamID
@@ -708,9 +687,7 @@ type DeregistrationStatus
 type DestinationAvailability
 type DestinationAvailabilityRequest struct
 type DestinationNetworkState struct
-type DestinationRange struct
 type DestinationStateAuditRequest struct
-type DestinationStatus struct
 type DestinationStatusKey struct
 type DestinationStatusSnapshot struct
 type DestinationUserPartUnavailableRequest struct

@@ -395,14 +395,14 @@ func stageOrGroupEndpointSSNM(
 	}
 
 	groups := make([]endpointSSNMGroup, 0, len(routingContexts))
-	records := make([]DestinationRange, 0, len(destinations)*len(routingContexts))
+	records := make([]destinationRange, 0, len(destinations)*len(routingContexts))
 	for _, routingContext := range routingContexts {
 		group := endpointSSNMGroup{destinations: make([]PointCodeRange, 0, len(destinations))}
 		if scoped {
 			group.routingContexts = []uint32{routingContext}
 		}
 		for _, destination := range destinations {
-			rangeValue := normalizeDestinationRange(DestinationRange{
+			rangeValue := normalizeDestinationRange(destinationRange{
 				NetworkAppearance:    storageScope.NetworkAppearance,
 				NetworkAppearanceSet: storageScope.NetworkAppearanceSet,
 				RoutingContext:       routingContext,
