@@ -296,7 +296,7 @@ configuration and observations:
   separately labelled fields and are never interchangeable.
 
 `send_duration.max_ns` is the exact observed maximum send-call duration, unlike
-the `p50`/`p95`/`p99` fields beside it, which are power-of-two bucket bounds.
+the `p50`/`p95`/`p99` fields beside it, which are conservative histogram bucket bounds.
 The acceptance decision in `internal/perfstats` reads it as the predeclared
 transport-stall signal: a send call blocked for at least one second has spanned
 at least one SCTP minimum retransmission timeout (RFC 9260 Section 16), and the

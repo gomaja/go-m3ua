@@ -131,7 +131,7 @@ so it reaches the report.
 - **Signal**: `send_duration.max_ns` from the fixture's sender record. The
   fixture already records it: each `WriteData` call is timed
   and fed to the send-duration histogram, whose `Max` is the exact observed
-  maximum rather than a power-of-two bucket bound (only p50, p95 and p99 are
+  maximum rather than a histogram bucket bound (only p50, p95 and p99 are
   bucket bounds). It measures the transport blocking the sender directly. The
   offered schedule is open loop, so a transport block shows up first, and
   unambiguously, as a send call that does not return; the outstanding-cap
