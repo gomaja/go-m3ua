@@ -1,4 +1,4 @@
-//go:build !race
+//go:build !race && go1.25
 
 package m3ua
 
