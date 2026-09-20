@@ -83,7 +83,7 @@ this library alone is not an RFC 3788 deployment-conformance claim.
 
 - RFC 4666 remains a Proposed Standard, obsoletes RFC 3332, and has no published
   update or replacement in the RFC Editor or Datatracker records checked for
-  this release candidate.
+  the original release validation.
 - RFC 4666 has no Verified erratum. Errata 2065 and 4475 are Held for Document
   Update, and Errata 2518 is Rejected; their dispositions are documented without
   silently treating them as normative corrections.
