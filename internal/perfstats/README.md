@@ -163,17 +163,20 @@ measured longest send call reaches the report whether or not it decided the run.
 
 The measured `spec.rate` must match the outer declared rate, and `spec.expected`
 must match rate multiplied by duration using the fixture's integer arithmetic.
-The record-level `expected` must match `spec.expected`, and a passing fixture
-must reconcile its scheduled, submitted and delivery totals with that expected
-workload. The measurement and drain unique-delivery counts must sum to the
+The record-level `expected` must match `spec.expected`, and sender scheduling
+and submission totals must reconcile. Delivery unique plus missing must equal
+expected for every completed record, including failed probes; an invalid record
+with a fatal error may lack complete receiver totals. The measurement and drain
+unique-delivery counts must sum to the
 reported unique total without overflow. Fatal errors, outstanding work and all
 fixture-invalid counters must agree with `fixture_verdict`; legitimate invalid
 probe records remain accepted evidence of a failed run, while a claimed pass
 with those failures is invalid input. Duplicate JSON member names are rejected
 using the same case-insensitive matching that `encoding/json` uses for struct
 fields. Duplicated outstanding limits and initiation fields must agree between
-the specification and manifest. Echo-mode sender records must include validated,
-capped, deadline, invalid and post-drain outstanding counters; non-echo sender
+the specification and manifest. Echo-mode sender records must include requests,
+validated, capped, deadline, invalid and post-drain outstanding counters; requests
+must equal sender submissions. Non-echo sender
 records must not carry echo evidence.
 
 Bidirectional capacity evidence is currently invalid input. Its reverse sender

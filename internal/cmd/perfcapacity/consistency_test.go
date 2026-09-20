@@ -137,6 +137,30 @@ func TestInvalidFixtureMayRetainIncompleteFailureCounters(testContext *testing.T
 	}
 }
 
+func TestCompleteInvalidFixtureRequiresReconciledDelivery(testContext *testing.T) {
+	complete := strings.Replace(passingRunJSON(), `"fixture_verdict":"pass"`, `"fixture_verdict":"invalid"`, 1)
+	complete = strings.Replace(complete, `"duplicate":0`, `"duplicate":1`, 1)
+	if _, _, err := evidenceFromFixture(json.RawMessage(complete), 10); err != nil {
+		testContext.Fatalf("rejected complete failed probe: %v", err)
+	}
+	for _, missing := range []string{"0", "1199", "1201", "18446744073709551615"} {
+		broken := strings.Replace(complete, `"unique":1200,"unique_measurement":1200`, `"unique":0,"unique_measurement":0`, 1)
+		broken = strings.Replace(broken, `"missing":0`, `"missing":`+missing, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(broken), 10); err == nil {
+			testContext.Fatalf("accepted inconsistent completed failure with missing=%s", missing)
+		}
+	}
+}
+
+func TestEchoRequestsMustEqualSubmissions(testContext *testing.T) {
+	for _, replacement := range []string{"", `"requests":null,`, `"requests":0,`, `"requests":1199,`, `"requests":1201,`} {
+		run := strings.Replace(echoRunJSON(), `"requests":1200,`, replacement, 1)
+		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+			testContext.Fatalf("accepted contradictory echo request count: %s", replacement)
+		}
+	}
+}
+
 func TestDeliveryPartitionMustEqualUniqueWithoutOverflow(testContext *testing.T) {
 	for _, replacement := range []string{
 		`"unique_measurement":0,"unique_drain":0`,
@@ -157,7 +181,7 @@ func TestEchoWorkloadRequiresEchoEvidence(testContext *testing.T) {
 }
 
 func TestEchoEvidenceMustMatchWorkload(testContext *testing.T) {
-	echo := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"validated":1200,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, 1)
+	echo := strings.Replace(passingRunJSON(), `"sender_window"`, `"echo":{"requests":1200,"validated":1200,"capped":0,"deadline_exceeded":0,"invalid":0,"outstanding_after_drain":0},"sender_window"`, 1)
 	for _, mode := range []string{"throughput", "bidirectional", "unknown"} {
 		run := strings.Replace(echo, `"mode":"throughput"`, `"mode":"`+mode+`"`, 1)
 		if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {

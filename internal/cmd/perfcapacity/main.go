@@ -219,6 +219,7 @@ type fixtureEvidence struct {
 		} `json:"backlog_change"`
 	} `json:"sender_window"`
 	Echo *struct {
+		Requests              *uint64 `json:"requests"`
 		Validated             *uint64 `json:"validated"`
 		Capped                *uint64 `json:"capped"`
 		DeadlineExceeded      *uint64 `json:"deadline_exceeded"`
@@ -444,7 +445,7 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 	if !sumEquals(*record.Delivery.Unique, *record.Delivery.UniqueMeasurement, *record.Delivery.UniqueDrain) {
 		return errors.New("delivery unique_measurement and unique_drain do not reconcile with delivery.unique")
 	}
-	if *record.FixtureVerdict == "pass" && !sumEquals(*record.Expected, *record.Delivery.Unique, *record.Delivery.Missing) {
+	if (*record.FixtureVerdict == "pass" || record.FatalError == "") && !sumEquals(*record.Expected, *record.Delivery.Unique, *record.Delivery.Missing) {
 		return errors.New("delivery unique and missing do not reconcile with the expected workload")
 	}
 
@@ -455,9 +456,12 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 
 	switch mode {
 	case "echo":
-		if record.Echo == nil || record.Echo.Validated == nil || record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil ||
+		if record.Echo == nil || record.Echo.Requests == nil || record.Echo.Validated == nil || record.Echo.Capped == nil || record.Echo.DeadlineExceeded == nil ||
 			record.Echo.Invalid == nil || record.Echo.OutstandingAfterDrain == nil {
-			return errors.New("echo runs require validated, capped, deadline_exceeded, invalid and outstanding_after_drain counters")
+			return errors.New("echo runs require requests, validated, capped, deadline_exceeded, invalid and outstanding_after_drain counters")
+		}
+		if *record.Echo.Requests != *record.Submitted {
+			return errors.New("echo requests must equal sender submissions")
 		}
 		if record.ReceiverEcho != nil {
 			return errors.New("sender records must not carry receiver_echo evidence")
