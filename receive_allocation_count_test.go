@@ -11,7 +11,7 @@ var receiveAllocationSink *DataMessage
 
 const maxHandleDataReadDataAllocations = 9
 
-const max32ASHandleDataReadDataAllocations = 10
+const max32ASHandleDataReadDataAllocations = 9
 
 func TestHandleDataReadDataAllocationCount(testContext *testing.T) {
 	tests := []struct {

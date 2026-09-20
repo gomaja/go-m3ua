@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -1839,7 +1840,7 @@ func (c *Association) dynamicRoutingContexts(local bool) []uint32 {
 		routingContexts = append(routingContexts, routingContext)
 	}
 	c.muDynamicASKeys.RUnlock()
-	sort.Slice(routingContexts, func(i, j int) bool { return routingContexts[i] < routingContexts[j] })
+	slices.Sort(routingContexts)
 	return routingContexts
 }
 
