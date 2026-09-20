@@ -2,6 +2,7 @@ package m3ua
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -93,13 +94,30 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ASP DAUD: %v", err)
 	}
-	congested := receiveDestinationStatus(t, ctx, aspAssociation)
-	available := receiveDestinationStatus(t, ctx, aspAssociation)
-	if !reportedSSNMCongestion(t, congested).Congested || reportedSSNMCongestion(t, congested).Level != 2 {
-		t.Fatalf("DAUD SCON status = %+v", congested)
-	}
-	if reportedSSNMAvailability(t, available) != DestinationAvailable {
-		t.Fatalf("DAUD DAVA status = %+v", available)
+	seen := make(map[SSNMReportKind]bool)
+	for range 3 {
+		report := receiveDestinationStatus(t, ctx, aspAssociation)
+		if seen[report.Kind] || !reflect.DeepEqual(report.Scope, scope) ||
+			len(report.Destinations) != 1 || report.Destinations[0] != destination {
+			t.Fatalf("duplicate or incorrectly scoped audit exchange report: %+v", report)
+		}
+		switch report.Kind {
+		case SSNMDestinationStateAuditReport:
+			if report.Source != SSNMLocalReport {
+				t.Fatalf("audit was not locally originated: %+v", report)
+			}
+		case SSNMSignallingCongestionReport:
+			if report.Source != SSNMPeerReport || !reportedSSNMCongestion(t, report).Congested || reportedSSNMCongestion(t, report).Level != 2 {
+				t.Fatalf("DAUD SCON status = %+v", report)
+			}
+		case SSNMDestinationAvailableReport:
+			if report.Source != SSNMPeerReport || !seen[SSNMSignallingCongestionReport] || reportedSSNMAvailability(t, report) != DestinationAvailable {
+				t.Fatalf("DAUD DAVA status or reply order = %+v", report)
+			}
+		default:
+			t.Fatalf("unexpected audit exchange report: %+v", report)
+		}
+		seen[report.Kind] = true
 	}
 
 	if err := sgpEndpoint.DestinationUserPartUnavailable(DestinationUserPartUnavailableRequest{
