@@ -267,6 +267,45 @@ Capacity remains unavailable until the sustained-growth decision rule and full
 campaign are established. HTTP observation overhead remains in whole-process
 CPU/allocation accounting; it is not silently subtracted.
 
+### Opt-in shared Linux clock
+
+Set `-same-host-clock` on both processes for throughput or bidirectional runs
+on the same controlled Linux host and time namespace. Echo mode rejects this
+option; its scheduled RTT remains a separate, process-local measurement.
+The default HTTP-interval mode is unchanged, and unsupported or mismatched
+shared-clock configurations fail rather than silently falling back.
+
+Before traffic, both sides compare `CLOCK_MONOTONIC`, kernel boot identity,
+time-namespace identity, and clock resolution. The sender declares a common
+future start and end; the receiver acknowledges that exact window before the
+sender schedules traffic. Missing the start during preparation invalidates the
+run. Both domains are checked again after the run. This is a controlled-host
+measurement assumption, not cryptographic proof that remote hosts are shared.
+Container placement must independently establish the common Linux host.
+
+Receiver progress timestamps and unique counters are captured under the same
+commit mutex. HTTP envelopes remain consistency checks, but HTTP transit time
+does not widen these receiver-local observations. Each timestamp still carries
+the reported clock-resolution uncertainty; boundary-adjacent deliveries remain
+bounded rather than being rounded into the measurement window. The sender's
+`sender_window` and receiver's `shared_clock_boundary` retain those bounds.
+`validated_per_second` is the conservative lower bound in this mode. Nominal
+`delivery.unique_measurement` remains accompanied by these explicit bounds.
+
+The instrument retains at most 604 progress observations and no per-message
+timestamp history. Clock reads add no allocation; observer CPU and contention
+must still be measured on Linux and remain in whole-process accounting. Run
+`go test ./internal/cmd/perftraffic -run TestSharedClock` and
+`go test ./internal/cmd/perftraffic -run '^$' -bench BenchmarkSharedClockLinuxRead -benchmem`
+on an otherwise idle Linux reference environment before calibration. Compare
+the complete instrumented workload with a pristine-base run separately.
+
+Aligned clocks do not establish sustainable capacity or excuse positive
+backlog growth. The fixture still reports capacity as unavailable. Retain the
+full time series, clock evidence, boundary counts, and post-drain counts; a
+growing trial that drains completely afterward must not become a passing trial.
+Finite first-to-last-quarter observations cannot prove indefinite stability.
+
 Sender stdout is one JSON object containing the active `phase`, top-level
 `sender`, `receiver`, `verdict`, an optional `error`, and retained `warmup` and
 `measurement` phase records. A warm-up failure returns both raw warm-up records

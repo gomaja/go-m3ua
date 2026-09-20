@@ -1,0 +1,225 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"time"
+)
+
+const sharedClockLead = 2 * time.Second
+
+type sharedClockDomain struct {
+	Clock         string `json:"clock"`
+	BootID        string `json:"boot_id"`
+	TimeNamespace string `json:"time_namespace"`
+	Resolution    int64  `json:"resolution_ns"`
+}
+
+func (domain sharedClockDomain) valid() bool {
+	return domain.Clock == "CLOCK_MONOTONIC" && domain.BootID != "" && domain.TimeNamespace != "" && domain.Resolution > 0 && domain.Resolution <= int64(time.Second)
+}
+
+type sharedClockWindow struct {
+	Domain sharedClockDomain `json:"domain"`
+	Start  int64             `json:"start_ns"`
+	End    int64             `json:"end_ns"`
+}
+
+func (window sharedClockWindow) valid(duration time.Duration) bool {
+	return window.Domain.valid() && window.Start > window.Domain.Resolution && window.End > window.Start && window.End <= math.MaxInt64-window.Domain.Resolution && window.End-window.Start == int64(duration)
+}
+
+type measurementClock interface {
+	Now() (int64, error)
+	Domain() (sharedClockDomain, error)
+}
+
+type sharedClockSnapshot struct {
+	Domain           sharedClockDomain `json:"domain"`
+	Captured         int64             `json:"captured_ns"`
+	MeasurementLower uint64            `json:"measurement_lower"`
+	MeasurementUpper uint64            `json:"measurement_upper"`
+}
+
+type sharedClockEvidence struct {
+	Before   sharedClockDomain `json:"before"`
+	After    sharedClockDomain `json:"after"`
+	Verified bool              `json:"verified"`
+}
+
+type sharedClockRequest struct {
+	Before int64 `json:"before_ns"`
+	After  int64 `json:"after_ns"`
+}
+
+type sharedRunClock struct {
+	source measurementClock
+	window sharedClockWindow
+}
+
+func sameRunSpec(first, second runSpec) bool {
+	firstClock, secondClock := first.Clock, second.Clock
+	first.Clock, second.Clock = nil, nil
+	if first != second {
+		return false
+	}
+	if firstClock == nil || secondClock == nil {
+		return firstClock == secondClock
+	}
+	return *firstClock == *secondClock
+}
+
+func copyRunSpec(specification runSpec) runSpec {
+	if specification.Clock != nil {
+		window := *specification.Clock
+		specification.Clock = &window
+	}
+	return specification
+}
+
+func readPeerClock(ctx context.Context, baseURL string, clock measurementClock) (sharedClockSnapshot, error) {
+	before, err := clock.Now()
+	if err != nil {
+		return sharedClockSnapshot{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/clock", nil)
+	if err != nil {
+		return sharedClockSnapshot{}, err
+	}
+	response, err := fixtureHTTPClient.Do(request)
+	if err != nil {
+		return sharedClockSnapshot{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return sharedClockSnapshot{}, fmt.Errorf("peer clock: %s", response.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 4097))
+	if err != nil || len(body) > 4096 {
+		return sharedClockSnapshot{}, errors.New("peer clock response failed or exceeds 4 KiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var snapshot sharedClockSnapshot
+	if err := decoder.Decode(&snapshot); err != nil {
+		return sharedClockSnapshot{}, err
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return sharedClockSnapshot{}, errors.New("peer clock contains trailing data")
+	}
+	after, err := clock.Now()
+	if err != nil {
+		return sharedClockSnapshot{}, err
+	}
+	domain, err := clock.Domain()
+	if err != nil || !domain.valid() || snapshot.Domain != domain || !clockEnvelopeContains(before, after, snapshot.Captured, domain.Resolution) {
+		return sharedClockSnapshot{}, errors.New("peer clock domain or request envelope mismatch")
+	}
+	return snapshot, nil
+}
+
+func clockEnvelopeContains(before, after, captured, resolution int64) bool {
+	return resolution > 0 && before >= resolution && after >= before && after <= math.MaxInt64-resolution && captured >= before-resolution && captured <= after+resolution
+}
+
+func prepareSharedRunClock(ctx context.Context, config commandConfig, specification *runSpec) (*sharedRunClock, error) {
+	if !config.SameHostClock {
+		return nil, nil
+	}
+	if specification.Mode == modeEcho {
+		return nil, errors.New("shared clock does not support echo measurements")
+	}
+	source, err := newMeasurementClock()
+	if err != nil {
+		return nil, err
+	}
+	peer, err := readPeerClock(ctx, config.PeerControl, source)
+	if err != nil {
+		return nil, err
+	}
+	now, err := source.Now()
+	if err != nil || now <= 0 || now > math.MaxInt64-int64(sharedClockLead)-int64(specification.Duration)-peer.Domain.Resolution {
+		return nil, errors.New("shared clock cannot establish a measurement window")
+	}
+	window := sharedClockWindow{Domain: peer.Domain, Start: now + int64(sharedClockLead), End: now + int64(sharedClockLead) + int64(specification.Duration)}
+	if config.clockWindow != nil {
+		window = *config.clockWindow
+	}
+	if !window.valid(specification.Duration) || window.Domain != peer.Domain || now+window.Domain.Resolution >= window.Start || window.Start-now > int64(sharedClockLead) {
+		return nil, errors.New("shared clock window is invalid or already started")
+	}
+	specification.Clock = &window
+	return &sharedRunClock{source: source, window: window}, nil
+}
+
+func (clock *sharedRunClock) elapsed() (time.Duration, error) {
+	now, err := clock.source.Now()
+	if err != nil || now <= 0 {
+		return 0, errors.New("shared monotonic clock read failed")
+	}
+	return time.Duration(now - clock.window.Start), nil
+}
+
+func (control *receiverControl) enableSharedClock(enabled bool) {
+	if !enabled {
+		return
+	}
+	clock, err := newMeasurementClock()
+	if err != nil {
+		control.fatal = err.Error()
+		return
+	}
+	control.clock = clock
+}
+
+func (control *receiverControl) clockSnapshot() (sharedClockSnapshot, error) {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	if control.clock == nil {
+		return sharedClockSnapshot{}, errors.New("same-host clock mode is not enabled")
+	}
+	domain, err := control.clock.Domain()
+	if err != nil || !domain.valid() {
+		return sharedClockSnapshot{}, errors.New("cannot verify local clock domain")
+	}
+	now, err := control.clock.Now()
+	if err != nil || now <= 0 || now > math.MaxInt64-domain.Resolution {
+		return sharedClockSnapshot{}, errors.New("cannot read local monotonic clock")
+	}
+	return sharedClockSnapshot{Domain: domain, Captured: now}, nil
+}
+
+func (control *receiverControl) sharedNowLocked() (int64, error) {
+	now, err := control.clock.Now()
+	if err != nil || now <= 0 || now < control.lastClock || now > math.MaxInt64-control.spec.Clock.Domain.Resolution {
+		control.fatal = "shared monotonic clock failed or regressed"
+		return 0, errors.New(control.fatal)
+	}
+	control.lastClock = now
+	return now, nil
+}
+
+func (control *receiverControl) classifySharedDeliveryLocked(now int64) {
+	window := control.spec.Clock
+	resolution := window.Domain.Resolution
+	if now-resolution >= window.Start && now+resolution < window.End {
+		control.measurementLower++
+	}
+	if now+resolution >= window.Start && now-resolution < window.End {
+		control.measurementUpper++
+	}
+	if now >= window.Start && now < window.End {
+		control.uniqueMeasurement++
+	} else {
+		control.uniqueDrain++
+	}
+	if now+resolution < window.Start {
+		control.fatal = "validated DATA arrived before the shared measurement window"
+	}
+}

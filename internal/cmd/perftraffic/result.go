@@ -21,12 +21,13 @@ type runSpec struct {
 	// carried in the specification rather than taken from each side's own
 	// flags so that both directions of a bidirectional run are bounded
 	// identically and report the same manifest.
-	Outstanding int      `json:"outstanding"`
-	Payload     workload `json:"payload,omitempty"`
-	Mode        string   `json:"mode,omitempty"`
-	Direction   string   `json:"direction,omitempty"`
-	Initiation  string   `json:"initiation,omitempty"`
-	PeerControl string   `json:"peer_control,omitempty"`
+	Outstanding int                `json:"outstanding"`
+	Payload     workload           `json:"payload,omitempty"`
+	Mode        string             `json:"mode,omitempty"`
+	Direction   string             `json:"direction,omitempty"`
+	Initiation  string             `json:"initiation,omitempty"`
+	PeerControl string             `json:"peer_control,omitempty"`
+	Clock       *sharedClockWindow `json:"shared_clock,omitempty"`
 }
 
 type deliveryResult struct {
@@ -99,6 +100,8 @@ type runRecord struct {
 	Reverse                   *runRecord            `json:"reverse,omitempty"`
 	ReverseReceiver           *runRecord            `json:"reverse_receiver,omitempty"`
 	ReverseError              string                `json:"reverse_error,omitempty"`
+	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
+	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
 }
 
 type fixtureManifest struct {
