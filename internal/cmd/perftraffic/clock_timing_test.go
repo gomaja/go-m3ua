@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,71 @@ func (clock *advancingMeasurementClock) Now() (int64, error) {
 
 func (clock *advancingMeasurementClock) Domain() (sharedClockDomain, error) {
 	return sharedClockDomain{Clock: "CLOCK_MONOTONIC", BootID: "test", TimeNamespace: "time:[1]", Resolution: 1}, nil
+}
+
+type schedulerSequenceClock struct {
+	readings []time.Duration
+	index    int
+}
+
+func (clock *schedulerSequenceClock) Now() (int64, error) {
+	if clock.index >= len(clock.readings) {
+		return int64(time.Second + 20*time.Millisecond), nil
+	}
+	elapsed := clock.readings[clock.index]
+	clock.index++
+	return int64(time.Second + elapsed), nil
+}
+
+func (clock *schedulerSequenceClock) Domain() (sharedClockDomain, error) {
+	return sharedClockDomain{Clock: "CLOCK_MONOTONIC", BootID: "test", TimeNamespace: "time:[1]", Resolution: 1}, nil
+}
+
+func TestSharedClockSchedulerRejectsRegressionAcrossStart(testContext *testing.T) {
+	for _, scenario := range []struct {
+		name      string
+		readings  []time.Duration
+		queued    int
+		regressed bool
+	}{
+		{name: "initial-negative", readings: []time.Duration{-10 * time.Millisecond, -20 * time.Millisecond}, regressed: true},
+		{name: "later-negative", readings: []time.Duration{-30 * time.Millisecond, -10 * time.Millisecond, -20 * time.Millisecond}, regressed: true},
+		{name: "zero-to-negative", readings: []time.Duration{-10 * time.Millisecond, 0, -time.Millisecond}, regressed: true},
+		{name: "positive", readings: []time.Duration{-10 * time.Millisecond, 2 * time.Millisecond, time.Millisecond}, queued: 1, regressed: true},
+		{name: "equal-and-increasing", readings: []time.Duration{-20 * time.Millisecond, -10 * time.Millisecond, -10 * time.Millisecond, 0, 0, 10 * time.Millisecond, 20 * time.Millisecond}, queued: 2},
+	} {
+		testContext.Run(scenario.name, func(testContext *testing.T) {
+			source := &schedulerSequenceClock{readings: scenario.readings}
+			domain, _ := source.Domain()
+			clock := &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: int64(time.Second), End: int64(time.Second + 20*time.Millisecond)}}
+			queues := []chan sendJob{make(chan sendJob, 2)}
+			counters := newSenderCounters(2)
+			dispatchScheduled(context.Background(), commandConfig{Rate: 100, Workload: workload128}, "regression", 20*time.Millisecond, time.Now(), 2, queues, counters, nil, clock)
+			if strings.Contains(counters.fatal, "regressed") != scenario.regressed || len(queues[0]) != scenario.queued || counters.scheduled != 2 || counters.capped != uint64(2-scenario.queued) {
+				testContext.Fatalf("regression=%t, fatal=%q, queued=%d, scheduled=%d, capped=%d", scenario.regressed, counters.fatal, len(queues[0]), counters.scheduled, counters.capped)
+			}
+		})
+	}
+}
+
+func FuzzSharedClockSchedulerPreStartRegression(fuzzContext *testing.F) {
+	fuzzContext.Add(int64(10), int64(20))
+	fuzzContext.Add(int64(20), int64(10))
+	fuzzContext.Add(int64(10), int64(10))
+	fuzzContext.Fuzz(func(testContext *testing.T, first, second int64) {
+		before := -1 - time.Duration(uint64(first)%uint64(time.Millisecond))
+		after := -1 - time.Duration(uint64(second)%uint64(time.Millisecond))
+		source := &schedulerSequenceClock{readings: []time.Duration{before, after}}
+		domain, _ := source.Domain()
+		clock := &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: int64(time.Second), End: int64(time.Second + 20*time.Millisecond)}}
+		queues := []chan sendJob{make(chan sendJob, 2)}
+		counters := newSenderCounters(2)
+		dispatchScheduled(context.Background(), commandConfig{Rate: 100, Workload: workload128}, "regression", 20*time.Millisecond, time.Now(), 2, queues, counters, nil, clock)
+		regressed := after < before
+		if strings.Contains(counters.fatal, "regressed") != regressed || (len(queues[0]) == 0) != regressed || counters.scheduled != 2 {
+			testContext.Fatalf("before=%v after=%v fatal=%q queued=%d scheduled=%d", before, after, counters.fatal, len(queues[0]), counters.scheduled)
+		}
+	})
 }
 
 func TestSharedClockSchedulerIgnoresGoOrigin(testContext *testing.T) {

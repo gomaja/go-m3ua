@@ -264,8 +264,10 @@ eight samples. Its `increase-demonstrated`, `nonincrease-demonstrated` and
 `unresolved` statuses describe those sampled quarters only. They are not a
 statistical stationarity test, proof of no intervening backlog, or a capacity
 acceptance rule. Uncertainty is not resolved by adding a percentage allowance.
-Capacity remains unavailable until the sustained-growth decision rule and full
-campaign are established. HTTP observation overhead remains in whole-process
+The separate `perfcapacity` gate applies the predeclared sustained-backlog
+decision rule; these descriptive quarter comparisons do not replace it.
+Capacity remains unavailable pending paired-series calibration and the full
+campaign. HTTP observation overhead remains in whole-process
 CPU/allocation accounting; it is not silently subtracted.
 
 ### Opt-in shared Linux clock
@@ -296,7 +298,7 @@ Socket and context watchdogs require Go deadlines. Their translation brackets
 after the shared end-plus-drain boundary. The bracket width plus twice the clock
 resolution must be at most 1 ms, otherwise preparation fails. The sender retains
 the bracket, target, translation-lateness bound, and budget in
-`clock_evidence.watchdog`. This bounds translation uncertainty, not OS wake-up
+`shared_clock_evidence.watchdog`. This bounds translation uncertainty, not OS wake-up
 latency. Sender write completion and receiver delivery commit must independently
 fit within the shared drain boundary including clock resolution; an uncertain
 or late completion invalidates the run rather than receiving extra drain credit.

@@ -518,14 +518,15 @@ func startSendWorkers(associations []*m3ua.Association, config commandConfig, co
 }
 
 func dispatchScheduled(ctx context.Context, config commandConfig, cohort string, duration time.Duration, started time.Time, expected uint64, queues []chan sendJob, counters *senderCounters, tracker *echoTracker, clock *sharedRunClock) {
+	var previousElapsed time.Duration
 	if clock != nil {
 		elapsed, err := clock.elapsed()
 		if err != nil || elapsed >= 0 {
 			counters.abort(expected, errors.New("shared measurement start was missed during preparation"))
 			return
 		}
+		previousElapsed = elapsed
 	}
-	var previousElapsed time.Duration
 	for index := uint64(0); index < expected; {
 		if err := ctx.Err(); err != nil {
 			counters.abort(expected-index, err)
@@ -535,7 +536,7 @@ func dispatchScheduled(ctx context.Context, config commandConfig, cohort string,
 		if clock != nil {
 			var err error
 			elapsed, err = clock.elapsed()
-			if err != nil || previousElapsed > 0 && elapsed < previousElapsed {
+			if err != nil || elapsed < previousElapsed {
 				counters.abort(expected-index, errors.New("shared scheduler clock failed or regressed"))
 				return
 			}
