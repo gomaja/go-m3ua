@@ -155,11 +155,48 @@ The response states the environment the campaign ran in, in `environments`:
 the toolchain, platform, `GOMAXPROCS`, go-sctp module and version, the
 fixture's own `vcs_revision`, and `assessed_baseline_revision`, the baseline
 commit required by issue #36. The last two are different commits and are never
-interchangeable. Distinct environments are listed in first-appearance order
-rather than merged, so a campaign whose runs did not all come from one
-environment shows that instead of presenting one it cannot support. Each run
-decision also reports its `stall`, so the measured longest send call reaches
-the report whether or not it decided the run.
+interchangeable. Every probe and repetition must name the same clean candidate
+revision, assessed baseline, workload and fixture-provided environment.
+Missing fields, dirty builds and mixed identities are invalid input rather
+than a capacity result. Each run decision also reports its `stall`, so the
+measured longest send call reaches the report whether or not it decided the run.
+
+The measured `spec.rate` must match the outer declared rate, and `spec.expected`
+must match rate multiplied by duration using the fixture's integer arithmetic.
+The top-level `measurement_duration_ns` and any `sender_window.duration_ns`
+must match `spec.duration_ns`. Sender records must include one
+`negotiated_outbound_streams` entry per declared association, so a different
+measured connection count cannot be relabeled as the campaign topology.
+The record-level `expected` must match `spec.expected`, and sender scheduling
+and submission totals must reconcile. Delivery unique plus missing must equal
+expected for every completed record, including failed probes; an invalid record
+with a fatal error may lack complete receiver totals. The measurement and drain
+unique-delivery counts must sum to the
+reported unique total without overflow. Fatal errors, outstanding work and all
+fixture-invalid counters must agree with `fixture_verdict`; legitimate invalid
+probe records remain accepted evidence of a failed run, while a claimed pass
+with those failures is invalid input. Duplicate JSON member names are rejected
+using the same case-insensitive matching that `encoding/json` uses for struct
+fields. Duplicated outstanding limits and initiation fields must agree between
+the specification and manifest. Payload must be one of the producer workloads:
+`128`, `512`, `4096` or `mix`. Echo-mode sender records must include their
+fixed round-trip scope and two-second deadline, outstanding limit, requests,
+validated, capped, deadline, invalid and post-drain outstanding counters; the
+echo outstanding limit must equal `spec.outstanding`, and requests must equal
+sender submissions. Direction must be `asp-to-sgp` or `sgp-to-asp`; initiation
+must be `asp-dial` or `sgp-dial`. Non-echo sender records must not carry echo
+evidence.
+
+Bidirectional capacity evidence is currently invalid input. Its reverse sender
+and receiver records are siblings of the forward records in the fixture's
+cohort result, not fields of the sender record accepted by this CLI. Qualifying
+that mode requires a separately defined complete-cohort input and decision rule;
+the forward sender record alone must not be treated as bidirectional evidence.
+Cohort and seed may vary between independent runs. Offered rate may vary during
+the search; associations, duration, drain, outstanding limit, payload, mode,
+direction, initiation and peer-control endpoint must otherwise stay fixed.
+The manifest must also preserve socket options, flow count, outstanding limit,
+initiation and accounting scope. Its required strings must be nonempty.
 
 A pass covers only the search and repetition rules; it does not establish
 environmental validity, latency or CPU budgets, or independent-peer behavior.
