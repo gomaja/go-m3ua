@@ -138,7 +138,7 @@ func (record *runRecord) evaluate() {
 	}
 	if record.UnsupportedModes == nil {
 		record.UnsupportedModes = map[string]string{
-			"router_or_ssnm_workload":     "unavailable: requires future routing and state APIs",
+			"router_or_ssnm_workload":     "unavailable: this fixture does not exercise the existing routing and state APIs",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}
 	}
