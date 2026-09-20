@@ -347,7 +347,11 @@ func (c *Association) outboundDataScopeForMessage(data *messages.Data) (ASKey, e
 			key.NetworkAppearance, key.NetworkAppearanceSet = dynamic.NetworkAppearance, dynamic.NetworkAppearanceSet
 			return key, nil
 		}
-		key.NetworkAppearance, key.NetworkAppearanceSet = c.applicationServerAppearance()
+		configured := c.contextlessASKey(false)
+		if key.RoutingContextSet {
+			configured = c.staticASKeyForRoutingContext(key.RoutingContext, false)
+		}
+		key.NetworkAppearance, key.NetworkAppearanceSet = configured.NetworkAppearance, configured.NetworkAppearanceSet
 		return key, nil
 	}
 	if data.NetworkAppearance.Tag != params.NetworkAppearance || len(data.NetworkAppearance.Data) != 4 {

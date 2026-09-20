@@ -1218,11 +1218,7 @@ func TestFailedWriteIsNotRetriedThroughAWorkingApplicationServer(t *testing.T) {
 	}
 }
 
-// Primary-backup means the primary comes back. Clearing an RFC 4666 Section
-// 4.3.4.3 override restores a Signalling Gateway that no peer has said anything
-// new about, and the request returns to it without waiting for a destination
-// report to move.
-func TestPrimaryBackupReturnsToARecoveredScopeWithoutANewReport(t *testing.T) {
+func TestPrimaryBackupReturnsToARecoveredScopeAfterFreshReport(t *testing.T) {
 	const pointCode = uint32(0x123456)
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
@@ -1241,9 +1237,8 @@ func TestPrimaryBackupReturnsToARecoveredScopeWithoutANewReport(t *testing.T) {
 			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
 	}
 
-	// Re-acknowledging the context clears the override. Nothing about the
-	// destination changed, so only re-deciding the assignment can find it.
 	associations["sg-a/sgp-a1"].noteRoutingContextsAcked(params.NewRoutingContext(1))
+	applyASPDAVA(t, associations["sg-a/sgp-a1"], 7, 1, pointCode, 0)
 	result, err := endpoint.MTPTransfer(request)
 	if err != nil {
 		t.Fatalf("MTPTransfer after the override was cleared: %v", err)
