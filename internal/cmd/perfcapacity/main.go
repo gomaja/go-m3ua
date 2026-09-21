@@ -41,6 +41,13 @@ const (
 	echoEvidenceDeadline = 2 * time.Second
 )
 
+const (
+	maximumFixtureAssociations = 32
+	maximumFixtureRunWindow    = 10 * time.Minute
+	maximumFixtureOutstanding  = 8192
+	maximumFixtureRate         = 1_000_000
+)
+
 type request struct {
 	Initial     *int      `json:"initial"`
 	Maximum     *int      `json:"maximum"`
@@ -1238,6 +1245,24 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	}
 	if *spec.Associations <= 0 || *spec.Expected == 0 || *spec.Duration <= 0 || spec.Drain < 0 || *spec.Outstanding <= 0 {
 		return workloadIdentity{}, errors.New("spec associations, expected, duration_ns and outstanding must be positive and drain_ns must not be negative")
+	}
+	if *spec.Associations > maximumFixtureAssociations {
+		return workloadIdentity{}, fmt.Errorf("spec associations must not exceed %d", maximumFixtureAssociations)
+	}
+	if *spec.Rate > maximumFixtureRate {
+		return workloadIdentity{}, fmt.Errorf("spec rate must not exceed %d", maximumFixtureRate)
+	}
+	if *spec.Outstanding > maximumFixtureOutstanding {
+		return workloadIdentity{}, fmt.Errorf("spec outstanding must not exceed %d", maximumFixtureOutstanding)
+	}
+	if *spec.Duration > maximumFixtureRunWindow {
+		return workloadIdentity{}, fmt.Errorf("spec duration_ns must not exceed %s", maximumFixtureRunWindow)
+	}
+	if spec.Drain > maximumFixtureRunWindow {
+		return workloadIdentity{}, fmt.Errorf("spec drain_ns must not exceed %s", maximumFixtureRunWindow)
+	}
+	if spec.Drain > (maximumFixtureRunWindow-*spec.Duration)/2 {
+		return workloadIdentity{}, fmt.Errorf("spec duration_ns plus twice drain_ns must not exceed %s", maximumFixtureRunWindow)
 	}
 	if uint64(*spec.Duration) > math.MaxUint64 / *spec.Rate || uint64(*spec.Duration)**spec.Rate/uint64(time.Second) != *spec.Expected {
 		return workloadIdentity{}, errors.New("spec.expected does not match the measured rate and duration")

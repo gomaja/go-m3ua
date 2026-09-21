@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
@@ -117,6 +118,120 @@ func runRequest(testContext *testing.T, input string) (int, response) {
 		testContext.Fatalf("output is not JSON: %v; output = %q", err, output.String())
 	}
 	return status, decoded
+}
+
+func TestWorkloadFromSpecEnforcesProducerLimits(testContext *testing.T) {
+	testCases := []struct {
+		name         string
+		declaredRate int
+		mutate       func(*fixtureSpec)
+		wantError    string
+	}{
+		{
+			name: "maximum values",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Associations = 32
+				*spec.Outstanding = 8192
+			},
+		},
+		{
+			name:         "maximum rate",
+			declaredRate: 1_000_000,
+			mutate: func(spec *fixtureSpec) {
+				*spec.Rate = 1_000_000
+				*spec.Expected = 120_000_000
+			},
+		},
+		{
+			name: "maximum duration",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 10 * time.Minute
+				*spec.Expected = 6_000
+				spec.Drain = 0
+			},
+		},
+		{
+			name: "maximum combined run window",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 2 * time.Second
+				*spec.Expected = 20
+				spec.Drain = 4*time.Minute + 59*time.Second
+			},
+		},
+		{
+			name: "too many associations",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Associations = 33
+			},
+			wantError: "associations must not exceed 32",
+		},
+		{
+			name:         "rate above maximum",
+			declaredRate: 1_000_001,
+			mutate: func(spec *fixtureSpec) {
+				*spec.Rate = 1_000_001
+				*spec.Expected = 120_000_120
+			},
+			wantError: "rate must not exceed 1000000",
+		},
+		{
+			name: "too many outstanding sends",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Outstanding = 8193
+			},
+			wantError: "outstanding must not exceed 8192",
+		},
+		{
+			name: "duration above maximum",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 10*time.Minute + time.Nanosecond
+				*spec.Expected = 6_000
+				spec.Drain = 0
+			},
+			wantError: "duration_ns must not exceed 10m0s",
+		},
+		{
+			name: "drain above maximum",
+			mutate: func(spec *fixtureSpec) {
+				spec.Drain = 10*time.Minute + time.Nanosecond
+			},
+			wantError: "drain_ns must not exceed 10m0s",
+		},
+		{
+			name: "combined run window above maximum",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 2*time.Second + time.Nanosecond
+				*spec.Expected = 20
+				spec.Drain = 4*time.Minute + 59*time.Second
+			},
+			wantError: "duration_ns plus twice drain_ns must not exceed 10m0s",
+		},
+	}
+
+	for _, testCase := range testCases {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			var record fixtureEvidence
+			if err := json.Unmarshal([]byte(passingRunJSON()), &record); err != nil {
+				testContext.Fatal(err)
+			}
+			declaredRate := testCase.declaredRate
+			if declaredRate == 0 {
+				declaredRate = 10
+			}
+			testCase.mutate(record.Spec)
+
+			_, err := workloadFromSpec(record.Spec, declaredRate)
+			if testCase.wantError == "" {
+				if err != nil {
+					testContext.Fatalf("workloadFromSpec() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != "spec "+testCase.wantError {
+				testContext.Fatalf("workloadFromSpec() error = %v, want %q", err, "spec "+testCase.wantError)
+			}
+		})
+	}
 }
 
 func TestBracketedSearchWithFivePassingRepetitionsPasses(testContext *testing.T) {
