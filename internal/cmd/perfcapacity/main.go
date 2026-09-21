@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -1324,6 +1325,9 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	default:
 		return workloadIdentity{}, errors.New("unsupported workload initiation")
 	}
+	if err := validateControlBaseURL(spec.PeerControl); err != nil {
+		return workloadIdentity{}, fmt.Errorf("spec.peer_control: %w", err)
+	}
 	instrumentation := "http-progress"
 	if spec.SharedClock != nil {
 		if _, err := clockFromSpec(spec); err != nil {
@@ -1343,6 +1347,27 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		PeerControl:     spec.PeerControl,
 		Instrumentation: instrumentation,
 	}, nil
+}
+
+func validateControlBaseURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("%q is not a URL: %w", value, err)
+	}
+	switch {
+	case parsed.Scheme != "http" && parsed.Scheme != "https":
+		return fmt.Errorf("%q must use the http or https scheme", value)
+	case parsed.Host == "":
+		return fmt.Errorf("%q must name a host", value)
+	case parsed.User != nil:
+		return fmt.Errorf("%q must not carry credentials", value)
+	case parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "":
+		return fmt.Errorf("%q must be a scheme and host only, with no path, query or fragment", value)
+	}
+	return nil
 }
 
 // environmentFromManifest requires and normalizes every fixture-provided
