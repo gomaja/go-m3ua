@@ -1,7 +1,9 @@
 // perfcapacity evaluates a bounded capacity search campaign. It reads one
 // strict JSON request from standard input: the search parameters, the per-run
 // fixture evidence for each probe in execution order, and optionally the five
-// validation repetitions at the selected rate. Each probe must have run at
+// validation repetitions at the selected rate. Shared-clock throughput uses a
+// complete sender/receiver cohort; bidirectional mode uses all four directional
+// records. Each probe must have run at
 // exactly the rate the predeclared search selected; any deviation is invalid
 // input, so a campaign cannot reorder or drop inconvenient probes.
 //
@@ -218,6 +220,23 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 		Reason: forward.Reason, Stall: forward.Stall,
 	}
 	if fixture.reverse == nil {
+		if fixture.direction != "" {
+			direction := directionDecision{
+				Direction: fixture.direction, Decision: string(forward.Decision), Backlog: string(forward.Backlog),
+				Reason: forward.Reason, Stall: forward.Stall,
+			}
+			if fixture.forwardAchieved != nil {
+				direction.AchievedRateLower = &fixture.forwardAchieved.lower
+				direction.AchievedRateUpper = &fixture.forwardAchieved.upper
+			}
+			result.Directions = []directionDecision{direction}
+			if forward.Stall == nil || !forward.Stall.Stalled() {
+				if fixture.cohortError {
+					result.Decision = string(perfstats.Fail)
+					result.Reason = "unidirectional-cohort-error"
+				}
+			}
+		}
 		return result
 	}
 	reverse := perfstats.DecideRun(*fixture.reverse)
@@ -444,6 +463,7 @@ type fixtureRun struct {
 	forward              perfstats.RunEvidence
 	reverse              *perfstats.RunEvidence
 	identity             runIdentity
+	direction            string
 	aggregateOfferedRate uint64
 	forwardAchieved      *achievedRateBounds
 	reverseAchieved      *achievedRateBounds
@@ -521,21 +541,44 @@ func (campaign campaignIdentity) environments() []runEnvironment {
 	return []runEnvironment{campaign.environment.reported}
 }
 
-// fixtureRunFromJSON accepts the sender record used by throughput and echo
-// campaigns, or the complete measurement cohort emitted for bidirectional
-// campaigns.
+// fixtureRunFromJSON accepts the sender record used by legacy unaligned
+// throughput and echo campaigns, the complete two-record shared-clock
+// throughput cohort, or the four-record bidirectional measurement cohort.
 func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, error) {
 	if len(raw) == 0 {
 		return fixtureRun{}, errors.New("run evidence is required")
 	}
 	var shape struct {
-		Sender json.RawMessage `json:"sender"`
+		Sender          json.RawMessage `json:"sender"`
+		ReverseSender   json.RawMessage `json:"reverse_sender"`
+		ReverseReceiver json.RawMessage `json:"reverse_receiver"`
 	}
 	if err := json.Unmarshal(raw, &shape); err != nil {
 		return fixtureRun{}, fmt.Errorf("decode run evidence: %w", err)
 	}
 	if len(shape.Sender) != 0 {
-		return bidirectionalFixtureRun(raw, declaredRate)
+		var sender struct {
+			Spec *struct {
+				Mode *string `json:"mode"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal(shape.Sender, &sender); err != nil {
+			return fixtureRun{}, fmt.Errorf("decode cohort sender: %w", err)
+		}
+		if sender.Spec == nil || sender.Spec.Mode == nil {
+			return fixtureRun{}, errors.New("cohort sender spec.mode is required")
+		}
+		switch *sender.Spec.Mode {
+		case "bidirectional":
+			return bidirectionalFixtureRun(raw, declaredRate)
+		case "throughput":
+			if len(shape.ReverseSender) != 0 || len(shape.ReverseReceiver) != 0 {
+				return fixtureRun{}, errors.New("unidirectional cohort must not contain reverse_sender or reverse_receiver members")
+			}
+			return unidirectionalFixtureRun(raw, declaredRate)
+		default:
+			return fixtureRun{}, errors.New("cohort sender mode must be throughput or bidirectional")
+		}
 	}
 	evidence, identity, err := evidenceFromFixture(raw, declaredRate)
 	if err != nil {
@@ -596,7 +639,7 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("bidirectional or shared-clock capacity evidence requires a complete cohort contract")
 	}
 	if completeCohort && record.ClockBoundary != nil {
-		return perfstats.RunEvidence{}, runIdentity{}, errors.New("bidirectional sender record must not carry receiver boundary evidence")
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("cohort sender record must not carry receiver boundary evidence")
 	}
 	if record.Expected == nil || *record.Expected != *record.Spec.Expected {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("record expected must equal workload spec.expected")
@@ -737,11 +780,11 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("reverse sender: %w", err)
 	}
-	forwardReceiverSpec, err := validateBidirectionalReceiver(cohort.Receiver, declaredRate)
+	forwardReceiverSpec, err := validateCohortReceiver(cohort.Receiver, declaredRate)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("forward receiver: %w", err)
 	}
-	reverseReceiverSpec, err := validateBidirectionalReceiver(cohort.ReverseReceiver, declaredRate)
+	reverseReceiverSpec, err := validateCohortReceiver(cohort.ReverseReceiver, declaredRate)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("reverse receiver: %w", err)
 	}
@@ -780,15 +823,15 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 		!equalDelivery(cohort.ReverseSender.Delivery, cohort.ReverseReceiver.Delivery) {
 		return fixtureRun{}, errors.New("sender and receiver delivery evidence does not match")
 	}
-	forwardAchieved, err := validateBidirectionalWindowPair(cohort.Sender, cohort.Receiver)
+	forwardAchieved, err := validateCohortWindowPair(cohort.Sender, cohort.Receiver)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("forward window: %w", err)
 	}
-	reverseAchieved, err := validateBidirectionalWindowPair(cohort.ReverseSender, cohort.ReverseReceiver)
+	reverseAchieved, err := validateCohortWindowPair(cohort.ReverseSender, cohort.ReverseReceiver)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("reverse window: %w", err)
 	}
-	if err := validateCohortVerdict(&cohort); err != nil {
+	if err := validateCohortVerdict(&cohort, cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
 		return fixtureRun{}, err
 	}
 	aggregateOffered, ok := checkedDouble(uint64(declaredRate))
@@ -829,6 +872,65 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	}, nil
 }
 
+func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun, error) {
+	var cohort fixtureCohort
+	if err := json.Unmarshal(raw, &cohort); err != nil {
+		return fixtureRun{}, fmt.Errorf("decode unidirectional cohort: %w", err)
+	}
+	if cohort.Phase == nil || *cohort.Phase != "measurement" {
+		return fixtureRun{}, errors.New("unidirectional cohort phase must be measurement")
+	}
+	if cohort.Sender == nil || cohort.Receiver == nil {
+		return fixtureRun{}, errors.New("unidirectional cohort requires sender and receiver records")
+	}
+	if cohort.ReverseSender != nil || cohort.ReverseReceiver != nil {
+		return fixtureRun{}, errors.New("unidirectional cohort must not contain reverse records")
+	}
+	if cohort.Verdict == nil {
+		return fixtureRun{}, errors.New("unidirectional cohort verdict is required")
+	}
+
+	forwardEvidence, identity, err := evidenceFromSenderRecord(cohort.Sender, declaredRate, true)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional sender: %w", err)
+	}
+	senderSpec, err := completeSpecIdentity(cohort.Sender.Spec, declaredRate)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional sender: %w", err)
+	}
+	receiverSpec, err := validateCohortReceiver(cohort.Receiver, declaredRate)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional receiver: %w", err)
+	}
+	forwardEvidence.FixtureValid = forwardEvidence.FixtureValid && *cohort.Receiver.FixtureVerdict == "pass"
+	if senderSpec != receiverSpec {
+		return fixtureRun{}, errors.New("unidirectional sender and receiver specs do not match")
+	}
+	if senderSpec.Workload.Mode != "throughput" {
+		return fixtureRun{}, errors.New("unidirectional cohort sender must use throughput mode")
+	}
+	if senderSpec.Workload.Direction != "asp-to-sgp" {
+		return fixtureRun{}, errors.New("unidirectional cohort sender must use the producer direction asp-to-sgp")
+	}
+	if senderSpec.Clock.Clock == "" {
+		return fixtureRun{}, errors.New("unidirectional capacity evidence requires a shared clock window")
+	}
+	if !equalDelivery(cohort.Sender.Delivery, cohort.Receiver.Delivery) {
+		return fixtureRun{}, errors.New("unidirectional sender and receiver delivery evidence does not match")
+	}
+	achieved, err := validateCohortWindowPair(cohort.Sender, cohort.Receiver)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional window: %w", err)
+	}
+	if err := validateCohortVerdict(&cohort, cohort.Sender, cohort.Receiver); err != nil {
+		return fixtureRun{}, err
+	}
+	return fixtureRun{
+		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
+		forwardAchieved: achieved, cohortError: cohort.Error != "",
+	}, nil
+}
+
 func sameBidirectionalWorkload(forward, reverse workloadIdentity) bool {
 	return forward.Associations == reverse.Associations && forward.Duration == reverse.Duration &&
 		forward.Drain == reverse.Drain && forward.Outstanding == reverse.Outstanding && forward.Payload == reverse.Payload &&
@@ -850,7 +952,7 @@ func completeSpecIdentity(spec *fixtureSpec, declaredRate int) (specIdentity, er
 	}, nil
 }
 
-func validateBidirectionalReceiver(record *fixtureEvidence, declaredRate int) (specIdentity, error) {
+func validateCohortReceiver(record *fixtureEvidence, declaredRate int) (specIdentity, error) {
 	if record.Spec == nil {
 		return specIdentity{}, errors.New("spec is required")
 	}
@@ -863,7 +965,7 @@ func validateBidirectionalReceiver(record *fixtureEvidence, declaredRate int) (s
 	}
 	if nonzero(record.Scheduled) || nonzero(record.Sent) || nonzero(record.Submitted) || record.SenderWindow != nil ||
 		record.Echo != nil || record.ReceiverEcho != nil {
-		return specIdentity{}, errors.New("bidirectional receiver record carries sender-only or echo evidence")
+		return specIdentity{}, errors.New("cohort receiver record carries sender-only or echo evidence")
 	}
 	if record.Expected == nil || *record.Expected != spec.Expected {
 		return specIdentity{}, errors.New("record expected must equal workload spec.expected")
@@ -1035,7 +1137,7 @@ func validateSharedSenderRecord(record *fixtureEvidence) (*achievedRateBounds, e
 	return &achievedRateBounds{lower: *window.RateLower, upper: *window.RateUpper}, nil
 }
 
-func validateBidirectionalWindowPair(sender, receiver *fixtureEvidence) (*achievedRateBounds, error) {
+func validateCohortWindowPair(sender, receiver *fixtureEvidence) (*achievedRateBounds, error) {
 	bounds, err := validateSharedSenderRecord(sender)
 	if err != nil {
 		return nil, err
@@ -1062,9 +1164,15 @@ func validateBidirectionalWindowPair(sender, receiver *fixtureEvidence) (*achiev
 	return bounds, nil
 }
 
-func validateCohortVerdict(cohort *fixtureCohort) error {
+func validateCohortVerdict(cohort *fixtureCohort, records ...*fixtureEvidence) error {
+	if cohort.Verdict == nil || len(records) == 0 {
+		return errors.New("cohort verdict and records are required")
+	}
 	verdict := "pass"
-	for _, record := range []*fixtureEvidence{cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver} {
+	for _, record := range records {
+		if record == nil {
+			return errors.New("cohort record is required")
+		}
 		if err := validateRecordVerdict(record); err != nil {
 			return err
 		}

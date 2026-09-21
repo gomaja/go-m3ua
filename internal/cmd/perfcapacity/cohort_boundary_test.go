@@ -79,17 +79,11 @@ func TestCapacityPreservesSupportedCohortShapes(testContext *testing.T) {
 	}
 }
 
-func TestSharedClockUnidirectionalCohortRemainsUnsupported(testContext *testing.T) {
-	cohort := mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, -1, 0, -2, -1), func(cohort map[string]any) {
-		delete(cohort, "reverse_sender")
-		delete(cohort, "reverse_receiver")
-		for _, side := range []string{"sender", "receiver"} {
-			cohort[side].(map[string]any)["spec"].(map[string]any)["mode"] = "throughput"
-		}
-	})
+func TestSharedClockUnidirectionalCohortIsACompleteSupportedShape(testContext *testing.T) {
+	cohort := unidirectionalRunJSON(testContext, 10, "asp-to-sgp", -1, 0)
 	input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, cohort)
 	status, decoded := runRequest(testContext, input)
-	if status != invalidInputExitStatus || decoded.Decision != "invalid-input" || !strings.Contains(decoded.Error, "requires sender, receiver, reverse_sender and reverse_receiver") {
-		testContext.Fatalf("unsupported two-record shared-clock cohort accepted: status=%d result=%+v", status, decoded)
+	if status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].Decision != "pass" {
+		testContext.Fatalf("complete two-record shared-clock cohort rejected: status=%d result=%+v", status, decoded)
 	}
 }
