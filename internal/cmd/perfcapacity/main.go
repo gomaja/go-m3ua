@@ -592,8 +592,8 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 	if err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("encode negotiated stream inventory: %w", err)
 	}
-	if workload.Mode == "bidirectional" && !completeCohort {
-		return perfstats.RunEvidence{}, runIdentity{}, errors.New("bidirectional capacity evidence requires a complete cohort contract")
+	if (workload.Mode == "bidirectional" || record.Spec.SharedClock != nil) && !completeCohort {
+		return perfstats.RunEvidence{}, runIdentity{}, errors.New("bidirectional or shared-clock capacity evidence requires a complete cohort contract")
 	}
 	if completeCohort && record.ClockBoundary != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("bidirectional sender record must not carry receiver boundary evidence")

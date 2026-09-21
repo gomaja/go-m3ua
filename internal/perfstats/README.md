@@ -187,6 +187,15 @@ sender submissions. Direction must be `asp-to-sgp` or `sgp-to-asp`; initiation
 must be `asp-dial` or `sgp-dial`. Non-echo sender records must not carry echo
 evidence.
 
+Standalone sender records are supported only for unaligned throughput and echo
+runs. A sender with `spec.shared_clock` requires a complete cohort; extracting a
+throughput-mode `reverse_sender` from a bidirectional run does not make it a
+standalone unidirectional run. Shared-clock unidirectional capacity evaluation
+is currently unsupported: the producer emits a two-record measurement cohort,
+but this evaluator supports only the four-record shared-clock contract below.
+Two-record cohort support is tracked in
+[issue #97](https://github.com/gomaja/go-m3ua/issues/97).
+
 Bidirectional entries use the fixture's actual `measurement` cohort object as
 `run`, not the outer combined result and not a forward sender alone. The cohort
 must carry `sender`, `receiver`, `reverse_sender`, and `reverse_receiver`. The
