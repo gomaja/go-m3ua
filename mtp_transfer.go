@@ -949,7 +949,12 @@ func hashASPTransferFlow(key aspTransferFlowKey, salt string) uint64 {
 	encoded[9] = key.ni
 	encoded[10] = key.sls
 	_, _ = hash.Write(encoded[:])
-	return hash.Sum64()
+	mixed := hash.Sum64()
+	mixed ^= mixed >> 33
+	mixed *= 0xff51afd7ed558ccd
+	mixed ^= mixed >> 33
+	mixed *= 0xc4ceb9fe1a85ec53
+	return mixed ^ (mixed >> 33)
 }
 
 // transferTargetsStillHeldLocked re-checks a remembered assignment against the
