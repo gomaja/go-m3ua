@@ -46,7 +46,12 @@ func newSGPSSNMFixture(t *testing.T) (*Endpoint, *Association) {
 // it, never both and never neither.
 func TestSubscribeSSNMSnapshotAndDeltasCoverEveryReportExactlyOnce(t *testing.T) {
 	const reports = 200
-	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), nil)
+	partition := canonicalSSNMPartition("sg-a", "as-core")
+	fixedEventBytes := ssnmEventBaseBytes + ssnmEventDestinationBytes + ssnmRoutingContextBytes +
+		2*(len(partition.SignallingGateway)+len(partition.ApplicationServer))
+	stateBytes := ssnmEventStateBytes + ssnmRoutingContextBytes
+	queueBytes := reports*fixedEventBytes + reports*(reports+1)/2*stateBytes
+	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), &SSNMStateConfig{SubscriptionQueueBytes: queueBytes})
 	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
 		SignallingGateway:        "sg-a",
 		SignallingGatewayProcess: "sgp-a1",
@@ -70,6 +75,7 @@ func TestSubscribeSSNMSnapshotAndDeltasCoverEveryReportExactlyOnce(t *testing.T)
 	}
 	defer func() { _ = subscription.Close() }()
 
+	producer.Wait()
 	seen := make(map[uint32]string, reports)
 	for _, knowledge := range snapshot.Partitions {
 		for _, destination := range knowledge.Destinations {
@@ -81,8 +87,8 @@ func TestSubscribeSSNMSnapshotAndDeltasCoverEveryReportExactlyOnce(t *testing.T)
 		if err != nil {
 			t.Fatalf("Next after %d of %d reports: %v", len(seen), reports, err)
 		}
-		if event.Kind != SSNMReportEvent {
-			continue
+		if event.Kind != SSNMReportEvent || !event.ReportSet || event.ContinuityLost {
+			t.Fatalf("atomicity fixture received an unexpected event: %+v", event)
 		}
 		if event.Revision <= snapshot.Revision {
 			t.Fatalf("delta revision %d is not after the snapshot revision %d",
@@ -95,7 +101,6 @@ func TestSubscribeSSNMSnapshotAndDeltasCoverEveryReportExactlyOnce(t *testing.T)
 			seen[destination.PointCode] = "stream"
 		}
 	}
-	producer.Wait()
 	for index := range reports {
 		if _, covered := seen[0x200000+uint32(index)]; !covered {
 			t.Fatalf("point code %#x reached neither the snapshot nor the stream", 0x200000+uint32(index))
