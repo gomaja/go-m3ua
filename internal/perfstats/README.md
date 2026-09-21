@@ -198,6 +198,11 @@ specification, delivery counters, verified clock domain and window. Raw
 value is `null`; SGP-to-ASP sender records are produced only by the
 bidirectional reverse driver and require the complete four-record contract.
 
+The recorded `spec.peer_control` comes from the producer's optional
+`-control-url`, not its required `-peer-control` destination. It may be omitted
+for unidirectional throughput; bidirectional forward records need it so the
+reverse driver can reach the ASP. A nonempty value must be a valid control URL.
+
 A valid two-record decision reports one `directions` entry for `asp-to-sgp`.
 Bounded achieved-rate evidence is reported on that entry; producer-shaped
 unavailable accounting remains inconclusive with omitted bounds rather than an

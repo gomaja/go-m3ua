@@ -16,6 +16,7 @@ func unidirectionalRunJSON(testContext *testing.T, rate int, direction string, l
 			specification := cohort[side].(map[string]any)["spec"].(map[string]any)
 			specification["mode"] = "throughput"
 			specification["direction"] = direction
+			delete(specification, "peer_control")
 		}
 	})
 }
@@ -45,6 +46,23 @@ func TestSharedClockUnidirectionalCohortReportsOneDirection(testContext *testing
 		if _, present := fields[field]; present {
 			testContext.Fatalf("unidirectional decision invented %s: %s", field, encoded)
 		}
+	}
+}
+
+func TestSharedClockUnidirectionalControlURLIsOptional(testContext *testing.T) {
+	for _, controlURL := range []string{"", "http://asp.example:8080"} {
+		testContext.Run(controlURL, func(testContext *testing.T) {
+			cohort := mutateBidirectionalJSON(testContext, unidirectionalRunJSON(testContext, 10, "asp-to-sgp", -1, 0), func(cohort map[string]any) {
+				for _, side := range []string{"sender", "receiver"} {
+					cohort[side].(map[string]any)["spec"].(map[string]any)["peer_control"] = controlURL
+				}
+			})
+			input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, cohort)
+			status, decoded := runRequest(testContext, input)
+			if status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].Decision != "pass" {
+				testContext.Fatalf("valid optional control URL rejected: status=%d result=%+v", status, decoded)
+			}
+		})
 	}
 }
 
@@ -93,21 +111,6 @@ func TestSharedClockUnidirectionalCohortRejectsContradictions(testContext *testi
 		{name: "missing shared clock", mutate: func(cohort map[string]any) {
 			delete(cohort["sender"].(map[string]any)["spec"].(map[string]any), "shared_clock")
 			delete(cohort["receiver"].(map[string]any)["spec"].(map[string]any), "shared_clock")
-		}},
-		{name: "missing peer control", mutate: func(cohort map[string]any) {
-			for _, side := range []string{"sender", "receiver"} {
-				delete(cohort[side].(map[string]any)["spec"].(map[string]any), "peer_control")
-			}
-		}},
-		{name: "empty peer control", mutate: func(cohort map[string]any) {
-			for _, side := range []string{"sender", "receiver"} {
-				cohort[side].(map[string]any)["spec"].(map[string]any)["peer_control"] = ""
-			}
-		}},
-		{name: "null peer control", mutate: func(cohort map[string]any) {
-			for _, side := range []string{"sender", "receiver"} {
-				cohort[side].(map[string]any)["spec"].(map[string]any)["peer_control"] = nil
-			}
 		}},
 		{name: "receiver direction", mutate: func(cohort map[string]any) {
 			cohort["receiver"].(map[string]any)["spec"].(map[string]any)["direction"] = "sgp-to-asp"
