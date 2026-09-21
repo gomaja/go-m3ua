@@ -78,6 +78,12 @@ func TestMTPTransferHierarchicalLoadshareUsesEveryEligibleAssociation(testContex
 
 func newHierarchicalLoadshareFixture(testContext *testing.T, preferred RemoteASID) (*Endpoint, map[AssociationID]*Association, map[AssociationID]*mtpTransferCapture) {
 	testContext.Helper()
+	return newNamedHierarchicalLoadshareFixture(testContext, preferred,
+		[]SignallingGatewayID{"sg-a", "sg-b"}, []SignallingGatewayProcessID{"p0", "p1"})
+}
+
+func newNamedHierarchicalLoadshareFixture(testContext *testing.T, preferred RemoteASID, gateways []SignallingGatewayID, processes []SignallingGatewayProcessID) (*Endpoint, map[AssociationID]*Association, map[AssociationID]*mtpTransferCapture) {
+	testContext.Helper()
 	applicationServers := []RemoteASID{"primary", "secondary"}
 	if preferred == "secondary" {
 		applicationServers[0], applicationServers[1] = applicationServers[1], applicationServers[0]
@@ -85,12 +91,11 @@ func newHierarchicalLoadshareFixture(testContext *testing.T, preferred RemoteASI
 	config := &ASPConfig{Routing: &ASPRoutingConfig{
 		SignallingGatewaySelection:        RouteSelectionLoadshare,
 		SignallingGatewayProcessSelection: make(map[SignallingGatewayID]RouteSelectionMode),
-		MTPRoutes: []MTPRouteConfig{{ID: "r", DestinationPointCode: 0, Mask: 8,
-			Paths: []MTPRoutePathID{"sg-a-path", "sg-b-path"}}},
+		MTPRoutes:                         []MTPRouteConfig{{ID: "r", DestinationPointCode: 0, Mask: 8}},
 	}}
-	for _, gatewayID := range []SignallingGatewayID{"sg-a", "sg-b"} {
+	for _, gatewayID := range gateways {
 		gateway := SignallingGatewayConfig{ID: gatewayID}
-		for _, processID := range []SignallingGatewayProcessID{"p0", "p1"} {
+		for _, processID := range processes {
 			gateway.SGPs = append(gateway.SGPs, SignallingGatewayProcessConfig{ID: processID,
 				ApplicationServers: []RemoteASConfig{{ID: "primary", ASKey: staticASKey(7, 1)}, {ID: "secondary", ASKey: staticASKey(7, 2)}}})
 		}
@@ -98,6 +103,7 @@ func newHierarchicalLoadshareFixture(testContext *testing.T, preferred RemoteASI
 		config.Routing.SignallingGatewayProcessSelection[gatewayID] = RouteSelectionLoadshare
 		config.Routing.Paths = append(config.Routing.Paths, MTPRoutePath{ID: MTPRoutePathID(string(gatewayID) + "-path"),
 			SignallingGateway: gatewayID, ApplicationServers: applicationServers})
+		config.Routing.MTPRoutes[0].Paths = append(config.Routing.MTPRoutes[0].Paths, MTPRoutePathID(string(gatewayID)+"-path"))
 	}
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
 	if err != nil {
@@ -139,6 +145,106 @@ func newHierarchicalLoadshareFixture(testContext *testing.T, preferred RemoteASI
 		}
 	}
 	return endpoint, associations, captures
+}
+
+func TestMTPTransferHierarchicalLoadshareSeparatesSelectorNames(testContext *testing.T) {
+	for _, fixture := range []struct {
+		name      string
+		gateways  []SignallingGatewayID
+		processes []SignallingGatewayProcessID
+	}{
+		{name: "gateway-matches-selector", gateways: []SignallingGatewayID{"signalling-gateway", "sg-b"}, processes: []SignallingGatewayProcessID{"p0", "p1"}},
+		{name: "slash-boundaries", gateways: []SignallingGatewayID{"a/b", "a"}, processes: []SignallingGatewayProcessID{"c", "b/c"}},
+		{name: "nul-boundaries", gateways: []SignallingGatewayID{"a\x00b", "a"}, processes: []SignallingGatewayProcessID{"c", "b\x00c"}},
+	} {
+		testContext.Run(fixture.name, func(testContext *testing.T) {
+			endpoint, associations, captures := newNamedHierarchicalLoadshareFixture(testContext, "primary", fixture.gateways, fixture.processes)
+			observed := make(map[AssociationID]int)
+			for flowIndex := 0; flowIndex < 4096; flowIndex++ {
+				protocolData := params.NewProtocolDataPayload(uint32(flowIndex/256), 1+uint32((flowIndex/16)%16),
+					params.ServiceIndSCCP, 0, 0, uint8(flowIndex), []byte{byte(flowIndex >> 8), byte(flowIndex)})
+				var previous MTPTransferPath
+				for replay := 0; replay < 2; replay++ {
+					result, err := endpoint.MTPTransfer(MTPTransferRequest{ProtocolData: protocolData})
+					if err != nil || len(result.SuccessfulPaths) != 1 || result.UserDataOctets != len(protocolData.Data) {
+						testContext.Fatalf("flow %d: result=%+v error=%v", flowIndex, result, err)
+					}
+					target := result.SuccessfulPaths[0]
+					if associations[target.Association] == nil || target.ApplicationServer != "primary" || target.AS != *staticASKey(7, 1) {
+						testContext.Fatalf("unexpected target %+v", target)
+					}
+					if replay != 0 && target != previous {
+						testContext.Fatalf("flow %d moved: %+v -> %+v", flowIndex, previous, target)
+					}
+					previous = target
+					observed[target.Association]++
+				}
+			}
+			for associationID := AssociationID(1); associationID <= 8; associationID++ {
+				count := captures[associationID].count()
+				testContext.Logf("association=%d peer=%q/%q writes=%d", associationID,
+					associations[associationID].cfg.PeerSGP.SignallingGateway,
+					associations[associationID].cfg.PeerSGP.SignallingGatewayProcess, count)
+				if count != observed[associationID] {
+					testContext.Errorf("association %d captured %d writes, results name %d", associationID, count, observed[associationID])
+				}
+			}
+			if len(observed) != 8 {
+				testContext.Fatalf("selector names restricted loadshare to %d of 8 eligible associations: %v", len(observed), observed)
+			}
+		})
+	}
+}
+
+func TestASPTransferHashDoesNotAllocate(testContext *testing.T) {
+	key := newASPTransferFlowKey("route\x00with/slashes", params.NewProtocolDataPayload(0x110000, 0x220000, params.ServiceIndSCCP, 0, 0, 15, nil))
+	var checksum uint64
+	allocations := testing.AllocsPerRun(1000, func() {
+		checksum ^= hashASPTransferFlow(key, aspTransferGatewayHash, "", "")
+		checksum ^= hashASPTransferFlow(key, aspTransferSGPHash, "sg-a", "")
+		checksum ^= hashASPTransferFlow(key, aspTransferAssociationHash, "sg-a", "sgp-a1")
+	})
+	testContext.Logf("three selector hashes: allocations=%g checksum=%x", allocations, checksum)
+	if allocations != 0 {
+		testContext.Fatalf("three selector hashes allocate %g times, want zero", allocations)
+	}
+}
+
+func TestASPTransferHashSeparatesDomainsAndIdentityFields(testContext *testing.T) {
+	type hashInput struct {
+		route   MTPRouteID
+		domain  aspTransferHashDomain
+		gateway SignallingGatewayID
+		process SignallingGatewayProcessID
+	}
+	for _, testCase := range []struct {
+		name   string
+		first  hashInput
+		second hashInput
+	}{
+		{name: "gateway-vs-SGP-domain", first: hashInput{route: "r", domain: aspTransferGatewayHash}, second: hashInput{route: "r", domain: aspTransferSGPHash}},
+		{name: "SGP-vs-member-domain", first: hashInput{route: "r", domain: aspTransferSGPHash, gateway: "sg"}, second: hashInput{route: "r", domain: aspTransferAssociationHash, gateway: "sg"}},
+		{name: "literal-selector-name", first: hashInput{route: "r", domain: aspTransferGatewayHash}, second: hashInput{route: "r", domain: aspTransferSGPHash, gateway: "signalling-gateway"}},
+		{name: "slash-members", first: hashInput{route: "r", domain: aspTransferAssociationHash, gateway: "a/b", process: "c"}, second: hashInput{route: "r", domain: aspTransferAssociationHash, gateway: "a", process: "b/c"}},
+		{name: "nul-route-gateway", first: hashInput{route: "a\x00b", domain: aspTransferSGPHash, gateway: "c"}, second: hashInput{route: "a", domain: aspTransferSGPHash, gateway: "b\x00c"}},
+		{name: "unseparated-route-gateway", first: hashInput{route: "ab", domain: aspTransferSGPHash, gateway: "c"}, second: hashInput{route: "a", domain: aspTransferSGPHash, gateway: "bc"}},
+		{name: "unseparated-gateway-process", first: hashInput{route: "r", domain: aspTransferAssociationHash, gateway: "ab", process: "c"}, second: hashInput{route: "r", domain: aspTransferAssociationHash, gateway: "a", process: "bc"}},
+		{name: "nul-gateway-process", first: hashInput{route: "r", domain: aspTransferAssociationHash, gateway: "a\x00b", process: "c"}, second: hashInput{route: "r", domain: aspTransferAssociationHash, gateway: "a", process: "b\x00c"}},
+	} {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			protocolData := params.NewProtocolDataPayload(0x110000, 0x220000, params.ServiceIndSCCP, 0, 0, 15, nil)
+			firstKey := newASPTransferFlowKey(testCase.first.route, protocolData)
+			secondKey := newASPTransferFlowKey(testCase.second.route, protocolData)
+			firstHash := hashASPTransferFlow(firstKey, testCase.first.domain, testCase.first.gateway, testCase.first.process)
+			secondHash := hashASPTransferFlow(secondKey, testCase.second.domain, testCase.second.gateway, testCase.second.process)
+			if firstHash == secondHash {
+				testContext.Fatalf("distinct selector identities encode to the same hash: %+v and %+v", testCase.first, testCase.second)
+			}
+			if firstHash != hashASPTransferFlow(firstKey, testCase.first.domain, testCase.first.gateway, testCase.first.process) {
+				testContext.Fatal("hash is not deterministic")
+			}
+		})
+	}
 }
 
 func TestMTPTransferHierarchicalLoadsharePreservesHealthyTargetsAfterMembershipChanges(testContext *testing.T) {
