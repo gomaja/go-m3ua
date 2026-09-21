@@ -323,21 +323,23 @@ type deliveryEvidence struct {
 }
 
 type senderWindowEvidence struct {
-	Status           *string        `json:"status"`
-	Reason           *string        `json:"reason"`
-	Duration         *time.Duration `json:"duration_ns"`
-	DeliveredLower   *uint64        `json:"delivered_lower"`
-	DeliveredUpper   *uint64        `json:"delivered_upper"`
-	OutstandingLower *uint64        `json:"outstanding_lower"`
-	OutstandingUpper *uint64        `json:"outstanding_upper"`
-	RateLower        *float64       `json:"rate_lower"`
-	RateUpper        *float64       `json:"rate_upper"`
-	BacklogChange    *struct {
-		Status      string   `json:"status"`
-		SampleCount int      `json:"sample_count"`
-		Lower       *float64 `json:"mean_change_lower"`
-		Upper       *float64 `json:"mean_change_upper"`
-	} `json:"backlog_change"`
+	Status           *string                `json:"status"`
+	Reason           *string                `json:"reason"`
+	Duration         *time.Duration         `json:"duration_ns"`
+	DeliveredLower   *uint64                `json:"delivered_lower"`
+	DeliveredUpper   *uint64                `json:"delivered_upper"`
+	OutstandingLower *uint64                `json:"outstanding_lower"`
+	OutstandingUpper *uint64                `json:"outstanding_upper"`
+	RateLower        *float64               `json:"rate_lower"`
+	RateUpper        *float64               `json:"rate_upper"`
+	BacklogChange    *backlogChangeEvidence `json:"backlog_change"`
+}
+
+type backlogChangeEvidence struct {
+	Status      string   `json:"status"`
+	SampleCount int      `json:"sample_count"`
+	Lower       *float64 `json:"mean_change_lower"`
+	Upper       *float64 `json:"mean_change_upper"`
 }
 
 type sharedClockDomain struct {
@@ -639,18 +641,50 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 		}
 	}
 
-	window := record.SenderWindow
-	if window == nil || window.Status == nil || *window.Status != "bounded" ||
-		window.BacklogChange == nil || window.BacklogChange.Status == "insufficient-samples" ||
-		window.BacklogChange.SampleCount < 8 ||
-		window.BacklogChange.Lower == nil || window.BacklogChange.Upper == nil {
-		return evidence, identity, nil
+	interval, err := backlogIntervalFromWindow(record.SenderWindow)
+	if err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
-	evidence.Interval = &perfstats.BacklogInterval{
-		Lower: *window.BacklogChange.Lower,
-		Upper: *window.BacklogChange.Upper,
-	}
+	evidence.Interval = interval
 	return evidence, identity, nil
+}
+
+func backlogIntervalFromWindow(window *senderWindowEvidence) (*perfstats.BacklogInterval, error) {
+	if window == nil || window.Status == nil || *window.Status != "bounded" || window.BacklogChange == nil {
+		return nil, nil
+	}
+	change := window.BacklogChange
+	switch change.Status {
+	case "", "insufficient-samples", "increase-demonstrated", "nonincrease-demonstrated", "unresolved":
+	default:
+		return nil, errors.New("unsupported backlog_change status")
+	}
+	if change.SampleCount < 8 {
+		if change.Status == "" || change.Status == "insufficient-samples" {
+			return nil, nil
+		}
+		return nil, errors.New("backlog_change status contradicts its sample count")
+	}
+	if change.Status == "insufficient-samples" {
+		return nil, errors.New("backlog_change status contradicts its sample count")
+	}
+	if change.Lower == nil || change.Upper == nil {
+		return nil, nil
+	}
+	interval := &perfstats.BacklogInterval{Lower: *change.Lower, Upper: *change.Upper}
+	if !interval.Valid() {
+		return nil, nil
+	}
+	expectedStatus := "unresolved"
+	if interval.Lower > 0 {
+		expectedStatus = "increase-demonstrated"
+	} else if interval.Upper <= 0 {
+		expectedStatus = "nonincrease-demonstrated"
+	}
+	if change.Status != expectedStatus {
+		return nil, errors.New("backlog_change status contradicts its mean-change interval")
+	}
+	return interval, nil
 }
 
 type clockIdentity struct {

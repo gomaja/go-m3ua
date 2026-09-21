@@ -345,11 +345,95 @@ func TestMissingWindowEvidenceNeverPasses(testContext *testing.T) {
 }
 
 func TestInsufficientSampleBacklogChangeIsMissingEvidence(testContext *testing.T) {
-	insufficient := strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated","sample_count":120`, `"status":"insufficient-samples","sample_count":4`, 1)
+	insufficient := strings.Replace(passingRunJSON(),
+		`"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5`,
+		`"status":"insufficient-samples","sample_count":7,"mean_change_lower":0,"mean_change_upper":0`, 1)
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, insufficient)
 	status, decoded := runRequest(testContext, input)
 	if status != inconclusiveExitStatus || decoded.ProbeDecisions[0].Decision != "inconclusive" {
 		testContext.Fatalf("status %d decision %+v, want inconclusive probe", status, decoded)
+	}
+}
+
+func TestBacklogChangeStatusMustMatchProducerClassification(testContext *testing.T) {
+	testCases := []struct {
+		name string
+		run  string
+	}{
+		{name: "growth label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"increase-demonstrated"`, 1)},
+		{name: "unresolved label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"unresolved"`, 1)},
+		{name: "unknown label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"unknown"`, 1)},
+		{name: "missing label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":""`, 1)},
+		{name: "nonincrease label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"nonincrease-demonstrated"`, 1)},
+		{name: "unresolved label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"unresolved"`, 1)},
+		{name: "unknown label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"unknown"`, 1)},
+		{name: "growth label on unresolved interval", run: strings.Replace(straddlingRunJSON(), `"status":"unresolved"`, `"status":"increase-demonstrated"`, 1)},
+		{name: "nonincrease label on unresolved interval", run: strings.Replace(straddlingRunJSON(), `"status":"unresolved"`, `"status":"nonincrease-demonstrated"`, 1)},
+		{name: "demonstrated label with too few samples", run: strings.Replace(passingRunJSON(), `"sample_count":120`, `"sample_count":7`, 1)},
+		{name: "insufficient label with enough samples", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"insufficient-samples"`, 1)},
+	}
+	for _, testCase := range testCases {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			if _, _, err := evidenceFromFixture(json.RawMessage(testCase.run), 10); err == nil {
+				testContext.Fatal("evidenceFromFixture accepted contradictory backlog_change status")
+			}
+		})
+	}
+}
+
+func TestCanonicalAndUnavailableBacklogChangeEvidence(testContext *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		run          string
+		wantInterval bool
+		wantDecision perfstats.Decision
+	}{
+		{name: "nonincrease", run: passingRunJSON(), wantInterval: true, wantDecision: perfstats.Pass},
+		{
+			name:         "exact zero is nonincrease",
+			run:          strings.Replace(passingRunJSON(), `"mean_change_lower":-2.5,"mean_change_upper":-0.5`, `"mean_change_lower":0,"mean_change_upper":0`, 1),
+			wantInterval: true,
+			wantDecision: perfstats.Pass,
+		},
+		{name: "growth", run: failingRunJSON(), wantInterval: true, wantDecision: perfstats.Fail},
+		{name: "unresolved", run: straddlingRunJSON(), wantInterval: true, wantDecision: perfstats.Inconclusive},
+		{
+			name:         "zero lower bound is unresolved",
+			run:          strings.Replace(straddlingRunJSON(), `"mean_change_lower":-3.4`, `"mean_change_lower":0`, 1),
+			wantInterval: true,
+			wantDecision: perfstats.Inconclusive,
+		},
+		{
+			name: "insufficient samples",
+			run: strings.Replace(passingRunJSON(),
+				`"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5`,
+				`"status":"insufficient-samples","sample_count":7,"mean_change_lower":0,"mean_change_upper":0`, 1),
+			wantDecision: perfstats.Inconclusive,
+		},
+		{
+			name: "missing backlog object",
+			run: strings.Replace(passingRunJSON(),
+				`,"backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}`, "", 1),
+			wantDecision: perfstats.Inconclusive,
+		},
+		{
+			name:         "missing backlog bound",
+			run:          strings.Replace(passingRunJSON(), `"mean_change_lower":-2.5,`, "", 1),
+			wantDecision: perfstats.Inconclusive,
+		},
+	} {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			evidence, _, err := evidenceFromFixture(json.RawMessage(testCase.run), 10)
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			if (evidence.Interval != nil) != testCase.wantInterval {
+				testContext.Fatalf("interval = %+v, want presence %t", evidence.Interval, testCase.wantInterval)
+			}
+			if decision := perfstats.DecideRun(evidence); decision.Decision != testCase.wantDecision {
+				testContext.Fatalf("decision = %+v, want %q", decision, testCase.wantDecision)
+			}
+		})
 	}
 }
 

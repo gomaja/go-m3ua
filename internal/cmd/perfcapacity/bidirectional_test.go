@@ -52,10 +52,16 @@ func bidirectionalDeliveryJSON(expected int) string {
 
 func bidirectionalSenderJSON(rate int, reverse bool, lower, upper float64) string {
 	expected := rate * 120
-	return fmt.Sprintf(`{"side":"sender",%s,"expected":%d,"scheduled":%d,"sent":%d,"submitted":%d,"send_errors":0,"capped":0,"outstanding_at_window_start":0,"outstanding_at_window_end":0,"outstanding_after_drain":0,"measurement_duration_ns":%d,"drain_duration_ns":1000000,%s,%s,%s,"fixture_verdict":"pass","verdict":"inconclusive",%s,"validated_per_second":%d,"sender_window":{"status":"bounded","duration_ns":%d,"delivered_lower":%d,"delivered_upper":%d,"outstanding_lower":0,"outstanding_upper":0,"rate_lower":%d,"rate_upper":%d,"backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":%g,"mean_change_upper":%g}}}`,
+	status := "unresolved"
+	if lower > 0 {
+		status = "increase-demonstrated"
+	} else if upper <= 0 {
+		status = "nonincrease-demonstrated"
+	}
+	return fmt.Sprintf(`{"side":"sender",%s,"expected":%d,"scheduled":%d,"sent":%d,"submitted":%d,"send_errors":0,"capped":0,"outstanding_at_window_start":0,"outstanding_at_window_end":0,"outstanding_after_drain":0,"measurement_duration_ns":%d,"drain_duration_ns":1000000,%s,%s,%s,"fixture_verdict":"pass","verdict":"inconclusive",%s,"validated_per_second":%d,"sender_window":{"status":"bounded","duration_ns":%d,"delivered_lower":%d,"delivered_upper":%d,"outstanding_lower":0,"outstanding_upper":0,"rate_lower":%d,"rate_upper":%d,"backlog_change":{"status":%q,"sample_count":120,"mean_change_lower":%g,"mean_change_upper":%g}}}`,
 		bidirectionalSpecJSON(rate, reverse), expected, expected, expected, expected, bidirectionalDuration,
 		bidirectionalDeliveryJSON(expected), sendDurationJSON(262144), manifestJSON()+`,"negotiated_outbound_streams":[8,8,8,8,8,8,8,8]`, bidirectionalClockEvidenceJSON(true),
-		rate, bidirectionalDuration, expected, expected, rate, rate, lower, upper)
+		rate, bidirectionalDuration, expected, expected, rate, rate, status, lower, upper)
 }
 
 func bidirectionalReceiverJSON(rate int, reverse bool) string {
@@ -560,6 +566,19 @@ func TestBidirectionalUnavailableWindowRejectsContradictions(testContext *testin
 				testContext.Fatalf("contradictory unavailable window accepted: status %d result %+v", status, decoded)
 			}
 		})
+	}
+}
+
+func TestBidirectionalRejectsContradictoryReverseBacklogStatus(testContext *testing.T) {
+	mutated := mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, -1, 0, -2, -1), func(cohort map[string]any) {
+		reverse := cohort["reverse_sender"].(map[string]any)
+		backlog := reverse["sender_window"].(map[string]any)["backlog_change"].(map[string]any)
+		backlog["status"] = "increase-demonstrated"
+	})
+	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, mutated)
+	status, _ := runRequest(testContext, input)
+	if status != invalidInputExitStatus {
+		testContext.Fatalf("status = %d, want invalid input", status)
 	}
 }
 
