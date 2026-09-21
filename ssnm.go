@@ -764,6 +764,7 @@ func (c *Association) applySSNM(
 	routingContexts, routingContextSet := c.destinationRoutingContexts(routingContext)
 	appearance := c.destinationKey(networkAppearance, 0)
 	statusScope := newDestinationStatusScope(networkAppearance, routingContext)
+	statusValues := make([]destinationStatus, len(pcs))
 	statuses := make([]*destinationStatus, 0, len(pcs))
 	updates := make([]destinationRange, 0, len(pcs))
 	// SCON is the one message that reports congestion rather than reachability.
@@ -772,10 +773,9 @@ func (c *Association) applySSNM(
 	congestionUpdate := dimensions.carries(destinationCongestionDimension)
 
 	for index, pc := range pcs {
-		status := &destinationStatus{
-			PointCode: pc,
-			Mask:      masks[index],
-		}
+		status := &statusValues[index]
+		status.PointCode = pc
+		status.Mask = masks[index]
 		statusScope.apply(status)
 		applied := destinationRange{
 			NetworkAppearance:    appearance.networkAppearance,
