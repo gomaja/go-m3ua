@@ -94,6 +94,21 @@ func TestSharedClockUnidirectionalCohortRejectsContradictions(testContext *testi
 			delete(cohort["sender"].(map[string]any)["spec"].(map[string]any), "shared_clock")
 			delete(cohort["receiver"].(map[string]any)["spec"].(map[string]any), "shared_clock")
 		}},
+		{name: "missing peer control", mutate: func(cohort map[string]any) {
+			for _, side := range []string{"sender", "receiver"} {
+				delete(cohort[side].(map[string]any)["spec"].(map[string]any), "peer_control")
+			}
+		}},
+		{name: "empty peer control", mutate: func(cohort map[string]any) {
+			for _, side := range []string{"sender", "receiver"} {
+				cohort[side].(map[string]any)["spec"].(map[string]any)["peer_control"] = ""
+			}
+		}},
+		{name: "null peer control", mutate: func(cohort map[string]any) {
+			for _, side := range []string{"sender", "receiver"} {
+				cohort[side].(map[string]any)["spec"].(map[string]any)["peer_control"] = nil
+			}
+		}},
 		{name: "receiver direction", mutate: func(cohort map[string]any) {
 			cohort["receiver"].(map[string]any)["spec"].(map[string]any)["direction"] = "sgp-to-asp"
 		}},

@@ -912,6 +912,9 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if senderSpec.Workload.Direction != "asp-to-sgp" {
 		return fixtureRun{}, errors.New("unidirectional cohort sender must use the producer direction asp-to-sgp")
 	}
+	if senderSpec.Workload.PeerControl == "" {
+		return fixtureRun{}, errors.New("unidirectional sender peer_control is required")
+	}
 	if senderSpec.Clock.Clock == "" {
 		return fixtureRun{}, errors.New("unidirectional capacity evidence requires a shared clock window")
 	}
