@@ -201,7 +201,11 @@ func referenceTargets(count int) []routeReferenceTarget {
 func TestRouteReferenceChurnCyclesOpenLoopAndReportsItsWindow(testContext *testing.T) {
 	_, _, _, paths := routedPeerPathsFixture(testContext)
 	table, _ := newApplicationRouteTable(paths)
-	clock := wallMeasurementClock{origin: time.Now()}
+	// The churn runs on a stepped clock, so its lag is at most one step
+	// however the host schedules it: on the wall clock a shared CI runner has
+	// held it off the CPU past the 100 ms tolerance.
+	clock := &fakeMeasurementClock{}
+	clock.now.Store(int64(time.Hour))
 	const rate = 5000
 	churner, err := newRouteReferenceChurner(table, referenceTargets(8), clock, rate, time.Minute)
 	if err != nil {
@@ -210,26 +214,37 @@ func TestRouteReferenceChurnCyclesOpenLoopAndReportsItsWindow(testContext *testi
 	if err := churner.start(context.Background()); err != nil {
 		testContext.Fatal(err)
 	}
-	time.Sleep(1200 * time.Millisecond)
+	completed := func() int {
+		churner.mutex.Lock()
+		defer churner.mutex.Unlock()
+		return len(churner.completed)
+	}
+	const step = 10 * time.Millisecond
+	for elapsed := step; elapsed <= 1200*time.Millisecond; elapsed += step {
+		clock.now.Add(int64(step))
+		// Operation k is due at k/rate from the anchor, so these are due.
+		due := int(uint64(elapsed)*rate/uint64(time.Second)) + 1
+		deadline := time.Now().Add(10 * time.Second)
+		for completed() < due {
+			if time.Now().After(deadline) {
+				testContext.Fatalf("%d of %d operations due at %v completed", completed(), due, elapsed)
+			}
+			time.Sleep(100 * time.Microsecond)
+		}
+	}
 	churner.stop()
 	// A cycle is 2,000 operations, 400 ms at this rate: the window holds the
 	// cycle ends at 400 ms and 800 ms.
 	start, end := churner.anchor+int64(100*time.Millisecond), churner.anchor+int64(time.Second)
 	evidence := churner.evidence(start, end)
-	if evidence.Scheduled != 4500 || evidence.PeakReached != routeReferencePeak || evidence.InvalidTargets != 0 || evidence.ClockFailure != "" {
+	if evidence.Scheduled != 4500 || evidence.PeakReached != routeReferencePeak || evidence.InvalidTargets != 0 || evidence.ClockFailure != "" ||
+		evidence.Completed != evidence.Scheduled || evidence.CompletedCycles != 2 || evidence.FirstReferences != 16 || evidence.LastReferences != 16 {
 		testContext.Fatalf("evidence %+v", evidence)
 	}
-	// The race detector's slowdown can make the churner late; the schedule
-	// arithmetic above holds regardless, the timing only without it.
-	if !raceDetector {
-		if evidence.Completed != evidence.Scheduled || evidence.CompletedCycles != 2 || evidence.FirstReferences != 16 || evidence.LastReferences != 16 {
-			testContext.Fatalf("evidence %+v", evidence)
-		}
-		record := &routeReferenceRecord{Churn: &evidence}
-		criteria := judgeRouteReferences(routeReferenceSpec{Mode: routeReferencesChurn, Rate: rate, Peak: routeReferencePeak}, record)
-		if criteria[0].Name != "churn_intensity" || criteria[0].Outcome != failoverPass || criteria[1].Outcome != failoverPass {
-			testContext.Fatalf("criteria %+v", criteria[:2])
-		}
+	record := &routeReferenceRecord{Churn: &evidence}
+	criteria := judgeRouteReferences(routeReferenceSpec{Mode: routeReferencesChurn, Rate: rate, Peak: routeReferencePeak}, record)
+	if criteria[0].Name != "churn_intensity" || criteria[0].Outcome != failoverPass || criteria[1].Outcome != failoverPass {
+		testContext.Fatalf("criteria %+v", criteria[:2])
 	}
 	future := churner.evidence(start, churner.anchor+int64(2*time.Second))
 	if future.Completed == future.Scheduled {
