@@ -19,7 +19,7 @@ func randomScopeAssociation(random *rand.Rand) *Association {
 	randomKey := func(contextless bool) ASKey {
 		key := ASKey{}
 		if !contextless {
-			key.RoutingContext, key.RoutingContextSet = uint32(1+random.IntN(4)), true
+			key.RoutingContext, key.RoutingContextSet = uint32(random.IntN(5)), true
 		}
 		if random.IntN(3) != 0 {
 			key.NetworkAppearance, key.NetworkAppearanceSet = uint32(7+random.IntN(2)), true
@@ -61,7 +61,7 @@ func randomScopeAssociation(random *rand.Rand) *Association {
 		association.dynamicPeerASKeys = make(map[uint32]ASKey, count)
 		for range count {
 			key := randomKey(false)
-			key.RoutingContext = uint32(1 + random.IntN(6))
+			key.RoutingContext = uint32(random.IntN(7))
 			association.dynamicPeerASKeys[key.RoutingContext] = key
 		}
 	}
@@ -86,8 +86,13 @@ func candidateScopeKeys(listed []ASKey) []ASKey {
 			value uint32
 			set   bool
 		}{{0, false}, {7, true}, {8, true}} {
-			candidates = append(candidates,
-				ASKey{RoutingContext: routingContext, RoutingContextSet: routingContext != 0, NetworkAppearance: appearance.value, NetworkAppearanceSet: appearance.set})
+			for _, routingContextSet := range []bool{false, true} {
+				if !routingContextSet && routingContext != 0 {
+					continue
+				}
+				candidates = append(candidates,
+					ASKey{RoutingContext: routingContext, RoutingContextSet: routingContextSet, NetworkAppearance: appearance.value, NetworkAppearanceSet: appearance.set})
+			}
 		}
 	}
 	return candidates
@@ -217,8 +222,8 @@ func TestMTPTransferReusesSequenceLocksSafely(testContext *testing.T) {
 	if len(routes.transferSequences) != 0 {
 		testContext.Fatalf("retained transfer sequence gates = %d, want 0", len(routes.transferSequences))
 	}
-	if len(routes.idleTransferFlowLocks) > maxIdleTransferFlowLocks {
-		testContext.Fatalf("idle flow locks = %d, above the %d bound", len(routes.idleTransferFlowLocks), maxIdleTransferFlowLocks)
+	if len(routes.idleTransferFlowLocks) == 0 || len(routes.idleTransferFlowLocks) > maxIdleTransferFlowLocks {
+		testContext.Fatalf("idle flow locks = %d, want retired locks kept for reuse up to the %d bound", len(routes.idleTransferFlowLocks), maxIdleTransferFlowLocks)
 	}
 	seen := make(map[*aspTransferFlowLock]struct{}, len(routes.idleTransferFlowLocks))
 	for _, flowLock := range routes.idleTransferFlowLocks {
@@ -230,5 +235,72 @@ func TestMTPTransferReusesSequenceLocksSafely(testContext *testing.T) {
 			testContext.Fatalf("idle flow lock still referenced (%d) or held", flowLock.references)
 		}
 		flowLock.mu.Unlock()
+	}
+}
+
+// An uncontended transfer takes a flow lock from the idle list and returns it,
+// so the lock bookkeeping allocates nothing once one lock has been retired.
+func TestTransferSequenceLockReuseDoesNotAllocate(testContext *testing.T) {
+	endpoint, _, _ := newASPTransferFixture(testContext, validASPConfig())
+	request := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 1, []byte("reuse"))}
+	sequence, err := endpoint.aspRoutes.lockTransferSequence(request)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	sequence.release()
+	if allocations := testing.AllocsPerRun(1000, func() {
+		sequence, err := endpoint.aspRoutes.lockTransferSequence(request)
+		if err != nil {
+			panic(err)
+		}
+		sequence.release()
+	}); allocations != 0 {
+		testContext.Fatalf("lock and release allocate %.1f times per transfer", allocations)
+	}
+}
+
+// Dynamically bound Application Servers are visited in ascending Routing
+// Context order and the visit stops when the visitor asks it to.
+func TestVisitASKeysVisitsDynamicScopesInOrderAndStops(testContext *testing.T) {
+	config := &ASPConfig{
+		SignallingGateways: []SignallingGatewayConfig{{ID: "sg-a", SGPs: []SignallingGatewayProcessConfig{{
+			ID: "sgp-a1",
+			ApplicationServers: []RemoteASConfig{{
+				ID:         "as-dynamic",
+				RoutingKey: &RoutingKey{Groups: []RoutingKeyGroup{{DestinationPointCode: 0x120000}}},
+			}},
+		}}}},
+	}
+	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	testContext.Cleanup(func() { _ = endpoint.Close() })
+	association, _ := newTestConn(testContext, StateASPActive, RoleASP)
+	identity := SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	association.cfg.PeerSGP = &identity
+	for _, routingContext := range []uint32{11, 9, 13} {
+		association.addDynamicASKey(ASKey{RoutingContext: routingContext, RoutingContextSet: true}, RoutingKey{}, false)
+		association.noteCanonicalRemoteAS(routingContext, "as-dynamic")
+	}
+	routing := endpoint.aspRoutes.config
+	var all []uint32
+	routing.visitASKeys(association, identity, "as-dynamic", func(key ASKey) bool {
+		all = append(all, key.RoutingContext)
+		return true
+	})
+	if fmt.Sprint(all) != "[9 11 13]" {
+		testContext.Fatalf("visited Routing Contexts %v, want [9 11 13]", all)
+	}
+	var visited []uint32
+	routing.visitASKeys(association, identity, "as-dynamic", func(key ASKey) bool {
+		visited = append(visited, key.RoutingContext)
+		return key.RoutingContext < 11
+	})
+	if fmt.Sprint(visited) != "[9 11]" {
+		testContext.Fatalf("visited Routing Contexts %v with a stop at 11, want [9 11]", visited)
+	}
+	if want := routing.asKeysFor(association, identity, "as-dynamic"); len(want) != 3 || want[0].RoutingContext != 9 {
+		testContext.Fatalf("asKeysFor = %+v, want the three dynamic scopes in order", want)
 	}
 }
