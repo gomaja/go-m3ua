@@ -28,6 +28,9 @@ type runSpec struct {
 	Initiation  string             `json:"initiation,omitempty"`
 	PeerControl string             `json:"peer_control,omitempty"`
 	Clock       *sharedClockWindow `json:"shared_clock,omitempty"`
+	// SSNM is the opt-in SSNM load declaration, nil and omitted when off. A
+	// pointer rather than omitzero, which Go 1.23 does not implement.
+	SSNM *ssnmWorkload `json:"ssnm,omitempty"`
 }
 
 type deliveryResult struct {
@@ -102,6 +105,7 @@ type runRecord struct {
 	ReverseError              string                `json:"reverse_error,omitempty"`
 	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
 	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
+	SSNM                      *ssnmRecord           `json:"ssnm,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -128,6 +132,9 @@ type fixtureManifest struct {
 	OutstandingLimit         int    `json:"outstanding_limit"`
 	Initiation               string `json:"initiation,omitempty"`
 	AccountingScope          string `json:"accounting_scope"`
+	// SSNMBudgets are the SSNM time budgets an SSNM-loaded ASP judged its
+	// run against, omitted otherwise.
+	SSNMBudgets *ssnmBudgetsRecord `json:"ssnm_budgets,omitempty"`
 }
 
 func (record *runRecord) evaluate() {

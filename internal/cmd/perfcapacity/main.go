@@ -292,6 +292,7 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 					result.Reason = "unidirectional-cohort-error"
 				}
 			}
+			applySSNMDecision(&result, fixture.ssnmVerdict, forward.Stall != nil && forward.Stall.Stalled())
 		}
 		return result
 	}
@@ -385,6 +386,7 @@ type fixtureEvidence struct {
 	ClockEvidence      *sharedClockEvidence `json:"shared_clock_evidence"`
 	ClockBoundary      *sharedClockBoundary `json:"shared_clock_boundary"`
 	ValidatedPerSecond *float64             `json:"validated_per_second"`
+	SSNM               *ssnmEvidence        `json:"ssnm"`
 }
 
 type deliveryEvidence struct {
@@ -504,6 +506,7 @@ type fixtureSpec struct {
 	Initiation   *string            `json:"initiation"`
 	PeerControl  string             `json:"peer_control"`
 	SharedClock  *sharedClockWindow `json:"shared_clock"`
+	SSNM         *ssnmSpecEvidence  `json:"ssnm"`
 }
 
 type fixtureManifest struct {
@@ -523,6 +526,8 @@ type fixtureManifest struct {
 	OutstandingLimit         *int    `json:"outstanding_limit"`
 	Initiation               *string `json:"initiation"`
 	AccountingScope          *string `json:"accounting_scope"`
+	// SSNMBudgets is present exactly on SSNM-loaded sender records.
+	SSNMBudgets *ssnmBudgetsEvidence `json:"ssnm_budgets"`
 }
 
 // workloadIdentity excludes the per-run cohort and seed, the offered rate,
@@ -539,6 +544,7 @@ type workloadIdentity struct {
 	Initiation      string
 	PeerControl     string
 	Instrumentation string
+	SSNM            ssnmIdentity
 }
 
 type fixtureRun struct {
@@ -553,7 +559,8 @@ type fixtureRun struct {
 	cohortError          bool
 	// warmup marks a probe whose warm-up failed with demonstrated loss or a
 	// stall, so it never reached measurement. It can never pass.
-	warmup bool
+	warmup      bool
+	ssnmVerdict string
 }
 
 type achievedRateBounds struct {
@@ -702,6 +709,9 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	var record fixtureEvidence
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("decode run evidence: %w", err)
+	}
+	if err := rejectStraySSNM(&record); err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
 	return evidenceFromSenderRecord(&record, declaredRate, false)
 }
@@ -870,6 +880,9 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if cohort.Verdict == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort verdict is required")
 	}
+	if err := rejectStraySSNM(cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
+		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
+	}
 
 	forwardEvidence, forwardIdentity, err := evidenceFromSenderRecord(cohort.Sender, declaredRate, true)
 	if err != nil {
@@ -1033,9 +1046,17 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if err := validateCohortVerdict(&cohort, cohort.Sender, cohort.Receiver); err != nil {
 		return fixtureRun{}, err
 	}
+	ssnmVerdict, ssnmBudgets, err := ssnmCohortVerdict(senderSpec.Workload.SSNM, warmup, cohort.Sender, cohort.Receiver)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional ssnm: %w", err)
+	}
+	// The budgets join the workload identity, so one campaign never mixes
+	// SSNM verdicts judged against different budgets.
+	identity.workload.SSNM.Budgets = ssnmBudgets
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
 		forwardAchieved: achieved, cohortError: cohort.Error != "", warmup: warmup,
+		ssnmVerdict: ssnmVerdict,
 	}, nil
 }
 
@@ -1610,6 +1631,10 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		}
 		instrumentation = "shared-clock"
 	}
+	ssnm, err := ssnmIdentityFromSpec(spec)
+	if err != nil {
+		return workloadIdentity{}, err
+	}
 	return workloadIdentity{
 		Associations:    *spec.Associations,
 		Duration:        *spec.Duration,
@@ -1621,6 +1646,7 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		Initiation:      *spec.Initiation,
 		PeerControl:     spec.PeerControl,
 		Instrumentation: instrumentation,
+		SSNM:            ssnm,
 	}, nil
 }
 
