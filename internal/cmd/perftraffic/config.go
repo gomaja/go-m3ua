@@ -85,6 +85,8 @@ type commandConfig struct {
 	Seed           uint64
 	Outstanding    int
 	CPUStatPath    string
+	SameHostClock  bool
+	clockWindow    *sharedClockWindow
 }
 
 func parseConfig(arguments []string) (commandConfig, error) {
@@ -114,6 +116,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	flagSet.Uint64Var(&config.Seed, "seed", 1, "deterministic workload seed")
 	flagSet.IntVar(&config.Outstanding, "outstanding", maxOutstanding, "maximum scheduled but unfinished sends")
 	flagSet.StringVar(&config.CPUStatPath, "cpu-stat", "/sys/fs/cgroup/cpu.stat", "cgroup v2 cpu.stat path")
+	flagSet.BoolVar(&config.SameHostClock, "same-host-clock", false, "verify a shared Linux monotonic clock for throughput measurement")
 	if err := flagSet.Parse(arguments); err != nil {
 		return commandConfig{}, err
 	}
@@ -124,6 +127,9 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	config.Transport = strings.ToLower(config.Transport)
 	config.Mode = strings.ToLower(config.Mode)
 	config.Workload = workload(workloadValue)
+	if config.SameHostClock && config.Mode == modeEcho {
+		return commandConfig{}, errors.New("same-host clock mode supports throughput and bidirectional measurement, not echo")
+	}
 	switch config.Mode {
 	case modeThroughput, modeEcho, modeBidirectional:
 	default:

@@ -51,6 +51,7 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 // control request.
 func newRunReceiverControl(ctx context.Context, config commandConfig) *receiverControl {
 	control := newReceiverControl(config.Associations, maxOutstanding)
+	control.enableSharedClock(config.SameHostClock)
 	control.cpuStatPath = config.CPUStatPath
 	control.driver = &reverseDriver{ctx: ctx, cpuStatPath: config.CPUStatPath}
 	control.reverseControl = config.PeerControl
@@ -59,6 +60,9 @@ func newRunReceiverControl(ctx context.Context, config commandConfig) *receiverC
 
 func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 	control := newRunReceiverControl(ctx, config)
+	if control.fatal != "" {
+		return runRecord{}, errors.New(control.fatal)
+	}
 	httpListener, err := net.Listen("tcp", config.ControlAddress)
 	if err != nil {
 		return runRecord{}, fmt.Errorf("startup control-bind: %w", err)
