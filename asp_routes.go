@@ -89,6 +89,9 @@ type aspTransferFlowLock struct {
 	references int
 }
 
+// maxIdleTransferFlowLocks bounds the released flow locks kept for reuse.
+const maxIdleTransferFlowLocks = 64
+
 // aspRoutes owns ASP-wide route state. RFC 4666 Section 4.5.2.2 scopes SSNM
 // updates to the originating SG, while Section 1.3.2.5 requires the ASP to
 // derive one destination state from all such routes.
@@ -120,6 +123,9 @@ type aspRoutes struct {
 	// when minimizing missequencing.
 	transferSequenceMu sync.Mutex
 	transferSequences  map[aspTransferFlowKey]*aspTransferFlowLock
+	// idleTransferFlowLocks keeps released flow locks for reuse, so an
+	// uncontended transfer does not allocate one per request.
+	idleTransferFlowLocks []*aspTransferFlowLock
 
 	indicationMu      sync.Mutex
 	indications       chan *MTPIndication
@@ -151,6 +157,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		transferFlows:                    make(map[aspTransferFlowKey]*list.Element),
 		transferFlowLRU:                  list.New(),
 		transferSequences:                make(map[aspTransferFlowKey]*aspTransferFlowLock),
+		idleTransferFlowLocks:            make([]*aspTransferFlowLock, 0, maxIdleTransferFlowLocks),
 		indications:                      make(chan *MTPIndication, queueSize),
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {
@@ -282,10 +289,17 @@ func (c aspRoutingConfig) eligibleCandidate(
 		return aspRouteCandidate{}, ASKey{}, false
 	}
 	for _, candidate := range sgp.candidatesFor(mtpRoute) {
-		for _, key := range c.asKeysFor(association, identity, candidate.applicationServer) {
+		var eligible ASKey
+		found := false
+		c.visitASKeys(association, identity, candidate.applicationServer, func(key ASKey) bool {
 			if aspAssociationEligibleForAS(association, key) {
-				return candidate, key, true
+				eligible, found = key, true
+				return false
 			}
+			return true
+		})
+		if found {
+			return candidate, eligible, true
 		}
 	}
 	return aspRouteCandidate{}, ASKey{}, false
@@ -1334,10 +1348,13 @@ func (c aspRoutingConfig) routeCandidateMatchesStatus(
 		return false
 	}
 	for _, candidate := range sgp.candidatesFor(mtpRoute) {
-		for _, key := range c.asKeysFor(association, identity, candidate.applicationServer) {
-			if aspRouteASMatchesStatus(association, key, status) {
-				return true
-			}
+		matched := false
+		c.visitASKeys(association, identity, candidate.applicationServer, func(key ASKey) bool {
+			matched = aspRouteASMatchesStatus(association, key, status)
+			return !matched
+		})
+		if matched {
+			return true
 		}
 	}
 	return false
@@ -1375,15 +1392,7 @@ func (c *Association) dynamicASKeysForRemoteAS(id RemoteASID) []ASKey {
 // has registered, one Application Server scope. It is the binding and
 // authorization question, asked before the active-state one.
 func aspAssociationBoundToAS(association *Association, key ASKey) bool {
-	if association == nil {
-		return false
-	}
-	for _, configuredKey := range association.configuredASKeys() {
-		if configuredKey == key {
-			return true
-		}
-	}
-	return false
+	return association.configuredASKeysContain(key)
 }
 
 func aspAssociationEligibleForAS(association *Association, key ASKey) bool {
