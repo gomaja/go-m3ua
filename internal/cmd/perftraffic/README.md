@@ -156,10 +156,14 @@ only the timed send call differs.
   are uniform, and each route is one ordered flow with its own OPC, DPC, SI,
   NI, priority and SLS. Every route maps to one sender worker, so a route's
   messages are submitted in order. Payload generation happens before the timed
-  call. The send duration covers Protocol Data construction and the send call:
-  MTPTransfer for `routed`, and the frozen-path lookup plus WriteData for
-  `routed-direct`. Payloads use a route-aware header
-  (version 2) that carries the route instead of the direct fixture's
+  call. The send duration covers the same work in both variants: Protocol Data
+  construction and one library call, MTPTransfer for `routed` and WriteData
+  for `routed-direct`. Everything else runs outside it in both: `routed`
+  checks the path MTPTransfer reported after the second timestamp, and
+  `routed-direct` takes its admission slot, checks the context and
+  revalidates the frozen path's association epoch and stream bound before the
+  first timestamp and again after the second. Payloads use a route-aware
+  header (version 2) that carries the route instead of the direct fixture's
   association and flow bytes.
 - **Validation.** The receiver checks every arrival against its route's
   frozen transport, association epoch, AS scope, stream and label plus the

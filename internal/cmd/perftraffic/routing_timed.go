@@ -187,10 +187,17 @@ func (sender *routingTimedSender) send(ctx context.Context, queue uint8, job rou
 			sendErr = errors.New("MTPTransfer used a path other than the frozen route")
 		}
 	case routingTimedDirect:
-		sendStarted = sender.now()
-		outcome := sender.direct.writeOutcome(ctx, job.identity.Route, payload)
-		sendEnded = sender.now()
-		_, sendErr = validateRoutingDirectOutcome(outcome)
+		// Admission, the context and the frozen-path revalidation run before
+		// the send clock and the after-write revalidation after it, as routed's
+		// path check does, so both timed regions hold Protocol Data
+		// construction and one library call.
+		write := sender.direct.begin(ctx, job.identity.Route, len(payload))
+		if write.ready() {
+			sendStarted = sender.now()
+			write.submit(job.identity.Route, payload)
+			sendEnded = sender.now()
+		}
+		_, sendErr = validateRoutingDirectOutcome(write.finish())
 	default:
 		counters.complete(errors.New("routing timed sender variant is invalid"), dispatchLag, 0)
 		return

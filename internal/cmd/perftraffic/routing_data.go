@@ -213,59 +213,111 @@ func (writer *routingDirectWriter) Write(ctx context.Context, route uint16, payl
 }
 
 func (writer *routingDirectWriter) writeOutcome(ctx context.Context, route uint16, payload []byte) routingDirectWriteOutcome {
-	outcome := routingDirectWriteOutcome{requested: len(payload)}
+	write := writer.begin(ctx, route, len(payload))
+	if write.ready() {
+		write.submit(route, payload)
+	}
+	return write.finish()
+}
+
+// routingDirectWrite is one direct write split at the send clock: begin does
+// the untimed admission, context and frozen-path checks, submit is the timed
+// Protocol Data construction and WriteData call, and finish revalidates the
+// association after the write and releases admission. The timed region is
+// therefore the same as routed's: Protocol Data construction and one library
+// call.
+type routingDirectWrite struct {
+	writer      *routingDirectWriter
+	association routingDataAssociation
+	as          m3ua.ASKey
+	admitted    bool
+	submitted   bool
+	outcome     routingDirectWriteOutcome
+}
+
+// begin performs every check that precedes a direct write, before the send
+// clock starts: the admission slot, the context, and the frozen path's
+// association, epoch and stream bound against preflight. A write that fails
+// here is never submitted; finish still releases what begin acquired.
+func (writer *routingDirectWriter) begin(ctx context.Context, route uint16, requested int) routingDirectWrite {
+	write := routingDirectWrite{writer: writer, outcome: routingDirectWriteOutcome{requested: requested}}
 	if writer == nil || writer.admission == nil {
-		outcome.validationErr = errors.New("routing direct writer is unavailable")
-		return outcome
+		write.outcome.validationErr = errors.New("routing direct writer is unavailable")
+		return write
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		outcome.validationErr = err
-		return outcome
+		write.outcome.validationErr = err
+		return write
 	}
 	select {
 	case writer.admission <- struct{}{}:
-		defer func() { <-writer.admission }()
+		write.admitted = true
 	case <-ctx.Done():
-		outcome.validationErr = ctx.Err()
-		return outcome
+		write.outcome.validationErr = ctx.Err()
+		return write
 	}
 	if err := ctx.Err(); err != nil {
-		outcome.validationErr = err
-		return outcome
+		write.outcome.validationErr = err
+		return write
 	}
 	path, err := writer.paths.path(route)
 	if err != nil {
-		outcome.validationErr = err
-		return outcome
+		write.outcome.validationErr = err
+		return write
 	}
 	association := writer.associations[path.Target.Association]
-	outcome.expectedEpoch = writer.epochs[path.Target.Association]
-	outcome.expectedMaxStream = path.Binding.MaxMessageStreamID
-	if association == nil || outcome.expectedEpoch == 0 || association.Epoch() != outcome.expectedEpoch ||
-		association.MaxMessageStreamID() != outcome.expectedMaxStream {
-		outcome.validationErr = errors.New("routing direct association changed after preflight")
-		return outcome
+	write.outcome.expectedEpoch = writer.epochs[path.Target.Association]
+	write.outcome.expectedMaxStream = path.Binding.MaxMessageStreamID
+	if association == nil || write.outcome.expectedEpoch == 0 || association.Epoch() != write.outcome.expectedEpoch ||
+		association.MaxMessageStreamID() != write.outcome.expectedMaxStream {
+		write.outcome.validationErr = errors.New("routing direct association changed after preflight")
+		return write
 	}
+	if write.outcome.expectedMaxStream == 0 {
+		write.outcome.validationErr = errors.New("routing direct path has no DATA stream")
+		return write
+	}
+	write.association, write.as = association, path.Target.AS
+	return write
+}
+
+// ready reports whether begin cleared the write for submission.
+func (write *routingDirectWrite) ready() bool {
+	return write.outcome.validationErr == nil && write.association != nil
+}
+
+// submit is the timed part of a direct write and holds nothing else: Protocol
+// Data construction, the stream choice from its SLS, and the one WriteData
+// call, exactly as MTPTransfer builds and submits the same DATA for routed.
+func (write *routingDirectWrite) submit(route uint16, payload []byte) {
 	protocolData, err := routeProtocolData(route, payload)
 	if err != nil {
-		outcome.validationErr = err
-		return outcome
+		write.outcome.validationErr = err
+		return
 	}
-	if outcome.expectedMaxStream == 0 {
-		outcome.validationErr = errors.New("routing direct path has no DATA stream")
-		return outcome
+	stream := uint16(protocolData.SignallingLinkSelection)%write.outcome.expectedMaxStream + 1
+	write.outcome.written, write.outcome.writeErr = write.association.WriteData(m3ua.DataRequest{AS: write.as, ProtocolData: protocolData, Stream: stream})
+	write.submitted = true
+}
+
+// finish rereads the association after a submitted write, so a write that
+// raced an association change is invalid, and releases the admission slot.
+func (write *routingDirectWrite) finish() routingDirectWriteOutcome {
+	if write.submitted {
+		write.outcome.afterEpoch = write.association.Epoch()
+		if write.outcome.afterEpoch == write.outcome.expectedEpoch {
+			write.outcome.afterMaxStream = write.association.MaxMessageStreamID()
+			write.outcome.afterMaxStreamRead = true
+		}
 	}
-	stream := uint16(protocolData.SignallingLinkSelection)%outcome.expectedMaxStream + 1
-	outcome.written, outcome.writeErr = association.WriteData(m3ua.DataRequest{AS: path.Target.AS, ProtocolData: protocolData, Stream: stream})
-	outcome.afterEpoch = association.Epoch()
-	if outcome.afterEpoch == outcome.expectedEpoch {
-		outcome.afterMaxStream = association.MaxMessageStreamID()
-		outcome.afterMaxStreamRead = true
+	if write.admitted {
+		write.admitted = false
+		<-write.writer.admission
 	}
-	return outcome
+	return write.outcome
 }
 
 func validateRoutingDirectOutcome(outcome routingDirectWriteOutcome) (int, error) {
