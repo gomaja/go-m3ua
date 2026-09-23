@@ -138,15 +138,18 @@ its schedule, receipts and delays are shared-clock timestamps.
 | `-ssnm-records` | both | distinct destinations cycled, at most 16,384 and a multiple of `-ssnm-apcs` (default 16,384) |
 | `-subscribers` | ASP | `SubscribeSSNM` consumers on the ASP Endpoint (default 8, at most 16) |
 | `-pause-subscriber=<offset>/<duration>` | ASP | F3: subscriber 0 stops reading `offset` into the measurement window for `duration`, then recovers by `Resync` |
+| `-ssnm-subscription-queue-bytes` | ASP | accounted byte limit of every subscription queue, `SSNMStateConfig.SubscriptionQueueBytes` (default 0: the library's 1 MiB); at least 512 and large enough for the preload message |
 | `-ssnm-apply-p99-budget` | ASP | p99 apply-time budget of 1,024-APC messages (default 100ms) |
 | `-ssnm-resync-budget` | ASP | F3 `Resync` snapshot and subscription acquisition budget (default 100ms) |
 | `-ssnm-recovery-budget` | ASP | F3 budget to consume the retained queued indications and the snapshot (default 1s) |
 
 Both processes must pass the same `-ssnm-rate`, `-ssnm-apcs` and
 `-ssnm-records`; the ASP declares them in every cohort specification (`spec.ssnm`)
-and the SGP refuses a cohort that differs from its own flags. The budget flags
-default to the section 4 contract values and are recorded in the ASP
-manifest's `ssnm_budgets`.
+and the SGP refuses a cohort that differs from its own flags. The ASP also
+declares its subscribers, pause and the subscription byte limit in force
+(`subscription_queue_bytes`, the resolved default included), which the SGP
+echoes in its generator record. The budget flags default to the section 4
+contract values and are recorded in the ASP manifest's `ssnm_budgets`.
 
 **Generator (SGP).** Before any cohort the ASP opens its subscriptions and asks
 the SGP (`POST /ssnm/preload`) to report every destination Unavailable once,
@@ -170,10 +173,12 @@ and fan-out failures (`SSNMDeliveryError`).
 adds an `SSNMState` sized for the workload: a standalone ASP Association is one
 partition and its own retention peer, and every association serves Routing
 Context 100, so each partition holds `-ssnm-records` records, the store
-`associations x records`, subscription queues keep the approved 256 events, and
-`MaxAffectedPointCodes` is 1,024. The chosen limits are recorded in
-`sender.ssnm.store.limits`. For the 16,384-retained-record rows use
-`-ssnm-records=16384` with one association or `-ssnm-records=2048` with eight.
+`associations x records`, subscription queues keep the approved 256 events and
+the byte limit in force (the approved 1 MiB unless
+`-ssnm-subscription-queue-bytes` sets another), and `MaxAffectedPointCodes` is
+1,024. The chosen limits are recorded in `sender.ssnm.store.limits`. For the
+16,384-retained-record rows use `-ssnm-records=16384` with one association or
+`-ssnm-records=2048` with eight.
 Each subscriber checks every delivered report against the deterministic plan:
 per partition every position exactly once and in order, counting gaps,
 duplicates, unexpected content, continuity loss, resource loss and
@@ -183,15 +188,68 @@ message.
 **F3 pause and recovery.** The paused subscriber stops calling `Next` at the
 offset, sleeps for the duration, then drains what its queue retained, observes
 `SSNMContinuityLostEvent`, calls `Resync`, consumes the snapshot and continues.
-`sender.ssnm.pause` records the events retained at loss against the count cap
-(`count_cap_enforced`), the destination updates those events carried, the drain
-time, the `Resync` acquisition time (`resync_ns`), the snapshot consumption
-time and `recovery_ns` from resumption to a consumed snapshot after the
-retained queue. The snapshot is validated destination by
+`sender.ssnm.pause` records the retained queue against both subscription caps
+(below), the drain time, the `Resync` acquisition time (`resync_ns`), the
+snapshot consumption time and `recovery_ns` from resumption to a consumed
+snapshot after the retained queue. The snapshot is validated destination by
 destination against the plan at the first report after `Resync`, so a stale or
-partial snapshot is a failure. A retained-byte cap is reported as not
-observable: this library's `SSNMStateConfig` bounds a subscription by event
-count only.
+partial snapshot is a failure.
+
+**F3 count and byte caps.** A subscription is bounded by events
+(`queue_limit`, the approved 256) and by accounted bytes (`queue_byte_limit`,
+`SSNMStateConfig.SubscriptionQueueBytes`). The paused subscriber recomputes the
+bytes of every event it drains from its retained queue from the delivered event
+alone, by the library's documented accounting and without its internals: 512
+per event, 8 per report destination, 256 per updated destination, 4 per Routing
+Context in the report and in both dimensions of each update, plus the byte
+lengths of `Reason` and of the event's and the report's partition identity
+strings. The continuity-loss marker is not charged. A generated report of `a`
+Affected Point Codes in a fixture (standalone) partition is therefore
+516 + 268a bytes: 784 for one APC, 274,948 for 1,024.
+
+| Field | Meaning |
+| --- | --- |
+| `queue_limit`, `queued_at_loss` | the count cap, and the events retained before the continuity-loss marker |
+| `queue_byte_limit`, `queued_bytes_at_loss` | the byte cap, and those events' accounted bytes |
+| `smallest_event_bytes` | the smallest event the generator can queue after the preload: one message of `-ssnm-apcs` destinations |
+| `smallest_queued_event_bytes` | the smallest retained event |
+| `count_cap_enforced` | the loss was observed with exactly `queue_limit` events retained |
+| `byte_cap_enforced` | the loss was observed with the retained bytes within `queue_byte_limit` and no room for another `smallest_event_bytes` |
+| `binding_cap` | `count` when the count cap was reached, otherwise `bytes` when the byte cap was, otherwise empty |
+| `queued_state_entries` | the destination updates the retained events carried |
+
+The caps hold when the loss was observed, the retained queue exceeds neither
+cap, one cap was reached, and `binding_cap` and the two flags agree with the
+numbers. A loss with neither cap reached is the library losing continuity early,
+and a queue over either cap is a cap not enforced; both fail F3. The drain stops
+one event past the count cap, so an over-retaining queue shows as one event
+more than `queue_limit`. A retained event smaller than `smallest_event_bytes`
+also fails: the byte judgment would then rest on a bound the workload does not
+respect.
+
+With the default limit the one-APC F3 run retains 256 events of 784 bytes,
+200,704 bytes, so the count cap binds. The byte cap binds below 256 x 784
+bytes, but the limit must also hold the workload's largest message, the
+preload's min(`-ssnm-records`, 1,024) destinations, or every subscriber would
+lose continuity before traffic starts; the ASP refuses such a limit. At the full
+16,384-record store that message is 274,948 bytes, more than 256 one-APC
+events, so the one-APC byte-binding run uses a 256-record store, whose single
+preload message is 69,124 bytes, and a 96 KiB limit. It retains 125 events,
+98,000 bytes, which another 784-byte event would take past 98,304:
+
+```sh
+# F3 with the byte cap binding: 125 events of 784 bytes at loss
+perftraffic -role=sgp ... -same-host-clock -ssnm-rate=1000 -ssnm-apcs=1 -ssnm-records=256
+perftraffic -role=asp ... -same-host-clock -ssnm-rate=1000 -ssnm-apcs=1 -ssnm-records=256 \
+  -pause-subscriber=5s/10s -ssnm-subscription-queue-bytes=98304
+```
+
+Every subscriber shares the limit, so the healthy ones keep 125 ms of slack at
+1,000 messages/s instead of 256 ms, and the run's `resync_ns` is taken at a
+256-record store: the full-fixture Resync budget stays with the count-binding
+run. The approved 1 MiB limit itself binds at the full store with larger
+messages: `-ssnm-rate=32 -ssnm-apcs=32` (1,024 updates/s) retains 115 events
+of 9,092 bytes, 1,045,580 bytes.
 
 **Records.** The SGP record's `ssnm.generator` covers the cohort window:
 `offered` (scheduled in the window), `reported_in_window`, `late`, `unsent`,
@@ -243,8 +301,10 @@ DATA verdicts do not include SSNM, and `sender.ssnm.verdict` is the SSNM
 result.
 
 **Capacity comparison.** `perfcapacity` reads `spec.ssnm` into the workload
-identity, so a campaign cannot mix SSNM-loaded probes with no-update probes or
-with a different SSNM intensity. An SSNM-loaded probe needs `sender.ssnm` and
+identity, so a campaign cannot mix SSNM-loaded probes with no-update probes, with
+a different SSNM intensity, pause or subscription byte limit
+(`subscription_queue_bytes`, required on every SSNM-loaded spec). An F3 probe
+folds like any other SSNM-loaded probe, its verdict including the cap judgment. An SSNM-loaded probe needs `sender.ssnm` and
 `receiver.ssnm.generator`; an SSNM `fail` fails the probe and an SSNM
 `inconclusive` turns a passing probe inconclusive. A warm-up that failed from
 overload is probe evidence here as in any throughput campaign: its

@@ -10,14 +10,15 @@ import (
 // ssnmSpecEvidence is the SSNM load declaration of a perftraffic cohort
 // specification. It is absent from every run without SSNM load.
 type ssnmSpecEvidence struct {
-	Rate          *uint64        `json:"rate"`
-	APCs          *int           `json:"apcs"`
-	Records       *int           `json:"records"`
-	Subscribers   *int           `json:"subscribers"`
-	PauseOffset   *time.Duration `json:"pause_offset_ns"`
-	PauseDuration *time.Duration `json:"pause_duration_ns"`
-	Phase         *string        `json:"phase"`
-	Anchor        *int64         `json:"anchor_ns"`
+	Rate                   *uint64        `json:"rate"`
+	APCs                   *int           `json:"apcs"`
+	Records                *int           `json:"records"`
+	Subscribers            *int           `json:"subscribers"`
+	SubscriptionQueueBytes *int           `json:"subscription_queue_bytes"`
+	PauseOffset            *time.Duration `json:"pause_offset_ns"`
+	PauseDuration          *time.Duration `json:"pause_duration_ns"`
+	Phase                  *string        `json:"phase"`
+	Anchor                 *int64         `json:"anchor_ns"`
 }
 
 // ssnmIdentity is the SSNM part of the workload identity. It is zero for a
@@ -26,12 +27,16 @@ type ssnmSpecEvidence struct {
 // per-run anchor is excluded, like the cohort name and seed, and so is the
 // phase: a failed warm-up ran the same disturbance as the measurement.
 type ssnmIdentity struct {
-	Rate          uint64
-	APCs          int
-	Records       int
-	Subscribers   int
-	PauseOffset   time.Duration
-	PauseDuration time.Duration
+	Rate        uint64
+	APCs        int
+	Records     int
+	Subscribers int
+	// SubscriptionQueueBytes is the ASP subscriptions' byte limit in force.
+	// It decides whether a paused subscriber's overflow is bound by count or
+	// by bytes, so campaigns under different limits never mix.
+	SubscriptionQueueBytes int
+	PauseOffset            time.Duration
+	PauseDuration          time.Duration
 	// Budgets are the time budgets the ASP judged the SSNM verdict against,
 	// from its manifest. The spec does not carry them, so they are zero in an
 	// identity derived from the spec alone.
@@ -72,6 +77,9 @@ const (
 	maximumSSNMAPCs        = 1024
 	maximumSSNMRecords     = 16_384
 	maximumSSNMSubscribers = 16
+	// minimumSSNMSubscriptionQueueBytes is the smallest subscription byte
+	// limit SSNMStateConfig.SubscriptionQueueBytes accepts.
+	minimumSSNMSubscriptionQueueBytes = 512
 )
 
 func ssnmIdentityFromSpec(spec *fixtureSpec) (ssnmIdentity, error) {
@@ -79,13 +87,13 @@ func ssnmIdentityFromSpec(spec *fixtureSpec) (ssnmIdentity, error) {
 	if declared == nil {
 		return ssnmIdentity{}, nil
 	}
-	if declared.Rate == nil || declared.APCs == nil || declared.Records == nil || declared.Subscribers == nil ||
+	if declared.Rate == nil || declared.APCs == nil || declared.Records == nil || declared.Subscribers == nil || declared.SubscriptionQueueBytes == nil ||
 		declared.PauseOffset == nil || declared.PauseDuration == nil || declared.Phase == nil || declared.Anchor == nil {
-		return ssnmIdentity{}, errors.New("spec.ssnm rate, apcs, records, subscribers, pause_offset_ns, pause_duration_ns, phase and anchor_ns are required")
+		return ssnmIdentity{}, errors.New("spec.ssnm rate, apcs, records, subscribers, subscription_queue_bytes, pause_offset_ns, pause_duration_ns, phase and anchor_ns are required")
 	}
 	identity := ssnmIdentity{
 		Rate: *declared.Rate, APCs: *declared.APCs, Records: *declared.Records, Subscribers: *declared.Subscribers,
-		PauseOffset: *declared.PauseOffset, PauseDuration: *declared.PauseDuration,
+		SubscriptionQueueBytes: *declared.SubscriptionQueueBytes, PauseOffset: *declared.PauseOffset, PauseDuration: *declared.PauseDuration,
 	}
 	switch {
 	case identity.Rate == 0 || identity.Rate > maximumSSNMRate:
@@ -96,6 +104,8 @@ func ssnmIdentityFromSpec(spec *fixtureSpec) (ssnmIdentity, error) {
 		return ssnmIdentity{}, errors.New("spec.ssnm records must be a multiple of apcs and at most 16384")
 	case identity.Subscribers < 1 || identity.Subscribers > maximumSSNMSubscribers:
 		return ssnmIdentity{}, errors.New("spec.ssnm subscribers must be between 1 and 16")
+	case identity.SubscriptionQueueBytes < minimumSSNMSubscriptionQueueBytes:
+		return ssnmIdentity{}, errors.New("spec.ssnm subscription_queue_bytes must be at least 512")
 	case identity.PauseOffset < 0 || identity.PauseDuration < 0 || identity.PauseDuration == 0 && identity.PauseOffset != 0:
 		return ssnmIdentity{}, errors.New("spec.ssnm pause must be absent or a non-negative offset with a positive duration")
 	case identity.PauseDuration > 0 && identity.Subscribers < 2:

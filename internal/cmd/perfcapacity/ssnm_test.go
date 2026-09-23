@@ -16,7 +16,7 @@ func ssnmRunJSON(testContext *testing.T, rate int, verdict string, mutate func(m
 		sender := cohort["sender"].(map[string]any)
 		start := sender["spec"].(map[string]any)["shared_clock"].(map[string]any)["start_ns"]
 		workload := map[string]any{
-			"rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8,
+			"rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20,
 			"pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": start,
 		}
 		for _, side := range []string{"sender", "receiver"} {
@@ -80,12 +80,12 @@ func TestSSNMLoadedCohortRequiresEvidence(testContext *testing.T) {
 		}},
 		{"workload disagrees with spec", func(cohort map[string]any) {
 			cohort["sender"].(map[string]any)["ssnm"].(map[string]any)["workload"] = map[string]any{
-				"rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
+				"rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
 			}
 		}},
 		{"receiver spec disagrees", func(cohort map[string]any) {
 			cohort["receiver"].(map[string]any)["spec"].(map[string]any)["ssnm"] = map[string]any{
-				"rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
+				"rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
 			}
 		}},
 		{"warm-up phase", func(cohort map[string]any) {
@@ -288,7 +288,7 @@ func TestSSNMBudgetsAreRequiredAndPartOfTheIdentity(testContext *testing.T) {
 // whose spec declares none.
 func TestStraySSNMEvidenceIsRefusedOutsideLoadedCohorts(testContext *testing.T) {
 	workload := map[string]any{
-		"rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8,
+		"rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20,
 		"pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
 	}
 	for _, side := range []string{"sender", "receiver", "reverse_sender", "reverse_receiver"} {
@@ -339,4 +339,42 @@ func TestStraySSNMEvidenceIsRefusedOutsideLoadedCohorts(testContext *testing.T) 
 			}
 		}
 	})
+}
+
+// The subscription byte limit decides whether a paused subscriber's overflow
+// is bound by count or by bytes, so every SSNM-loaded spec declares it and it
+// is part of the workload identity: a byte-bound F3 probe folds like any
+// other, but never into a campaign under another limit.
+func TestSSNMSubscriptionQueueBytesArePartOfTheIdentity(testContext *testing.T) {
+	// One map is the sender and receiver spec.ssnm and the sender's ssnm
+	// workload, so setting a field sets it in all three.
+	workload := func(cohort map[string]any) map[string]any {
+		return cohort["sender"].(map[string]any)["spec"].(map[string]any)["ssnm"].(map[string]any)
+	}
+	byteBound := func(cohort map[string]any) {
+		workload(cohort)["subscription_queue_bytes"] = 98_304
+		workload(cohort)["records"] = 256
+		workload(cohort)["pause_offset_ns"] = float64(5_000_000_000)
+		workload(cohort)["pause_duration_ns"] = float64(10_000_000_000)
+	}
+	input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, ssnmRunJSON(testContext, 10, "pass", byteBound))
+	if status, decoded := runRequest(testContext, input); status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].Decision != "pass" {
+		testContext.Fatalf("byte-bound F3 probe: status=%d result=%+v, want a folded passing probe", status, decoded)
+	}
+	otherLimit := ssnmRunJSON(testContext, 20, "pass", func(cohort map[string]any) { workload(cohort)["subscription_queue_bytes"] = 98_304 })
+	input = fmt.Sprintf(`{"initial":10,"maximum":40,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`, ssnmRunJSON(testContext, 10, "pass", nil), otherLimit)
+	if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "workload") {
+		testContext.Fatalf("campaign mixing subscription byte limits: status=%d result=%+v", status, decoded)
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"missing":                   func(cohort map[string]any) { delete(workload(cohort), "subscription_queue_bytes") },
+		"below the library minimum": func(cohort map[string]any) { workload(cohort)["subscription_queue_bytes"] = 511 },
+	} {
+		testContext.Run(name, func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, ssnmRunJSON(testContext, 10, "pass", mutate))
+			if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "subscription_queue_bytes") {
+				testContext.Fatalf("status=%d result=%+v, want the spec refused for subscription_queue_bytes", status, decoded)
+			}
+		})
+	}
 }
