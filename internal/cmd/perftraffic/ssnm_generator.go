@@ -366,7 +366,7 @@ func (generator *ssnmGenerator) cohortRecord(specification runSpec) *ssnmGenerat
 	defer generator.mutex.Unlock()
 	record := &ssnmGeneratorRecord{
 		Scope:             ssnmGeneratorScope,
-		Workload:          specification.SSNM,
+		Workload:          *specification.SSNM,
 		PointCodeBase:     ssnmPointCodeBase,
 		RoutingContext:    ssnmRoutingContext,
 		NetworkAppearance: testNetworkAppearance,

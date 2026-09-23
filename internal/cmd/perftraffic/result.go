@@ -28,8 +28,9 @@ type runSpec struct {
 	Initiation  string             `json:"initiation,omitempty"`
 	PeerControl string             `json:"peer_control,omitempty"`
 	Clock       *sharedClockWindow `json:"shared_clock,omitempty"`
-	// SSNM is the opt-in SSNM load declaration, omitted when off.
-	SSNM ssnmWorkload `json:"ssnm,omitzero"`
+	// SSNM is the opt-in SSNM load declaration, nil and omitted when off. A
+	// pointer rather than omitzero, which Go 1.23 does not implement.
+	SSNM *ssnmWorkload `json:"ssnm,omitempty"`
 }
 
 type deliveryResult struct {

@@ -279,7 +279,8 @@ func (run *ssnmSenderRun) attach(specification *runSpec, phase string) error {
 	if run.anchor == 0 {
 		run.anchor = specification.Clock.Start
 	}
-	specification.SSNM = run.config.workload(phase, run.anchor)
+	workload := run.config.workload(phase, run.anchor)
+	specification.SSNM = &workload
 	if phase != ssnmPhaseMeasurement {
 		return nil
 	}

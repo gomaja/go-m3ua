@@ -81,7 +81,7 @@ func TestSSNMGeneratorLeavesSGPWritesToTheLibrary(testContext *testing.T) {
 	specification := runSpec{
 		Clock: &sharedClockWindow{Domain: domain, Start: start, End: start + int64(300*time.Millisecond)},
 		Drain: 200 * time.Millisecond,
-		SSNM:  ssnm.workload(ssnmPhaseMeasurement, start),
+		SSNM:  workloadRef(ssnm.workload(ssnmPhaseMeasurement, start)),
 	}
 	if err := control.ssnm.acceptSpec(specification); err != nil {
 		testContext.Fatal(err)

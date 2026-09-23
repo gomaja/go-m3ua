@@ -93,7 +93,7 @@ type ssnmWorkload struct {
 	Anchor        int64         `json:"anchor_ns"`
 }
 
-func (workload ssnmWorkload) enabled() bool { return workload.Rate > 0 }
+func (workload *ssnmWorkload) enabled() bool { return workload != nil && workload.Rate > 0 }
 
 // pauseFlag parses -pause-subscriber=<offset>/<duration>.
 type pauseFlag struct {

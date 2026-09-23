@@ -110,7 +110,7 @@ func TestSSNMRunSpecOmittedWhenOff(testContext *testing.T) {
 
 func TestSSNMRunSpecRoundTripsAndCompares(testContext *testing.T) {
 	window := &sharedClockWindow{Start: 10, End: 20}
-	specification := runSpec{Cohort: "c", Clock: window, SSNM: ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8}.workload(ssnmPhaseMeasurement, 10)}
+	specification := runSpec{Cohort: "c", Clock: window, SSNM: workloadRef(ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8}.workload(ssnmPhaseMeasurement, 10))}
 	encoded, err := json.Marshal(specification)
 	if err != nil {
 		testContext.Fatal(err)
@@ -141,3 +141,6 @@ func TestSSNMStoreLimitsFitTheWorkload(testContext *testing.T) {
 		testContext.Fatalf("endpoint configuration without SSNM load changed: %+v", config)
 	}
 }
+
+// workloadRef returns a declaration as runSpec carries it.
+func workloadRef(workload ssnmWorkload) *ssnmWorkload { return &workload }

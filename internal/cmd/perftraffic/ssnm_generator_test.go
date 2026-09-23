@@ -91,7 +91,7 @@ func armedSpec(generator *ssnmGenerator, phase string, start, end, anchor int64)
 	return runSpec{
 		Clock: &sharedClockWindow{Start: start, End: end},
 		Drain: time.Second,
-		SSNM:  ssnmConfig{Rate: generator.rate, APCs: generator.apcs, Records: generator.records, Subscribers: 8}.workload(phase, anchor),
+		SSNM:  workloadRef(ssnmConfig{Rate: generator.rate, APCs: generator.apcs, Records: generator.records, Subscribers: 8}.workload(phase, anchor)),
 	}
 }
 
