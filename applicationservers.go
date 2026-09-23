@@ -22,6 +22,9 @@ func asConfigRoutingContexts(servers []ASConfig) []uint32 {
 	var routingContexts []uint32
 	for index := range servers {
 		if servers[index].ASKey.RoutingContextSet {
+			if routingContexts == nil {
+				routingContexts = make([]uint32, 0, len(servers)-index)
+			}
 			routingContexts = append(routingContexts, servers[index].ASKey.RoutingContext)
 		}
 	}
