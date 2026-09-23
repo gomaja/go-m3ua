@@ -906,7 +906,7 @@ func (s *ssnmState) apply(report SSNMReport) error {
 	if len(s.subscribers) > 0 {
 		event.Updated = make([]SSNMDestinationKnowledge, len(writes))
 		for index, write := range writes {
-			event.Updated[index] = state.destinationKnowledge(write.key)
+			event.Updated[index] = state.retainedKnowledge(write.key)
 		}
 	}
 	s.publishLocked(event)
@@ -1028,9 +1028,9 @@ func describeSSNMPartition(partition SSNMPartition) string {
 		partition.ApplicationServer, partition.SignallingGateway)
 }
 
-// destinationKnowledge returns both retained dimensions of one destination.
+// retainedKnowledge returns both retained dimensions of one destination.
 // The scopes are the store's own and must be copied before they leave it.
-func (p *ssnmPartitionState) destinationKnowledge(key ssnmDestinationKey) SSNMDestinationKnowledge {
+func (p *ssnmPartitionState) retainedKnowledge(key ssnmDestinationKey) SSNMDestinationKnowledge {
 	entry := SSNMDestinationKnowledge{Destination: key.pointCodeRange()}
 	if availability, held := p.availability[key]; held {
 		entry.Availability = availability
@@ -1068,7 +1068,7 @@ func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSN
 	slices.SortFunc(keys, compareSSNMDestinationKeys)
 	knowledge := make([]SSNMDestinationKnowledge, len(keys))
 	for index, key := range keys {
-		entry := state.destinationKnowledge(key)
+		entry := state.retainedKnowledge(key)
 		entry.Availability.Scope = entry.Availability.Scope.clone()
 		entry.Congestion.Scope = entry.Congestion.Scope.clone()
 		knowledge[index] = entry

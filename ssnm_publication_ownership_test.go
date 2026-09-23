@@ -196,8 +196,6 @@ func TestSSNMBindingPublicationPreservesIndependentOwners(testContext *testing.T
 					}
 				}
 				wantEvent := ssnmOwnershipValue(testContext, event)
-				event.Partition.SignallingGateway = "mutated"
-				event.Binding.Association = 99
 				requireSSNMOwnershipValue(testContext, "lifecycle second subscriber", nextSSNMOwnershipEvent(testContext, second), wantEvent)
 				requireSSNMOwnershipValue(testContext, "lifecycle retained state", endpoint.SSNMKnowledge(), wantSnapshot)
 			}

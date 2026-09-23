@@ -1095,3 +1095,30 @@ func TestSSNMDeltaEventsAreChargedForWhatTheyCarry(t *testing.T) {
 		})
 	}
 }
+
+// A burst that exactly fills a grown array drains to a queue whose remaining
+// capacity is tiny while its backing array is not. Keeping that queue as the
+// spare would pin the whole burst-sized array for the life of the
+// subscription, so only an array that was small when it was allocated is kept.
+func TestSSNMSubscriptionReleasesAnExactlyFilledBurstArray(t *testing.T) {
+	endpoint := newSSNMStateEndpoint(t, nil, nil)
+	_, subscription, err := endpoint.SubscribeSSNM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const burst = 2 * ssnmSpareQueueSlots
+	for index := range burst {
+		subscription.enqueue(SSNMEvent{Revision: uint64(1 + index)})
+	}
+	if cap(subscription.queue) != burst {
+		t.Fatalf("the burst grew a %d-slot array; the test needs one it exactly fills (%d)", cap(subscription.queue), burst)
+	}
+	for index := range burst {
+		if event, _, _ := subscription.take(); event.Revision != uint64(1+index) {
+			t.Fatalf("burst event %d out of order: %d", index, event.Revision)
+		}
+	}
+	if subscription.spare != nil {
+		t.Fatalf("kept the drained %d-slot burst array as the spare", burst)
+	}
+}

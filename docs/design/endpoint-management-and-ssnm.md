@@ -438,7 +438,8 @@ lifecycle events carry no destinations, and a retired or invalidated partition
 is discarded whole by its event kind. No report removes a single destination:
 DAVA and a level-zero SCON are retained as statements, and bounds refuse
 rather than evict. Applying the events in order to the snapshot the
-subscription started from reproduces `SSNMKnowledge`; the whole partition comes
+subscription started from reproduces the partition knowledge `SSNMKnowledge`
+returns (its refusal tallies are counters no event carries); the whole partition comes
 only from `SubscribeSSNM` and `Resync`. Carrying the partition in every event
 had made a one-destination report cost the partition's size once per
 subscriber and once more to build — about 24 MB per report with 16,384

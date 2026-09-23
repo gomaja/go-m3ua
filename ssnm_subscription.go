@@ -254,7 +254,13 @@ type SSNMSubscription struct {
 	// while it is small. A consumer that keeps up then costs no allocation to
 	// queue for; the larger array a burst grew is released once drained. Every
 	// slot in it has been cleared.
-	spare          []queuedSSNMEvent
+	spare []queuedSSNMEvent
+	// queueArrayCap is the whole capacity of the array queue lives in, from
+	// its first slot. cap(queue) cannot stand in for it: take advances queue
+	// through the array, so a drained queue reports only the slots after its
+	// last event, and a burst that exactly filled a large array would look
+	// small enough to keep.
+	queueArrayCap  int
 	queuedBytes    int
 	closed         bool
 	terminal       error
@@ -313,7 +319,13 @@ func (s *SSNMSubscription) enqueue(event SSNMEvent) {
 	if len(s.queue) == 0 && s.spare != nil {
 		s.queue, s.spare = s.spare, nil
 	}
+	previousCap := cap(s.queue)
 	s.queue = append(s.queue, queuedSSNMEvent{event: event.clone(), bytes: accountedBytes})
+	if cap(s.queue) != previousCap {
+		// append moved the queue to a new array, and the queue starts at its
+		// first slot.
+		s.queueArrayCap = cap(s.queue)
+	}
 	s.queuedBytes += accountedBytes
 	s.mu.Unlock()
 	s.signal()
@@ -381,7 +393,7 @@ func (s *SSNMSubscription) take() (SSNMEvent, bool, error) {
 			s.queue = s.queue[1:]
 			return queued.event, true, nil
 		}
-		if cap(s.queue) <= ssnmSpareQueueSlots {
+		if s.queueArrayCap <= ssnmSpareQueueSlots {
 			s.spare = s.queue[:0]
 		}
 		s.queue = nil
