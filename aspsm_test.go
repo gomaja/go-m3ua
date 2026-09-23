@@ -457,7 +457,7 @@ func TestHeartbeatAckWithoutDataDoesNotPanic(t *testing.T) {
 // prescribes the correct answer instead: Error "Missing Parameter" (0x16).
 func TestDataWithoutProtocolDataIsRejected(t *testing.T) {
 	// DATA carrying a single parameter that is not Protocol Data, plus the
-	// bare-header case. All are well-formed enough to parse.
+	// bare-header case. Each lacks the mandatory parameter.
 	param := func(tag uint16, val []byte) []byte {
 		plen := 4 + len(val)
 		b := make([]byte, 4, plen)
@@ -476,45 +476,43 @@ func TestDataWithoutProtocolDataIsRejected(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		raw  []byte
+		data *messages.Data
 	}{
-		{"bare header", []byte{1, 0, 1, 1, 0, 0, 0, 8}},
-		{"NetworkAppearance only", param(0x0200, []byte{0, 0, 0, 0})},
-		{"RoutingContext only", param(0x0006, []byte{0, 0, 0, 1})},
-		{"CorrelationID only", param(0x0013, []byte{0, 0, 0, 7})},
+		{"bare header", []byte{1, 0, 1, 1, 0, 0, 0, 8}, &messages.Data{}},
+		{"NetworkAppearance only", param(0x0200, []byte{0, 0, 0, 0}), &messages.Data{NetworkAppearance: params.NewNetworkAppearance(0)}},
+		{"RoutingContext only", param(0x0006, []byte{0, 0, 0, 1}), &messages.Data{RoutingContext: params.NewRoutingContext(1)}},
+		{"CorrelationID only", param(0x0013, []byte{0, 0, 0, 7}), &messages.Data{CorrelationID: params.NewCorrelationID(7)}},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			parsed, err := messages.Parse(tt.raw)
-			if err != nil {
-				t.Skipf("not parseable: %v", err)
-			}
-			data, ok := parsed.(*messages.Data)
-			if !ok {
-				t.Fatalf("parsed %T, want *messages.Data", parsed)
-			}
-
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("panic on DATA without Protocol Data: %v", r)
+		t.Run(tt.name, func(testContext *testing.T) {
+			testContext.Run("parser", func(testContext *testing.T) {
+				parsed, err := messages.Parse(tt.raw)
+				if !errors.Is(err, messages.ErrMissingParameter) || parsed != nil {
+					testContext.Fatalf("Parse = %T, %v; want nil and ErrMissingParameter", parsed, err)
 				}
-			}()
-
-			conn, _ := newTestConn(t, StateASPActive, RoleSGP)
-			// A legal arrival stream, so the missing Protocol Data is what this
-			// exercises: DATA on stream 0 is refused earlier, by Section
-			// 1.4.7's rule 1, and would mask the guard under test.
-			conn.recvStream.Store(1)
-			conn.handleData(context.Background(), data, nil)
-
-			select {
-			case err := <-conn.errChan:
-				if !errors.Is(err, ErrMissingProtocolData) {
-					t.Errorf("error = %v, want ErrMissingProtocolData", err)
+			})
+			testContext.Run("handler", func(testContext *testing.T) {
+				association, _ := newTestConn(testContext, StateASPActive, RoleSGP)
+				association.cfg.ApplicationServers = association.cfg.ApplicationServers[:1]
+				setInventoryNetworkAppearance(&association.cfg.ApplicationServers, tt.data.NetworkAppearance)
+				association.recvStream.Store(1)
+				association.handleData(context.Background(), tt.data, nil)
+				select {
+				case err := <-association.errChan:
+					if !errors.Is(err, ErrMissingProtocolData) {
+						testContext.Errorf("error = %v, want ErrMissingProtocolData", err)
+					}
+				default:
+					testContext.Error("no error reported for DATA without Protocol Data")
 				}
-			default:
-				t.Error("no error reported for DATA without Protocol Data")
-			}
+			})
 		})
 	}
+	t.Run("present Protocol Data", func(testContext *testing.T) {
+		parsed, err := messages.Parse(param(0x0210, make([]byte, 12)))
+		if err != nil || parsed == nil {
+			testContext.Fatalf("valid Protocol Data rejected: %v", err)
+		}
+	})
 }
 
 // The Missing Parameter error must reach the wire with the RFC 4666 Section

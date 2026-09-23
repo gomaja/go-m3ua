@@ -1450,7 +1450,7 @@ func (c *Association) writeDestinationAuditReply(
 		if state.Congestion.LevelSet {
 			congestion = params.NewCongestionIndications(state.Congestion.Level)
 		}
-		if _, err := c.WriteSignal(messages.NewSignallingCongestion(
+		if _, err := c.writeControl(messages.NewSignallingCongestion(
 			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil, congestion, nil,
 		)); err != nil {
 			return err
@@ -1470,7 +1470,7 @@ func (c *Association) writeDestinationAuditReply(
 			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
 	}
 
-	_, err := c.WriteSignal(reply)
+	_, err := c.writeControl(reply)
 	return err
 }
 

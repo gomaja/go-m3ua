@@ -183,6 +183,17 @@ func parsePayload(payload []byte) (messageIdentity, error) {
 	return identity, nil
 }
 
+// misscopedError is a validation failure of scope rather than content: an
+// otherwise well-formed cohort message that arrived with another flow's
+// routing label, Network Appearance or Routing Context, or on another
+// association. The message is invalid either way; overload trials report
+// mis-scoped deliveries separately.
+type misscopedError string
+
+func (err misscopedError) Error() string {
+	return string(err)
+}
+
 func validateMessage(message receivedMessage, cohort string, seed uint64, associations int, workload workload, kind byte, reverse bool) (messageIdentity, error) {
 	identity, err := parsePayload(message.ProtocolData.Data)
 	if err != nil {
@@ -209,7 +220,7 @@ func validateMessage(message receivedMessage, cohort string, seed uint64, associ
 		return messageIdentity{}, errors.New("payload size does not match scheduled workload")
 	}
 	if int(identity.Association) >= associations || int(identity.Association) != int(identity.Flow)%associations {
-		return messageIdentity{}, errors.New("association assignment mismatch")
+		return messageIdentity{}, misscopedError("association assignment mismatch")
 	}
 	tuple := tupleFor(identity.Flow, identity.Association)
 	if reverse {
@@ -221,13 +232,13 @@ func validateMessage(message receivedMessage, cohort string, seed uint64, associ
 		message.ProtocolData.NetworkIndicator != tuple.NetworkIndicator ||
 		message.ProtocolData.MessagePriority != tuple.MessagePriority ||
 		message.ProtocolData.SignallingLinkSelection != tuple.SignallingLinkSelection {
-		return messageIdentity{}, errors.New("protocol data tuple mismatch")
+		return messageIdentity{}, misscopedError("protocol data tuple mismatch")
 	}
 	if !message.NetworkAppearanceSet || message.NetworkAppearance != testNetworkAppearance {
-		return messageIdentity{}, errors.New("network appearance mismatch")
+		return messageIdentity{}, misscopedError("network appearance mismatch")
 	}
 	if !message.RoutingContextSet || message.RoutingContext != tuple.RoutingContext {
-		return messageIdentity{}, errors.New("routing context mismatch")
+		return messageIdentity{}, misscopedError("routing context mismatch")
 	}
 	expected := buildPayload(messageIdentity{
 		Cohort:      cohort,

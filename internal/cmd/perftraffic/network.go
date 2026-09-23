@@ -20,6 +20,9 @@ const (
 	sctpNoDelay       = true
 	sctpSACKDelay     = uint32(0)
 	sctpSACKFrequency = uint32(1)
+	// dataQueueSize is each association's inbound DATA queue bound, the
+	// per-association DATA queue of performance budgets section 4.
+	dataQueueSize = 1024
 )
 
 func associationConfig(role string) *m3ua.AssociationConfig {
@@ -40,7 +43,7 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 		SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).
 		SetApplicationServers(applicationServers...)
 	config.HeartbeatInfo = &m3ua.HeartbeatInfo{Enabled: false}
-	config.DataQueueSize = 1024
+	config.DataQueueSize = dataQueueSize
 	return config
 }
 
@@ -51,14 +54,29 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 // control request.
 func newRunReceiverControl(ctx context.Context, config commandConfig) *receiverControl {
 	control := newReceiverControl(config.Associations, maxOutstanding)
+	control.enableSharedClock(config.SameHostClock)
 	control.cpuStatPath = config.CPUStatPath
 	control.driver = &reverseDriver{ctx: ctx, cpuStatPath: config.CPUStatPath}
 	control.reverseControl = config.PeerControl
+	if config.SSNM.enabled() {
+		clock, err := newMeasurementClock()
+		if err != nil {
+			control.fatal = "SSNM load clock: " + err.Error()
+			return control
+		}
+		control.ssnm = newSSNMGenerator(ctx, config, clock)
+	}
 	return control
 }
 
 func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
+	if routedMode(config.Mode) {
+		return runRoutedReceiver(ctx, config)
+	}
 	control := newRunReceiverControl(ctx, config)
+	if control.fatal != "" {
+		return runRecord{}, errors.New(control.fatal)
+	}
 	httpListener, err := net.Listen("tcp", config.ControlAddress)
 	if err != nil {
 		return runRecord{}, fmt.Errorf("startup control-bind: %w", err)
@@ -78,6 +96,7 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 		return runRecord{}, fmt.Errorf("startup endpoint: %w", err)
 	}
 	defer func() { _ = endpoint.Close() }()
+	control.ssnm.setReporter(endpoint)
 
 	fatal := make(chan error, 1)
 	if config.Transport == "dial" {
@@ -145,6 +164,7 @@ func dialAndRead(ctx context.Context, endpoint *m3ua.Endpoint, config commandCon
 			_ = association.Close()
 			return fmt.Errorf("dial association %d: %w", index, err)
 		}
+		control.trackAssociation(index, association)
 		control.registerReverseAssociation(association)
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		go readAssociation(ctx, index, association, control, fatal)
@@ -159,6 +179,7 @@ func acceptAndRead(ctx context.Context, listener *m3ua.Listener, associations in
 			nonblockingError(fatal, fmt.Errorf("accept association %d: %w", index, err))
 			return
 		}
+		control.trackAssociation(index, association)
 		control.registerReverseAssociation(association)
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		go readAssociation(ctx, index, association, control, fatal)

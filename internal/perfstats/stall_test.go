@@ -47,15 +47,15 @@ func TestDetectedStallIsInconclusiveAheadOfEveryOtherGate(testContext *testing.T
 		name     string
 		evidence RunEvidence
 	}{
-		{name: "otherwise a clean pass", evidence: RunEvidence{FixtureValid: true, Interval: interval(-1, 0), Stall: stalled()}},
-		{name: "otherwise fixture-invalid", evidence: RunEvidence{FixtureValid: false, Interval: interval(-1, 0), Stall: stalled()}},
+		{name: "otherwise a clean pass", evidence: RunEvidence{FixtureValid: true, Trend: trend(-1, 0, 250), Stall: stalled()}},
+		{name: "otherwise fixture-invalid", evidence: RunEvidence{FixtureValid: false, Trend: trend(-1, 0, 250), Stall: stalled()}},
 		{name: "otherwise a capped submission failure", evidence: RunEvidence{
-			FixtureValid: true, Interval: interval(-1, 0), Counters: RunCounters{Capped: 4231}, Stall: stalled(),
+			FixtureValid: true, Trend: trend(-1, 0, 250), Counters: RunCounters{Capped: 4231}, Stall: stalled(),
 		}},
 		{name: "otherwise a missing delivery failure", evidence: RunEvidence{
-			FixtureValid: false, Interval: interval(1.5, 3), Counters: RunCounters{Missing: 4231}, Stall: stalled(),
+			FixtureValid: false, Trend: trend(251, 300, 250), Counters: RunCounters{Missing: 4231}, Stall: stalled(),
 		}},
-		{name: "otherwise a growing backlog", evidence: RunEvidence{FixtureValid: true, Interval: interval(1.5, 3), Stall: stalled()}},
+		{name: "otherwise a growing backlog", evidence: RunEvidence{FixtureValid: true, Trend: trend(251, 300, 250), Stall: stalled()}},
 		{name: "otherwise missing backlog evidence", evidence: RunEvidence{FixtureValid: true, Stall: stalled()}},
 	}
 	for _, test := range tests {
@@ -79,10 +79,10 @@ func TestStallEvidenceIsEchoedIntoEveryDecision(testContext *testing.T) {
 		evidence RunEvidence
 		want     Decision
 	}{
-		{name: "pass", evidence: RunEvidence{FixtureValid: true, Interval: interval(-1, 0), Stall: unstalled()}, want: Pass},
-		{name: "fixture-invalid failure", evidence: RunEvidence{FixtureValid: false, Interval: interval(-1, 0), Stall: unstalled()}, want: Fail},
-		{name: "growing failure", evidence: RunEvidence{FixtureValid: true, Interval: interval(1.5, 3), Stall: unstalled()}, want: Fail},
-		{name: "unresolved interval", evidence: RunEvidence{FixtureValid: true, Interval: interval(-3.4, 3.53), Stall: unstalled()}, want: Inconclusive},
+		{name: "pass", evidence: RunEvidence{FixtureValid: true, Trend: trend(-1, 0, 250), Stall: unstalled()}, want: Pass},
+		{name: "fixture-invalid failure", evidence: RunEvidence{FixtureValid: false, Trend: trend(-1, 0, 250), Stall: unstalled()}, want: Fail},
+		{name: "growing failure", evidence: RunEvidence{FixtureValid: true, Trend: trend(251, 300, 250), Stall: unstalled()}, want: Fail},
+		{name: "unresolved trend", evidence: RunEvidence{FixtureValid: true, Trend: trend(240, 260, 250), Stall: unstalled()}, want: Inconclusive},
 	}
 	for _, test := range tests {
 		testContext.Run(test.name, func(testContext *testing.T) {
@@ -100,7 +100,7 @@ func TestStallEvidenceIsEchoedIntoEveryDecision(testContext *testing.T) {
 // A run whose freedom from stalls was never observed cannot be credited with a
 // sustained rate.
 func TestMissingStallEvidenceCannotPass(testContext *testing.T) {
-	decision := DecideRun(RunEvidence{FixtureValid: true, Interval: interval(-1, 0)})
+	decision := DecideRun(RunEvidence{FixtureValid: true, Trend: trend(-1, 0, 250)})
 	if decision.Decision != Inconclusive || decision.Reason != StallEvidenceMissingReason {
 		testContext.Fatalf("DecideRun() = %+v, want inconclusive with %q", decision, StallEvidenceMissingReason)
 	}
@@ -117,9 +117,9 @@ func TestMissingStallEvidenceDoesNotMaskDemonstratedFailures(testContext *testin
 		evidence RunEvidence
 		reason   string
 	}{
-		{name: "invalid fixture", evidence: RunEvidence{FixtureValid: false, Interval: interval(-1, 0)}, reason: FixtureInvalidReason},
+		{name: "invalid fixture", evidence: RunEvidence{FixtureValid: false, Trend: trend(-1, 0, 250)}, reason: FixtureInvalidReason},
 		{name: "counted failure", evidence: RunEvidence{
-			FixtureValid: true, Interval: interval(-1, 0), Counters: RunCounters{Capped: 1},
+			FixtureValid: true, Trend: trend(-1, 0, 250), Counters: RunCounters{Capped: 1},
 		}, reason: DeliveryFailuresReason},
 	}
 	for _, test := range tests {
@@ -135,7 +135,7 @@ func TestMissingStallEvidenceDoesNotMaskDemonstratedFailures(testContext *testin
 // The decision is reported and encoded elsewhere. Echoing the caller's own
 // pointer would let either side alter the other's record of the run.
 func TestEchoedStallEvidenceIsACopy(testContext *testing.T) {
-	evidence := RunEvidence{FixtureValid: true, Interval: interval(-1, 0), Stall: unstalled()}
+	evidence := RunEvidence{FixtureValid: true, Trend: trend(-1, 0, 250), Stall: unstalled()}
 	decision := DecideRun(evidence)
 	if decision.Stall == nil {
 		testContext.Fatalf("DecideRun() = %+v, want the stall echoed", decision)
