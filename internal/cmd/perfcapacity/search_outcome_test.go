@@ -103,22 +103,132 @@ func TestWarmupWithoutDemonstratedOverloadIsNotEvidence(testContext *testing.T) 
 	}
 }
 
-// A warm-up that failed for a reason unrelated to the offered rate, with every
-// message delivered and no send blocked, says nothing about the rate. The
-// record here is a real loss-free cohort whose run then failed after it.
+// A warm-up that ran its whole schedule and failed only its own validity rules,
+// but with every message delivered and no send blocked, says nothing about the
+// rate. The record here is a real loss-free cohort relabelled as such a warm-up.
 func TestWarmupFailureWithoutLossOrStallIsNotEvidence(testContext *testing.T) {
-	for _, reason := range []string{"prepare shared clock: peer clock domain or request envelope mismatch", "reset receiver: connection refused"} {
-		testContext.Run(reason, func(testContext *testing.T) {
-			record := searchRecord(testContext, "search-80000-measurement.json")
-			record["phase"] = "warmup"
-			record["verdict"] = "invalid"
-			record["error"] = reason
+	record := searchRecord(testContext, "search-80000-measurement.json")
+	record["phase"] = "warmup"
+	record["verdict"] = "invalid"
+	record["error"] = warmupOverloadError
+	status, decoded := runRequest(testContext, searchRequest(testContext, record))
+	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "without demonstrated loss or a stall") {
+		testContext.Fatalf("status %d error %q, want a loss-free failed warm-up rejected", status, decoded.Error)
+	}
+}
+
+// Loss counts alone do not show that the rate was not sustained: an abort for
+// another reason also strands messages. Only a warm-up that offered its whole
+// schedule, had no fatal read or control failure and failed only its own
+// validity rules is evidence against the rate.
+func TestWarmupAbortedForAnotherReasonIsNotEvidence(testContext *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"control request failure": func(run map[string]any) { run["error"] = "reset receiver: connection refused" },
+		"joined poll failure": func(run map[string]any) {
+			run["error"] = "warmup did not drain cleanly: progress request failed\ncohort is invalid; inspect machine-readable reasons"
+		},
+		"receiver read failure": func(run map[string]any) {
+			run["receiver"].(map[string]any)["fatal_error"] = "M3UA association not established"
+		},
+		"sender fatal failure": func(run map[string]any) {
+			run["sender"].(map[string]any)["fatal_error"] = "write deadline exceeded"
+		},
+		"schedule cut short": func(run map[string]any) {
+			sender := run["sender"].(map[string]any)
+			sender["scheduled"] = sender["expected"].(float64) - 1
+		},
+	} {
+		testContext.Run(name, func(testContext *testing.T) {
+			record := searchRecord(testContext, "search-160000-warmup.json")
+			mutate(record)
 			status, decoded := runRequest(testContext, searchRequest(testContext, record))
-			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "without demonstrated loss or a stall") {
-				testContext.Fatalf("status %d error %q, want a loss-free failed warm-up rejected", status, decoded.Error)
+			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "probe 4") || !strings.Contains(decoded.Error, "not probe evidence") {
+				testContext.Fatalf("status %d error %q, want the aborted warm-up rejected", status, decoded.Error)
 			}
 		})
 	}
+}
+
+// The reverse direction of a bidirectional warm-up is checked like the forward
+// one: loss or a stall in either direction is evidence against the rate.
+func TestWarmupOverloadIsDetectedInEitherDirection(testContext *testing.T) {
+	count := func(value uint64) *uint64 { return &value }
+	record := func(capped, missing uint64) *fixtureEvidence {
+		return &fixtureEvidence{Scheduled: count(100), Expected: count(100), Capped: count(capped), Delivery: &deliveryEvidence{Missing: count(missing)}}
+	}
+	phase, verdict := "warmup", "invalid"
+	for _, scenario := range []struct {
+		name             string
+		forward, reverse *fixtureEvidence
+		accepted         bool
+	}{
+		{"reverse loss", record(0, 0), record(0, 7), true},
+		{"reverse cap refusals", record(0, 0), record(3, 3), true},
+		{"forward loss", record(2, 2), record(0, 0), true},
+		{"neither", record(0, 0), record(0, 0), false},
+	} {
+		cohort := &fixtureCohort{Phase: &phase, Verdict: &verdict, Error: warmupOverloadError,
+			Sender: scenario.forward, Receiver: &fixtureEvidence{}, ReverseSender: scenario.reverse, ReverseReceiver: &fixtureEvidence{}}
+		warmup, err := cohortPhase(cohort)
+		if (err == nil) != scenario.accepted || err == nil && !warmup {
+			testContext.Errorf("%s: warmup=%t err=%v, want accepted=%t", scenario.name, warmup, err, scenario.accepted)
+		}
+	}
+}
+
+// A validation repetition whose warm-up failed from overload never reached a
+// full run at the selected rate. The repetition path decides it like any run,
+// so it is a failed repetition (or not demonstrated with a stall), never a
+// pass: DecideCapacity requires every repetition to pass.
+func TestFailedWarmupRepetitionIsNeverAPass(testContext *testing.T) {
+	for name, maximumSend := range map[string]float64{"loss": 4_000_000, "loss and stall": 1_030_000_000} {
+		warmup := searchRecord(testContext, "search-160000-warmup.json")
+		warmup["sender"].(map[string]any)["send_duration"].(map[string]any)["max_ns"] = maximumSend
+		fixture, err := fixtureRunFromJSON(mustJSON(testContext, warmup), 160000)
+		if err != nil {
+			testContext.Fatalf("%s: %v", name, err)
+		}
+		decision := decideFixtureRun(fixture, 160000)
+		if decision.Phase != "warmup" || decision.Decision == string(perfstats.Pass) {
+			testContext.Fatalf("%s: failed warm-up repetition decided %+v, want a non-passing warm-up", name, decision)
+		}
+		capacity := perfstats.DecideCapacity(bracketedAt(testContext, 160000), []int{160000, 160000, 160000, 160000, 160000},
+			[]perfstats.Decision{perfstats.Pass, perfstats.Pass, perfstats.Pass, perfstats.Pass, perfstats.Decision(decision.Decision)})
+		if capacity.Decision == perfstats.Pass {
+			testContext.Fatalf("%s: campaign %+v passed with a failed warm-up repetition", name, capacity)
+		}
+	}
+}
+
+// bracketedAt returns a search bracketed with lower bound rate.
+func bracketedAt(testContext *testing.T, rate int) *perfstats.CapacitySearch {
+	testContext.Helper()
+	search, err := perfstats.NewCapacitySearch(rate, 2*rate, 24)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	for {
+		next, running := search.NextRate()
+		if !running {
+			return search
+		}
+		outcome := perfstats.ProbeFailing
+		if next <= rate {
+			outcome = perfstats.ProbePassing
+		}
+		if err := search.Record(next, outcome); err != nil {
+			testContext.Fatal(err)
+		}
+	}
+}
+
+func mustJSON(testContext *testing.T, value any) json.RawMessage {
+	testContext.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	return encoded
 }
 
 // A campaign may meet its first failed warm-up before any measurement fixes
@@ -182,6 +292,12 @@ func TestSearchOutcomeSeparatesRateEvidenceFromMissingEvidence(testContext *test
 		{probeDecision{Decision: "inconclusive", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{
 			direction(perfstats.Pass, ""), direction(perfstats.Pass, "")}},
 			perfstats.ProbeInconclusive},
+		// A demonstrated failure in one direction with a stall in the other is
+		// decided stall-first (inconclusive) at the cohort level and so is not
+		// demonstrated: it still bounds the bracket from above.
+		{probeDecision{Decision: "inconclusive", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{
+			direction(perfstats.Fail, perfstats.DeliveryFailuresReason), direction(perfstats.Inconclusive, perfstats.TransportStallReason)}},
+			perfstats.ProbeNotDemonstrated},
 		{probeDecision{Decision: "surprise"}, perfstats.ProbeInconclusive},
 	} {
 		if got := searchOutcome(scenario.decision); got != scenario.want {

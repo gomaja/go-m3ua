@@ -1029,11 +1029,19 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	}, nil
 }
 
+// warmupOverloadError is the whole error perftraffic reports when a warm-up
+// cohort ran its complete offered schedule and then failed only its own
+// loss-free validity rules. Any other failure — a receiver read failure, a
+// failed control request, a clock or reset error — joins further text or
+// fails before the schedule completes.
+const warmupOverloadError = "warmup did not drain cleanly: cohort is invalid; inspect machine-readable reasons"
+
 // cohortPhase accepts a measurement cohort, or a warm-up cohort whose warm-up
-// failed with demonstrated loss or a stall: the probe rate was not sustained
-// long enough to reach measurement, which is evidence against that rate. A
-// warm-up that did not fail, or failed without loss or a stall, is not probe
-// evidence.
+// failed because the offered rate was not sustained: the cohort ran its whole
+// schedule with no fatal read or control failure, failed only its own validity
+// rules, and shows outstanding-cap refusals, missing deliveries or a stall.
+// That is evidence against the rate. A warm-up that did not fail, or failed
+// for any other reason, says nothing about the rate and is not probe evidence.
 func cohortPhase(cohort *fixtureCohort) (bool, error) {
 	if cohort.Phase == nil {
 		return false, errors.New("phase is required")
@@ -1048,19 +1056,32 @@ func cohortPhase(cohort *fixtureCohort) (bool, error) {
 	if cohort.Verdict == nil || *cohort.Verdict != "invalid" || cohort.Error == "" {
 		return false, errors.New("a warmup cohort is probe evidence only when its warm-up failed")
 	}
+	if cohort.Error != warmupOverloadError {
+		return false, errors.New("a warmup that failed for a reason other than its own validity is not probe evidence")
+	}
+	for _, record := range []*fixtureEvidence{cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver} {
+		if record != nil && record.FatalError != "" {
+			return false, errors.New("a warmup with a fatal read or control failure is not probe evidence")
+		}
+	}
+	overloaded := false
 	for _, record := range []*fixtureEvidence{cohort.Sender, cohort.ReverseSender} {
 		if record == nil {
 			continue
+		}
+		if record.Scheduled == nil || record.Expected == nil || *record.Scheduled != *record.Expected {
+			return false, errors.New("a warmup that did not offer its whole schedule is not probe evidence")
 		}
 		stalled := record.SendDuration != nil && record.SendDuration.Max != nil &&
 			(perfstats.StallObservation{LongestSend: *record.SendDuration.Max}).Stalled()
 		lost := record.Capped != nil && *record.Capped > 0 ||
 			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0
-		if stalled || lost {
-			return true, nil
-		}
+		overloaded = overloaded || stalled || lost
 	}
-	return false, errors.New("a failed warmup without demonstrated loss or a stall is not probe evidence")
+	if !overloaded {
+		return false, errors.New("a failed warmup without demonstrated loss or a stall is not probe evidence")
+	}
+	return true, nil
 }
 
 func sameBidirectionalWorkload(forward, reverse workloadIdentity) bool {

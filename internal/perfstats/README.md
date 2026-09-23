@@ -187,11 +187,21 @@ Each probe contributes one of four outcomes:
   rate and ends the search.
 
 `no-passing-rate` is a failure when every probe failed, and inconclusive when
-any probe was only not demonstrated. A probe whose warm-up failed with
-outstanding-cap refusals, missing deliveries or a stall never reached
-measurement; its failed warm-up cohort is accepted as that probe's evidence and
-can only fail or be not demonstrated. A warm-up that failed without such loss,
-or did not fail, is not probe evidence.
+any probe was only not demonstrated.
+
+A probe whose warm-up could not sustain the rate never reaches measurement; its
+failed warm-up cohort is accepted as that probe's evidence, and it can only fail
+or be not demonstrated. It qualifies only when the warm-up offered its whole
+schedule, no record carries a fatal read or control failure, the only error is
+the fixture's own validity failure, and the sender shows outstanding-cap
+refusals, missing deliveries or a stall. Loss counts alone are not enough: an
+abort for another reason, such as a failed control request or a receiver read
+failure, also strands messages but says nothing about the rate, and is rejected
+as invalid input. The same failed warm-up in a validation repetition is a failed
+repetition, never a pass. Campaign identity compares a warm-up cohort with the
+measurement workload in every field except its duration; the fixture runs its
+warm-up with the measurement's drain, outstanding limit, payload and
+instrumentation, and a warm-up that differed in any of them would be rejected.
 
 The CLI at `internal/cmd/perfcapacity` reads one strict JSON request with the
 search parameters, per-run fixture sender records in execution order, and the
