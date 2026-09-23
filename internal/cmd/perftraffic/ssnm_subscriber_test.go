@@ -156,6 +156,50 @@ func TestSSNMSubscriberLocksOnAfterResync(testContext *testing.T) {
 	if failures := positionFailures("", record, 1); len(failures) != 0 {
 		testContext.Fatalf("position failures %v", failures)
 	}
+	if failures := pausedSubscriberFailures(record, cleanPause(), 1); len(failures) != 0 {
+		testContext.Fatalf("clean resync failures %v", failures)
+	}
+}
+
+// cleanPause is the F3 evidence of a pause that overflowed at the cap and
+// validated its one resynchronized partition.
+func cleanPause() *ssnmPauseRecord {
+	return &ssnmPauseRecord{ContinuityLossObserved: true, QueueLimit: 256, QueuedAtLoss: 256, CountCapEnforced: true, SnapshotValidated: 1}
+}
+
+// After a successful Resync and lock-on the paused subscriber must be
+// lossless again: a duplicate or a gap after the lock-on fails F3.
+func TestSSNMSubscriberAfterResyncMustStayLossless(testContext *testing.T) {
+	plan := ssnmPlan{records: 16, apcs: 1}
+	preload := plan.preloadMessages()
+	anchor := int64(1_000_000_000)
+	resumed := preload + 25
+	received := anchor + ssnmScheduled(1000, resumed-preload) + int64(2*time.Millisecond)
+	for name, positions := range map[string][]uint64{
+		"duplicate": {resumed, resumed + 1, resumed + 1, resumed + 2},
+		"gap":       {resumed, resumed + 1, resumed + 3},
+	} {
+		testContext.Run(name, func(testContext *testing.T) {
+			subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4)
+			subscriber.pause = &ssnmPauseRecord{}
+			subscriber.armReceipts(anchor, 0, 0, false)
+			for position := uint64(0); position < preload+10; position++ {
+				subscriber.observe(planEvent(plan, testPartition, position), 0)
+			}
+			subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMContinuityLostEvent, ContinuityLost: true}, 0)
+			subscriber.captureSnapshot(snapshotAfter(plan, testPartition, resumed))
+			for _, position := range positions {
+				subscriber.observe(planEvent(plan, testPartition, position), received)
+			}
+			record := subscriber.record(positions[len(positions)-1] + 1)
+			if subscriber.pause.SnapshotValidated != 1 || len(subscriber.pause.LockedOnPositions) != 1 || subscriber.pause.LockedOnPositions[0] != resumed {
+				testContext.Fatalf("lock-on did not succeed: %+v", subscriber.pause)
+			}
+			if failures := pausedSubscriberFailures(record, cleanPause(), 1); len(failures) == 0 {
+				testContext.Fatalf("post-resync %s not reported: %+v", name, record)
+			}
+		})
+	}
 }
 
 func TestSSNMSubscriberRejectsStaleSnapshot(testContext *testing.T) {

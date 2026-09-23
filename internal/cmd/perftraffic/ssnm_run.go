@@ -69,15 +69,16 @@ type ssnmSenderRun struct {
 	plan         ssnmPlan
 	associations int
 	drain        time.Duration
-	endpoint     *m3ua.Endpoint
-	clock        measurementClock
-	peerControl  string
-	limits       m3ua.SSNMStateConfig
-	cancel       context.CancelFunc
-	group        sync.WaitGroup
-	subscribers  []*ssnmSubscriber
-	pauseAt      atomic.Int64
-	closeOnce    sync.Once
+	// knowledge reads the ASP store: Endpoint.SSNMKnowledge in a run.
+	knowledge   func() m3ua.SSNMSnapshot
+	clock       measurementClock
+	peerControl string
+	limits      m3ua.SSNMStateConfig
+	cancel      context.CancelFunc
+	group       sync.WaitGroup
+	subscribers []*ssnmSubscriber
+	pauseAt     atomic.Int64
+	closeOnce   sync.Once
 
 	mutex       sync.Mutex
 	anchor      int64
@@ -114,7 +115,7 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 		plan:         ssnmPlan{records: config.SSNM.Records, apcs: config.SSNM.APCs},
 		associations: config.Associations,
 		drain:        config.Drain,
-		endpoint:     endpoint,
+		knowledge:    endpoint.SSNMKnowledge,
 		clock:        clock,
 		peerControl:  config.PeerControl,
 		limits:       ssnmStoreLimits(config.SSNM, config.Associations),
@@ -302,7 +303,9 @@ func (run *ssnmSenderRun) close() {
 	run.closeOnce.Do(func() {
 		run.cancel()
 		for _, subscriber := range run.subscribers {
-			_ = subscriber.subscription.Close()
+			if subscriber.subscription != nil {
+				_ = subscriber.subscription.Close()
+			}
 		}
 		run.group.Wait()
 		// One stderr line keeps the subscribers' progress even when a cohort
@@ -432,7 +435,7 @@ func (run *ssnmSenderRun) finish(ctx context.Context, measurement *cohortResult)
 	}
 	run.close()
 
-	knowledge := run.endpoint.SSNMKnowledge()
+	knowledge := run.knowledge()
 	record.Store = &ssnmStoreRecord{
 		Limits:                limitsRecord(run.limits),
 		RecordsAtEnd:          ssnmStoreRecords(knowledge),
