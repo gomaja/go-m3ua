@@ -298,6 +298,13 @@ func TestSearchOutcomeSeparatesRateEvidenceFromMissingEvidence(testContext *test
 		{probeDecision{Decision: "inconclusive", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{
 			direction(perfstats.Fail, perfstats.DeliveryFailuresReason), direction(perfstats.Inconclusive, perfstats.TransportStallReason)}},
 			perfstats.ProbeNotDemonstrated},
+		// An accepted warm-up whose other direction lacks evidence is still
+		// evidence against the rate: it cannot end the search.
+		{probeDecision{Decision: "inconclusive", Phase: "warmup", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{
+			direction(perfstats.Inconclusive, perfstats.TransportStallReason), direction(perfstats.Inconclusive, perfstats.BacklogEvidenceMissingReason)}},
+			perfstats.ProbeNotDemonstrated},
+		{probeDecision{Decision: "inconclusive", Phase: "warmup", Reason: perfstats.BacklogEvidenceMissingReason}, perfstats.ProbeNotDemonstrated},
+		{probeDecision{Decision: "fail", Phase: "warmup", Reason: perfstats.DeliveryFailuresReason}, perfstats.ProbeFailing},
 		{probeDecision{Decision: "surprise"}, perfstats.ProbeInconclusive},
 	} {
 		if got := searchOutcome(scenario.decision); got != scenario.want {

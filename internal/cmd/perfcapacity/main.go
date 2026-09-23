@@ -239,6 +239,12 @@ func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
 	case perfstats.Fail:
 		return perfstats.ProbeFailing
 	}
+	// An accepted warm-up already showed that the offered rate was not
+	// sustained (cohortPhase), so whatever else a direction lacks, it can only
+	// fail or be not demonstrated.
+	if decision.Phase == "warmup" {
+		return perfstats.ProbeNotDemonstrated
+	}
 	reasons := []string{decision.Reason}
 	if len(decision.Directions) > 1 {
 		reasons = reasons[:0]
