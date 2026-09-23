@@ -29,6 +29,7 @@ const DefaultRecoveryQueueMessages
 const DefaultRecoveryQueueTotalBytes
 const DefaultRecoveryQueueTotalMessages
 const DefaultRecoveryTimer
+const DefaultSSNMSubscriptionQueueBytes
 const DefaultSSNMSubscriptionQueueSize
 const DefaultTAck
 const DefaultTAckRetries
@@ -499,6 +500,7 @@ field SSNMStateConfig.MaxRecords
 field SSNMStateConfig.MaxRecordsPerPartition
 field SSNMStateConfig.MaxRecordsPerPeer
 field SSNMStateConfig.MaxSubscribers
+field SSNMStateConfig.SubscriptionQueueBytes
 field SSNMStateConfig.SubscriptionQueueSize
 field SignallingCongestionRequest.ConcernedDestination
 field SignallingCongestionRequest.ConcernedDestinationSet

@@ -39,6 +39,9 @@ const (
 	// DefaultSSNMSubscriptionQueueSize bounds the deltas one subscription
 	// retains while the application is not reading them.
 	DefaultSSNMSubscriptionQueueSize = 256
+	// DefaultSSNMSubscriptionQueueBytes bounds the accounted bytes queued by
+	// one subscription, independently of its event-count limit.
+	DefaultSSNMSubscriptionQueueBytes = 1 << 20
 )
 
 // Accounted retention of one stored item. The values are deliberately fixed
@@ -76,6 +79,17 @@ type SSNMStateConfig struct {
 	// the application is not reading them. Overflow is reported as continuity
 	// loss and cleared only by a successful Resync.
 	SubscriptionQueueSize int
+	// SubscriptionQueueBytes bounds the portable accounted payload of queued
+	// events. Zero selects DefaultSSNMSubscriptionQueueBytes; a positive limit
+	// must be at least 512 bytes. Accounting charges 512 bytes per event,
+	// 8 per report destination, 256 per retained destination state, 4 per
+	// Routing Context in the report and both state dimensions, and the byte
+	// lengths of Reason and the event/report partition identity strings.
+	// Snapshot results, the fixed continuity-loss marker, queue backing-array
+	// capacity, and allocator overhead are outside this accounting. It is not
+	// a Go heap or RSS limit. Either queue limit losing continuity requires
+	// Resync; successfully queued events remain deliverable first.
+	SubscriptionQueueBytes int
 	// MaxAffectedPointCodes bounds the Affected Point Codes accepted from one
 	// SSNM message. The count is taken from the encoded parameter before the
 	// point codes are expanded, so an oversized message costs no allocation
@@ -478,6 +492,7 @@ func resolveSSNMStateConfig(config *SSNMStateConfig) (SSNMStateConfig, error) {
 		{"MaxPartitions", &resolved.MaxPartitions},
 		{"MaxSubscribers", &resolved.MaxSubscribers},
 		{"SubscriptionQueueSize", &resolved.SubscriptionQueueSize},
+		{"SubscriptionQueueBytes", &resolved.SubscriptionQueueBytes},
 		{"MaxAffectedPointCodes", &resolved.MaxAffectedPointCodes},
 	}
 	for _, field := range fields {
@@ -499,6 +514,7 @@ func resolveSSNMStateConfig(config *SSNMStateConfig) (SSNMStateConfig, error) {
 		{&resolved.MaxPartitions, DefaultMaxSSNMPartitions},
 		{&resolved.MaxSubscribers, DefaultMaxSSNMSubscribers},
 		{&resolved.SubscriptionQueueSize, DefaultSSNMSubscriptionQueueSize},
+		{&resolved.SubscriptionQueueBytes, DefaultSSNMSubscriptionQueueBytes},
 		{&resolved.MaxAffectedPointCodes, DefaultMaxAffectedPointCodesPerSSNM},
 	}
 	for _, field := range defaults {
@@ -539,6 +555,10 @@ func resolveSSNMStateConfig(config *SSNMStateConfig) (SSNMStateConfig, error) {
 		return SSNMStateConfig{}, fmt.Errorf(
 			"%w: %d bytes cannot hold one partition and one record, which need %d",
 			ErrInvalidSSNMStateConfig, resolved.MaxBytes, minimum)
+	}
+	if resolved.SubscriptionQueueBytes < ssnmEventBaseBytes {
+		return SSNMStateConfig{}, fmt.Errorf("%w: subscription byte budget %d cannot hold one event, which needs at least %d",
+			ErrInvalidSSNMStateConfig, resolved.SubscriptionQueueBytes, ssnmEventBaseBytes)
 	}
 	return resolved, nil
 }
