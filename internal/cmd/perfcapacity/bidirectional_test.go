@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
@@ -52,16 +53,10 @@ func bidirectionalDeliveryJSON(expected int) string {
 
 func bidirectionalSenderJSON(rate int, reverse bool, lower, upper float64) string {
 	expected := rate * 120
-	status := "unresolved"
-	if lower > 0 {
-		status = "increase-demonstrated"
-	} else if upper <= 0 {
-		status = "nonincrease-demonstrated"
-	}
-	return fmt.Sprintf(`{"side":"sender",%s,"expected":%d,"scheduled":%d,"sent":%d,"submitted":%d,"send_errors":0,"capped":0,"outstanding_at_window_start":0,"outstanding_at_window_end":0,"outstanding_after_drain":0,"measurement_duration_ns":%d,"drain_duration_ns":1000000,%s,%s,%s,"fixture_verdict":"pass","verdict":"inconclusive",%s,"validated_per_second":%d,"sender_window":{"status":"bounded","duration_ns":%d,"delivered_lower":%d,"delivered_upper":%d,"outstanding_lower":0,"outstanding_upper":0,"rate_lower":%d,"rate_upper":%d,"backlog_change":{"status":%q,"sample_count":120,"mean_change_lower":%g,"mean_change_upper":%g}}}`,
+	return fmt.Sprintf(`{"side":"sender",%s,"expected":%d,"scheduled":%d,"sent":%d,"submitted":%d,"send_errors":0,"capped":0,"outstanding_at_window_start":0,"outstanding_at_window_end":0,"outstanding_after_drain":0,"measurement_duration_ns":%d,"drain_duration_ns":1000000,%s,%s,%s,"fixture_verdict":"pass","verdict":"inconclusive",%s,"validated_per_second":%d,"sender_window":{"status":"bounded","duration_ns":%d,"delivered_lower":%d,"delivered_upper":%d,"outstanding_lower":0,"outstanding_upper":0,"rate_lower":%d,"rate_upper":%d,%s}}`,
 		bidirectionalSpecJSON(rate, reverse), expected, expected, expected, expected, bidirectionalDuration,
 		bidirectionalDeliveryJSON(expected), sendDurationJSON(262144), manifestJSON()+`,"negotiated_outbound_streams":[8,8,8,8,8,8,8,8]`, bidirectionalClockEvidenceJSON(true),
-		rate, bidirectionalDuration, expected, expected, rate, rate, status, lower, upper)
+		rate, bidirectionalDuration, expected, expected, rate, rate, backlogWindowJSON(uint64(rate), time.Duration(bidirectionalDuration), lower, upper))
 }
 
 func bidirectionalReceiverJSON(rate int, reverse bool) string {
@@ -529,8 +524,10 @@ func setUnavailableSenderWindow(sender map[string]any) {
 	for _, field := range []string{"delivered_lower", "delivered_upper", "outstanding_lower", "outstanding_upper", "rate_lower", "rate_upper"} {
 		window[field] = float64(0)
 	}
-	window["backlog_change"] = map[string]any{
-		"status": "", "sample_count": float64(0), "mean_change_lower": float64(0), "mean_change_upper": float64(0),
+	delete(window, "samples")
+	window["backlog_trend"] = map[string]any{
+		"status": "", "sample_count": float64(0), "window_ns": float64(0), "floor": float64(0), "lag": float64(0),
+		"slope_lower": float64(0), "slope_upper": float64(0), "growth_lower": float64(0), "growth_upper": float64(0),
 	}
 }
 
@@ -572,8 +569,8 @@ func TestBidirectionalUnavailableWindowRejectsContradictions(testContext *testin
 func TestBidirectionalRejectsContradictoryReverseBacklogStatus(testContext *testing.T) {
 	mutated := mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, -1, 0, -2, -1), func(cohort map[string]any) {
 		reverse := cohort["reverse_sender"].(map[string]any)
-		backlog := reverse["sender_window"].(map[string]any)["backlog_change"].(map[string]any)
-		backlog["status"] = "increase-demonstrated"
+		backlog := reverse["sender_window"].(map[string]any)["backlog_trend"].(map[string]any)
+		backlog["status"] = "growing"
 	})
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, mutated)
 	status, _ := runRequest(testContext, input)
@@ -700,10 +697,10 @@ func TestCampaignIdentityDistinguishesSharedClockInstrumentation(testContext *te
 		testContext.Fatalf("instrumentation identities both equal %q", httpWorkload.Instrumentation)
 	}
 	var campaign campaignIdentity
-	if err := campaign.add(runIdentity{workload: httpWorkload}); err != nil {
+	if err := campaign.add(runIdentity{workload: httpWorkload}, false); err != nil {
 		testContext.Fatal(err)
 	}
-	if err := campaign.add(runIdentity{workload: sharedWorkload}); err == nil {
+	if err := campaign.add(runIdentity{workload: sharedWorkload}, false); err == nil {
 		testContext.Fatal("campaign mixed HTTP and shared-clock instrumentation")
 	}
 }

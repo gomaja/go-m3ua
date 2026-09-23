@@ -243,6 +243,11 @@ var (
 	// exhausted the bounded mandatory-control queue. The association is closed.
 	ErrNotificationQueueFull = errors.New("mandatory control queue full")
 
+	// ErrControlWriteTimeout reports a message the library wrote on its own
+	// behalf that waited for SCTP send-buffer space longer than
+	// AssociationConfig.ControlWriteTimeout. The association is closed.
+	ErrControlWriteTimeout = errors.New("control message could not be written within the control write timeout")
+
 	// ErrIndicationQueueFull reports an association whose application stopped
 	// consuming lossless Layer Management indications. The association is
 	// closed rather than silently losing a state or management event.
@@ -870,7 +875,7 @@ func (c *Association) handleErrors(e error) error {
 		return e
 	}
 
-	if _, err := c.WriteSignal(res); err != nil {
+	if _, err := c.writeControl(res); err != nil {
 		return err
 	}
 

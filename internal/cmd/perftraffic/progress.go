@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
 
 // The sampler takes one observation per second and one more just before the
@@ -23,12 +25,13 @@ const (
 )
 
 type receiverProgress struct {
-	Spec       runSpec              `json:"spec"`
-	Generation uint64               `json:"generation"`
-	Phase      receiverPhase        `json:"phase"`
-	Delivery   ledgerSnapshot       `json:"delivery"`
-	FatalError string               `json:"fatal_error,omitempty"`
-	Clock      *sharedClockSnapshot `json:"shared_clock,omitempty"`
+	Spec       runSpec                   `json:"spec"`
+	Generation uint64                    `json:"generation"`
+	Phase      receiverPhase             `json:"phase"`
+	Delivery   ledgerSnapshot            `json:"delivery"`
+	FatalError string                    `json:"fatal_error,omitempty"`
+	Clock      *sharedClockSnapshot      `json:"shared_clock,omitempty"`
+	Overload   *receiverOverloadProgress `json:"overload,omitempty"`
 }
 
 func stopFailedProgress(baseURL string, specification runSpec, observation progressObservation, cause error) (runRecord, runRecord, error) {
@@ -50,6 +53,10 @@ type progressObservation struct {
 	Snapshot *receiverProgress   `json:"snapshot,omitempty"`
 	Error    string              `json:"error,omitempty"`
 	Clock    *sharedClockRequest `json:"shared_clock_request,omitempty"`
+	// SenderBefore and SenderAfter bracket the request with the sender's own
+	// attempt accounting; only overload measurement cohorts record them.
+	SenderBefore *overloadSenderMark `json:"sender_before,omitempty"`
+	SenderAfter  *overloadSenderMark `json:"sender_after,omitempty"`
 }
 
 type backlogInterval struct {
@@ -71,52 +78,40 @@ type windowAccounting struct {
 	RateLower        float64           `json:"rate_lower"`
 	RateUpper        float64           `json:"rate_upper"`
 	Samples          []backlogInterval `json:"samples,omitempty"`
-	BacklogChange    backlogChange     `json:"backlog_change"`
+	BacklogTrend     backlogTrend      `json:"backlog_trend"`
 }
 
-type backlogChange struct {
-	Status          string  `json:"status"`
-	SampleCount     int     `json:"sample_count"`
-	MeanChangeLower float64 `json:"mean_change_lower"`
-	MeanChangeUpper float64 `json:"mean_change_upper"`
+// backlogTrend is the sender-window sustained-backlog evidence: the fitted
+// growth bounds over the measurement window and their verdict against the
+// materiality floor. Status is a perfstats.BacklogVerdict for a fitted trend,
+// or perfstats.BacklogTrendInsufficientSamples or
+// perfstats.BacklogTrendInvalidSamples when no trend could be fitted.
+type backlogTrend struct {
+	Status string `json:"status"`
+	perfstats.BacklogTrend
 }
 
-func describeBacklogChange(samples []backlogInterval, duration time.Duration) backlogChange {
-	measurement := make([]backlogInterval, 0, len(samples))
-	for _, sample := range samples {
-		if sample.Before > 0 && sample.After < duration {
-			measurement = append(measurement, sample)
-		}
+func describeBacklogTrend(samples []backlogInterval, duration time.Duration, rate uint64) backlogTrend {
+	observations := make([]perfstats.BacklogObservation, len(samples))
+	for index, sample := range samples {
+		observations[index] = perfstats.BacklogObservation{Before: sample.Before, After: sample.After, Lower: sample.BacklogLower, Upper: sample.BacklogUpper}
 	}
-	result := backlogChange{Status: "insufficient-samples", SampleCount: len(measurement)}
-	if len(measurement) < 8 {
-		return result
-	}
-	quarter := len(measurement) / 4
-	var firstLower, firstUpper, lastLower, lastUpper uint64
-	for index := 0; index < quarter; index++ {
-		firstLower += measurement[index].BacklogLower
-		firstUpper += measurement[index].BacklogUpper
-		lastLower += measurement[len(measurement)-quarter+index].BacklogLower
-		lastUpper += measurement[len(measurement)-quarter+index].BacklogUpper
-	}
-	result.MeanChangeLower = (float64(lastLower) - float64(firstUpper)) / float64(quarter)
-	result.MeanChangeUpper = (float64(lastUpper) - float64(firstLower)) / float64(quarter)
-	result.Status = "unresolved"
-	if lastLower > firstUpper {
-		result.Status = "increase-demonstrated"
-	} else if lastUpper <= firstLower {
-		result.Status = "nonincrease-demonstrated"
-	}
-	return result
+	status, trend := perfstats.DescribeBacklogTrend(observations, duration, rate)
+	return backlogTrend{Status: status, BacklogTrend: trend}
 }
 
 func (control *receiverControl) progress() receiverProgress {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	result := receiverProgress{Spec: copyRunSpec(control.spec), Generation: control.generation, Phase: control.phase, FatalError: control.fatal}
-	if control.ledger != nil {
-		result.Delivery = control.ledger.snapshot()
+	if control.overload != nil && control.overload.begun {
+		overload, snapshot, present := control.overloadProgressLocked()
+		result.Overload = overload
+		if present {
+			result.Delivery = snapshot
+		}
+	} else if snapshot, present := control.deliveryLocked(); present {
+		result.Delivery = snapshot
 	}
 	if control.spec.Clock != nil {
 		now, err := control.sharedNowLocked()
@@ -133,10 +128,27 @@ func offeredAt(specification runSpec, elapsed time.Duration) uint64 {
 	if elapsed <= 0 {
 		return 0
 	}
+	if schedule := specification.overloadSchedule(); schedule != nil {
+		return min(schedule.due(elapsed), specification.Expected)
+	}
 	if elapsed >= specification.Duration {
 		return specification.Expected
 	}
 	return min(uint64(elapsed)*specification.Rate/uint64(time.Second)+1, specification.Expected)
+}
+
+// specExpected is the number of messages a specification schedules: the
+// phased total of an overload measurement cohort, otherwise rate times
+// duration.
+func specExpected(specification runSpec) (uint64, error) {
+	if specification.overloadMeasurement() {
+		schedule := specification.overloadSchedule()
+		if schedule == nil || schedule.duration != specification.Duration {
+			return 0, errors.New("invalid overload schedule")
+		}
+		return schedule.expected, nil
+	}
+	return scheduledMessages(specification.Rate, specification.Duration)
 }
 
 func analyzeProgress(specification runSpec, observations []progressObservation) windowAccounting {
@@ -146,7 +158,7 @@ func analyzeProgress(specification runSpec, observations []progressObservation) 
 	unavailable := func(reason string) windowAccounting {
 		return windowAccounting{Status: verdictInconclusive, Reason: reason, Duration: specification.Duration}
 	}
-	expected, err := scheduledMessages(specification.Rate, specification.Duration)
+	expected, err := specExpected(specification)
 	if err != nil || specification.Duration <= 0 || specification.Duration > maxRunWindow || specification.Rate == 0 || specification.Rate > maxOfferedRate || expected == 0 || expected != specification.Expected {
 		return unavailable("invalid offered schedule")
 	}
@@ -204,7 +216,7 @@ func analyzeProgress(specification runSpec, observations []progressObservation) 
 	result.OutstandingUpper = specification.Expected - result.DeliveredLower
 	result.RateLower = float64(result.DeliveredLower) / specification.Duration.Seconds()
 	result.RateUpper = float64(result.DeliveredUpper) / specification.Duration.Seconds()
-	result.BacklogChange = describeBacklogChange(result.Samples, specification.Duration)
+	result.BacklogTrend = describeBacklogTrend(result.Samples, specification.Duration, specification.Rate)
 	return result
 }
 
@@ -260,6 +272,23 @@ func sampleProgress(ctx context.Context, started time.Time, duration time.Durati
 }
 
 func sampleSharedProgress(ctx context.Context, started time.Time, duration time.Duration, baseURL string, clock *sharedRunClock) <-chan []progressObservation {
+	return sampleMarkedProgress(ctx, started, duration, baseURL, clock, nil)
+}
+
+// sampleMarkedProgress is the progress sampler. When mark is set, each
+// observation is bracketed by the sender's attempt accounting taken just
+// before and just after its request.
+func sampleMarkedProgress(ctx context.Context, started time.Time, duration time.Duration, baseURL string, clock *sharedRunClock, mark func() overloadSenderMark) <-chan []progressObservation {
+	observe := func(requestContext context.Context) progressObservation {
+		if mark == nil {
+			return observeSharedProgress(requestContext, started, baseURL, clock)
+		}
+		before := mark()
+		observation := observeSharedProgress(requestContext, started, baseURL, clock)
+		after := mark()
+		observation.SenderBefore, observation.SenderAfter = &before, &after
+		return observation
+	}
 	done := make(chan []progressObservation, 1)
 	go func() {
 		offsets := progressOffsets(duration)
@@ -280,7 +309,7 @@ func sampleSharedProgress(ctx context.Context, started time.Time, duration time.
 					return
 				}
 				requestContext, cancel := context.WithTimeout(ctx, progressRequestTimeout)
-				observations = append(observations, observeSharedProgress(requestContext, started, baseURL, clock))
+				observations = append(observations, observe(requestContext))
 				cancel()
 				continue
 			}
@@ -294,7 +323,7 @@ func sampleSharedProgress(ctx context.Context, started time.Time, duration time.
 					return
 				}
 				requestContext, cancel := context.WithTimeout(ctx, progressRequestTimeout)
-				observation := observeSharedProgress(requestContext, started, baseURL, clock)
+				observation := observe(requestContext)
 				cancel()
 				observations = append(observations, observation)
 			}

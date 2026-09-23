@@ -78,6 +78,16 @@ type receiverControl struct {
 	reverseSender   *runRecord
 	reverseReceiver *runRecord
 	reverseError    string
+	// routed is set only on the SGP receiver of a routed run. Its cohorts use
+	// the per-route ledger and route-aware validation instead of ledger.
+	routed *routedReceiveState
+	// ssnm is the SGP's SSNM load generator, nil without SSNM load.
+	ssnm *ssnmGenerator
+	// tracked is the association serving each transport index, observed by
+	// overload cohorts. overload is the current cohort's overload accounting,
+	// nil for every nominal cohort.
+	tracked  []*m3ua.Association
+	overload *receiverOverloadState
 }
 
 // reverseDriver lets the bidirectional SGP run the reverse (SGP-to-ASP)
@@ -197,7 +207,11 @@ func (control *receiverControl) reset(specification runSpec) error {
 			return fmt.Errorf("%w: shared clock domain or future window mismatch", errInvalidRunSpec)
 		}
 	}
-	expected, expectedErr := scheduledMessages(specification.Rate, specification.Duration)
+	overloadSchedule, overloadErr := validateOverloadSpec(specification)
+	if overloadErr != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, overloadErr)
+	}
+	expected, expectedErr := specExpected(specification)
 	if specification.Cohort == "" || specification.Associations != control.expectedAssociations ||
 		specification.Expected == 0 || specification.Duration <= 0 || specification.Duration > maxRunWindow ||
 		specification.Payload.size(0) == 0 || specification.Rate > maxOfferedRate ||
@@ -208,6 +222,13 @@ func (control *receiverControl) reset(specification runSpec) error {
 	}
 	switch specification.Mode {
 	case "", modeThroughput, modeEcho, modeBidirectional:
+		if control.routed != nil {
+			return fmt.Errorf("%w: this receiver hosts the routed topology and accepts only %s cohorts", errInvalidRunSpec, control.routed.mode)
+		}
+	case modeRouted, modeRoutedDirect:
+		if err := control.validateRoutedSpecLocked(specification); err != nil {
+			return err
+		}
 	default:
 		return errInvalidRunSpec
 	}
@@ -236,13 +257,35 @@ func (control *receiverControl) reset(specification runSpec) error {
 			return fmt.Errorf("%w: the peer control URL is not this receiver's configured reverse control destination", errInvalidRunSpec)
 		}
 	}
+	var routedLedger *routingLedger
+	if control.routed != nil {
+		ledger, err := newRoutingLedger(specification.Expected, control.ledgerWindow)
+		if err != nil {
+			return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+		}
+		routedLedger = ledger
+	}
+	// acceptSpec commits the generator to the cohort, so it runs after every
+	// check that can still refuse the specification.
+	if err := control.ssnm.acceptSpec(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
+	control.stopOverloadLocked()
+	control.overload = nil
+	if overloadSchedule != nil {
+		control.overload = newReceiverOverloadState(overloadSchedule)
+	}
 	control.spec = copyRunSpec(specification)
 	control.lastClock = 0
 	control.stoppedClock = 0
 	control.measurementLower = 0
 	control.measurementUpper = 0
 	control.clockEvidence = nil
-	control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
+	if control.routed != nil {
+		control.routed.ledger = routedLedger
+	} else {
+		control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
+	}
 	control.transportToLogical = filledInts(specification.Associations, -1)
 	control.logicalToTransport = filledInts(specification.Associations, -1)
 	control.started = time.Time{}
@@ -289,12 +332,16 @@ func (control *receiverControl) start() error {
 		control.cpuError = err.Error()
 	}
 	control.phase = receiverMeasuring
+	control.startOverloadLocked()
 	specification := control.spec
 	driver := control.driver
 	// Everything the reverse cohort is pinned to is captured here, under the
 	// mutex that commits the cohort.
 	run := reverseRun{specification: specification, reverseControl: control.reverseControl, generation: control.generation}
 	control.mutex.Unlock()
+	if specification.SSNM.enabled() {
+		control.ssnm.begin()
+	}
 	if specification.Mode == modeBidirectional && driver != nil {
 		go control.runReverseCohort(driver, run)
 	}
@@ -366,6 +413,7 @@ func (control *receiverControl) stop() error {
 		control.stoppedClock, clockErr = control.sharedNowLocked()
 		if clockErr != nil {
 			control.phase = receiverStopped
+			control.stopOverloadLocked()
 			return clockErr
 		}
 	}
@@ -376,6 +424,10 @@ func (control *receiverControl) stop() error {
 	}
 	control.allocAfter = readRuntimeCounters()
 	control.phase = receiverStopped
+	control.stopOverloadLocked()
+	if control.overload != nil && control.overload.begun {
+		control.overload.finish()
+	}
 	if control.spec.Clock != nil {
 		domain, domainErr := control.clock.Domain()
 		if control.clockEvidence == nil {
@@ -457,6 +509,12 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 	}
 	if err != nil || !control.bindAssociation(transportIndex, int(identity.Association)) {
 		control.ledger.snapshotData.Invalid++
+		if control.overload != nil {
+			var scope misscopedError
+			if err == nil || errors.As(err, &scope) {
+				control.overload.misscoped++
+			}
+		}
 		return arrival{identity: identity, generation: generation}, recordInvalid
 	}
 	identity.Cohort = specification.Cohort
@@ -465,6 +523,9 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 	}
 	status := control.ledger.record(identity)
 	if status != ledgerUnique {
+		if status == ledgerDuplicate && control.overload != nil {
+			control.overload.recordDuplicate(globalIndex(identity))
+		}
 		return arrival{identity: identity, generation: generation}, recordNotUnique
 	}
 	if control.spec.Clock != nil {
@@ -478,12 +539,18 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 			return arrival{identity: identity, generation: generation}, recordInvalid
 		}
 		control.classifySharedDeliveryLocked(sharedReceived)
+		if control.overload != nil {
+			control.overload.recordUnique(globalIndex(identity))
+		}
 		return arrival{identity: identity, generation: generation}, recordUnique
 	}
 	if received.Before(control.firstArrival.Add(control.spec.Duration)) {
 		control.uniqueMeasurement++
 	} else {
 		control.uniqueDrain++
+	}
+	if control.overload != nil {
+		control.overload.recordUnique(globalIndex(identity))
 	}
 	return arrival{identity: identity, generation: generation}, recordUnique
 }
@@ -594,8 +661,7 @@ func (control *receiverControl) result() runRecord {
 		record.WindowAlignment = "verified same-host CLOCK_MONOTONIC window; boundary counts retain clock-resolution uncertainty"
 		record.ClockBoundary = &sharedClockSnapshot{Domain: control.spec.Clock.Domain, Captured: control.lastClock, MeasurementLower: control.measurementLower, MeasurementUpper: control.measurementUpper}
 	}
-	if control.ledger != nil {
-		snapshot := control.ledger.snapshot()
+	if snapshot, present := control.deliveryLocked(); present {
 		record.Delivery = deliveryResult{
 			Unique:            snapshot.Unique,
 			UniqueMeasurement: control.uniqueMeasurement,
@@ -615,6 +681,9 @@ func (control *receiverControl) result() runRecord {
 			RepliesDropped: control.echoRepliesDropped,
 		}
 	}
+	if control.overload != nil {
+		record.Overload = &overloadRecord{Receiver: control.overload.record()}
+	}
 	record.Reverse = control.reverseSender
 	record.ReverseReceiver = control.reverseReceiver
 	record.ReverseError = control.reverseError
@@ -628,6 +697,10 @@ func (control *receiverControl) result() runRecord {
 		if control.stopped.After(measurementEnd) {
 			record.DrainDuration = control.stopped.Sub(measurementEnd)
 		}
+	}
+	if generator := control.ssnm.cohortRecord(control.spec); generator != nil {
+		record.SSNM = &ssnmRecord{Generator: generator}
+		record.UnsupportedModes = ssnmUnsupportedModes()
 	}
 	record.CPU = newCPUObservation(record.CPU.Before, record.CPU.After, errorFromString(record.CPU.Error), nil, record.Delivery.Unique)
 	record.Allocations.Delta = runtimeDelta(record.Allocations.Before, record.Allocations.After)
@@ -651,10 +724,10 @@ func errorFromString(message string) error {
 func (control *receiverControl) sample(now time.Time) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
-	if control.phase != receiverMeasuring || control.ledger == nil || len(control.series) >= 601 {
+	snapshot, present := control.deliveryLocked()
+	if control.phase != receiverMeasuring || !present || len(control.series) >= 601 {
 		return
 	}
-	snapshot := control.ledger.snapshot()
 	origin := control.firstArrival
 	if origin.IsZero() {
 		origin = control.started
@@ -671,6 +744,12 @@ func (control *receiverControl) sample(now time.Time) {
 		offset = time.Duration(sharedNow - control.spec.Clock.Start)
 	}
 	scheduled := scheduledAt(control.spec.Rate, offset, control.spec.Duration, control.spec.Expected)
+	outstanding := outstandingAt(control.spec.Rate, offset, control.spec.Duration, snapshot.Unique)
+	if control.overload != nil {
+		scheduled = control.overload.schedule.scheduledBefore(offset)
+		outstanding = subtractFloor(scheduled, snapshot.Unique)
+		control.sampleOverloadLocked(offset, snapshot.Unique)
+	}
 	missing := uint64(0)
 	if snapshot.Unique < scheduled {
 		missing = scheduled - snapshot.Unique
@@ -682,7 +761,7 @@ func (control *receiverControl) sample(now time.Time) {
 		Missing:      missing,
 		Duplicate:    snapshot.Duplicate,
 		Invalid:      snapshot.Invalid,
-		Outstanding:  outstandingAt(control.spec.Rate, offset, control.spec.Duration, snapshot.Unique),
+		Outstanding:  outstanding,
 	})
 }
 
@@ -772,6 +851,8 @@ func (control *receiverControl) handler() http.Handler {
 	mux.HandleFunc("GET /results", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, control.result())
 	})
+	mux.HandleFunc("GET /overload/delivered", control.serveDeliveredLedger)
+	control.ssnm.register(mux)
 	return mux
 }
 

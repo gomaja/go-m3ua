@@ -37,7 +37,7 @@ func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRe
 		)
 		request := c.startTAck(aspActive, requestAspActive)
 		pending = append(pending, request)
-		if _, err := c.WriteSignal(aspActive); err != nil {
+		if _, err := c.writeControl(aspActive); err != nil {
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
@@ -121,7 +121,7 @@ func (c *Association) initiateASPInactive(routingContext *params.Param) error {
 func (c *Association) beginASPInactive(routingContext *params.Param) (*pendingRequest, error) {
 	aspInactive := messages.NewAspInactive(routingContext.Copy(), nil)
 	request := c.startTAck(aspInactive, requestAspInactive)
-	if _, err := c.WriteSignal(aspInactive); err != nil {
+	if _, err := c.writeControl(aspInactive); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}
@@ -247,7 +247,7 @@ func (c *Association) heartbeat(ctx context.Context) {
 		// an Ack racing straight back is never compared against stale data.
 		c.setBeatData(data)
 		sentAt := time.Now()
-		if _, err := c.WriteSignal(
+		if _, err := c.writeControl(
 			messages.NewHeartbeat(params.NewHeartbeatData(data)),
 		); err != nil {
 			c.sendErr(ErrFailedToWriteSignal)
@@ -782,9 +782,18 @@ func validateRoutingContextAgainst(peer *params.Param, configured []uint32) erro
 	if peer == nil {
 		return nil
 	}
+	if len(peer.Data) == 4 {
+		theirs := peer.RoutingContext()
+		for _, ours := range configured {
+			if theirs == ours {
+				return nil
+			}
+		}
+		return NewInvalidRoutingContextError(theirs)
+	}
 	theirs := peer.RoutingContexts()
 
-	ours := make(map[uint32]struct{})
+	ours := make(map[uint32]struct{}, len(configured))
 	for _, rc := range configured {
 		ours[rc] = struct{}{}
 	}
@@ -1116,7 +1125,7 @@ func (c *Association) handleHeartbeat(beat *messages.Heartbeat) error {
 		ack.Others = append(ack.Others, parameter.Copy())
 	}
 	ack.SetLength()
-	if _, err := c.WriteSignal(ack); err != nil {
+	if _, err := c.writeControl(ack); err != nil {
 		return err
 	}
 	return nil

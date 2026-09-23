@@ -329,3 +329,83 @@ func TestCapacitySearchStaysExactAtTheAcceptedMaximum(testContext *testing.T) {
 		}
 	}
 }
+
+// Near and above capacity a probe is expected to stall or to leave its backlog
+// trend straddling the floor. Such a probe bounds the bracket from above like a
+// failure; it must not end the search.
+func TestNotDemonstratedProbeBoundsTheBracketAndContinues(testContext *testing.T) {
+	search, err := NewCapacitySearch(20000, 1_000_000, 24)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	schedule := []struct {
+		rate    int
+		outcome ProbeOutcome
+	}{
+		{20000, ProbePassing}, {40000, ProbePassing}, {80000, ProbePassing},
+		{160000, ProbeFailing}, {120000, ProbeNotDemonstrated}, {100000, ProbePassing},
+		{110000, ProbeNotDemonstrated}, {105000, ProbePassing},
+	}
+	for index, probe := range schedule {
+		next, running := search.NextRate()
+		if !running || next != probe.rate {
+			testContext.Fatalf("probe %d: NextRate() = %d, %t; want %d", index+1, next, running, probe.rate)
+		}
+		if err := search.Record(probe.rate, probe.outcome); err != nil {
+			testContext.Fatalf("probe %d: %v", index+1, err)
+		}
+	}
+	if search.Status() != SearchBracketed || search.Lower() != 105000 || search.Upper() != 110000 {
+		testContext.Fatalf("status %q bracket [%d, %d], want bracketed [105000, 110000]", search.Status(), search.Lower(), search.Upper())
+	}
+	probes := search.Probes()
+	if probes[4].Outcome != ProbeNotDemonstrated || probes[6].Outcome != ProbeNotDemonstrated {
+		testContext.Fatalf("recorded outcomes %+v lost the not-demonstrated probes", probes)
+	}
+	decision := DecideCapacity(search, []int{105000, 105000, 105000, 105000, 105000}, []Decision{Pass, Pass, Pass, Pass, Pass})
+	if decision.Decision != Pass || decision.SelectedRate != 105000 {
+		testContext.Fatalf("DecideCapacity() = %+v, want pass at 105000", decision)
+	}
+}
+
+// Failure means the workload was shown not to be sustainable. A search with no
+// demonstrated rate is a failure only if every probe failed; undemonstrated
+// probes leave it inconclusive.
+func TestNoPassingRateNeedsDemonstratedFailures(testContext *testing.T) {
+	for _, scenario := range []struct {
+		name     string
+		outcomes func(index int) ProbeOutcome
+		want     Decision
+		reason   string
+	}{
+		{"all failed", func(int) ProbeOutcome { return ProbeFailing }, Fail, NoPassingRateReason},
+		{"one undemonstrated", func(index int) ProbeOutcome {
+			if index == 1 {
+				return ProbeNotDemonstrated
+			}
+			return ProbeFailing
+		}, Inconclusive, NoDemonstratedRateReason},
+	} {
+		testContext.Run(scenario.name, func(testContext *testing.T) {
+			search, err := NewCapacitySearch(4, 100, 24)
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			for index := 0; ; index++ {
+				next, running := search.NextRate()
+				if !running {
+					break
+				}
+				if err := search.Record(next, scenario.outcomes(index)); err != nil {
+					testContext.Fatal(err)
+				}
+			}
+			if search.Status() != SearchNoPassingRate {
+				testContext.Fatalf("status %q, want no passing rate", search.Status())
+			}
+			if decision := DecideCapacity(search, nil, nil); decision.Decision != scenario.want || decision.Reason != scenario.reason {
+				testContext.Fatalf("DecideCapacity() = %+v, want %q with %q", decision, scenario.want, scenario.reason)
+			}
+		})
+	}
+}

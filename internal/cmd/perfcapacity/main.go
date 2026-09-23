@@ -1,8 +1,9 @@
 // perfcapacity evaluates a bounded capacity search campaign. It reads one
 // strict JSON request from standard input: the search parameters, the per-run
 // fixture evidence for each probe in execution order, and optionally the five
-// validation repetitions at the selected rate. Shared-clock throughput uses a
-// complete sender/receiver cohort; bidirectional mode uses all four directional
+// validation repetitions at the selected rate. Shared-clock throughput and the
+// routed and routed-direct optional-router workloads use a complete
+// sender/receiver cohort; bidirectional mode uses all four directional
 // records. Each probe must have run at
 // exactly the rate the predeclared search selected; any deviation is invalid
 // input, so a campaign cannot reorder or drop inconvenient probes.
@@ -74,6 +75,11 @@ type probeDecision struct {
 	Reason                     string                      `json:"reason,omitempty"`
 	Stall                      *perfstats.StallObservation `json:"stall,omitempty"`
 	Directions                 []directionDecision         `json:"directions,omitempty"`
+	// Phase is "warmup" when the probe failed during warm-up and never
+	// reached measurement.
+	Phase string `json:"phase,omitempty"`
+	// SearchOutcome is what the probe contributes to the capacity search.
+	SearchOutcome perfstats.ProbeOutcome `json:"search_outcome,omitempty"`
 }
 
 type directionDecision struct {
@@ -103,10 +109,14 @@ type runEnvironment struct {
 }
 
 type response struct {
-	Decision             string                  `json:"decision"`
-	Environments         []runEnvironment        `json:"environments,omitempty"`
-	SearchStatus         perfstats.SearchStatus  `json:"search_status,omitempty"`
-	SelectedRate         int                     `json:"selected_rate,omitempty"`
+	Decision     string                 `json:"decision"`
+	Environments []runEnvironment       `json:"environments,omitempty"`
+	SearchStatus perfstats.SearchStatus `json:"search_status,omitempty"`
+	SelectedRate int                    `json:"selected_rate,omitempty"`
+	// NextProbeRate is the rate the unfinished search selected for its next
+	// probe, so a campaign driver can run the search one probe at a time
+	// without reimplementing it. It is absent once the search has terminated.
+	NextProbeRate        int                     `json:"next_probe_rate,omitempty"`
 	AggregateOfferedRate uint64                  `json:"aggregate_offered_rate,omitempty"`
 	Probes               []perfstats.ProbeRecord `json:"probes,omitempty"`
 	ProbeDecisions       []probeDecision         `json:"probe_decisions,omitempty"`
@@ -170,17 +180,21 @@ func evaluate(decoded request) (response, error) {
 		if err != nil {
 			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
 		}
-		if err := campaign.add(fixture.identity); err != nil {
+		if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
 			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
 		}
 		decision := decideFixtureRun(fixture, *probe.Rate)
+		decision.SearchOutcome = searchOutcome(decision)
 		result.ProbeDecisions = append(result.ProbeDecisions, decision)
-		if err := search.Record(*probe.Rate, perfstats.ProbeOutcome(decision.Decision)); err != nil {
+		if err := search.Record(*probe.Rate, decision.SearchOutcome); err != nil {
 			return response{}, fmt.Errorf("probe %d: %w", index+1, err)
 		}
 	}
 	result.SearchStatus = search.Status()
 	result.Probes = search.Probes()
+	if next, running := search.NextRate(); running {
+		result.NextProbeRate = next
+	}
 
 	var repetitionRates []int
 	var repetitionDecisions []perfstats.Decision
@@ -189,7 +203,7 @@ func evaluate(decoded request) (response, error) {
 		if err != nil {
 			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
 		}
-		if err := campaign.add(fixture.identity); err != nil {
+		if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
 			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
 		}
 		decision := decideFixtureRun(fixture, *repetition.Rate)
@@ -213,11 +227,53 @@ func evaluate(decoded request) (response, error) {
 	return result, nil
 }
 
+// searchOutcome is what one probe decision contributes to the capacity search.
+// An inconclusive probe whose every inconclusive reason is a transport stall
+// or a backlog trend straddling the floor did not demonstrate its rate: near
+// and above capacity those are the expected outcomes, so the rate bounds the
+// bracket from above. Any other inconclusive reason is missing or invalid
+// evidence, which says nothing about the rate and ends the search.
+func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
+	switch perfstats.Decision(decision.Decision) {
+	case perfstats.Pass:
+		return perfstats.ProbePassing
+	case perfstats.Fail:
+		return perfstats.ProbeFailing
+	}
+	// An accepted warm-up already showed that the offered rate was not
+	// sustained (cohortPhase), so whatever else a direction lacks, it can only
+	// fail or be not demonstrated.
+	if decision.Phase == "warmup" {
+		return perfstats.ProbeNotDemonstrated
+	}
+	reasons := []string{decision.Reason}
+	if len(decision.Directions) > 1 {
+		reasons = reasons[:0]
+		for _, direction := range decision.Directions {
+			if perfstats.Decision(direction.Decision) == perfstats.Inconclusive {
+				reasons = append(reasons, direction.Reason)
+			}
+		}
+	}
+	if len(reasons) == 0 {
+		return perfstats.ProbeInconclusive
+	}
+	for _, reason := range reasons {
+		if reason != perfstats.TransportStallReason && reason != perfstats.BacklogUnresolvedReason {
+			return perfstats.ProbeInconclusive
+		}
+	}
+	return perfstats.ProbeNotDemonstrated
+}
+
 func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	forward := perfstats.DecideRun(fixture.forward)
 	result := probeDecision{
 		Rate: rate, Decision: string(forward.Decision), Backlog: string(forward.Backlog),
 		Reason: forward.Reason, Stall: forward.Stall,
+	}
+	if fixture.warmup {
+		result.Phase = "warmup"
 	}
 	if fixture.reverse == nil {
 		if fixture.direction != "" {
@@ -236,6 +292,7 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 					result.Reason = "unidirectional-cohort-error"
 				}
 			}
+			applySSNMDecision(&result, fixture.ssnmVerdict, forward.Stall != nil && forward.Stall.Stalled())
 		}
 		return result
 	}
@@ -329,6 +386,7 @@ type fixtureEvidence struct {
 	ClockEvidence      *sharedClockEvidence `json:"shared_clock_evidence"`
 	ClockBoundary      *sharedClockBoundary `json:"shared_clock_boundary"`
 	ValidatedPerSecond *float64             `json:"validated_per_second"`
+	SSNM               *ssnmEvidence        `json:"ssnm"`
 }
 
 type deliveryEvidence struct {
@@ -343,23 +401,49 @@ type deliveryEvidence struct {
 }
 
 type senderWindowEvidence struct {
-	Status           *string                `json:"status"`
-	Reason           *string                `json:"reason"`
-	Duration         *time.Duration         `json:"duration_ns"`
-	DeliveredLower   *uint64                `json:"delivered_lower"`
-	DeliveredUpper   *uint64                `json:"delivered_upper"`
-	OutstandingLower *uint64                `json:"outstanding_lower"`
-	OutstandingUpper *uint64                `json:"outstanding_upper"`
-	RateLower        *float64               `json:"rate_lower"`
-	RateUpper        *float64               `json:"rate_upper"`
-	BacklogChange    *backlogChangeEvidence `json:"backlog_change"`
+	Status           *string                 `json:"status"`
+	Reason           *string                 `json:"reason"`
+	Duration         *time.Duration          `json:"duration_ns"`
+	DeliveredLower   *uint64                 `json:"delivered_lower"`
+	DeliveredUpper   *uint64                 `json:"delivered_upper"`
+	OutstandingLower *uint64                 `json:"outstanding_lower"`
+	OutstandingUpper *uint64                 `json:"outstanding_upper"`
+	RateLower        *float64                `json:"rate_lower"`
+	RateUpper        *float64                `json:"rate_upper"`
+	Samples          []backlogSampleEvidence `json:"samples"`
+	BacklogTrend     *backlogTrendEvidence   `json:"backlog_trend"`
 }
 
-type backlogChangeEvidence struct {
-	Status      string   `json:"status"`
-	SampleCount int      `json:"sample_count"`
-	Lower       *float64 `json:"mean_change_lower"`
-	Upper       *float64 `json:"mean_change_upper"`
+type backlogSampleEvidence struct {
+	Before *time.Duration `json:"before_ns"`
+	After  *time.Duration `json:"after_ns"`
+	Lower  *uint64        `json:"backlog_lower"`
+	Upper  *uint64        `json:"backlog_upper"`
+}
+
+type backlogTrendEvidence struct {
+	Status      *string        `json:"status"`
+	SampleCount *int           `json:"sample_count"`
+	Window      *time.Duration `json:"window_ns"`
+	Floor       *float64       `json:"floor"`
+	Lag         *int           `json:"lag"`
+	SlopeLower  *float64       `json:"slope_lower"`
+	SlopeUpper  *float64       `json:"slope_upper"`
+	GrowthLower *float64       `json:"growth_lower"`
+	GrowthUpper *float64       `json:"growth_upper"`
+}
+
+// complete reports whether every trend field is present.
+func (trend *backlogTrendEvidence) complete() bool {
+	return trend.Status != nil && trend.SampleCount != nil && trend.Window != nil && trend.Floor != nil && trend.Lag != nil &&
+		trend.SlopeLower != nil && trend.SlopeUpper != nil && trend.GrowthLower != nil && trend.GrowthUpper != nil
+}
+
+// unavailable reports whether the trend is the producer's zero value, which it
+// emits for a sender window whose accounting is unavailable.
+func (trend *backlogTrendEvidence) unavailable() bool {
+	return trend.complete() && *trend.Status == "" && *trend.SampleCount == 0 && *trend.Window == 0 && *trend.Floor == 0 &&
+		*trend.Lag == 0 && *trend.SlopeLower == 0 && *trend.SlopeUpper == 0 && *trend.GrowthLower == 0 && *trend.GrowthUpper == 0
 }
 
 type sharedClockDomain struct {
@@ -422,6 +506,10 @@ type fixtureSpec struct {
 	Initiation   *string            `json:"initiation"`
 	PeerControl  string             `json:"peer_control"`
 	SharedClock  *sharedClockWindow `json:"shared_clock"`
+	SSNM         *ssnmSpecEvidence  `json:"ssnm"`
+	// Overload is the identity of a DATA overload trial's cohorts. Its mere
+	// presence refuses the record: an overload trial is never a capacity probe.
+	Overload json.RawMessage `json:"overload"`
 }
 
 type fixtureManifest struct {
@@ -441,6 +529,8 @@ type fixtureManifest struct {
 	OutstandingLimit         *int    `json:"outstanding_limit"`
 	Initiation               *string `json:"initiation"`
 	AccountingScope          *string `json:"accounting_scope"`
+	// SSNMBudgets is present exactly on SSNM-loaded sender records.
+	SSNMBudgets *ssnmBudgetsEvidence `json:"ssnm_budgets"`
 }
 
 // workloadIdentity excludes the per-run cohort and seed, the offered rate,
@@ -457,6 +547,7 @@ type workloadIdentity struct {
 	Initiation      string
 	PeerControl     string
 	Instrumentation string
+	SSNM            ssnmIdentity
 }
 
 type fixtureRun struct {
@@ -469,6 +560,10 @@ type fixtureRun struct {
 	reverseAchieved      *achievedRateBounds
 	aggregateAchieved    *achievedRateBounds
 	cohortError          bool
+	// warmup marks a probe whose warm-up failed with demonstrated loss or a
+	// stall, so it never reached measurement. It can never pass.
+	warmup      bool
+	ssnmVerdict string
 }
 
 type achievedRateBounds struct {
@@ -502,7 +597,14 @@ type campaignIdentity struct {
 	reverseStreams string
 }
 
-func (campaign *campaignIdentity) add(run runIdentity) error {
+// add checks one run against the campaign identity. A failed warm-up ran the
+// campaign workload for its warm-up duration only, so its duration is not part
+// of the comparison; the campaign duration is fixed by the first measurement
+// run. Zero is never a valid measurement duration, so it marks "not yet fixed".
+func (campaign *campaignIdentity) add(run runIdentity, warmup bool) error {
+	if warmup {
+		run.workload.Duration = 0
+	}
 	if !campaign.set {
 		campaign.set = true
 		campaign.workload = run.workload
@@ -510,6 +612,11 @@ func (campaign *campaignIdentity) add(run runIdentity) error {
 		campaign.streams = run.streams
 		campaign.reverseStreams = run.reverseStreams
 		return nil
+	}
+	if campaign.workload.Duration == 0 {
+		campaign.workload.Duration = run.workload.Duration
+	} else if warmup {
+		run.workload.Duration = campaign.workload.Duration
 	}
 	if run.environment.reported.VCSRevision != campaign.environment.reported.VCSRevision {
 		return fmt.Errorf("candidate vcs_revision %q does not match campaign revision %q",
@@ -548,6 +655,9 @@ func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, erro
 	if len(raw) == 0 {
 		return fixtureRun{}, errors.New("run evidence is required")
 	}
+	if err := refuseOverloadEvidence(raw); err != nil {
+		return fixtureRun{}, err
+	}
 	var shape struct {
 		Sender          json.RawMessage `json:"sender"`
 		ReverseSender   json.RawMessage `json:"reverse_sender"`
@@ -571,13 +681,13 @@ func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, erro
 		switch *sender.Spec.Mode {
 		case "bidirectional":
 			return bidirectionalFixtureRun(raw, declaredRate)
-		case "throughput":
+		case "throughput", routedMode, routedDirectMode:
 			if len(shape.ReverseSender) != 0 || len(shape.ReverseReceiver) != 0 {
 				return fixtureRun{}, errors.New("unidirectional cohort must not contain reverse_sender or reverse_receiver members")
 			}
 			return unidirectionalFixtureRun(raw, declaredRate)
 		default:
-			return fixtureRun{}, errors.New("cohort sender mode must be throughput or bidirectional")
+			return fixtureRun{}, errors.New("cohort sender mode must be throughput, bidirectional, routed or routed-direct")
 		}
 	}
 	evidence, identity, err := evidenceFromFixture(raw, declaredRate)
@@ -589,9 +699,9 @@ func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, erro
 
 // evidenceFromFixture maps one per-run fixture sender record to the
 // predeclared decision inputs and to the environment the run happened in. A
-// missing or unbounded sender window, an insufficient-sample backlog change,
-// or absent interval bounds is missing evidence: the run is inconclusive,
-// never a pass. It is never an error.
+// missing or unbounded sender window, or a missing, incomplete or
+// insufficient-sample backlog trend, is missing evidence: the run is
+// inconclusive, never a pass. It is never an error.
 //
 // The transport-stall signal and the manifest are required rather than
 // optional. A record without send_duration.max_ns cannot show whether a stall
@@ -605,6 +715,9 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	var record fixtureEvidence
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("decode run evidence: %w", err)
+	}
+	if err := rejectStraySSNM(&record); err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
 	return evidenceFromSenderRecord(&record, declaredRate, false)
 }
@@ -660,6 +773,9 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 	if workload.Outstanding != environment.OutstandingLimit || workload.Initiation != environment.Initiation {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("run environment outstanding_limit and initiation must agree with the workload spec")
 	}
+	if isRoutedWorkload(workload.Mode) && environment.FlowCount != routedFlowCount {
+		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("routed workloads require manifest flow_count %d, one ordered flow per configured route", routedFlowCount)
+	}
 	identity := runIdentity{workload: workload, environment: environment, streams: string(streams)}
 
 	evidence := perfstats.RunEvidence{
@@ -685,50 +801,56 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 		}
 	}
 
-	interval, err := backlogIntervalFromWindow(record.SenderWindow)
+	trend, err := backlogTrendFromWindow(record.SenderWindow, *record.Spec.Rate)
 	if err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
-	evidence.Interval = interval
+	evidence.Trend = trend
 	return evidence, identity, nil
 }
 
-func backlogIntervalFromWindow(window *senderWindowEvidence) (*perfstats.BacklogInterval, error) {
-	if window == nil || window.Status == nil || *window.Status != "bounded" || window.BacklogChange == nil {
+// backlogTrendFromWindow recomputes the sustained-backlog trend from the
+// sender window's raw observations and requires the producer's reported trend
+// to agree with it. The decision always uses the recomputed trend, so a
+// producer cannot pass a run by reporting growth bounds its observations do
+// not support. A missing or incomplete trend or observation, or too few or
+// unfittable observations, is missing evidence: the run is inconclusive,
+// never a pass. A reported trend that its own observations contradict is an
+// error.
+func backlogTrendFromWindow(window *senderWindowEvidence, rate uint64) (*perfstats.BacklogTrend, error) {
+	if window == nil || window.Status == nil || *window.Status != "bounded" || window.Duration == nil ||
+		window.BacklogTrend == nil || !window.BacklogTrend.complete() {
 		return nil, nil
 	}
-	change := window.BacklogChange
-	switch change.Status {
-	case "", "insufficient-samples", "increase-demonstrated", "nonincrease-demonstrated", "unresolved":
-	default:
-		return nil, errors.New("unsupported backlog_change status")
-	}
-	if change.SampleCount < 8 {
-		if change.Status == "" || change.Status == "insufficient-samples" {
+	reported := window.BacklogTrend
+	observations := make([]perfstats.BacklogObservation, len(window.Samples))
+	for index, sample := range window.Samples {
+		if sample.Before == nil || sample.After == nil || sample.Lower == nil || sample.Upper == nil {
 			return nil, nil
 		}
-		return nil, errors.New("backlog_change status contradicts its sample count")
+		observations[index] = perfstats.BacklogObservation{Before: *sample.Before, After: *sample.After, Lower: *sample.Lower, Upper: *sample.Upper}
 	}
-	if change.Status == "insufficient-samples" {
-		return nil, errors.New("backlog_change status contradicts its sample count")
+	status, trend := perfstats.DescribeBacklogTrend(observations, *window.Duration, rate)
+	if *reported.Status != status {
+		return nil, errors.New("backlog_trend status contradicts its sender_window samples")
 	}
-	if change.Lower == nil || change.Upper == nil {
+	if *reported.SampleCount != trend.SampleCount || *reported.Window != trend.Window || *reported.Lag != trend.Lag ||
+		!agrees(*reported.Floor, trend.Floor) || !agrees(*reported.SlopeLower, trend.SlopeLower) ||
+		!agrees(*reported.SlopeUpper, trend.SlopeUpper) || !agrees(*reported.GrowthLower, trend.GrowthLower) ||
+		!agrees(*reported.GrowthUpper, trend.GrowthUpper) {
+		return nil, errors.New("backlog_trend bounds contradict its sender_window samples")
+	}
+	if status == perfstats.BacklogTrendInsufficientSamples || status == perfstats.BacklogTrendInvalidSamples {
 		return nil, nil
 	}
-	interval := &perfstats.BacklogInterval{Lower: *change.Lower, Upper: *change.Upper}
-	if !interval.Valid() {
-		return nil, nil
-	}
-	expectedStatus := "unresolved"
-	if interval.Lower > 0 {
-		expectedStatus = "increase-demonstrated"
-	} else if interval.Upper <= 0 {
-		expectedStatus = "nonincrease-demonstrated"
-	}
-	if change.Status != expectedStatus {
-		return nil, errors.New("backlog_change status contradicts its mean-change interval")
-	}
-	return interval, nil
+	return &trend, nil
+}
+
+// agrees compares a reported and a recomputed value to within rounding: the
+// producer may run on another architecture, where the compiler is free to fuse
+// multiply-adds differently.
+func agrees(reported, recomputed float64) bool {
+	return math.Abs(reported-recomputed) <= 1e-9*math.Max(1, math.Abs(recomputed))
 }
 
 type clockIdentity struct {
@@ -754,14 +876,18 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if err := json.Unmarshal(raw, &cohort); err != nil {
 		return fixtureRun{}, fmt.Errorf("decode bidirectional cohort: %w", err)
 	}
-	if cohort.Phase == nil || *cohort.Phase != "measurement" {
-		return fixtureRun{}, errors.New("bidirectional cohort phase must be measurement")
+	warmup, err := cohortPhase(&cohort)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
 	}
 	if cohort.Sender == nil || cohort.Receiver == nil || cohort.ReverseSender == nil || cohort.ReverseReceiver == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort requires sender, receiver, reverse_sender and reverse_receiver records")
 	}
 	if cohort.Verdict == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort verdict is required")
+	}
+	if err := rejectStraySSNM(cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
+		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
 	}
 
 	forwardEvidence, forwardIdentity, err := evidenceFromSenderRecord(cohort.Sender, declaredRate, true)
@@ -868,7 +994,7 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 		forward: forwardEvidence, reverse: &reverseEvidence, identity: forwardIdentity,
 		aggregateOfferedRate: aggregateOffered, forwardAchieved: forwardAchieved,
 		reverseAchieved: reverseAchieved, aggregateAchieved: aggregateAchieved,
-		cohortError: cohort.Error != "",
+		cohortError: cohort.Error != "", warmup: warmup,
 	}, nil
 }
 
@@ -877,8 +1003,9 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if err := json.Unmarshal(raw, &cohort); err != nil {
 		return fixtureRun{}, fmt.Errorf("decode unidirectional cohort: %w", err)
 	}
-	if cohort.Phase == nil || *cohort.Phase != "measurement" {
-		return fixtureRun{}, errors.New("unidirectional cohort phase must be measurement")
+	warmup, err := cohortPhase(&cohort)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional cohort: %w", err)
 	}
 	if cohort.Sender == nil || cohort.Receiver == nil {
 		return fixtureRun{}, errors.New("unidirectional cohort requires sender and receiver records")
@@ -906,8 +1033,8 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if senderSpec != receiverSpec {
 		return fixtureRun{}, errors.New("unidirectional sender and receiver specs do not match")
 	}
-	if senderSpec.Workload.Mode != "throughput" {
-		return fixtureRun{}, errors.New("unidirectional cohort sender must use throughput mode")
+	if senderSpec.Workload.Mode != "throughput" && !isRoutedWorkload(senderSpec.Workload.Mode) {
+		return fixtureRun{}, errors.New("unidirectional cohort sender must use throughput, routed or routed-direct mode")
 	}
 	if senderSpec.Workload.Direction != "asp-to-sgp" {
 		return fixtureRun{}, errors.New("unidirectional cohort sender must use the producer direction asp-to-sgp")
@@ -925,10 +1052,73 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if err := validateCohortVerdict(&cohort, cohort.Sender, cohort.Receiver); err != nil {
 		return fixtureRun{}, err
 	}
+	ssnmVerdict, ssnmBudgets, err := ssnmCohortVerdict(senderSpec.Workload.SSNM, warmup, cohort.Sender, cohort.Receiver)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional ssnm: %w", err)
+	}
+	// The budgets join the workload identity, so one campaign never mixes
+	// SSNM verdicts judged against different budgets.
+	identity.workload.SSNM.Budgets = ssnmBudgets
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
-		forwardAchieved: achieved, cohortError: cohort.Error != "",
+		forwardAchieved: achieved, cohortError: cohort.Error != "", warmup: warmup,
+		ssnmVerdict: ssnmVerdict,
 	}, nil
+}
+
+// warmupOverloadError is the whole error perftraffic reports when a warm-up
+// cohort ran its complete offered schedule and then failed only its own
+// loss-free validity rules. Any other failure — a receiver read failure, a
+// failed control request, a clock or reset error — joins further text or
+// fails before the schedule completes.
+const warmupOverloadError = "warmup did not drain cleanly: cohort is invalid; inspect machine-readable reasons"
+
+// cohortPhase accepts a measurement cohort, or a warm-up cohort whose warm-up
+// failed because the offered rate was not sustained: the cohort ran its whole
+// schedule with no fatal read or control failure, failed only its own validity
+// rules, and shows outstanding-cap refusals, missing deliveries or a stall.
+// That is evidence against the rate. A warm-up that did not fail, or failed
+// for any other reason, says nothing about the rate and is not probe evidence.
+func cohortPhase(cohort *fixtureCohort) (bool, error) {
+	if cohort.Phase == nil {
+		return false, errors.New("phase is required")
+	}
+	switch *cohort.Phase {
+	case "measurement":
+		return false, nil
+	case "warmup":
+	default:
+		return false, errors.New("phase must be measurement or a failed warmup")
+	}
+	if cohort.Verdict == nil || *cohort.Verdict != "invalid" || cohort.Error == "" {
+		return false, errors.New("a warmup cohort is probe evidence only when its warm-up failed")
+	}
+	if cohort.Error != warmupOverloadError {
+		return false, errors.New("a warmup that failed for a reason other than its own validity is not probe evidence")
+	}
+	for _, record := range []*fixtureEvidence{cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver} {
+		if record != nil && record.FatalError != "" {
+			return false, errors.New("a warmup with a fatal read or control failure is not probe evidence")
+		}
+	}
+	overloaded := false
+	for _, record := range []*fixtureEvidence{cohort.Sender, cohort.ReverseSender} {
+		if record == nil {
+			continue
+		}
+		if record.Scheduled == nil || record.Expected == nil || *record.Scheduled != *record.Expected {
+			return false, errors.New("a warmup that did not offer its whole schedule is not probe evidence")
+		}
+		stalled := record.SendDuration != nil && record.SendDuration.Max != nil &&
+			(perfstats.StallObservation{LongestSend: *record.SendDuration.Max}).Stalled()
+		lost := record.Capped != nil && *record.Capped > 0 ||
+			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0
+		overloaded = overloaded || stalled || lost
+	}
+	if !overloaded {
+		return false, errors.New("a failed warmup without demonstrated loss or a stall is not probe evidence")
+	}
+	return true, nil
 }
 
 func sameBidirectionalWorkload(forward, reverse workloadIdentity) bool {
@@ -1106,9 +1296,8 @@ func validateSharedSenderRecord(record *fixtureEvidence) (*achievedRateBounds, e
 	if *window.Status == "inconclusive" {
 		if window.Reason == nil || *window.Reason == "" || *window.DeliveredLower != 0 || *window.DeliveredUpper != 0 ||
 			*window.OutstandingLower != 0 || *window.OutstandingUpper != 0 || *window.RateLower != 0 || *window.RateUpper != 0 ||
-			record.ValidatedPerSecond == nil || *record.ValidatedPerSecond != 0 || window.BacklogChange == nil ||
-			window.BacklogChange.Status != "" || window.BacklogChange.SampleCount != 0 || window.BacklogChange.Lower == nil ||
-			window.BacklogChange.Upper == nil || *window.BacklogChange.Lower != 0 || *window.BacklogChange.Upper != 0 {
+			record.ValidatedPerSecond == nil || *record.ValidatedPerSecond != 0 || window.BacklogTrend == nil ||
+			!window.BacklogTrend.unavailable() || len(window.Samples) != 0 {
 			return nil, errors.New("inconclusive sender_window does not match unavailable producer accounting")
 		}
 		return nil, nil
@@ -1351,7 +1540,7 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 		}
 		fixtureInvalid = fixtureInvalid || *record.Echo.Validated != *record.Expected || *record.Echo.Capped != 0 ||
 			*record.Echo.DeadlineExceeded != 0 || *record.Echo.Invalid != 0 || *record.Echo.OutstandingAfterDrain != 0
-	case "throughput", "bidirectional":
+	case "throughput", "bidirectional", routedMode, routedDirectMode:
 		if record.Echo != nil || record.ReceiverEcho != nil {
 			return errors.New("throughput sender records must not carry echo evidence")
 		}
@@ -1380,6 +1569,9 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	}
 	if uint64(declaredRate) != *spec.Rate {
 		return workloadIdentity{}, fmt.Errorf("declared rate %d does not match measured spec.rate %d", declaredRate, *spec.Rate)
+	}
+	if spec.Overload != nil {
+		return workloadIdentity{}, errOverloadEvidence
 	}
 	if spec.Cohort == nil || *spec.Cohort == "" || spec.Seed == nil || spec.Associations == nil ||
 		spec.Expected == nil || spec.Duration == nil || spec.Outstanding == nil ||
@@ -1419,7 +1611,7 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		return workloadIdentity{}, errors.New("unsupported payload workload")
 	}
 	switch *spec.Mode {
-	case "throughput", "echo", "bidirectional":
+	case "throughput", "echo", "bidirectional", routedMode, routedDirectMode:
 	default:
 		return workloadIdentity{}, errors.New("unsupported workload mode")
 	}
@@ -1436,12 +1628,21 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	if err := validateControlBaseURL(spec.PeerControl); err != nil {
 		return workloadIdentity{}, fmt.Errorf("spec.peer_control: %w", err)
 	}
+	if isRoutedWorkload(*spec.Mode) {
+		if err := validateRoutedTopology(spec); err != nil {
+			return workloadIdentity{}, err
+		}
+	}
 	instrumentation := "http-progress"
 	if spec.SharedClock != nil {
 		if _, err := clockFromSpec(spec); err != nil {
 			return workloadIdentity{}, err
 		}
 		instrumentation = "shared-clock"
+	}
+	ssnm, err := ssnmIdentityFromSpec(spec)
+	if err != nil {
+		return workloadIdentity{}, err
 	}
 	return workloadIdentity{
 		Associations:    *spec.Associations,
@@ -1454,7 +1655,39 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		Initiation:      *spec.Initiation,
 		PeerControl:     spec.PeerControl,
 		Instrumentation: instrumentation,
+		SSNM:            ssnm,
 	}, nil
+}
+
+// The optional-router workload (performance budgets section 2) has one fixed
+// shape: 2 SGs x 2 SGPs x 2 associations, the deterministic mixed payload, the
+// ASP dialling, traffic from ASP to SGP, and one ordered flow per configured
+// route. routed sends through Endpoint.MTPTransfer; routed-direct is the
+// matched control that writes the same traffic on the same frozen paths with
+// Association.WriteData.
+const (
+	routedMode             = "routed"
+	routedDirectMode       = "routed-direct"
+	routedAssociationCount = 8
+	routedFlowCount        = 1000
+)
+
+func isRoutedWorkload(mode string) bool {
+	return mode == routedMode || mode == routedDirectMode
+}
+
+func validateRoutedTopology(spec *fixtureSpec) error {
+	switch {
+	case *spec.Associations != routedAssociationCount:
+		return fmt.Errorf("routed workloads require exactly %d associations (2 SGs x 2 SGPs x 2 associations)", routedAssociationCount)
+	case *spec.Payload != "mix":
+		return errors.New("routed workloads require the mix payload")
+	case *spec.Initiation != "asp-dial":
+		return errors.New("routed workloads require asp-dial initiation")
+	case *spec.Direction != "asp-to-sgp":
+		return errors.New("routed workloads require direction asp-to-sgp")
+	}
+	return nil
 }
 
 func validateControlBaseURL(value string) error {
@@ -1661,4 +1894,41 @@ func writeInvalidResponse(output io.Writer, err error) {
 		Scope:    decisionScope,
 		Error:    err.Error(),
 	})
+}
+
+// errOverloadEvidence refuses the records of a perftraffic DATA overload trial.
+// Such a trial offers more than it can deliver on purpose and is judged by its
+// own outcome-accounting and recovery contract (performance budgets section
+// 4); its refusals and losses say nothing about the nominal sustainable rate.
+var errOverloadEvidence = errors.New("overload trial records are not capacity evidence: an overload trial is judged by its own accounting and recovery contract, never as a nominal capacity probe")
+
+// refuseOverloadEvidence rejects a run that carries the overload identity
+// anywhere perftraffic records it: a record's spec.overload or its overload
+// object, on a standalone sender record, on any record of a cohort, or on the
+// cohort itself. It runs before every other check, so a warm-up or
+// measurement cohort of an overload trial is refused for what it is rather
+// than for a symptom such as its phased expected count.
+func refuseOverloadEvidence(raw json.RawMessage) error {
+	type identity struct {
+		Spec *struct {
+			Overload json.RawMessage `json:"overload"`
+		} `json:"spec"`
+		Overload json.RawMessage `json:"overload"`
+	}
+	var run struct {
+		identity
+		Sender          *identity `json:"sender"`
+		Receiver        *identity `json:"receiver"`
+		ReverseSender   *identity `json:"reverse_sender"`
+		ReverseReceiver *identity `json:"reverse_receiver"`
+	}
+	if err := json.Unmarshal(raw, &run); err != nil {
+		return fmt.Errorf("decode run evidence: %w", err)
+	}
+	for _, record := range []*identity{&run.identity, run.Sender, run.Receiver, run.ReverseSender, run.ReverseReceiver} {
+		if record != nil && (record.Overload != nil || record.Spec != nil && record.Spec.Overload != nil) {
+			return errOverloadEvidence
+		}
+	}
+	return nil
 }

@@ -206,4 +206,17 @@ drainInitialStates:
 	if got := sgp.State(); got != StateASPActive {
 		t.Errorf("SGP state after restart recovery = %v, want %v", got, StateASPActive)
 	}
+
+	// A control message that has to wait for send-buffer space leaves through
+	// the socket's default send parameters, which setUpSocket set on the
+	// original association. The restart keeps the kernel association, so they
+	// must still be the control template.
+	defaults, err := sgp.sctpConn.GetDefaultSndInfo()
+	if err != nil {
+		t.Fatalf("reading the default send parameters after the restart: %v", err)
+	}
+	if defaults.SID != 0 || defaults.PPID != M3UAPPID {
+		t.Errorf("default send parameters after the restart are stream %d PPID %d; want stream 0, PPID %d",
+			defaults.SID, defaults.PPID, M3UAPPID)
+	}
 }

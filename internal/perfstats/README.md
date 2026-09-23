@@ -27,20 +27,50 @@ absolute performance and correctness gate passed.
 
 ## Predeclared sustained-backlog decision method
 
-`backlog.go` evaluates the sender-window first-to-last-quarter mean backlog
-change interval `[lower, upper]` without an additional numeric tolerance.
-Missing, non-finite or reversed bounds are indeterminate. Valid intervals are:
+`backlog.go` fits the trend of the sender-window backlog over the measurement
+window and compares the implied growth with a materiality floor.
 
-- `not-growing` when `upper <= 0`;
-- `growing` when `lower > 0`; and
-- `indeterminate` otherwise.
+The rule replaced a first-to-last-quarter mean comparison with zero tolerance
+on 2026-09-23 ([#44](https://github.com/gomaja/go-m3ua/issues/44)). That
+comparison cannot tell a stationary queue from a growing one: the difference
+between two quarter means of a flat but noisy series is positive about half
+the time. Replayed through it, 101 of 200 synthetic loss-free stationary runs
+were classified as growing, and a recorded loss-free 120 s run at 25,000/s
+(3,000,000 deliveries) measured +0.633 messages and failed.
 
-Means of integer samples need not be integers: with two samples per quarter,
-counts `[0, 0]` followed by `[0, 1]` demonstrate a positive mean change of
-0.5 messages. A one-message allowance would incorrectly pass that growth.
-Sampling uncertainty is already represented by the interval width and is not
-grounds for adding an acceptance tolerance. Even a small interval straddling
-zero remains inconclusive; improve the measurement instead of moving the gate.
+Method:
+
+- **Samples.** Observations taken strictly inside the window, each placed at
+  the midpoint of its request bracket with backlog bounds `[lower, upper]`. At
+  least eight are required.
+- **Slope.** The least-squares slope of the per-second backlog. Because the
+  slope is linear in the observations, its exact range over every backlog path
+  inside the brackets is computed first. That range is then widened on each
+  side by the one-sided 99% Newey–West standard error of the slope fitted to
+  the bracket midpoints (Bartlett kernel, lag `floor(4*(n/100)^(2/9))`,
+  `n/(n-2)` correction), so autocorrelated noise does not overstate precision.
+- **Growth bounds.** The slope bounds multiplied by the window length, in
+  messages.
+- **Floor.** The traffic offered in 10 ms: `rate * 0.010`, which is 250
+  messages at 25,000/s and 50 at 5,000/s.
+
+Verdicts:
+
+- `not-growing` when the upper growth bound is at or below the floor;
+- `growing` when the lower growth bound exceeds the floor; and
+- `indeterminate` otherwise, and for missing, non-finite or reversed bounds.
+
+The deliberately under-served control (5,000/s offered, 4,998/s served, about
+240 messages of growth over 120 s against a 50-message floor) remains
+`growing`. The floor applies to growth over the observed window; it is not a
+loss allowance. Nominal runs still require zero loss, and every numerical
+budget is unchanged. The fit weights each observation by its leverage, so a
+transient late spike is not what this rule detects; the latency, loss and
+outstanding-cap gates cover that.
+
+`perfcapacity` recomputes the trend from the sender window's raw observations
+and rejects a reported status or bound those observations contradict. Missing
+or incomplete trend evidence is inconclusive, never a pass.
 
 A passing run additionally requires valid fixture evidence, no detected
 transport stall and zero delivery/submission failures. Counter totals saturate
@@ -48,8 +78,8 @@ rather than overflow. A later drain cannot erase measured-window backlog
 growth. This finite-run comparison covers the observed window only; it does
 not prove indefinite queue stability or replace the remaining acceptance gates.
 
-Historical campaigns evaluated against a one-message threshold must be
-re-evaluated under the corrected rule before claiming current acceptance.
+Historical campaigns evaluated under the quarter-mean or one-message rules must
+be re-evaluated under this rule before claiming current acceptance.
 
 ## Predeclared transport-stall detection
 
@@ -100,7 +130,7 @@ so it reaches the report.
 3. **missing** stall evidence is `inconclusive`: a run whose freedom from
    stalls was never observed is not credited with a sustained rate;
 4. missing or invalid backlog evidence is `inconclusive`;
-5. the predeclared interval rule above.
+5. the predeclared trend rule above.
 
 The threshold must not be tuned after observing results. Raising it so a
 stalled row reports clean, and lowering it so an inconvenient row can be
@@ -123,11 +153,12 @@ gates passed, or that any campaign-level repetition requirement was met.
 
 ## Bounded capacity search
 
-`capacity.go` mirrors the predeclared bounded search of the local
-`capacity.py` probe driver: integer message-per-second rates, a pass/fail
-bracket refined to within five percent (`100*upper <= 105*lower`), downward
-and upward halving/doubling between bounds, no probe retries after an
-inconclusive outcome, and a fixed probe budget. Rates are bounded by
+`capacity.go` implements the predeclared bounded search for the budget's
+"highest sustained offered rate": integer message-per-second rates, a bracket
+between the highest rate that demonstrated a sustained, loss-free,
+not-growing run and the lowest rate that did not, refined to within five
+percent (`100*upper <= 105*lower`), downward and upward halving/doubling
+between bounds, no probe retries, and a fixed probe budget. Rates are bounded by
 `MaximumSearchRate` so that the products those comparisons form stay exact;
 a maximum above it is rejected by the constructor rather than allowed to wrap
 a comparison and report a bracket that was never refined. Probes must be recorded in
@@ -135,15 +166,56 @@ execution order at exactly the selected rate. Only a refined bracket proceeds
 to validation: exactly five full repetitions at the lower passing rate must
 all pass, and that lower rate is the result. `lower-bound-only`,
 `integer-resolution-limit` and `probe-budget-exhausted` are inconclusive,
-never widened into a pass; `no-passing-rate` is a failure.
+never widened into a pass.
+
+Each probe contributes one of four outcomes:
+
+- `pass`: the run demonstrated the rate.
+- `fail`: the run failed at the rate, for example with delivery or
+  submission loss.
+- `not-demonstrated`: the run was inconclusive only because of a detected
+  transport stall or a backlog trend straddling the floor. Near and above
+  capacity these are the observed outcomes. On the reference environment, with
+  one association and 128-byte payloads, a 120,000 messages/s probe was
+  loss-free but its backlog trend straddled the floor; probes at 140,000 and
+  160,000 messages/s filled the outstanding cap within their first second and
+  each blocked one send for about 1.03 seconds. The rate was not shown to be
+  sustained, so it bounds the bracket from above exactly as a failure does and
+  the search continues. Under the former rule, which ended the search at any
+  inconclusive probe, none of these searches could converge.
+- `inconclusive`: evidence was missing or invalid. It says nothing about the
+  rate and ends the search.
+
+`no-passing-rate` is a failure when every probe failed, and inconclusive when
+any probe was only not demonstrated.
+
+A probe whose warm-up could not sustain the rate never reaches measurement; its
+failed warm-up cohort is accepted as that probe's evidence, and it can only fail
+or be not demonstrated. It qualifies only when the warm-up offered its whole
+schedule, no record carries a fatal read or control failure, the only error is
+the fixture's own validity failure, and the sender shows outstanding-cap
+refusals, missing deliveries or a stall. Loss counts alone are not enough: an
+abort for another reason, such as a failed control request or a receiver read
+failure, also strands messages but says nothing about the rate, and is rejected
+as invalid input. The same failed warm-up in a validation repetition is a failed
+repetition, never a pass. Campaign identity compares a warm-up cohort with the
+measurement workload in every field except its duration; the fixture runs its
+warm-up with the measurement's drain, outstanding limit, payload and
+instrumentation, and a warm-up that differed in any of them would be rejected.
 
 The CLI at `internal/cmd/perfcapacity` reads one strict JSON request with the
 search parameters, per-run fixture sender records in execution order, and the
 validation repetitions. Each run is decided by the predeclared backlog and
-stall rules above; a missing or unbounded sender window, an insufficient-sample
-backlog change or absent interval bounds is missing evidence and stays
+stall rules above; a missing or unbounded sender window, or a missing,
+incomplete or insufficient-sample backlog trend, is missing evidence and stays
 inconclusive. Exit statuses are 0 pass, 1 fail, 2 inconclusive, 3 invalid
 input.
+
+While the search is still running, the response carries `next_probe_rate`,
+the rate the search selected for its next probe. A campaign driver runs one
+probe at that rate, appends it and asks again, so the probe order is always
+the search's own; once the search terminates the field is absent and
+`selected_rate` names the rate for the five validation repetitions.
 
 Each run record must carry `send_duration.max_ns` and a `manifest`. Neither is
 optional: a record without the send-duration maximum cannot show whether a
