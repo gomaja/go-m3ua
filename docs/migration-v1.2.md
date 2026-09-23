@@ -23,6 +23,7 @@ Contents:
 - [Ownership and shutdown](#ownership-and-shutdown)
 - [Codec cleanup](#codec-cleanup)
 - [Complete v1.1.1 API disposition](#complete-v111-api-disposition)
+- [After v1.2.0: SSNM events are deltas](#after-v120-ssnm-events-are-deltas)
 
 ## Endpoint role
 
@@ -299,9 +300,10 @@ not an association-level cache as an application routing contract.
 A report describes the message received, not a combined availability/congestion
 snapshot. Read the report kind before interpreting its fields. DUPU and peer
 SCON are event-only: a snapshot does not reconstruct lost user-part or peer
-congestion indications. Handle `SSNMContinuityLostEvent` with
-`SSNMSubscription.Resync` and account for event-only information that remains
-unknown. Closing one
+congestion indications. Events are deltas applied to that snapshot: a report
+event's `Updated` names only the destinations it wrote. Handle
+`SSNMContinuityLostEvent` with `SSNMSubscription.Resync` and account for
+event-only information that remains unknown. Closing one
 association does not close an Endpoint subscription; observe binding/partition
 lifecycle events. Close the subscription when its consumer stops, or close the
 owning Endpoint to terminate all its subscriptions.
@@ -741,3 +743,59 @@ role are rejected before association processing:
 
 The configuration `ListenerConfig.SelectAssociationConfig` returns is validated
 after SCTP accept and before socket setup, monitoring or M3UA parsing.
+
+## After v1.2.0: SSNM events are deltas
+
+This change ships in the next minor release and breaks code written against
+v1.2.0.
+
+`SSNMEvent.States` carried the whole partition's retained knowledge after every
+event, so a one-destination report cost the size of the partition once per
+subscriber. It is replaced by `SSNMEvent.Updated`, which carries only what the
+event changed:
+
+| Event | v1.2.0 `States` | Now |
+| --- | --- | --- |
+| `SSNMReportEvent`, retained | every destination of the partition | `Updated`: the destinations the report wrote, each with both dimensions as retained after it, in point-code then mask order |
+| `SSNMReportEvent`, retained by nobody (unbound partition, DUPU, DAUD, peer SCON) | empty | empty |
+| `SSNMBindingAdmittedEvent`, `SSNMBindingActivatedEvent`, `SSNMBindingRetiredEvent` | every destination of the partition | empty: bindings change no destination knowledge |
+| `SSNMPartitionRetiredEvent`, `SSNMPartitionInvalidatedEvent` | empty | empty: the kind discards the partition's destinations |
+
+The field is renamed rather than redefined so that code relying on the old
+meaning stops compiling instead of silently dropping destinations. A consumer
+that replaced its view of a partition with each event's `States`:
+
+```go
+// view map[m3ua.SSNMPartition][]m3ua.SSNMDestinationKnowledge
+if event.Kind == m3ua.SSNMReportEvent && event.States != nil {
+    view[event.Partition] = event.States
+}
+```
+
+patches it instead, starting from the snapshot's `Destinations` keyed by
+`Destination`:
+
+```go
+// view map[m3ua.SSNMPartition]map[m3ua.PointCodeRange]m3ua.SSNMDestinationKnowledge
+switch event.Kind {
+case m3ua.SSNMBindingAdmittedEvent:
+    if view[event.Partition] == nil {
+        view[event.Partition] = make(map[m3ua.PointCodeRange]m3ua.SSNMDestinationKnowledge)
+    }
+case m3ua.SSNMReportEvent:
+    for _, update := range event.Updated {
+        view[event.Partition][update.Destination] = update
+    }
+case m3ua.SSNMPartitionInvalidatedEvent:
+    clear(view[event.Partition])
+case m3ua.SSNMPartitionRetiredEvent:
+    delete(view, event.Partition)
+}
+```
+
+No event removes a single destination: DAVA and a level-zero SCON are retained
+as knowledge, and bounds refuse a report rather than evict. The whole retained
+state still comes only from `SubscribeSSNM`, `Resync` and `SSNMKnowledge`,
+unchanged. `SubscriptionQueueBytes` accounting charges 256 bytes per `Updated`
+entry, as it charged per `States` entry, so the same byte budget now queues far
+more one-destination reports.

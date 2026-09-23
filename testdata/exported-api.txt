@@ -440,7 +440,7 @@ field SSNMEvent.Reason
 field SSNMEvent.Report
 field SSNMEvent.ReportSet
 field SSNMEvent.Revision
-field SSNMEvent.States
+field SSNMEvent.Updated
 field SSNMPartition.ApplicationServer
 field SSNMPartition.Association
 field SSNMPartition.Kind
