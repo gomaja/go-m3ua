@@ -35,6 +35,12 @@ type readyResult struct {
 
 type receiverControl struct {
 	mutex                sync.Mutex
+	clock                measurementClock
+	lastClock            int64
+	stoppedClock         int64
+	measurementLower     uint64
+	measurementUpper     uint64
+	clockEvidence        *sharedClockEvidence
 	now                  func() time.Time
 	expectedAssociations int
 	ledgerWindow         int
@@ -72,6 +78,16 @@ type receiverControl struct {
 	reverseSender   *runRecord
 	reverseReceiver *runRecord
 	reverseError    string
+	// routed is set only on the SGP receiver of a routed run. Its cohorts use
+	// the per-route ledger and route-aware validation instead of ledger.
+	routed *routedReceiveState
+	// ssnm is the SGP's SSNM load generator, nil without SSNM load.
+	ssnm *ssnmGenerator
+	// tracked is the association serving each transport index, observed by
+	// overload cohorts. overload is the current cohort's overload accounting,
+	// nil for every nominal cohort.
+	tracked  []*m3ua.Association
+	overload *receiverOverloadState
 }
 
 // reverseDriver lets the bidirectional SGP run the reverse (SGP-to-ASP)
@@ -181,7 +197,21 @@ func (control *receiverControl) reset(specification runSpec) error {
 	if control.readyAssociations != control.expectedAssociations {
 		return errors.New("not all associations are ready")
 	}
-	expected, expectedErr := scheduledMessages(specification.Rate, specification.Duration)
+	if (specification.Clock != nil) != (control.clock != nil) {
+		return fmt.Errorf("%w: both peers must explicitly enable the same-host clock", errInvalidRunSpec)
+	}
+	if specification.Clock != nil {
+		domain, err := control.clock.Domain()
+		now, readErr := control.clock.Now()
+		if err != nil || readErr != nil || !specification.Clock.valid(specification.Duration) || !specification.Clock.validDrain(specification.Drain) || specification.Clock.Domain != domain || now <= 0 || now >= specification.Clock.Start-domain.Resolution || specification.Clock.Start-now > int64(sharedClockLead) || specification.Mode == modeEcho {
+			return fmt.Errorf("%w: shared clock domain or future window mismatch", errInvalidRunSpec)
+		}
+	}
+	overloadSchedule, overloadErr := validateOverloadSpec(specification)
+	if overloadErr != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, overloadErr)
+	}
+	expected, expectedErr := specExpected(specification)
 	if specification.Cohort == "" || specification.Associations != control.expectedAssociations ||
 		specification.Expected == 0 || specification.Duration <= 0 || specification.Duration > maxRunWindow ||
 		specification.Payload.size(0) == 0 || specification.Rate > maxOfferedRate ||
@@ -192,6 +222,13 @@ func (control *receiverControl) reset(specification runSpec) error {
 	}
 	switch specification.Mode {
 	case "", modeThroughput, modeEcho, modeBidirectional:
+		if control.routed != nil {
+			return fmt.Errorf("%w: this receiver hosts the routed topology and accepts only %s cohorts", errInvalidRunSpec, control.routed.mode)
+		}
+	case modeRouted, modeRoutedDirect:
+		if err := control.validateRoutedSpecLocked(specification); err != nil {
+			return err
+		}
 	default:
 		return errInvalidRunSpec
 	}
@@ -220,8 +257,35 @@ func (control *receiverControl) reset(specification runSpec) error {
 			return fmt.Errorf("%w: the peer control URL is not this receiver's configured reverse control destination", errInvalidRunSpec)
 		}
 	}
-	control.spec = specification
-	control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
+	var routedLedger *routingLedger
+	if control.routed != nil {
+		ledger, err := newRoutingLedger(specification.Expected, control.ledgerWindow)
+		if err != nil {
+			return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+		}
+		routedLedger = ledger
+	}
+	// acceptSpec commits the generator to the cohort, so it runs after every
+	// check that can still refuse the specification.
+	if err := control.ssnm.acceptSpec(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
+	control.stopOverloadLocked()
+	control.overload = nil
+	if overloadSchedule != nil {
+		control.overload = newReceiverOverloadState(overloadSchedule)
+	}
+	control.spec = copyRunSpec(specification)
+	control.lastClock = 0
+	control.stoppedClock = 0
+	control.measurementLower = 0
+	control.measurementUpper = 0
+	control.clockEvidence = nil
+	if control.routed != nil {
+		control.routed.ledger = routedLedger
+	} else {
+		control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
+	}
 	control.transportToLogical = filledInts(specification.Associations, -1)
 	control.logicalToTransport = filledInts(specification.Associations, -1)
 	control.started = time.Time{}
@@ -252,6 +316,15 @@ func (control *receiverControl) start() error {
 		return errors.New("receiver is not armed")
 	}
 	control.started = control.now()
+	if control.spec.Clock != nil {
+		domain, err := control.clock.Domain()
+		now, readErr := control.sharedNowLocked()
+		if err != nil || readErr != nil || domain != control.spec.Clock.Domain || now >= control.spec.Clock.Start-domain.Resolution {
+			control.mutex.Unlock()
+			return errors.New("shared clock changed or measurement window already started")
+		}
+		control.clockEvidence = &sharedClockEvidence{Before: domain}
+	}
 	control.allocBefore = readRuntimeCounters()
 	var err error
 	control.cpuBefore, err = readCPUStat(control.cpuStatPath)
@@ -259,12 +332,16 @@ func (control *receiverControl) start() error {
 		control.cpuError = err.Error()
 	}
 	control.phase = receiverMeasuring
+	control.startOverloadLocked()
 	specification := control.spec
 	driver := control.driver
 	// Everything the reverse cohort is pinned to is captured here, under the
 	// mutex that commits the cohort.
 	run := reverseRun{specification: specification, reverseControl: control.reverseControl, generation: control.generation}
 	control.mutex.Unlock()
+	if specification.SSNM.enabled() {
+		control.ssnm.begin()
+	}
 	if specification.Mode == modeBidirectional && driver != nil {
 		go control.runReverseCohort(driver, run)
 	}
@@ -302,8 +379,10 @@ func (control *receiverControl) runReverseCohort(driver *reverseDriver, run reve
 		// it, and taking it from configuration here means a specification can
 		// never redirect this request even if it reached the cohort by some
 		// other path.
-		PeerControl: run.reverseControl,
-		CPUStatPath: driver.cpuStatPath,
+		PeerControl:   run.reverseControl,
+		CPUStatPath:   driver.cpuStatPath,
+		SameHostClock: specification.Clock != nil,
+		clockWindow:   specification.Clock,
 	}
 	sender, receiver, err := runSenderCohort(driver.ctx, reverseConfig, driver.associations, nil, specification.Cohort+"-reverse", specification.Duration)
 	control.mutex.Lock()
@@ -329,6 +408,15 @@ func (control *receiverControl) stop() error {
 		return errors.New("receiver is not measuring")
 	}
 	control.stopped = control.now()
+	if control.spec.Clock != nil {
+		var clockErr error
+		control.stoppedClock, clockErr = control.sharedNowLocked()
+		if clockErr != nil {
+			control.phase = receiverStopped
+			control.stopOverloadLocked()
+			return clockErr
+		}
+	}
 	var err error
 	control.cpuAfter, err = readCPUStat(control.cpuStatPath)
 	if err != nil && control.cpuError == "" {
@@ -336,6 +424,22 @@ func (control *receiverControl) stop() error {
 	}
 	control.allocAfter = readRuntimeCounters()
 	control.phase = receiverStopped
+	control.stopOverloadLocked()
+	if control.overload != nil && control.overload.begun {
+		control.overload.finish()
+	}
+	if control.spec.Clock != nil {
+		domain, domainErr := control.clock.Domain()
+		if control.clockEvidence == nil {
+			control.clockEvidence = &sharedClockEvidence{}
+		}
+		control.clockEvidence.After = domain
+		control.clockEvidence.Verified = domainErr == nil && domain == control.spec.Clock.Domain && domain == control.clockEvidence.Before
+		if !control.clockEvidence.Verified {
+			control.fatal = "shared clock domain changed during measurement"
+			return errors.New(control.fatal)
+		}
+	}
 	return nil
 }
 
@@ -391,7 +495,10 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 	}
 	identity, err := validateMessage(message, specification.Cohort, specification.Seed,
 		specification.Associations, specification.Payload, expectedKind, specification.Direction == directionSGPToASP)
-	received := control.now()
+	var received time.Time
+	if specification.Clock == nil {
+		received = control.now()
+	}
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	if control.phase != receiverMeasuring || control.generation != generation {
@@ -402,6 +509,12 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 	}
 	if err != nil || !control.bindAssociation(transportIndex, int(identity.Association)) {
 		control.ledger.snapshotData.Invalid++
+		if control.overload != nil {
+			var scope misscopedError
+			if err == nil || errors.As(err, &scope) {
+				control.overload.misscoped++
+			}
+		}
 		return arrival{identity: identity, generation: generation}, recordInvalid
 	}
 	identity.Cohort = specification.Cohort
@@ -410,12 +523,34 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 	}
 	status := control.ledger.record(identity)
 	if status != ledgerUnique {
+		if status == ledgerDuplicate && control.overload != nil {
+			control.overload.recordDuplicate(globalIndex(identity))
+		}
 		return arrival{identity: identity, generation: generation}, recordNotUnique
+	}
+	if control.spec.Clock != nil {
+		sharedReceived, clockErr := control.sharedNowLocked()
+		if clockErr != nil || sharedReceived > control.spec.Clock.End+int64(control.spec.Drain)-control.spec.Clock.Domain.Resolution {
+			control.ledger.snapshotData.Unique--
+			control.ledger.snapshotData.Invalid++
+			if clockErr == nil {
+				control.fatal = "delivery exceeds shared drain deadline"
+			}
+			return arrival{identity: identity, generation: generation}, recordInvalid
+		}
+		control.classifySharedDeliveryLocked(sharedReceived)
+		if control.overload != nil {
+			control.overload.recordUnique(globalIndex(identity))
+		}
+		return arrival{identity: identity, generation: generation}, recordUnique
 	}
 	if received.Before(control.firstArrival.Add(control.spec.Duration)) {
 		control.uniqueMeasurement++
 	} else {
 		control.uniqueDrain++
+	}
+	if control.overload != nil {
+		control.overload.recordUnique(globalIndex(identity))
 	}
 	return arrival{identity: identity, generation: generation}, recordUnique
 }
@@ -507,7 +642,7 @@ func (control *receiverControl) result() runRecord {
 	defer control.mutex.Unlock()
 	record := runRecord{
 		Side:                "receiver",
-		Spec:                control.spec,
+		Spec:                copyRunSpec(control.spec),
 		Expected:            control.spec.Expected,
 		FatalError:          control.fatal,
 		AcceptanceScope:     baselineFixtureScope,
@@ -518,8 +653,15 @@ func (control *receiverControl) result() runRecord {
 		Allocations:         AllocationObservation{Scope: wholeProcessScope, Before: control.allocBefore, After: control.allocAfter},
 		Series:              append([]seriesPoint(nil), control.series...),
 	}
-	if control.ledger != nil {
-		snapshot := control.ledger.snapshot()
+	if control.clockEvidence != nil {
+		evidence := *control.clockEvidence
+		record.ClockEvidence = &evidence
+	}
+	if control.spec.Clock != nil {
+		record.WindowAlignment = "verified same-host CLOCK_MONOTONIC window; boundary counts retain clock-resolution uncertainty"
+		record.ClockBoundary = &sharedClockSnapshot{Domain: control.spec.Clock.Domain, Captured: control.lastClock, MeasurementLower: control.measurementLower, MeasurementUpper: control.measurementUpper}
+	}
+	if snapshot, present := control.deliveryLocked(); present {
 		record.Delivery = deliveryResult{
 			Unique:            snapshot.Unique,
 			UniqueMeasurement: control.uniqueMeasurement,
@@ -539,10 +681,15 @@ func (control *receiverControl) result() runRecord {
 			RepliesDropped: control.echoRepliesDropped,
 		}
 	}
+	if control.overload != nil {
+		record.Overload = &overloadRecord{Receiver: control.overload.record()}
+	}
 	record.Reverse = control.reverseSender
 	record.ReverseReceiver = control.reverseReceiver
 	record.ReverseError = control.reverseError
-	if !control.started.IsZero() && !control.stopped.IsZero() {
+	if control.spec.Clock != nil {
+		record.DrainDuration = time.Duration(max(control.stoppedClock-control.spec.Clock.End, 0))
+	} else if !control.started.IsZero() && !control.stopped.IsZero() {
 		measurementEnd := control.firstArrival.Add(control.spec.Duration)
 		if control.firstArrival.IsZero() {
 			measurementEnd = control.started.Add(control.spec.Duration)
@@ -551,10 +698,17 @@ func (control *receiverControl) result() runRecord {
 			record.DrainDuration = control.stopped.Sub(measurementEnd)
 		}
 	}
+	if generator := control.ssnm.cohortRecord(control.spec); generator != nil {
+		record.SSNM = &ssnmRecord{Generator: generator}
+		record.UnsupportedModes = ssnmUnsupportedModes()
+	}
 	record.CPU = newCPUObservation(record.CPU.Before, record.CPU.After, errorFromString(record.CPU.Error), nil, record.Delivery.Unique)
 	record.Allocations.Delta = runtimeDelta(record.Allocations.Before, record.Allocations.After)
 	if record.MeasurementDuration > 0 {
 		record.ValidatedPerSecond = float64(record.Delivery.UniqueMeasurement) / record.MeasurementDuration.Seconds()
+		if control.spec.Clock != nil {
+			record.ValidatedPerSecond = float64(control.measurementLower) / record.MeasurementDuration.Seconds()
+		}
 	}
 	record.evaluate()
 	return record
@@ -570,10 +724,10 @@ func errorFromString(message string) error {
 func (control *receiverControl) sample(now time.Time) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
-	if control.phase != receiverMeasuring || control.ledger == nil || len(control.series) >= 601 {
+	snapshot, present := control.deliveryLocked()
+	if control.phase != receiverMeasuring || !present || len(control.series) >= 601 {
 		return
 	}
-	snapshot := control.ledger.snapshot()
 	origin := control.firstArrival
 	if origin.IsZero() {
 		origin = control.started
@@ -582,7 +736,20 @@ func (control *receiverControl) sample(now time.Time) {
 	if now.After(origin) {
 		offset = now.Sub(origin)
 	}
+	if control.spec.Clock != nil {
+		sharedNow, err := control.sharedNowLocked()
+		if err != nil || sharedNow < control.spec.Clock.Start {
+			return
+		}
+		offset = time.Duration(sharedNow - control.spec.Clock.Start)
+	}
 	scheduled := scheduledAt(control.spec.Rate, offset, control.spec.Duration, control.spec.Expected)
+	outstanding := outstandingAt(control.spec.Rate, offset, control.spec.Duration, snapshot.Unique)
+	if control.overload != nil {
+		scheduled = control.overload.schedule.scheduledBefore(offset)
+		outstanding = subtractFloor(scheduled, snapshot.Unique)
+		control.sampleOverloadLocked(offset, snapshot.Unique)
+	}
 	missing := uint64(0)
 	if snapshot.Unique < scheduled {
 		missing = scheduled - snapshot.Unique
@@ -594,7 +761,7 @@ func (control *receiverControl) sample(now time.Time) {
 		Missing:      missing,
 		Duplicate:    snapshot.Duplicate,
 		Invalid:      snapshot.Invalid,
-		Outstanding:  outstandingAt(control.spec.Rate, offset, control.spec.Duration, snapshot.Unique),
+		Outstanding:  outstanding,
 	})
 }
 
@@ -635,6 +802,14 @@ func sampleReceiver(ctx context.Context, control *receiverControl) {
 
 func (control *receiverControl) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /clock", func(writer http.ResponseWriter, _ *http.Request) {
+		snapshot, err := control.clockSnapshot()
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(writer, http.StatusOK, snapshot)
+	})
 	mux.HandleFunc("GET /progress", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, control.progress())
 	})
@@ -676,6 +851,8 @@ func (control *receiverControl) handler() http.Handler {
 	mux.HandleFunc("GET /results", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, control.result())
 	})
+	mux.HandleFunc("GET /overload/delivered", control.serveDeliveredLedger)
+	control.ssnm.register(mux)
 	return mux
 }
 

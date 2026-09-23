@@ -1452,7 +1452,7 @@ func TestLoadsharedFlowKeepsItsSGPWhenAThirdJoins(t *testing.T) {
 	found := false
 	for candidate := uint8(0); candidate < 255 && !found; candidate++ {
 		key := newASPTransferFlowKey("sccp-a", transferProtocolData(pointCode, candidate, nil))
-		hash := hashASPTransferFlow(key, "sg-a")
+		hash := hashASPTransferFlow(key, aspTransferSGPHash, "sg-a", "")
 		if hash%2 != hash%3 {
 			sls, found = candidate, true
 		}

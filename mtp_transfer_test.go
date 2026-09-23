@@ -505,7 +505,7 @@ func TestMTPTransferSGPBroadcastKeepsHealthyLoadsharedSignallingGateway(t *testi
 	for sls := uint8(0); ; sls++ {
 		request = MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, sls, nil)}
 		flowKey := newASPTransferFlowKey("sccp-a", request.ProtocolData)
-		if hashASPTransferFlow(flowKey, "signalling-gateway")%2 == 1 {
+		if hashASPTransferFlow(flowKey, aspTransferGatewayHash, "", "")%2 == 1 {
 			break
 		}
 	}
@@ -728,7 +728,7 @@ func TestMTPTransferKeepsHealthyAssignmentWhenAssociationAppears(t *testing.T) {
 	var sls uint8
 	for candidate := uint8(0); ; candidate++ {
 		key := newASPTransferFlowKey("sccp-a", transferProtocolData(0x123456, candidate, nil))
-		if hashASPTransferFlow(key, "sg-a/sgp-a1")%2 == 1 {
+		if hashASPTransferFlow(key, aspTransferAssociationHash, "sg-a", "sgp-a1")%2 == 1 {
 			sls = candidate
 			break
 		}
