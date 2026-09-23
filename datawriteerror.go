@@ -4,7 +4,11 @@
 
 package m3ua
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"os"
+)
 
 // DataSendOutcome is what a failed DATA send leaves behind, and therefore what
 // the application may safely do next.
@@ -18,9 +22,11 @@ type DataSendOutcome uint8
 
 const (
 	// DataNotSent means the send was refused before any octet was submitted to
-	// the transport. Nothing of the message can be on the wire, so the
-	// application may resend it — to this association or another — without
-	// risking a duplicate.
+	// the transport, or the transport refused the whole message: SCTP queues a
+	// message whole or not at all, so a send refused for want of send-buffer
+	// space leaves nothing behind. Nothing of the message can be on the wire,
+	// so the application may resend it — to this association or another —
+	// without risking a duplicate.
 	DataNotSent DataSendOutcome = iota + 1
 
 	// DataSendIndeterminate means submission had begun when the failure was
@@ -77,4 +83,27 @@ func newDataNotSent(key ASKey, stream uint16, cause error) *DataWriteError {
 // newDataSendIndeterminate reports a failure detected after submission began.
 func newDataSendIndeterminate(key ASKey, stream uint16, cause error) *DataWriteError {
 	return &DataWriteError{Outcome: DataSendIndeterminate, AS: key, Stream: stream, Err: cause}
+}
+
+// newDataSubmissionError classifies a failure of the transport write itself.
+//
+// Such a failure is indeterminate unless the transport refused the message
+// whole. sctp_sendmsg queues a message whole or not at all, and the SCTP
+// dependency documents the same, so a send refused for want of send-buffer
+// space -- EAGAIN without a write deadline, or a write deadline that expired
+// while the send waited for space -- leaves nothing of the message queued, let
+// alone on the wire. Reporting that as indeterminate told the application a
+// resend might duplicate exactly when backpressure made resending the right
+// thing to do.
+func newDataSubmissionError(key ASKey, stream uint16, cause error) *DataWriteError {
+	if transportRefusedWhole(cause) {
+		return newDataNotSent(key, stream, cause)
+	}
+	return newDataSendIndeterminate(key, stream, cause)
+}
+
+// transportRefusedWhole reports a transport error that means the SCTP stack
+// refused the whole message rather than failing partway.
+func transportRefusedWhole(err error) bool {
+	return sendBufferFull(err) || errors.Is(err, os.ErrDeadlineExceeded)
 }

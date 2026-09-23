@@ -208,8 +208,10 @@ var writeErr *m3ua.DataWriteError
 if errors.As(err, &writeErr) {
     switch writeErr.Outcome {
     case m3ua.DataNotSent:
-        // Nothing reached the transport. Re-sending cannot duplicate SS7
-        // traffic, so the application may safely retry or reroute.
+        // Nothing reached the transport, or the transport refused the whole
+        // message (a full SCTP send buffer, or a write deadline that expired
+        // waiting for one). Re-sending cannot duplicate SS7 traffic, so the
+        // application may safely retry or reroute.
     case m3ua.DataSendIndeterminate:
         // Submission had begun. The peer may or may not have the message; the
         // application owns the retry decision, because a resend may duplicate.

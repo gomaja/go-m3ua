@@ -338,14 +338,19 @@ func snapshotApplicationServer(applicationServer *applicationServer) Application
 }
 
 // MTPRouteStatus returns one configured ASP MTP Route by its local key.
+//
+// It reads aspRoutes.derived in one pass, collecting only this route's own
+// keys, rather than building every route's destinations
+// to answer one of them: the cost is proportional to the total number of
+// derived destination records, not to their product with the route count.
 func (e *Endpoint) MTPRouteStatus(id MTPRouteID) (MTPRouteStatus, bool) {
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return MTPRouteStatus{}, false
 	}
 	routes := e.aspRoutes
 	routes.mu.RLock()
+	defer routes.mu.RUnlock()
 	if _, exists := routes.config.mtpRouteByID[id]; !exists {
-		routes.mu.RUnlock()
 		return MTPRouteStatus{}, false
 	}
 	associations := make([]AssociationID, 0)
@@ -354,40 +359,70 @@ func (e *Endpoint) MTPRouteStatus(id MTPRouteID) (MTPRouteStatus, bool) {
 			associations = append(associations, association.ID())
 		}
 	}
-	routes.mu.RUnlock()
 	sort.Slice(associations, func(i, j int) bool { return associations[i] < associations[j] })
 
-	allDestinations := routes.mtpDestinationStatuses()
-	destinations := make([]MTPDestinationStatus, 0)
-	for _, destination := range allDestinations {
-		if destination.Destination.MTPRoute == id {
-			destinations = append(destinations, destination)
+	keys := make([]aspDerivedRangeKey, 0)
+	for key := range routes.derived {
+		if key.mtpRoute == id {
+			keys = append(keys, key)
 		}
 	}
+
 	return MTPRouteStatus{
 		MTPRoute:     id,
-		Destinations: destinations,
+		Destinations: sortedDestinationStatuses(routes.derived, keys),
 		Associations: associations,
 	}, true
 }
 
 // MTPRouteStatuses returns every configured ASP MTP Route in configuration
 // order. Every nested slice is caller-owned.
+//
+// It builds every route's destinations and eligible Associations in one pass
+// each under one read lock — one pass over
+// aspRoutes.derived grouping keys by route, and one pass over
+// associationEligibleRoutes grouping Associations by route — rather than
+// querying one route at a time: the cost is proportional to the configured
+// routes, Associations and destination records, not to their product.
 func (e *Endpoint) MTPRouteStatuses() []MTPRouteStatus {
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return nil
 	}
-	e.aspRoutes.mu.RLock()
-	ids := make([]MTPRouteID, 0, len(e.aspRoutes.config.mtpRoutes))
-	for _, route := range e.aspRoutes.config.mtpRoutes {
-		ids = append(ids, route.id)
+	routes := e.aspRoutes
+	routes.mu.RLock()
+	defer routes.mu.RUnlock()
+
+	destinationsByRoute := make(map[MTPRouteID][]aspDerivedRangeKey, len(routes.config.mtpRoutes))
+	for key := range routes.derived {
+		destinationsByRoute[key.mtpRoute] = append(destinationsByRoute[key.mtpRoute], key)
 	}
-	e.aspRoutes.mu.RUnlock()
-	statuses := make([]MTPRouteStatus, 0, len(ids))
-	for _, id := range ids {
-		if status, ok := e.MTPRouteStatus(id); ok {
-			statuses = append(statuses, status)
+
+	associationsByRoute := make(map[MTPRouteID][]AssociationID, len(routes.config.mtpRoutes))
+	for association, eligible := range routes.associationEligibleRoutes {
+		id := association.ID()
+		if id == 0 {
+			continue
 		}
+		for mtpRoute := range eligible {
+			associationsByRoute[mtpRoute] = append(associationsByRoute[mtpRoute], id)
+		}
+	}
+	for mtpRoute := range associationsByRoute {
+		associations := associationsByRoute[mtpRoute]
+		sort.Slice(associations, func(i, j int) bool { return associations[i] < associations[j] })
+	}
+
+	statuses := make([]MTPRouteStatus, 0, len(routes.config.mtpRoutes))
+	for _, route := range routes.config.mtpRoutes {
+		associations := associationsByRoute[route.id]
+		if associations == nil {
+			associations = make([]AssociationID, 0)
+		}
+		statuses = append(statuses, MTPRouteStatus{
+			MTPRoute:     route.id,
+			Destinations: sortedDestinationStatuses(routes.derived, destinationsByRoute[route.id]),
+			Associations: associations,
+		})
 	}
 	return statuses
 }

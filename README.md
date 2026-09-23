@@ -392,14 +392,17 @@ written, err := association.WriteData(m3ua.DataRequest{
 `written` is the SS7 user octets accepted by the local transport; RFC 4666
 defines no acknowledgement for DATA, so it is never a claim about delivery.
 Every failure is a `*m3ua.DataWriteError` whose `Outcome` is `DataNotSent` —
-nothing reached the transport, so a resend cannot duplicate — or
+nothing reached the transport, or the transport refused the whole message as SCTP
+does when its send buffer is full, so a resend cannot duplicate — or
 `DataSendIndeterminate`, where submission had begun and the application owns the
 retry decision. `errors.Is` and `errors.As` still reach the cause.
 
 A zero `Stream` selects the negotiated stream this message's own Signalling
 Link Selection maps to, which is what keeps one SLS in sequence (Section 1.4.7);
 an explicit stream is validated against the negotiated maximum, and stream 0 is
-never used for DATA.
+never used for DATA. Dialled and accepted associations both ask for 257 streams
+in each direction, stream 0 plus one per 8-bit SLS, so every SLS gets a stream
+of its own without the kernel preallocating state for streams M3UA never uses.
 
 ```go
 message, err := association.ReadData(ctx)

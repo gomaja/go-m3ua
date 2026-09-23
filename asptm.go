@@ -37,7 +37,7 @@ func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRe
 		)
 		request := c.startTAck(aspActive, requestAspActive)
 		pending = append(pending, request)
-		if _, err := c.WriteSignal(aspActive); err != nil {
+		if _, err := c.writeControl(aspActive); err != nil {
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
@@ -121,7 +121,7 @@ func (c *Association) initiateASPInactive(routingContext *params.Param) error {
 func (c *Association) beginASPInactive(routingContext *params.Param) (*pendingRequest, error) {
 	aspInactive := messages.NewAspInactive(routingContext.Copy(), nil)
 	request := c.startTAck(aspInactive, requestAspInactive)
-	if _, err := c.WriteSignal(aspInactive); err != nil {
+	if _, err := c.writeControl(aspInactive); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}
@@ -247,7 +247,7 @@ func (c *Association) heartbeat(ctx context.Context) {
 		// an Ack racing straight back is never compared against stale data.
 		c.setBeatData(data)
 		sentAt := time.Now()
-		if _, err := c.WriteSignal(
+		if _, err := c.writeControl(
 			messages.NewHeartbeat(params.NewHeartbeatData(data)),
 		); err != nil {
 			c.sendErr(ErrFailedToWriteSignal)
@@ -782,9 +782,18 @@ func validateRoutingContextAgainst(peer *params.Param, configured []uint32) erro
 	if peer == nil {
 		return nil
 	}
+	if len(peer.Data) == 4 {
+		theirs := peer.RoutingContext()
+		for _, ours := range configured {
+			if theirs == ours {
+				return nil
+			}
+		}
+		return NewInvalidRoutingContextError(theirs)
+	}
 	theirs := peer.RoutingContexts()
 
-	ours := make(map[uint32]struct{})
+	ours := make(map[uint32]struct{}, len(configured))
 	for _, rc := range configured {
 		ours[rc] = struct{}{}
 	}
@@ -904,8 +913,12 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
-	if c.isRepeatedASPTMAcknowledgement(requestAspInactive, aspAcAck.RoutingContext) {
-		return c.validateLocalRoutingContext(aspAcAck.RoutingContext)
+	acknowledgedContext := aspAcAck.RoutingContext
+	if acknowledgedContext == nil {
+		acknowledgedContext = c.unambiguousInactiveAckRoutingContext()
+	}
+	if c.isRepeatedASPTMAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext) {
+		return c.validateLocalRoutingContext(acknowledgedContext)
 	}
 	if c.rejectStaleASPTMAck(requestAspInactive) {
 		return NewUnexpectedMessageError(aspAcAck)
@@ -921,17 +934,17 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	// ASP Inactive Ack carries no Traffic Mode Type (Section 3.7.4), so only
 	// the Routing Context is checked: the Ack must concern contexts we asked
 	// to deactivate.
-	if err := c.validateLocalRoutingContext(aspAcAck.RoutingContext); err != nil {
+	if err := c.validateLocalRoutingContext(acknowledgedContext); err != nil {
 		return err
 	}
-	if err := c.validateTAckRoutingContexts(requestAspInactive, aspAcAck.RoutingContext); err != nil {
+	if err := c.validateTAckRoutingContexts(requestAspInactive, acknowledgedContext); err != nil {
 		return err
 	}
 	if c.role == RoleIPSP {
 		if c.isIPSPDoubleExchange() {
-			acknowledgement := c.claimTAckAcknowledgement(requestAspInactive, aspAcAck.RoutingContext)
+			acknowledgement := c.claimTAckAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext)
 			if previousState == StateASPActive {
-				c.noteRoutingContextsUnacked(aspAcAck.RoutingContext)
+				c.noteRoutingContextsUnacked(acknowledgedContext)
 			} else {
 				c.noteNoRoutingContextsAcked()
 			}
@@ -940,10 +953,10 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 			acknowledgement.complete()
 			return nil
 		}
-		acknowledgement := c.claimTAckAcknowledgement(requestAspInactive, aspAcAck.RoutingContext)
+		acknowledgement := c.claimTAckAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext)
 		routingContexts := c.configuredRoutingContexts()
-		if aspAcAck.RoutingContext != nil {
-			routingContexts = aspAcAck.RoutingContext.RoutingContexts()
+		if acknowledgedContext != nil {
+			routingContexts = acknowledgedContext.RoutingContexts()
 		}
 		quiescedRoutingContexts := routingContexts
 		if previousState == StateASPActive {
@@ -972,12 +985,13 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	// acknowledged context here made an RC-scoped ASP Inactive tear down the
 	// unaffected Application Servers carried by the same association.
 	if previousState == StateASPActive {
-		c.noteRoutingContextsUnacked(aspAcAck.RoutingContext)
+		c.noteRoutingContextsUnacked(acknowledgedContext)
 	} else {
 		c.noteNoRoutingContextsAcked()
 	}
-	solicited := c.acknowledgeTAck(requestAspInactive, aspAcAck.RoutingContext)
-	if solicited || previousState != StateASPActive {
+	acknowledgement := c.claimTAckAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext)
+	acknowledgement.complete()
+	if acknowledgement.solicited || previousState != StateASPActive {
 		return nil
 	}
 
@@ -987,11 +1001,42 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	// restart only the displaced scope here. Otherwise the ASP-INACTIVE entry
 	// action initiates the return after that required intermediate state.
 	if c.stateForAcknowledgedRoutingContexts() == StateASPActive {
-		return c.initiateASPActive(aspAcAck.RoutingContext)
+		return c.initiateASPActive(acknowledgedContext)
 	}
 	c.armResumeAfterStrayAck()
 
 	return nil
+}
+
+// RFC 4666 Sections 3.7.4 and 4.3.4.4 permit an omitted Inactive Ack RC,
+// but partial acknowledgements cannot identify an AS in a multi-AS scope.
+// Unlike Inactive Ack, Section 4.3.4.3 requires Active Ack to echo explicit RCs.
+func (c *Association) unambiguousInactiveAckRoutingContext() *params.Param {
+	inventory := c.applicationServerInventory(true)
+	if len(inventory) == 0 {
+		return nil
+	}
+	key := inventory[0].ASKey
+	if !key.RoutingContextSet {
+		return nil
+	}
+	for _, applicationServer := range inventory[1:] {
+		if applicationServer.ASKey != key {
+			return nil
+		}
+	}
+	c.muDynamicASKeys.RLock()
+	defer c.muDynamicASKeys.RUnlock()
+	dynamicKeys := c.dynamicPeerASKeys
+	if c.isIPSPDoubleExchange() {
+		dynamicKeys = c.dynamicLocalASKeys
+	}
+	for _, dynamicKey := range dynamicKeys {
+		if dynamicKey != key {
+			return nil
+		}
+	}
+	return params.NewRoutingContext(key.RoutingContext)
 }
 
 // noteRoutingContextsUnacked removes the contexts an ASP Inactive Ack covered
@@ -1080,7 +1125,7 @@ func (c *Association) handleHeartbeat(beat *messages.Heartbeat) error {
 		ack.Others = append(ack.Others, parameter.Copy())
 	}
 	ack.SetLength()
-	if _, err := c.WriteSignal(ack); err != nil {
+	if _, err := c.writeControl(ack); err != nil {
 		return err
 	}
 	return nil

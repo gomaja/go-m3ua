@@ -49,8 +49,8 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			policy := oneShotSCTPDialPolicy(test.timeout)
-			if policy.init.NumOstreams != sctp.SCTP_MAX_STREAM {
-				t.Errorf("NumOstreams = %d, want %d", policy.init.NumOstreams, sctp.SCTP_MAX_STREAM)
+			if policy.init.NumOstreams != sctpStreams || policy.init.MaxInstreams != sctpStreams {
+				t.Errorf("streams = %d out, %d in, want %d each", policy.init.NumOstreams, policy.init.MaxInstreams, sctpStreams)
 			}
 			if policy.init.MaxAttempts != 1 {
 				t.Errorf("MaxAttempts = %d, want 1", policy.init.MaxAttempts)
