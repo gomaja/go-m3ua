@@ -614,10 +614,9 @@ func TestSSNMEventDeltasReplayToKnowledge(t *testing.T) {
 		}},
 		{"defaults", SSNMStateConfig{SubscriptionQueueSize: 16}},
 	}
-	operations := 3000
-	if testing.Short() {
-		operations = 600
-	}
+	// The full run takes about a second, and a shorter one no longer reaches
+	// every bound the coverage checks below require, so -short keeps it.
+	const operations = 3000
 	for _, configuration := range configurations {
 		for seed := uint64(1); seed <= 6; seed++ {
 			t.Run(fmt.Sprintf("%s/seed=%d", configuration.name, seed), func(t *testing.T) {
