@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
 
 // routedRunJSON is one complete shared-clock cohort of the optional-router
@@ -122,5 +124,50 @@ func TestRoutedCampaignCannotMixRoutedAndDirectVariants(testContext *testing.T) 
 	status, decoded := runRequest(testContext, input)
 	if status != invalidInputExitStatus || decoded.Decision != "invalid-input" || !strings.Contains(decoded.Error, "workload") {
 		testContext.Fatalf("routed and direct variants joined one campaign: status=%d result=%+v", status, decoded)
+	}
+}
+
+// routedWarmupJSON is a routed warm-up cohort that ran its whole schedule and
+// failed only its own validity rules with one send blocked past the stall
+// bound: the overload evidence a failed throughput warm-up carries.
+func routedWarmupJSON(testContext *testing.T, rate int, mode, failure string) string {
+	testContext.Helper()
+	return mutateBidirectionalJSON(testContext, routedRunJSON(testContext, rate, mode), func(cohort map[string]any) {
+		cohort["phase"] = "warmup"
+		cohort["verdict"] = "invalid"
+		cohort["error"] = failure
+		cohort["sender"].(map[string]any)["send_duration"].(map[string]any)["max_ns"] = float64(1_030_000_000)
+	})
+}
+
+// Routed cohorts go through the same capacity search and warm-up validation
+// as throughput: a routed warm-up that failed from overload is probe evidence
+// that bounds the bracket from above, and one that failed for any other
+// reason is not evidence at all.
+func TestRoutedWarmupsFollowTheThroughputSearchRules(testContext *testing.T) {
+	for _, mode := range []string{"routed", "routed-direct"} {
+		testContext.Run(mode+"/overloaded", func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+				routedRunJSON(testContext, 10, mode), routedWarmupJSON(testContext, 20, mode, warmupOverloadError))
+			status, decoded := runRequest(testContext, input)
+			if status == invalidInputExitStatus || decoded.Error != "" || len(decoded.ProbeDecisions) != 2 {
+				testContext.Fatalf("routed failed warm-up rejected: status=%d result=%+v", status, decoded)
+			}
+			warmup := decoded.ProbeDecisions[1]
+			if decoded.ProbeDecisions[0].SearchOutcome != perfstats.ProbePassing || warmup.Phase != "warmup" ||
+				warmup.SearchOutcome != perfstats.ProbeNotDemonstrated || warmup.Decision == string(perfstats.Pass) ||
+				decoded.SearchStatus != perfstats.SearchRunning || decoded.NextProbeRate != 15 {
+				testContext.Fatalf("decisions %+v status %q next %d, want the warm-up to bound the bracket at 20 and probe 15",
+					decoded.ProbeDecisions, decoded.SearchStatus, decoded.NextProbeRate)
+			}
+		})
+		testContext.Run(mode+"/other failure", func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+				routedRunJSON(testContext, 10, mode), routedWarmupJSON(testContext, 20, mode, "routed preflight: receiver refused the route map"))
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "probe 2") || !strings.Contains(decoded.Error, "not probe evidence") {
+				testContext.Fatalf("status %d error %q, want the unrelated warm-up failure rejected", status, decoded.Error)
+			}
+		})
 	}
 }
