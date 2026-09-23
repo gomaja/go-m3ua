@@ -1096,7 +1096,7 @@ func (c *Association) writeMTPTransfer(request MTPTransferRequest, key ASKey) (i
 		return 0, newDataNotSent(key, 0, err)
 	}
 	if err := c.submitData(c.encodeDataFrame(&data), stream); err != nil {
-		return 0, newDataSendIndeterminate(key, stream, err)
+		return 0, newDataSubmissionError(key, stream, err)
 	}
 	return len(data.ProtocolData.Data), nil
 }
