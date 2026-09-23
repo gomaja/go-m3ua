@@ -132,17 +132,23 @@ func parseSCTPAssocs(content []byte) ([]sctpAssoc, error) {
 			return nil, fmt.Errorf("short /proc/net/sctp/assocs row %q", line)
 		}
 		tail := len(fields) - 11
-		values := make([]uint64, 0, 8)
-		for _, index := range []int{4, 10, 11, 12, tail + 1, tail + 2, tail + 9, tail + 10} {
-			value, err := strconv.ParseUint(fields[index], 10, 64)
+		inode, err := strconv.ParseUint(fields[10], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("column 10 of /proc/net/sctp/assocs row %q: %w", line, err)
+		}
+		// State, ports, stream counts and buffer sizes all fit in 32 bits;
+		// parsing them at that size keeps the conversion to int exact.
+		values := make([]int, 0, 7)
+		for _, index := range []int{4, 11, 12, tail + 1, tail + 2, tail + 9, tail + 10} {
+			value, err := strconv.ParseInt(fields[index], 10, 32)
 			if err != nil {
 				return nil, fmt.Errorf("column %d of /proc/net/sctp/assocs row %q: %w", index, line, err)
 			}
-			values = append(values, value)
+			values = append(values, int(value))
 		}
-		associations = append(associations, sctpAssoc{State: int(values[0]), Inode: values[1],
-			LocalPort: int(values[2]), RemotePort: int(values[3]), InStreams: int(values[4]), OutStreams: int(values[5]),
-			SendBuffer: int(values[6]), ReceiveBuffer: int(values[7])})
+		associations = append(associations, sctpAssoc{State: values[0], Inode: inode,
+			LocalPort: values[1], RemotePort: values[2], InStreams: values[3], OutStreams: values[4],
+			SendBuffer: values[5], ReceiveBuffer: values[6]})
 	}
 	return associations, scanner.Err()
 }
