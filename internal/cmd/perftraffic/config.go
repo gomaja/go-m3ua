@@ -99,7 +99,13 @@ type commandConfig struct {
 	Outstanding    int
 	CPUStatPath    string
 	SameHostClock  bool
-	clockWindow    *sharedClockWindow
+	// OverloadProfile turns a throughput sender into a DATA overload trial;
+	// overload is its parsed form and overloadRole the role of the cohort
+	// being run (warm-up or measurement).
+	OverloadProfile string
+	overload        *overloadProfile
+	overloadRole    string
+	clockWindow     *sharedClockWindow
 }
 
 func parseConfig(arguments []string) (commandConfig, error) {
@@ -130,9 +136,16 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	flagSet.IntVar(&config.Outstanding, "outstanding", maxOutstanding, "maximum scheduled but unfinished sends")
 	flagSet.StringVar(&config.CPUStatPath, "cpu-stat", "/sys/fs/cgroup/cpu.stat", "cgroup v2 cpu.stat path")
 	flagSet.BoolVar(&config.SameHostClock, "same-host-clock", false, "verify a shared Linux monotonic clock for throughput measurement")
+	flagSet.StringVar(&config.OverloadProfile, "overload-profile", "", "DATA overload trial: comma-separated MULTIPLIERx:DURATION phases of -rate, e.g. 2x:60s,0.5x:60s (ASP sender, throughput mode)")
 	if err := flagSet.Parse(arguments); err != nil {
 		return commandConfig{}, err
 	}
+	durationSet := false
+	flagSet.Visit(func(set *flag.Flag) {
+		if set.Name == "duration" {
+			durationSet = true
+		}
+	})
 	if flagSet.NArg() != 0 {
 		return commandConfig{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flagSet.Args(), " "))
 	}
@@ -173,6 +186,11 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	}
 	if config.Rate > maxOfferedRate {
 		return commandConfig{}, fmt.Errorf("rate must not exceed %d", maxOfferedRate)
+	}
+	if config.OverloadProfile != "" {
+		if err := applyOverloadProfile(&config, durationSet); err != nil {
+			return commandConfig{}, err
+		}
 	}
 	if config.Warmup < 0 || config.Duration <= 0 || config.Drain < 0 {
 		return commandConfig{}, errors.New("warmup and drain must be non-negative and duration must be positive")
@@ -269,5 +287,29 @@ func validateControlBaseURL(value string) error {
 	case parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "":
 		return fmt.Errorf("%q must be a scheme and host only, with no path, query or fragment", value)
 	}
+	return nil
+}
+
+// applyOverloadProfile validates an overload trial's configuration and fixes
+// its measurement window to the concatenated phases. The drain is raised to
+// outlast the two-second request deadline by the drain margin, so every
+// request completes or is refused before the drain deadline.
+func applyOverloadProfile(config *commandConfig, durationSet bool) error {
+	if config.Role != "asp" {
+		return errors.New("overload-profile is an ASP sender flag; the receiver learns the profile from each cohort's run specification")
+	}
+	if config.Mode != modeThroughput {
+		return fmt.Errorf("overload-profile runs in throughput mode only, not %s", config.Mode)
+	}
+	profile, err := parseOverloadProfile(config.OverloadProfile, config.Rate)
+	if err != nil {
+		return err
+	}
+	if durationSet && config.Duration != profile.duration() {
+		return fmt.Errorf("duration %s contradicts the overload profile's %s; omit -duration with -overload-profile", config.Duration, profile.duration())
+	}
+	config.Duration = profile.duration()
+	config.Drain = max(config.Drain, overloadRequestDeadline+overloadDrainMargin)
+	config.overload = profile
 	return nil
 }

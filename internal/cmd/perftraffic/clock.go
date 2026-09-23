@@ -178,7 +178,9 @@ func (job sendJob) dispatchDelay() (time.Duration, error) {
 func sameRunSpec(first, second runSpec) bool {
 	firstClock, secondClock := first.Clock, second.Clock
 	first.Clock, second.Clock = nil, nil
-	if first != second {
+	firstOverload, secondOverload := first.Overload, second.Overload
+	first.Overload, second.Overload = nil, nil
+	if first != second || !sameOverloadSpec(firstOverload, secondOverload) {
 		return false
 	}
 	if firstClock == nil || secondClock == nil {
@@ -192,6 +194,7 @@ func copyRunSpec(specification runSpec) runSpec {
 		window := *specification.Clock
 		specification.Clock = &window
 	}
+	specification.Overload = copyOverloadSpec(specification.Overload)
 	return specification
 }
 
