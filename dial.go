@@ -44,6 +44,22 @@ const rtoMarginMillis = 1000
 
 const maxRTOInfoMillis = uint64(^uint32(0))
 
+// sctpStreams is how many SCTP streams an association asks for in each
+// direction: stream 0, where RFC 4666 Section 1.4.7 rule 2 puts the management
+// classes, and one stream per value of the 8-bit Signalling Link Selection the
+// Protocol Data parameter carries (Section 3.3.1). streamFor maps SLS n to
+// stream n+1, so with 257 streams every SLS keeps an ordered stream of its own;
+// Section 1.4.7 bounds that mapping by "the maximum number of streams supported
+// by the underlying SCTP association", and M3UA has no use for more.
+//
+// Asking for more is not free. Linux preallocates per-stream state for every
+// negotiated stream for the life of the association: 65,535 outbound streams,
+// the SCTP maximum these associations used to request, pinned about 2.9 MB of
+// unreclaimable kernel memory per association on loopback against 11.5 kB for
+// 257. The limit applies inbound as well, so a peer that asks for the maximum
+// cannot make this end preallocate it either.
+const sctpStreams = 257
+
 type sctpDialPolicy struct {
 	init    sctp.InitMsg
 	rto     sctp.RtoInfo
@@ -54,7 +70,8 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 	rtoMillis := oneShotRTOMillisFor(timeout)
 	return sctpDialPolicy{
 		init: sctp.InitMsg{
-			NumOstreams: sctp.SCTP_MAX_STREAM,
+			NumOstreams:  sctpStreams,
+			MaxInstreams: sctpStreams,
 			// Belt and braces: the deadline above ends the attempt first, and
 			// the raised RTO keeps the kernel from retransmitting inside it.
 			MaxAttempts:    1,

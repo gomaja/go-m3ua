@@ -141,15 +141,23 @@ func TestSSNMPublicationWaitsOutAFullSendBuffer(t *testing.T) {
 type stalledASP struct {
 	resume chan struct{}
 
-	mu    sync.Mutex
-	dunas []stalledAck
-	data  []uint64
+	mu          sync.Mutex
+	dunas       []stalledAck
+	data        []uint64
+	dataStreams []uint16
 }
 
 func dialStalledASP(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32) *stalledASP {
 	t.Helper()
+	return dialStalledASPWith(t, sgp, routingContext, sctp.InitMsg{NumOstreams: 16, MaxInstreams: 16})
+}
+
+// dialStalledASPWith is dialStalledASP with the INIT stream request chosen by
+// the caller.
+func dialStalledASPWith(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32, init sctp.InitMsg) *stalledASP {
+	t.Helper()
 	socket := &sctp.SocketConfig{
-		InitMsg: sctp.InitMsg{NumOstreams: 16, MaxInstreams: 16},
+		InitMsg: init,
 		Control: func(_, _ string, c syscall.RawConn) error {
 			var setErr error
 			if err := c.Control(func(fd uintptr) {
@@ -227,6 +235,9 @@ func dialStalledASP(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32) *st
 				if payload, err := data.ProtocolData.ProtocolData(); err == nil && len(payload.Data) >= 8 {
 					peer.mu.Lock()
 					peer.data = append(peer.data, binary.BigEndian.Uint64(payload.Data))
+					if info != nil {
+						peer.dataStreams = append(peer.dataStreams, info.Stream)
+					}
 					peer.mu.Unlock()
 				}
 				continue
@@ -249,6 +260,13 @@ func (p *stalledASP) delivered() []uint64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]uint64(nil), p.data...)
+}
+
+// deliveredStreams is the stream each DATA in delivered arrived on.
+func (p *stalledASP) deliveredStreams() []uint16 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]uint16(nil), p.dataStreams...)
 }
 
 func (p *stalledASP) unavailable() []stalledAck {
@@ -293,7 +311,7 @@ func newStallingPeer(t *testing.T, port int) *stallingPeer {
 	// window. Left to the kernel default, a host that raised
 	// net.core.rmem_default absorbs the whole flood and nothing ever waits.
 	socket := &sctp.SocketConfig{
-		InitMsg: sctp.InitMsg{NumOstreams: sctp.SCTP_MAX_STREAM},
+		InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams},
 		Control: func(_, _ string, c syscall.RawConn) error {
 			var setErr error
 			if err := c.Control(func(fd uintptr) {
