@@ -177,22 +177,34 @@ func (job sendJob) dispatchDelay() (time.Duration, error) {
 
 func sameRunSpec(first, second runSpec) bool {
 	firstClock, secondClock := first.Clock, second.Clock
+	firstSSNM, secondSSNM := first.SSNM, second.SSNM
 	first.Clock, second.Clock = nil, nil
+	first.SSNM, second.SSNM = nil, nil
 	firstOverload, secondOverload := first.Overload, second.Overload
 	first.Overload, second.Overload = nil, nil
 	if first != second || !sameOverloadSpec(firstOverload, secondOverload) {
 		return false
 	}
-	if firstClock == nil || secondClock == nil {
-		return firstClock == secondClock
+	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM)
+}
+
+// samePointee compares two optional values: both absent, or both present and
+// equal.
+func samePointee[T comparable](first, second *T) bool {
+	if first == nil || second == nil {
+		return first == second
 	}
-	return *firstClock == *secondClock
+	return *first == *second
 }
 
 func copyRunSpec(specification runSpec) runSpec {
 	if specification.Clock != nil {
 		window := *specification.Clock
 		specification.Clock = &window
+	}
+	if specification.SSNM != nil {
+		workload := *specification.SSNM
+		specification.SSNM = &workload
 	}
 	specification.Overload = copyOverloadSpec(specification.Overload)
 	return specification

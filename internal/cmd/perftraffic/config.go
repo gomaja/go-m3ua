@@ -99,13 +99,20 @@ type commandConfig struct {
 	Outstanding    int
 	CPUStatPath    string
 	SameHostClock  bool
+	clockWindow    *sharedClockWindow
+	// SSNM is the opt-in SSNM load workload; zero when -ssnm-rate is unset.
+	SSNM ssnmConfig
+	// ssnmPhase names the cohort phase an SSNM cohort declares; empty is the
+	// measurement cohort.
+	ssnmPhase string
+	// ssnmRun is the ASP's SSNM subscriber run, nil without SSNM load.
+	ssnmRun *ssnmSenderRun
 	// OverloadProfile turns a throughput sender into a DATA overload trial;
 	// overload is its parsed form and overloadRole the role of the cohort
 	// being run (warm-up or measurement).
 	OverloadProfile string
 	overload        *overloadProfile
 	overloadRole    string
-	clockWindow     *sharedClockWindow
 }
 
 func parseConfig(arguments []string) (commandConfig, error) {
@@ -136,6 +143,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	flagSet.IntVar(&config.Outstanding, "outstanding", maxOutstanding, "maximum scheduled but unfinished sends")
 	flagSet.StringVar(&config.CPUStatPath, "cpu-stat", "/sys/fs/cgroup/cpu.stat", "cgroup v2 cpu.stat path")
 	flagSet.BoolVar(&config.SameHostClock, "same-host-clock", false, "verify a shared Linux monotonic clock for throughput measurement")
+	registerSSNMFlags(flagSet, &config.SSNM)
 	flagSet.StringVar(&config.OverloadProfile, "overload-profile", "", "DATA overload trial: comma-separated MULTIPLIERx:DURATION phases of -rate, e.g. 2x:60s,0.5x:60s (ASP sender, throughput mode)")
 	if err := flagSet.Parse(arguments); err != nil {
 		return commandConfig{}, err
@@ -229,6 +237,9 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 			return commandConfig{}, err
 		}
 	}
+	if err := validateSSNMConfig(flagSet, &config); err != nil {
+		return commandConfig{}, err
+	}
 	return config, nil
 }
 
@@ -300,6 +311,9 @@ func applyOverloadProfile(config *commandConfig, durationSet bool) error {
 	}
 	if config.Mode != modeThroughput {
 		return fmt.Errorf("overload-profile runs in throughput mode only, not %s", config.Mode)
+	}
+	if config.SSNM.enabled() {
+		return errors.New(overloadSSNMRefusal)
 	}
 	profile, err := parseOverloadProfile(config.OverloadProfile, config.Rate)
 	if err != nil {

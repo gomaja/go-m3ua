@@ -77,7 +77,7 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 	if routedMode(config.Mode) {
 		return runRoutedSender(ctx, config)
 	}
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: nil})
+	endpoint, err := m3ua.NewEndpoint(senderEndpointConfig(config))
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("create standalone ASP endpoint: %w", err)
 	}
@@ -92,6 +92,11 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 	if err := waitForReady(ctx, config.PeerControl, config.Associations); err != nil {
 		return combinedResult{}, err
 	}
+	config.ssnmRun, err = startSSNMLoad(ctx, config, endpoint, associations)
+	if err != nil {
+		return combinedResult{}, err
+	}
+	defer config.ssnmRun.close()
 	var registry *echoRegistry
 	if config.Mode == modeEcho {
 		registry = newEchoRegistry()
@@ -110,6 +115,9 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		defer shutdown()
 	}
 	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
+		if phase == "warmup" {
+			cohortConfig.ssnmPhase = ssnmPhaseWarmup
+		}
 		if cohortConfig.overload != nil {
 			// An overload trial warms up loss-free at the profile's recovery
 			// rate; only its measurement cohort follows the phases.
@@ -127,6 +135,7 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		return result, err
 	}
 	return runWarmupAndMeasurement(config, runCohort, func(measurement *cohortResult) {
+		config.ssnmRun.finish(ctx, measurement)
 		if config.Mode == modeBidirectional {
 			select {
 			case readErr := <-localFatal:
@@ -364,6 +373,9 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("prepare shared clock: %w", err)
 	}
+	if err := config.ssnmRun.attach(&specification, config.ssnmPhase); err != nil {
+		return runRecord{}, runRecord{}, fmt.Errorf("declare SSNM load: %w", err)
+	}
 	if err := postJSON(ctx, config.PeerControl+"/reset", specification); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("reset receiver: %w", err)
 	}
@@ -523,6 +535,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		sender.NegotiatedOutboundStreams[index] = int(association.MaxMessageStreamID()) + 1
 	}
 	sender.Manifest = currentManifest(config.Outstanding, config.Initiation)
+	sender.Manifest.SSNMBudgets = config.SSNM.budgetsRecord()
 	if routed != nil {
 		sender.Manifest.FlowCount = routingRouteCount
 	}

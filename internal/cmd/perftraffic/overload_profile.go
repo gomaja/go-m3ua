@@ -49,6 +49,14 @@ const (
 	overloadRoleMeasurement = "measurement"
 )
 
+// overloadSSNMRefusal is why an overload trial never runs with SSNM load. The
+// DATA overload row offers DATA alone and judges its deliberate refusals and
+// losses by its own contract; the SSNM rows judge SSNM delivery and budgets
+// against loss-free DATA at a fixed nominal load. A combined run belongs to
+// neither contract: each workload's verdict would rest on conditions the
+// other deliberately breaks.
+const overloadSSNMRefusal = "overload-profile cannot be combined with SSNM load (-ssnm-rate): the DATA overload row runs DATA alone, and the SSNM rows judge SSNM delivery against loss-free DATA"
+
 // overloadPhase is one phase of an overload profile: the multiplier exactly
 // as written, the offered rate it yields, and how long it lasts.
 type overloadPhase struct {
@@ -355,6 +363,9 @@ func validateOverloadSpec(specification runSpec) (*phasedSchedule, error) {
 	}
 	if specification.Mode != modeThroughput || specification.Direction != directionASPToSGP {
 		return nil, errors.New("overload trials run in throughput mode from ASP to SGP only")
+	}
+	if specification.SSNM != nil {
+		return nil, errors.New(overloadSSNMRefusal)
 	}
 	if spec.Profile == "" || spec.NominalRate == 0 || spec.NominalRate > maxOfferedRate {
 		return nil, errors.New("overload identity needs its profile and nominal rate")

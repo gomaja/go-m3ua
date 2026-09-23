@@ -12,8 +12,11 @@ optional-router pair `routed` and `routed-direct` described under
 [Routed modes](#routed-modes). Throughput mode also runs the DATA overload
 trial described under [DATA overload mode](#data-overload-mode). The direct modes support both SCTP initiation
 directions: ASP-dial to SGP-listen (the default) and SGP-dial to ASP-listen.
-SSNM storm, reference-churn and independent-peer workloads are reported as
-unavailable; they are never emitted as zero-valued successful measurements.
+Throughput runs can add the opt-in SSNM load workload described under
+[SSNM load, overflow and resynchronization](#ssnm-load-overflow-and-resynchronization).
+Workloads a run does not exercise (SSNM load outside that workload, the router
+outside the routed modes, reference churn and independent peers) are reported
+as unavailable; they are never emitted as zero-valued successful measurements.
 Both processes run this binary, so `fixture_verdict: pass` establishes
 loss-free fixture validity only, not independent-peer, sustainable-capacity,
 or candidate acceptance.
@@ -118,6 +121,154 @@ is likewise bounded by the cap and emptied by the deadline sweep even when
 the peer never answers, so neither side amplifies a wedge.
 
 Throughput mode does not use echo traffic.
+
+## SSNM load, overflow and resynchronization
+
+`-ssnm-rate` adds an SSNM disturbance to a shared-clock throughput run
+(performance budgets section 4: SSNM steady updates, large SSNM updates,
+indication overflow and resynchronization). It is off by default; without it
+flags, specifications, control routes and records are unchanged. SSNM load
+requires `-mode=throughput` and `-same-host-clock` on both processes, because
+its schedule, receipts and delays are shared-clock timestamps.
+
+| Flag | Process | Meaning |
+| --- | --- | --- |
+| `-ssnm-rate` | both | generated DUNA/DAVA messages per second (1 to 10,000) |
+| `-ssnm-apcs` | both | Affected Point Codes per message, 1 to 1,024 (default 1) |
+| `-ssnm-records` | both | distinct destinations cycled, at most 16,384 and a multiple of `-ssnm-apcs` (default 16,384) |
+| `-subscribers` | ASP | `SubscribeSSNM` consumers on the ASP Endpoint (default 8, at most 16) |
+| `-pause-subscriber=<offset>/<duration>` | ASP | F3: subscriber 0 stops reading `offset` into the measurement window for `duration`, then recovers by `Resync` |
+| `-ssnm-apply-p99-budget` | ASP | p99 apply-time budget of 1,024-APC messages (default 100ms) |
+| `-ssnm-resync-budget` | ASP | F3 `Resync` snapshot and subscription acquisition budget (default 100ms) |
+| `-ssnm-recovery-budget` | ASP | F3 budget to consume the retained queued indications and the snapshot (default 1s) |
+
+Both processes must pass the same `-ssnm-rate`, `-ssnm-apcs` and
+`-ssnm-records`; the ASP declares them in every cohort specification (`spec.ssnm`)
+and the SGP refuses a cohort that differs from its own flags. The budget flags
+default to the section 4 contract values and are recorded in the ASP
+manifest's `ssnm_budgets`.
+
+**Generator (SGP).** Before any cohort the ASP opens its subscriptions and asks
+the SGP (`POST /ssnm/preload`) to report every destination Unavailable once,
+1,024 per message, then waits until every subscriber has consumed the preload
+and the ASP store holds `associations x records` records: DATA always starts
+against a full store. The generator then calls
+`Endpoint.ReportDestinationAvailability` open-loop at `-ssnm-rate`, anchored at
+the first cohort's shared start and running through warm-up, the gap between
+cohorts and the measurement window until the measurement end. Message `m` is
+scheduled at `anchor + floor(m * 1s / rate)`; a late generator catches up in
+order and never skips, and stops issuing at the measurement end plus drain.
+Each message names destinations `0x400000 + d`, a contiguous run of
+`-ssnm-apcs` explicit point codes (mask 0) cycling through `-ssnm-records`,
+alternately Unavailable and Available on successive passes, in Routing Context
+100 with Network Appearance 7. DATA uses DPCs `0x220000`-`0x221f1f`, so the
+disturbance never names a DATA destination and cannot make DATA ineligible.
+The SGP keeps each message's report start and completion (`GET /ssnm/reports`)
+and fan-out failures (`SSNMDeliveryError`).
+
+**Subscribers (ASP).** The ASP Endpoint keeps its nil `ASP` configuration and
+adds an `SSNMState` sized for the workload: a standalone ASP Association is one
+partition and its own retention peer, and every association serves Routing
+Context 100, so each partition holds `-ssnm-records` records, the store
+`associations x records`, subscription queues keep the approved 256 events, and
+`MaxAffectedPointCodes` is 1,024. The chosen limits are recorded in
+`sender.ssnm.store.limits`. For the 16,384-retained-record rows use
+`-ssnm-records=16384` with one association or `-ssnm-records=2048` with eight.
+Each subscriber checks every delivered report against the deterministic plan:
+per partition every position exactly once and in order, counting gaps,
+duplicates, unexpected content, continuity loss, resource loss and
+invalidation, and records its shared-clock receipt time of each measurement
+message.
+
+**F3 pause and recovery.** The paused subscriber stops calling `Next` at the
+offset, sleeps for the duration, then drains what its queue retained, observes
+`SSNMContinuityLostEvent`, calls `Resync`, consumes the snapshot and continues.
+`sender.ssnm.pause` records the events retained at loss against the count cap
+(`count_cap_enforced`), the partition states those events carried, the drain
+time, the `Resync` acquisition time (`resync_ns`), the snapshot consumption
+time and `recovery_ns` from resumption to a consumed snapshot after the
+retained queue. The snapshot is validated destination by
+destination against the plan at the first report after `Resync`, so a stale or
+partial snapshot is a failure. A retained-byte cap is reported as not
+observable: this library's `SSNMStateConfig` bounds a subscription by event
+count only.
+
+**Records.** The SGP record's `ssnm.generator` covers the cohort window:
+`offered` (scheduled in the window), `reported_in_window`, `late`, `unsent`,
+`failed`, `fanout_failures`, offered and actual rates, dispatch lag and report
+call duration. The ASP measurement record's `ssnm` carries the workload, the
+store limits and end counters, the preload, every subscriber's accounting, the
+final generator view recomputed from the complete per-message log, `delay`
+(report start to healthy-subscriber receipt, p50/p95/p99/max; an upper bound on
+apply-and-publish time), `pause`, `budgets`, and `verdict`: `fail` for any
+healthy indication loss, store refusal, generator failure, F3 contract
+violation, exceeded time budget, final store that does not hold exactly the
+plan's state, or a binding or partition lifecycle event reaching a subscriber;
+`inconclusive` when the generator did not hold the intensity (a window message
+unsent or failed, or a report starting more than `dispatch_tolerance_ns`, one
+scheduling interval and at least 100 ms, after its schedule) or a gated budget
+could not be measured; otherwise `pass`.
+
+**Time budgets.** `budgets` lists each section 4 budget with its value,
+measurement, whether it gates this run, and its outcome (`within`, `exceeded`,
+`not measured`, or `recorded` where no budget applies). With `-ssnm-apcs=1024`
+the report-to-receipt p99 gates the large row's "p99 apply time within 100
+ms": that delay runs from the SGP's report call to the subscriber's receipt, so
+it bounds apply time from above, and a p99 over the budget fails the run as a
+budget not demonstrated. Other APC counts, the one-APC steady row included,
+have no apply-time budget in section 4 and record the delay only. With
+`-pause-subscriber` the F3 `resync_ns` gates "snapshot/subscription acquisition
+within 100 ms" and `recovery_ns` gates "consume retained snapshot and 256
+queued indications within 1 s".
+
+**Final store.** After every subscriber has consumed every reported message,
+the ASP reads `SSNMKnowledge` once more and requires `associations x records`
+records holding exactly the plan's state after the last reported position,
+destination by destination, the same check a Resync snapshot gets
+(`store.state_validated`, `store.state_mismatches`).
+`association_errors` names any association that ended during the run with the
+library's close cause, which is also written to stderr as an
+`ssnm_diagnostic` line, together with the subscribers' progress when they close.
+
+The SGP sets no write deadline on its associations. Destination state
+publications are writes the library makes on its own behalf, so when the ASP
+falls behind and the SCTP send buffer fills, each one waits for space for up to
+`AssociationConfig.ControlWriteTimeout`, which the fixture leaves at the library
+default (`DefaultControlWriteTimeout`, 5 s): a slow ASP shows up as generator
+lag and report duration. Only a wait longer than that closes the association
+with `ErrControlWriteTimeout`, which `association_errors` then names. A socket
+write deadline would replace that bound with its own and close the association
+on any library write once it passed. Existing fields keep their meaning: the
+DATA verdicts do not include SSNM, and `sender.ssnm.verdict` is the SSNM
+result.
+
+**Capacity comparison.** `perfcapacity` reads `spec.ssnm` into the workload
+identity, so a campaign cannot mix SSNM-loaded probes with no-update probes or
+with a different SSNM intensity. An SSNM-loaded probe needs `sender.ssnm` and
+`receiver.ssnm.generator`; an SSNM `fail` fails the probe and an SSNM
+`inconclusive` turns a passing probe inconclusive. A warm-up that failed from
+overload is probe evidence here as in any throughput campaign: its
+`spec.ssnm.phase` is `warmup`, its SGP record carries `ssnm.generator`, and
+its ASP record carries no `ssnm` result, since the SSNM verdict belongs to the
+measurement cohort; it keeps the SSNM workload identity. The matched no-update
+control is the same pair of commands without the SSNM flags on either process:
+
+```sh
+# SSNM-loaded campaign probe (steady row; large row: -ssnm-rate=10 -ssnm-apcs=1024)
+perftraffic -role=sgp ... -same-host-clock -ssnm-rate=1000 -ssnm-apcs=1 -ssnm-records=16384
+perftraffic -role=asp ... -same-host-clock -ssnm-rate=1000 -ssnm-apcs=1 -ssnm-records=16384 -rate=<probe>
+# Matched no-update control probe: identical except the SSNM flags
+perftraffic -role=sgp ... -same-host-clock
+perftraffic -role=asp ... -same-host-clock -rate=<probe>
+```
+
+Run each campaign through `perfcapacity` separately and compare the selected
+rates: the steady row needs at least 90% and the large row at least 80% of the
+control's capacity. The SSNM verdict each probe folds in includes the time
+budgets, and `perfcapacity` adds the manifest's `ssnm_budgets` to the workload
+identity, so one campaign cannot mix verdicts judged against different
+budgets. Bidirectional and legacy single-record evidence carrying any SSNM
+evidence is refused.
 
 ## Routed modes
 
@@ -229,7 +380,11 @@ recovery phase must last at least 12 s (the 2 s allowance, a one-second
 window and eight trend observations). It schedules at most 2^26 messages, the
 bound of the per-message outcome ledgers. The flag is an ASP sender flag for
 throughput mode only; the receiver learns the profile from each cohort's run
-specification. Without it every mode, including `routed` and
+specification. It is refused together with `-ssnm-rate`, and a receiver
+refuses a specification carrying both: the overload row runs DATA alone and
+judges its deliberate losses by its own contract, while the SSNM rows judge
+SSNM delivery against loss-free DATA at a fixed nominal load, so a combined
+run would belong to neither contract. Without it every mode, including `routed` and
 `routed-direct`, is unchanged: no field below is emitted and the scheduler's
 single-rate arithmetic is exactly the historical one.
 

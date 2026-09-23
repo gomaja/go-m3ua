@@ -63,6 +63,11 @@ func TestOverloadTrialRecordsAreNeverCapacityEvidence(testContext *testing.T) {
 		{name: "bidirectional reverse record", run: func(testContext *testing.T) string {
 			return mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, 10, 10, 10, 10), withSpec([]string{"reverse_sender"}, overloadSpec))
 		}},
+		// An SSNM-loaded cohort that also carries the overload identity is
+		// refused as overload evidence before any SSNM rule is applied.
+		{name: "ssnm cohort", run: func(testContext *testing.T) string {
+			return ssnmRunJSON(testContext, 10, "pass", withSpec([]string{"sender", "receiver"}, overloadSpec))
+		}},
 		{name: "standalone sender record", run: func(*testing.T) string {
 			return strings.Replace(passingRunJSON(), `"spec":{`, `"spec":{"overload":{"profile":"2x:15s,0.5x:15s","role":"measurement"},`, 1)
 		}},
@@ -94,6 +99,9 @@ func TestOverloadTrialRecordsAreNeverCapacityEvidence(testContext *testing.T) {
 }
 
 func passingOrCohort(testContext *testing.T, name string) string {
+	if strings.Contains(name, "ssnm") {
+		return ssnmRunJSON(testContext, 10, "pass", nil)
+	}
 	if strings.Contains(name, "bidirectional") {
 		return bidirectionalRunJSON(10, 10, 10, 10, 10)
 	}

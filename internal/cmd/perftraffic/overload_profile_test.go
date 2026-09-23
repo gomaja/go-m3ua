@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math/rand"
 	"strings"
 	"sync"
@@ -133,6 +134,45 @@ func TestOverloadProfileFlagConfiguresOnlyTheThroughputSender(testContext *testi
 	} {
 		if _, err := parseConfig(scenario.arguments); err == nil || !strings.Contains(err.Error(), scenario.want) {
 			testContext.Errorf("%v: err = %v, want %q", scenario.arguments, err, scenario.want)
+		}
+	}
+}
+
+// An overload trial and SSNM load belong to different contracts and are never
+// combined: the sender refuses both flags together and a receiver refuses a
+// specification that carries both.
+func TestOverloadProfileIsNeverCombinedWithSSNMLoad(testContext *testing.T) {
+	_, err := parseConfig(ssnmSenderArguments("-ssnm-rate=1000", "-overload-profile=2x:15s,0.5x:15s"))
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with SSNM load") {
+		testContext.Fatalf("sender flags: %v", err)
+	}
+	if _, err := parseConfig(ssnmSenderArguments("-ssnm-rate=1000")); err != nil {
+		testContext.Fatalf("SSNM load alone: %v", err)
+	}
+	if config, err := parseConfig(ssnmSenderArguments("-overload-profile=2x:15s,0.5x:15s")); err != nil || config.overload == nil || config.SSNM.enabled() {
+		testContext.Fatalf("overload profile alone: %+v, %v", config, err)
+	}
+	profile, err := parseOverloadProfile("2x:15s,0.5x:15s", 40_000)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	for _, role := range []string{overloadRoleMeasurement, overloadRoleWarmup} {
+		specification := runSpec{
+			Cohort: "combined", Seed: 1, Associations: 1, Expected: profile.expected(), Duration: profile.duration(),
+			Drain: 3 * time.Second, Rate: 40_000, Outstanding: maxOutstanding, Payload: workloadMix,
+			Mode: modeThroughput, Direction: directionASPToSGP, Overload: profile.spec(role),
+			SSNM: &ssnmWorkload{Rate: 1_000, APCs: 1, Records: 16_384, Subscribers: 8, Phase: "measurement"},
+		}
+		if role == overloadRoleWarmup {
+			specification.Rate, specification.Duration, specification.Expected = 20_000, 5*time.Second, 100_000
+		}
+		if _, err := validateOverloadSpec(specification); err == nil || !strings.Contains(err.Error(), "cannot be combined with SSNM load") {
+			testContext.Errorf("%s specification with SSNM load: %v", role, err)
+		}
+		control := newReceiverControl(1, maxOutstanding)
+		control.setAssociationReady(0, 15)
+		if err := control.reset(specification); !errors.Is(err, errInvalidRunSpec) {
+			testContext.Errorf("%s receiver reset with SSNM load: %v", role, err)
 		}
 	}
 }
