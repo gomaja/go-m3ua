@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,143 @@ func criterionStatus(record *overloadRecord, name string) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+// The shared-clock path brackets each receiver capture by the clock
+// resolution, exactly as the nominal sender window does, and places it
+// relative to the shared start.
+func TestOverloadPointsUseTheSharedClockCapture(testContext *testing.T) {
+	cohort := syntheticCohort{clock: true, resolution: 250 * time.Microsecond, capture: 700 * time.Microsecond}
+	evidence := cohort.evidence(testContext)
+	points, err := overloadPoints(evidence.specification, evidence.observations)
+	if err != nil || len(points) != len(evidence.observations) {
+		testContext.Fatalf("points = %+v, %v", points, err)
+	}
+	for index, point := range points {
+		captured := evidence.observations[index].Snapshot.Clock.Captured
+		wantBefore := time.Duration(captured - int64(cohort.resolution) - syntheticClockStart)
+		wantAfter := time.Duration(captured + int64(cohort.resolution) - syntheticClockStart)
+		if point.Before != wantBefore || point.After != wantAfter {
+			testContext.Fatalf("point %d = [%s, %s], want [%s, %s]", index, point.Before, point.After, wantBefore, wantAfter)
+		}
+	}
+	if points[1].Before != time.Second+450*time.Microsecond || points[1].After != time.Second+950*time.Microsecond {
+		testContext.Fatalf("switch point = [%s, %s]", points[1].Before, points[1].After)
+	}
+	// The sender-side request envelope is not the capture bracket.
+	if points[1].Before == evidence.observations[1].Before {
+		testContext.Fatal("the shared-clock path used the request envelope instead of the capture")
+	}
+	missing := evidence.observations
+	missing[3].Snapshot.Clock = nil
+	if _, err := overloadPoints(evidence.specification, missing); err == nil || !strings.Contains(err.Error(), "no receiver capture") {
+		testContext.Fatalf("missing capture: %v", err)
+	}
+	record := evaluateOverloadCohort(evidence)
+	if record.Acceptance.Verdict != verdictInvalid {
+		testContext.Fatalf("a missing capture did not invalidate the cohort: %+v", record.Acceptance)
+	}
+	if status, detail := criterionStatus(record, "fixture"); status != overloadCriterionFail || !strings.Contains(detail, "no receiver capture") {
+		testContext.Fatalf("fixture criterion = %s: %s", status, detail)
+	}
+}
+
+// Whether the observation taken at the switch can start a recovery window
+// depends on the capture bracket. With a fine resolution its bracket starts
+// after the switch and it is the first candidate, as in the HTTP-interval
+// path; once the resolution exceeds the capture delay its bracket may start
+// before the switch, it is excluded, and the next observation's window is the
+// only candidate left within the allowance.
+func TestOverloadSharedClockRecoveryWindowEligibility(testContext *testing.T) {
+	capture := 500 * time.Microsecond
+	for _, scenario := range []struct {
+		name     string
+		cohort   syntheticCohort
+		status   string
+		recovery time.Duration
+	}{
+		{name: "http-interval", cohort: syntheticCohort{capture: capture}, status: overloadRecovered, recovery: capture + 100*time.Microsecond},
+		{name: "fine-clock", cohort: syntheticCohort{clock: true, resolution: time.Nanosecond, capture: capture}, status: overloadRecovered, recovery: capture + time.Nanosecond},
+		{name: "coarse-clock", cohort: syntheticCohort{clock: true, resolution: 600 * time.Microsecond, capture: capture}, status: overloadRecovered, recovery: time.Second + capture + 600*time.Microsecond},
+		// Ten refusals just after 2 s leave the only window the coarse clock
+		// can use 490 deliveries against 490.59 required. The other paths
+		// recover in the window that starts at the switch.
+		{name: "http-interval-dip", cohort: syntheticCohort{capture: capture, refused: dipAfterTwoSeconds()}, status: overloadRecovered, recovery: capture + 100*time.Microsecond},
+		{name: "fine-clock-dip", cohort: syntheticCohort{clock: true, resolution: time.Nanosecond, capture: capture, refused: dipAfterTwoSeconds()}, status: overloadRecovered, recovery: capture + time.Nanosecond},
+		{name: "coarse-clock-dip", cohort: syntheticCohort{clock: true, resolution: 600 * time.Microsecond, capture: capture, refused: dipAfterTwoSeconds()}, status: overloadNotRecovered},
+	} {
+		testContext.Run(scenario.name, func(testContext *testing.T) {
+			record := evaluateOverloadCohort(scenario.cohort.evidence(testContext))
+			if len(record.Recovery) != 1 {
+				testContext.Fatalf("recovery = %+v", record.Recovery)
+			}
+			recovery := record.Recovery[0]
+			if recovery.Status != scenario.status || scenario.status == overloadRecovered && recovery.RecoveryTime != scenario.recovery {
+				testContext.Fatalf("recovery = %+v, want %s in %s", recovery, scenario.status, scenario.recovery)
+			}
+			wantVerdict := verdictPass
+			if scenario.status != overloadRecovered {
+				wantVerdict = overloadVerdictFail
+			}
+			if record.Acceptance.Verdict != wantVerdict {
+				testContext.Fatalf("verdict %s, want %s: %+v", record.Acceptance.Verdict, wantVerdict, record.Acceptance.Criteria)
+			}
+		})
+	}
+}
+
+// dipAfterTwoSeconds refuses the ten recovery-phase messages scheduled from
+// 2 s on (indexes 2,500 to 2,509 at 2 ms spacing).
+func dipAfterTwoSeconds() map[uint64]bool {
+	refused := make(map[uint64]bool)
+	for index := uint64(2_500); index < 2_510; index++ {
+		refused[index] = true
+	}
+	return refused
+}
+
+func TestOverloadCohortFixtureFailuresAreAssembled(testContext *testing.T) {
+	for _, scenario := range []struct {
+		name    string
+		cohort  syntheticCohort
+		mutate  func(*overloadEvidence)
+		verdict string
+		failed  string
+		detail  string
+	}{
+		{name: "unverified-clock", cohort: syntheticCohort{clock: true, resolution: time.Nanosecond, capture: time.Millisecond},
+			mutate: func(evidence *overloadEvidence) { evidence.clockVerified = false }, verdict: verdictInvalid, failed: "fixture", detail: "shared clock evidence is not verified"},
+		{name: "missing-receiver-overload", mutate: func(evidence *overloadEvidence) { evidence.receiver.Overload = nil },
+			verdict: verdictInvalid, failed: "fixture", detail: "receiver record has no overload observations"},
+		{name: "queues-never-polled", mutate: func(evidence *overloadEvidence) { evidence.receiver.Overload.Receiver.QueuePolls = 0 },
+			verdict: verdictInvalid, failed: "fixture", detail: "never observed its DATA queues"},
+		{name: "sender-fatal", mutate: func(evidence *overloadEvidence) { evidence.senderFatal = "clock regressed" },
+			verdict: verdictInvalid, failed: "fixture", detail: "sender fixture failure: clock regressed"},
+		{name: "unbounded-window", mutate: func(evidence *overloadEvidence) {
+			evidence.senderWindow = &windowAccounting{Status: verdictInconclusive, Reason: "progress request failed"}
+		}, verdict: verdictInvalid, failed: "fixture", detail: "progress request failed"},
+		{name: "receiver-not-stopped", mutate: func(evidence *overloadEvidence) {
+			evidence.delivered = nil
+			evidence.deliveredErr = errors.New("receiver did not stop cleanly: 409 Conflict")
+		}, verdict: verdictInconclusive, failed: "accounting", detail: "receiver did not stop cleanly"},
+	} {
+		testContext.Run(scenario.name, func(testContext *testing.T) {
+			cohort := scenario.cohort
+			if cohort.capture == 0 {
+				cohort.capture = time.Millisecond
+			}
+			evidence := cohort.evidence(testContext)
+			if record := evaluateOverloadCohort(evidence); record.Acceptance.Verdict != verdictPass {
+				testContext.Fatalf("unmutated cohort: %+v", record.Acceptance.Criteria)
+			}
+			scenario.mutate(&evidence)
+			record := evaluateOverloadCohort(evidence)
+			status, detail := criterionStatus(record, scenario.failed)
+			if record.Acceptance.Verdict != scenario.verdict || status == overloadCriterionPass || !strings.Contains(detail, scenario.detail) {
+				testContext.Fatalf("verdict %s, %s %s: %s", record.Acceptance.Verdict, scenario.failed, status, detail)
+			}
+		})
+	}
 }
 
 // The offered load must follow the phased schedule. Both bounds are tested

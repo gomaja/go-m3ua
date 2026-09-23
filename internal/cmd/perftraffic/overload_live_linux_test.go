@@ -17,6 +17,19 @@ import (
 // the per-message ledgers must reconcile with the receiver's, and no bound
 // may be exceeded. Recovery depends on the host's speed and is only logged.
 func TestOverloadCohortAccountsForEveryMessageOverLoopbackSCTP(testContext *testing.T) {
+	for _, sharedClock := range []bool{false, true} {
+		name := "http-interval"
+		if sharedClock {
+			name = "same-host-clock"
+		}
+		testContext.Run(name, func(testContext *testing.T) { runLiveOverloadCohort(testContext, sharedClock) })
+	}
+}
+
+// runLiveOverloadCohort runs one live overload cohort; with sharedClock both
+// sides use the verified same-host monotonic clock, the path the approved
+// acceptance command uses.
+func runLiveOverloadCohort(testContext *testing.T, sharedClock bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
@@ -33,6 +46,10 @@ func TestOverloadCohortAccountsForEveryMessageOverLoopbackSCTP(testContext *test
 		testContext.Fatal(err)
 	}
 	control := newReceiverControl(1, maxOutstanding)
+	control.enableSharedClock(sharedClock)
+	if control.fatal != "" {
+		testContext.Fatal(control.fatal)
+	}
 	fatal := make(chan error, 1)
 	go acceptAndRead(ctx, listener, 1, control, fatal)
 	server := httptest.NewServer(control.handler())
@@ -45,7 +62,7 @@ func TestOverloadCohortAccountsForEveryMessageOverLoopbackSCTP(testContext *test
 		Role: "asp", Mode: modeThroughput, Direction: directionASPToSGP, Initiation: initiationASPDial,
 		SCTPAddress: listener.Addr().String(), Associations: 1, PeerControl: server.URL, Cohort: "overload-live", Seed: 7,
 		Rate: 20_000, Workload: workloadMix, Duration: profile.duration(), Drain: overloadRequestDeadline + overloadDrainMargin,
-		Outstanding: 1, OverloadProfile: profile.text, overload: profile,
+		Outstanding: 1, OverloadProfile: profile.text, overload: profile, SameHostClock: sharedClock,
 	}
 	result, runErr := runSender(ctx, config)
 	select {
@@ -81,8 +98,18 @@ func TestOverloadCohortAccountsForEveryMessageOverLoopbackSCTP(testContext *test
 	if overload.Bounds.MaxOutstanding > 1 || len(overload.Bounds.ReceiverAssociations) != 1 || !overload.Bounds.ReceiverAssociations[0].Active {
 		testContext.Errorf("bounds = %+v", overload.Bounds)
 	}
+	if sharedClock != (sender.Spec.Clock != nil) || sharedClock && (sender.ClockEvidence == nil || !sender.ClockEvidence.Verified) {
+		testContext.Errorf("shared clock %t: spec clock %+v evidence %+v", sharedClock, sender.Spec.Clock, sender.ClockEvidence)
+	}
+	shape := overload.OfferedShape
+	if shape == nil || !shape.FinalMatchesTotals || shape.Samples < 12 {
+		testContext.Errorf("offered shape = %+v", shape)
+	}
+	if final := overload.Series[len(overload.Series)-1]; !final.Final || final.Offered != totals.Offered || final.Accepted != totals.Accepted {
+		testContext.Errorf("series does not end at the totals: %+v", final)
+	}
 	if len(overload.Recovery) != 1 {
 		testContext.Fatalf("recovery = %+v", overload.Recovery)
 	}
-	testContext.Logf("recovery %s in %s; totals %+v; verdict %s (%v)", overload.Recovery[0].Status, overload.Recovery[0].RecoveryTime, *totals, overload.Acceptance.Verdict, runErr)
+	testContext.Logf("recovery %s in %s; scheduler lag max %s; totals %+v; verdict %s (%v)", overload.Recovery[0].Status, overload.Recovery[0].RecoveryTime, shape.MaxSchedulerLag, *totals, overload.Acceptance.Verdict, runErr)
 }
