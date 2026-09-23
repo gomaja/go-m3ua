@@ -304,13 +304,21 @@ type ledgerSender struct {
 	errors     atomic.Uint64
 	refused    atomic.Uint64
 	firstError atomic.Pointer[string]
-	started    time.Time
-	cancel     context.CancelFunc
-	group      sync.WaitGroup
+	// now is the schedule's clock: time.Now, or a test's stepped clock.
+	now     func() time.Time
+	started time.Time
+	cancel  context.CancelFunc
+	group   sync.WaitGroup
 }
 
 func startLedgerSender(ctx context.Context, writers []dataWriter, plan senderPlan) *ledgerSender {
-	sender := &ledgerSender{plan: plan, writers: writers, started: time.Now()}
+	return startLedgerSenderWithClock(ctx, writers, plan, time.Now)
+}
+
+// startLedgerSenderWithClock is startLedgerSender with the schedule read from
+// now, so a test can place the stop at an exact point of the schedule.
+func startLedgerSenderWithClock(ctx context.Context, writers []dataWriter, plan senderPlan, now func() time.Time) *ledgerSender {
+	sender := &ledgerSender{plan: plan, writers: writers, now: now, started: now()}
 	ctx, sender.cancel = context.WithCancel(ctx)
 	perAssociation := plan.Rate / float64(len(writers))
 	for index, writer := range writers {
@@ -335,7 +343,7 @@ func (sender *ledgerSender) run(ctx context.Context, index int, writer dataWrite
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for slot := uint64(0); ; {
-		due := scheduledMessages(rate, time.Since(sender.started))
+		due := scheduledMessages(rate, sender.now().Sub(sender.started))
 		for ; slot < due; slot++ {
 			if ctx.Err() != nil {
 				return
@@ -367,7 +375,7 @@ func (sender *ledgerSender) run(ctx context.Context, index int, writer dataWrite
 			sequences[flow]++
 		}
 		next := sender.started.Add(time.Duration(float64(slot+1) / rate * float64(time.Second)))
-		timer.Reset(min(max(time.Until(next), 0), senderWake))
+		timer.Reset(min(max(next.Sub(sender.now()), 0), senderWake))
 		select {
 		case <-ctx.Done():
 			return
@@ -392,7 +400,7 @@ type senderResult struct {
 
 // stop ends the epoch and returns what was written.
 func (sender *ledgerSender) stop() senderResult {
-	elapsed := time.Since(sender.started)
+	elapsed := sender.now().Sub(sender.started)
 	sender.cancel()
 	sender.group.Wait()
 	perAssociation := sender.plan.Rate / float64(len(sender.writers))
