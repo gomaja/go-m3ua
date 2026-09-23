@@ -504,6 +504,9 @@ type fixtureSpec struct {
 	Initiation   *string            `json:"initiation"`
 	PeerControl  string             `json:"peer_control"`
 	SharedClock  *sharedClockWindow `json:"shared_clock"`
+	// Overload is the identity of a DATA overload trial's cohorts. Its mere
+	// presence refuses the record: an overload trial is never a capacity probe.
+	Overload json.RawMessage `json:"overload"`
 }
 
 type fixtureManifest struct {
@@ -644,6 +647,9 @@ func (campaign campaignIdentity) environments() []runEnvironment {
 func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, error) {
 	if len(raw) == 0 {
 		return fixtureRun{}, errors.New("run evidence is required")
+	}
+	if err := refuseOverloadEvidence(raw); err != nil {
+		return fixtureRun{}, err
 	}
 	var shape struct {
 		Sender          json.RawMessage `json:"sender"`
@@ -1543,6 +1549,9 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	if uint64(declaredRate) != *spec.Rate {
 		return workloadIdentity{}, fmt.Errorf("declared rate %d does not match measured spec.rate %d", declaredRate, *spec.Rate)
 	}
+	if spec.Overload != nil {
+		return workloadIdentity{}, errOverloadEvidence
+	}
 	if spec.Cohort == nil || *spec.Cohort == "" || spec.Seed == nil || spec.Associations == nil ||
 		spec.Expected == nil || spec.Duration == nil || spec.Outstanding == nil ||
 		spec.Payload == nil || spec.Mode == nil || spec.Direction == nil || spec.Initiation == nil {
@@ -1859,4 +1868,41 @@ func writeInvalidResponse(output io.Writer, err error) {
 		Scope:    decisionScope,
 		Error:    err.Error(),
 	})
+}
+
+// errOverloadEvidence refuses the records of a perftraffic DATA overload trial.
+// Such a trial offers more than it can deliver on purpose and is judged by its
+// own outcome-accounting and recovery contract (performance budgets section
+// 4); its refusals and losses say nothing about the nominal sustainable rate.
+var errOverloadEvidence = errors.New("overload trial records are not capacity evidence: an overload trial is judged by its own accounting and recovery contract, never as a nominal capacity probe")
+
+// refuseOverloadEvidence rejects a run that carries the overload identity
+// anywhere perftraffic records it: a record's spec.overload or its overload
+// object, on a standalone sender record, on any record of a cohort, or on the
+// cohort itself. It runs before every other check, so a warm-up or
+// measurement cohort of an overload trial is refused for what it is rather
+// than for a symptom such as its phased expected count.
+func refuseOverloadEvidence(raw json.RawMessage) error {
+	type identity struct {
+		Spec *struct {
+			Overload json.RawMessage `json:"overload"`
+		} `json:"spec"`
+		Overload json.RawMessage `json:"overload"`
+	}
+	var run struct {
+		identity
+		Sender          *identity `json:"sender"`
+		Receiver        *identity `json:"receiver"`
+		ReverseSender   *identity `json:"reverse_sender"`
+		ReverseReceiver *identity `json:"reverse_receiver"`
+	}
+	if err := json.Unmarshal(raw, &run); err != nil {
+		return fmt.Errorf("decode run evidence: %w", err)
+	}
+	for _, record := range []*identity{&run.identity, run.Sender, run.Receiver, run.ReverseSender, run.ReverseReceiver} {
+		if record != nil && (record.Overload != nil || record.Spec != nil && record.Spec.Overload != nil) {
+			return errOverloadEvidence
+		}
+	}
+	return nil
 }
