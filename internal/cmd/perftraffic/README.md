@@ -201,7 +201,8 @@ final generator view recomputed from the complete per-message log, `delay`
 (report start to healthy-subscriber receipt, p50/p95/p99/max; an upper bound on
 apply-and-publish time), `pause`, `budgets`, and `verdict`: `fail` for any
 healthy indication loss, store refusal, generator failure, F3 contract
-violation or exceeded time budget;
+violation, exceeded time budget, final store that does not hold exactly the
+plan's state, or a binding or partition lifecycle event reaching a subscriber;
 `inconclusive` when the generator did not hold the intensity (a window message
 unsent or failed, or a report starting more than `dispatch_tolerance_ns`, one
 scheduling interval and at least 100 ms, after its schedule) or a gated budget
@@ -218,6 +219,12 @@ have no apply-time budget in section 4 and record the delay only. With
 `-pause-subscriber` the F3 `resync_ns` gates "snapshot/subscription acquisition
 within 100 ms" and `recovery_ns` gates "consume retained snapshot and 256
 queued indications within 1 s".
+
+**Final store.** After every subscriber has consumed every reported message,
+the ASP reads `SSNMKnowledge` once more and requires `associations x records`
+records holding exactly the plan's state after the last reported position,
+destination by destination, the same check a Resync snapshot gets
+(`store.state_validated`, `store.state_mismatches`).
 `association_errors` names any association that ended during the run with the
 library's close cause, which is also written to stderr as an
 `ssnm_diagnostic` line, together with the subscribers' progress when they close.

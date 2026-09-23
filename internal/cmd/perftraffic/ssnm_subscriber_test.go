@@ -202,6 +202,17 @@ func TestSSNMSubscriberAfterResyncMustStayLossless(testContext *testing.T) {
 	}
 }
 
+func TestSSNMSubscriberOtherEventsFail(testContext *testing.T) {
+	record := ssnmSubscriberRecord{Partitions: 1, FinalPositions: []uint64{10}, ExpectedFinalPosition: 10, ssnmSubscriberCounts: ssnmSubscriberCounts{OtherEvents: 1}}
+	if failures := healthySubscriberFailures(record, 1); len(failures) != 1 {
+		testContext.Fatalf("healthy subscriber with an unexpected lifecycle event: %v", failures)
+	}
+	record.ContinuityLost = 1
+	if failures := pausedSubscriberFailures(record, cleanPause(), 1); len(failures) != 1 {
+		testContext.Fatalf("paused subscriber with an unexpected lifecycle event: %v", failures)
+	}
+}
+
 func TestSSNMSubscriberRejectsStaleSnapshot(testContext *testing.T) {
 	plan := ssnmPlan{records: 16, apcs: 1}
 	preload := plan.preloadMessages()

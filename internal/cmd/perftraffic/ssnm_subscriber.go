@@ -258,29 +258,59 @@ func (subscriber *ssnmSubscriber) captureSnapshot(snapshot m3ua.SSNMSnapshot) (p
 			continue
 		}
 		partitions++
-		states := make([]uint8, subscriber.plan.records)
-		for _, destination := range knowledge.Destinations {
-			destinations++
-			offset := int64(destination.Destination.PointCode) - int64(ssnmPointCodeBase)
-			if destination.Destination.Mask != 0 || offset < 0 || offset >= int64(len(states)) || !destination.AvailabilitySet {
-				subscriber.counts.SnapshotMismatches++
-				continue
-			}
-			switch destination.Availability.State {
-			case m3ua.DestinationUnavailable:
-				states[offset] = ssnmStateUnavailable
-			case m3ua.DestinationAvailable:
-				states[offset] = ssnmStateAvailable
-			default:
-				subscriber.counts.SnapshotMismatches++
-			}
-		}
+		destinations += len(knowledge.Destinations)
+		states, invalid := ssnmKnowledgeStates(knowledge, subscriber.plan.records)
+		subscriber.counts.SnapshotMismatches += invalid
 		subscriber.snapshot[progress.slot] = states
 	}
 	for _, progress := range subscriber.partitions {
 		progress.relock = true
 	}
 	return partitions, destinations
+}
+
+// ssnmKnowledgeStates maps one partition's retained knowledge onto the
+// plan's destinations and counts entries no plan position can produce: a
+// masked range, a destination outside the plan, or no availability.
+func ssnmKnowledgeStates(knowledge m3ua.SSNMPartitionKnowledge, records int) ([]uint8, uint64) {
+	states := make([]uint8, records)
+	var invalid uint64
+	for _, destination := range knowledge.Destinations {
+		offset := int64(destination.Destination.PointCode) - int64(ssnmPointCodeBase)
+		if destination.Destination.Mask != 0 || offset < 0 || offset >= int64(len(states)) || !destination.AvailabilitySet {
+			invalid++
+			continue
+		}
+		switch destination.Availability.State {
+		case m3ua.DestinationUnavailable:
+			states[offset] = ssnmStateUnavailable
+		case m3ua.DestinationAvailable:
+			states[offset] = ssnmStateAvailable
+		default:
+			invalid++
+		}
+	}
+	return states, invalid
+}
+
+// stateMismatches counts the destinations whose retained state differs from
+// the plan's after exactly positions, an absent destination included.
+func (plan ssnmPlan) stateMismatches(states []uint8, positions uint64) uint64 {
+	var mismatches uint64
+	for destination, state := range states {
+		expected, present := plan.expectedState(destination, positions)
+		want := ssnmStateAbsent
+		if present {
+			want = ssnmStateAvailable
+			if expected == m3ua.DestinationUnavailable {
+				want = ssnmStateUnavailable
+			}
+		}
+		if state != want {
+			mismatches++
+		}
+	}
+	return mismatches
 }
 
 // validateSnapshotLocked checks that the retained snapshot equals the plan's
@@ -292,19 +322,7 @@ func (subscriber *ssnmSubscriber) validateSnapshotLocked(slot int, position uint
 		return
 	}
 	delete(subscriber.snapshot, slot)
-	for destination, state := range states {
-		expected, present := subscriber.plan.expectedState(destination, position)
-		want := ssnmStateAbsent
-		if present {
-			want = ssnmStateAvailable
-			if expected == m3ua.DestinationUnavailable {
-				want = ssnmStateUnavailable
-			}
-		}
-		if state != want {
-			subscriber.counts.SnapshotMismatches++
-		}
-	}
+	subscriber.counts.SnapshotMismatches += subscriber.plan.stateMismatches(states, position)
 	if subscriber.pause != nil {
 		subscriber.pause.SnapshotValidated++
 	}

@@ -258,6 +258,44 @@ func TestSSNMFinishGatesResyncBudgets(testContext *testing.T) {
 	}
 }
 
+func TestSSNMFinishAssertsFinalStore(testContext *testing.T) {
+	missing := steadyFinishFixture()
+	partition := &missing.knowledge.Partitions[0]
+	partition.Destinations = partition.Destinations[1:]
+	if record := missing.run(testContext); record.Verdict != ssnmVerdictFail || !reasonsContain(record.Reasons, "held 7 records at the end, want 8") {
+		testContext.Fatalf("short store: verdict %s reasons %q", record.Verdict, record.Reasons)
+	}
+	wrong := steadyFinishFixture()
+	flipped := &wrong.knowledge.Partitions[0].Destinations[2].Availability
+	if flipped.State == m3ua.DestinationAvailable {
+		flipped.State = m3ua.DestinationUnavailable
+	} else {
+		flipped.State = m3ua.DestinationAvailable
+	}
+	record := wrong.run(testContext)
+	if record.Verdict != ssnmVerdictFail || !reasonsContain(record.Reasons, "1 destinations") || record.Store.RecordsAtEnd != 8 || record.Store.StateMismatches != 1 || !record.Store.StateValidated {
+		testContext.Fatalf("stale store state: verdict %s reasons %q store %+v", record.Verdict, record.Reasons, record.Store)
+	}
+	if clean := steadyFinishFixture().run(testContext); !clean.Store.StateValidated || clean.Store.StateMismatches != 0 {
+		testContext.Fatalf("clean store = %+v", clean.Store)
+	}
+}
+
+func TestSSNMFinishFailsOnOtherEvents(testContext *testing.T) {
+	for name, fixture := range map[string]*finishFixture{
+		"steady": steadyFinishFixture(),
+		"paused": pausedFinishFixture(time.Millisecond, 10*time.Millisecond),
+	} {
+		testContext.Run(name, func(testContext *testing.T) {
+			fixture.events = []m3ua.SSNMEvent{{Kind: m3ua.SSNMBindingAdmittedEvent}}
+			record := fixture.run(testContext)
+			if record.Verdict != ssnmVerdictFail || !reasonsContain(record.Reasons, "subscriber 0 saw 1 other events") || !reasonsContain(record.Reasons, "subscriber 1 saw 1 other events") {
+				testContext.Fatalf("other events: verdict %s reasons %q", record.Verdict, record.Reasons)
+			}
+		})
+	}
+}
+
 func budgetCheck(record *ssnmRecord, name string) *ssnmBudgetCheck {
 	for index := range record.Budgets {
 		if record.Budgets[index].Name == name {

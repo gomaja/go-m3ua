@@ -346,6 +346,11 @@ type ssnmStoreRecord struct {
 	ReportsRefused        uint64           `json:"reports_refused"`
 	PartitionsInvalidated uint64           `json:"partitions_invalidated"`
 	LastResourceLoss      string           `json:"last_resource_loss,omitempty"`
+	// StateValidated is set when every retained destination was compared
+	// with the plan after all reported positions; StateMismatches counts the
+	// destinations that disagreed.
+	StateValidated  bool   `json:"state_validated"`
+	StateMismatches uint64 `json:"state_mismatches"`
 }
 
 // ssnmBudgetCheck is one section 4 time budget as the ASP judged it.
@@ -466,6 +471,19 @@ func (run *ssnmSenderRun) finish(ctx context.Context, measurement *cohortResult)
 	if knowledge.RecordsRefused != 0 || knowledge.ReportsRefused != 0 || knowledge.PartitionsInvalidated != 0 {
 		fail("the ASP store refused or invalidated SSNM state")
 	}
+	if want := run.associations * run.config.Records; record.Store.RecordsAtEnd != want {
+		fail(fmt.Sprintf("the ASP store held %d records at the end, want %d", record.Store.RecordsAtEnd, want))
+	}
+	// Every subscriber has consumed every reported position, so the store
+	// must hold exactly the plan's state after them. Without the complete log
+	// the positions are unknown and the state is left unvalidated.
+	if logErr == nil && log.State != ssnmGeneratorRunning {
+		record.Store.StateValidated = true
+		record.Store.StateMismatches = ssnmStoreMismatches(run.plan, knowledge, expected)
+		if record.Store.StateMismatches != 0 {
+			fail(fmt.Sprintf("the ASP store's final state disagreed with the plan at %d destinations", record.Store.StateMismatches))
+		}
+	}
 
 	histogram := newDurationHistogram()
 	healthy := 0
@@ -569,6 +587,18 @@ func ssnmBudgetChecks(config ssnmConfig, delay *ssnmDelayRecord, pause *ssnmPaus
 	return checks, reasons
 }
 
+// ssnmStoreMismatches counts the retained destinations that disagree with
+// the plan's state after positions, over every partition of a store
+// snapshot, exactly as a Resync snapshot is validated.
+func ssnmStoreMismatches(plan ssnmPlan, knowledge m3ua.SSNMSnapshot, positions uint64) uint64 {
+	var mismatches uint64
+	for _, partition := range knowledge.Partitions {
+		states, invalid := ssnmKnowledgeStates(partition, plan.records)
+		mismatches += invalid + plan.stateMismatches(states, positions)
+	}
+	return mismatches
+}
+
 // healthySubscriberFailures lists why a subscriber that must stay lossless
 // did not.
 func healthySubscriberFailures(record ssnmSubscriberRecord, associations int) []string {
@@ -580,6 +610,7 @@ func healthySubscriberFailures(record ssnmSubscriberRecord, associations int) []
 	if record.ContinuityLost != 0 || record.ResourceLoss != 0 || record.Invalidated != 0 {
 		reasons = append(reasons, prefix+fmt.Sprintf("saw %d continuity-loss, %d resource-loss and %d invalidation events", record.ContinuityLost, record.ResourceLoss, record.Invalidated))
 	}
+	reasons = append(reasons, otherEventFailures(prefix, record)...)
 	reasons = append(reasons, positionFailures(prefix, record, associations)...)
 	if record.MissingReceipts != 0 {
 		reasons = append(reasons, prefix+fmt.Sprintf("never received %d measurement messages", record.MissingReceipts))
@@ -588,6 +619,16 @@ func healthySubscriberFailures(record ssnmSubscriberRecord, associations int) []
 		reasons = append(reasons, prefix+"failed: "+record.Error)
 	}
 	return reasons
+}
+
+// otherEventFailures rejects binding and partition lifecycle events and
+// unknown kinds. Every binding is admitted before the subscriptions open and
+// none is retired during the run, so a subscriber should see none.
+func otherEventFailures(prefix string, record ssnmSubscriberRecord) []string {
+	if record.OtherEvents == 0 {
+		return nil
+	}
+	return []string{prefix + fmt.Sprintf("saw %d other events (binding or partition lifecycle, or an unknown kind)", record.OtherEvents)}
 }
 
 func positionFailures(prefix string, record ssnmSubscriberRecord, associations int) []string {
@@ -627,6 +668,7 @@ func pausedSubscriberFailures(record ssnmSubscriberRecord, pause *ssnmPauseRecor
 	if record.Gaps != 0 || record.Duplicates != 0 || record.Unexpected != 0 || record.ContinuityLost > 1 || record.ResourceLoss != 0 || record.Invalidated != 0 {
 		reasons = append(reasons, prefix+"was not lossless outside its one observed overflow")
 	}
+	reasons = append(reasons, otherEventFailures(prefix, record)...)
 	reasons = append(reasons, positionFailures(prefix, record, associations)...)
 	if record.Error != "" {
 		reasons = append(reasons, prefix+"failed: "+record.Error)
