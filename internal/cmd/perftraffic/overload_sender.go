@@ -147,11 +147,36 @@ type overloadCounters struct {
 	// finalized is set by the final series point; a periodic sample that
 	// races it is dropped rather than appended after it.
 	finalized bool
-	// maxSchedulerLag is the longest any message waited past its scheduled
-	// instant for the scheduler to emit it, and maxSchedulerLagAt that
-	// message's scheduled offset.
-	maxSchedulerLag   time.Duration
-	maxSchedulerLagAt time.Duration
+	// emission is written by the scheduler goroutine alone and read once the
+	// scheduler has returned.
+	emission emissionLags
+}
+
+// emissionLags records how long past its scheduled instant the scheduler
+// emitted each message, measured at the scheduler's clock read for the batch
+// the message was emitted in: a histogram, the maximum and the scheduled
+// offset of the message that waited longest.
+type emissionLags struct {
+	histogram *durationHistogram
+	max       time.Duration
+	maxAt     time.Duration
+}
+
+func (lags *emissionLags) record(lag, offset time.Duration) {
+	if lags.histogram == nil {
+		lags.histogram = newDurationHistogram()
+	}
+	lags.histogram.record(lag)
+	if lag > lags.max {
+		lags.max, lags.maxAt = lag, offset
+	}
+}
+
+func (lags *emissionLags) percentiles() durationPercentiles {
+	if lags.histogram == nil {
+		return durationPercentiles{}
+	}
+	return lags.histogram.percentiles()
 }
 
 func newOverloadCounters(schedule *phasedSchedule) *overloadCounters {
@@ -335,17 +360,6 @@ func (counters *senderCounters) finishOverloadSeries(offset time.Duration) {
 		Started: overload.started, Outstanding: counters.outstanding, Final: true,
 	})
 	overload.finalized = true
-}
-
-// noteSchedulerLag records how long past its scheduled instant the scheduler
-// emitted the first message of a batch.
-func (counters *senderCounters) noteSchedulerLag(lag, offset time.Duration) {
-	counters.mutex.Lock()
-	defer counters.mutex.Unlock()
-	if counters.overload != nil && lag > counters.overload.maxSchedulerLag {
-		counters.overload.maxSchedulerLag = lag
-		counters.overload.maxSchedulerLagAt = offset
-	}
 }
 
 // classifyDataWrite maps one WriteData result to its overload class.
@@ -550,7 +564,7 @@ func collectOverloadEvidence(ctx context.Context, config commandConfig, specific
 	evidence.indeterminate = overload.indeterminate
 	evidence.notAdmitted = append([]uint64(nil), overload.notAdmitted...)
 	evidence.series = append([]overloadSenderPoint(nil), overload.series...)
-	evidence.maxSchedulerLag, evidence.maxSchedulerLagAt = overload.maxSchedulerLag, overload.maxSchedulerLagAt
+	evidence.emissionLag, evidence.maxEmissionLagAt = overload.emission.percentiles(), overload.emission.maxAt
 	evidence.errorSamples = make(map[string]string, len(overload.errorSamples))
 	for key, value := range overload.errorSamples {
 		evidence.errorSamples[key] = value

@@ -29,6 +29,12 @@ func dispatchOpenLoop(ctx context.Context, rate uint64, duration time.Duration, 
 // clock checks, cancellation and the wait for the window end — is the same for
 // every schedule.
 func dispatchScheduleOpenLoop(ctx context.Context, schedule openLoopSchedule, duration time.Duration, started time.Time, expected uint64, clock *sharedRunClock, counters *senderCounters, emit func(index uint64, offset time.Duration, scheduled time.Time)) {
+	// An overload trial judges its offered shape by how late each message was
+	// emitted; every other cohort records nothing here.
+	var lags *emissionLags
+	if counters.overload != nil {
+		lags = &counters.overload.emission
+	}
 	var previousElapsed time.Duration
 	if clock != nil {
 		elapsed, err := clock.elapsed()
@@ -68,11 +74,6 @@ func dispatchScheduleOpenLoop(ctx context.Context, schedule openLoopSchedule, du
 			}
 			continue
 		}
-		if counters.overload != nil {
-			// The first message due in a batch waited longest for it; an
-			// overload trial judges the offered shape by that wait.
-			counters.noteSchedulerLag(elapsed-schedule.offset(index), schedule.offset(index))
-		}
 		for index < due {
 			if index%256 == 0 {
 				if err := ctx.Err(); err != nil {
@@ -81,6 +82,9 @@ func dispatchScheduleOpenLoop(ctx context.Context, schedule openLoopSchedule, du
 				}
 			}
 			offset := schedule.offset(index)
+			if lags != nil {
+				lags.record(elapsed-offset, offset)
+			}
 			counters.schedule()
 			emit(index, offset, started.Add(offset))
 			index++

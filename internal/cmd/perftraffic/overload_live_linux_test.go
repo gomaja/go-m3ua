@@ -129,5 +129,5 @@ func runLiveOverloadCohort(testContext *testing.T, sharedClock bool) {
 	if len(overload.Recovery) != 1 {
 		testContext.Fatalf("recovery = %+v", overload.Recovery)
 	}
-	testContext.Logf("recovery %s in %s; scheduler lag max %s; totals %+v; verdict %s (%v)", overload.Recovery[0].Status, overload.Recovery[0].RecoveryTime, shape.MaxSchedulerLag, *totals, overload.Acceptance.Verdict, runErr)
+	testContext.Logf("recovery %s in %s; emission lag p99 %s max %s; totals %+v; verdict %s (%v)", overload.Recovery[0].Status, overload.Recovery[0].RecoveryTime, shape.EmissionLag.P99, shape.EmissionLag.Max, *totals, overload.Acceptance.Verdict, runErr)
 }

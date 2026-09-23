@@ -156,28 +156,37 @@ type overloadRecovery struct {
 
 // overloadShapeTolerance bounds how far the offered load may lag the phased
 // schedule: the backlog trend rule's floor duration, 10 ms of offered
-// traffic. The scheduler never emits early.
+// traffic. At least 99% of messages must be emitted within it of their
+// scheduled instant, and each per-second sample may fall at most this much of
+// the phase's traffic short. The scheduler never emits early.
 const overloadShapeTolerance = perfstats.BacklogFloorDuration
+
+// overloadShapeMaximumLag bounds the single latest emission: a tenth of the
+// one-second windows recovery is judged over, so no message is ever carried
+// across a material share of a window. A rare scheduling hiccup of a few tens
+// of milliseconds is disclosed in the record but does not change the phased
+// shape.
+const overloadShapeMaximumLag = 100 * time.Millisecond
 
 // overloadOfferedShape judges whether the offered load followed the phased
 // schedule. The scheduler records how long past its scheduled instant it
-// emitted the first message of each batch, the message of the batch that
-// waited longest; the per-second series records the offered count at each
-// sample, which must lie between schedule.due at that instant less the
+// emitted each message; the per-second series records the offered count at
+// each sample, which must lie between schedule.due at that instant less the
 // tolerance's worth of the current phase's traffic and schedule.due itself.
 type overloadOfferedShape struct {
-	Status             string        `json:"status"`
-	Reason             string        `json:"reason,omitempty"`
-	Tolerance          time.Duration `json:"tolerance_ns"`
-	MaxSchedulerLag    time.Duration `json:"max_scheduler_lag_ns"`
-	MaxSchedulerLagAt  time.Duration `json:"max_scheduler_lag_at_ns"`
-	Samples            int           `json:"samples"`
-	MaxShortfall       uint64        `json:"max_shortfall"`
-	MaxShortfallAt     time.Duration `json:"max_shortfall_at_ns"`
-	ShortfallAllowance uint64        `json:"shortfall_allowance_at_max"`
-	MaxExcess          uint64        `json:"max_excess"`
-	FinalMatchesTotals bool          `json:"final_point_matches_totals"`
-	FinalPointOffset   time.Duration `json:"final_point_offset_ns"`
+	Status             string              `json:"status"`
+	Reason             string              `json:"reason,omitempty"`
+	Tolerance          time.Duration       `json:"tolerance_ns"`
+	MaximumLag         time.Duration       `json:"maximum_lag_ns"`
+	EmissionLag        durationPercentiles `json:"emission_lag"`
+	MaxEmissionLagAt   time.Duration       `json:"max_emission_lag_at_ns"`
+	Samples            int                 `json:"samples"`
+	MaxShortfall       uint64              `json:"max_shortfall"`
+	MaxShortfallAt     time.Duration       `json:"max_shortfall_at_ns"`
+	ShortfallAllowance uint64              `json:"shortfall_allowance_at_max"`
+	MaxExcess          uint64              `json:"max_excess"`
+	FinalMatchesTotals bool                `json:"final_point_matches_totals"`
+	FinalPointOffset   time.Duration       `json:"final_point_offset_ns"`
 }
 
 const (
@@ -188,14 +197,20 @@ const (
 // judgeOfferedShape applies the offered-shape rule to the scheduler lag and
 // the per-second series, and checks that the series ends, after the drain, at
 // the cohort's totals.
-func judgeOfferedShape(schedule *phasedSchedule, series []overloadSenderPoint, totals overloadClassCounts, maxLag, maxLagAt time.Duration) *overloadOfferedShape {
+func judgeOfferedShape(schedule *phasedSchedule, series []overloadSenderPoint, totals overloadClassCounts, lag durationPercentiles, maxLagAt time.Duration) *overloadOfferedShape {
 	shape := &overloadOfferedShape{
-		Status: overloadShapeFollowed, Tolerance: overloadShapeTolerance,
-		MaxSchedulerLag: maxLag, MaxSchedulerLagAt: maxLagAt,
+		Status: overloadShapeFollowed, Tolerance: overloadShapeTolerance, MaximumLag: overloadShapeMaximumLag,
+		EmissionLag: lag, MaxEmissionLagAt: maxLagAt,
 	}
 	var reasons []string
-	if maxLag > overloadShapeTolerance {
-		reasons = append(reasons, fmt.Sprintf("the scheduler emitted the message scheduled at %s %s late, beyond %s", maxLagAt, maxLag, overloadShapeTolerance))
+	switch {
+	case lag.Count != schedule.expected:
+		reasons = append(reasons, fmt.Sprintf("the scheduler recorded the emission of %d of %d messages", lag.Count, schedule.expected))
+	case lag.P99 > overloadShapeTolerance:
+		reasons = append(reasons, fmt.Sprintf("the p99 emission lag %s exceeds %s", lag.P99, overloadShapeTolerance))
+	}
+	if lag.Max > overloadShapeMaximumLag {
+		reasons = append(reasons, fmt.Sprintf("the scheduler emitted the message scheduled at %s %s late, beyond %s", maxLagAt, lag.Max, overloadShapeMaximumLag))
 	}
 	for _, point := range series {
 		offset := time.Duration(point.OffsetMillis) * time.Millisecond
@@ -642,8 +657,8 @@ type overloadEvidence struct {
 	indeterminate      bitmap
 	notAdmitted        []uint64
 	series             []overloadSenderPoint
-	maxSchedulerLag    time.Duration
-	maxSchedulerLagAt  time.Duration
+	emissionLag        durationPercentiles
+	maxEmissionLagAt   time.Duration
 	errorSamples       map[string]string
 	fixtureQueueMax    []int
 	senderAssociations []overloadAssociationObservation
@@ -720,7 +735,7 @@ func evaluateOverloadCohort(evidence overloadEvidence) *overloadRecord {
 	record.Bounds = &bounds
 
 	var fixtureFailures []string
-	record.OfferedShape = judgeOfferedShape(schedule, evidence.series, totals, evidence.maxSchedulerLag, evidence.maxSchedulerLagAt)
+	record.OfferedShape = judgeOfferedShape(schedule, evidence.series, totals, evidence.emissionLag, evidence.maxEmissionLagAt)
 	if record.OfferedShape.Status != overloadShapeFollowed {
 		fixtureFailures = append(fixtureFailures, "the offered load did not follow the phased schedule: "+record.OfferedShape.Reason)
 	}

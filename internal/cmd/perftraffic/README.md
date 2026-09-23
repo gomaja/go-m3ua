@@ -396,16 +396,20 @@ single-rate arithmetic is exactly the historical one.
   the drain deadline.
 - **Offered shape.** The trial is only evidence if the offered load followed
   the phased schedule, so the scheduler records how long past its scheduled
-  instant it emitted the first message of each batch (the message of the batch
-  that waited longest), and each per-second sample records the offered count.
-  The offered load followed the schedule when the scheduler was never more
-  than 10 ms late (the trend rule's floor duration) and every in-window sample
+  instant it emitted every message (measured at its clock read for the batch
+  the message went out in), and each per-second sample records the offered
+  count at the instant it was read. The offered load followed the schedule
+  when every message's emission was recorded, at least 99% of them were
+  emitted within 10 ms of their scheduled instant (p99 at most the trend
+  rule's floor duration), none was emitted more than 100 ms late (a tenth of
+  the one-second windows recovery is judged over), and every in-window sample
   lies between `schedule.due` at the sample instant less 10 ms of the current
   phase's traffic (rounded up) and `schedule.due` itself, the upper bound taken
   at the end of the millisecond the sample offset is truncated to. The
   scheduler never emits early, so any excess is a fixture fault. A deviation,
-  or no in-window sample at all, makes the trial `invalid`; the observations
-  are in `overload.offered_shape`.
+  or no in-window sample at all, makes the trial `invalid`; the emission-lag
+  percentiles, maximum and per-sample shortfall are in
+  `overload.offered_shape`.
 - **Warm-up.** The warm-up is an ordinary loss-free throughput cohort at the
   profile's last-phase rate, the nominal level the trial returns to (0.5x of
   the row: section 4's "mixed traffic at 50% of its target"). A warm-up that is

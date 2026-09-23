@@ -105,8 +105,9 @@ func (cohort syntheticCohort) evidence(testContext *testing.T) overloadEvidence 
 	return overloadEvidence{
 		specification: specification, schedule: schedule, phases: phases, maxOutstanding: 5,
 		accepted: accepted, indeterminate: indeterminate, notAdmitted: notAdmitted, series: series,
-		maxSchedulerLag: time.Millisecond, maxSchedulerLagAt: 3 * time.Second,
-		fixtureQueueMax: []int{5}, senderAssociations: []overloadAssociationObservation{healthy},
+		emissionLag:      durationPercentiles{Count: schedule.expected, P50: 100 * time.Microsecond, P95: 500 * time.Microsecond, P99: time.Millisecond, Max: 3 * time.Millisecond},
+		maxEmissionLagAt: 3 * time.Second,
+		fixtureQueueMax:  []int{5}, senderAssociations: []overloadAssociationObservation{healthy},
 		receiver: receiver, delivered: append(bitmap(nil), accepted...), observations: observations,
 		senderWindow: &windowAccounting{Status: "bounded"}, clockVerified: cohort.clock,
 	}
@@ -270,8 +271,11 @@ func TestOverloadOfferedShapeIsJudged(testContext *testing.T) {
 		valid  bool
 		reason string
 	}{
-		{name: "lag-at-tolerance", mutate: func(evidence *overloadEvidence) { evidence.maxSchedulerLag = overloadShapeTolerance }, valid: true},
-		{name: "lag-beyond-tolerance", mutate: func(evidence *overloadEvidence) { evidence.maxSchedulerLag = overloadShapeTolerance + 1 }, reason: "the scheduler emitted"},
+		{name: "p99-at-tolerance", mutate: func(evidence *overloadEvidence) { evidence.emissionLag.P99 = overloadShapeTolerance }, valid: true},
+		{name: "p99-beyond-tolerance", mutate: func(evidence *overloadEvidence) { evidence.emissionLag.P99 = overloadShapeTolerance + 1 }, reason: "the p99 emission lag"},
+		{name: "max-at-bound", mutate: func(evidence *overloadEvidence) { evidence.emissionLag.Max = overloadShapeMaximumLag }, valid: true},
+		{name: "max-beyond-bound", mutate: func(evidence *overloadEvidence) { evidence.emissionLag.Max = overloadShapeMaximumLag + 1 }, reason: "the scheduler emitted the message scheduled at 3s"},
+		{name: "emissions-missing", mutate: func(evidence *overloadEvidence) { evidence.emissionLag.Count-- }, reason: "recorded the emission of"},
 		// At 3 s the 500/s recovery phase allows ceil(500 x 10 ms) = 5.
 		{name: "shortfall-at-allowance", mutate: func(evidence *overloadEvidence) { evidence.series[2].Offered -= 5 }, valid: true},
 		{name: "shortfall-beyond-allowance", mutate: func(evidence *overloadEvidence) { evidence.series[2].Offered -= 6 }, reason: "6 short of the"},
