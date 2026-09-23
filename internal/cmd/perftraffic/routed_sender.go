@@ -141,6 +141,9 @@ func runRoutedSenderWith(ctx context.Context, config commandConfig, environment 
 	}
 	prepared = true
 	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
+		// Only the measurement cohort of a failure trial declares the
+		// failure; the warm-up runs the nominal routed workload.
+		cohortConfig.sgpFailureCohort = cohortConfig.SGPFailure > 0 && phase == "measurement"
 		sender, receiver, err := runSenderCohortWith(ctx, cohortConfig, associations, nil, timed, cohort, duration)
 		return newCohortResult(phase, sender, receiver, err), err
 	}

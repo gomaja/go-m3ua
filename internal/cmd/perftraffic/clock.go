@@ -178,12 +178,14 @@ func (job sendJob) dispatchDelay() (time.Duration, error) {
 func sameRunSpec(first, second runSpec) bool {
 	firstClock, secondClock := first.Clock, second.Clock
 	firstSSNM, secondSSNM := first.SSNM, second.SSNM
+	firstFailure, secondFailure := first.SGPFailure, second.SGPFailure
 	first.Clock, second.Clock = nil, nil
 	first.SSNM, second.SSNM = nil, nil
+	first.SGPFailure, second.SGPFailure = nil, nil
 	if first != second {
 		return false
 	}
-	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM)
+	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM) && samePointee(firstFailure, secondFailure)
 }
 
 // samePointee compares two optional values: both absent, or both present and
@@ -203,6 +205,10 @@ func copyRunSpec(specification runSpec) runSpec {
 	if specification.SSNM != nil {
 		workload := *specification.SSNM
 		specification.SSNM = &workload
+	}
+	if specification.SGPFailure != nil {
+		failure := *specification.SGPFailure
+		specification.SGPFailure = &failure
 	}
 	return specification
 }

@@ -3,9 +3,12 @@ package main
 import "time"
 
 const (
-	verdictPass          = "pass"
-	verdictInvalid       = "invalid"
-	verdictInconclusive  = "inconclusive"
+	verdictPass         = "pass"
+	verdictInvalid      = "invalid"
+	verdictInconclusive = "inconclusive"
+	// verdictFail is an acceptance failure of a fault trial whose fixture is
+	// valid; nominal cohorts never report it.
+	verdictFail          = "fail"
 	baselineFixtureScope = "baseline fixture validity only; not independent-peer or candidate acceptance"
 )
 
@@ -31,6 +34,9 @@ type runSpec struct {
 	// SSNM is the opt-in SSNM load declaration, nil and omitted when off. A
 	// pointer rather than omitzero, which Go 1.23 does not implement.
 	SSNM *ssnmWorkload `json:"ssnm,omitempty"`
+	// SGPFailure is the one-SGP failure declaration of a failure trial's
+	// measurement cohort, nil and omitted for every other cohort.
+	SGPFailure *sgpFailureSpec `json:"failure_trial,omitempty"`
 }
 
 type deliveryResult struct {
@@ -106,6 +112,11 @@ type runRecord struct {
 	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
 	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
 	SSNM                      *ssnmRecord           `json:"ssnm,omitempty"`
+	// Failover is present only on the records of an SGP failure trial's
+	// measurement cohort: the receiver's fault and delivery observations on
+	// the receiver record, the outcome accounting and per-criterion
+	// evaluation on the sender record.
+	Failover *failoverRecord `json:"failover,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -158,6 +169,10 @@ func (record *runRecord) evaluate() {
 			"router_or_ssnm_workload":     "unavailable: this fixture does not exercise the existing routing and state APIs",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}
+	}
+	if record.Failover != nil {
+		record.evaluateFailover()
+		return
 	}
 	invalid := func(reason string) {
 		record.Reasons = append(record.Reasons, reason)

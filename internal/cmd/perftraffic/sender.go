@@ -278,6 +278,8 @@ func newCohortResult(phase string, sender, receiver runRecord, err error) cohort
 	result := cohortResult{Phase: phase, Sender: sender, Receiver: receiver, Verdict: verdictPass}
 	if sender.Verdict == verdictInvalid || receiver.Verdict == verdictInvalid || err != nil {
 		result.Verdict = verdictInvalid
+	} else if sender.Verdict == verdictFail || receiver.Verdict == verdictFail {
+		result.Verdict = verdictFail
 	} else if sender.Verdict == verdictInconclusive || receiver.Verdict == verdictInconclusive {
 		result.Verdict = verdictInconclusive
 	}
@@ -344,9 +346,22 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if specification.Direction == "" {
 		specification.Direction = directionASPToSGP
 	}
+	if config.sgpFailureCohort {
+		specification.SGPFailure = newSGPFailureSpec(config.SGPFailure)
+	}
 	clock, err := prepareSharedRunClock(ctx, config, &specification)
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("prepare shared clock: %w", err)
+	}
+	var failover *failoverTracker
+	if specification.SGPFailure != nil {
+		if routed == nil || clock == nil {
+			return runRecord{}, runRecord{}, errors.New("an SGP failure cohort needs the routed sender and the shared clock")
+		}
+		if failover, err = newFailoverTracker(*specification.SGPFailure, clock, routed.plane, routed.paths); err != nil {
+			return runRecord{}, runRecord{}, err
+		}
+		routed = routed.withFailover(failover)
 	}
 	if err := config.ssnmRun.attach(&specification, config.ssnmPhase); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("declare SSNM load: %w", err)
@@ -409,6 +424,10 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	} else {
 		queues, workersDone = startSendWorkers(associations, config, counters, tracker)
 	}
+	if failover != nil {
+		failover.watch(associations)
+		defer failover.finish()
+	}
 	sampleDone := make(chan struct{})
 	go sampleSharedSender(started, counters, sampleDone, clock)
 	progressDone := sampleSharedProgress(ctx, started, duration, config.PeerControl, clock)
@@ -447,7 +466,13 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		<-workersDone
 	}
 	drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
-	receiver, pollErr := waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
+	var receiver runRecord
+	var pollErr error
+	if failover != nil {
+		receiver, pollErr = waitFailoverDrain(drainContext, config.PeerControl, failover, drainDeadline)
+	} else {
+		receiver, pollErr = waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
+	}
 	observations = append(observations, observeSharedProgress(drainContext, started, config.PeerControl, clock))
 	cancelDrain()
 	if pollErr != nil {
@@ -515,6 +540,9 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		sender.WindowAlignment = "verified same-host CLOCK_MONOTONIC window; rate and backlog retain clock-resolution bounds"
 	}
 	sender.OutstandingScope = "legacy counters measure sender worker queues only; sender_window bounds include all scheduled but not yet validated deliveries"
+	if failover != nil {
+		sender.Failover = failover.evaluate(failoverInputs{specification: specification, scheduled: sender.Scheduled, capped: sender.Capped, receiver: receiver, accounting: accounting})
+	}
 	sender.evaluate()
 	var cohortErrors []error
 	if pollErr != nil {
