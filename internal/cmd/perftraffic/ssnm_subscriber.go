@@ -78,11 +78,15 @@ func newSSNMSubscriber(index int, paused bool, plan ssnmPlan, rate uint64, parti
 	}
 }
 
-// armReceipts allocates the measurement-window receipt store.
-func (subscriber *ssnmSubscriber) armReceipts(anchor int64, first, last uint64) {
+// armReceipts pins the generator anchor, which the post-Resync lock-on needs,
+// and allocates the measurement-window receipt store when store is set.
+func (subscriber *ssnmSubscriber) armReceipts(anchor int64, first, last uint64, store bool) {
 	subscriber.mutex.Lock()
 	defer subscriber.mutex.Unlock()
 	subscriber.anchor = anchor
+	if !store {
+		return
+	}
 	subscriber.receiptFirst, subscriber.receiptLast = first, last
 	subscriber.receipts = make([][]uint32, subscriber.partitionCap)
 	for slot := range subscriber.receipts {

@@ -88,7 +88,7 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 	if err := waitForReady(ctx, config.PeerControl, config.Associations); err != nil {
 		return combinedResult{}, err
 	}
-	config.ssnmRun, err = startSSNMLoad(ctx, config, endpoint)
+	config.ssnmRun, err = startSSNMLoad(ctx, config, endpoint, associations)
 	if err != nil {
 		return combinedResult{}, err
 	}

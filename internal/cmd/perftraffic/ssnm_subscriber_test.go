@@ -89,7 +89,7 @@ func TestSSNMSubscriberJoinsReceiptsWithReports(testContext *testing.T) {
 	preload := plan.preloadMessages()
 	anchor := int64(1_000_000_000)
 	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256)
-	subscriber.armReceipts(anchor, 2, 6)
+	subscriber.armReceipts(anchor, 2, 6, true)
 	for position := uint64(0); position < preload+5; position++ {
 		message := position - preload
 		received := anchor + int64(message)*int64(time.Millisecond) + int64(3*time.Millisecond)
@@ -133,7 +133,7 @@ func TestSSNMSubscriberLocksOnAfterResync(testContext *testing.T) {
 	anchor := int64(1_000_000_000)
 	subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4)
 	subscriber.pause = &ssnmPauseRecord{}
-	subscriber.anchor = anchor
+	subscriber.armReceipts(anchor, 0, 0, false)
 	for position := uint64(0); position < preload+10; position++ {
 		subscriber.observe(planEvent(plan, testPartition, position), 0)
 	}
@@ -163,7 +163,7 @@ func TestSSNMSubscriberRejectsStaleSnapshot(testContext *testing.T) {
 	preload := plan.preloadMessages()
 	anchor := int64(1_000_000_000)
 	subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4)
-	subscriber.anchor = anchor
+	subscriber.armReceipts(anchor, 0, 0, false)
 	for position := uint64(0); position < preload+10; position++ {
 		subscriber.observe(planEvent(plan, testPartition, position), 0)
 	}
@@ -218,7 +218,7 @@ func TestSSNMVerdict(testContext *testing.T) {
 func TestSSNMSubscriberConcurrentAccounting(testContext *testing.T) {
 	plan := ssnmPlan{records: 64, apcs: 1}
 	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256)
-	subscriber.armReceipts(0, 0, 1000)
+	subscriber.armReceipts(0, 0, 1000, true)
 	var group sync.WaitGroup
 	group.Add(2)
 	go func() {
@@ -236,5 +236,36 @@ func TestSSNMSubscriberConcurrentAccounting(testContext *testing.T) {
 	group.Wait()
 	if record := subscriber.record(1000); record.Accepted != 1000 {
 		testContext.Fatalf("accepted %d", record.Accepted)
+	}
+}
+
+// TestSSNMAttachArmsEverySubscriberAnchor pins the anchor on the paused
+// subscriber too: its post-Resync lock-on estimates the position from the
+// anchor, and a zero anchor locks on whole periods away from the truth.
+func TestSSNMAttachArmsEverySubscriberAnchor(testContext *testing.T) {
+	plan := ssnmPlan{records: 16, apcs: 1}
+	run := &ssnmSenderRun{config: ssnmConfig{Rate: 1000, APCs: 1, Records: 16, Subscribers: 2, Pause: ssnmPause{Offset: time.Second, Duration: time.Second}}, plan: plan, associations: 1}
+	run.subscribers = []*ssnmSubscriber{newSSNMSubscriber(0, true, plan, 1000, 1, 4), newSSNMSubscriber(1, false, plan, 1000, 1, 4)}
+	warmup := runSpec{Clock: &sharedClockWindow{Start: 5_000_000_000, End: 6_000_000_000}}
+	if err := run.attach(&warmup, ssnmPhaseWarmup); err != nil || warmup.SSNM.Anchor != 5_000_000_000 || warmup.SSNM.Phase != ssnmPhaseWarmup {
+		testContext.Fatalf("warm-up attach = %+v, %v", warmup.SSNM, err)
+	}
+	measurement := runSpec{Clock: &sharedClockWindow{Start: 9_000_000_000, End: 12_000_000_000}}
+	if err := run.attach(&measurement, ""); err != nil || measurement.SSNM.Anchor != 5_000_000_000 || measurement.SSNM.Phase != ssnmPhaseMeasurement {
+		testContext.Fatalf("measurement attach = %+v, %v", measurement.SSNM, err)
+	}
+	for _, subscriber := range run.subscribers {
+		if subscriber.anchor != 5_000_000_000 {
+			testContext.Fatalf("subscriber %d anchor = %d", subscriber.index, subscriber.anchor)
+		}
+	}
+	if run.subscribers[0].receipts != nil || len(run.subscribers[1].receipts) != 1 || len(run.subscribers[1].receipts[0]) != 3000 {
+		testContext.Fatal("receipts must be stored for healthy subscribers only")
+	}
+	if run.pauseAt.Load() != 10_000_000_000 || run.first != 4000 || run.last != 7000 {
+		testContext.Fatalf("pauseAt %d window [%d, %d)", run.pauseAt.Load(), run.first, run.last)
+	}
+	if err := run.attach(&runSpec{}, ""); err == nil {
+		testContext.Fatal("attach without a shared clock accepted")
 	}
 }

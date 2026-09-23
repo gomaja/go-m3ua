@@ -110,6 +110,7 @@ func (driver *reverseDriver) addAssociation(association *m3ua.Association) {
 func (control *receiverControl) registerReverseAssociation(association *m3ua.Association) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
+	control.ssnm.addAssociation(association)
 	if control.driver == nil {
 		return
 	}

@@ -246,12 +246,20 @@ func TestSSNMWindowSummaryClassifiesMessages(testContext *testing.T) {
 	record := &ssnmGeneratorRecord{AnchorNS: 0, WindowStartNS: int64(time.Second), WindowEndNS: int64(2 * time.Second)}
 	// Rate 4: window messages are 4..7. Message 5 failed, message 7 was late,
 	// message 8 exists and message 9 onward was never sent.
-	reports := []int64{0, 250e6, 500e6, 750e6, 1000e6, 1250e6, 1500e6, 2100e6}
+	reports := []int64{0, 250e6, 500e6, 750e6, 1000e6, 1250e6, 1500e6, 2400e6}
 	completions := append([]int64(nil), reports...)
 	statuses := []uint8{1, 1, 1, 1, 1, 2, 1, 1}
 	summarizeSSNMWindow(record, 4, reports, completions, statuses)
 	if record.FirstMessage != 4 || record.EndMessage != 8 || record.Offered != 4 || record.Failed != 1 || record.Late != 1 || record.Unsent != 0 || record.ReportedInWindow != 2 || record.IntensityHeld {
 		testContext.Fatalf("summary = %+v", record)
+	}
+	// A report started just after the window within one interval is late
+	// but holds the intensity; one lagging beyond the tolerance does not.
+	onTime := &ssnmGeneratorRecord{WindowStartNS: int64(time.Second), WindowEndNS: int64(2 * time.Second)}
+	boundary := []int64{0, 250e6, 500e6, 750e6, 1000e6, 1250e6, 1500e6, 2000e6}
+	summarizeSSNMWindow(onTime, 4, boundary, boundary, []uint8{1, 1, 1, 1, 1, 1, 1, 1})
+	if onTime.Late != 1 || !onTime.IntensityHeld {
+		testContext.Fatalf("boundary summary = %+v", onTime)
 	}
 	short := &ssnmGeneratorRecord{WindowStartNS: int64(time.Second), WindowEndNS: int64(2 * time.Second)}
 	summarizeSSNMWindow(short, 4, reports[:6], completions[:6], statuses[:6])

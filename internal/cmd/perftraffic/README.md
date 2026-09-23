@@ -192,8 +192,18 @@ final generator view recomputed from the complete per-message log, `delay`
 (report start to healthy-subscriber receipt, p50/p95/p99/max; an upper bound on
 apply-and-publish time), `pause`, and `verdict`: `fail` for any healthy
 indication loss, store refusal, generator failure or F3 contract violation;
-`inconclusive` when the generator did not report every message scheduled in the
-window inside it; otherwise `pass`. Existing fields keep their meaning: the DATA
+`inconclusive` when the generator did not hold the intensity (a window message
+unsent or failed, or a report starting more than `dispatch_tolerance_ns`, one
+scheduling interval and at least 100 ms, after its schedule); otherwise `pass`.
+`association_errors` names any association that ended during the run with the
+library's close cause, which is also written to stderr as an
+`ssnm_diagnostic` line, together with the subscribers' progress when they close.
+
+The SGP installs a write deadline spanning the generator on every association:
+go-sctp's `SCTPWrite` reports a full send buffer as EAGAIN unless a deadline is
+set, and the library closes an association whose mandatory SSNM write fails, so
+without it a slow ASP would tear the association down instead of showing up as
+generator lag. Existing fields keep their meaning: the DATA
 verdicts do not include SSNM, and `sender.ssnm.verdict` is the SSNM result.
 
 **Capacity comparison.** `perfcapacity` reads `spec.ssnm` into the workload

@@ -17,6 +17,11 @@ type ssnmReporter interface {
 	ReportDestinationAvailability(request m3ua.DestinationAvailabilityRequest) error
 }
 
+// ssnmDeadlineSetter is the part of an SGP Association the generator needs.
+type ssnmDeadlineSetter interface {
+	SetWriteDeadline(deadline time.Time) error
+}
+
 const (
 	ssnmGeneratorIdle     = "idle"
 	ssnmGeneratorRunning  = "running"
@@ -50,14 +55,20 @@ type ssnmGenerator struct {
 
 	mutex    sync.Mutex
 	reporter ssnmReporter
-	state    string
-	reason   string
-	preload  *ssnmPreloadRecord
-	anchor   int64
-	end      int64
-	stopAt   int64
-	started  bool
-	done     chan struct{}
+	// associations carry the fan-out. go-sctp's SCTPWrite fails a full send
+	// buffer with EAGAIN unless a write deadline is installed, and the library
+	// closes an association whose mandatory SSNM write fails, so the
+	// generator installs one spanning its horizon: a slow ASP then shows up as
+	// generator lag rather than as a torn-down association.
+	associations []ssnmDeadlineSetter
+	state        string
+	reason       string
+	preload      *ssnmPreloadRecord
+	anchor       int64
+	end          int64
+	stopAt       int64
+	started      bool
+	done         chan struct{}
 	// reports, completions and statuses are indexed by generator message.
 	reports        []int64
 	completions    []int64
@@ -93,6 +104,35 @@ func newSSNMGenerator(ctx context.Context, config commandConfig, clock measureme
 		state:        ssnmGeneratorIdle,
 		done:         make(chan struct{}),
 	}
+}
+
+func (generator *ssnmGenerator) addAssociation(association ssnmDeadlineSetter) {
+	if generator == nil {
+		return
+	}
+	generator.mutex.Lock()
+	defer generator.mutex.Unlock()
+	generator.associations = append(generator.associations, association)
+}
+
+// installWriteDeadlines gives every fan-out association a write deadline at
+// the shared-clock instant target, translated to a Go deadline from one
+// shared read.
+func (generator *ssnmGenerator) installWriteDeadlines(target int64) error {
+	now, err := generator.clock.Now()
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(time.Duration(target-now) + time.Second)
+	generator.mutex.Lock()
+	associations := append([]ssnmDeadlineSetter(nil), generator.associations...)
+	generator.mutex.Unlock()
+	for _, association := range associations {
+		if err := association.SetWriteDeadline(deadline); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (generator *ssnmGenerator) setReporter(reporter ssnmReporter) {
@@ -165,7 +205,13 @@ func (generator *ssnmGenerator) begin() {
 	}
 	generator.started = true
 	generator.state = ssnmGeneratorRunning
+	stopAt := generator.stopAt
 	generator.mutex.Unlock()
+	if err := generator.installWriteDeadlines(stopAt); err != nil {
+		generator.stop(ssnmGeneratorStopped, "install write deadlines: "+err.Error())
+		close(generator.done)
+		return
+	}
 	go generator.run()
 }
 
@@ -186,6 +232,9 @@ func (generator *ssnmGenerator) preloadStore() error {
 		return errors.New("SGP endpoint is not ready")
 	}
 	started, err := generator.clock.Now()
+	if err == nil {
+		err = generator.installWriteDeadlines(started + int64(ssnmGeneratorHorizon))
+	}
 	if err != nil {
 		generator.finishPreload(record, 0, err)
 		return err
@@ -300,12 +349,16 @@ func (generator *ssnmGenerator) send(reporter ssnmReporter, message uint64, anch
 	if err != nil {
 		status = ssnmMessageFailed
 		generator.failedMessages++
+		detail := err.Error()
 		var delivery *m3ua.SSNMDeliveryError
 		if errors.As(err, &delivery) {
 			generator.fanoutFailures += uint64(len(delivery.Failed))
+			for _, failure := range delivery.Failed {
+				detail += fmt.Sprintf("; association %d: %v", failure.Association, failure.Cause)
+			}
 		}
 		if generator.firstError == "" {
-			generator.firstError = fmt.Sprintf("message %d: %v", message, err)
+			generator.firstError = fmt.Sprintf("message %d: %s", message, detail)
 		}
 	}
 	generator.statuses = append(generator.statuses, status)
@@ -346,6 +399,7 @@ type ssnmGeneratorRecord struct {
 	SentTotal         uint64              `json:"sent_total"`
 	FailedTotal       uint64              `json:"failed_total"`
 	IntensityHeld     bool                `json:"intensity_held"`
+	DispatchTolerance time.Duration       `json:"dispatch_tolerance_ns"`
 	DispatchLag       durationPercentiles `json:"dispatch_lag"`
 	ReportDuration    durationPercentiles `json:"report_duration"`
 }
@@ -419,7 +473,17 @@ func summarizeSSNMWindow(record *ssnmGeneratorRecord, rate uint64, reports, comp
 	}
 	record.DispatchLag = lag.percentiles()
 	record.ReportDuration = duration.percentiles()
-	record.IntensityHeld = record.Offered > 0 && record.Unsent == 0 && record.Late == 0 && record.Failed == 0
+	record.DispatchTolerance = ssnmDispatchTolerance(rate)
+	record.IntensityHeld = record.Offered > 0 && record.Unsent == 0 && record.Failed == 0 &&
+		record.DispatchLag.Max <= record.DispatchTolerance
+}
+
+// ssnmDispatchTolerance is how late a report may start and still count as
+// holding the fixed intensity: one scheduling interval, and never less than
+// 100 ms. A report scheduled just before the window end and started just after
+// it is counted late but does not by itself break the intensity.
+func ssnmDispatchTolerance(rate uint64) time.Duration {
+	return max(100*time.Millisecond, time.Second/time.Duration(rate))
 }
 
 // ssnmReportsResponse carries the per-message log for one message range.

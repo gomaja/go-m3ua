@@ -86,6 +86,8 @@ type ssnmSenderRun struct {
 	first       uint64
 	last        uint64
 	preload     ssnmSenderPreload
+	// associationErrors lists associations that ended during the run.
+	associationErrors []string
 }
 
 type ssnmSenderPreload struct {
@@ -98,7 +100,7 @@ type ssnmSenderPreload struct {
 // startSSNMLoad opens the subscriptions, has the SGP preload the store and
 // waits until every subscriber has consumed the preload, so DATA starts
 // against a full store. It returns nil when the workload is off.
-func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.Endpoint) (*ssnmSenderRun, error) {
+func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.Endpoint, associations []*m3ua.Association) (*ssnmSenderRun, error) {
 	if !config.SSNM.enabled() {
 		return nil, nil
 	}
@@ -136,6 +138,13 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 			subscriber.run(runContext, clock, run.pauseAt.Load, config.SSNM.Pause)
 		}()
 	}
+	for index, association := range associations {
+		run.group.Add(1)
+		go func() {
+			defer run.group.Done()
+			run.watchAssociation(runContext, index, association)
+		}()
+	}
 	if run.preload.InitialDestinations != 0 {
 		run.close()
 		return nil, errors.New("SSNM store was not empty before the preload")
@@ -167,6 +176,36 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 		return nil, fmt.Errorf("SSNM store holds %d records after the preload, want %d", run.preload.StoreRecords, want)
 	}
 	return run, nil
+}
+
+// watchAssociation records an association that ends while SSNM load runs,
+// with the library's close cause, which ReadData and WriteData failures on
+// either side do not carry.
+func (run *ssnmSenderRun) watchAssociation(ctx context.Context, index int, association *m3ua.Association) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-association.Done():
+	}
+	cause := "closed without a recorded cause"
+	if err := association.Err(); err != nil {
+		cause = err.Error()
+	}
+	run.mutex.Lock()
+	run.associationErrors = append(run.associationErrors, fmt.Sprintf("association %d: %s", index, cause))
+	run.mutex.Unlock()
+	writeSSNMDiagnostic("association-closed", index, cause)
+}
+
+// writeSSNMDiagnostic emits one JSON line to stderr, like the receiver's
+// startup diagnostics, so a failure before any record is written keeps its
+// cause.
+func writeSSNMDiagnostic(event string, association int, cause string) {
+	_ = json.NewEncoder(startupDiagnosticWriter).Encode(map[string]any{
+		"ssnm_diagnostic": event,
+		"association":     association,
+		"error":           cause,
+	})
 }
 
 func postSSNMPreload(ctx context.Context, baseURL string) error {
@@ -247,9 +286,7 @@ func (run *ssnmSenderRun) attach(specification *runSpec, phase string) error {
 	run.windowStart, run.windowEnd = specification.Clock.Start, specification.Clock.End
 	run.first, run.last = ssnmWindowMessages(run.config.Rate, run.anchor, run.windowStart, run.windowEnd)
 	for _, subscriber := range run.subscribers {
-		if !subscriber.paused {
-			subscriber.armReceipts(run.anchor, run.first, run.last)
-		}
+		subscriber.armReceipts(run.anchor, run.first, run.last, !subscriber.paused)
 	}
 	if run.config.Pause.enabled() {
 		run.pauseAt.Store(specification.Clock.Start + int64(run.config.Pause.Offset))
@@ -267,6 +304,15 @@ func (run *ssnmSenderRun) close() {
 			_ = subscriber.subscription.Close()
 		}
 		run.group.Wait()
+		// One stderr line keeps the subscribers' progress even when a cohort
+		// failed before any record could carry it.
+		summary := make([]map[string]any, 0, len(run.subscribers))
+		for _, subscriber := range run.subscribers {
+			subscriber.mutex.Lock()
+			summary = append(summary, map[string]any{"index": subscriber.index, "events": subscriber.counts.Events, "accepted": subscriber.counts.Accepted, "continuity_lost": subscriber.counts.ContinuityLost})
+			subscriber.mutex.Unlock()
+		}
+		_ = json.NewEncoder(startupDiagnosticWriter).Encode(map[string]any{"ssnm_diagnostic": "subscribers-closed", "subscribers": summary})
 	})
 }
 
@@ -274,16 +320,17 @@ func (run *ssnmSenderRun) close() {
 // record carries the generator's view; the ASP record carries the
 // subscribers, the store, the delay join and the final generator view.
 type ssnmRecord struct {
-	Scope       string                 `json:"scope,omitempty"`
-	Workload    *ssnmWorkload          `json:"workload,omitempty"`
-	Generator   *ssnmGeneratorRecord   `json:"generator,omitempty"`
-	Store       *ssnmStoreRecord       `json:"store,omitempty"`
-	Preload     *ssnmSenderPreload     `json:"preload,omitempty"`
-	Subscribers []ssnmSubscriberRecord `json:"subscribers,omitempty"`
-	Delay       *ssnmDelayRecord       `json:"delay,omitempty"`
-	Pause       *ssnmPauseRecord       `json:"pause,omitempty"`
-	Verdict     string                 `json:"verdict,omitempty"`
-	Reasons     []string               `json:"reasons,omitempty"`
+	Scope             string                 `json:"scope,omitempty"`
+	Workload          *ssnmWorkload          `json:"workload,omitempty"`
+	Generator         *ssnmGeneratorRecord   `json:"generator,omitempty"`
+	Store             *ssnmStoreRecord       `json:"store,omitempty"`
+	Preload           *ssnmSenderPreload     `json:"preload,omitempty"`
+	Subscribers       []ssnmSubscriberRecord `json:"subscribers,omitempty"`
+	Delay             *ssnmDelayRecord       `json:"delay,omitempty"`
+	Pause             *ssnmPauseRecord       `json:"pause,omitempty"`
+	AssociationErrors []string               `json:"association_errors,omitempty"`
+	Verdict           string                 `json:"verdict,omitempty"`
+	Reasons           []string               `json:"reasons,omitempty"`
 }
 
 type ssnmStoreRecord struct {
@@ -421,6 +468,12 @@ func (run *ssnmSenderRun) finish(ctx context.Context, measurement *cohortResult)
 	}
 	if logErr == nil {
 		record.Delay = &ssnmDelayRecord{Scope: ssnmDelayScope, Subscribers: healthy, Messages: last - first, Delay: histogram.percentiles()}
+	}
+	run.mutex.Lock()
+	record.AssociationErrors = append([]string(nil), run.associationErrors...)
+	run.mutex.Unlock()
+	if len(record.AssociationErrors) != 0 {
+		reasons = append(reasons, "fail: an association ended during SSNM load")
 	}
 	record.Verdict, record.Reasons = ssnmVerdict(reasons)
 	measurement.Sender.SSNM = record
