@@ -411,10 +411,14 @@ func stageOrGroupEndpointSSNM(
 				Mask:                 destination.Mask,
 				State:                state,
 			})
-			if stageAnyMTP3RestartRangeLocked(restarts, stagedDestination{
+			staged, err := stageAnyMTP3RestartRangeLocked(restarts, endpoint.destinations, stagedDestination{
 				rangeValue: rangeValue,
 				dimensions: dimensions,
-			}) {
+			})
+			if err != nil {
+				return nil, err
+			}
+			if staged {
 				continue
 			}
 			group.destinations = append(group.destinations, destination)

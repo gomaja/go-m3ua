@@ -763,6 +763,13 @@ func (c *Association) applySSNM(
 	}
 	routingContexts, routingContextSet := c.destinationRoutingContexts(routingContext)
 	appearance := c.destinationKey(networkAppearance, 0)
+	if networkAppearance == nil {
+		keys := c.ssnmASKeys(report.Scope)
+		if len(keys) > 0 {
+			appearance.networkAppearance = keys[0].NetworkAppearance
+			appearance.networkAppearanceSet = keys[0].NetworkAppearanceSet
+		}
+	}
 	statusScope := newDestinationStatusScope(networkAppearance, routingContext)
 	statusValues := make([]destinationStatus, len(pcs))
 	statuses := make([]*destinationStatus, 0, len(pcs))
@@ -1007,7 +1014,7 @@ func (c *Association) ssnmRoutingContextsAllowed(routingContext *params.Param, d
 		if _, ok := pendingActivation[rtCtx]; ok {
 			continue
 		}
-		if c.State() == StateASPActive && c.routingContextAcked(rtCtx) {
+		if c.State() == StateASPActive && c.routingContextAcked(rtCtx) && !c.routingContextOverridden(rtCtx) {
 			continue
 		}
 		return false
@@ -1491,6 +1498,10 @@ func (c *Association) writeDestinationAuditReply(
 func (c *Association) ForgetDestinations() int {
 	if c == nil {
 		return 0
+	}
+	if c.mtp3Restarts != nil {
+		c.mtp3Restarts.procedureMu.Lock()
+		defer c.mtp3Restarts.procedureMu.Unlock()
 	}
 	return c.destinations.forget()
 }
