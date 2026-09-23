@@ -421,8 +421,8 @@ up as an unexplained stale destination months later.
 
 **Bounds refuse; they do not evict.** The store is bounded in every dimension a
 peer controls — records per partition, per peer and per Endpoint, accounted
-bytes, partitions, subscribers and per-subscription queue depth. Reaching one
-refuses the record or the report and counts it in
+bytes, partitions, subscribers and per-subscription queue depth and bytes.
+Reaching a state-retention bound refuses the record or the report and counts it in
 `SSNMSnapshot.RecordsRefused`, `ReportsRefused` or `PartitionsInvalidated`, with
 `LastResourceLoss` naming the most recent. A subscription that falls behind is
 told so with `SSNMEvent.ContinuityLost` and recovers with `Resync`. Silent
@@ -430,6 +430,25 @@ eviction would have handed the application a view that looked complete and was
 not, which is worse than refusing: a peer chooses every Affected Point Code it
 reports, so unbounded retention is peer-controlled memory, and silent eviction
 is peer-controlled misinformation.
+
+`SSNMStateConfig.SubscriptionQueueBytes` defaults to 1 MiB independently of
+the 256-event default `SubscriptionQueueSize`. Positive byte limits must be at
+least 512. The portable accounting charges 512 bytes per queued event, 8 per
+report destination, 256 per retained destination state, 4 per Routing Context
+in the report and both state dimensions, and the byte lengths of the reason
+and both event/report partition identity strings. Every variable field is
+charged even when its presence flag is false, because the queued copy retains
+it. These fixed charges are accounting units, not a heap-size measurement;
+queue backing-array capacity and allocator overhead are separate. Owned
+snapshot results and the fixed, out-of-band continuity-loss marker are not
+charged against this queue budget.
+
+Both queue limits are checked before cloning an event. Overflow preserves
+already queued events and marks continuity lost; later reports are suppressed
+until `Resync` atomically replaces the view and clears the queue. Taking an
+event releases its accounting and clears its queue slot. `Close` preserves
+queued events for delivery before the terminal result, so their accounting
+remains until they are consumed.
 
 `Epoch` is the binding generation, numbered across the whole store. A partition
 that loses its last binding is retired; the next binding starts a new epoch, so
