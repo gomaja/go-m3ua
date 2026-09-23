@@ -126,6 +126,9 @@ type overloadSenderPoint struct {
 	overloadClassCounts
 	Started     uint64 `json:"started"`
 	Outstanding uint64 `json:"outstanding"`
+	// Final marks the point taken once every sender worker has finished, so
+	// the series ends at the cohort's totals.
+	Final bool `json:"final,omitempty"`
 }
 
 // overloadCounters is the sender's overload accounting, guarded by the
@@ -141,6 +144,14 @@ type overloadCounters struct {
 	notAdmitted    []uint64
 	errorSamples   map[string]string
 	series         []overloadSenderPoint
+	// finalized is set by the final series point; a periodic sample that
+	// races it is dropped rather than appended after it.
+	finalized bool
+	// maxSchedulerLag is the longest any message waited past its scheduled
+	// instant for the scheduler to emit it, and maxSchedulerLagAt that
+	// message's scheduled offset.
+	maxSchedulerLag   time.Duration
+	maxSchedulerLagAt time.Duration
 }
 
 func newOverloadCounters(schedule *phasedSchedule) *overloadCounters {
@@ -299,13 +310,42 @@ func (counters *senderCounters) overloadMark() overloadSenderMark {
 // under the counters mutex from the sender sampler.
 func (counters *senderCounters) sampleOverloadLocked(offset time.Duration) {
 	overload := counters.overload
-	if overload == nil || len(overload.series) >= 601 {
+	if overload == nil || overload.finalized || len(overload.series) >= 601 {
 		return
 	}
 	overload.series = append(overload.series, overloadSenderPoint{
 		OffsetMillis: uint64(offset / time.Millisecond), overloadClassCounts: overload.totals(),
 		Started: overload.started, Outstanding: counters.outstanding,
 	})
+}
+
+// finishOverloadSeries appends the final series point once every sender
+// worker has finished. The per-second sampler stops at the end of the
+// measurement window while requests still complete during the drain; the
+// final point carries those completions, so the series ends at the totals.
+func (counters *senderCounters) finishOverloadSeries(offset time.Duration) {
+	counters.mutex.Lock()
+	defer counters.mutex.Unlock()
+	overload := counters.overload
+	if overload == nil || overload.finalized {
+		return
+	}
+	overload.series = append(overload.series, overloadSenderPoint{
+		OffsetMillis: uint64(max(offset, 0) / time.Millisecond), overloadClassCounts: overload.totals(),
+		Started: overload.started, Outstanding: counters.outstanding, Final: true,
+	})
+	overload.finalized = true
+}
+
+// noteSchedulerLag records how long past its scheduled instant the scheduler
+// emitted the first message of a batch.
+func (counters *senderCounters) noteSchedulerLag(lag, offset time.Duration) {
+	counters.mutex.Lock()
+	defer counters.mutex.Unlock()
+	if counters.overload != nil && lag > counters.overload.maxSchedulerLag {
+		counters.overload.maxSchedulerLag = lag
+		counters.overload.maxSchedulerLagAt = offset
+	}
 }
 
 // classifyDataWrite maps one WriteData result to its overload class.
@@ -420,7 +460,11 @@ func startOverloadSendWorkers(associations []*m3ua.Association, config commandCo
 
 // dispatchOverload offers the phased schedule open loop through the shared
 // scheduler and returns the largest occupancy each per-association fixture
-// queue reached.
+// queue was seen at. Occupancy is read at every enqueue, immediately before
+// (plus the message being added) and immediately after it; a worker may
+// dequeue in between, and a peak between two enqueues is not seen, so the
+// maximum is a sampled observation. The channel capacity itself enforces the
+// bound.
 func dispatchOverload(ctx context.Context, config commandConfig, cohort string, schedule *phasedSchedule, started time.Time, queues []chan sendJob, counters *senderCounters, clock *sharedRunClock) []int {
 	maxima := make([]int, len(queues))
 	dispatchScheduleOpenLoop(ctx, schedule, schedule.duration, started, schedule.expected, clock, counters, func(index uint64, offset time.Duration, scheduled time.Time) {
@@ -431,9 +475,10 @@ func dispatchOverload(ctx context.Context, config commandConfig, cohort string, 
 			return
 		}
 		queue := queues[identity.Association]
+		before := len(queue)
 		select {
 		case queue <- job:
-			maxima[identity.Association] = max(maxima[identity.Association], len(queue))
+			maxima[identity.Association] = max(maxima[identity.Association], min(before+1, cap(queue)), len(queue))
 		default:
 			counters.rejectOverloadReservation(index)
 		}
@@ -505,6 +550,7 @@ func collectOverloadEvidence(ctx context.Context, config commandConfig, specific
 	evidence.indeterminate = overload.indeterminate
 	evidence.notAdmitted = append([]uint64(nil), overload.notAdmitted...)
 	evidence.series = append([]overloadSenderPoint(nil), overload.series...)
+	evidence.maxSchedulerLag, evidence.maxSchedulerLagAt = overload.maxSchedulerLag, overload.maxSchedulerLagAt
 	evidence.errorSamples = make(map[string]string, len(overload.errorSamples))
 	for key, value := range overload.errorSamples {
 		evidence.errorSamples[key] = value

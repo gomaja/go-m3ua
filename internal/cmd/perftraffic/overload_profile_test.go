@@ -334,6 +334,34 @@ func TestOverloadSchedulerSwitchesRatesOnTheSharedClock(testContext *testing.T) 
 	}
 }
 
+// The scheduler records how late it emitted the first message of each batch:
+// a clock that advances 15 ms per read makes the first batch 14 ms late.
+func TestOverloadSchedulerRecordsHowLateItEmits(testContext *testing.T) {
+	schedule, err := newPhasedSchedule([]overloadPhase{{Rate: 1_000, Duration: 100 * time.Millisecond}, {Rate: 100, Duration: 100 * time.Millisecond}})
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	start := int64(time.Second)
+	// The first read is 1 ms before the start, the second 14 ms after it.
+	source := &steppingMeasurementClock{now: start - int64(16*time.Millisecond), step: int64(15 * time.Millisecond)}
+	domain, _ := source.Domain()
+	clock := &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: start, End: start + int64(schedule.duration)}}
+	counters := newSenderCounters(int(schedule.expected))
+	counters.overload = newOverloadCounters(schedule)
+	queue := make(chan sendJob, schedule.expected)
+	dispatchOverload(context.Background(), commandConfig{Seed: 3, Workload: workload128}, "late", schedule, time.Now(), []chan sendJob{queue}, counters, clock)
+	if counters.overload.maxSchedulerLag != 14*time.Millisecond || counters.overload.maxSchedulerLagAt != 0 || len(queue) != int(schedule.expected) {
+		testContext.Fatalf("scheduler lag %s at %s, queued %d", counters.overload.maxSchedulerLag, counters.overload.maxSchedulerLagAt, len(queue))
+	}
+	// A nominal cohort's scheduler records nothing.
+	nominal := newSenderCounters(10)
+	source.now = start - int64(16*time.Millisecond)
+	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128}, "nominal", 10*time.Millisecond, time.Now(), 10, []chan sendJob{make(chan sendJob, 10)}, nominal, nil, &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: start, End: start + int64(10*time.Millisecond)}})
+	if nominal.overload != nil || nominal.scheduled != 10 {
+		testContext.Fatalf("nominal counters = %+v", nominal)
+	}
+}
+
 // Under a cap the scheduler refuses rather than delays: the offered schedule
 // is unchanged and every refusal is counted in the phase it was scheduled in.
 func TestOverloadSchedulerCountsCapRefusalsByPhase(testContext *testing.T) {

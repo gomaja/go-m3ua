@@ -487,6 +487,15 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		}
 		<-workersDone
 	}
+	if overloadProfile != nil {
+		finalOffset := time.Since(started)
+		if clock != nil {
+			if elapsed, clockErr := clock.elapsed(); clockErr == nil {
+				finalOffset = elapsed
+			}
+		}
+		counters.finishOverloadSeries(finalOffset)
+	}
 	drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
 	receiver, pollErr := waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
 	observations = append(observations, observeSharedProgress(drainContext, started, config.PeerControl, clock))

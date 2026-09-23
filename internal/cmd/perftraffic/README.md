@@ -394,6 +394,18 @@ single-rate arithmetic is exactly the historical one.
   included); only its schedule switches rate at each phase boundary. The drain
   is raised to at least 3 s so every request deadline falls a second before
   the drain deadline.
+- **Offered shape.** The trial is only evidence if the offered load followed
+  the phased schedule, so the scheduler records how long past its scheduled
+  instant it emitted the first message of each batch (the message of the batch
+  that waited longest), and each per-second sample records the offered count.
+  The offered load followed the schedule when the scheduler was never more
+  than 10 ms late (the trend rule's floor duration) and every in-window sample
+  lies between `schedule.due` at the sample instant less 10 ms of the current
+  phase's traffic (rounded up) and `schedule.due` itself, the upper bound taken
+  at the end of the millisecond the sample offset is truncated to. The
+  scheduler never emits early, so any excess is a fixture fault. A deviation,
+  or no in-window sample at all, makes the trial `invalid`; the observations
+  are in `overload.offered_shape`.
 - **Warm-up.** The warm-up is an ordinary loss-free throughput cohort at the
   profile's last-phase rate, the nominal level the trial returns to (0.5x of
   the row: section 4's "mixed traffic at 50% of its target"). A warm-up that is
@@ -421,7 +433,15 @@ single-rate arithmetic is exactly the historical one.
   short write), `fixture_errors` and `aborted`. The legacy `submitted`,
   `send_errors` and `capped` fields keep counting accepted messages,
   `WriteData` failures, and fixture refusals plus deadline expiries. The
-  fixture never resends a refused or indeterminate message.
+  fixture never resends a refused or indeterminate message. The per-second
+  sampler stops at the end of the measurement window while requests still
+  complete during the drain, so a final point (`final: true`) is taken once
+  every sender worker has finished; the series must end at the cohort totals
+  or the trial is `invalid`. The per-association fixture queue maximum is read
+  at every enqueue, immediately before (counting the message being added) and
+  immediately after it: a worker can dequeue in between and a peak between two
+  enqueues is not seen, so it is a sampled observation, and the channel
+  capacity itself enforces the bound.
 - **Receiver observations.** Validated unique deliveries and duplicates are
   counted by the phase the message was scheduled in, a scope failure (wrong
   routing label, Network Appearance, Routing Context or association) is counted
@@ -442,7 +462,10 @@ single-rate arithmetic is exactly the historical one.
   by started-after minus refused-before minus unique minus discards-before.
   Refused messages are never part of it. `sender_window` keeps its nominal
   meaning over the phased offered schedule; its backlog includes refused
-  messages and is not an acceptance input here.
+  messages and is not an acceptance input here. With `-same-host-clock` an
+  observation's instant is the receiver's capture plus or minus the clock
+  resolution on the shared clock, as for the nominal sender window, not the
+  sender's HTTP request envelope; a missing capture invalidates the trial.
 
 The sender record's `overload` object carries the per-phase and total classes,
 the per-second series, the refusals by scheduled second, the per-message
@@ -454,7 +477,9 @@ observations above. Acceptance is machine-readable, one entry per criterion
 with the numbers in its detail:
 
 1. **fixture** — no fixture or clock failure, bounded progress observations,
-   receiver observations present. A failure makes the trial `invalid`.
+   receiver observations present, the offered load following the phased
+   schedule and the per-second series ending at the totals. A failure makes
+   the trial `invalid`.
 2. **accounting** — every offered message reached exactly one class and the
    whole schedule was offered; the accepted and indeterminate ledgers agree
    with the counts and never overlap; the delivered ledger agrees with the
@@ -483,7 +508,12 @@ with the numbers in its detail:
    leaves behind, a window whose trend is undecided also counts when no later
    admitted backlog exceeds the backlog at the window's start by more than the
    floor (`non_growth_by: envelope`). A `growing` verdict is never excused. The
-   recovery time is the window's latest possible start minus the switch.
+   recovery time is the window's latest possible start minus the switch. An
+   observation whose bracket begins before the switch cannot start a window,
+   because the deliveries it counts may include the overload phase's: with
+   `-same-host-clock` that is the observation taken at the switch whenever
+   the clock resolution exceeds its capture delay, and the next observation's
+   window is then the first candidate.
    Refusals scheduled after the window and the end of the phase's last refused
    second are reported but are not part of the criterion.
 

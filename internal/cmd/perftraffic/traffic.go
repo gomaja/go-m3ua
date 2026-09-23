@@ -68,6 +68,11 @@ func dispatchScheduleOpenLoop(ctx context.Context, schedule openLoopSchedule, du
 			}
 			continue
 		}
+		if counters.overload != nil {
+			// The first message due in a batch waited longest for it; an
+			// overload trial judges the offered shape by that wait.
+			counters.noteSchedulerLag(elapsed-schedule.offset(index), schedule.offset(index))
+		}
 		for index < due {
 			if index%256 == 0 {
 				if err := ctx.Err(); err != nil {

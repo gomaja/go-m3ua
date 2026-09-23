@@ -42,6 +42,7 @@ type overloadRecord struct {
 	Series          []overloadSenderPoint   `json:"series,omitempty"`
 	NotAdmitted     []uint64                `json:"not_admitted_by_scheduled_second,omitempty"`
 	ErrorSamples    map[string]string       `json:"error_samples,omitempty"`
+	OfferedShape    *overloadOfferedShape   `json:"offered_shape,omitempty"`
 	SenderPeakRSS   uint64                  `json:"sender_peak_rss_bytes,omitempty"`
 	SenderRSSError  string                  `json:"sender_peak_rss_error,omitempty"`
 	Acceptance      *overloadAcceptance     `json:"acceptance,omitempty"`
@@ -151,6 +152,96 @@ type overloadRecovery struct {
 	NotAdmittedAfterWindow uint64        `json:"not_admitted_after_window"`
 	DiscardedAfterWindow   uint64        `json:"discarded_after_window"`
 	LastNotAdmittedSecond  time.Duration `json:"last_not_admitted_second_end_ns"`
+}
+
+// overloadShapeTolerance bounds how far the offered load may lag the phased
+// schedule: the backlog trend rule's floor duration, 10 ms of offered
+// traffic. The scheduler never emits early.
+const overloadShapeTolerance = perfstats.BacklogFloorDuration
+
+// overloadOfferedShape judges whether the offered load followed the phased
+// schedule. The scheduler records how long past its scheduled instant it
+// emitted the first message of each batch, the message of the batch that
+// waited longest; the per-second series records the offered count at each
+// sample, which must lie between schedule.due at that instant less the
+// tolerance's worth of the current phase's traffic and schedule.due itself.
+type overloadOfferedShape struct {
+	Status             string        `json:"status"`
+	Reason             string        `json:"reason,omitempty"`
+	Tolerance          time.Duration `json:"tolerance_ns"`
+	MaxSchedulerLag    time.Duration `json:"max_scheduler_lag_ns"`
+	MaxSchedulerLagAt  time.Duration `json:"max_scheduler_lag_at_ns"`
+	Samples            int           `json:"samples"`
+	MaxShortfall       uint64        `json:"max_shortfall"`
+	MaxShortfallAt     time.Duration `json:"max_shortfall_at_ns"`
+	ShortfallAllowance uint64        `json:"shortfall_allowance_at_max"`
+	MaxExcess          uint64        `json:"max_excess"`
+	FinalMatchesTotals bool          `json:"final_point_matches_totals"`
+	FinalPointOffset   time.Duration `json:"final_point_offset_ns"`
+}
+
+const (
+	overloadShapeFollowed = "followed"
+	overloadShapeDeviated = "deviated"
+)
+
+// judgeOfferedShape applies the offered-shape rule to the scheduler lag and
+// the per-second series, and checks that the series ends, after the drain, at
+// the cohort's totals.
+func judgeOfferedShape(schedule *phasedSchedule, series []overloadSenderPoint, totals overloadClassCounts, maxLag, maxLagAt time.Duration) *overloadOfferedShape {
+	shape := &overloadOfferedShape{
+		Status: overloadShapeFollowed, Tolerance: overloadShapeTolerance,
+		MaxSchedulerLag: maxLag, MaxSchedulerLagAt: maxLagAt,
+	}
+	var reasons []string
+	if maxLag > overloadShapeTolerance {
+		reasons = append(reasons, fmt.Sprintf("the scheduler emitted the message scheduled at %s %s late, beyond %s", maxLagAt, maxLag, overloadShapeTolerance))
+	}
+	for _, point := range series {
+		offset := time.Duration(point.OffsetMillis) * time.Millisecond
+		if point.Final || offset <= 0 || offset >= schedule.duration {
+			continue
+		}
+		shape.Samples++
+		// The series offset is truncated to the millisecond: the sample was
+		// taken within the millisecond after it, so the count due is at least
+		// due(offset) and at most due at the end of that millisecond.
+		due := schedule.due(offset)
+		upper := schedule.due(offset + time.Millisecond - 1)
+		allowance := max(uint64(math.Ceil(float64(schedule.phases[schedule.phaseAt(offset)].rate)*overloadShapeTolerance.Seconds())), 1)
+		if point.Offered > upper {
+			shape.MaxExcess = max(shape.MaxExcess, point.Offered-upper)
+		}
+		if shortfall := subtractFloor(due, point.Offered); shortfall > shape.MaxShortfall {
+			shape.MaxShortfall, shape.MaxShortfallAt, shape.ShortfallAllowance = shortfall, offset, allowance
+		}
+		if shortfall := subtractFloor(due, point.Offered); shortfall > allowance {
+			reasons = append(reasons, fmt.Sprintf("at %s %d messages were offered, %d short of the %d due, beyond %d", offset, point.Offered, shortfall, due, allowance))
+		}
+	}
+	if shape.MaxExcess != 0 {
+		reasons = append(reasons, fmt.Sprintf("the offered count ran %d ahead of the schedule", shape.MaxExcess))
+	}
+	if shape.Samples == 0 {
+		reasons = append(reasons, "no per-second offered observation inside the measurement window")
+	}
+	if count := len(series); count > 0 && series[count-1].Final {
+		final := series[count-1]
+		totals.Unresolved = 0
+		shape.FinalPointOffset = time.Duration(final.OffsetMillis) * time.Millisecond
+		shape.FinalMatchesTotals = final.overloadClassCounts == totals
+	}
+	if !shape.FinalMatchesTotals {
+		reasons = append(reasons, "the per-second class series does not end, after the drain, at the cohort totals")
+	}
+	if len(reasons) != 0 {
+		shape.Status = overloadShapeDeviated
+		if len(reasons) > 4 {
+			reasons = append(reasons[:4], fmt.Sprintf("and %d more", len(reasons)-4))
+		}
+		shape.Reason = strings.Join(reasons, "; ")
+	}
+	return shape
 }
 
 type overloadCriterion struct {
@@ -551,6 +642,8 @@ type overloadEvidence struct {
 	indeterminate      bitmap
 	notAdmitted        []uint64
 	series             []overloadSenderPoint
+	maxSchedulerLag    time.Duration
+	maxSchedulerLagAt  time.Duration
 	errorSamples       map[string]string
 	fixtureQueueMax    []int
 	senderAssociations []overloadAssociationObservation
@@ -627,6 +720,10 @@ func evaluateOverloadCohort(evidence overloadEvidence) *overloadRecord {
 	record.Bounds = &bounds
 
 	var fixtureFailures []string
+	record.OfferedShape = judgeOfferedShape(schedule, evidence.series, totals, evidence.maxSchedulerLag, evidence.maxSchedulerLagAt)
+	if record.OfferedShape.Status != overloadShapeFollowed {
+		fixtureFailures = append(fixtureFailures, "the offered load did not follow the phased schedule: "+record.OfferedShape.Reason)
+	}
 	if evidence.senderFatal != "" {
 		fixtureFailures = append(fixtureFailures, "sender fixture failure: "+evidence.senderFatal)
 	}
