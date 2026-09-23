@@ -13,6 +13,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
@@ -61,6 +62,11 @@ type Association struct {
 	// byte order that the current call does not require of it, for no
 	// behavioural gain. The kernel accepts either form, and both can be mixed
 	// on one association.
+	//
+	// setUpSocket also installs this template as the socket's
+	// SCTP_DEFAULT_SNDINFO, because the one send that carries no ancillary data
+	// at all -- writeControlFrame's wait for buffer space -- takes its stream and
+	// PPID from there.
 	sctpInfo *sctp.SndRcvInfo
 	// lastRecv is when the last successfully parsed M3UA message with PPID 0 or
 	// M3UAPPID was received from the peer, in Unix nanoseconds. RFC 4666 Section
@@ -386,8 +392,11 @@ type Association struct {
 	signalWriter func(m3 messages.M3UA) (int, error)
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
-	dataWriter      func([]byte, *sctp.SndRcvInfo) (int, error)
-	transportCloser func() error
+	dataWriter func([]byte, *sctp.SndRcvInfo) (int, error)
+	// controlTransport is the test seam for writeControlFrame's two sends.
+	// Production leaves it nil and writes through sctpConn.
+	controlTransport controlSender
+	transportCloser  func() error
 	// notificationQueue keeps peer-controlled socket backpressure out of the AS
 	// state machine and proactive SSNM paths. A full queue closes the association
 	// rather than silently dropping mandatory ordered control traffic.
@@ -727,6 +736,20 @@ func (c *Association) setUpSocket() error {
 		return fmt.Errorf("failed to enable SCTP_RECVRCVINFO: %w", err)
 	}
 
+	// writeControlFrame waits for send-buffer space through Write, the one send
+	// that carries no ancillary data, so the kernel applies these defaults to
+	// it (RFC 6458 Section 8.1.31). They are the control template every other
+	// control write names explicitly: stream 0, which RFC 4666 Section 1.4.7
+	// reserves for the management classes, and the M3UA PPID. Without them that
+	// write would leave with PPID 0.
+	if err := c.sctpConn.SetDefaultSndInfo(&sctp.SndInfo{
+		SID:  c.sctpInfo.Stream,
+		PPID: c.sctpInfo.PPID,
+	}); err != nil {
+		_ = c.sctpConn.Close()
+		return fmt.Errorf("failed to set SCTP_DEFAULT_SNDINFO: %w", err)
+	}
+
 	r, err := c.sctpConn.GetStatus()
 	if err != nil {
 		_ = c.sctpConn.Close()
@@ -815,15 +838,133 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 //
 // It takes a message rather than a buffer, so a successful call reports the
 // encoded length of that message.
+//
+// Like WriteData it is the application's write, and the application owns its
+// backpressure: without a write deadline, a full SCTP send buffer is reported
+// to the caller at once and the association stays up. Messages the library
+// sends on its own behalf wait for buffer space instead, bounded by
+// AssociationConfig.ControlWriteTimeout, and while one is waiting a
+// WriteSignal or WriteData on the same association waits behind it for the
+// socket.
 func (c *Association) WriteSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, true)
+	return c.writeSignal(m3, true, applicationWrite)
+}
+
+// writeControl writes a message the library sends on its own behalf. It waits
+// for send-buffer space rather than failing on it; see writeControlFrame.
+func (c *Association) writeControl(m3 messages.M3UA) (n int, err error) {
+	return c.writeSignal(m3, true, libraryWrite)
 }
 
 // writeDistributedSignal writes a message whose Application Server has already
 // been selected and whose deliveryMu is already held by the distribution
 // engine. Re-entering the public scope barrier there would deadlock.
 func (c *Association) writeDistributedSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, false)
+	return c.writeSignal(m3, false, applicationWrite)
+}
+
+// writeOrigin records who decided a message should be sent, because that
+// decides what a full SCTP send buffer means for it.
+type writeOrigin uint8
+
+const (
+	// applicationWrite is a message the application asked for. A full send
+	// buffer is reported to it and the association stays up: the application
+	// can wait, retry or send elsewhere, and only it knows which.
+	applicationWrite writeOrigin = iota
+	// libraryWrite is a message the library sends on its own behalf: an
+	// acknowledgement, BEAT or BEAT Ack, Error, Notify, destination state
+	// reply or publication, registration response, or an ASP procedure request
+	// and its retransmissions. Nobody else can resend it, so a full send
+	// buffer is waited out rather than reported.
+	libraryWrite
+)
+
+// controlSender is the part of the SCTP association that writes signals: the
+// non-blocking SCTPWrite every signal tries first, and the waiting Write that
+// writeControlFrame falls back to.
+type controlSender interface {
+	SCTPWrite(b []byte, info *sctp.SndRcvInfo) (int, error)
+	Write(b []byte) (int, error)
+}
+
+func (c *Association) controlSender() controlSender {
+	if c.controlTransport != nil {
+		return c.controlTransport
+	}
+	return c.sctpConn
+}
+
+// controlWriteTimeout resolves AssociationConfig.ControlWriteTimeout.
+func (c *Association) controlWriteTimeout() time.Duration {
+	if c.cfg != nil && c.cfg.ControlWriteTimeout > 0 {
+		return c.cfg.ControlWriteTimeout
+	}
+	return DefaultControlWriteTimeout
+}
+
+// sendBufferFull reports the SCTP dependency refusing a send for want of
+// send-buffer space. Without a write deadline SCTPWrite does not wait: it
+// passes MSG_DONTWAIT and returns EAGAIN.
+func sendBufferFull(err error) bool {
+	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
+}
+
+// The states of one writeControlFrame wait, shared with its watchdog.
+const (
+	controlWriteWaiting uint32 = iota
+	controlWriteFinished
+	controlWriteExpired
+)
+
+// writeControlFrame hands the transport a message the library writes on its
+// own behalf, waiting for send-buffer space rather than failing on it.
+//
+// SCTPWrite does not wait unless the application installed a write deadline.
+// Without one a full send buffer comes back as EAGAIN, and treating that as a
+// failure closed the association: a peer whose receive window was closed for a
+// moment, or one DATA chunk waiting out its T3-rtx retransmission at RTO.Min
+// (RFC 9260 Sections 6.3.3 and 16), tore down an association with nothing
+// wrong with it. A full buffer is backpressure, not failure.
+//
+// The first attempt is the ordinary non-blocking one, so a write that fits
+// costs exactly what it did. Only a refused one waits, through Write, which
+// parks in the runtime poller until the socket is writable. Write sends no
+// ancillary data; setUpSocket installed this association's control template as
+// SCTP_DEFAULT_SNDINFO (RFC 6458 Section 8.1.31), so the message still leaves
+// on stream 0 with the M3UA PPID. The refused attempt queued nothing --
+// sctp_sendmsg queues a message whole or not at all -- so sending the whole
+// buffer again cannot duplicate it.
+//
+// The wait is bounded by ControlWriteTimeout. A waiting write holds the
+// socket's write lock, and whatever ordering barrier its caller holds, so an
+// unbounded wait on a peer that never reads again would hold both for good.
+// When the bound expires the association is closed, and that also ends the
+// wait: closing the SCTP association releases any write parked in the poller
+// before the descriptor goes.
+func (c *Association) writeControlFrame(frame []byte, info *sctp.SndRcvInfo) error {
+	transport := c.controlSender()
+	_, err := transport.SCTPWrite(frame, info)
+	if !sendBufferFull(err) {
+		return err
+	}
+
+	timeout := c.controlWriteTimeout()
+	expired := fmt.Errorf("%w (%s)", ErrControlWriteTimeout, timeout)
+	var state atomic.Uint32
+	watchdog := time.AfterFunc(timeout, func() {
+		if state.CompareAndSwap(controlWriteWaiting, controlWriteExpired) {
+			_ = c.closeWith(expired)
+		}
+	})
+	_, err = transport.Write(frame)
+	if !state.CompareAndSwap(controlWriteWaiting, controlWriteFinished) {
+		// The watchdog decided first. The association is closing on its
+		// account, whatever this attempt returned, so report the cause.
+		return expired
+	}
+	watchdog.Stop()
+	return err
 }
 
 // writeMandatoryControls writes one ordered control batch. The queue-backed
@@ -835,7 +976,7 @@ func (c *Association) writeMandatoryControls(control []messages.M3UA, enforceTra
 	}
 	writeDirect := func() error {
 		for _, message := range control {
-			if _, err := c.writeSignal(message, enforceTrafficScope); err != nil {
+			if _, err := c.writeSignal(message, enforceTrafficScope, libraryWrite); err != nil {
 				return err
 			}
 		}
@@ -890,7 +1031,7 @@ func (c *Association) writeMandatoryControls(control []messages.M3UA, enforceTra
 	}
 }
 
-func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool) (n int, err error) {
+func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin) (n int, err error) {
 	if m3 == nil {
 		return 0, errors.New("cannot write a nil M3UA signal")
 	}
@@ -940,7 +1081,12 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool) (n
 		defer release()
 	}
 
-	if _, err := c.sctpConn.SCTPWrite(buf, &sctpInfo); err != nil {
+	if origin == libraryWrite {
+		err = c.writeControlFrame(buf, &sctpInfo)
+	} else {
+		_, err = c.controlSender().SCTPWrite(buf, &sctpInfo)
+	}
+	if err != nil {
 		return 0, fmt.Errorf("failed to write M3UA: %w", err)
 	}
 
@@ -1260,7 +1406,7 @@ func (c *Association) writeNotifications() {
 				if c.notificationWriter != nil {
 					_, writeErr = c.notificationWriter(message)
 				} else {
-					_, writeErr = c.writeSignal(message, control.enforceTrafficScope)
+					_, writeErr = c.writeSignal(message, control.enforceTrafficScope, libraryWrite)
 				}
 				if writeErr != nil {
 					break

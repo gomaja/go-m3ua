@@ -153,6 +153,16 @@ request from deterministic replay state.
 | T(r), the AS recovery timer | `ApplicationServerConfig.RecoveryTimer` | `TestRecoveryTimerResolvesPending`, `TestASPActiveBeforeRecoveryTimerRestoresActive` |
 | M3UA handshake budget | `AssociationConfig.EstablishTimeout` | `TestEstablishTimeoutBoundsTheM3UAHandshake` |
 | One SCTP association attempt | `SCTPConfig.InitTimeout` | `dial_test.go` |
+| Send-buffer wait for messages the library sends itself | `AssociationConfig.ControlWriteTimeout` | `TestLibraryRepliesWaitForAStalledPeerToResume`, `TestStalledPeerClosesTheAssociationAfterControlWriteTimeout`, `TestSSNMPublicationWaitsOutAFullSendBuffer` |
+
+A full SCTP send buffer is backpressure, not a failure. Acknowledgements, BEAT
+Ack, Error, Notify, destination state replies and publications, registration
+responses and ASP procedure requests wait for buffer space instead of closing
+the association on the transport's EAGAIN. The wait is bounded, because a
+waiting write holds the socket and whatever ordering barrier its caller holds.
+The default of 5 s covers two consecutive T3-rtx expiries from RTO.Min (RFC 9260
+Sections 6.3.3 and 16). Writes the application asks for, such as `WriteData`
+and `WriteSignal`, still report a full buffer to the caller.
 
 T(ack) retransmission is bounded rather than unbounded. RFC 4666 says to resend
 "until it receives an ASP Up Ack message", and the equivalent for the other three
