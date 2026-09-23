@@ -153,11 +153,12 @@ gates passed, or that any campaign-level repetition requirement was met.
 
 ## Bounded capacity search
 
-`capacity.go` mirrors the predeclared bounded search of the local
-`capacity.py` probe driver: integer message-per-second rates, a pass/fail
-bracket refined to within five percent (`100*upper <= 105*lower`), downward
-and upward halving/doubling between bounds, no probe retries after an
-inconclusive outcome, and a fixed probe budget. Rates are bounded by
+`capacity.go` implements the predeclared bounded search for the budget's
+"highest sustained offered rate": integer message-per-second rates, a bracket
+between the highest rate that demonstrated a sustained, loss-free,
+not-growing run and the lowest rate that did not, refined to within five
+percent (`100*upper <= 105*lower`), downward and upward halving/doubling
+between bounds, no probe retries, and a fixed probe budget. Rates are bounded by
 `MaximumSearchRate` so that the products those comparisons form stay exact;
 a maximum above it is rejected by the constructor rather than allowed to wrap
 a comparison and report a bracket that was never refined. Probes must be recorded in
@@ -165,7 +166,32 @@ execution order at exactly the selected rate. Only a refined bracket proceeds
 to validation: exactly five full repetitions at the lower passing rate must
 all pass, and that lower rate is the result. `lower-bound-only`,
 `integer-resolution-limit` and `probe-budget-exhausted` are inconclusive,
-never widened into a pass; `no-passing-rate` is a failure.
+never widened into a pass.
+
+Each probe contributes one of four outcomes:
+
+- `pass`: the run demonstrated the rate.
+- `fail`: the run failed at the rate, for example with delivery or
+  submission loss.
+- `not-demonstrated`: the run was inconclusive only because of a detected
+  transport stall or a backlog trend straddling the floor. Near and above
+  capacity these are the observed outcomes. On the reference environment, with
+  one association and 128-byte payloads, a 120,000 messages/s probe was
+  loss-free but its backlog trend straddled the floor; probes at 140,000 and
+  160,000 messages/s filled the outstanding cap within their first second and
+  each blocked one send for about 1.03 seconds. The rate was not shown to be
+  sustained, so it bounds the bracket from above exactly as a failure does and
+  the search continues. Under the former rule, which ended the search at any
+  inconclusive probe, none of these searches could converge.
+- `inconclusive`: evidence was missing or invalid. It says nothing about the
+  rate and ends the search.
+
+`no-passing-rate` is a failure when every probe failed, and inconclusive when
+any probe was only not demonstrated. A probe whose warm-up failed with
+outstanding-cap refusals, missing deliveries or a stall never reached
+measurement; its failed warm-up cohort is accepted as that probe's evidence and
+can only fail or be not demonstrated. A warm-up that failed without such loss,
+or did not fail, is not probe evidence.
 
 The CLI at `internal/cmd/perfcapacity` reads one strict JSON request with the
 search parameters, per-run fixture sender records in execution order, and the
