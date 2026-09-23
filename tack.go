@@ -240,6 +240,18 @@ func (c *Association) runTAck(req *pendingRequest, kind requestKind) {
 		}
 	}
 
+	// The last resend is owed a full T(ack) too. RFC 4666 Section 4.3.4.1 has
+	// the sender "restart T(ack) and resend", so the request has expired only
+	// when the timer the final resend started runs out unanswered; giving up
+	// the moment it is written leaves that resend no chance to be answered.
+	select {
+	case <-req.stop:
+		return
+	case <-c.done:
+		return
+	case <-time.After(interval):
+	}
+
 	// The peer never answered. Report it rather than retrying silently forever:
 	// an operator needs to see that the far end is not completing the handshake.
 	if c.forgetTAckRequest(req, kind, ErrTAckExpired) {

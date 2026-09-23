@@ -477,7 +477,9 @@ type AssociationConfig struct {
 	// (2 seconds, per RFC 4666 Sections 4.3.4.1 to 4.3.4.4).
 	TAck time.Duration
 	// TAckRetries bounds how many times a request is resent before the attempt
-	// is reported as failed. Zero selects DefaultTAckRetries.
+	// is reported as failed. Every send, the last resend included, is given
+	// TAck to be answered, so an unanswered request fails TAck x (TAckRetries
+	// + 1) after it was first sent. Zero selects DefaultTAckRetries.
 	TAckRetries int
 	// EstablishTimeout bounds the M3UA handshake once the association is up.
 	// Zero selects DefaultEstablishTimeout.
