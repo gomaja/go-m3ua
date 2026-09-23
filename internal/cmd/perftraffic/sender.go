@@ -494,6 +494,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		sender.NegotiatedOutboundStreams[index] = int(association.MaxMessageStreamID()) + 1
 	}
 	sender.Manifest = currentManifest(config.Outstanding, config.Initiation)
+	sender.Manifest.SSNMBudgets = config.SSNM.budgetsRecord()
 	if routed != nil {
 		sender.Manifest.FlowCount = routingRouteCount
 	}

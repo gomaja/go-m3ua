@@ -47,6 +47,25 @@ const (
 	ssnmPhaseMeasurement = "measurement"
 )
 
+// The section 4 time budgets the ASP judges, at their contract values:
+// "p99 apply time within 100 ms" for the large (1,024-APC) row, and for
+// resynchronization "authoritative retained snapshot/subscription acquisition
+// within 100 ms" and "consume retained snapshot and 256 queued indications
+// within 1 s". The one-APC steady row has no apply-time budget there.
+const (
+	ssnmDefaultApplyP99Budget = 100 * time.Millisecond
+	ssnmDefaultResyncBudget   = 100 * time.Millisecond
+	ssnmDefaultRecoveryBudget = time.Second
+)
+
+// ssnmBudgets are the ASP's SSNM time budgets. The flags default to the
+// contract values; the manifest records the values a run was judged against.
+type ssnmBudgets struct {
+	ApplyP99 time.Duration
+	Resync   time.Duration
+	Recovery time.Duration
+}
+
 // ssnmPause is one subscriber's F3 pause: it stops reading Offset into the
 // measurement window for Duration, then recovers by Resync.
 type ssnmPause struct {
@@ -65,6 +84,8 @@ type ssnmConfig struct {
 	Records     int
 	Subscribers int
 	Pause       ssnmPause
+	// Budgets are judged by the ASP only; they are zero on the SGP.
+	Budgets ssnmBudgets
 }
 
 func (config ssnmConfig) enabled() bool { return config.Rate > 0 }
@@ -133,7 +154,13 @@ func registerSSNMFlags(flagSet *flag.FlagSet, config *ssnmConfig) {
 	flagSet.IntVar(&config.Records, "ssnm-records", ssnmDefaultRecords, "SSNM load: distinct destinations cycled and retained per association")
 	flagSet.IntVar(&config.Subscribers, "subscribers", 0, "SSNM load (ASP): SSNM subscriptions, default 8 when SSNM load is on")
 	flagSet.Var(pauseFlag{pause: &config.Pause}, "pause-subscriber", "SSNM load (ASP): pause subscriber 0 at <offset>/<duration> into the measurement window, then Resync")
+	flagSet.DurationVar(&config.Budgets.ApplyP99, "ssnm-apply-p99-budget", ssnmDefaultApplyP99Budget, "SSNM load (ASP): p99 apply-time budget of 1,024-APC messages, judged on the report-to-receipt p99, which bounds apply time from above; other APC counts record the delay without a budget")
+	flagSet.DurationVar(&config.Budgets.Resync, "ssnm-resync-budget", ssnmDefaultResyncBudget, "SSNM load (ASP): budget for the paused subscriber's Resync snapshot and subscription acquisition")
+	flagSet.DurationVar(&config.Budgets.Recovery, "ssnm-recovery-budget", ssnmDefaultRecoveryBudget, "SSNM load (ASP): budget for the paused subscriber to consume its retained queued indications and the Resync snapshot after the pause")
 }
+
+// ssnmBudgetFlags are the ASP-only budget flags.
+var ssnmBudgetFlags = []string{"ssnm-apply-p99-budget", "ssnm-resync-budget", "ssnm-recovery-budget"}
 
 // validateSSNMConfig applies the SSNM defaults and bounds after the rest of
 // the configuration has been validated.
@@ -142,7 +169,7 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 	flagSet.Visit(func(set *flag.Flag) { explicit[set.Name] = true })
 	ssnm := &config.SSNM
 	if !ssnm.enabled() {
-		for _, name := range []string{"ssnm-apcs", "ssnm-records", "subscribers", "pause-subscriber"} {
+		for _, name := range append([]string{"ssnm-apcs", "ssnm-records", "subscribers", "pause-subscriber"}, ssnmBudgetFlags...) {
 			if explicit[name] {
 				return fmt.Errorf("-%s requires -ssnm-rate", name)
 			}
@@ -168,7 +195,16 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 		if explicit["subscribers"] || explicit["pause-subscriber"] {
 			return errors.New("-subscribers and -pause-subscriber configure the ASP subscribers and are not SGP flags")
 		}
+		for _, name := range ssnmBudgetFlags {
+			if explicit[name] {
+				return fmt.Errorf("-%s is judged by the ASP and is not an SGP flag", name)
+			}
+		}
+		ssnm.Budgets = ssnmBudgets{}
 		return nil
+	}
+	if ssnm.Budgets.ApplyP99 <= 0 || ssnm.Budgets.Resync <= 0 || ssnm.Budgets.Recovery <= 0 {
+		return errors.New("SSNM budgets must be positive durations")
 	}
 	if ssnm.Subscribers == 0 {
 		ssnm.Subscribers = ssnmDefaultSubscribers
@@ -208,6 +244,25 @@ func (config ssnmConfig) workload(phase string, anchor int64) ssnmWorkload {
 		Phase:         phase,
 		Anchor:        anchor,
 	}
+}
+
+// ssnmBudgetsRecord is the manifest's record of the budgets an SSNM-loaded
+// ASP judged its run against.
+type ssnmBudgetsRecord struct {
+	ApplyP99 time.Duration `json:"apply_p99_ns"`
+	Resync   time.Duration `json:"resync_ns"`
+	Recovery time.Duration `json:"recovery_ns"`
+	Scope    string        `json:"scope"`
+}
+
+const ssnmBudgetsScope = "apply_p99 gates 1,024-APC runs on the report-to-receipt p99 (an upper bound on apply time); resync and recovery gate the paused subscriber's Resync acquisition and its consumption of the retained queued indications plus the snapshot; other runs record these measurements without a gate"
+
+// budgetsRecord is the manifest entry, nil when SSNM load is off.
+func (config ssnmConfig) budgetsRecord() *ssnmBudgetsRecord {
+	if !config.enabled() {
+		return nil
+	}
+	return &ssnmBudgetsRecord{ApplyP99: config.Budgets.ApplyP99, Resync: config.Budgets.Resync, Recovery: config.Budgets.Recovery, Scope: ssnmBudgetsScope}
 }
 
 // ssnmScope is the wire scope every generated message names.

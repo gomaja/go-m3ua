@@ -332,6 +332,7 @@ type ssnmRecord struct {
 	Subscribers       []ssnmSubscriberRecord `json:"subscribers,omitempty"`
 	Delay             *ssnmDelayRecord       `json:"delay,omitempty"`
 	Pause             *ssnmPauseRecord       `json:"pause,omitempty"`
+	Budgets           []ssnmBudgetCheck      `json:"budgets,omitempty"`
 	AssociationErrors []string               `json:"association_errors,omitempty"`
 	Verdict           string                 `json:"verdict,omitempty"`
 	Reasons           []string               `json:"reasons,omitempty"`
@@ -346,6 +347,23 @@ type ssnmStoreRecord struct {
 	PartitionsInvalidated uint64           `json:"partitions_invalidated"`
 	LastResourceLoss      string           `json:"last_resource_loss,omitempty"`
 }
+
+// ssnmBudgetCheck is one section 4 time budget as the ASP judged it.
+type ssnmBudgetCheck struct {
+	Name     string        `json:"name"`
+	Budget   time.Duration `json:"budget_ns"`
+	Measured time.Duration `json:"measured_ns"`
+	Gated    bool          `json:"gated"`
+	Outcome  string        `json:"outcome"`
+}
+
+// Budget check outcomes. A recorded check has no budget in this row.
+const (
+	ssnmBudgetWithin      = "within"
+	ssnmBudgetExceeded    = "exceeded"
+	ssnmBudgetNotMeasured = "not measured"
+	ssnmBudgetRecorded    = "recorded"
+)
 
 type ssnmLimitsRecord struct {
 	MaxRecords             int `json:"max_records"`
@@ -473,6 +491,9 @@ func (run *ssnmSenderRun) finish(ctx context.Context, measurement *cohortResult)
 	if logErr == nil {
 		record.Delay = &ssnmDelayRecord{Scope: ssnmDelayScope, Subscribers: healthy, Messages: last - first, Delay: histogram.percentiles()}
 	}
+	var budgetReasons []string
+	record.Budgets, budgetReasons = ssnmBudgetChecks(run.config, record.Delay, record.Pause)
+	reasons = append(reasons, budgetReasons...)
 	run.mutex.Lock()
 	record.AssociationErrors = append([]string(nil), run.associationErrors...)
 	run.mutex.Unlock()
@@ -491,6 +512,61 @@ func limitsRecord(limits m3ua.SSNMStateConfig) ssnmLimitsRecord {
 		MaxPartitions: limits.MaxPartitions, MaxSubscribers: limits.MaxSubscribers,
 		SubscriptionQueueSize: limits.SubscriptionQueueSize, MaxAffectedPointCodes: limits.MaxAffectedPointCodes,
 	}
+}
+
+// ssnmBudgetChecks judges the section 4 time budgets. The 1,024-APC row's
+// "p99 apply time within 100 ms" is judged on the report-to-receipt p99: that
+// delay runs from the SGP's report call to the subscriber's receipt, so it
+// bounds apply time from above, and a p99 over the budget leaves the budget
+// undemonstrated. Other APC counts have no apply-time budget in section 4 and
+// only record the delay. The F3 pause judges the Resync acquisition and the
+// consumption of the retained queued indications plus the snapshot; a pause
+// that never reached Resync already fails the F3 contract and is left
+// unmeasured here.
+func ssnmBudgetChecks(config ssnmConfig, delay *ssnmDelayRecord, pause *ssnmPauseRecord) ([]ssnmBudgetCheck, []string) {
+	var checks []ssnmBudgetCheck
+	var reasons []string
+	judge := func(check ssnmBudgetCheck, measured bool, exceeded string) {
+		switch {
+		case !measured:
+			check.Outcome = ssnmBudgetNotMeasured
+		case !check.Gated:
+			check.Outcome = ssnmBudgetRecorded
+		case check.Measured > check.Budget:
+			check.Outcome = ssnmBudgetExceeded
+			reasons = append(reasons, "fail: "+exceeded)
+		default:
+			check.Outcome = ssnmBudgetWithin
+		}
+		checks = append(checks, check)
+	}
+
+	apply := ssnmBudgetCheck{Name: "apply_p99", Gated: config.APCs == ssnmMaxAPCs}
+	measured := delay != nil && delay.Delay.Count != 0
+	if measured {
+		apply.Measured = delay.Delay.P99
+	}
+	if apply.Gated {
+		apply.Budget = config.Budgets.ApplyP99
+		if !measured {
+			reasons = append(reasons, "inconclusive: the 1,024-APC apply-time budget was not demonstrated: no report-to-receipt delay was measured")
+		}
+	}
+	judge(apply, measured, fmt.Sprintf("1,024-APC report-to-receipt p99 %s exceeds the %s apply-time budget; report-to-receipt is an upper bound on apply time, so the budget is not demonstrated", apply.Measured, apply.Budget))
+
+	if !config.Pause.enabled() {
+		return checks, reasons
+	}
+	measured = pause != nil && pause.Error == "" && pause.ContinuityLossObserved
+	resync := ssnmBudgetCheck{Name: "resync", Budget: config.Budgets.Resync, Gated: true}
+	recovery := ssnmBudgetCheck{Name: "recovery", Budget: config.Budgets.Recovery, Gated: true}
+	queued := 0
+	if measured {
+		resync.Measured, recovery.Measured, queued = time.Duration(pause.ResyncNS), time.Duration(pause.RecoveryNS), pause.QueuedAtLoss
+	}
+	judge(resync, measured, fmt.Sprintf("the paused subscriber's Resync snapshot and subscription acquisition took %s, over the %s budget", resync.Measured, resync.Budget))
+	judge(recovery, measured, fmt.Sprintf("the paused subscriber took %s to consume its %d retained queued indications and the Resync snapshot, over the %s budget", recovery.Measured, queued, recovery.Budget))
+	return checks, reasons
 }
 
 // healthySubscriberFailures lists why a subscriber that must stay lossless

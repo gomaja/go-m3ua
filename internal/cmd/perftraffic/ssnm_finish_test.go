@@ -40,7 +40,21 @@ func steadyFinishFixture() *finishFixture {
 	return newFinishFixture(ssnmConfig{Rate: 1000, APCs: 1, Records: 8, Subscribers: 2}, 2*time.Millisecond)
 }
 
+func largeFinishFixture(delay time.Duration) *finishFixture {
+	return newFinishFixture(ssnmConfig{Rate: 1000, APCs: ssnmMaxAPCs, Records: ssnmMaxAPCs, Subscribers: 2}, delay)
+}
+
+func pausedFinishFixture(resync, recovery time.Duration) *finishFixture {
+	fixture := newFinishFixture(ssnmConfig{Rate: 1000, APCs: 1, Records: 8, Subscribers: 2, Pause: ssnmPause{Offset: time.Millisecond, Duration: time.Millisecond}}, 2*time.Millisecond)
+	fixture.pause = &ssnmPauseRecord{
+		ContinuityLossObserved: true, QueueLimit: 256, QueuedAtLoss: 256, CountCapEnforced: true, SnapshotValidated: 1,
+		ResyncNS: int64(resync), RecoveryNS: int64(recovery),
+	}
+	return fixture
+}
+
 func newFinishFixture(config ssnmConfig, delay time.Duration) *finishFixture {
+	config.Budgets = ssnmBudgets{ApplyP99: ssnmDefaultApplyP99Budget, Resync: ssnmDefaultResyncBudget, Recovery: ssnmDefaultRecoveryBudget}
 	plan := ssnmPlan{records: config.Records, apcs: config.APCs}
 	log := ssnmReportsResponse{State: ssnmGeneratorComplete, SentTotal: finishSent}
 	for message := uint64(0); message < finishSent; message++ {
@@ -172,4 +186,83 @@ func TestSSNMFinishVerdicts(testContext *testing.T) {
 			}
 		})
 	}
+}
+
+// The 1,024-APC row's p99 apply-time budget is judged on the report-to-receipt
+// p99, which bounds apply time from above: a p99 over the budget means the
+// budget was not demonstrated and fails the run.
+func TestSSNMFinishGatesLargeApplyBudget(testContext *testing.T) {
+	within := largeFinishFixture(40 * time.Millisecond).run(testContext)
+	if within.Verdict != ssnmVerdictPass {
+		testContext.Fatalf("p99 40ms under a 100ms budget: verdict %s reasons %q", within.Verdict, within.Reasons)
+	}
+	over := largeFinishFixture(150 * time.Millisecond).run(testContext)
+	if over.Verdict != ssnmVerdictFail || !reasonsContain(over.Reasons, "apply-time budget") || !reasonsContain(over.Reasons, "upper bound") {
+		testContext.Fatalf("p99 150ms over a 100ms budget: verdict %s reasons %q", over.Verdict, over.Reasons)
+	}
+	check := budgetCheck(over, "apply_p99")
+	if check == nil || !check.Gated || check.Outcome != ssnmBudgetExceeded || check.Budget != 100*time.Millisecond || check.Measured < 100*time.Millisecond {
+		testContext.Fatalf("apply check = %+v", check)
+	}
+	loosened := largeFinishFixture(150 * time.Millisecond)
+	loosened.config.Budgets.ApplyP99 = 200 * time.Millisecond
+	if record := loosened.run(testContext); record.Verdict != ssnmVerdictPass {
+		testContext.Fatalf("p99 150ms under a 200ms flag budget: verdict %s reasons %q", record.Verdict, record.Reasons)
+	}
+}
+
+// The one-APC steady row has no apply-time budget in section 4: its delay is
+// recorded, never gated.
+func TestSSNMFinishRecordsSteadyDelayWithoutGate(testContext *testing.T) {
+	fixture := steadyFinishFixture()
+	fixture.delay = 150 * time.Millisecond
+	record := fixture.run(testContext)
+	if record.Verdict != ssnmVerdictPass {
+		testContext.Fatalf("one-APC delay gated: verdict %s reasons %q", record.Verdict, record.Reasons)
+	}
+	check := budgetCheck(record, "apply_p99")
+	if check == nil || check.Gated || check.Outcome != ssnmBudgetRecorded || check.Measured < 100*time.Millisecond {
+		testContext.Fatalf("apply check = %+v", check)
+	}
+}
+
+func TestSSNMFinishGatesResyncBudgets(testContext *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		resync   time.Duration
+		recovery time.Duration
+		verdict  string
+		reason   string
+	}{
+		{"within both budgets", 5 * time.Millisecond, 50 * time.Millisecond, ssnmVerdictPass, ""},
+		{"resync at the budget", 100 * time.Millisecond, 500 * time.Millisecond, ssnmVerdictPass, ""},
+		{"resync over budget", 150 * time.Millisecond, 500 * time.Millisecond, ssnmVerdictFail, "Resync snapshot and subscription acquisition"},
+		{"recovery over budget", 5 * time.Millisecond, 1500 * time.Millisecond, ssnmVerdictFail, "retained queued indications and the Resync snapshot"},
+	} {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			record := pausedFinishFixture(testCase.resync, testCase.recovery).run(testContext)
+			if record.Verdict != testCase.verdict || testCase.reason != "" && !reasonsContain(record.Reasons, testCase.reason) {
+				testContext.Fatalf("verdict %s reasons %q, want %s with %q", record.Verdict, record.Reasons, testCase.verdict, testCase.reason)
+			}
+			for _, name := range []string{"resync", "recovery"} {
+				if check := budgetCheck(record, name); check == nil || !check.Gated || check.Outcome == ssnmBudgetNotMeasured {
+					testContext.Fatalf("%s check = %+v", name, check)
+				}
+			}
+		})
+	}
+	loosened := pausedFinishFixture(150*time.Millisecond, 1500*time.Millisecond)
+	loosened.config.Budgets = ssnmBudgets{ApplyP99: ssnmDefaultApplyP99Budget, Resync: 200 * time.Millisecond, Recovery: 2 * time.Second}
+	if record := loosened.run(testContext); record.Verdict != ssnmVerdictPass {
+		testContext.Fatalf("timings under loosened flag budgets: verdict %s reasons %q", record.Verdict, record.Reasons)
+	}
+}
+
+func budgetCheck(record *ssnmRecord, name string) *ssnmBudgetCheck {
+	for index := range record.Budgets {
+		if record.Budgets[index].Name == name {
+			return &record.Budgets[index]
+		}
+	}
+	return nil
 }

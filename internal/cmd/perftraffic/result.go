@@ -132,6 +132,9 @@ type fixtureManifest struct {
 	OutstandingLimit         int    `json:"outstanding_limit"`
 	Initiation               string `json:"initiation,omitempty"`
 	AccountingScope          string `json:"accounting_scope"`
+	// SSNMBudgets are the SSNM time budgets an SSNM-loaded ASP judged its
+	// run against, omitted otherwise.
+	SSNMBudgets *ssnmBudgetsRecord `json:"ssnm_budgets,omitempty"`
 }
 
 func (record *runRecord) evaluate() {

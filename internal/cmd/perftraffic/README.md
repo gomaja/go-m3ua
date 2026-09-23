@@ -137,10 +137,15 @@ its schedule, receipts and delays are shared-clock timestamps.
 | `-ssnm-records` | both | distinct destinations cycled, at most 16,384 and a multiple of `-ssnm-apcs` (default 16,384) |
 | `-subscribers` | ASP | `SubscribeSSNM` consumers on the ASP Endpoint (default 8, at most 16) |
 | `-pause-subscriber=<offset>/<duration>` | ASP | F3: subscriber 0 stops reading `offset` into the measurement window for `duration`, then recovers by `Resync` |
+| `-ssnm-apply-p99-budget` | ASP | p99 apply-time budget of 1,024-APC messages (default 100ms) |
+| `-ssnm-resync-budget` | ASP | F3 `Resync` snapshot and subscription acquisition budget (default 100ms) |
+| `-ssnm-recovery-budget` | ASP | F3 budget to consume the retained queued indications and the snapshot (default 1s) |
 
 Both processes must pass the same `-ssnm-rate`, `-ssnm-apcs` and
 `-ssnm-records`; the ASP declares them in every cohort specification (`spec.ssnm`)
-and the SGP refuses a cohort that differs from its own flags.
+and the SGP refuses a cohort that differs from its own flags. The budget flags
+default to the section 4 contract values and are recorded in the ASP
+manifest's `ssnm_budgets`.
 
 **Generator (SGP).** Before any cohort the ASP opens its subscriptions and asks
 the SGP (`POST /ssnm/preload`) to report every destination Unavailable once,
@@ -179,9 +184,9 @@ offset, sleeps for the duration, then drains what its queue retained, observes
 `SSNMContinuityLostEvent`, calls `Resync`, consumes the snapshot and continues.
 `sender.ssnm.pause` records the events retained at loss against the count cap
 (`count_cap_enforced`), the partition states those events carried, the drain
-time, the `Resync` acquisition time (`resync_ns`, budget 100 ms), the snapshot
-consumption time and `recovery_ns` from resumption to a consumed snapshot after
-the retained queue (budget 1 s). The snapshot is validated destination by
+time, the `Resync` acquisition time (`resync_ns`), the snapshot consumption
+time and `recovery_ns` from resumption to a consumed snapshot after the
+retained queue. The snapshot is validated destination by
 destination against the plan at the first report after `Resync`, so a stale or
 partial snapshot is a failure. A retained-byte cap is reported as not
 observable: this library's `SSNMStateConfig` bounds a subscription by event
@@ -194,11 +199,25 @@ call duration. The ASP measurement record's `ssnm` carries the workload, the
 store limits and end counters, the preload, every subscriber's accounting, the
 final generator view recomputed from the complete per-message log, `delay`
 (report start to healthy-subscriber receipt, p50/p95/p99/max; an upper bound on
-apply-and-publish time), `pause`, and `verdict`: `fail` for any healthy
-indication loss, store refusal, generator failure or F3 contract violation;
+apply-and-publish time), `pause`, `budgets`, and `verdict`: `fail` for any
+healthy indication loss, store refusal, generator failure, F3 contract
+violation or exceeded time budget;
 `inconclusive` when the generator did not hold the intensity (a window message
 unsent or failed, or a report starting more than `dispatch_tolerance_ns`, one
-scheduling interval and at least 100 ms, after its schedule); otherwise `pass`.
+scheduling interval and at least 100 ms, after its schedule) or a gated budget
+could not be measured; otherwise `pass`.
+
+**Time budgets.** `budgets` lists each section 4 budget with its value,
+measurement, whether it gates this run, and its outcome (`within`, `exceeded`,
+`not measured`, or `recorded` where no budget applies). With `-ssnm-apcs=1024`
+the report-to-receipt p99 gates the large row's "p99 apply time within 100
+ms": that delay runs from the SGP's report call to the subscriber's receipt, so
+it bounds apply time from above, and a p99 over the budget fails the run as a
+budget not demonstrated. Other APC counts, the one-APC steady row included,
+have no apply-time budget in section 4 and record the delay only. With
+`-pause-subscriber` the F3 `resync_ns` gates "snapshot/subscription acquisition
+within 100 ms" and `recovery_ns` gates "consume retained snapshot and 256
+queued indications within 1 s".
 `association_errors` names any association that ended during the run with the
 library's close cause, which is also written to stderr as an
 `ssnm_diagnostic` line, together with the subscribers' progress when they close.
@@ -237,8 +256,8 @@ perftraffic -role=asp ... -same-host-clock -rate=<probe>
 
 Run each campaign through `perfcapacity` separately and compare the selected
 rates: the steady row needs at least 90% and the large row at least 80% of the
-control's capacity. The fixture does not apply the SSNM or F3 time budgets
-itself; it records the measurements.
+control's capacity. The SSNM verdict each probe folds in includes the time
+budgets.
 
 ## Routed modes
 

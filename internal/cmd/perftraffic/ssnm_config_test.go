@@ -34,7 +34,8 @@ func TestSSNMFlagsApplyDefaults(testContext *testing.T) {
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
-	want := ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8}
+	want := ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8,
+		Budgets: ssnmBudgets{ApplyP99: 100 * time.Millisecond, Resync: 100 * time.Millisecond, Recovery: time.Second}}
 	if config.SSNM != want {
 		testContext.Fatalf("SSNM config = %+v, want %+v", config.SSNM, want)
 	}
@@ -44,6 +45,34 @@ func TestSSNMFlagsApplyDefaults(testContext *testing.T) {
 	}
 	if receiver.SSNM != (ssnmConfig{Rate: 10, APCs: 1024, Records: 16384}) {
 		testContext.Fatalf("receiver SSNM config = %+v", receiver.SSNM)
+	}
+}
+
+func TestSSNMBudgetFlagsParseAndReachTheManifest(testContext *testing.T) {
+	config, err := parseConfig(ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apcs=1024", "-ssnm-records=1024",
+		"-ssnm-apply-p99-budget=250ms", "-ssnm-resync-budget=50ms", "-ssnm-recovery-budget=2s"))
+	if err != nil {
+		testContext.Fatalf("parseConfig: %v", err)
+	}
+	want := ssnmBudgets{ApplyP99: 250 * time.Millisecond, Resync: 50 * time.Millisecond, Recovery: 2 * time.Second}
+	if config.SSNM.Budgets != want {
+		testContext.Fatalf("budgets = %+v, want %+v", config.SSNM.Budgets, want)
+	}
+	record := config.SSNM.budgetsRecord()
+	if record == nil || record.ApplyP99 != want.ApplyP99 || record.Resync != want.Resync || record.Recovery != want.Recovery || record.Scope == "" {
+		testContext.Fatalf("manifest budgets = %+v", record)
+	}
+	encoded, err := json.Marshal(fixtureManifest{SSNMBudgets: record})
+	if err != nil || !strings.Contains(string(encoded), `"ssnm_budgets":{"apply_p99_ns":250000000,"resync_ns":50000000,"recovery_ns":2000000000`) {
+		testContext.Fatalf("manifest encoding %s, %v", encoded, err)
+	}
+	off, err := parseConfig(ssnmSenderArguments())
+	if err != nil || off.SSNM.budgetsRecord() != nil {
+		testContext.Fatalf("budgets recorded without SSNM load: %+v, %v", off.SSNM, err)
+	}
+	encoded, err = json.Marshal(fixtureManifest{})
+	if err != nil || strings.Contains(string(encoded), "ssnm") {
+		testContext.Fatalf("manifest without SSNM load encodes %s, %v", encoded, err)
 	}
 }
 
@@ -80,6 +109,10 @@ func TestSSNMFlagsRejectInvalidCombinations(testContext *testing.T) {
 		"pause malformed":           {ssnmSenderArguments("-ssnm-rate=10", "-pause-subscriber=10s"), "offset>/<duration"},
 		"pause negative":            {ssnmSenderArguments("-ssnm-rate=10", "-pause-subscriber=-1s/1s"), "negative"},
 		"receipt storage bound":     {append(ssnmSenderArguments("-ssnm-rate=10000", "-subscribers=16"), "-associations=32", "-duration=9m", "-warmup=0s"), "receipt storage"},
+		"budget without rate":       {ssnmSenderArguments("-ssnm-resync-budget=1s"), "requires -ssnm-rate"},
+		"receiver budget":           {ssnmReceiverArguments("-ssnm-rate=10", "-ssnm-apply-p99-budget=1s"), "not an SGP flag"},
+		"zero budget":               {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-recovery-budget=0s"), "budgets must be positive"},
+		"negative budget":           {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apply-p99-budget=-1ms"), "budgets must be positive"},
 	}
 	for name, testCase := range cases {
 		testContext.Run(name, func(testContext *testing.T) {
