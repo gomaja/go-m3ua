@@ -65,6 +65,12 @@ func (c *Association) ssnmASKeys(scope WireScope) []ASKey {
 			RoutingContext:       routingContext,
 			RoutingContextSet:    true,
 		}
+		if !scope.NetworkAppearanceSet {
+			key = c.staticASKeyForRoutingContext(routingContext, false)
+			if dynamic, ok := c.dynamicASKey(routingContext, false); ok {
+				key = dynamic
+			}
+		}
 		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
@@ -215,7 +221,7 @@ func (c *Association) ssnmBindingScopes() []ssnmBindingScope {
 		switch c.role {
 		case RoleASP:
 			switch {
-			case active && c.routingContextAcked(routingContext):
+			case active && c.routingContextAcked(routingContext) && !c.routingContextOverridden(routingContext):
 				admitted = true
 			case pendingActivation:
 				admitted, admittedPending = true, true
