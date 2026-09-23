@@ -35,17 +35,9 @@ func platformSocketOptions(fd int) (socketOptions, error) {
 	if options.NoDelay, err = syscall.GetsockoptInt(fd, syscall.IPPROTO_SCTP, sctpNoDelayOption); err != nil {
 		return options, err
 	}
-	// struct sctp_sack_info { sctp_assoc_t sack_assoc_id; uint32_t
-	// sack_delay; uint32_t sack_freq; }; association 0 on a one-to-one
-	// socket is its own association.
-	sack := new([3]uint32)
-	length := uint32(unsafe.Sizeof(*sack))
-	_, _, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT, uintptr(fd), syscall.IPPROTO_SCTP, sctpDelayedSACKOption,
-		uintptr(unsafe.Pointer(sack)), uintptr(unsafe.Pointer(&length)), 0)
-	if errno != 0 {
-		return options, errno
+	if options.SACKDelay, options.SACKFrequency, err = delayedSACK(fd); err != nil {
+		return options, err
 	}
-	options.SACKDelay, options.SACKFrequency = sack[1], sack[2]
 	return options, nil
 }
 
