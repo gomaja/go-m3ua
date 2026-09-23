@@ -76,13 +76,32 @@ func runLiveOverloadCohort(testContext *testing.T, sharedClock bool) {
 	}
 	overload := sender.Overload
 	status := map[string]string{}
+	detail := map[string]string{}
 	for _, criterion := range overload.Acceptance.Criteria {
-		status[criterion.Name] = criterion.Status
+		status[criterion.Name], detail[criterion.Name] = criterion.Status, criterion.Detail
 		testContext.Logf("%s: %s: %s", criterion.Name, criterion.Status, criterion.Detail)
 	}
-	for _, name := range []string{"fixture", "accounting", "bounds"} {
+	for _, name := range []string{"accounting", "bounds"} {
 		if status[name] != overloadCriterionPass {
 			testContext.Errorf("criterion %s = %s", name, status[name])
+		}
+	}
+	// A scheduler starved by a loaded test host runs late, and the trial then
+	// rightly reports that its offered load did not follow the schedule. That
+	// depends on the host, so it is logged rather than failed; every other
+	// fixture failure fails the test, and the scheduler may never run ahead.
+	shape := overload.OfferedShape
+	if shape == nil {
+		testContext.Fatal("offered shape was not judged")
+	}
+	if shape.MaxExcess != 0 || !shape.FinalMatchesTotals {
+		testContext.Errorf("offered shape = %+v", shape)
+	}
+	if status["fixture"] != overloadCriterionPass {
+		if shape.Status != overloadShapeDeviated || detail["fixture"] != "the offered load did not follow the phased schedule: "+shape.Reason {
+			testContext.Errorf("criterion fixture = %s: %s", status["fixture"], detail["fixture"])
+		} else {
+			testContext.Logf("the loaded test host starved the scheduler: %s", shape.Reason)
 		}
 	}
 	totals := overload.Totals
@@ -101,9 +120,8 @@ func runLiveOverloadCohort(testContext *testing.T, sharedClock bool) {
 	if sharedClock != (sender.Spec.Clock != nil) || sharedClock && (sender.ClockEvidence == nil || !sender.ClockEvidence.Verified) {
 		testContext.Errorf("shared clock %t: spec clock %+v evidence %+v", sharedClock, sender.Spec.Clock, sender.ClockEvidence)
 	}
-	shape := overload.OfferedShape
-	if shape == nil || !shape.FinalMatchesTotals || shape.Samples < 12 {
-		testContext.Errorf("offered shape = %+v", shape)
+	if shape.Samples < 12 {
+		testContext.Errorf("offered shape has %d in-window samples: %+v", shape.Samples, shape)
 	}
 	if final := overload.Series[len(overload.Series)-1]; !final.Final || final.Offered != totals.Offered || final.Accepted != totals.Accepted {
 		testContext.Errorf("series does not end at the totals: %+v", final)

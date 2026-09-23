@@ -754,7 +754,17 @@ func sampleSharedSender(started time.Time, counters *senderCounters, done <-chan
 				counters.mutex.Unlock()
 				continue
 			}
-			counters.sampleOverloadLocked(offset)
+			if counters.overload != nil {
+				// The overload series is judged against the schedule at the
+				// instant its counts were read. The tick time can be well
+				// before the mutex was taken, so without a shared clock the
+				// instant is read again under the mutex.
+				overloadOffset := offset
+				if clock == nil {
+					overloadOffset = time.Since(started)
+				}
+				counters.sampleOverloadLocked(overloadOffset)
+			}
 			if len(counters.series) < 601 {
 				counters.series = append(counters.series, seriesPoint{
 					OffsetMillis: uint64(offset / time.Millisecond),

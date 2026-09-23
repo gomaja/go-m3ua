@@ -357,3 +357,43 @@ func TestOverloadFinalSeriesPointCarriesDrainCompletions(testContext *testing.T)
 		testContext.Fatalf("series = %+v", series)
 	}
 }
+
+// Without a shared clock the per-second sampler's tick time can be well
+// before it gets the counters mutex, while the scheduler keeps emitting; the
+// overload series must be stamped with the instant its counts were read, or a
+// healthy run appears to have offered messages ahead of the schedule.
+func TestOverloadSeriesIsStampedWhenItsCountsAreRead(testContext *testing.T) {
+	schedule, err := newPhasedSchedule([]overloadPhase{{Rate: 1_000, Duration: 5 * time.Second}, {Rate: 100, Duration: 12 * time.Second}})
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	counters := newSenderCounters(8)
+	counters.overload = newOverloadCounters(schedule)
+	started := time.Now()
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		sampleSharedSender(started, counters, done, nil)
+	}()
+	// Hold the mutex across the one-second tick, emitting on schedule, as a
+	// busy scheduler does.
+	time.Sleep(time.Until(started.Add(900 * time.Millisecond)))
+	counters.mutex.Lock()
+	time.Sleep(time.Until(started.Add(1300 * time.Millisecond)))
+	counters.overload.phases[0].Offered = schedule.due(time.Since(started))
+	counters.mutex.Unlock()
+	time.Sleep(200 * time.Millisecond)
+	close(done)
+	<-finished
+	counters.mutex.Lock()
+	series := append([]overloadSenderPoint(nil), counters.overload.series...)
+	counters.mutex.Unlock()
+	if len(series) != 1 {
+		testContext.Fatalf("series = %+v", series)
+	}
+	offset := time.Duration(series[0].OffsetMillis) * time.Millisecond
+	if upper := schedule.due(offset + time.Millisecond - 1); series[0].Offered > upper || offset < 1300*time.Millisecond {
+		testContext.Fatalf("sample at %s carries %d offered, %d due", offset, series[0].Offered, upper)
+	}
+}
