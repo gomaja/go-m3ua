@@ -311,7 +311,9 @@ type routeReferenceEvent struct {
 // routeReferenceObserver drains every sender association's StateChanges and
 // ManagementIndications and watches Done for the whole run, timestamping each
 // on the shared clock. The same observer runs for churn and for the static
-// control.
+// control. Its goroutines end with their association: the library closes both
+// channels and Done when it ends, and they must be drained until then, since
+// an unread indication channel closes the association.
 type routeReferenceObserver struct {
 	clock  measurementClock
 	mutex  sync.Mutex

@@ -143,7 +143,7 @@ func (control *receiverControl) recordRouted(transport routingTransport, message
 		return recordNotUnique
 	}
 	if failover != nil && specification.SGPFailure != nil {
-		failover.uniqueLocked(ledger, identity, reorderedBefore, alternative)
+		failover.uniqueLocked(ledger, identity, reorderedBefore, alternative, transport)
 	}
 	if control.spec.Clock != nil {
 		sharedReceived, clockErr := control.sharedNowLocked()

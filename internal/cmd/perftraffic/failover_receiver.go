@@ -402,16 +402,20 @@ func (failover *failoverReceiver) claimAlternativeLocked(route uint16, transport
 	}
 }
 
-// uniqueLocked moves a reordering of an affected route out of the nominal
-// reorder count: at the failover the failed SGP may still hand over messages
-// it read before the fault after the alternative has delivered later ones.
-// Healthy routes keep the nominal zero-reorder rule.
-func (failover *failoverReceiver) uniqueLocked(ledger *routingLedger, identity routingIdentity, reorderedBefore uint64, alternative bool) {
+// uniqueLocked moves out of the nominal reorder count the one reordering the
+// failover can cause: after the fault, the failed SGP handing over a message
+// of an affected route that it read before the fault, once the alternative
+// has delivered later ones. Only such a message can arrive late: every later
+// message of a moved route travels the alternative. A reorder before the
+// fault, one the alternative delivers, or one on a healthy route stays a
+// nominal reorder.
+func (failover *failoverReceiver) uniqueLocked(ledger *routingLedger, identity routingIdentity, reorderedBefore uint64, alternative bool, transport routingTransport) {
 	cohort := failover.cohort
 	if cohort == nil {
 		return
 	}
-	if ledger.snapshotData.Reordered > reorderedBefore && failover.affected[identity.Route] {
+	_, failedPath := failover.failed[transport]
+	if ledger.snapshotData.Reordered > reorderedBefore && failover.affected[identity.Route] && failedPath && failover.injected.Load() {
 		ledger.snapshotData.Reordered--
 		cohort.failoverReordered++
 	}

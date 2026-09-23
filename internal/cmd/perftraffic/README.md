@@ -399,9 +399,12 @@ the window before the fault and 10 s after it.
   at cohort start (`sender.transport_timers`).
 - **Receiver.** An affected route may arrive on the alternative only after the
   fault, in the alternative's scope, stream and epoch, and on one alternative
-  association; every other arrival keeps the frozen-path validation. A
-  reordering of an affected route across the move is counted as
-  `failover_reordered`, never as a nominal reorder. Unique deliveries are
+  association; every other arrival keeps the frozen-path validation. Only the
+  failed SGP handing over, after the fault, an older message of an affected
+  route is counted as `failover_reordered`: every later message of a moved
+  route travels the alternative, so nothing else can arrive late because of
+  the failure. A reorder before the fault, or one the alternative delivers,
+  stays a nominal reorder. Unique deliveries are
   binned every 100 ms by shared-clock arrival (all, and on the surviving SGPs
   only) and by each message's scheduled offset, and counted per transport.
 - **Drain.** The sender waits until every submission on a surviving
@@ -415,7 +418,8 @@ one entry per criterion with its numbers (`criteria`), and `verdict`:
 | --- | --- |
 | `fault_injected` | the declared fault ran at its instant, inside the window, on both associations |
 | `transport_failure_notified` | both failed-SGP associations, and no other, ended after the fault |
-| `alternative_selection` | the first alternative MTPTransfer returns within 100 ms of the notification; no call started later than that touched or was refused on the failed SGP or failed; every affected route moved |
+| `pre_failure_nominal` | every message scheduled in the whole bins that end at least one bin before the fault is delivered: the period before the failure was nominal, so no loss is left for the failed path's accounting to absorb and the pre-failure rate is the offered one |
+| `alternative_selection` | the first alternative MTPTransfer returns within 100 ms of the notification (one returning before it, since the notification is the later of the two association ends, is judged as 0); no call started later than that touched or was refused on the failed SGP or failed; every affected route moved |
 | `healthy_path_recovery` | pre-failure rate: mean all-SGP deliveries per bin over whole bins from 1 s after the start to the fault; the first whole bin starting at or after the notification whose surviving-SGP deliveries reach 90% of it must end within 1 s of the notification |
 | `full_rate_after_recovery` | from the milestone (notification plus 1 s, rounded up to a bin) every scheduled message is delivered, and the sender-window backlog trend over the rest of the window is `not-growing` |
 | `healthy_routes_nominal` | no unexpected outcome; every surviving association delivered exactly what was submitted on it; no invalid, duplicate, nominal reordered or late delivery |

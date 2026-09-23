@@ -324,7 +324,7 @@ func failoverCriterionByName(record *failoverRecord, name string) failoverCriter
 func TestFailoverEvaluationPassesAConsistentTrial(testContext *testing.T) {
 	scenario := newFailoverScenario(testContext)
 	record := scenario.tracker.evaluate(scenario.inputs)
-	if record.Verdict != failoverPass || len(record.Criteria) != 7 {
+	if record.Verdict != failoverPass || len(record.Criteria) != 8 {
 		testContext.Fatalf("verdict %s criteria %+v", record.Verdict, record.Criteria)
 	}
 	sender := record.Sender
@@ -338,6 +338,36 @@ func TestFailoverEvaluationPassesAConsistentTrial(testContext *testing.T) {
 	result.evaluate()
 	if result.Verdict != verdictPass || result.FixtureVerdict != verdictPass || result.CapacityVerdict != "unavailable" {
 		testContext.Fatalf("record verdict %s fixture %s reasons %v", result.Verdict, result.FixtureVerdict, result.Reasons)
+	}
+}
+
+// A message scheduled in the guard bin just before the fault may have been in
+// flight to the failed SGP; losing it is the failure's, not a pre-failure loss.
+func TestFailoverPreFailureGuardBinIsTheFailures(testContext *testing.T) {
+	scenario := newFailoverScenario(testContext)
+	scenario.inputs.receiver.Failover.Receiver.ScheduledBins[99] = 99
+	record := scenario.tracker.evaluate(scenario.inputs)
+	if got := failoverCriterionByName(record, "pre_failure_nominal"); got.Outcome != failoverPass || got.Measured == nil || *got.Measured != 0 {
+		testContext.Fatalf("pre_failure_nominal = %+v", got)
+	}
+	scenario.inputs.receiver.Failover.Receiver.ScheduledBins[98] = 99
+	record = scenario.tracker.evaluate(scenario.inputs)
+	if got := failoverCriterionByName(record, "pre_failure_nominal"); got.Outcome != failoverFail || got.Measured == nil || *got.Measured != 1 {
+		testContext.Fatalf("a loss in the last bin before the guard = %+v", got)
+	}
+}
+
+// The notification is the later of the two failed-SGP association ends, so the
+// alternative may already carry traffic when it arrives.
+func TestFailoverSelectionBeforeTheNotificationIsJudgedAsImmediate(testContext *testing.T) {
+	scenario := newFailoverScenario(testContext)
+	scenario.tracker.first.CallStarted = scenario.notification - 300_000
+	scenario.tracker.first.Returned = scenario.notification - 100_000
+	record := scenario.tracker.evaluate(scenario.inputs)
+	got := failoverCriterionByName(record, "alternative_selection")
+	if got.Outcome != failoverPass || got.Measured == nil || *got.Measured != 0 || record.Sender.FirstAlternative.Latency != -100_000 ||
+		!strings.Contains(got.Detail, "returned 100000 ns before the notification") {
+		testContext.Fatalf("alternative_selection = %+v, first %+v", got, record.Sender.FirstAlternative)
 	}
 }
 
@@ -374,6 +404,9 @@ func TestFailoverEvaluationFailsEveryViolatedCriterion(testContext *testing.T) {
 			for index := 100; index < len(bins); index++ {
 				bins[index] = 75
 			}
+		}},
+		{name: "loss before the fault", criterion: "pre_failure_nominal", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
+			scenario.inputs.receiver.Failover.Receiver.ScheduledBins[50] = 99
 		}},
 		{name: "loss after the milestone", criterion: "full_rate_after_recovery", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
 			scenario.inputs.receiver.Failover.Receiver.ScheduledBins[250] = 99
@@ -631,7 +664,7 @@ func TestFailoverReceiverInjectsOnceAndValidatesTheMove(testContext *testing.T) 
 		testContext.Fatalf("bins: arrivals %d surviving %d scheduled %d", arrivals, surviving, scheduled)
 	}
 	// Three deliberately invalid arrivals make the receiver fixture invalid.
-	if record.Verdict != verdictInvalid || len(record.Reasons) != 1 || record.Reasons[0] != "receiver observed duplicate, invalid or late traffic" {
+	if record.Verdict != verdictInvalid || len(record.Reasons) != 1 || record.Reasons[0] != "receiver observed duplicate, invalid, reordered, or late traffic" {
 		testContext.Fatalf("receiver verdict %s reasons %v", record.Verdict, record.Reasons)
 	}
 	if err := control.stop(); err != nil {
@@ -642,6 +675,67 @@ func TestFailoverReceiverInjectsOnceAndValidatesTheMove(testContext *testing.T) 
 	again.Clock = &sharedClockWindow{Domain: specification.Clock.Domain, Start: clock.now.Load() + int64(time.Second), End: clock.now.Load() + int64(31*time.Second)}
 	if err := control.reset(again); err == nil {
 		testContext.Fatal("receiver accepted a second failure cohort after the fault")
+	}
+}
+
+// Only the failed SGP handing over, after the fault, a message it read before
+// it is the failover's reorder. A reorder before the fault, or one the
+// alternative delivers, stays nominal and fails the healthy-routes criterion.
+func TestFailoverReorderExcuseIsOnlyTheFailedSGPsLateHandover(testContext *testing.T) {
+	specification := sgpFailureSpecFixture()
+	control, clock, paths, _ := failoverReceiverFixture(testContext, 10*time.Second)
+	if err := control.reset(specification); err != nil {
+		testContext.Fatal(err)
+	}
+	failover := control.routed.failover
+	alternatives := make([]routingTransport, 0, 2)
+	for transport := range failover.alternatives {
+		alternatives = append(alternatives, transport)
+	}
+	if err := control.start(); err != nil {
+		testContext.Fatal(err)
+	}
+	record := func(transport routingTransport, message *m3ua.DataMessage) {
+		testContext.Helper()
+		if outcome := control.recordRouted(transport, message); outcome != recordUnique {
+			testContext.Fatalf("arrival = %v, want unique", outcome)
+		}
+	}
+	clock.now.Store(specification.Clock.Start + int64(time.Second))
+	// Route 8 is frozen on sg-a/p0: a late arrival there before the fault is
+	// a nominal reorder.
+	for _, index := range []uint64{3008, 1008} {
+		transport, message := routedTimedMessage(testContext, paths, specification, index)
+		record(transport, message)
+	}
+	clock.now.Store(sgpFailureInstant(specification))
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		control.mutex.Lock()
+		fault := failover.cohort.fault
+		control.mutex.Unlock()
+		if fault != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			testContext.Fatal("the fault was never recorded")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	clock.now.Add(int64(50 * time.Millisecond))
+	// After the move, a late arrival the alternative delivers is nominal too.
+	for _, index := range []uint64{5008, 4008} {
+		record(alternatives[0], failoverAlternativeMessage(testContext, control, specification, index, alternatives[0]))
+	}
+	// The failed SGP's late handover of an older message is the failover's.
+	transport, older := routedTimedMessage(testContext, paths, specification, 2008)
+	record(transport, older)
+	result := control.result()
+	if result.Failover.Receiver.FailoverReordered != 1 || result.Delivery.Reordered != 2 {
+		testContext.Fatalf("failover reorders %d, nominal reorders %d; want 1 and 2", result.Failover.Receiver.FailoverReordered, result.Delivery.Reordered)
+	}
+	if result.Verdict != verdictInvalid {
+		testContext.Fatalf("receiver verdict %s with nominal reorders", result.Verdict)
 	}
 }
 

@@ -421,6 +421,7 @@ func (control *receiverControl) stop() error {
 		control.stoppedClock, clockErr = control.sharedNowLocked()
 		if clockErr != nil {
 			control.phase = receiverStopped
+			control.stopFailoverLocked()
 			control.stopOverloadLocked()
 			return clockErr
 		}

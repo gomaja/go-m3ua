@@ -552,6 +552,7 @@ func (tracker *failoverTracker) evaluate(inputs failoverInputs) *failoverRecord 
 		notification = 0
 	}
 	record.Criteria = append(record.Criteria,
+		failoverPreFailureCriterion(record, inputs),
 		tracker.selectionCriterionLocked(record, notification),
 		failoverRecoveryCriterion(record, inputs, notification),
 		failoverFullRateCriterion(record, inputs, notification),
@@ -701,7 +702,15 @@ func (tracker *failoverTracker) selectionCriterionLocked(record *failoverRecord,
 	first := *tracker.first
 	first.Latency = first.Returned - notification
 	sender.FirstAlternative = &first
-	criterion.Measured = &first.Latency
+	// The notification is the later of the failed SGP's two association ends,
+	// so the alternative can already be in use when it arrives. The evidence
+	// keeps the signed latency; the judged one is zero.
+	measured := max(first.Latency, 0)
+	criterion.Measured = &measured
+	returned := fmt.Sprintf("returned %d ns after the notification", first.Latency)
+	if first.Latency < 0 {
+		returned = fmt.Sprintf("returned %d ns before the notification, the later of the failed SGP's association ends", -first.Latency)
+	}
 	limit := notification + budget
 	switch {
 	case first.Latency > budget:
@@ -714,8 +723,8 @@ func (tracker *failoverTracker) selectionCriterionLocked(record *failoverRecord,
 		criterion.Detail = fmt.Sprintf("%d of %d affected routes moved to the alternative", sender.RouteSwitch.MovedRoutes, sender.RouteSwitch.AffectedRoutes)
 	default:
 		criterion.Outcome = failoverPass
-		criterion.Detail = fmt.Sprintf("first alternative MTPTransfer started %d ns and returned %d ns after the notification; all %d affected routes moved (per-route median %d ns, max %d ns, bounded below by each route's own send interval); last failed-SGP call started %s and last failed call %s",
-			first.CallStarted-notification, first.Latency, sender.RouteSwitch.AffectedRoutes, sender.RouteSwitch.MedianLatency, sender.RouteSwitch.MaxLatency,
+		criterion.Detail = fmt.Sprintf("first alternative MTPTransfer started %d ns after the notification and %s; all %d affected routes moved (per-route median %d ns, max %d ns, bounded below by each route's own send interval); last failed-SGP call started %s and last failed call %s",
+			first.CallStarted-notification, returned, sender.RouteSwitch.AffectedRoutes, sender.RouteSwitch.MedianLatency, sender.RouteSwitch.MaxLatency,
 			failoverRelative(tracker.lastFailedSGPCall, notification), failoverRelative(tracker.lastFailureCall, notification))
 	}
 	return criterion
@@ -769,6 +778,41 @@ func failoverRecoveryCriterion(record *failoverRecord, inputs failoverInputs, no
 	criterion.Detail = fmt.Sprintf("pre-failure %.1f deliveries per %s over %d bins; surviving SGPs delivered %d in the bin ending %d ns after the notification",
 		recovery.PreFailurePerBin, receiver.Bin, recovery.PreFailureBins, recovery.RecoveryBinSurviving, recovery.Recovery)
 	if recovery.Recovery <= budget {
+		criterion.Outcome = failoverPass
+	}
+	return criterion
+}
+
+// failoverPreFailureCriterion requires the period before the fault to be
+// nominal: every message scheduled in the whole bins that end at least one bin
+// before the fault is delivered, on whatever path and however late. The guard
+// bin leaves out what may still have been in flight to the failed SGP when it
+// failed. Loss before that is not the failure's; without this criterion it
+// would be absorbed into the failed path's accounting and would lower the
+// pre-failure rate the recovery is judged against.
+func failoverPreFailureCriterion(record *failoverRecord, inputs failoverInputs) failoverCriterion {
+	receiver, specification := record.Receiver, inputs.specification
+	criterion := failoverCriterion{Name: "pre_failure_nominal", Outcome: failoverNotMeasured}
+	if receiver.Fault == nil || receiver.Bin <= 0 {
+		criterion.Detail = "no fault or scheduled bins to measure from"
+		return criterion
+	}
+	bins := int((receiver.Fault.Before-specification.Clock.Start)/int64(receiver.Bin)) - 1
+	if bins < 1 || bins > len(receiver.ScheduledBins) {
+		criterion.Detail = fmt.Sprintf("no whole pre-failure bin outside the guard bin (%d)", bins)
+		return criterion
+	}
+	end := time.Duration(bins) * receiver.Bin
+	scheduled := failoverScheduledIn(specification.Rate, specification.Expected, 0, end)
+	var delivered uint64
+	for _, count := range receiver.ScheduledBins[:bins] {
+		delivered += count
+	}
+	missing := int64(scheduled) - int64(delivered)
+	criterion.Measured = &missing
+	criterion.Detail = fmt.Sprintf("%d of %d messages scheduled before offset %s, at least %s before the fault, delivered", delivered, scheduled, end, receiver.Bin)
+	criterion.Outcome = failoverFail
+	if missing == 0 {
 		criterion.Outcome = failoverPass
 	}
 	return criterion
@@ -914,8 +958,8 @@ func (record *runRecord) evaluateFailover() {
 		if record.Failover.Receiver == nil || record.Failover.Receiver.Fault == nil {
 			invalid("the declared fault was not injected")
 		}
-		if record.Delivery.Duplicate != 0 || record.Delivery.Invalid != 0 || record.Delivery.LateAfterStop != 0 {
-			invalid("receiver observed duplicate, invalid or late traffic")
+		if record.Delivery.Duplicate != 0 || record.Delivery.Invalid != 0 || record.Delivery.Reordered != 0 || record.Delivery.LateAfterStop != 0 {
+			invalid("receiver observed duplicate, invalid, reordered, or late traffic")
 		}
 		if record.Verdict == verdictInvalid {
 			return
