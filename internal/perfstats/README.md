@@ -27,20 +27,50 @@ absolute performance and correctness gate passed.
 
 ## Predeclared sustained-backlog decision method
 
-`backlog.go` evaluates the sender-window first-to-last-quarter mean backlog
-change interval `[lower, upper]` without an additional numeric tolerance.
-Missing, non-finite or reversed bounds are indeterminate. Valid intervals are:
+`backlog.go` fits the trend of the sender-window backlog over the measurement
+window and compares the implied growth with a materiality floor.
 
-- `not-growing` when `upper <= 0`;
-- `growing` when `lower > 0`; and
-- `indeterminate` otherwise.
+The rule replaced a first-to-last-quarter mean comparison with zero tolerance
+on 2026-09-23 ([#44](https://github.com/gomaja/go-m3ua/issues/44)). That
+comparison cannot tell a stationary queue from a growing one: the difference
+between two quarter means of a flat but noisy series is positive about half
+the time. Replayed through it, 101 of 200 synthetic loss-free stationary runs
+were classified as growing, and a recorded loss-free 120 s run at 25,000/s
+(3,000,000 deliveries) measured +0.633 messages and failed.
 
-Means of integer samples need not be integers: with two samples per quarter,
-counts `[0, 0]` followed by `[0, 1]` demonstrate a positive mean change of
-0.5 messages. A one-message allowance would incorrectly pass that growth.
-Sampling uncertainty is already represented by the interval width and is not
-grounds for adding an acceptance tolerance. Even a small interval straddling
-zero remains inconclusive; improve the measurement instead of moving the gate.
+Method:
+
+- **Samples.** Observations taken strictly inside the window, each placed at
+  the midpoint of its request bracket with backlog bounds `[lower, upper]`. At
+  least eight are required.
+- **Slope.** The least-squares slope of the per-second backlog. Because the
+  slope is linear in the observations, its exact range over every backlog path
+  inside the brackets is computed first. That range is then widened on each
+  side by the one-sided 99% Newey–West standard error of the slope fitted to
+  the bracket midpoints (Bartlett kernel, lag `floor(4*(n/100)^(2/9))`,
+  `n/(n-2)` correction), so autocorrelated noise does not overstate precision.
+- **Growth bounds.** The slope bounds multiplied by the window length, in
+  messages.
+- **Floor.** The traffic offered in 10 ms: `rate * 0.010`, which is 250
+  messages at 25,000/s and 50 at 5,000/s.
+
+Verdicts:
+
+- `not-growing` when the upper growth bound is at or below the floor;
+- `growing` when the lower growth bound exceeds the floor; and
+- `indeterminate` otherwise, and for missing, non-finite or reversed bounds.
+
+The deliberately under-served control (5,000/s offered, 4,998/s served, about
+240 messages of growth over 120 s against a 50-message floor) remains
+`growing`. The floor applies to growth over the observed window; it is not a
+loss allowance. Nominal runs still require zero loss, and every numerical
+budget is unchanged. The fit weights each observation by its leverage, so a
+transient late spike is not what this rule detects; the latency, loss and
+outstanding-cap gates cover that.
+
+`perfcapacity` recomputes the trend from the sender window's raw observations
+and rejects a reported status or bound those observations contradict. Missing
+or incomplete trend evidence is inconclusive, never a pass.
 
 A passing run additionally requires valid fixture evidence, no detected
 transport stall and zero delivery/submission failures. Counter totals saturate
@@ -48,8 +78,8 @@ rather than overflow. A later drain cannot erase measured-window backlog
 growth. This finite-run comparison covers the observed window only; it does
 not prove indefinite queue stability or replace the remaining acceptance gates.
 
-Historical campaigns evaluated against a one-message threshold must be
-re-evaluated under the corrected rule before claiming current acceptance.
+Historical campaigns evaluated under the quarter-mean or one-message rules must
+be re-evaluated under this rule before claiming current acceptance.
 
 ## Predeclared transport-stall detection
 
@@ -100,7 +130,7 @@ so it reaches the report.
 3. **missing** stall evidence is `inconclusive`: a run whose freedom from
    stalls was never observed is not credited with a sustained rate;
 4. missing or invalid backlog evidence is `inconclusive`;
-5. the predeclared interval rule above.
+5. the predeclared trend rule above.
 
 The threshold must not be tuned after observing results. Raising it so a
 stalled row reports clean, and lowering it so an inconvenient row can be
@@ -140,8 +170,8 @@ never widened into a pass; `no-passing-rate` is a failure.
 The CLI at `internal/cmd/perfcapacity` reads one strict JSON request with the
 search parameters, per-run fixture sender records in execution order, and the
 validation repetitions. Each run is decided by the predeclared backlog and
-stall rules above; a missing or unbounded sender window, an insufficient-sample
-backlog change or absent interval bounds is missing evidence and stays
+stall rules above; a missing or unbounded sender window, or a missing,
+incomplete or insufficient-sample backlog trend, is missing evidence and stays
 inconclusive. Exit statuses are 0 pass, 1 fail, 2 inconclusive, 3 invalid
 input.
 

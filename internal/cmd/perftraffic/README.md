@@ -258,14 +258,13 @@ In the default HTTP-interval mode, the receiver's first-arrival-based `delivery.
 sender-aligned acceptance measurements. Older fixture results must not be mixed
 with these bounds as if the measurement definitions were identical.
 
-The paired `backlog_change` reports first-to-last-quarter mean change bounds
-using only observations strictly within the measurement window and at least
-eight samples. Its `increase-demonstrated`, `nonincrease-demonstrated` and
-`unresolved` statuses describe those sampled quarters only. They are not a
-statistical stationarity test, proof of no intervening backlog, or a capacity
-acceptance rule. Uncertainty is not resolved by adding a percentage allowance.
-The separate `perfcapacity` gate applies the predeclared sustained-backlog
-decision rule; these descriptive quarter comparisons do not replace it.
+The paired `backlog_trend` fits the sustained-backlog trend of the observations
+strictly within the measurement window (at least eight), as described in
+[internal/perfstats](../../perfstats/README.md). Its `status` is `not-growing`,
+`growing` or `indeterminate` against a floor of 10 ms of offered traffic, or
+`insufficient-samples` or `invalid-samples` when no trend can be fitted. The
+raw `samples` are retained so `perfcapacity` can recompute the trend before it
+applies the predeclared decision; the fixture does not decide capacity itself.
 Capacity remains unavailable pending paired-series calibration and the full
 campaign. HTTP observation overhead remains in whole-process
 CPU/allocation accounting; it is not silently subtracted.
@@ -331,7 +330,7 @@ Aligned clocks do not establish sustainable capacity or excuse positive
 backlog growth. The fixture still reports capacity as unavailable. Retain the
 full time series, clock evidence, boundary counts, and post-drain counts; a
 growing trial that drains completely afterward must not become a passing trial.
-Finite first-to-last-quarter observations cannot prove indefinite stability.
+A trend fitted over a finite window cannot prove indefinite stability.
 
 Sender stdout is one JSON object containing the active `phase`, top-level
 `sender`, `receiver`, `verdict`, an optional `error`, and retained `warmup` and
