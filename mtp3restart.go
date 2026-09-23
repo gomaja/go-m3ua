@@ -142,6 +142,10 @@ func beginMTP3Restart(target mtp3RestartTarget, affected ...AffectedDestination)
 			}
 		}
 	}
+	if err := retainMTP3RestartIsolation(target.destinations(), ranges, true); err != nil {
+		registry.mu.Unlock()
+		return nil, err
+	}
 	registry.generation++
 	if registry.generation == 0 {
 		registry.generation++
@@ -155,8 +159,6 @@ func beginMTP3Restart(target mtp3RestartTarget, affected ...AffectedDestination)
 	}
 	registry.mu.Unlock()
 
-	destinations := target.destinations()
-	destinations.setRanges(ranges)
 	handle := &MTP3Restart{target: target, generation: generation}
 	staged := make([]stagedDestination, len(ranges))
 	for index, rangeValue := range ranges {
@@ -204,7 +206,7 @@ func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationN
 	if state.Congestion.reported() {
 		dimensions |= destinationCongestionDimension
 	}
-	return stageMTP3RestartRange(r.target.registry, r.generation, stagedDestination{
+	return stageMTP3RestartRange(r.target.registry, r.target.destinations(), r.generation, stagedDestination{
 		rangeValue: rangeValue,
 		dimensions: dimensions,
 	})
@@ -287,7 +289,7 @@ func affectedDestinationOf(rangeValue DestinationRange) AffectedDestination {
 	}
 }
 
-func stageMTP3RestartRange(registry *mtp3RestartRegistry, generation uint64, staged stagedDestination) error {
+func stageMTP3RestartRange(registry *mtp3RestartRegistry, store *destinations, generation uint64, staged stagedDestination) error {
 	registry.procedureMu.RLock()
 	defer registry.procedureMu.RUnlock()
 	registry.mu.Lock()
@@ -299,25 +301,67 @@ func stageMTP3RestartRange(registry *mtp3RestartRegistry, generation uint64, sta
 	if !restartEpochCovers(epoch, staged.rangeValue) {
 		return ErrMTP3RestartScope
 	}
+	if err := retainMTP3RestartIsolation(store, []DestinationRange{staged.rangeValue}, false); err != nil {
+		return err
+	}
 	epoch.updates = appendRestartUpdate(epoch.updates, staged)
 	return nil
 }
 
 // stageAnyMTP3RestartRangeLocked requires registry.procedureMu to be held for
 // reading, keeping the stage-or-publish decision atomic against Complete.
-func stageAnyMTP3RestartRangeLocked(registry *mtp3RestartRegistry, staged stagedDestination) bool {
+func stageAnyMTP3RestartRangeLocked(registry *mtp3RestartRegistry, store *destinations, staged stagedDestination) (bool, error) {
 	if registry == nil {
-		return false
+		return false, nil
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	for _, epoch := range registry.active {
 		if restartEpochIsolates(epoch, staged.rangeValue) {
+			if err := retainMTP3RestartIsolation(store, []DestinationRange{staged.rangeValue}, false); err != nil {
+				return true, err
+			}
 			epoch.updates = appendRestartUpdate(epoch.updates, staged)
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+// RFC 4666 Sections 4.6 and 4.5.3 require retained restart isolation and
+// recovery knowledge to agree with the SSNM published and later audited.
+func retainMTP3RestartIsolation(store *destinations, ranges []DestinationRange, replace bool) error {
+	if store == nil {
+		return ErrNotEstablished
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	missing := make(map[destinationKey]struct{})
+	for _, rangeValue := range ranges {
+		key := destinationRangeKey(rangeValue)
+		if _, exists := store.state[key]; !exists {
+			missing[key] = struct{}{}
+		}
+	}
+	if refused := len(store.state) + len(missing) - store.recordLimitLocked(); refused > 0 {
+		return store.recordLimitErrorLocked(refused)
+	}
+	if store.state == nil {
+		store.state = make(map[destinationKey]destinationRecord)
+	}
+	for _, rangeValue := range ranges {
+		if _, exists := store.state[destinationRangeKey(rangeValue)]; exists && !replace {
+			continue
+		}
+		rangeValue.State = DestinationNetworkState{Availability: DestinationUnavailable}
+		if !store.storeLocked(destinationRecord{
+			rangeValue: normalizeDestinationRange(rangeValue),
+			dimensions: destinationAvailabilityDimension,
+		}) {
+			return store.recordLimitErrorLocked(1)
+		}
+	}
+	return nil
 }
 
 // appendRestartUpdate replaces a destination's staged state, keeping the
@@ -366,14 +410,24 @@ func completeMTP3Restart(target mtp3RestartTarget, generation uint64) error {
 	outstanding := make([]stagedDestination, 0, len(updates))
 	completed := make([]DestinationRange, 0, len(updates))
 	failure := &SSNMDeliveryError{}
+	var retentionFailure error
 	for _, staged := range updates {
+		if err := retainMTP3RestartIsolation(destinations, []DestinationRange{staged.rangeValue}, false); err != nil {
+			retentionFailure = errors.Join(retentionFailure, err)
+			outstanding = append(outstanding, staged)
+			continue
+		}
 		outcome := target.publish([]stagedDestination{staged}, true, true)
 		mergeSSNMDeliveryOutcome(failure, outcome)
 		if outcome != nil && len(outcome.Failed) > 0 {
 			outstanding = append(outstanding, staged)
 			continue
 		}
-		applyStagedDestination(destinations, staged)
+		if err := applyStagedDestination(destinations, staged); err != nil {
+			retentionFailure = errors.Join(retentionFailure, err)
+			outstanding = append(outstanding, staged)
+			continue
+		}
 		completed = append(completed, staged.rangeValue)
 	}
 
@@ -387,7 +441,10 @@ func completeMTP3Restart(target mtp3RestartTarget, generation uint64) error {
 	if len(outstanding) > 0 {
 		epoch.updates = outstanding
 		epoch.attempted = true
-		return failure
+		if retentionFailure == nil {
+			return failure
+		}
+		return errors.Join(retentionFailure, ssnmDeliveryResult(failure))
 	}
 	delete(registry.active, generation)
 	return nil
@@ -395,9 +452,9 @@ func completeMTP3Restart(target mtp3RestartTarget, generation uint64) error {
 
 // applyStagedDestination records a staged destination's state in the dimensions
 // it actually staged.
-func applyStagedDestination(destinations *destinations, staged stagedDestination) {
+func applyStagedDestination(destinations *destinations, staged stagedDestination) error {
 	if destinations == nil {
-		return
+		return ErrNotEstablished
 	}
 	record := destinationRecord{
 		rangeValue: normalizeDestinationRange(staged.rangeValue),
@@ -408,9 +465,10 @@ func applyStagedDestination(destinations *destinations, staged stagedDestination
 	if destinations.state == nil {
 		destinations.state = make(map[destinationKey]destinationRecord)
 	}
-	// Every key here is already held by the isolation record the restart wrote,
-	// so no record is refused.
-	_ = destinations.storeLocked(record)
+	if !destinations.storeLocked(record) {
+		return destinations.recordLimitErrorLocked(1)
+	}
+	return nil
 }
 
 // mergeSSNMDeliveryOutcome folds one fan-out's outcome into the accumulated one,
