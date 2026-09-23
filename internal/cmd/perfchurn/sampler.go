@@ -518,7 +518,10 @@ func (recorder *sampler) sampleHeap() {
 	} else {
 		sample.AnonHugePagesBytes = huge
 	}
-	if snapshot.LiveHeapBytes == 0 {
+	switch {
+	case snapshot.GCCycles == 0:
+		sample.BeforeFirstGC = true
+	case snapshot.LiveHeapBytes == 0:
 		sample.Error = "live heap unavailable"
 	}
 	recorder.mutex.Lock()

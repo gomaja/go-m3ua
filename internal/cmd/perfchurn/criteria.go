@@ -225,6 +225,10 @@ func splitSeries(record *aspRecord) (steadyHeap, steadyRSS, overloadHeap, overlo
 		rssCounts[sample.Phase]++
 	}
 	for _, sample := range record.HeapSeries {
+		if sample.BeforeFirstGC {
+			// No collection has run, so there is no post-GC live heap yet.
+			continue
+		}
 		window := &steadyHeap
 		if overloadPhase(sample.Phase) {
 			window = &overloadHeap

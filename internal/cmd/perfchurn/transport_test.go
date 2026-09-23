@@ -13,7 +13,7 @@ import (
 
 func TestInterfacesAreReadFromSysfs(t *testing.T) {
 	root := t.TempDir()
-	files := map[string]string{"eth0/mtu": "1500\n", "eth0/tx_queue_len": "1000\n", "eth0/gso_max_size": "65536\n",
+	files := map[string]string{"bonding_masters": "\n", "eth0/mtu": "1500\n", "eth0/tx_queue_len": "1000\n", "eth0/gso_max_size": "65536\n",
 		"eth0/gso_max_segs": "65535\n", "eth0/gro_max_size": "65536\n", "lo/mtu": "65536\n"}
 	for name, content := range files {
 		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(name)), 0o755); err != nil {
@@ -31,6 +31,9 @@ func TestInterfacesAreReadFromSysfs(t *testing.T) {
 	}
 	if lo.MTU != 65536 || lo.GSOMaxSize != -1 || len(lo.Unreadable) != 4 {
 		t.Fatalf("lo %+v: unreadable values must be recorded, not zeroed", lo)
+	}
+	if _, listed := interfaces["bonding_masters"]; listed || len(interfaces) != 2 {
+		t.Fatalf("a sysfs file that is not an interface was listed: %v", interfaces)
 	}
 	if len(readInterfaces(filepath.Join(root, "absent"), nil)) != 0 {
 		t.Fatal("an absent sysfs produced interfaces")

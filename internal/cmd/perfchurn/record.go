@@ -54,6 +54,7 @@ type heapSample struct {
 	AnonHugePagesBytes uint64        `json:"anon_huge_pages_bytes"`
 	Error              string        `json:"error,omitempty"`
 	AuxError           string        `json:"aux_error,omitempty"`
+	BeforeFirstGC      bool          `json:"before_first_gc,omitempty"`
 }
 
 type fdSnapshot struct {

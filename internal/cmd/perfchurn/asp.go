@@ -517,6 +517,7 @@ func (asp *aspRun) warm(record *aspRecord) error {
 	record.Warm.StableAccepted = asp.registeredCount()
 	record.Manifest.Transport = collectTransport(asp.source, asp.endpoint.AssociationStatuses(),
 		func(_, remote int) int { return remote })
+	record.Manifest.Transport.Notes = append(record.Manifest.Transport.Notes, listenerStreamsNote)
 	record.Warm.EstablishMillis = time.Since(started).Milliseconds()
 	for _, association := range asp.stableSet() {
 		record.Manifest.Limits.ObservedChannelCapacities = map[string]int{

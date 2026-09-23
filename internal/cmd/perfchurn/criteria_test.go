@@ -354,6 +354,15 @@ func TestSplitSeriesSeparatesWindowsAndGatesCoverage(t *testing.T) {
 		t.Fatalf("complete window %+v", got)
 	}
 
+	// Before the first collection there is no post-GC live heap to measure:
+	// such a sample is neither a value nor a failed measurement.
+	early := build()
+	early.HeapSeries = append([]heapSample{{Phase: phaseStartup, BeforeFirstGC: true}}, early.HeapSeries...)
+	steadyHeap, _, _, _ = splitSeries(early)
+	if steadyHeap.Errored != 0 || len(steadyHeap.Values) != 4 {
+		t.Fatalf("a sample before the first GC was judged: %+v", steadyHeap)
+	}
+
 	errored := build()
 	errored.RSSSeries[5].Error, errored.RSSSeries[5].RSSBytes = "read status: busy", 0
 	_, steadyRSS, _, _ = splitSeries(errored)

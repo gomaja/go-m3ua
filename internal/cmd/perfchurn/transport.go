@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,7 +19,13 @@ type transportEvidence struct {
 	ConfiguredSACKFrequency uint32                       `json:"configured_sack_frequency"`
 	Associations            []associationEvidence        `json:"associations"`
 	Interfaces              map[string]interfaceEvidence `json:"interfaces"`
+	Notes                   []string                     `json:"notes,omitempty"`
 }
+
+// listenerStreamsNote explains the ASP's outbound stream count: section 1
+// asks for 16 negotiated outbound streams where the fixture supports it, and
+// this one cannot choose them.
+const listenerStreamsNote = "the ASP accepts every association on an m3ua.Listener, which exposes no SCTP_INITMSG setting, so its outbound stream count is the kernel default (10); the dialing peer requests 65,535. Each flow keeps one SLS and therefore one stream"
 
 // associationEvidence joins one Association's library status, its row in
 // /proc/net/sctp/assocs and getsockopt on its own socket.
@@ -76,6 +83,11 @@ func readInterfaces(root string, offloads func(string) (map[string]bool, map[str
 	}
 	interfaces := make(map[string]interfaceEvidence, len(entries))
 	for _, entry := range entries {
+		// Interfaces are directories or symbolic links to their devices;
+		// sysfs keeps a few plain files beside them, such as bonding_masters.
+		if !entry.IsDir() && entry.Type()&fs.ModeSymlink == 0 {
+			continue
+		}
 		name := entry.Name()
 		evidence := interfaceEvidence{}
 		for _, field := range []struct {
