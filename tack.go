@@ -230,7 +230,7 @@ func (c *Association) runTAck(req *pendingRequest, kind requestKind) {
 		default:
 		}
 
-		_, err := c.WriteSignal(req.msg)
+		_, err := c.writeControl(req.msg)
 		c.tack.retryMu.Unlock()
 		if err != nil {
 			// The association is going away; monitor() will act on the write

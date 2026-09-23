@@ -307,7 +307,7 @@ func (c *Association) handleRegistrationRequest(message *messages.RegistrationRe
 			}
 		}
 	}
-	if _, err := c.WriteSignal(messages.NewRegistrationResponse(parameters...)); err != nil {
+	if _, err := c.writeControl(messages.NewRegistrationResponse(parameters...)); err != nil {
 		return err
 	}
 	registry.registrationResponseWritten(c, requests, results)
@@ -376,7 +376,7 @@ func (c *Association) handleDeregistrationRequest(message *messages.Deregistrati
 			}
 		}
 	}
-	if _, err := c.WriteSignal(messages.NewDeregistrationResponse(parameters...)); err != nil {
+	if _, err := c.writeControl(messages.NewDeregistrationResponse(parameters...)); err != nil {
 		return err
 	}
 	registry.deregistrationResponseWritten(c, results)
