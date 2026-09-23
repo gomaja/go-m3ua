@@ -248,6 +248,9 @@ type routedPeerOperations struct {
 	preparation *routingPeerPreparation
 	control     *receiverControl
 	fatal       chan<- error
+	// timedReaderStarted observes the preflight-to-timed handoff; it is nil
+	// outside tests.
+	timedReaderStarted func(index int)
 
 	mutex          sync.Mutex
 	dataController *routingDataPeerController
@@ -272,6 +275,20 @@ func (operations *routedPeerOperations) controlOperations() routingControlOperat
 
 func (operations *routedPeerOperations) dataOperations() routingDataControlOperations {
 	return routingDataControlOperations{Start: operations.startPreflight, Complete: operations.completePreflight}
+}
+
+// handler serves the routing preparation operations under /routing/ beside
+// the receiver's ordinary cohort control.
+func (operations *routedPeerOperations) handler() (http.Handler, error) {
+	routing, err := newRoutingControl(routedPreparationID, operations.controlOperations())
+	if err != nil {
+		return nil, err
+	}
+	routingHandler, err := newRoutingDataControlHandler(routing.handler(), routedPreparationID, operations.dataOperations())
+	if err != nil {
+		return nil, err
+	}
+	return routedControlHandler(operations.control.handler(), routingHandler), nil
 }
 
 func (operations *routedPeerOperations) prepare(ctx context.Context, values []routingTransportDTO) error {
@@ -386,10 +403,19 @@ func (operations *routedPeerOperations) completePreflight(ctx context.Context) (
 	operations.preflightDone = true
 	operations.mutex.Unlock()
 	for index, association := range associations {
-		go readRoutedAssociation(operations.ctx, index, pairs[index].Binding.Peer, association, operations.control, operations.fatal)
+		operations.startTimedReader(index, pairs[index].Binding.Peer, association)
 		operations.control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 	}
 	return receipts, nil
+}
+
+// startTimedReader starts the one timed reader of an association whose
+// preflight reader has been joined.
+func (operations *routedPeerOperations) startTimedReader(index int, transport routingTransport, association routingDataAssociation) {
+	if operations.timedReaderStarted != nil {
+		operations.timedReaderStarted(index)
+	}
+	go readRoutedAssociation(operations.ctx, index, transport, association, operations.control, operations.fatal)
 }
 
 // stop is the sender's request to tear the routed topology down after a
@@ -514,15 +540,11 @@ func runRoutedReceiver(ctx context.Context, config commandConfig) (runRecord, er
 	}
 	fatal := make(chan error, 1)
 	operations := &routedPeerOperations{ctx: lifetime, topology: topology, peers: peers, preparation: preparation, control: control, fatal: fatal}
-	routing, err := newRoutingControl(routedPreparationID, operations.controlOperations())
+	handler, err := operations.handler()
 	if err != nil {
 		return runRecord{}, fmt.Errorf("startup routed control: %w", err)
 	}
-	routingHandler, err := newRoutingDataControlHandler(routing.handler(), routedPreparationID, operations.dataOperations())
-	if err != nil {
-		return runRecord{}, fmt.Errorf("startup routed control: %w", err)
-	}
-	httpServer := &http.Server{Handler: routedControlHandler(control.handler(), routingHandler), ReadHeaderTimeout: 5 * time.Second}
+	httpServer := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	httpFailure := make(chan error, 1)
 	go func() {
 		serveErr := httpServer.Serve(httpListener)
