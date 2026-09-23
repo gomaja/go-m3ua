@@ -338,14 +338,13 @@ In the default HTTP-interval mode, the receiver's first-arrival-based `delivery.
 sender-aligned acceptance measurements. Older fixture results must not be mixed
 with these bounds as if the measurement definitions were identical.
 
-The paired `backlog_change` reports first-to-last-quarter mean change bounds
-using only observations strictly within the measurement window and at least
-eight samples. Its `increase-demonstrated`, `nonincrease-demonstrated` and
-`unresolved` statuses describe those sampled quarters only. They are not a
-statistical stationarity test, proof of no intervening backlog, or a capacity
-acceptance rule. Uncertainty is not resolved by adding a percentage allowance.
-The separate `perfcapacity` gate applies the predeclared sustained-backlog
-decision rule; these descriptive quarter comparisons do not replace it.
+The paired `backlog_trend` fits the sustained-backlog trend of the observations
+strictly within the measurement window (at least eight), as described in
+[internal/perfstats](../../perfstats/README.md). Its `status` is `not-growing`,
+`growing` or `indeterminate` against a floor of 10 ms of offered traffic, or
+`insufficient-samples` or `invalid-samples` when no trend can be fitted. The
+raw `samples` are retained so `perfcapacity` can recompute the trend before it
+applies the predeclared decision; the fixture does not decide capacity itself.
 Capacity remains unavailable pending paired-series calibration and the full
 campaign. HTTP observation overhead remains in whole-process
 CPU/allocation accounting; it is not silently subtracted.
@@ -353,13 +352,18 @@ CPU/allocation accounting; it is not silently subtracted.
 ### Opt-in shared Linux clock
 
 Set `-same-host-clock` on both processes for throughput or bidirectional runs
-on the same controlled Linux host and time namespace. Echo mode rejects this
+on the same controlled Linux host. Echo mode rejects this
 option; its scheduled RTT remains a separate, process-local measurement.
 The default HTTP-interval mode is unchanged, and unsupported or mismatched
 shared-clock configurations fail rather than silently falling back.
 
 Before traffic, both sides compare `CLOCK_MONOTONIC`, kernel boot identity,
-time-namespace identity, and clock resolution. The sender declares a common
+monotonic time-namespace offset, and clock resolution. A time namespace's
+`CLOCK_MONOTONIC` is the boot's clock plus that namespace's monotonic offset
+([time_namespaces(7)](https://man7.org/linux/man-pages/man7/time_namespaces.7.html)),
+so the offset, read from `/proc/self/timens_offsets`, identifies the clock;
+the namespace inode does not, because container runtimes give each container
+its own time namespace. The sender declares a common
 future start and end; the receiver acknowledges that exact window before the
 sender schedules traffic. Missing the start during preparation invalidates the
 run. Both domains are checked again after the run. This is a controlled-host
@@ -387,7 +391,7 @@ therefore exceed the delivery allowance without extending that allowance.
 Go's Linux runtime uses `CLOCK_MONOTONIC` for its monotonic reading
 ([Go 1.25.10 arm64 runtime](https://github.com/golang/go/blob/go1.25.10/src/runtime/sys_linux_arm64.s));
 [`time.Time.Add`](https://pkg.go.dev/time#Time.Add) preserves the local monotonic
-reading used by these watchdogs. Host and time-namespace identity checks remain
+reading used by these watchdogs. Host and monotonic-offset identity checks remain
 mandatory; translating a timestamp does not establish a shared clock domain.
 
 Receiver progress timestamps and unique counters are captured under the same
@@ -411,7 +415,7 @@ Aligned clocks do not establish sustainable capacity or excuse positive
 backlog growth. The fixture still reports capacity as unavailable. Retain the
 full time series, clock evidence, boundary counts, and post-drain counts; a
 growing trial that drains completely afterward must not become a passing trial.
-Finite first-to-last-quarter observations cannot prove indefinite stability.
+A trend fitted over a finite window cannot prove indefinite stability.
 
 Sender stdout is one JSON object containing the active `phase`, top-level
 `sender`, `receiver`, `verdict`, an optional `error`, and retained `warmup` and

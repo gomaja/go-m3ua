@@ -104,10 +104,14 @@ type runEnvironment struct {
 }
 
 type response struct {
-	Decision             string                  `json:"decision"`
-	Environments         []runEnvironment        `json:"environments,omitempty"`
-	SearchStatus         perfstats.SearchStatus  `json:"search_status,omitempty"`
-	SelectedRate         int                     `json:"selected_rate,omitempty"`
+	Decision     string                 `json:"decision"`
+	Environments []runEnvironment       `json:"environments,omitempty"`
+	SearchStatus perfstats.SearchStatus `json:"search_status,omitempty"`
+	SelectedRate int                    `json:"selected_rate,omitempty"`
+	// NextProbeRate is the rate the unfinished search selected for its next
+	// probe, so a campaign driver can run the search one probe at a time
+	// without reimplementing it. It is absent once the search has terminated.
+	NextProbeRate        int                     `json:"next_probe_rate,omitempty"`
 	AggregateOfferedRate uint64                  `json:"aggregate_offered_rate,omitempty"`
 	Probes               []perfstats.ProbeRecord `json:"probes,omitempty"`
 	ProbeDecisions       []probeDecision         `json:"probe_decisions,omitempty"`
@@ -182,6 +186,9 @@ func evaluate(decoded request) (response, error) {
 	}
 	result.SearchStatus = search.Status()
 	result.Probes = search.Probes()
+	if next, running := search.NextRate(); running {
+		result.NextProbeRate = next
+	}
 
 	var repetitionRates []int
 	var repetitionDecisions []perfstats.Decision
@@ -344,23 +351,49 @@ type deliveryEvidence struct {
 }
 
 type senderWindowEvidence struct {
-	Status           *string                `json:"status"`
-	Reason           *string                `json:"reason"`
-	Duration         *time.Duration         `json:"duration_ns"`
-	DeliveredLower   *uint64                `json:"delivered_lower"`
-	DeliveredUpper   *uint64                `json:"delivered_upper"`
-	OutstandingLower *uint64                `json:"outstanding_lower"`
-	OutstandingUpper *uint64                `json:"outstanding_upper"`
-	RateLower        *float64               `json:"rate_lower"`
-	RateUpper        *float64               `json:"rate_upper"`
-	BacklogChange    *backlogChangeEvidence `json:"backlog_change"`
+	Status           *string                 `json:"status"`
+	Reason           *string                 `json:"reason"`
+	Duration         *time.Duration          `json:"duration_ns"`
+	DeliveredLower   *uint64                 `json:"delivered_lower"`
+	DeliveredUpper   *uint64                 `json:"delivered_upper"`
+	OutstandingLower *uint64                 `json:"outstanding_lower"`
+	OutstandingUpper *uint64                 `json:"outstanding_upper"`
+	RateLower        *float64                `json:"rate_lower"`
+	RateUpper        *float64                `json:"rate_upper"`
+	Samples          []backlogSampleEvidence `json:"samples"`
+	BacklogTrend     *backlogTrendEvidence   `json:"backlog_trend"`
 }
 
-type backlogChangeEvidence struct {
-	Status      string   `json:"status"`
-	SampleCount int      `json:"sample_count"`
-	Lower       *float64 `json:"mean_change_lower"`
-	Upper       *float64 `json:"mean_change_upper"`
+type backlogSampleEvidence struct {
+	Before *time.Duration `json:"before_ns"`
+	After  *time.Duration `json:"after_ns"`
+	Lower  *uint64        `json:"backlog_lower"`
+	Upper  *uint64        `json:"backlog_upper"`
+}
+
+type backlogTrendEvidence struct {
+	Status      *string        `json:"status"`
+	SampleCount *int           `json:"sample_count"`
+	Window      *time.Duration `json:"window_ns"`
+	Floor       *float64       `json:"floor"`
+	Lag         *int           `json:"lag"`
+	SlopeLower  *float64       `json:"slope_lower"`
+	SlopeUpper  *float64       `json:"slope_upper"`
+	GrowthLower *float64       `json:"growth_lower"`
+	GrowthUpper *float64       `json:"growth_upper"`
+}
+
+// complete reports whether every trend field is present.
+func (trend *backlogTrendEvidence) complete() bool {
+	return trend.Status != nil && trend.SampleCount != nil && trend.Window != nil && trend.Floor != nil && trend.Lag != nil &&
+		trend.SlopeLower != nil && trend.SlopeUpper != nil && trend.GrowthLower != nil && trend.GrowthUpper != nil
+}
+
+// unavailable reports whether the trend is the producer's zero value, which it
+// emits for a sender window whose accounting is unavailable.
+func (trend *backlogTrendEvidence) unavailable() bool {
+	return trend.complete() && *trend.Status == "" && *trend.SampleCount == 0 && *trend.Window == 0 && *trend.Floor == 0 &&
+		*trend.Lag == 0 && *trend.SlopeLower == 0 && *trend.SlopeUpper == 0 && *trend.GrowthLower == 0 && *trend.GrowthUpper == 0
 }
 
 type sharedClockDomain struct {
@@ -590,9 +623,9 @@ func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, erro
 
 // evidenceFromFixture maps one per-run fixture sender record to the
 // predeclared decision inputs and to the environment the run happened in. A
-// missing or unbounded sender window, an insufficient-sample backlog change,
-// or absent interval bounds is missing evidence: the run is inconclusive,
-// never a pass. It is never an error.
+// missing or unbounded sender window, or a missing, incomplete or
+// insufficient-sample backlog trend, is missing evidence: the run is
+// inconclusive, never a pass. It is never an error.
 //
 // The transport-stall signal and the manifest are required rather than
 // optional. A record without send_duration.max_ns cannot show whether a stall
@@ -689,50 +722,56 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 		}
 	}
 
-	interval, err := backlogIntervalFromWindow(record.SenderWindow)
+	trend, err := backlogTrendFromWindow(record.SenderWindow, *record.Spec.Rate)
 	if err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
-	evidence.Interval = interval
+	evidence.Trend = trend
 	return evidence, identity, nil
 }
 
-func backlogIntervalFromWindow(window *senderWindowEvidence) (*perfstats.BacklogInterval, error) {
-	if window == nil || window.Status == nil || *window.Status != "bounded" || window.BacklogChange == nil {
+// backlogTrendFromWindow recomputes the sustained-backlog trend from the
+// sender window's raw observations and requires the producer's reported trend
+// to agree with it. The decision always uses the recomputed trend, so a
+// producer cannot pass a run by reporting growth bounds its observations do
+// not support. A missing or incomplete trend or observation, or too few or
+// unfittable observations, is missing evidence: the run is inconclusive,
+// never a pass. A reported trend that its own observations contradict is an
+// error.
+func backlogTrendFromWindow(window *senderWindowEvidence, rate uint64) (*perfstats.BacklogTrend, error) {
+	if window == nil || window.Status == nil || *window.Status != "bounded" || window.Duration == nil ||
+		window.BacklogTrend == nil || !window.BacklogTrend.complete() {
 		return nil, nil
 	}
-	change := window.BacklogChange
-	switch change.Status {
-	case "", "insufficient-samples", "increase-demonstrated", "nonincrease-demonstrated", "unresolved":
-	default:
-		return nil, errors.New("unsupported backlog_change status")
-	}
-	if change.SampleCount < 8 {
-		if change.Status == "" || change.Status == "insufficient-samples" {
+	reported := window.BacklogTrend
+	observations := make([]perfstats.BacklogObservation, len(window.Samples))
+	for index, sample := range window.Samples {
+		if sample.Before == nil || sample.After == nil || sample.Lower == nil || sample.Upper == nil {
 			return nil, nil
 		}
-		return nil, errors.New("backlog_change status contradicts its sample count")
+		observations[index] = perfstats.BacklogObservation{Before: *sample.Before, After: *sample.After, Lower: *sample.Lower, Upper: *sample.Upper}
 	}
-	if change.Status == "insufficient-samples" {
-		return nil, errors.New("backlog_change status contradicts its sample count")
+	status, trend := perfstats.DescribeBacklogTrend(observations, *window.Duration, rate)
+	if *reported.Status != status {
+		return nil, errors.New("backlog_trend status contradicts its sender_window samples")
 	}
-	if change.Lower == nil || change.Upper == nil {
+	if *reported.SampleCount != trend.SampleCount || *reported.Window != trend.Window || *reported.Lag != trend.Lag ||
+		!agrees(*reported.Floor, trend.Floor) || !agrees(*reported.SlopeLower, trend.SlopeLower) ||
+		!agrees(*reported.SlopeUpper, trend.SlopeUpper) || !agrees(*reported.GrowthLower, trend.GrowthLower) ||
+		!agrees(*reported.GrowthUpper, trend.GrowthUpper) {
+		return nil, errors.New("backlog_trend bounds contradict its sender_window samples")
+	}
+	if status == perfstats.BacklogTrendInsufficientSamples || status == perfstats.BacklogTrendInvalidSamples {
 		return nil, nil
 	}
-	interval := &perfstats.BacklogInterval{Lower: *change.Lower, Upper: *change.Upper}
-	if !interval.Valid() {
-		return nil, nil
-	}
-	expectedStatus := "unresolved"
-	if interval.Lower > 0 {
-		expectedStatus = "increase-demonstrated"
-	} else if interval.Upper <= 0 {
-		expectedStatus = "nonincrease-demonstrated"
-	}
-	if change.Status != expectedStatus {
-		return nil, errors.New("backlog_change status contradicts its mean-change interval")
-	}
-	return interval, nil
+	return &trend, nil
+}
+
+// agrees compares a reported and a recomputed value to within rounding: the
+// producer may run on another architecture, where the compiler is free to fuse
+// multiply-adds differently.
+func agrees(reported, recomputed float64) bool {
+	return math.Abs(reported-recomputed) <= 1e-9*math.Max(1, math.Abs(recomputed))
 }
 
 type clockIdentity struct {
@@ -1110,9 +1149,8 @@ func validateSharedSenderRecord(record *fixtureEvidence) (*achievedRateBounds, e
 	if *window.Status == "inconclusive" {
 		if window.Reason == nil || *window.Reason == "" || *window.DeliveredLower != 0 || *window.DeliveredUpper != 0 ||
 			*window.OutstandingLower != 0 || *window.OutstandingUpper != 0 || *window.RateLower != 0 || *window.RateUpper != 0 ||
-			record.ValidatedPerSecond == nil || *record.ValidatedPerSecond != 0 || window.BacklogChange == nil ||
-			window.BacklogChange.Status != "" || window.BacklogChange.SampleCount != 0 || window.BacklogChange.Lower == nil ||
-			window.BacklogChange.Upper == nil || *window.BacklogChange.Lower != 0 || *window.BacklogChange.Upper != 0 {
+			record.ValidatedPerSecond == nil || *record.ValidatedPerSecond != 0 || window.BacklogTrend == nil ||
+			!window.BacklogTrend.unavailable() || len(window.Samples) != 0 {
 			return nil, errors.New("inconclusive sender_window does not match unavailable producer accounting")
 		}
 		return nil, nil

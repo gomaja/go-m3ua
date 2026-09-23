@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
 
 // The sampler takes one observation per second and one more just before the
@@ -71,44 +73,26 @@ type windowAccounting struct {
 	RateLower        float64           `json:"rate_lower"`
 	RateUpper        float64           `json:"rate_upper"`
 	Samples          []backlogInterval `json:"samples,omitempty"`
-	BacklogChange    backlogChange     `json:"backlog_change"`
+	BacklogTrend     backlogTrend      `json:"backlog_trend"`
 }
 
-type backlogChange struct {
-	Status          string  `json:"status"`
-	SampleCount     int     `json:"sample_count"`
-	MeanChangeLower float64 `json:"mean_change_lower"`
-	MeanChangeUpper float64 `json:"mean_change_upper"`
+// backlogTrend is the sender-window sustained-backlog evidence: the fitted
+// growth bounds over the measurement window and their verdict against the
+// materiality floor. Status is a perfstats.BacklogVerdict for a fitted trend,
+// or perfstats.BacklogTrendInsufficientSamples or
+// perfstats.BacklogTrendInvalidSamples when no trend could be fitted.
+type backlogTrend struct {
+	Status string `json:"status"`
+	perfstats.BacklogTrend
 }
 
-func describeBacklogChange(samples []backlogInterval, duration time.Duration) backlogChange {
-	measurement := make([]backlogInterval, 0, len(samples))
-	for _, sample := range samples {
-		if sample.Before > 0 && sample.After < duration {
-			measurement = append(measurement, sample)
-		}
+func describeBacklogTrend(samples []backlogInterval, duration time.Duration, rate uint64) backlogTrend {
+	observations := make([]perfstats.BacklogObservation, len(samples))
+	for index, sample := range samples {
+		observations[index] = perfstats.BacklogObservation{Before: sample.Before, After: sample.After, Lower: sample.BacklogLower, Upper: sample.BacklogUpper}
 	}
-	result := backlogChange{Status: "insufficient-samples", SampleCount: len(measurement)}
-	if len(measurement) < 8 {
-		return result
-	}
-	quarter := len(measurement) / 4
-	var firstLower, firstUpper, lastLower, lastUpper uint64
-	for index := 0; index < quarter; index++ {
-		firstLower += measurement[index].BacklogLower
-		firstUpper += measurement[index].BacklogUpper
-		lastLower += measurement[len(measurement)-quarter+index].BacklogLower
-		lastUpper += measurement[len(measurement)-quarter+index].BacklogUpper
-	}
-	result.MeanChangeLower = (float64(lastLower) - float64(firstUpper)) / float64(quarter)
-	result.MeanChangeUpper = (float64(lastUpper) - float64(firstLower)) / float64(quarter)
-	result.Status = "unresolved"
-	if lastLower > firstUpper {
-		result.Status = "increase-demonstrated"
-	} else if lastUpper <= firstLower {
-		result.Status = "nonincrease-demonstrated"
-	}
-	return result
+	status, trend := perfstats.DescribeBacklogTrend(observations, duration, rate)
+	return backlogTrend{Status: status, BacklogTrend: trend}
 }
 
 func (control *receiverControl) progress() receiverProgress {
@@ -204,7 +188,7 @@ func analyzeProgress(specification runSpec, observations []progressObservation) 
 	result.OutstandingUpper = specification.Expected - result.DeliveredLower
 	result.RateLower = float64(result.DeliveredLower) / specification.Duration.Seconds()
 	result.RateUpper = float64(result.DeliveredUpper) / specification.Duration.Seconds()
-	result.BacklogChange = describeBacklogChange(result.Samples, specification.Duration)
+	result.BacklogTrend = describeBacklogTrend(result.Samples, specification.Duration, specification.Rate)
 	return result
 }
 
