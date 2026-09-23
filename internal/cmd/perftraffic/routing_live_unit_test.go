@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -50,7 +51,8 @@ func TestRoutingLiveWriteAtomicRefusesOverwrite(testContext *testing.T) {
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows has no Unix permission bits; Go reports 0666 for every writable file.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		testContext.Fatalf("mode=%#o", info.Mode().Perm())
 	}
 	matches, err := filepath.Glob(filepath.Join(directory, ".routing-live-*"))
