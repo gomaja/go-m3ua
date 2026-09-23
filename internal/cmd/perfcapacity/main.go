@@ -1038,7 +1038,7 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if err := validateCohortVerdict(&cohort, cohort.Sender, cohort.Receiver); err != nil {
 		return fixtureRun{}, err
 	}
-	ssnmVerdict, err := ssnmCohortVerdict(senderSpec.Workload.SSNM, cohort.Sender, cohort.Receiver)
+	ssnmVerdict, err := ssnmCohortVerdict(senderSpec.Workload.SSNM, warmup, cohort.Sender, cohort.Receiver)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("unidirectional ssnm: %w", err)
 	}

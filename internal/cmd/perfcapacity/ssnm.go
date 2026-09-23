@@ -23,7 +23,8 @@ type ssnmSpecEvidence struct {
 // ssnmIdentity is the SSNM part of the workload identity. It is zero for a
 // run without SSNM load, so an SSNM-loaded campaign and its matched
 // no-update control can never be mixed into one capacity decision. The
-// per-run anchor is excluded, like the cohort name and seed.
+// per-run anchor is excluded, like the cohort name and seed, and so is the
+// phase: a failed warm-up ran the same disturbance as the measurement.
 type ssnmIdentity struct {
 	Rate          uint64
 	APCs          int
@@ -43,6 +44,11 @@ type ssnmEvidence struct {
 type ssnmGeneratorEvidence struct {
 	State *string `json:"state"`
 }
+
+const (
+	ssnmPhaseMeasurement = "measurement"
+	ssnmPhaseWarmup      = "warmup"
+)
 
 const (
 	maximumSSNMRate        = 10_000
@@ -77,8 +83,8 @@ func ssnmIdentityFromSpec(spec *fixtureSpec) (ssnmIdentity, error) {
 		return ssnmIdentity{}, errors.New("spec.ssnm pause must be absent or a non-negative offset with a positive duration")
 	case identity.PauseDuration > 0 && identity.Subscribers < 2:
 		return ssnmIdentity{}, errors.New("spec.ssnm pause needs a healthy subscriber")
-	case *declared.Phase != "measurement":
-		return ssnmIdentity{}, errors.New("spec.ssnm phase of a measured run must be measurement")
+	case *declared.Phase != ssnmPhaseMeasurement && *declared.Phase != ssnmPhaseWarmup:
+		return ssnmIdentity{}, errors.New("spec.ssnm phase must be measurement or warmup")
 	case spec.Mode == nil || *spec.Mode != "throughput":
 		return ssnmIdentity{}, errors.New("spec.ssnm load is defined for throughput cohorts only")
 	case spec.SharedClock == nil || spec.SharedClock.Start == nil:
@@ -90,22 +96,40 @@ func ssnmIdentityFromSpec(spec *fixtureSpec) (ssnmIdentity, error) {
 }
 
 // ssnmCohortVerdict validates the SSNM evidence a loaded cohort must carry
-// and returns the sender's SSNM verdict.
-func ssnmCohortVerdict(identity ssnmIdentity, sender, receiver *fixtureEvidence) (string, error) {
+// and returns the sender's SSNM verdict. warmup marks a failed warm-up
+// accepted as probe evidence (cohortPhase): its spec declares the warm-up
+// phase, the SGP record still carries the generator view, and the ASP record
+// carries no SSNM result, because perftraffic judges SSNM for the measurement
+// cohort only. A warm-up therefore contributes no SSNM verdict; it can never
+// pass anyway.
+func ssnmCohortVerdict(identity ssnmIdentity, warmup bool, sender, receiver *fixtureEvidence) (string, error) {
 	if identity == (ssnmIdentity{}) {
 		if sender.SSNM != nil || receiver.SSNM != nil {
 			return "", errors.New("ssnm evidence is present but the spec declares no SSNM load")
 		}
 		return "", nil
 	}
-	if sender.SSNM == nil || sender.SSNM.Verdict == nil || sender.SSNM.Workload == nil {
-		return "", errors.New("SSNM-loaded sender record requires ssnm verdict and workload")
+	phase := ssnmPhaseMeasurement
+	if warmup {
+		phase = ssnmPhaseWarmup
+	}
+	if sender.Spec.SSNM.Phase == nil || *sender.Spec.SSNM.Phase != phase {
+		return "", errors.New("spec.ssnm phase must be the cohort phase")
 	}
 	if receiver.SSNM == nil || receiver.SSNM.Generator == nil || receiver.SSNM.Generator.State == nil {
 		return "", errors.New("SSNM-loaded receiver record requires ssnm generator evidence")
 	}
+	if warmup {
+		if sender.SSNM != nil {
+			return "", errors.New("a warm-up sender record carries no ssnm result")
+		}
+		return "", nil
+	}
+	if sender.SSNM == nil || sender.SSNM.Verdict == nil || sender.SSNM.Workload == nil {
+		return "", errors.New("SSNM-loaded sender record requires ssnm verdict and workload")
+	}
 	recorded, err := ssnmIdentityFromSpec(&fixtureSpec{SSNM: sender.SSNM.Workload, Mode: sender.Spec.Mode, SharedClock: sender.Spec.SharedClock})
-	if err != nil || recorded != identity {
+	if err != nil || recorded != identity || *sender.SSNM.Workload.Phase != phase {
 		return "", errors.New("sender ssnm workload does not match the spec")
 	}
 	switch verdict := *sender.SSNM.Verdict; verdict {

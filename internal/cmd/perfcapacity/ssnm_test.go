@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
 
 // ssnmRunJSON is a complete unidirectional cohort under SSNM load with the
@@ -128,5 +130,115 @@ func TestSSNMDecisionKeepsStallInconclusive(testContext *testing.T) {
 	applySSNMDecision(&failed, "inconclusive", false)
 	if failed.Decision != "fail" || failed.Reason != "data" {
 		testContext.Fatalf("SSNM inconclusive rescued a DATA failure: %+v", failed)
+	}
+}
+
+// setSSNMPhase declares phase in both records' spec.ssnm.
+func setSSNMPhase(cohort map[string]any, phase string) {
+	for _, side := range []string{"sender", "receiver"} {
+		cohort[side].(map[string]any)["spec"].(map[string]any)["ssnm"].(map[string]any)["phase"] = phase
+	}
+}
+
+// ssnmWarmupJSON is an SSNM-loaded warm-up cohort as perftraffic emits it
+// when the warm-up ran its whole schedule and failed from overload: both
+// specs declare the warm-up phase, the SGP record carries its generator view,
+// and the ASP record carries no ssnm result, which perftraffic computes for
+// the measurement cohort only.
+func ssnmWarmupJSON(testContext *testing.T, rate int, mutate func(map[string]any)) string {
+	testContext.Helper()
+	return ssnmRunJSON(testContext, rate, "pass", func(cohort map[string]any) {
+		cohort["phase"] = "warmup"
+		cohort["verdict"] = "invalid"
+		cohort["error"] = warmupOverloadError
+		sender := cohort["sender"].(map[string]any)
+		sender["send_duration"].(map[string]any)["max_ns"] = float64(1_030_000_000)
+		delete(sender, "ssnm")
+		setSSNMPhase(cohort, "warmup")
+		if mutate != nil {
+			mutate(cohort)
+		}
+	})
+}
+
+// An SSNM-loaded warm-up that failed from overload is probe evidence exactly
+// like a no-update one: it bounds the bracket from above.
+func TestSSNMLoadedFailedWarmupBoundsTheSearch(testContext *testing.T) {
+	input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+		ssnmRunJSON(testContext, 10, "pass", nil), ssnmWarmupJSON(testContext, 20, nil))
+	status, decoded := runRequest(testContext, input)
+	if status == invalidInputExitStatus || decoded.Error != "" || len(decoded.ProbeDecisions) != 2 {
+		testContext.Fatalf("SSNM-loaded failed warm-up rejected: status=%d result=%+v", status, decoded)
+	}
+	warmup := decoded.ProbeDecisions[1]
+	if decoded.ProbeDecisions[0].SearchOutcome != perfstats.ProbePassing || warmup.Phase != "warmup" ||
+		warmup.SearchOutcome != perfstats.ProbeNotDemonstrated || warmup.Decision == string(perfstats.Pass) ||
+		decoded.SearchStatus != perfstats.SearchRunning || decoded.NextProbeRate != 15 {
+		testContext.Fatalf("decisions %+v status %q next %d, want the warm-up to bound the bracket at 20 and probe 15",
+			decoded.ProbeDecisions, decoded.SearchStatus, decoded.NextProbeRate)
+	}
+}
+
+// The SSNM phase must be the cohort's own phase, the SGP must have run the
+// generator, and a warm-up carries no SSNM result to fold.
+func TestSSNMLoadedWarmupRequiresMatchingEvidence(testContext *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"measurement phase in a warm-up": func(cohort map[string]any) { setSSNMPhase(cohort, "measurement") },
+		"missing receiver generator":     func(cohort map[string]any) { delete(cohort["receiver"].(map[string]any), "ssnm") },
+		"sender ssnm result": func(cohort map[string]any) {
+			cohort["sender"].(map[string]any)["ssnm"] = map[string]any{"verdict": "pass", "workload": cohort["sender"].(map[string]any)["spec"].(map[string]any)["ssnm"]}
+		},
+		"unknown phase": func(cohort map[string]any) { setSSNMPhase(cohort, "setup") },
+	} {
+		testContext.Run(name, func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+				ssnmRunJSON(testContext, 10, "pass", nil), ssnmWarmupJSON(testContext, 20, mutate))
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "probe 2") {
+				testContext.Fatalf("status %d error %q, want the warm-up rejected as probe 2 evidence", status, decoded.Error)
+			}
+		})
+	}
+}
+
+// A failed SSNM-loaded warm-up keeps the SSNM workload identity, so it cannot
+// join a no-update campaign either.
+func TestSSNMLoadedWarmupCannotMixWithNoUpdateControl(testContext *testing.T) {
+	input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+		unidirectionalRunJSON(testContext, 10, "asp-to-sgp", -1, 0), ssnmWarmupJSON(testContext, 20, nil))
+	status, decoded := runRequest(testContext, input)
+	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "workload") {
+		testContext.Fatalf("SSNM warm-up joined a no-update campaign: status=%d result=%+v", status, decoded)
+	}
+}
+
+// SSNM load is a direct throughput workload: a routed cohort cannot declare
+// it, and an SSNM-loaded campaign cannot absorb routed or routed-direct
+// probes.
+func TestSSNMAndRoutedWorkloadsStayApart(testContext *testing.T) {
+	for _, mode := range []string{"routed", "routed-direct"} {
+		testContext.Run(mode+"/mixed campaign", func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+				ssnmRunJSON(testContext, 10, "pass", nil), routedRunJSON(testContext, 20, mode))
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "workload") {
+				testContext.Fatalf("routed probe joined an SSNM-loaded campaign: status=%d result=%+v", status, decoded)
+			}
+		})
+		testContext.Run(mode+"/declared load", func(testContext *testing.T) {
+			run := ssnmRunJSON(testContext, 10, "pass", func(cohort map[string]any) {
+				for _, side := range []string{"sender", "receiver"} {
+					specification := cohort[side].(map[string]any)["spec"].(map[string]any)
+					specification["mode"] = mode
+					specification["payload"] = "mix"
+				}
+				cohort["sender"].(map[string]any)["manifest"].(map[string]any)["flow_count"] = float64(1000)
+			})
+			input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, run)
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "ssnm") {
+				testContext.Fatalf("%s cohort declaring SSNM load accepted: status=%d result=%+v", mode, status, decoded)
+			}
+		})
 	}
 }

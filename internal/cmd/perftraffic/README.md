@@ -214,7 +214,11 @@ verdicts do not include SSNM, and `sender.ssnm.verdict` is the SSNM result.
 identity, so a campaign cannot mix SSNM-loaded probes with no-update probes or
 with a different SSNM intensity. An SSNM-loaded probe needs `sender.ssnm` and
 `receiver.ssnm.generator`; an SSNM `fail` fails the probe and an SSNM
-`inconclusive` turns a passing probe inconclusive. The matched no-update
+`inconclusive` turns a passing probe inconclusive. A warm-up that failed from
+overload is probe evidence here as in any throughput campaign: its
+`spec.ssnm.phase` is `warmup`, its SGP record carries `ssnm.generator`, and
+its ASP record carries no `ssnm` result, since the SSNM verdict belongs to the
+measurement cohort; it keeps the SSNM workload identity. The matched no-update
 control is the same pair of commands without the SSNM flags on either process:
 
 ```sh
