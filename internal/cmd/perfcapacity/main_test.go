@@ -752,3 +752,25 @@ func TestOneEnvironmentIsStatedOnce(testContext *testing.T) {
 		testContext.Fatalf("environments = %+v, want exactly one", decoded.Environments)
 	}
 }
+
+// A campaign driver runs the search one probe at a time: every partial probe
+// list must name the rate the search selects next, and a terminated search
+// must name none, so the driver cannot run a probe the search did not select.
+func TestPartialSearchNamesItsNextProbeRate(testContext *testing.T) {
+	for completed := 0; completed <= len(capacity37Schedule); completed++ {
+		input := requestJSON(10, capacity37Schedule[:completed], "")
+		status, decoded := runRequest(testContext, input)
+		if status == invalidInputExitStatus {
+			testContext.Fatalf("%d probes: invalid input: %+v", completed, decoded)
+		}
+		if completed < len(capacity37Schedule) {
+			if want := capacity37Schedule[completed].rate; decoded.NextProbeRate != want || decoded.SearchStatus != perfstats.SearchRunning {
+				testContext.Fatalf("%d probes: next_probe_rate %d status %q, want %d while running", completed, decoded.NextProbeRate, decoded.SearchStatus, want)
+			}
+			continue
+		}
+		if decoded.NextProbeRate != 0 || decoded.SearchStatus != perfstats.SearchBracketed || decoded.SelectedRate != 37 {
+			testContext.Fatalf("terminated search: next_probe_rate %d status %q selected %d", decoded.NextProbeRate, decoded.SearchStatus, decoded.SelectedRate)
+		}
+	}
+}

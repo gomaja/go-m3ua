@@ -145,6 +145,12 @@ backlog change or absent interval bounds is missing evidence and stays
 inconclusive. Exit statuses are 0 pass, 1 fail, 2 inconclusive, 3 invalid
 input.
 
+While the search is still running, the response carries `next_probe_rate`,
+the rate the search selected for its next probe. A campaign driver runs one
+probe at that rate, appends it and asks again, so the probe order is always
+the search's own; once the search terminates the field is absent and
+`selected_rate` names the rate for the five validation repetitions.
+
 Each run record must carry `send_duration.max_ns` and a `manifest`. Neither is
 optional: a record without the send-duration maximum cannot show whether a
 stall contaminated it, and a record without a manifest cannot say where it ran

@@ -103,10 +103,14 @@ type runEnvironment struct {
 }
 
 type response struct {
-	Decision             string                  `json:"decision"`
-	Environments         []runEnvironment        `json:"environments,omitempty"`
-	SearchStatus         perfstats.SearchStatus  `json:"search_status,omitempty"`
-	SelectedRate         int                     `json:"selected_rate,omitempty"`
+	Decision     string                 `json:"decision"`
+	Environments []runEnvironment       `json:"environments,omitempty"`
+	SearchStatus perfstats.SearchStatus `json:"search_status,omitempty"`
+	SelectedRate int                    `json:"selected_rate,omitempty"`
+	// NextProbeRate is the rate the unfinished search selected for its next
+	// probe, so a campaign driver can run the search one probe at a time
+	// without reimplementing it. It is absent once the search has terminated.
+	NextProbeRate        int                     `json:"next_probe_rate,omitempty"`
 	AggregateOfferedRate uint64                  `json:"aggregate_offered_rate,omitempty"`
 	Probes               []perfstats.ProbeRecord `json:"probes,omitempty"`
 	ProbeDecisions       []probeDecision         `json:"probe_decisions,omitempty"`
@@ -181,6 +185,9 @@ func evaluate(decoded request) (response, error) {
 	}
 	result.SearchStatus = search.Status()
 	result.Probes = search.Probes()
+	if next, running := search.NextRate(); running {
+		result.NextProbeRate = next
+	}
 
 	var repetitionRates []int
 	var repetitionDecisions []perfstats.Decision
