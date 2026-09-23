@@ -15,8 +15,6 @@ import (
 	"github.com/gomaja/go-m3ua"
 )
 
-const schedulerQuantum = 100 * time.Microsecond
-
 var fixtureHTTPClient = &http.Client{Timeout: 5 * time.Second}
 
 type combinedResult struct {
@@ -518,101 +516,33 @@ func startSendWorkers(associations []*m3ua.Association, config commandConfig, co
 }
 
 func dispatchScheduled(ctx context.Context, config commandConfig, cohort string, duration time.Duration, started time.Time, expected uint64, queues []chan sendJob, counters *senderCounters, tracker *echoTracker, clock *sharedRunClock) {
-	var previousElapsed time.Duration
-	if clock != nil {
-		elapsed, err := clock.elapsed()
-		if err != nil || elapsed >= 0 {
-			counters.abort(expected, errors.New("shared measurement start was missed during preparation"))
+	dispatchOpenLoop(ctx, config.Rate, duration, started, expected, clock, counters, func(index uint64, offset time.Duration, scheduled time.Time) {
+		identity := planMessage(cohort, config.Seed, index, len(queues))
+		if tracker != nil {
+			identity.Kind = kindEchoRequest
+		}
+		job := sendJob{
+			identity: identity, scheduled: scheduled,
+			clock: clock, offset: offset,
+			size: config.Workload.size(index), reverse: config.Direction == directionSGPToASP,
+		}
+		if tracker != nil && !tracker.admit(index, job.scheduled) {
+			counters.capOne()
 			return
 		}
-		previousElapsed = elapsed
-	}
-	for index := uint64(0); index < expected; {
-		if err := ctx.Err(); err != nil {
-			counters.abort(expected-index, err)
-			return
-		}
-		elapsed := time.Since(started)
-		if clock != nil {
-			var err error
-			elapsed, err = clock.elapsed()
-			if err != nil || elapsed < previousElapsed {
-				counters.abort(expected-index, errors.New("shared scheduler clock failed or regressed"))
-				return
-			}
-			previousElapsed = elapsed
-		}
-		due := uint64(0)
-		if elapsed > 0 {
-			due = uint64(elapsed)*config.Rate/uint64(time.Second) + 1
-		}
-		if due > expected {
-			due = expected
-		}
-		if due <= index {
-			timer := time.NewTimer(schedulerQuantum)
+		if counters.reserve() {
 			select {
-			case <-ctx.Done():
-				timer.Stop()
-				counters.abort(expected-index, ctx.Err())
-				return
-			case <-timer.C:
-			}
-			continue
-		}
-		for index < due {
-			if index%256 == 0 {
-				if err := ctx.Err(); err != nil {
-					counters.abort(expected-index, err)
-					return
+			case queues[identity.Association] <- job:
+			default:
+				counters.rejectReservation()
+				if tracker != nil {
+					tracker.fail(index)
 				}
 			}
-			offset := time.Duration(index * uint64(time.Second) / config.Rate)
-			identity := planMessage(cohort, config.Seed, index, len(queues))
-			if tracker != nil {
-				identity.Kind = kindEchoRequest
-			}
-			job := sendJob{
-				identity: identity, scheduled: started.Add(offset),
-				clock: clock, offset: offset,
-				size: config.Workload.size(index), reverse: config.Direction == directionSGPToASP,
-			}
-			counters.schedule()
-			if tracker != nil && !tracker.admit(index, job.scheduled) {
-				counters.capOne()
-				index++
-				continue
-			}
-			if counters.reserve() {
-				select {
-				case queues[identity.Association] <- job:
-				default:
-					counters.rejectReservation()
-					if tracker != nil {
-						tracker.fail(index)
-					}
-				}
-			} else if tracker != nil {
-				tracker.fail(index)
-			}
-			index++
+		} else if tracker != nil {
+			tracker.fail(index)
 		}
-	}
-	if clock != nil {
-		if err := clock.waitUntil(ctx, clock.window.End); err != nil {
-			counters.setFatal(err.Error())
-		}
-		return
-	}
-	remaining := time.Until(started.Add(duration))
-	if remaining > 0 {
-		timer := time.NewTimer(remaining)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-		case <-timer.C:
-		}
-	}
+	})
 }
 
 func (counters *senderCounters) schedule() {
