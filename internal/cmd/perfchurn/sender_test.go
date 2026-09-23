@@ -14,6 +14,7 @@ import (
 type fakeWriter struct {
 	mutex    sync.Mutex
 	accepted []m3ua.DataRequest
+	failed   []m3ua.DataRequest
 	refuse   int
 	failAt   int
 	calls    int
@@ -28,6 +29,8 @@ func (writer *fakeWriter) WriteData(request m3ua.DataRequest) (int, error) {
 		return 0, refusal(m3ua.DataNotSent)
 	}
 	if writer.failAt != 0 && writer.calls == writer.failAt {
+		request.ProtocolData.Data = append([]byte(nil), request.ProtocolData.Data...)
+		writer.failed = append(writer.failed, request)
 		return 0, &m3ua.DataWriteError{Outcome: m3ua.DataSendIndeterminate, Err: errors.New("association ended")}
 	}
 	request.ProtocolData.Data = append([]byte(nil), request.ProtocolData.Data...)
@@ -90,12 +93,24 @@ func TestSenderOffersTheOpenLoopScheduleOnEveryFlow(t *testing.T) {
 			}
 			next[flow]++
 		}
+		// Interleaving is judged on what was offered to each flow: a write that
+		// failed was still that flow's turn, so it counts with the accepted
+		// ones, and the stop may land anywhere in the round, so flows may
+		// differ by one.
+		attempted := append([]uint64(nil), next...)
+		for _, request := range fake.failed {
+			header, err := decodePayload(request.ProtocolData.Data)
+			if err != nil {
+				t.Fatalf("association %d: failed request %v", association, err)
+			}
+			attempted[header.Flow]++
+		}
 		for flow := range next {
 			if next[flow] != result.Sent[flowIndex(association, flow)] {
 				t.Fatalf("association %d flow %d: %d accepted, %d reported", association, flow, next[flow], result.Sent[flowIndex(association, flow)])
 			}
-			if next[flow]+1 < next[0] || next[flow] > next[0]+1 {
-				t.Fatalf("association %d flows are not interleaved: %v", association, next)
+			if attempted[flow]+1 < attempted[0] || attempted[flow] > attempted[0]+1 {
+				t.Fatalf("association %d flows are not interleaved: %v attempted (%v accepted)", association, attempted, next)
 			}
 		}
 	}
