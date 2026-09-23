@@ -75,6 +75,11 @@ type probeDecision struct {
 	Reason                     string                      `json:"reason,omitempty"`
 	Stall                      *perfstats.StallObservation `json:"stall,omitempty"`
 	Directions                 []directionDecision         `json:"directions,omitempty"`
+	// Phase is "warmup" when the probe failed during warm-up and never
+	// reached measurement.
+	Phase string `json:"phase,omitempty"`
+	// SearchOutcome is what the probe contributes to the capacity search.
+	SearchOutcome perfstats.ProbeOutcome `json:"search_outcome,omitempty"`
 }
 
 type directionDecision struct {
@@ -175,12 +180,13 @@ func evaluate(decoded request) (response, error) {
 		if err != nil {
 			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
 		}
-		if err := campaign.add(fixture.identity); err != nil {
+		if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
 			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
 		}
 		decision := decideFixtureRun(fixture, *probe.Rate)
+		decision.SearchOutcome = searchOutcome(decision)
 		result.ProbeDecisions = append(result.ProbeDecisions, decision)
-		if err := search.Record(*probe.Rate, perfstats.ProbeOutcome(decision.Decision)); err != nil {
+		if err := search.Record(*probe.Rate, decision.SearchOutcome); err != nil {
 			return response{}, fmt.Errorf("probe %d: %w", index+1, err)
 		}
 	}
@@ -197,7 +203,7 @@ func evaluate(decoded request) (response, error) {
 		if err != nil {
 			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
 		}
-		if err := campaign.add(fixture.identity); err != nil {
+		if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
 			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
 		}
 		decision := decideFixtureRun(fixture, *repetition.Rate)
@@ -221,11 +227,53 @@ func evaluate(decoded request) (response, error) {
 	return result, nil
 }
 
+// searchOutcome is what one probe decision contributes to the capacity search.
+// An inconclusive probe whose every inconclusive reason is a transport stall
+// or a backlog trend straddling the floor did not demonstrate its rate: near
+// and above capacity those are the expected outcomes, so the rate bounds the
+// bracket from above. Any other inconclusive reason is missing or invalid
+// evidence, which says nothing about the rate and ends the search.
+func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
+	switch perfstats.Decision(decision.Decision) {
+	case perfstats.Pass:
+		return perfstats.ProbePassing
+	case perfstats.Fail:
+		return perfstats.ProbeFailing
+	}
+	// An accepted warm-up already showed that the offered rate was not
+	// sustained (cohortPhase), so whatever else a direction lacks, it can only
+	// fail or be not demonstrated.
+	if decision.Phase == "warmup" {
+		return perfstats.ProbeNotDemonstrated
+	}
+	reasons := []string{decision.Reason}
+	if len(decision.Directions) > 1 {
+		reasons = reasons[:0]
+		for _, direction := range decision.Directions {
+			if perfstats.Decision(direction.Decision) == perfstats.Inconclusive {
+				reasons = append(reasons, direction.Reason)
+			}
+		}
+	}
+	if len(reasons) == 0 {
+		return perfstats.ProbeInconclusive
+	}
+	for _, reason := range reasons {
+		if reason != perfstats.TransportStallReason && reason != perfstats.BacklogUnresolvedReason {
+			return perfstats.ProbeInconclusive
+		}
+	}
+	return perfstats.ProbeNotDemonstrated
+}
+
 func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	forward := perfstats.DecideRun(fixture.forward)
 	result := probeDecision{
 		Rate: rate, Decision: string(forward.Decision), Backlog: string(forward.Backlog),
 		Reason: forward.Reason, Stall: forward.Stall,
+	}
+	if fixture.warmup {
+		result.Phase = "warmup"
 	}
 	if fixture.reverse == nil {
 		if fixture.direction != "" {
@@ -503,6 +551,9 @@ type fixtureRun struct {
 	reverseAchieved      *achievedRateBounds
 	aggregateAchieved    *achievedRateBounds
 	cohortError          bool
+	// warmup marks a probe whose warm-up failed with demonstrated loss or a
+	// stall, so it never reached measurement. It can never pass.
+	warmup bool
 }
 
 type achievedRateBounds struct {
@@ -536,7 +587,14 @@ type campaignIdentity struct {
 	reverseStreams string
 }
 
-func (campaign *campaignIdentity) add(run runIdentity) error {
+// add checks one run against the campaign identity. A failed warm-up ran the
+// campaign workload for its warm-up duration only, so its duration is not part
+// of the comparison; the campaign duration is fixed by the first measurement
+// run. Zero is never a valid measurement duration, so it marks "not yet fixed".
+func (campaign *campaignIdentity) add(run runIdentity, warmup bool) error {
+	if warmup {
+		run.workload.Duration = 0
+	}
 	if !campaign.set {
 		campaign.set = true
 		campaign.workload = run.workload
@@ -544,6 +602,11 @@ func (campaign *campaignIdentity) add(run runIdentity) error {
 		campaign.streams = run.streams
 		campaign.reverseStreams = run.reverseStreams
 		return nil
+	}
+	if campaign.workload.Duration == 0 {
+		campaign.workload.Duration = run.workload.Duration
+	} else if warmup {
+		run.workload.Duration = campaign.workload.Duration
 	}
 	if run.environment.reported.VCSRevision != campaign.environment.reported.VCSRevision {
 		return fmt.Errorf("candidate vcs_revision %q does not match campaign revision %q",
@@ -797,8 +860,9 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if err := json.Unmarshal(raw, &cohort); err != nil {
 		return fixtureRun{}, fmt.Errorf("decode bidirectional cohort: %w", err)
 	}
-	if cohort.Phase == nil || *cohort.Phase != "measurement" {
-		return fixtureRun{}, errors.New("bidirectional cohort phase must be measurement")
+	warmup, err := cohortPhase(&cohort)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
 	}
 	if cohort.Sender == nil || cohort.Receiver == nil || cohort.ReverseSender == nil || cohort.ReverseReceiver == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort requires sender, receiver, reverse_sender and reverse_receiver records")
@@ -911,7 +975,7 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 		forward: forwardEvidence, reverse: &reverseEvidence, identity: forwardIdentity,
 		aggregateOfferedRate: aggregateOffered, forwardAchieved: forwardAchieved,
 		reverseAchieved: reverseAchieved, aggregateAchieved: aggregateAchieved,
-		cohortError: cohort.Error != "",
+		cohortError: cohort.Error != "", warmup: warmup,
 	}, nil
 }
 
@@ -920,8 +984,9 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if err := json.Unmarshal(raw, &cohort); err != nil {
 		return fixtureRun{}, fmt.Errorf("decode unidirectional cohort: %w", err)
 	}
-	if cohort.Phase == nil || *cohort.Phase != "measurement" {
-		return fixtureRun{}, errors.New("unidirectional cohort phase must be measurement")
+	warmup, err := cohortPhase(&cohort)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional cohort: %w", err)
 	}
 	if cohort.Sender == nil || cohort.Receiver == nil {
 		return fixtureRun{}, errors.New("unidirectional cohort requires sender and receiver records")
@@ -970,8 +1035,63 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	}
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
-		forwardAchieved: achieved, cohortError: cohort.Error != "",
+		forwardAchieved: achieved, cohortError: cohort.Error != "", warmup: warmup,
 	}, nil
+}
+
+// warmupOverloadError is the whole error perftraffic reports when a warm-up
+// cohort ran its complete offered schedule and then failed only its own
+// loss-free validity rules. Any other failure — a receiver read failure, a
+// failed control request, a clock or reset error — joins further text or
+// fails before the schedule completes.
+const warmupOverloadError = "warmup did not drain cleanly: cohort is invalid; inspect machine-readable reasons"
+
+// cohortPhase accepts a measurement cohort, or a warm-up cohort whose warm-up
+// failed because the offered rate was not sustained: the cohort ran its whole
+// schedule with no fatal read or control failure, failed only its own validity
+// rules, and shows outstanding-cap refusals, missing deliveries or a stall.
+// That is evidence against the rate. A warm-up that did not fail, or failed
+// for any other reason, says nothing about the rate and is not probe evidence.
+func cohortPhase(cohort *fixtureCohort) (bool, error) {
+	if cohort.Phase == nil {
+		return false, errors.New("phase is required")
+	}
+	switch *cohort.Phase {
+	case "measurement":
+		return false, nil
+	case "warmup":
+	default:
+		return false, errors.New("phase must be measurement or a failed warmup")
+	}
+	if cohort.Verdict == nil || *cohort.Verdict != "invalid" || cohort.Error == "" {
+		return false, errors.New("a warmup cohort is probe evidence only when its warm-up failed")
+	}
+	if cohort.Error != warmupOverloadError {
+		return false, errors.New("a warmup that failed for a reason other than its own validity is not probe evidence")
+	}
+	for _, record := range []*fixtureEvidence{cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver} {
+		if record != nil && record.FatalError != "" {
+			return false, errors.New("a warmup with a fatal read or control failure is not probe evidence")
+		}
+	}
+	overloaded := false
+	for _, record := range []*fixtureEvidence{cohort.Sender, cohort.ReverseSender} {
+		if record == nil {
+			continue
+		}
+		if record.Scheduled == nil || record.Expected == nil || *record.Scheduled != *record.Expected {
+			return false, errors.New("a warmup that did not offer its whole schedule is not probe evidence")
+		}
+		stalled := record.SendDuration != nil && record.SendDuration.Max != nil &&
+			(perfstats.StallObservation{LongestSend: *record.SendDuration.Max}).Stalled()
+		lost := record.Capped != nil && *record.Capped > 0 ||
+			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0
+		overloaded = overloaded || stalled || lost
+	}
+	if !overloaded {
+		return false, errors.New("a failed warmup without demonstrated loss or a stall is not probe evidence")
+	}
+	return true, nil
 }
 
 func sameBidirectionalWorkload(forward, reverse workloadIdentity) bool {

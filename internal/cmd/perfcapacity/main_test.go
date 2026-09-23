@@ -334,14 +334,38 @@ func TestNoPassingRateFails(testContext *testing.T) {
 	}
 }
 
-func TestInconclusiveProbeStopsTheSearch(testContext *testing.T) {
-	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, straddlingRunJSON())
-	status, decoded := runRequest(testContext, input)
-	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" || decoded.SearchStatus != "inconclusive" {
-		testContext.Fatalf("status %d decision %+v, want inconclusive", status, decoded)
+// A probe that did not demonstrate its rate for a rate-related reason (here a
+// backlog trend that cannot be shown not to grow) bounds the bracket from
+// above, and the search continues downward.
+func TestUndemonstratedProbeBoundsTheSearchFromAbove(testContext *testing.T) {
+	for name, run := range map[string]string{"straddling backlog": straddlingRunJSON(), "transport stall": stalledRunJSON()} {
+		testContext.Run(name, func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, run)
+			status, decoded := runRequest(testContext, input)
+			if status == invalidInputExitStatus || decoded.Decision != "inconclusive" || decoded.SearchStatus != perfstats.SearchRunning {
+				testContext.Fatalf("status %d decision %+v, want a running search", status, decoded)
+			}
+			if len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].SearchOutcome != perfstats.ProbeNotDemonstrated ||
+				len(decoded.Probes) != 1 || decoded.Probes[0].Outcome != perfstats.ProbeNotDemonstrated || decoded.NextProbeRate != 5 {
+				testContext.Fatalf("probe %+v next %d, want not-demonstrated at 10 and next probe 5", decoded.ProbeDecisions, decoded.NextProbeRate)
+			}
+		})
 	}
-	if len(decoded.Probes) != 1 {
-		testContext.Fatalf("probes = %+v, want the search to stop after one inconclusive probe", decoded.Probes)
+}
+
+// Missing evidence says nothing about the rate, so it still ends the search.
+func TestEvidenceInconclusiveProbeStopsTheSearch(testContext *testing.T) {
+	noWindow := strings.Replace(passingRunJSON(), ","+singleWindowJSON(-2.5, -0.5), "", 1)
+	if noWindow == passingRunJSON() {
+		testContext.Fatal("fixture did not remove the sender window")
+	}
+	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, noWindow)
+	status, decoded := runRequest(testContext, input)
+	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" || decoded.SearchStatus != perfstats.SearchInconclusive {
+		testContext.Fatalf("status %d decision %+v, want an inconclusive search", status, decoded)
+	}
+	if len(decoded.Probes) != 1 || decoded.Probes[0].Outcome != perfstats.ProbeInconclusive || decoded.NextProbeRate != 0 {
+		testContext.Fatalf("probes = %+v next %d, want the search to stop after one inconclusive probe", decoded.Probes, decoded.NextProbeRate)
 	}
 }
 
