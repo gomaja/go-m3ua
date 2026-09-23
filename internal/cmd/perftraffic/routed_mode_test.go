@@ -175,7 +175,7 @@ func TestRoutingPeerPathsRejectContradictoryReceipts(testContext *testing.T) {
 		}},
 	} {
 		testContext.Run(test.name, func(testContext *testing.T) {
-			owned := cloneRoutingDataLiveReceipts(receipts)
+			owned := cloneRoutingDataReceipts(receipts)
 			if _, err := freezeRoutingPeerPaths(topology, pairs, test.mutate(owned), "preflight", 7); err == nil {
 				testContext.Fatal("contradictory receipts froze a receiver path map")
 			}
