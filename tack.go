@@ -344,6 +344,10 @@ func (acknowledgement pendingTAckAcknowledgement) complete() {
 // waiter blocked. A state handler can then close traffic gates and drain writes
 // admitted before the Ack before calling complete.
 func (c *Association) claimTAckAcknowledgement(kind requestKind, acknowledged *params.Param) pendingTAckAcknowledgement {
+	return c.claimTAckAcknowledgementForScope(kind, acknowledged, acknowledged)
+}
+
+func (c *Association) claimTAckAcknowledgementForScope(kind requestKind, acknowledged, wireRoutingContext *params.Param) pendingTAckAcknowledgement {
 	if c.tack == nil {
 		return pendingTAckAcknowledgement{}
 	}
@@ -388,6 +392,9 @@ func (c *Association) claimTAckAcknowledgement(kind requestKind, acknowledged *p
 	}
 	if result.solicited {
 		c.recordASPTMAcknowledgementLocked(kind, acknowledged)
+		if wireRoutingContext == nil {
+			c.recordASPTMAcknowledgementLocked(kind, nil)
+		}
 	}
 	return result
 }
@@ -521,12 +528,19 @@ func (c *Association) rejectStaleASPTMAck(kind requestKind) bool {
 // protocol provides no request identifier that could distinguish its Ack from
 // an older retransmission's Ack.
 func (c *Association) isRepeatedASPTMAcknowledgement(kind requestKind, acknowledged *params.Param) bool {
+	return c.isRepeatedASPTMAcknowledgementForScope(kind, acknowledged, acknowledged)
+}
+
+func (c *Association) isRepeatedASPTMAcknowledgementForScope(kind requestKind, acknowledged, wireRoutingContext *params.Param) bool {
 	if c.tack == nil {
 		return false
 	}
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
 	for _, request := range c.pendingRequestsLocked(kind) {
+		if kind == requestAspInactive && wireRoutingContext == nil {
+			return false
+		}
 		if acknowledged == nil {
 			if request.routingContextOmitted || request.routingContexts == nil {
 				return false
@@ -545,6 +559,9 @@ func (c *Association) isRepeatedASPTMAcknowledgement(kind requestKind, acknowled
 	scope := c.tack.acknowledgedASPTM[kind]
 	if scope == nil {
 		return false
+	}
+	if wireRoutingContext == nil && scope.routingContextOmitted {
+		return true
 	}
 	if acknowledged == nil {
 		return scope.routingContextOmitted

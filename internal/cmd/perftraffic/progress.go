@@ -23,11 +23,12 @@ const (
 )
 
 type receiverProgress struct {
-	Spec       runSpec        `json:"spec"`
-	Generation uint64         `json:"generation"`
-	Phase      receiverPhase  `json:"phase"`
-	Delivery   ledgerSnapshot `json:"delivery"`
-	FatalError string         `json:"fatal_error,omitempty"`
+	Spec       runSpec              `json:"spec"`
+	Generation uint64               `json:"generation"`
+	Phase      receiverPhase        `json:"phase"`
+	Delivery   ledgerSnapshot       `json:"delivery"`
+	FatalError string               `json:"fatal_error,omitempty"`
+	Clock      *sharedClockSnapshot `json:"shared_clock,omitempty"`
 }
 
 func stopFailedProgress(baseURL string, specification runSpec, observation progressObservation, cause error) (runRecord, runRecord, error) {
@@ -44,10 +45,11 @@ func stopFailedProgress(baseURL string, specification runSpec, observation progr
 }
 
 type progressObservation struct {
-	Before   time.Duration     `json:"before_ns"`
-	After    time.Duration     `json:"after_ns"`
-	Snapshot *receiverProgress `json:"snapshot,omitempty"`
-	Error    string            `json:"error,omitempty"`
+	Before   time.Duration       `json:"before_ns"`
+	After    time.Duration       `json:"after_ns"`
+	Snapshot *receiverProgress   `json:"snapshot,omitempty"`
+	Error    string              `json:"error,omitempty"`
+	Clock    *sharedClockRequest `json:"shared_clock_request,omitempty"`
 }
 
 type backlogInterval struct {
@@ -112,9 +114,17 @@ func describeBacklogChange(samples []backlogInterval, duration time.Duration) ba
 func (control *receiverControl) progress() receiverProgress {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
-	result := receiverProgress{Spec: control.spec, Generation: control.generation, Phase: control.phase, FatalError: control.fatal}
+	result := receiverProgress{Spec: copyRunSpec(control.spec), Generation: control.generation, Phase: control.phase, FatalError: control.fatal}
 	if control.ledger != nil {
 		result.Delivery = control.ledger.snapshot()
+	}
+	if control.spec.Clock != nil {
+		now, err := control.sharedNowLocked()
+		if err != nil {
+			result.FatalError = err.Error()
+		} else {
+			result.Clock = &sharedClockSnapshot{Domain: control.spec.Clock.Domain, Captured: now, MeasurementLower: control.measurementLower, MeasurementUpper: control.measurementUpper}
+		}
 	}
 	return result
 }
@@ -130,6 +140,9 @@ func offeredAt(specification runSpec, elapsed time.Duration) uint64 {
 }
 
 func analyzeProgress(specification runSpec, observations []progressObservation) windowAccounting {
+	if specification.Clock != nil {
+		return analyzeSharedProgress(specification, observations)
+	}
 	unavailable := func(reason string) windowAccounting {
 		return windowAccounting{Status: verdictInconclusive, Reason: reason, Duration: specification.Duration}
 	}
@@ -153,7 +166,7 @@ func analyzeProgress(specification runSpec, observations []progressObservation) 
 			return unavailable("progress request failed or returned no snapshot")
 		}
 		snapshot := observation.Snapshot
-		if snapshot.Spec != specification || snapshot.Generation != initial.Snapshot.Generation || snapshot.Phase != receiverMeasuring {
+		if !sameRunSpec(snapshot.Spec, specification) || snapshot.Generation != initial.Snapshot.Generation || snapshot.Phase != receiverMeasuring {
 			return unavailable("progress cohort, generation or phase mismatch")
 		}
 		if observation.Before < previousAfter || observation.After < observation.Before || index > 0 && observation.Before < 0 {
@@ -243,12 +256,34 @@ func observeProgress(ctx context.Context, started time.Time, baseURL string) pro
 }
 
 func sampleProgress(ctx context.Context, started time.Time, duration time.Duration, baseURL string) <-chan []progressObservation {
+	return sampleSharedProgress(ctx, started, duration, baseURL, nil)
+}
+
+func sampleSharedProgress(ctx context.Context, started time.Time, duration time.Duration, baseURL string, clock *sharedRunClock) <-chan []progressObservation {
 	done := make(chan []progressObservation, 1)
 	go func() {
 		offsets := progressOffsets(duration)
 		observations := make([]progressObservation, 0, len(offsets))
 		defer func() { done <- observations }()
 		for _, offset := range offsets {
+			if clock != nil {
+				if err := clock.waitUntil(ctx, clock.window.Start+int64(offset)); err != nil {
+					observations = append(observations, progressObservation{Error: err.Error()})
+					return
+				}
+				elapsed, err := clock.elapsed()
+				if err != nil {
+					observations = append(observations, progressObservation{Error: err.Error()})
+					return
+				}
+				if elapsed >= duration {
+					return
+				}
+				requestContext, cancel := context.WithTimeout(ctx, progressRequestTimeout)
+				observations = append(observations, observeSharedProgress(requestContext, started, baseURL, clock))
+				cancel()
+				continue
+			}
 			timer := time.NewTimer(max(time.Until(started.Add(offset)), 0))
 			select {
 			case <-ctx.Done():
@@ -259,7 +294,7 @@ func sampleProgress(ctx context.Context, started time.Time, duration time.Durati
 					return
 				}
 				requestContext, cancel := context.WithTimeout(ctx, progressRequestTimeout)
-				observation := observeProgress(requestContext, started, baseURL)
+				observation := observeSharedProgress(requestContext, started, baseURL, clock)
 				cancel()
 				observations = append(observations, observation)
 			}
