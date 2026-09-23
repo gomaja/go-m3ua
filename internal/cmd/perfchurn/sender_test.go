@@ -68,8 +68,17 @@ func TestSenderOffersTheOpenLoopScheduleOnEveryFlow(t *testing.T) {
 	if result.Scheduled < rate/2*9/10 || result.Scheduled > rate/2*12/10 {
 		t.Fatalf("scheduled %d in about 500 ms at %d/s", result.Scheduled, rate)
 	}
-	if sent+result.Errors+scheduleTolerance(result.Scheduled, rate) < result.Scheduled || sent > result.Scheduled {
-		t.Fatalf("sent %d with %d errors against %d scheduled", sent, result.Errors, result.Scheduled)
+	// scheduleTolerance is the campaign's criterion, judged on its dedicated
+	// host. This test shares a runner with every other package, and a runner
+	// that holds a sender goroutine off the CPU when stop is called leaves
+	// that long of the schedule unsent: Windows runners have missed by 13 to
+	// 20 ms against the 10 ms the criterion allows. testRunnerJitter absorbs
+	// that, while a sender that fell behind its schedule rather than being
+	// stopped mid-wake would still miss by far more.
+	const testRunnerJitter = 50 * time.Millisecond
+	allowance := scheduleTolerance(result.Scheduled, rate) + uint64(rate*testRunnerJitter.Seconds())
+	if sent+result.Errors+allowance < result.Scheduled || sent > result.Scheduled {
+		t.Fatalf("sent %d with %d errors against %d scheduled (allowance %d)", sent, result.Errors, result.Scheduled, allowance)
 	}
 	if result.Refused != 5 || result.Errors != 1 || result.Rate != rate || result.Workload != workloadMix {
 		t.Fatalf("result refused %d errors %d rate %v workload %s", result.Refused, result.Errors, result.Rate, result.Workload)
