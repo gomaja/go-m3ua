@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"reflect"
 	"sort"
@@ -490,20 +491,32 @@ func BenchmarkMTPRouteStatus(b *testing.B) {
 	}
 }
 
-func measureMTPRouteStatuses(tb testing.TB, endpoint *Endpoint, runs int) time.Duration {
+// fastestMTPRouteStatuses returns the fastest of up to runs calls, stopping
+// early once the calls have taken budget in total. The fastest call is the one
+// least disturbed by scheduling and garbage collection, which is what a growth
+// ratio between two small timings needs; the budget keeps a return to the old
+// cubic cost from turning into a test timeout rather than a failure.
+func fastestMTPRouteStatuses(tb testing.TB, endpoint *Endpoint, runs int, budget time.Duration) time.Duration {
 	tb.Helper()
 	_ = endpoint.MTPRouteStatuses() // warm-up
-	start := time.Now()
-	for i := 0; i < runs; i++ {
+	fastest := time.Duration(math.MaxInt64)
+	var total time.Duration
+	for run := 0; run < runs && total < budget; run++ {
+		start := time.Now()
 		_ = endpoint.MTPRouteStatuses()
+		elapsed := time.Since(start)
+		total += elapsed
+		if elapsed < fastest {
+			fastest = elapsed
+		}
 	}
-	return time.Since(start) / time.Duration(runs)
+	return fastest
 }
 
 // TestMTPRouteStatusesScalesWithRouteCount is the failing-first scaling gate
 // for issue #111. On the pre-fix O(routes) x O(derived) x O(routes)
-// implementation, 1,000 routes measured ~10.1s per call (~30s for the 3 runs
-// below), which blows both the absolute ceiling and the growth-ratio check.
+// implementation, 1,000 routes measured ~10.1s per call, which blows both the
+// absolute ceiling and the growth-ratio check.
 // After the fix both are single-digit milliseconds.
 func TestMTPRouteStatusesScalesWithRouteCount(t *testing.T) {
 	if testing.Short() {
@@ -511,23 +524,23 @@ func TestMTPRouteStatusesScalesWithRouteCount(t *testing.T) {
 	}
 
 	smallEndpoint, _ := buildMTPRouteStatusPerfFixture(t, 250)
-	smallElapsed := measureMTPRouteStatuses(t, smallEndpoint, 5)
+	smallElapsed := fastestMTPRouteStatuses(t, smallEndpoint, 20, time.Second)
 
 	largeEndpoint, _ := buildMTPRouteStatusPerfFixture(t, 1000)
-	largeElapsed := measureMTPRouteStatuses(t, largeEndpoint, 3)
+	largeElapsed := fastestMTPRouteStatuses(t, largeEndpoint, 20, time.Second)
 
-	t.Logf("MTPRouteStatuses: 250 routes ~%s/call, 1,000 routes ~%s/call", smallElapsed, largeElapsed)
+	t.Logf("MTPRouteStatuses fastest call: 250 routes %s, 1,000 routes %s", smallElapsed, largeElapsed)
 
 	const ceiling = 250 * time.Millisecond
 	if largeElapsed > ceiling {
-		t.Fatalf("MTPRouteStatuses over 1,000 routes averaged %s/call, want under %s", largeElapsed, ceiling)
+		t.Fatalf("MTPRouteStatuses over 1,000 routes took %s at its fastest, want under %s", largeElapsed, ceiling)
 	}
 
-	// 1,000 routes is 4x 250 routes. Linear or n*log(n) growth stays well
-	// under an order of magnitude; cubic growth (the historical defect) is
-	// roughly 64x. The slack keeps this from flaking under CI jitter without
-	// letting a quadratic or cubic regression back in unnoticed.
-	const maxGrowth = 16.0
+	// 1,000 routes is 4x 250 routes: linear or n*log(n) growth is about 4-5x,
+	// quadratic about 16x and cubic (the historical defect) about 64x. Taking
+	// the fastest of repeated calls keeps jitter out of the ratio, so the limit
+	// can sit below quadratic.
+	const maxGrowth = 10.0
 	if smallElapsed > 0 {
 		growth := float64(largeElapsed) / float64(smallElapsed)
 		if growth > maxGrowth {
