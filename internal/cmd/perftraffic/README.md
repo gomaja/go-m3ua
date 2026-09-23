@@ -203,12 +203,17 @@ scheduling interval and at least 100 ms, after its schedule); otherwise `pass`.
 library's close cause, which is also written to stderr as an
 `ssnm_diagnostic` line, together with the subscribers' progress when they close.
 
-The SGP installs a write deadline spanning the generator on every association:
-go-sctp's `SCTPWrite` reports a full send buffer as EAGAIN unless a deadline is
-set, and the library closes an association whose mandatory SSNM write fails, so
-without it a slow ASP would tear the association down instead of showing up as
-generator lag. Existing fields keep their meaning: the DATA
-verdicts do not include SSNM, and `sender.ssnm.verdict` is the SSNM result.
+The SGP sets no write deadline on its associations. Destination state
+publications are writes the library makes on its own behalf, so when the ASP
+falls behind and the SCTP send buffer fills, each one waits for space for up to
+`AssociationConfig.ControlWriteTimeout`, which the fixture leaves at the library
+default (`DefaultControlWriteTimeout`, 5 s): a slow ASP shows up as generator
+lag and report duration. Only a wait longer than that closes the association
+with `ErrControlWriteTimeout`, which `association_errors` then names. A socket
+write deadline would replace that bound with its own and close the association
+on any library write once it passed. Existing fields keep their meaning: the
+DATA verdicts do not include SSNM, and `sender.ssnm.verdict` is the SSNM
+result.
 
 **Capacity comparison.** `perfcapacity` reads `spec.ssnm` into the workload
 identity, so a campaign cannot mix SSNM-loaded probes with no-update probes or

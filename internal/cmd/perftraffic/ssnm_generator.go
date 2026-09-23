@@ -17,11 +17,6 @@ type ssnmReporter interface {
 	ReportDestinationAvailability(request m3ua.DestinationAvailabilityRequest) error
 }
 
-// ssnmDeadlineSetter is the part of an SGP Association the generator needs.
-type ssnmDeadlineSetter interface {
-	SetWriteDeadline(deadline time.Time) error
-}
-
 const (
 	ssnmGeneratorIdle     = "idle"
 	ssnmGeneratorRunning  = "running"
@@ -55,20 +50,14 @@ type ssnmGenerator struct {
 
 	mutex    sync.Mutex
 	reporter ssnmReporter
-	// associations carry the fan-out. go-sctp's SCTPWrite fails a full send
-	// buffer with EAGAIN unless a write deadline is installed, and the library
-	// closes an association whose mandatory SSNM write fails, so the
-	// generator installs one spanning its horizon: a slow ASP then shows up as
-	// generator lag rather than as a torn-down association.
-	associations []ssnmDeadlineSetter
-	state        string
-	reason       string
-	preload      *ssnmPreloadRecord
-	anchor       int64
-	end          int64
-	stopAt       int64
-	started      bool
-	done         chan struct{}
+	state    string
+	reason   string
+	preload  *ssnmPreloadRecord
+	anchor   int64
+	end      int64
+	stopAt   int64
+	started  bool
+	done     chan struct{}
 	// reports, completions and statuses are indexed by generator message.
 	reports        []int64
 	completions    []int64
@@ -104,35 +93,6 @@ func newSSNMGenerator(ctx context.Context, config commandConfig, clock measureme
 		state:        ssnmGeneratorIdle,
 		done:         make(chan struct{}),
 	}
-}
-
-func (generator *ssnmGenerator) addAssociation(association ssnmDeadlineSetter) {
-	if generator == nil {
-		return
-	}
-	generator.mutex.Lock()
-	defer generator.mutex.Unlock()
-	generator.associations = append(generator.associations, association)
-}
-
-// installWriteDeadlines gives every fan-out association a write deadline at
-// the shared-clock instant target, translated to a Go deadline from one
-// shared read.
-func (generator *ssnmGenerator) installWriteDeadlines(target int64) error {
-	now, err := generator.clock.Now()
-	if err != nil {
-		return err
-	}
-	deadline := time.Now().Add(time.Duration(target-now) + time.Second)
-	generator.mutex.Lock()
-	associations := append([]ssnmDeadlineSetter(nil), generator.associations...)
-	generator.mutex.Unlock()
-	for _, association := range associations {
-		if err := association.SetWriteDeadline(deadline); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (generator *ssnmGenerator) setReporter(reporter ssnmReporter) {
@@ -205,13 +165,7 @@ func (generator *ssnmGenerator) begin() {
 	}
 	generator.started = true
 	generator.state = ssnmGeneratorRunning
-	stopAt := generator.stopAt
 	generator.mutex.Unlock()
-	if err := generator.installWriteDeadlines(stopAt); err != nil {
-		generator.stop(ssnmGeneratorStopped, "install write deadlines: "+err.Error())
-		close(generator.done)
-		return
-	}
 	go generator.run()
 }
 
@@ -232,9 +186,6 @@ func (generator *ssnmGenerator) preloadStore() error {
 		return errors.New("SGP endpoint is not ready")
 	}
 	started, err := generator.clock.Now()
-	if err == nil {
-		err = generator.installWriteDeadlines(started + int64(ssnmGeneratorHorizon))
-	}
 	if err != nil {
 		generator.finishPreload(record, 0, err)
 		return err
