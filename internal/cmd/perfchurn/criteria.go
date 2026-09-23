@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 )
@@ -87,6 +89,9 @@ func evaluateRetention(baseline, sample retainedSample, stable int) (bool, []str
 
 func resourceFailures(baseline, sample retainedSample, stable int) []string {
 	var failures []string
+	if sample.LiveSubscriptions != subscriberCount {
+		failures = append(failures, fmt.Sprintf("live subscriptions %d, want %d", sample.LiveSubscriptions, subscriberCount))
+	}
 	if sample.Goroutines != baseline.Goroutines {
 		failures = append(failures, fmt.Sprintf("goroutines %d, baseline %d", sample.Goroutines, baseline.Goroutines))
 	}
@@ -133,11 +138,14 @@ func evaluateRun(record *aspRecord) {
 	}
 	steadyHeap, steadyRSS, overloadHeap, overloadRSS := splitSeries(record)
 	record.Criteria = append(record.Criteria,
-		evaluateCeiling("f8.steady-heap", "F8", "steady state: Go live heap after GC at most 256 MiB (10 s samples, every non-overload phase)", steadyHeap, steadyLiveHeapLimit),
-		evaluateCeiling("f8.steady-rss", "F8", "steady state: library-process RSS at most 512 MiB (1 s samples, every non-overload phase)", steadyRSS, steadyRSSLimit),
-		evaluateCeiling("f8.overload-heap", "F8", "bounded overload/full queues: live heap at most 512 MiB", overloadHeap, overloadLiveHeapLimit),
-		evaluateCeiling("f8.overload-rss", "F8", "bounded overload/full queues: RSS at most 1 GiB", overloadRSS, overloadRSSLimit),
+		contractLoadCriterion(record),
+		evaluateWindow("f8.steady-heap", "F8", "steady state: Go live heap after GC at most 256 MiB (10 s samples, every non-overload phase)", steadyHeap, steadyLiveHeapLimit),
+		evaluateWindow("f8.steady-rss", "F8", "steady state: library-process RSS at most 512 MiB (1 s samples, every non-overload phase)", steadyRSS, steadyRSSLimit),
+		evaluateWindow("f8.overload-heap", "F8", "bounded overload/full queues: live heap at most 512 MiB", overloadHeap, overloadLiveHeapLimit),
+		evaluateWindow("f8.overload-rss", "F8", "bounded overload/full queues: RSS at most 1 GiB", overloadRSS, overloadRSSLimit),
 		overloadBoundsCriterion(record),
+		postOverloadCriterion(record),
+		subscriptionsCriterion(record),
 	)
 	finals := make([]uint64, len(record.Blocks))
 	for index, block := range record.Blocks {
@@ -145,11 +153,12 @@ func evaluateRun(record *aspRecord) {
 	}
 	record.Criteria = append(record.Criteria,
 		evaluateFinalBlocks(record.BaselineFinal.LiveHeapBytes, finals, requiredBlocks, finalBlocksChecked),
-		perBlockCriterion(record, "f8.retained-resources", "library-owned descriptors and goroutines return to baseline counts after every block",
+		perBlockCriterion(record, "f8.retained-resources", "library-owned descriptors and goroutines return to baseline counts after every block, with all 8 subscriptions live",
 			func(sample retainedSample) []string {
 				var failures []string
 				for _, failure := range resourceFailures(record.BaselineFinal, sample, stableAssociations) {
-					if strings.HasPrefix(failure, "goroutines") || strings.HasPrefix(failure, "descriptors") {
+					if strings.HasPrefix(failure, "goroutines") || strings.HasPrefix(failure, "descriptors") ||
+						strings.HasPrefix(failure, "live subscriptions") {
 						failures = append(failures, failure)
 					}
 				}
@@ -187,28 +196,91 @@ func verdictFor(record *aspRecord) string {
 	return verdict
 }
 
-func splitSeries(record *aspRecord) (steadyHeap, steadyRSS, overloadHeap, overloadRSS []uint64) {
-	for _, sample := range record.HeapSeries {
-		if sample.Error != "" {
-			continue
-		}
-		if overloadPhase(sample.Phase) {
-			overloadHeap = append(overloadHeap, sample.LiveHeapBytes)
-		} else {
-			steadyHeap = append(steadyHeap, sample.LiveHeapBytes)
-		}
-	}
+// seriesWindow is one gated window of a sampled series: the values of every
+// sample that could be taken, how many could not, and every phase whose
+// coverage fell short of its sampling interval.
+type seriesWindow struct {
+	Values  []uint64
+	Errored int
+	Gaps    []string
+}
+
+// splitSeries divides the RSS and live-heap series into the steady window
+// (every non-overload phase) and the overload window. An errored sample is
+// counted, not dropped silently, and each phase must hold at least one sample
+// per sampling interval, less one for the phase boundaries: an unsampled
+// stretch could hide the peak a ceiling exists to catch.
+func splitSeries(record *aspRecord) (steadyHeap, steadyRSS, overloadHeap, overloadRSS seriesWindow) {
+	rssCounts, heapCounts := map[string]int{}, map[string]int{}
 	for _, sample := range record.RSSSeries {
+		window := &steadyRSS
+		if overloadPhase(sample.Phase) {
+			window = &overloadRSS
+		}
 		if sample.Error != "" {
+			window.Errored++
 			continue
 		}
+		window.Values = append(window.Values, sample.RSSBytes)
+		rssCounts[sample.Phase]++
+	}
+	for _, sample := range record.HeapSeries {
+		window := &steadyHeap
 		if overloadPhase(sample.Phase) {
-			overloadRSS = append(overloadRSS, sample.RSSBytes)
-		} else {
-			steadyRSS = append(steadyRSS, sample.RSSBytes)
+			window = &overloadHeap
+		}
+		if sample.Error != "" || sample.LiveHeapBytes == 0 {
+			window.Errored++
+			continue
+		}
+		window.Values = append(window.Values, sample.LiveHeapBytes)
+		heapCounts[sample.Phase]++
+	}
+	for _, mark := range record.Phases {
+		duration := time.Duration(mark.EndMillis-mark.StartMillis) * time.Millisecond
+		rssWindow, heapWindow := &steadyRSS, &steadyHeap
+		if overloadPhase(mark.Name) {
+			rssWindow, heapWindow = &overloadRSS, &overloadHeap
+		}
+		if want := int(duration/rssInterval) - 1; rssCounts[mark.Name] < want {
+			rssWindow.Gaps = append(rssWindow.Gaps, fmt.Sprintf("phase %s: %d RSS samples in %s, expected at least %d",
+				mark.Name, rssCounts[mark.Name], duration, want))
+		}
+		if want := int(duration/heapInterval) - 1; heapCounts[mark.Name] < want {
+			heapWindow.Gaps = append(heapWindow.Gaps, fmt.Sprintf("phase %s: %d heap samples in %s, expected at least %d",
+				mark.Name, heapCounts[mark.Name], duration, want))
 		}
 	}
 	return steadyHeap, steadyRSS, overloadHeap, overloadRSS
+}
+
+// evaluateWindow holds a window to a ceiling. A sample above the limit fails
+// the window whatever else is missing; otherwise an errored sample or a
+// coverage gap leaves it not evaluated, because what was not measured cannot
+// be shown to be within the limit.
+func evaluateWindow(id, contract, requirement string, window seriesWindow, limit uint64) criterion {
+	result := evaluateCeiling(id, contract, requirement, window.Values, limit)
+	if result.Status == statusFail {
+		return result
+	}
+	var missing []string
+	if window.Errored != 0 {
+		missing = append(missing, fmt.Sprintf("%d samples could not be taken", window.Errored))
+	}
+	missing = append(missing, window.Gaps...)
+	if len(missing) != 0 {
+		result.Status = statusNotEvaluated
+		result.Observed += "; " + strings.Join(missing, "; ")
+	}
+	return result
+}
+
+// scheduleTolerance is how far below its open-loop schedule one epoch's sent
+// volume may end: 0.5% of the schedule plus 10 ms of offered traffic, which
+// covers the sender's wake granularity and the instant it is stopped. A
+// sender that falls further behind did not offer the load.
+func scheduleTolerance(scheduled uint64, rate float64) uint64 {
+	return scheduled/200 + uint64(math.Ceil(rate*0.010))
 }
 
 func cyclesCriterion(record *aspRecord) criterion {
@@ -262,14 +334,16 @@ func rateCriterion(record *aspRecord) criterion {
 
 func concurrentAcceptsCriterion(record *aspRecord) criterion {
 	result := criterion{ID: "f7.concurrent-accepts", Contract: "F7",
-		Requirement: "establishments overlap, so the listener serves concurrent accepts"}
-	peak := 0
+		Requirement: "establishments overlap at both ends, so the listener serves concurrent accepts"}
+	peak, listener := 0, 0
 	for _, block := range record.Blocks {
 		peak = max(peak, block.Peer.MaxEstablishing)
+		listener = max(listener, block.ASP.MaxEstablishing)
 	}
-	result.Observed = fmt.Sprintf("max concurrent establishing %d with %d concurrent Accept calls", peak, record.Config.AcceptConcurrency)
+	result.Observed = fmt.Sprintf("max concurrent establishing %d at the dialing peer and %d in the ASP listener (SCTP accepted, M3UA handshake not yet complete) with %d concurrent Accept calls",
+		peak, listener, record.Config.AcceptConcurrency)
 	result.Status = statusPass
-	if peak < 2 {
+	if peak < 2 || listener < 2 {
 		result.Status = statusFail
 	}
 	if len(record.Blocks) == 0 {
@@ -355,7 +429,7 @@ func survivingCriterion(record *aspRecord) criterion {
 func overloadBoundsCriterion(record *aspRecord) criterion {
 	overload := record.Overload
 	result := criterion{ID: "f8.overload-bounds", Contract: "F8",
-		Requirement: "bounded queues filled with 4,096-byte payloads and never beyond their caps: 1,024-message DATA queues, 256-event subscriptions (continuity loss, then resync), 16,384 records; no OOM"}
+		Requirement: "bounded queues filled with 4,096-byte payloads and never beyond their caps: 1,024-message DATA queues, 256-event subscriptions (continuity loss, then resync), 16,384 records; after drain every flood message is received or counted discarded; no OOM"}
 	var problems []string
 	if overload.Error != "" {
 		problems = append(problems, overload.Error)
@@ -367,6 +441,10 @@ func overloadBoundsCriterion(record *aspRecord) criterion {
 		overload.QueueCapacity != dataQueueSize || overload.Discarded == 0 {
 		problems = append(problems, fmt.Sprintf("DATA queues: %d of %d full, max queued %d of capacity %d over %d samples, discarded %d",
 			overload.FullAssociations, stableAssociations, overload.MaxQueued, overload.QueueCapacity, overload.QueuedSamples, overload.Discarded))
+	}
+	if overload.Received+overload.Discarded != overload.PeerSent {
+		problems = append(problems, fmt.Sprintf("delivery not reconciled: received %d + discarded %d != peer sent %d",
+			overload.Received, overload.Discarded, overload.PeerSent))
 	}
 	if len(overload.Subscribers) != subscriberCount {
 		problems = append(problems, fmt.Sprintf("%d subscribers observed", len(overload.Subscribers)))
@@ -423,11 +501,138 @@ func perBlockCriterion(record *aspRecord, id, requirement string, failures func(
 }
 
 func blocksCriterion(record *aspRecord) criterion {
-	result := criterion{ID: "f8.blocks", Contract: "F8", Requirement: fmt.Sprintf("%d churn blocks with full time series", requiredBlocks),
+	result := criterion{ID: "f8.blocks", Contract: "F8", Requirement: fmt.Sprintf("at least %d churn blocks with full time series", requiredBlocks),
 		Observed: fmt.Sprintf("%d blocks, %d RSS and %d heap samples", len(record.Blocks), len(record.RSSSeries), len(record.HeapSeries))}
 	result.Status = statusPass
 	if len(record.Blocks) < requiredBlocks {
 		result.Status = statusNotEvaluated
+	}
+	return result
+}
+
+// contractLoadCriterion holds the stable associations to section 4's load:
+// "Use mixed traffic at 50% of its target except where a row specifies
+// otherwise." The churn row sets churn, not traffic, so the section 2
+// deterministic mix runs at half its 40,000/s target through steady and every
+// churn block. Each epoch must deliver its open-loop schedule within
+// scheduleTolerance, with no write failure. A transport refusal fails it too:
+// the resend keeps the ledger whole, but section 4 counts "concealed upstream
+// throttling" against a fixed-load trial, and a refused send is exactly that.
+func contractLoadCriterion(record *aspRecord) criterion {
+	result := criterion{ID: "f7.contract-load", Contract: "F7/F8",
+		Requirement: "section 2 deterministic mix at 50% of 40,000/s (20,000 msg/s aggregate) on the stable associations through steady and every churn block; each epoch delivers its schedule within 0.5% + 10 ms of offered traffic with no write failure and no transport refusal"}
+	var problems []string
+	var scheduled, sent, refused uint64
+	epochs := 0
+	check := func(name string, ledgers []ledgerResult) {
+		epochs++
+		if len(ledgers) == 0 {
+			problems = append(problems, name+": no ledger")
+		}
+		for _, ledger := range ledgers {
+			scheduled += ledger.Scheduled
+			sent += ledger.SentTotal
+			refused += ledger.Refused
+			tolerance := scheduleTolerance(ledger.Scheduled, ledger.Rate)
+			switch {
+			case ledger.Scheduled == 0:
+				problems = append(problems, fmt.Sprintf("%s %s: nothing scheduled", name, ledger.Direction))
+			case ledger.SentTotal+tolerance < ledger.Scheduled:
+				problems = append(problems, fmt.Sprintf("%s %s: sent %d of %d scheduled at %.0f/s (tolerance %d)",
+					name, ledger.Direction, ledger.SentTotal, ledger.Scheduled, ledger.Rate, tolerance))
+			}
+			if ledger.WriteErrors != 0 || ledger.Refused != 0 {
+				problems = append(problems, fmt.Sprintf("%s %s: %d write errors, %d transport refusals",
+					name, ledger.Direction, ledger.WriteErrors, ledger.Refused))
+			}
+		}
+	}
+	check("steady", record.Steady)
+	for _, block := range record.Blocks {
+		check(fmt.Sprintf("block %d", block.Block), block.Ledgers)
+	}
+	result.Observed = fmt.Sprintf("configured %s at %d msg/s forward and %d msg/s reverse; %d epochs, %d of %d scheduled messages sent, %d refusals",
+		record.Config.Payload, record.Config.DataRate, record.Config.ReverseRate, epochs, sent, scheduled, refused)
+	switch {
+	case len(problems) != 0:
+		result.Status = statusFail
+		result.Observed += "; " + strings.Join(problems, "; ")
+	case record.Config.DataRate != contractDataRate || record.Config.Payload != string(workloadMix):
+		result.Status = statusNotEvaluated
+		result.Observed += "; not the contract load"
+	case len(record.Blocks) == 0:
+		result.Status = statusNotEvaluated
+	default:
+		result.Status = statusPass
+	}
+	return result
+}
+
+// postOverloadCriterion gates the sample taken after the overload has
+// drained exactly like a block's retained sample, so retention the overload
+// leaves behind is attributed to it rather than to the first churn block.
+func postOverloadCriterion(record *aspRecord) criterion {
+	result := criterion{ID: "f8.post-overload-retained", Contract: "F8",
+		Requirement: "after the overload drains, two forced GCs: live heap within max(8 MiB, 5%) of the baseline, goroutines, descriptors, registry, kernel associations and subscriptions at baseline"}
+	sample := record.PostOverload
+	if sample.Attempt == 0 {
+		result.Status, result.Observed = statusNotEvaluated, "no post-overload sample"
+		return result
+	}
+	pass, failures := evaluateRetention(record.BaselineFinal, sample, stableAssociations)
+	result.Observed = fmt.Sprintf("live heap %s (baseline %s), %d goroutines, %d descriptors, %d ms after drain",
+		formatMiB(sample.LiveHeapBytes), formatMiB(record.BaselineFinal.LiveHeapBytes), sample.Goroutines, sample.FDs.Total, sample.SinceDrainMillis)
+	result.Status = statusPass
+	if !pass {
+		result.Status = statusFail
+		result.Observed += "; " + strings.Join(failures, "; ")
+	}
+	return result
+}
+
+// subscriptionsCriterion requires the 8 subscriptions to stay healthy for the
+// whole run: no terminal error, no failed resync, continuity loss only in the
+// overload phases that cause it on purpose, a resync for every loss, and all
+// 8 live at the baseline.
+func subscriptionsCriterion(record *aspRecord) criterion {
+	result := criterion{ID: "f8.subscriptions", Contract: "F8",
+		Requirement: "8 subscriptions healthy throughout: continuity loss only during the overload, each followed by a successful resync, no terminal error, all 8 live at the baseline"}
+	var problems []string
+	if len(record.Subscribers) != subscriberCount {
+		problems = append(problems, fmt.Sprintf("%d subscribers recorded", len(record.Subscribers)))
+	}
+	var events uint64
+	for _, subscriber := range record.Subscribers {
+		events += subscriber.Events
+		if subscriber.TerminalError != "" {
+			problems = append(problems, fmt.Sprintf("subscriber %d ended: %s", subscriber.Subscriber, subscriber.TerminalError))
+		}
+		if subscriber.ResyncErrorText != "" {
+			problems = append(problems, fmt.Sprintf("subscriber %d resync failed: %s", subscriber.Subscriber, subscriber.ResyncErrorText))
+		}
+		for phase, losses := range subscriber.LossByPhase {
+			if losses != 0 && !overloadPhase(phase) {
+				problems = append(problems, fmt.Sprintf("subscriber %d lost continuity %d times in phase %s", subscriber.Subscriber, losses, phase))
+			}
+		}
+		if subscriber.Resyncs != subscriber.ContinuityLoss {
+			problems = append(problems, fmt.Sprintf("subscriber %d: %d continuity losses, %d resyncs",
+				subscriber.Subscriber, subscriber.ContinuityLoss, subscriber.Resyncs))
+		}
+	}
+	baselines := append([]retainedSample{record.BaselineFinal}, record.Baseline...)
+	for _, sample := range baselines {
+		if sample.LiveSubscriptions != subscriberCount {
+			problems = append(problems, fmt.Sprintf("baseline sample %d: %d live subscriptions", sample.Attempt, sample.LiveSubscriptions))
+			break
+		}
+	}
+	result.Observed = fmt.Sprintf("%d subscribers, %d events", len(record.Subscribers), events)
+	result.Status = statusPass
+	if len(problems) != 0 {
+		sort.Strings(problems)
+		result.Status = statusFail
+		result.Observed += "; " + strings.Join(problems, "; ")
 	}
 	return result
 }

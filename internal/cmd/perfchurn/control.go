@@ -34,14 +34,27 @@ type populateResponse struct {
 	Errors   []string `json:"errors,omitempty"`
 }
 
+// trafficStartRequest starts the peer's epoch: Rate is the aggregate the peer
+// sends toward the ASP.
 type trafficStartRequest struct {
-	Epoch          uint32 `json:"epoch"`
-	PerAssociation int    `json:"per_association"`
+	Epoch    uint32  `json:"epoch"`
+	Rate     float64 `json:"rate"`
+	Workload string  `json:"workload"`
 }
 
+// trafficStartResponse carries what the peer's ledger recorded for the
+// previous epoch after that epoch was judged.
+type trafficStartResponse struct {
+	Addendum ledgerAddendum `json:"closing_addendum"`
+}
+
+// trafficStopRequest ends the epoch and hands the peer what the ASP wrote
+// per flow, so the peer can judge its ledger against it.
 type trafficStopRequest struct {
 	Epoch           uint32   `json:"epoch"`
 	ASPSent         []uint64 `json:"asp_sent"`
+	ASPScheduled    uint64   `json:"asp_scheduled"`
+	ASPRate         float64  `json:"asp_rate"`
 	ASPWriteErrors  uint64   `json:"asp_write_errors"`
 	ASPFirstError   string   `json:"asp_first_error,omitempty"`
 	ASPRefused      uint64   `json:"asp_refused"`
@@ -50,6 +63,8 @@ type trafficStopRequest struct {
 
 type trafficStopResponse struct {
 	PeerSent        []uint64     `json:"peer_sent"`
+	PeerScheduled   uint64       `json:"peer_scheduled"`
+	PeerRate        float64      `json:"peer_rate"`
 	PeerWriteErrors uint64       `json:"peer_write_errors"`
 	PeerFirstError  string       `json:"peer_first_error,omitempty"`
 	PeerRefused     uint64       `json:"peer_refused"`

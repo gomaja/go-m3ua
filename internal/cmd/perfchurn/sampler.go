@@ -46,6 +46,12 @@ type sctpAssoc struct {
 	Inode      uint64
 	LocalPort  int
 	RemotePort int
+	// The kernel's view of the association: negotiated stream counts and
+	// the socket's send and receive buffer sizes (sk_sndbuf, sk_rcvbuf).
+	InStreams     int
+	OutStreams    int
+	SendBuffer    int
+	ReceiveBuffer int
 }
 
 // procStatus is what /proc/<pid>/status says about resident memory and
@@ -109,8 +115,10 @@ func parseStatusRSS(content []byte) (uint64, error) {
 }
 
 // parseSCTPAssocs reads the columns this fixture needs from
-// /proc/net/sctp/assocs: ST (4), INODE (10), LPORT (11) and RPORT (12), in
-// the layout of the kernel's sctp_assocs_seq_show.
+// /proc/net/sctp/assocs, in the layout of the kernel's sctp_assocs_seq_show:
+// ST (4), INODE (10), LPORT (11) and RPORT (12) from the front, and the fixed
+// eleven columns after the address lists from the back (HBINT INS OUTS MAXRT
+// T1X T2X RTXC wmema wmemq sndbuf rcvbuf).
 func parseSCTPAssocs(content []byte) ([]sctpAssoc, error) {
 	var associations []sctpAssoc
 	scanner := bufio.NewScanner(bytes.NewReader(content))
@@ -120,11 +128,12 @@ func parseSCTPAssocs(content []byte) ([]sctpAssoc, error) {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) < 13 {
+		if len(fields) < 13+3+11 {
 			return nil, fmt.Errorf("short /proc/net/sctp/assocs row %q", line)
 		}
-		values := make([]uint64, 0, 4)
-		for _, index := range []int{4, 10, 11, 12} {
+		tail := len(fields) - 11
+		values := make([]uint64, 0, 8)
+		for _, index := range []int{4, 10, 11, 12, tail + 1, tail + 2, tail + 9, tail + 10} {
 			value, err := strconv.ParseUint(fields[index], 10, 64)
 			if err != nil {
 				return nil, fmt.Errorf("column %d of /proc/net/sctp/assocs row %q: %w", index, line, err)
@@ -132,7 +141,8 @@ func parseSCTPAssocs(content []byte) ([]sctpAssoc, error) {
 			values = append(values, value)
 		}
 		associations = append(associations, sctpAssoc{State: int(values[0]), Inode: values[1],
-			LocalPort: int(values[2]), RemotePort: int(values[3])})
+			LocalPort: int(values[2]), RemotePort: int(values[3]), InStreams: int(values[4]), OutStreams: int(values[5]),
+			SendBuffer: int(values[6]), ReceiveBuffer: int(values[7])})
 	}
 	return associations, scanner.Err()
 }
@@ -497,17 +507,19 @@ func (recorder *sampler) sampleHeap() {
 	sample := heapSample{AtMillis: recorder.millis(), LiveHeapBytes: snapshot.LiveHeapBytes,
 		HeapObjectsBytes: snapshot.HeapObjectsBytes, HeapGoalBytes: snapshot.HeapGoalBytes,
 		GCCycles: snapshot.GCCycles, Goroutines: snapshot.Goroutines, FDs: descriptors.Total, Classes: snapshot.Classes}
+	// Error is reserved for the live heap itself, which the heap ceiling
+	// gates; the descriptor and huge-page readings are recorded beside it.
 	if descriptors.Error != "" {
 		sample.FDs = -1
-		sample.Error = descriptors.Error
+		sample.AuxError = descriptors.Error
 	}
 	if huge, err := recorder.source.anonHugePages(); err != nil {
-		sample.Error = strings.TrimPrefix(sample.Error+"; "+err.Error(), "; ")
+		sample.AuxError = strings.TrimPrefix(sample.AuxError+"; "+err.Error(), "; ")
 	} else {
 		sample.AnonHugePagesBytes = huge
 	}
 	if snapshot.LiveHeapBytes == 0 {
-		sample.Error = strings.TrimPrefix(sample.Error+"; live heap unavailable", "; ")
+		sample.Error = "live heap unavailable"
 	}
 	recorder.mutex.Lock()
 	sample.Phase = recorder.phase

@@ -138,4 +138,12 @@ func TestGaugeTracksTheMaximum(t *testing.T) {
 	if level.maximum() != 3 {
 		t.Fatalf("maximum %d", level.maximum())
 	}
+	level.resetPeak()
+	if level.maximum() != 2 {
+		t.Fatalf("a reset peak starts from the current level, got %d", level.maximum())
+	}
+	level.inc()
+	if level.maximum() != 3 {
+		t.Fatalf("maximum after reset %d", level.maximum())
+	}
 }

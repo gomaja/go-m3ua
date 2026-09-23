@@ -135,6 +135,13 @@ func (level *gauge) dec() {
 	level.mutex.Unlock()
 }
 
+// resetPeak starts a new maximum from the current level.
+func (level *gauge) resetPeak() {
+	level.mutex.Lock()
+	level.peak = level.current
+	level.mutex.Unlock()
+}
+
 func (level *gauge) maximum() int {
 	level.mutex.Lock()
 	defer level.mutex.Unlock()

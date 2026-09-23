@@ -126,6 +126,12 @@ func TestParseSCTPAssociationsAndEndpoints(t *testing.T) {
 		associations[0].RemotePort != 30000 || associations[1].State != 7 || associations[1].Inode != 0 {
 		t.Fatalf("associations %+v", associations)
 	}
+	// The row's last eleven columns: HBINT INS OUTS MAXRT T1X T2X RTXC wmema
+	// wmemq sndbuf rcvbuf, whatever the number of addresses before them.
+	if associations[0].InStreams != 17 || associations[0].OutStreams != 17 || associations[0].SendBuffer != 212992 ||
+		associations[0].ReceiveBuffer != 212992 {
+		t.Fatalf("stream and buffer columns %+v", associations[0])
+	}
 	endpoints, err := parseSCTPEndpoints([]byte(endpointsFixture))
 	if err != nil || !endpoints[200] || len(endpoints) != 1 {
 		t.Fatalf("endpoints %v, %v", endpoints, err)

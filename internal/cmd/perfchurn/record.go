@@ -53,6 +53,7 @@ type heapSample struct {
 	Classes            memoryClasses `json:"memory_classes"`
 	AnonHugePagesBytes uint64        `json:"anon_huge_pages_bytes"`
 	Error              string        `json:"error,omitempty"`
+	AuxError           string        `json:"aux_error,omitempty"`
 }
 
 type fdSnapshot struct {
@@ -102,6 +103,8 @@ type retainedSample struct {
 	Pass             bool               `json:"meets_retention"`
 	Failures         []string           `json:"retention_failures,omitempty"`
 	GoroutineProfile string             `json:"goroutine_profile,omitempty"`
+
+	LiveSubscriptions int `json:"live_subscriptions"`
 }
 
 type ledgerResult struct {
@@ -122,11 +125,19 @@ type ledgerResult struct {
 	// Refused counts sends the transport refused for a full send buffer and
 	// that were offered again: backpressure, not loss.
 	Refused uint64 `json:"refused_then_resent"`
+
+	Workload   string  `json:"workload"`
+	Rate       float64 `json:"rate"`
+	Scheduled  uint64  `json:"scheduled"`
+	AfterClose uint64  `json:"after_close"`
 }
 
+// lossFree requires every sent message delivered exactly once, in order, in
+// its own epoch: a stale-epoch arrival or one after the epoch was judged is a
+// delivery that escaped its ledger, not a harmless extra.
 func (result ledgerResult) lossFree() bool {
 	return result.SentTotal > 0 && result.Missing == 0 && result.Gaps == 0 && result.Late == 0 &&
-		result.Excess == 0 && result.Invalid == 0 && result.WriteErrors == 0
+		result.Excess == 0 && result.Invalid == 0 && result.Stale == 0 && result.AfterClose == 0 && result.WriteErrors == 0
 }
 
 type churnStats struct {
@@ -153,6 +164,8 @@ type aspChurnStats struct {
 	ByMode         map[string]int `json:"released_by_close_mode,omitempty"`
 	StillOpen      int            `json:"still_open_after_block"`
 	Rejected       int            `json:"establishment_errors"`
+
+	MaxEstablishing int `json:"max_concurrent_establishing"`
 }
 
 type blockResult struct {
@@ -294,4 +307,27 @@ type peerRecord struct {
 	Blocks   []churnStats   `json:"blocks"`
 	Ledgers  []ledgerResult `json:"ledgers"`
 	Events   []string       `json:"events,omitempty"`
+
+	// FinalAddendum is what the peer's ledger recorded for its last epoch
+	// after that epoch was judged.
+	FinalAddendum ledgerAddendum `json:"final_addendum"`
+}
+
+// foldAddendum folds a closing addendum into the ledger of its epoch and
+// direction, wherever in the run that epoch was recorded.
+func (record *aspRecord) foldAddendum(direction string, addendum ledgerAddendum) {
+	if addendum.Epoch == 0 {
+		return
+	}
+	fold := func(ledgers []ledgerResult) {
+		for index := range ledgers {
+			if ledgers[index].Direction == direction && ledgers[index].Epoch == addendum.Epoch {
+				ledgers[index].fold(addendum)
+			}
+		}
+	}
+	fold(record.Steady)
+	for index := range record.Blocks {
+		fold(record.Blocks[index].Ledgers)
+	}
 }

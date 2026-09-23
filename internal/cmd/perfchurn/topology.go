@@ -330,14 +330,16 @@ func sgpEndpointConfig() *m3ua.SGPConfig {
 	}
 }
 
-// dataTuple is the fixed routing label of one stable association's ledgered
-// DATA in one direction. One SLS per association keeps the flow on one SCTP
-// stream, so the ledger can require strict order.
-func dataTuple(stableIndex int, towardSGP bool) (m3ua.ASKey, params.ProtocolDataPayload) {
+// dataTuple is the routing label of one flow of one stable association in
+// one direction. Each flow has its own SLS, so the library keeps it on one
+// SCTP stream and the ledger can require strict order per flow; the four flows
+// of neighbouring associations use different SLS values, so the 32
+// associations spread over all 16 SLS values.
+func dataTuple(stableIndex, flow int, towardSGP bool) (m3ua.ASKey, params.ProtocolDataPayload) {
 	sgp := stableIndex / stablePerSGP
 	index := stableIndex % stablePerSGP
-	local := uint32(0x100000 + stableIndex)
-	remote := uint32(0x200000 + stableIndex)
+	local := uint32(0x100000 + stableIndex<<4 + flow)
+	remote := uint32(0x200000 + stableIndex<<4 + flow)
 	if !towardSGP {
 		local, remote = remote, local
 	}
@@ -347,6 +349,6 @@ func dataTuple(stableIndex int, towardSGP bool) (m3ua.ASKey, params.ProtocolData
 		ServiceIndicator:        3,
 		NetworkIndicator:        2,
 		MessagePriority:         0,
-		SignallingLinkSelection: uint8(index),
+		SignallingLinkSelection: uint8((stableIndex%4)*flowsPerAssociation + flow),
 	}
 }

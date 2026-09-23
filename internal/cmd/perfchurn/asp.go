@@ -198,6 +198,16 @@ type aspRun struct {
 	indications    atomic.Uint64
 	resyncMarkers  atomic.Uint64
 
+	// liveSubscriptions counts subscriber goroutines still reading.
+	liveSubscriptions atomic.Int32
+	// establishing counts churn associations the listener has accepted at
+	// the SCTP level and whose M3UA handshake has not finished: from the
+	// config selector, which runs right after SCTP accept, to Accept
+	// returning or giving up on that peer.
+	establishing gauge
+	pendingMutex sync.Mutex
+	pending      map[int]bool
+
 	mutex       sync.Mutex
 	stable      []*m3ua.Association
 	stableIDs   map[m3ua.AssociationID]int
@@ -210,7 +220,7 @@ func runASP(ctx context.Context, config commandConfig) (record aspRecord) {
 	record = aspRecord{Kind: "perfchurn-asp", Label: config.Label, Config: config, Manifest: currentManifest(roleASP, config)}
 	asp := &aspRun{config: config, ctx: ctx, source: defaultProcSource(), client: newControlClient(config.PeerControl),
 		stable: make([]*m3ua.Association, stableAssociations), stableIDs: map[m3ua.AssociationID]int{},
-		stableReady: make(chan struct{})}
+		stableReady: make(chan struct{}), pending: map[int]bool{}}
 	asp.churn.reset()
 	asp.recorder = newSampler(asp.source, rssInterval, heapInterval)
 	samplerContext, stopSampler := context.WithCancel(context.Background())
@@ -260,7 +270,11 @@ func (asp *aspRun) start(record *aspRecord) error {
 		consumer := &subscriber{index: index, subscription: subscription,
 			summary: subscriberSummary{Subscriber: index, ByKind: map[string]int{}, LossByPhase: map[string]int{}}}
 		asp.subscribers = append(asp.subscribers, consumer)
-		go consumer.run(asp.ctx, &asp.subscriberGate, asp.recorder.currentPhase)
+		asp.liveSubscriptions.Add(1)
+		go func() {
+			defer asp.liveSubscriptions.Add(-1)
+			consumer.run(asp.ctx, &asp.subscriberGate, asp.recorder.currentPhase)
+		}()
 	}
 	address, err := sctp.ResolveSCTPAddr("sctp", asp.config.SCTPAddress)
 	if err != nil {
@@ -274,6 +288,9 @@ func (asp *aspRun) start(record *aspRecord) error {
 			role, err := classifyPort(info.RemoteAddr.Port)
 			if err != nil {
 				return nil, err
+			}
+			if !role.Stable {
+				asp.beginEstablish(info.RemoteAddr.Port)
 			}
 			return aspAssociationConfig(role), nil
 		},
@@ -294,6 +311,9 @@ func (asp *aspRun) acceptLoop() {
 		if err != nil {
 			var establishment *m3ua.AssociationEstablishmentError
 			if errors.As(err, &establishment) {
+				if establishment.RemoteAddr != nil {
+					asp.endEstablish(establishment.RemoteAddr.Port)
+				}
 				asp.churn.reject()
 				continue
 			}
@@ -305,6 +325,7 @@ func (asp *aspRun) acceptLoop() {
 			asp.churn.reject()
 			continue
 		}
+		asp.endEstablish(remote.Port)
 		role, err := classifyPort(remote.Port)
 		if err != nil {
 			_ = association.Close()
@@ -316,6 +337,24 @@ func (asp *aspRun) acceptLoop() {
 			continue
 		}
 		go asp.serveChurn(association, role)
+	}
+}
+
+func (asp *aspRun) beginEstablish(port int) {
+	asp.pendingMutex.Lock()
+	defer asp.pendingMutex.Unlock()
+	if !asp.pending[port] {
+		asp.pending[port] = true
+		asp.establishing.inc()
+	}
+}
+
+func (asp *aspRun) endEstablish(port int) {
+	asp.pendingMutex.Lock()
+	defer asp.pendingMutex.Unlock()
+	if asp.pending[port] {
+		delete(asp.pending, port)
+		asp.establishing.dec()
 	}
 }
 
@@ -411,7 +450,7 @@ func (asp *aspRun) phases(record *aspRecord) error {
 		return err
 	}
 	asp.recorder.setPhase(phaseSteady)
-	ledgers, err := asp.traffic(1, func() error {
+	ledgers, err := asp.traffic(record, 1, func() error {
 		return sleepContext(asp.ctx, asp.config.Steady)
 	})
 	record.Steady = ledgers
@@ -476,6 +515,8 @@ func (asp *aspRun) warm(record *aspRecord) error {
 		return asp.ctx.Err()
 	}
 	record.Warm.StableAccepted = asp.registeredCount()
+	record.Manifest.Transport = collectTransport(asp.source, asp.endpoint.AssociationStatuses(),
+		func(_, remote int) int { return remote })
 	record.Warm.EstablishMillis = time.Since(started).Milliseconds()
 	for _, association := range asp.stableSet() {
 		record.Manifest.Limits.ObservedChannelCapacities = map[string]int{
@@ -541,26 +582,32 @@ func (asp *aspRun) storeSummary() storeSummary {
 
 // traffic runs one ledgered epoch in both directions on the stable
 // associations while during runs, then stops both senders and judges both
-// ledgers.
-func (asp *aspRun) traffic(epoch uint32, during func() error) ([]ledgerResult, error) {
-	perAssociation := asp.config.DataRate / stableAssociations
-	asp.ledger.reset(epoch)
+// ledgers. Forward is the ASP-to-SGP load of section 4; the reverse flow is a
+// lighter probe of the ASP's own receive path. What either ledger recorded
+// for the previous epoch after it was judged is folded back into that epoch.
+func (asp *aspRun) traffic(record *aspRecord, epoch uint32, during func() error) ([]ledgerResult, error) {
+	workload := payloadWorkload(asp.config.Payload)
+	record.foldAddendum("sgp-to-asp", asp.ledger.reset(epoch, workload))
+	var started trafficStartResponse
 	if err := asp.client.call(asp.ctx, operationTrafficStart, 30*time.Second,
-		trafficStartRequest{Epoch: epoch, PerAssociation: perAssociation}, &struct{}{}); err != nil {
+		trafficStartRequest{Epoch: epoch, Rate: float64(asp.config.ReverseRate), Workload: string(workload)}, &started); err != nil {
 		return nil, err
 	}
-	sender := startLedgerSender(asp.ctx, asp.stableSet(), true, epoch, perAssociation)
+	record.foldAddendum("asp-to-sgp", started.Addendum)
+	sender := startLedgerSender(asp.ctx, writers(asp.stableSet()),
+		senderPlan{Epoch: epoch, Rate: float64(asp.config.DataRate), Workload: workload, TowardSGP: true})
 	duringErr := during()
 	written := sender.stop()
 	var stopped trafficStopResponse
 	err := asp.client.call(asp.ctx, operationTrafficStop, time.Minute, trafficStopRequest{Epoch: epoch, ASPSent: written.Sent,
-		ASPWriteErrors: written.Errors, ASPFirstError: written.FirstError, ASPRefused: written.Refused, DrainWaitMillis: 10000}, &stopped)
+		ASPScheduled: written.Scheduled, ASPRate: written.Rate, ASPWriteErrors: written.Errors, ASPFirstError: written.FirstError,
+		ASPRefused: written.Refused, DrainWaitMillis: 10000}, &stopped)
 	if err != nil {
 		return nil, errors.Join(duringErr, err)
 	}
 	waitLedger(asp.ctx, &asp.ledger, stopped.PeerSent, 10*time.Second)
 	received := asp.ledger.result("sgp-to-asp", stopped.PeerSent, stopped.PeerWriteErrors, stopped.PeerFirstError)
-	received.Refused = stopped.PeerRefused
+	received.Rate, received.Scheduled, received.Refused = stopped.PeerRate, stopped.PeerScheduled, stopped.PeerRefused
 	return []ledgerResult{stopped.Ledger, received}, duringErr
 }
 
@@ -625,7 +672,7 @@ func (asp *aspRun) retainedSample(attempt int, drained time.Time) retainedSample
 	snapshot := forcedRuntimeSnapshot()
 	sample := retainedSample{Attempt: attempt, AtMillis: asp.recorder.millis(), SinceDrainMillis: time.Since(drained).Milliseconds(),
 		LiveHeapBytes: snapshot.LiveHeapBytes, HeapObjectsBytes: snapshot.HeapObjectsBytes, Goroutines: runtime.NumGoroutine(),
-		Classes: snapshot.Classes}
+		Classes: snapshot.Classes, LiveSubscriptions: int(asp.liveSubscriptions.Load())}
 	if status, err := asp.source.status(); err != nil {
 		sample.RSSError = err.Error()
 	} else {
@@ -790,10 +837,11 @@ func (asp *aspRun) churnBlock(record *aspRecord, block int) (blockResult, error)
 	asp.recorder.setPhase(fmt.Sprintf("%s%d", phaseChurnPrefix, block))
 	asp.holdNanos.Store(int64(asp.config.ChurnHold))
 	asp.churn.reset()
+	asp.establishing.resetPeak()
 	endedBefore := asp.stableEndedCount()
 	started := time.Now()
 	var peerErr error
-	ledgers, err := asp.traffic(uint32(100+block), func() error {
+	ledgers, err := asp.traffic(record, uint32(100+block), func() error {
 		var response churnResponse
 		plan := churnPlan{FirstCycle: firstCycle, Cycles: asp.config.BlockCycles, Rate: asp.config.ChurnRate, Group: asp.config.ChurnGroup}
 		timeout := time.Duration(float64(plan.Cycles)/plan.Rate*float64(time.Second)) + asp.config.ChurnHold + 2*time.Minute
@@ -809,6 +857,7 @@ func (asp *aspRun) churnBlock(record *aspRecord, block int) (blockResult, error)
 	result.TrafficRunning = time.Since(started).Seconds()
 	result.Ledgers = ledgers
 	result.ASP = asp.churn.snapshot()
+	result.ASP.MaxEstablishing = asp.establishing.maximum()
 	if peerErr != nil {
 		result.PeerError = peerErr.Error()
 	}
@@ -845,9 +894,11 @@ func (asp *aspRun) stop(record *aspRecord) {
 	var peer peerRecord
 	if err := asp.client.call(context.Background(), operationFinish, 30*time.Second, struct{}{}, &peer); err == nil {
 		record.Peer = &peer
+		record.foldAddendum("asp-to-sgp", peer.FinalAddendum)
 	} else if record.Error == "" {
 		record.Error = err.Error()
 	}
+	record.foldAddendum("sgp-to-asp", asp.ledger.finalRead())
 	for _, consumer := range asp.subscribers {
 		consumer.mutex.Lock()
 		summary := consumer.summary

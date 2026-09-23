@@ -16,11 +16,23 @@ func TestConfigDefaultsAreTheContractWorkload(t *testing.T) {
 		t.Fatalf("parseConfig: %v", err)
 	}
 	if config.Routes != 1000 || config.Blocks != 5 || config.BlockCycles != 200 || config.totalCycles() != 1000 ||
-		config.ChurnRate != 4 || config.DataRate != 320 {
+		config.ChurnRate != 4 {
 		t.Fatalf("defaults %+v are not the contract workload: 1,000 routes, 5 blocks of 200 cycles at 4/s", config)
+	}
+	// Section 4: "Use mixed traffic at 50% of its target"; section 2's mix
+	// target is 40,000 msg/s aggregate.
+	if config.DataRate != 20000 || config.Payload != "mix" || config.ReverseRate < stableAssociations {
+		t.Fatalf("defaults %+v are not the section 4 load: the section 2 mix at 20,000 msg/s", config)
 	}
 	if config.ChurnGroup < 2 || config.AcceptConcurrency < 2 {
 		t.Fatalf("defaults %+v do not exercise concurrent accepts", config)
+	}
+}
+
+func TestConfigKeepsTheLoadConfigurable(t *testing.T) {
+	config, err := parseConfig(aspArguments("-data-rate=40000", "-payload=128", "-reverse-rate=640"))
+	if err != nil || config.DataRate != 40000 || config.Payload != "128" || config.ReverseRate != 640 {
+		t.Fatalf("config %+v, %v", config, err)
 	}
 }
 
@@ -58,8 +70,11 @@ func TestConfigRejectsInvalidRuns(t *testing.T) {
 		{"peer control https", aspArguments("-peer-control=https://peer:8080"), "peer-control"},
 		{"routes neither 0 nor 1000", aspArguments("-routes=10"), "routes"},
 		{"steady too short", aspArguments("-steady=500ms"), "steady"},
-		{"data rate not a multiple", aspArguments("-data-rate=100"), "data-rate"},
+		{"data rate below one per association", aspArguments("-data-rate=31"), "data-rate"},
 		{"data rate zero", aspArguments("-data-rate=0"), "data-rate"},
+		{"data rate too high", aspArguments("-data-rate=100001"), "data-rate"},
+		{"reverse rate below one per association", aspArguments("-reverse-rate=10"), "reverse-rate"},
+		{"unknown payload", aspArguments("-payload=256"), "payload"},
 		{"overload hold zero", aspArguments("-overload-hold=0s"), "overload-hold"},
 		{"overload extra zero", aspArguments("-overload-extra=0"), "overload-extra"},
 		{"toggles cannot overflow", aspArguments("-ssnm-toggles=128"), "ssnm-toggles"},

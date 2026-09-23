@@ -123,9 +123,15 @@ func (peer *peerRun) establish(_ context.Context, _ struct{}) (establishResponse
 			go peer.read(stableIndex, association)
 		}
 	}
+	var snapshots []m3ua.AssociationSnapshot
+	for _, endpoint := range peer.endpoints {
+		snapshots = append(snapshots, endpoint.AssociationStatuses()...)
+	}
+	transport := collectTransport(defaultProcSource(), snapshots, func(local, _ int) int { return local })
 	peer.mutex.Lock()
 	peer.stable = stable
 	peer.record.Stable = len(stable)
+	peer.record.Manifest.Transport = transport
 	peer.mutex.Unlock()
 	return establishResponse{Stable: len(stable), Millis: time.Since(started).Milliseconds()}, nil
 }
@@ -184,21 +190,32 @@ func (peer *peerRun) stableAssociations() []*m3ua.Association {
 	return peer.stable
 }
 
-func (peer *peerRun) trafficStart(_ context.Context, request trafficStartRequest) (struct{}, error) {
+func writers(associations []*m3ua.Association) []dataWriter {
+	result := make([]dataWriter, len(associations))
+	for index, association := range associations {
+		result[index] = association
+	}
+	return result
+}
+
+func (peer *peerRun) trafficStart(_ context.Context, request trafficStartRequest) (trafficStartResponse, error) {
 	stable := peer.stableAssociations()
-	if len(stable) != stableAssociations || request.PerAssociation < 1 {
-		return struct{}{}, errors.New("traffic start before establishment or without a rate")
+	workload, err := parseWorkload(request.Workload)
+	if err != nil || len(stable) != stableAssociations || !(request.Rate > 0) {
+		return trafficStartResponse{}, fmt.Errorf("traffic start before establishment or without a rate and workload: %v", err)
 	}
-	peer.ledger.reset(request.Epoch)
-	sender := startLedgerSender(peer.ctx, stable, false, request.Epoch, request.PerAssociation)
 	peer.mutex.Lock()
-	defer peer.mutex.Unlock()
-	if peer.sender != nil {
-		sender.stop()
-		return struct{}{}, errors.New("traffic already running")
+	running := peer.sender != nil
+	peer.mutex.Unlock()
+	if running {
+		return trafficStartResponse{}, errors.New("traffic already running")
 	}
+	closing := peer.ledger.reset(request.Epoch, workload)
+	sender := startLedgerSender(peer.ctx, writers(stable), senderPlan{Epoch: request.Epoch, Rate: request.Rate, Workload: workload})
+	peer.mutex.Lock()
 	peer.sender = sender
-	return struct{}{}, nil
+	peer.mutex.Unlock()
+	return trafficStartResponse{Addendum: closing}, nil
 }
 
 // trafficStop ends the peer's epoch and judges the ASP's: it waits, bounded,
@@ -208,18 +225,18 @@ func (peer *peerRun) trafficStop(ctx context.Context, request trafficStopRequest
 	sender := peer.sender
 	peer.sender = nil
 	peer.mutex.Unlock()
-	if sender == nil || sender.epoch != request.Epoch {
+	if sender == nil || sender.plan.Epoch != request.Epoch {
 		return trafficStopResponse{}, fmt.Errorf("no running epoch %d", request.Epoch)
 	}
 	written := sender.stop()
 	waitLedger(ctx, &peer.ledger, request.ASPSent, time.Duration(request.DrainWaitMillis)*time.Millisecond)
 	result := peer.ledger.result("asp-to-sgp", request.ASPSent, request.ASPWriteErrors, request.ASPFirstError)
-	result.Refused = request.ASPRefused
+	result.Rate, result.Scheduled, result.Refused = request.ASPRate, request.ASPScheduled, request.ASPRefused
 	peer.mutex.Lock()
 	peer.record.Ledgers = append(peer.record.Ledgers, result)
 	peer.mutex.Unlock()
-	return trafficStopResponse{PeerSent: written.Sent, PeerWriteErrors: written.Errors, PeerFirstError: written.FirstError,
-		PeerRefused: written.Refused, Ledger: result}, nil
+	return trafficStopResponse{PeerSent: written.Sent, PeerScheduled: written.Scheduled, PeerRate: written.Rate,
+		PeerWriteErrors: written.Errors, PeerFirstError: written.FirstError, PeerRefused: written.Refused, Ledger: result}, nil
 }
 
 // overload writes 4,096-byte DATA to every stable association as fast as the
@@ -238,10 +255,11 @@ func (peer *peerRun) overload(_ context.Context, request overloadRequest) (overl
 		group.Add(1)
 		go func(index int, association *m3ua.Association) {
 			defer group.Done()
-			key, protocolData := dataTuple(index, false)
+			key, protocolData := dataTuple(index, 0, false)
 			buffer := make([]byte, overloadPayloadSize)
 			for sequence := 0; sequence < request.PerAssociation; sequence++ {
-				protocolData.Data = encodePayload(buffer, payloadHeader{Kind: kindOverload, Association: uint16(index), Sequence: uint64(sequence)})
+				protocolData.Data = encodePayload(buffer, payloadHeader{Kind: kindOverload, Association: uint16(index),
+					Sequence: uint64(sequence)}, overloadPayloadSize)
 				// The flood outruns the transport by design. A refused send is
 				// offered again, so every association really receives
 				// PerAssociation messages and its DATA queue fills; the ASP
@@ -346,8 +364,10 @@ func (peer *peerRun) cycle(ctx context.Context, cycle int, hold time.Duration, e
 
 func (peer *peerRun) finishRun(_ context.Context, _ struct{}) (peerRecord, error) {
 	peer.finishing.Store(true)
+	final := peer.ledger.finalRead()
 	peer.mutex.Lock()
 	record := peer.record
+	record.FinalAddendum = final
 	record.Blocks = append([]churnStats(nil), peer.record.Blocks...)
 	record.Ledgers = append([]ledgerResult(nil), peer.record.Ledgers...)
 	record.Events = append([]string(nil), peer.record.Events...)

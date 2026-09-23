@@ -46,6 +46,14 @@ const (
 	overloadPayloadSize   = 4096
 )
 
+// contractDataRate is section 4's "mixed traffic at 50% of its target": the
+// section 2 deterministic mix targets 40,000 msg/s aggregate.
+const (
+	contractDataRate   = 20000
+	defaultReverseRate = 320
+	maxDataRate        = 100000
+)
+
 const (
 	roleASP  = "asp"
 	rolePeer = "peer"
@@ -60,6 +68,8 @@ type commandConfig struct {
 	Routes            int
 	Steady            time.Duration
 	DataRate          int
+	ReverseRate       int
+	Payload           string
 	OverloadHold      time.Duration
 	OverloadExtra     int
 	SSNMToggles       int
@@ -86,7 +96,9 @@ func parseConfig(arguments []string) (commandConfig, error) {
 	flagSet.StringVar(&config.PeerControl, "peer-control", "", "ASP: the peer control base URL, scheme://host:port")
 	flagSet.IntVar(&config.Routes, "routes", referenceRouteCount, "ASP: provisioned MTP routes, 0 or 1000")
 	flagSet.DurationVar(&config.Steady, "steady", 2*time.Minute, "ASP: steady phase duration")
-	flagSet.IntVar(&config.DataRate, "data-rate", 320, "ASP: ledgered DATA messages/s per direction across the stable associations")
+	flagSet.IntVar(&config.DataRate, "data-rate", contractDataRate, "ASP: ledgered DATA messages/s from the ASP across the stable associations (section 4: the section 2 mix at 50% of 40,000/s)")
+	flagSet.IntVar(&config.ReverseRate, "reverse-rate", defaultReverseRate, "ASP: ledgered DATA messages/s from the peer toward the ASP, a probe of the ASP's receive path")
+	flagSet.StringVar(&config.Payload, "payload", string(workloadMix), "ASP: ledgered payload sizes: mix (section 2: 90% 128, 9% 512, 1% 4,096 bytes), 128, 512 or 4096")
 	flagSet.DurationVar(&config.OverloadHold, "overload-hold", 20*time.Second, "ASP: time the bounded queues are held full")
 	flagSet.IntVar(&config.OverloadExtra, "overload-extra", 256, "ASP: 4,096-byte messages sent to each stable association beyond its DATA queue capacity")
 	flagSet.IntVar(&config.SSNMToggles, "ssnm-toggles", 320, "ASP: destination state toggles (two reports each) sent while subscribers are paused")
@@ -132,13 +144,18 @@ func (config commandConfig) validateASP() error {
 	if err := validateControlBaseURL(config.PeerControl); err != nil {
 		return fmt.Errorf("peer-control: %w", err)
 	}
+	if _, err := parseWorkload(config.Payload); err != nil {
+		return err
+	}
 	switch {
 	case config.Routes != 0 && config.Routes != referenceRouteCount:
 		return fmt.Errorf("routes must be 0 or %d", referenceRouteCount)
 	case config.Steady < time.Second || config.Steady > 30*time.Minute:
 		return errors.New("steady must be between 1s and 30m")
-	case config.DataRate < stableAssociations || config.DataRate > 100*stableAssociations || config.DataRate%stableAssociations != 0:
-		return fmt.Errorf("data-rate must be a multiple of %d between %d and %d", stableAssociations, stableAssociations, 100*stableAssociations)
+	case config.DataRate < stableAssociations || config.DataRate > maxDataRate:
+		return fmt.Errorf("data-rate must be between %d (one per stable association) and %d", stableAssociations, maxDataRate)
+	case config.ReverseRate < stableAssociations || config.ReverseRate > maxDataRate:
+		return fmt.Errorf("reverse-rate must be between %d (one per stable association) and %d", stableAssociations, maxDataRate)
 	case config.OverloadHold < time.Second || config.OverloadHold > 5*time.Minute:
 		return errors.New("overload-hold must be between 1s and 5m")
 	case config.OverloadExtra < 1 || config.OverloadExtra > dataQueueSize:

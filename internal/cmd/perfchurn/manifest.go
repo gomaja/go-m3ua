@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -40,6 +41,8 @@ type manifest struct {
 	Topology             topologyManifest  `json:"topology"`
 	Limits               pinnedLimits      `json:"limits"`
 	Workload             map[string]string `json:"workload,omitempty"`
+	// Transport is recorded once the stable associations are up.
+	Transport *transportEvidence `json:"transport,omitempty"`
 }
 
 type topologyManifest struct {
@@ -164,6 +167,16 @@ func currentManifest(role string, config commandConfig) manifest {
 		TransparentHugePages: readValues("/sys/kernel/mm/transparent_hugepage", "enabled", "defrag", "khugepaged/defrag",
 			"khugepaged/max_ptes_none", "khugepaged/pages_to_scan", "khugepaged/scan_sleep_millisecs"),
 		Limits: limits,
+		Workload: map[string]string{
+			"payload":               config.Payload,
+			"asp_to_peer_rate":      fmt.Sprint(config.DataRate),
+			"peer_to_asp_rate":      fmt.Sprint(config.ReverseRate),
+			"flows_per_association": fmt.Sprint(flowsPerAssociation),
+			"ordering":              "strict per flow; each flow has its own SLS, (association mod 4) x 4 + flow",
+			"schedule":              "open loop per association, slot k due at k/rate, flows interleaved slot by slot",
+			"schedule_tolerance":    "0.5% of the schedule plus 10 ms of offered traffic",
+			"contract":              "performance-budgets.md section 4: section 2 mix at 50% of 40,000 msg/s",
+		},
 		Topology: topologyManifest{
 			SignallingGateways: gatewayCount, SGPs: sgpCount, ApplicationServersPerSG: asPerGateway,
 			StableAssociations: stableAssociations, ASPerStableAssociation: asPerStableAssociation,

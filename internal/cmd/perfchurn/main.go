@@ -25,6 +25,10 @@
 // samples, baseline, limits, manifest and a pass/fail/not-evaluated status
 // per criterion.
 //
+// Exit status: 0 the run passed every criterion; 1 a criterion failed (or the
+// peer process failed); 2 the command line was invalid and nothing ran; 3 the
+// run was incomplete, some criterion not evaluated; 4 the run was invalid.
+//
 //	perfchurn -role=peer -sctp-address=ASP_IP:2905 -local-ip=PEER_IP
 //	perfchurn -role=asp -peer-control=http://PEER_IP:8080 -routes=1000
 package main
@@ -32,20 +36,49 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
 )
 
+const (
+	exitPass       = 0
+	exitFail       = 1
+	exitUsage      = 2
+	exitIncomplete = 3
+	exitInvalid    = 4
+)
+
+// exitCodeFor maps the ASP verdict to the process exit status, so a caller
+// that only checks the status cannot mistake a failed or incomplete run for a
+// passing one.
+func exitCodeFor(verdict string) int {
+	switch verdict {
+	case verdictPass:
+		return exitPass
+	case verdictFail:
+		return exitFail
+	case verdictIncomplete:
+		return exitIncomplete
+	default:
+		return exitInvalid
+	}
+}
+
 func main() {
-	config, err := parseConfig(os.Args[1:])
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(arguments []string, stdout, stderr io.Writer) int {
+	config, err := parseConfig(arguments)
 	if err != nil {
-		_ = json.NewEncoder(os.Stderr).Encode(map[string]string{"verdict": verdictInvalid, "error": err.Error()})
-		os.Exit(2)
+		_ = json.NewEncoder(stderr).Encode(map[string]string{"verdict": verdictInvalid, "error": err.Error()})
+		return exitUsage
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	encoder := json.NewEncoder(os.Stdout)
+	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	if config.Role == rolePeer {
 		record, err := runPeer(ctx, config)
@@ -54,15 +87,11 @@ func main() {
 		}
 		_ = encoder.Encode(record)
 		if err != nil {
-			cancel()
-			os.Exit(1)
+			return exitFail
 		}
-		return
+		return exitPass
 	}
 	record := runASP(ctx, config)
 	_ = encoder.Encode(record)
-	if record.Verdict == verdictInvalid {
-		cancel()
-		os.Exit(1)
-	}
+	return exitCodeFor(record.Verdict)
 }

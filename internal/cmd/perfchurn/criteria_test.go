@@ -80,6 +80,7 @@ func TestRetentionSampleComparesEveryResourceWithTheBaseline(t *testing.T) {
 		"kernel owned":        func(sample *retainedSample) { sample.Kernel.OwnedEstablished++ },
 		"kernel unowned live": func(sample *retainedSample) { sample.Kernel.UnownedByState = map[string]int{"ESTABLISHED": 1} },
 		"kernel error":        func(sample *retainedSample) { sample.Kernel.Error = "unavailable" },
+		"subscription ended":  func(sample *retainedSample) { sample.LiveSubscriptions-- },
 	}
 	for name, mutate := range mutations {
 		sample := passingRetained(0)
@@ -102,12 +103,25 @@ func passingRetained(extraHeap uint64) retainedSample {
 		FDs:           fdSnapshot{Total: 40, Sockets: 34, SCTPAssociationSockets: 32, SCTPEndpointSockets: 1},
 		Associations:  stableAssociations,
 		Kernel:        kernelAssociations{Total: 32, OwnedEstablished: 32},
+
+		LiveSubscriptions: subscriberCount,
 	}
+}
+
+// deliveredLedger is one direction of one epoch that carried its whole
+// schedule without loss.
+func deliveredLedger(direction string, rate float64, count uint64) ledgerResult {
+	return ledgerResult{Direction: direction, Workload: string(workloadMix), Rate: rate, Scheduled: count, SentTotal: count, UniqueTotal: count}
+}
+
+func epochLedgers(forward, reverse uint64) []ledgerResult {
+	return []ledgerResult{deliveredLedger("asp-to-sgp", contractDataRate, forward), deliveredLedger("sgp-to-asp", defaultReverseRate, reverse)}
 }
 
 // passingRecord is a synthetic full-contract run: every criterion holds.
 func passingRecord() *aspRecord {
-	record := &aspRecord{Config: commandConfig{Blocks: 5, BlockCycles: 200, ChurnRate: 4, ChurnGroup: 2}}
+	record := &aspRecord{Config: commandConfig{Blocks: 5, BlockCycles: 200, ChurnRate: 4, ChurnGroup: 2, AcceptConcurrency: 4,
+		DataRate: contractDataRate, ReverseRate: defaultReverseRate, Payload: string(workloadMix)}}
 	for index, phase := range []string{phaseWarm, phaseSteady, phaseOverload, phaseOverloadDrain, "churn-1", "retain-5"} {
 		value := uint64(100+index) * mebibyte
 		if overloadPhase(phase) {
@@ -121,9 +135,16 @@ func passingRecord() *aspRecord {
 		record.HeapSeries = append(record.HeapSeries, heapSample{Phase: phase, LiveHeapBytes: heap})
 	}
 	record.BaselineFinal = passingRetained(0)
-	record.Steady = []ledgerResult{{SentTotal: 100, UniqueTotal: 100}, {SentTotal: 100, UniqueTotal: 100}}
+	record.Steady = epochLedgers(2_400_000, 38_400)
 	record.Overload = overloadResult{QueueCapacity: dataQueueSize, FullAssociations: stableAssociations, MaxQueued: dataQueueSize,
-		QueuedSamples: 10, Discarded: 256 * stableAssociations, StateRecords: stateRecords}
+		QueuedSamples: 10, Discarded: 256 * stableAssociations, StateRecords: stateRecords,
+		PeerSent: 1280 * stableAssociations, Received: dataQueueSize * stableAssociations}
+	record.PostOverload = passingRetained(mebibyte)
+	record.PostOverload.Attempt, record.PostOverload.Pass = 1, true
+	for subscriber := 0; subscriber < subscriberCount; subscriber++ {
+		record.Subscribers = append(record.Subscribers, subscriberSummary{Subscriber: subscriber, Events: 4282,
+			ContinuityLoss: 1, Resyncs: 1, LossByPhase: map[string]int{phaseOverloadDrain: 1}})
+	}
 	for subscriber := 0; subscriber < subscriberCount; subscriber++ {
 		record.Overload.Subscribers = append(record.Overload.Subscribers,
 			subscriberOverload{Subscriber: subscriber, DeliveredBeforeLoss: subscriptionQueueSize, LossObserved: true, Resynced: true})
@@ -136,8 +157,9 @@ func passingRecord() *aspRecord {
 			Block: block, Cycles: 200,
 			Peer: churnStats{Attempted: 200, Completed: 200, MaxEstablishing: 2, MaxStartLatenessMillis: 3, AchievedRate: 4,
 				ByMode: map[string]int{"asp-graceful": 67, "asp-abrupt": 67, "peer": 66}},
-			ASP:     aspChurnStats{Accepted: 200, Released: 200, ByMode: map[string]int{"asp-graceful": 67, "asp-abrupt": 67, "peer": 66}},
-			Ledgers: []ledgerResult{{SentTotal: 500, UniqueTotal: 500}, {SentTotal: 500, UniqueTotal: 500}},
+			ASP: aspChurnStats{Accepted: 200, Released: 200, MaxEstablishing: 2,
+				ByMode: map[string]int{"asp-graceful": 67, "asp-abrupt": 67, "peer": 66}},
+			Ledgers: epochLedgers(1_000_000, 16_000),
 			Final:   final,
 		})
 	}
@@ -177,6 +199,7 @@ func TestEvaluateRunFailsEachCriterionIndependently(t *testing.T) {
 		{"f7.cycles", func(record *aspRecord) { record.Blocks[2].Peer.Failed, record.Blocks[2].Peer.Completed = 1, 199 }, statusFail},
 		{"f7.cycles", func(record *aspRecord) { record.Config.BlockCycles = 40; trimBlocks(record, 2, 40) }, statusNotEvaluated},
 		{"f7.rate", func(record *aspRecord) { record.Blocks[0].Peer.MaxStartLatenessMillis = 300 }, statusFail},
+		{"f8.blocks", func(record *aspRecord) { trimBlocks(record, 5, 200) }, statusPass},
 		{"f7.rate", func(record *aspRecord) { record.Config.ChurnRate = 2 }, statusNotEvaluated},
 		{"f7.concurrent-accepts", func(record *aspRecord) {
 			for index := range record.Blocks {
@@ -194,6 +217,39 @@ func TestEvaluateRunFailsEachCriterionIndependently(t *testing.T) {
 		{"f7.surviving-no-loss", func(record *aspRecord) { record.Blocks[4].StableEnded = 1 }, statusFail},
 		{"f7.surviving-no-loss", func(record *aspRecord) { record.Steady[0].Late = 1 }, statusFail},
 		{"f7.surviving-no-loss", func(record *aspRecord) { record.Blocks[0].Ledgers[0].SentTotal = 0 }, statusFail},
+		{"f7.surviving-no-loss", func(record *aspRecord) { record.Blocks[3].Ledgers[1].Stale = 1 }, statusFail},
+		{"f7.surviving-no-loss", func(record *aspRecord) { record.Blocks[3].Ledgers[0].AfterClose = 1 }, statusFail},
+		{"f7.contract-load", func(record *aspRecord) { record.Blocks[1].Ledgers[0].Refused = 1 }, statusFail},
+		{"f7.contract-load", func(record *aspRecord) { record.Steady[1].Refused = 1 }, statusFail},
+		{"f7.contract-load", func(record *aspRecord) {
+			// 0.5% plus 10 ms of offered traffic below the schedule is the tolerance.
+			ledger := &record.Blocks[2].Ledgers[0]
+			ledger.SentTotal = ledger.Scheduled - scheduleTolerance(ledger.Scheduled, ledger.Rate) - 1
+			ledger.UniqueTotal = ledger.SentTotal
+		}, statusFail},
+		{"f7.contract-load", func(record *aspRecord) {
+			ledger := &record.Blocks[2].Ledgers[0]
+			ledger.SentTotal = ledger.Scheduled - scheduleTolerance(ledger.Scheduled, ledger.Rate)
+			ledger.UniqueTotal = ledger.SentTotal
+		}, statusPass},
+		{"f7.contract-load", func(record *aspRecord) { record.Blocks[4].Ledgers[1].Scheduled = 0 }, statusFail},
+		{"f7.contract-load", func(record *aspRecord) { record.Config.DataRate = 320 }, statusNotEvaluated},
+		{"f7.contract-load", func(record *aspRecord) { record.Config.Payload = "128" }, statusNotEvaluated},
+		{"f7.concurrent-accepts", func(record *aspRecord) {
+			for index := range record.Blocks {
+				record.Blocks[index].ASP.MaxEstablishing = 1
+			}
+		}, statusFail},
+		{"f8.subscriptions", func(record *aspRecord) { record.Subscribers[2].TerminalError = "closed" }, statusFail},
+		{"f8.subscriptions", func(record *aspRecord) { record.Subscribers[5].ResyncErrorText = "busy" }, statusFail},
+		{"f8.subscriptions", func(record *aspRecord) { record.Subscribers[1].LossByPhase["churn-2"] = 1 }, statusFail},
+		{"f8.subscriptions", func(record *aspRecord) { record.Subscribers[1].Resyncs = 0 }, statusFail},
+		{"f8.subscriptions", func(record *aspRecord) { record.BaselineFinal.LiveSubscriptions = 7 }, statusFail},
+		{"f8.subscriptions", func(record *aspRecord) { record.Subscribers = record.Subscribers[:7] }, statusFail},
+		{"f8.retained-resources", func(record *aspRecord) { record.Blocks[2].Final.LiveSubscriptions = 7 }, statusFail},
+		{"f8.post-overload-retained", func(record *aspRecord) { record.PostOverload.Goroutines++ }, statusFail},
+		{"f8.post-overload-retained", func(record *aspRecord) { record.PostOverload.LiveHeapBytes += 9 * mebibyte }, statusFail},
+		{"f8.post-overload-retained", func(record *aspRecord) { record.PostOverload = retainedSample{} }, statusNotEvaluated},
 		{"f8.steady-heap", func(record *aspRecord) { record.HeapSeries[1].LiveHeapBytes = 257 * mebibyte }, statusFail},
 		{"f8.steady-rss", func(record *aspRecord) { record.RSSSeries[4].RSSBytes = 513 * mebibyte }, statusFail},
 		{"f8.overload-heap", func(record *aspRecord) { record.HeapSeries[2].LiveHeapBytes = 513 * mebibyte }, statusFail},
@@ -204,6 +260,8 @@ func TestEvaluateRunFailsEachCriterionIndependently(t *testing.T) {
 		{"f8.overload-bounds", func(record *aspRecord) { record.Overload.Subscribers[3].LossObserved = false }, statusFail},
 		{"f8.overload-bounds", func(record *aspRecord) { record.Overload.StateRecords = stateRecords + 1 }, statusFail},
 		{"f8.overload-bounds", func(record *aspRecord) { record.Overload.OOMKills = 1 }, statusFail},
+		{"f8.overload-bounds", func(record *aspRecord) { record.Overload.Received-- }, statusFail},
+		{"f8.overload-bounds", func(record *aspRecord) { record.Overload.Discarded++ }, statusFail},
 		{"f8.overload-bounds", func(record *aspRecord) { record.Overload.PeerWriteErrors = 1 }, statusFail},
 		{"f8.overload-bounds", func(record *aspRecord) { record.Overload.PeerRefused = 5000 }, statusPass},
 		{"f8.retained-heap", func(record *aspRecord) { record.Blocks[3].Final.LiveHeapBytes = 109 * mebibyte }, statusFail},
@@ -253,5 +311,76 @@ func TestEvaluateRunIsInvalidAfterAFatalError(t *testing.T) {
 	evaluateRun(record)
 	if record.Verdict != verdictInvalid {
 		t.Fatalf("verdict %s", record.Verdict)
+	}
+}
+
+func TestSplitSeriesSeparatesWindowsAndGatesCoverage(t *testing.T) {
+	build := func() *aspRecord {
+		record := &aspRecord{Phases: []phaseMark{
+			{Name: phaseSteady, StartMillis: 0, EndMillis: 20_000},
+			{Name: phaseOverload, StartMillis: 20_000, EndMillis: 30_000},
+			{Name: "churn-1", StartMillis: 30_000, EndMillis: 50_000},
+		}}
+		for second := int64(0); second < 50; second++ {
+			phase := phaseSteady
+			switch {
+			case second >= 30:
+				phase = "churn-1"
+			case second >= 20:
+				phase = phaseOverload
+			}
+			value := uint64(40) * mebibyte
+			if phase == phaseOverload {
+				value = 300 * mebibyte
+			}
+			record.RSSSeries = append(record.RSSSeries, rssSample{AtMillis: second * 1000, Phase: phase, RSSBytes: value})
+			if second%10 == 0 {
+				record.HeapSeries = append(record.HeapSeries, heapSample{AtMillis: second * 1000, Phase: phase, LiveHeapBytes: value / 4})
+			}
+		}
+		return record
+	}
+	steadyHeap, steadyRSS, overloadHeap, overloadRSS := splitSeries(build())
+	if len(steadyRSS.Values) != 40 || len(overloadRSS.Values) != 10 || len(steadyHeap.Values) != 4 || len(overloadHeap.Values) != 1 {
+		t.Fatalf("windows: steady RSS %d heap %d, overload RSS %d heap %d",
+			len(steadyRSS.Values), len(steadyHeap.Values), len(overloadRSS.Values), len(overloadHeap.Values))
+	}
+	for _, window := range []seriesWindow{steadyHeap, steadyRSS, overloadHeap, overloadRSS} {
+		if window.Errored != 0 || len(window.Gaps) != 0 {
+			t.Fatalf("complete series reported %+v", window)
+		}
+	}
+	if got := evaluateWindow("x", "F8", "r", steadyRSS, steadyRSSLimit); got.Status != statusPass {
+		t.Fatalf("complete window %+v", got)
+	}
+
+	errored := build()
+	errored.RSSSeries[5].Error, errored.RSSSeries[5].RSSBytes = "read status: busy", 0
+	_, steadyRSS, _, _ = splitSeries(errored)
+	if steadyRSS.Errored != 1 || len(steadyRSS.Values) != 39 {
+		t.Fatalf("errored sample: %+v", steadyRSS)
+	}
+	if got := evaluateWindow("x", "F8", "r", steadyRSS, steadyRSSLimit); got.Status != statusNotEvaluated {
+		t.Fatalf("an errored sample in a gated window passed: %+v", got)
+	}
+
+	sparse := build()
+	sparse.RSSSeries = append(sparse.RSSSeries[:32], sparse.RSSSeries[40:]...)
+	sparse.HeapSeries = sparse.HeapSeries[2:]
+	steadyHeap, steadyRSS, _, _ = splitSeries(sparse)
+	if len(steadyRSS.Gaps) != 1 || !strings.Contains(steadyRSS.Gaps[0], "churn-1") || len(steadyHeap.Gaps) != 1 ||
+		!strings.Contains(steadyHeap.Gaps[0], phaseSteady) {
+		t.Fatalf("coverage gaps not reported: RSS %v heap %v", steadyRSS.Gaps, steadyHeap.Gaps)
+	}
+	if got := evaluateWindow("x", "F8", "r", steadyRSS, steadyRSSLimit); got.Status != statusNotEvaluated {
+		t.Fatalf("a window with a coverage gap passed: %+v", got)
+	}
+
+	over := build()
+	over.RSSSeries[3].RSSBytes = steadyRSSLimit + 1
+	over.RSSSeries[4].Error = "gone"
+	_, steadyRSS, _, _ = splitSeries(over)
+	if got := evaluateWindow("x", "F8", "r", steadyRSS, steadyRSSLimit); got.Status != statusFail {
+		t.Fatalf("a sample over the limit must fail whatever else is missing: %+v", got)
 	}
 }
