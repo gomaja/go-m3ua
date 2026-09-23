@@ -103,6 +103,53 @@ func (e SSNMEvent) clone() SSNMEvent {
 	return e
 }
 
+const (
+	ssnmEventBaseBytes        = 512
+	ssnmEventDestinationBytes = 8
+	ssnmEventStateBytes       = 256
+)
+
+func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
+	remaining := limit
+	if !reserveSSNMEventBytes(&remaining, 1, ssnmEventBaseBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.Report.Destinations), ssnmEventDestinationBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.States), ssnmEventStateBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.Report.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+		return 0, false
+	}
+	for _, value := range []string{
+		event.Reason,
+		string(event.Partition.SignallingGateway),
+		string(event.Partition.ApplicationServer),
+		string(event.Report.Partition.SignallingGateway),
+		string(event.Report.Partition.ApplicationServer),
+	} {
+		if !reserveSSNMEventBytes(&remaining, len(value), 1) {
+			return 0, false
+		}
+	}
+	for _, state := range event.States {
+		if !reserveSSNMEventBytes(&remaining, len(state.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) ||
+			!reserveSSNMEventBytes(&remaining, len(state.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+			return 0, false
+		}
+	}
+	return limit - remaining, true
+}
+
+func reserveSSNMEventBytes(remaining *int, count, width int) bool {
+	if *remaining < 0 || count < 0 || width <= 0 || count > *remaining/width {
+		return false
+	}
+	*remaining -= count * width
+	return true
+}
+
+type queuedSSNMEvent struct {
+	event SSNMEvent
+	bytes int
+}
+
 // Subscription errors.
 var (
 	// ErrSSNMSubscriptionClosed reports use of a subscription after Close, or
@@ -132,7 +179,8 @@ type SSNMSubscription struct {
 	busy chan struct{}
 
 	mu             sync.Mutex
-	queue          []SSNMEvent
+	queue          []queuedSSNMEvent
+	queuedBytes    int
 	closed         bool
 	terminal       error
 	continuityLost bool
@@ -140,15 +188,17 @@ type SSNMSubscription struct {
 	// once, after whatever was already queued.
 	pendingLoss bool
 	limit       int
+	byteLimit   int
 	wake        chan struct{}
 }
 
-func newSSNMSubscription(state *ssnmState, limit int) *SSNMSubscription {
+func newSSNMSubscription(state *ssnmState, limit, byteLimit int) *SSNMSubscription {
 	return &SSNMSubscription{
-		state: state,
-		busy:  make(chan struct{}, 1),
-		limit: limit,
-		wake:  make(chan struct{}, 1),
+		state:     state,
+		busy:      make(chan struct{}, 1),
+		limit:     limit,
+		byteLimit: byteLimit,
+		wake:      make(chan struct{}, 1),
 	}
 }
 
@@ -174,14 +224,19 @@ func (s *SSNMSubscription) enqueue(event SSNMEvent) {
 		s.mu.Unlock()
 		return
 	}
-	if len(s.queue) >= s.limit {
+	accountedBytes, fits := 0, false
+	if len(s.queue) < s.limit {
+		accountedBytes, fits = ssnmEventAccountedBytes(event, s.byteLimit-s.queuedBytes)
+	}
+	if !fits {
 		s.continuityLost = true
 		s.pendingLoss = true
 		s.mu.Unlock()
 		s.signal()
 		return
 	}
-	s.queue = append(s.queue, event.clone())
+	s.queue = append(s.queue, queuedSSNMEvent{event: event.clone(), bytes: accountedBytes})
+	s.queuedBytes += accountedBytes
 	s.mu.Unlock()
 	s.signal()
 }
@@ -241,12 +296,14 @@ func (s *SSNMSubscription) take() (SSNMEvent, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.queue) > 0 {
-		event := s.queue[0]
+		queued := s.queue[0]
+		s.queue[0] = queuedSSNMEvent{}
 		s.queue = s.queue[1:]
+		s.queuedBytes -= queued.bytes
 		if len(s.queue) == 0 {
 			s.queue = nil
 		}
-		return event, true, nil
+		return queued.event, true, nil
 	}
 	// The terminal state is delivered only once the queue that preceded it has
 	// been drained, so closing does not discard deltas already accepted.
@@ -306,7 +363,9 @@ func (s *SSNMSubscription) Resync() (SSNMSnapshot, error) {
 		state.mu.Unlock()
 		return SSNMSnapshot{}, terminal
 	}
+	clear(s.queue)
 	s.queue = nil
+	s.queuedBytes = 0
 	s.continuityLost = false
 	s.pendingLoss = false
 	s.mu.Unlock()
@@ -364,7 +423,7 @@ func (e *Endpoint) SubscribeSSNM() (SSNMSnapshot, *SSNMSubscription, error) {
 		return SSNMSnapshot{}, nil, fmt.Errorf("%w: %d subscriptions open, limit %d",
 			ErrSSNMSubscriberLimit, len(state.subscribers), state.limits.MaxSubscribers)
 	}
-	subscription := newSSNMSubscription(state, state.limits.SubscriptionQueueSize)
+	subscription := newSSNMSubscription(state, state.limits.SubscriptionQueueSize, state.limits.SubscriptionQueueBytes)
 	state.subscribers[subscription] = struct{}{}
 	return state.snapshotLocked(), subscription, nil
 }
