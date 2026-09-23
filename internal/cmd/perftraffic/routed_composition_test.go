@@ -506,6 +506,92 @@ func TestRoutedReceiverHTTPCompositionResetsAFreshRoutingLedger(testContext *tes
 	}
 }
 
+// routedCancelAfterContext reports cancellation from its nth Err call on. The
+// routed preparation consults the request context twice inside the SSNM
+// preparation's prepare and then again at its own commit, so a context that
+// turns canceled after two checks is canceled exactly between the SSNM
+// preparation committing and the routed DATA controller committing.
+type routedCancelAfterContext struct {
+	context.Context
+	remaining *atomic.Int32
+}
+
+func (ctx routedCancelAfterContext) Err() error {
+	if ctx.remaining.Add(-1) >= 0 {
+		return nil
+	}
+	return context.Canceled
+}
+
+// A /routing/prepare canceled after its DATA controller was built discards
+// only that uncommitted controller: the SGP endpoints the SSNM preparation
+// has committed to stay open, and the receiver still tears them down when it
+// is stopped.
+func TestRoutedPeerCanceledPrepareClosesOnlyItsUncommittedController(testContext *testing.T) {
+	receiver := newRoutedTestReceiver(testContext, modeRouted)
+	remaining := &atomic.Int32{}
+	remaining.Store(2)
+	err := receiver.operations.prepare(routedCancelAfterContext{Context: context.Background(), remaining: remaining}, receiver.senders)
+	if err == nil || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "prepared repeatedly or canceled") {
+		testContext.Fatalf("prepare error = %v, want the routed commit to refuse the canceled request", err)
+	}
+	receiver.operations.preparation.mutex.Lock()
+	committed := receiver.operations.preparation.prepared
+	receiver.operations.preparation.mutex.Unlock()
+	if !committed || receiver.operations.dataController != nil {
+		testContext.Fatalf("SSNM preparation committed=%v routed controller=%v, want only the SSNM preparation committed", committed, receiver.operations.dataController)
+	}
+	select {
+	case <-receiver.peers.Done():
+		testContext.Fatal("the canceled preparation closed the shared SGP endpoints")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if closed := receiver.endpointsClosed(); closed != 0 {
+		testContext.Fatalf("%d SGP endpoints closed by the canceled preparation", closed)
+	}
+	if _, err := receiver.peers.Inventory(); err != nil {
+		testContext.Fatalf("SGP inventory after the canceled preparation: %v", err)
+	}
+	if err := receiver.operations.stop(context.Background()); err != nil {
+		testContext.Fatal(err)
+	}
+	if closed := receiver.endpointsClosed(); closed != len(receiver.endpoints) {
+		testContext.Fatalf("stop closed %d of %d SGP endpoints", closed, len(receiver.endpoints))
+	}
+}
+
+// A committed controller still owns the endpoints: the sender's stop closes
+// them and marks the receiver fatal, and shutdown after it is idempotent.
+func TestRoutedPeerStopClosesTheCommittedTopology(testContext *testing.T) {
+	receiver := newRoutedTestReceiver(testContext, modeRouted)
+	receiver.prepareAndPublish(testContext)
+	if err := receiver.operations.startPreflight(context.Background(), "routed-preflight", 7); err != nil {
+		testContext.Fatal(err)
+	}
+	receiver.operations.mutex.Lock()
+	controller := receiver.operations.dataController
+	receiver.operations.mutex.Unlock()
+	if err := controller.Close(); err != nil {
+		testContext.Fatal(err)
+	}
+	select {
+	case <-receiver.peers.Done():
+	case <-time.After(5 * time.Second):
+		testContext.Fatal("closing the committed controller left the SGP endpoints open")
+	}
+	if first, second := receiver.operations.stop(context.Background()), receiver.operations.shutdown(); first != nil || second != nil {
+		testContext.Fatalf("stop=%v shutdown=%v", first, second)
+	}
+	if ready := receiver.control.ready(); ready.Ready || !strings.Contains(ready.Error, "stopped by the sender") {
+		testContext.Fatalf("ready after stop = %+v", ready)
+	}
+	for transport, association := range receiver.associations {
+		if active, _ := association.readers(); active != 0 {
+			testContext.Fatalf("%+v still has %d readers after stop", transport, active)
+		}
+	}
+}
+
 // routedTestSenderPreparation wraps the SSNM preparation fake so a test can
 // fail or contradict the sender inventory read after SSNM preparation.
 type routedTestSenderPreparation struct {

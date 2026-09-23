@@ -197,7 +197,8 @@ is not an isolated-library measurement.
 
 If the ASP fails at any point before its first cohort, it sends
 `/routing/stop`, so the receiver ends with that reason instead of waiting for
-a sender that has gone.
+a sender that has gone. A canceled preparation request never closes the SGP
+endpoints on its own.
 
 The routed modes do not cover alternate AS preference, partial path failures,
 SSNM storms or reference churn; those remain separate workloads and are

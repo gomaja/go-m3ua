@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gomaja/go-m3ua"
@@ -326,7 +327,17 @@ func (operations *routedPeerOperations) prepare(ctx context.Context, values []ro
 			return errors.New("routed peer association is not paired")
 		}
 	}
-	plane, err := newRoutingDataPeerPlane(associations, pairs, operations.peers.Close)
+	// The DATA plane owns the shared SGP endpoints only once this preparation
+	// is committed. A controller discarded before that — a canceled or
+	// repeated prepare — closes only itself, never the endpoints that the SSNM
+	// preparation and any committed controller still use.
+	var committed atomic.Bool
+	plane, err := newRoutingDataPeerPlane(associations, pairs, func() error {
+		if !committed.Load() {
+			return nil
+		}
+		return operations.peers.Close()
+	})
 	if err != nil {
 		return err
 	}
@@ -339,6 +350,7 @@ func (operations *routedPeerOperations) prepare(ctx context.Context, values []ro
 	if operations.dataController != nil || ctx.Err() != nil {
 		return errors.Join(ctx.Err(), controller.Close(), errors.New("routed peer was prepared repeatedly or canceled"))
 	}
+	committed.Store(true)
 	operations.dataController = controller
 	operations.pairs = pairs
 	operations.associations = associations
