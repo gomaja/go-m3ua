@@ -20,6 +20,9 @@ const (
 	sctpNoDelay       = true
 	sctpSACKDelay     = uint32(0)
 	sctpSACKFrequency = uint32(1)
+	// dataQueueSize is each association's inbound DATA queue bound, the
+	// per-association DATA queue of performance budgets section 4.
+	dataQueueSize = 1024
 )
 
 func associationConfig(role string) *m3ua.AssociationConfig {
@@ -40,7 +43,7 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 		SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).
 		SetApplicationServers(applicationServers...)
 	config.HeartbeatInfo = &m3ua.HeartbeatInfo{Enabled: false}
-	config.DataQueueSize = 1024
+	config.DataQueueSize = dataQueueSize
 	return config
 }
 
@@ -161,6 +164,7 @@ func dialAndRead(ctx context.Context, endpoint *m3ua.Endpoint, config commandCon
 			_ = association.Close()
 			return fmt.Errorf("dial association %d: %w", index, err)
 		}
+		control.trackAssociation(index, association)
 		control.registerReverseAssociation(association)
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		go readAssociation(ctx, index, association, control, fatal)
@@ -175,6 +179,7 @@ func acceptAndRead(ctx context.Context, listener *m3ua.Listener, associations in
 			nonblockingError(fatal, fmt.Errorf("accept association %d: %w", index, err))
 			return
 		}
+		control.trackAssociation(index, association)
 		control.registerReverseAssociation(association)
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
 		go readAssociation(ctx, index, association, control, fatal)

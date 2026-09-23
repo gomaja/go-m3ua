@@ -9,7 +9,8 @@ each DATA call uses a newly constructed Protocol Data parameter plus
 The fixture implements five modes: one-way `throughput` (the default), `echo`
 for round-trip latency, `bidirectional` for simultaneous two-way DATA, and the
 optional-router pair `routed` and `routed-direct` described under
-[Routed modes](#routed-modes). The direct modes support both SCTP initiation
+[Routed modes](#routed-modes). Throughput mode also runs the DATA overload
+trial described under [DATA overload mode](#data-overload-mode). The direct modes support both SCTP initiation
 directions: ASP-dial to SGP-listen (the default) and SGP-dial to ASP-listen.
 Throughput runs can add the opt-in SSNM load workload described under
 [SSNM load, overflow and resynchronization](#ssnm-load-overflow-and-resynchronization).
@@ -355,6 +356,180 @@ The routed modes do not cover alternate AS preference, partial path failures,
 SSNM storms or reference churn; those remain separate workloads and are
 reported as unavailable in `unsupported_modes`.
 
+## DATA overload mode
+
+`-overload-profile` turns a throughput sender into the DATA overload trial of
+performance budgets section 4: "Offer twice the matched required rate for
+60 s, then 50% for 60 s; all configured bounds hold, every
+rejection/loss/indeterminate outcome accounted for, admitted healthy
+throughput recovers within 2 s." The matched required rate is the section 2
+mixed row, so the approved trial is
+
+```sh
+perftraffic -role=asp ... -associations=8 -payload=mix -rate=40000 \
+  -overload-profile=2x:60s,0.5x:60s -warmup=30s -same-host-clock
+```
+
+The profile is a comma-separated list of `MULTIPLIERx:DURATION` phases. A
+multiplier is a plain decimal (`2x`, `0.5x`, `1.25x`, at most `16x`) applied
+to `-rate`; each phase rate must come out a whole number of messages per
+second. Durations are whole seconds, so every phase boundary falls on a
+per-second progress observation. The profile must contain a phase above 1x
+followed by a phase at or below 1x, must end at or below 1x, and each such
+recovery phase must last at least 12 s (the 2 s allowance, a one-second
+window and eight trend observations). It schedules at most 2^26 messages, the
+bound of the per-message outcome ledgers. The flag is an ASP sender flag for
+throughput mode only; the receiver learns the profile from each cohort's run
+specification. It is refused together with `-ssnm-rate`, and a receiver
+refuses a specification carrying both: the overload row runs DATA alone and
+judges its deliberate losses by its own contract, while the SSNM rows judge
+SSNM delivery against loss-free DATA at a fixed nominal load, so a combined
+run would belong to neither contract. Without it every mode, including `routed` and
+`routed-direct`, is unchanged: no field below is emitted and the scheduler's
+single-rate arithmetic is exactly the historical one.
+
+- **Window and schedule.** The measurement window is the concatenation of the
+  phases; `-duration` may be omitted or must equal it. The open-loop scheduler
+  is the same 100 microsecond scheduler on the same clock (`-same-host-clock`
+  included); only its schedule switches rate at each phase boundary. The drain
+  is raised to at least 3 s so every request deadline falls a second before
+  the drain deadline.
+- **Offered shape.** The trial is only evidence if the offered load followed
+  the phased schedule, so the scheduler records how long past its scheduled
+  instant it emitted every message (measured at its clock read for the batch
+  the message went out in), and each per-second sample records the offered
+  count at the instant it was read. The offered load followed the schedule
+  when every message's emission was recorded, at least 99% of them were
+  emitted within 10 ms of their scheduled instant (p99 at most the trend
+  rule's floor duration), none was emitted more than 100 ms late (a tenth of
+  the one-second windows recovery is judged over), and every in-window sample
+  lies between `schedule.due` at the sample instant less 10 ms of the current
+  phase's traffic (rounded up) and `schedule.due` itself, the upper bound taken
+  at the end of the millisecond the sample offset is truncated to. The
+  scheduler never emits early, so any excess is a fixture fault. A deviation,
+  or no in-window sample at all, makes the trial `invalid`; the emission-lag
+  percentiles, maximum and per-sample shortfall are in
+  `overload.offered_shape`.
+- **Warm-up.** The warm-up is an ordinary loss-free throughput cohort at the
+  profile's last-phase rate, the nominal level the trial returns to (0.5x of
+  the row: section 4's "mixed traffic at 50% of its target"). A warm-up that is
+  not loss-free ends the run as in every other mode.
+- **Per-request deadline and the cap.** Section 2's open-loop rules apply:
+  scheduled but unfinished sends are capped at `-outstanding` (8,192), each
+  request has a two-second deadline from its scheduled instant, and refusals
+  are counted, never omitted. A message whose deadline passed while it waited
+  in the fixture queue is not offered to the library. Otherwise the sender sets
+  the association write deadline to the request's deadline (never beyond the
+  drain deadline) for exactly the one `WriteData` call and then restores the
+  cohort's drain deadline, so a request deadline never bounds a write the
+  library makes on its own behalf. A full send buffer is therefore waited out
+  until the request's deadline.
+- **Outcome classes.** Every offered message ends in exactly one class,
+  counted per phase, in total and in a per-second series: `accepted` by
+  `WriteData`; `not_sent` (`m3ua.DataNotSent`) by cause, `write_deadline`
+  (`os.ErrDeadlineExceeded`), `send_buffer_full` (`EAGAIN`/`EWOULDBLOCK`,
+  which cannot occur while a write deadline is installed but is still
+  classified), `not_established` and `other`; `indeterminate`
+  (`m3ua.DataSendIndeterminate`); fixture cap refusals
+  (`cap_refused_outstanding` for the 8,192 cap, `cap_refused_queue` for a full
+  per-association queue); `deadline_expired`; and the fixture-failure classes
+  `unclassified` (a result outside the `*m3ua.DataWriteError` contract or a
+  short write), `fixture_errors` and `aborted`. The legacy `submitted`,
+  `send_errors` and `capped` fields keep counting accepted messages,
+  `WriteData` failures, and fixture refusals plus deadline expiries. The
+  fixture never resends a refused or indeterminate message. The per-second
+  sampler stops at the end of the measurement window while requests still
+  complete during the drain, so a final point (`final: true`) is taken once
+  every sender worker has finished; the series must end at the cohort totals
+  or the trial is `invalid`. The per-association fixture queue maximum is read
+  at every enqueue, immediately before (counting the message being added) and
+  immediately after it: a worker can dequeue in between and a peak between two
+  enqueues is not seen, so it is a sampled observation, and the channel
+  capacity itself enforces the bound.
+- **Receiver observations.** Validated unique deliveries and duplicates are
+  counted by the phase the message was scheduled in, a scope failure (wrong
+  routing label, Network Appearance, Routing Context or association) is counted
+  as `misscoped` within `invalid`, and a per-message delivered ledger records
+  every validated delivery. Library discards are observable through the public
+  API: `Association.DataQueueStats` reports each inbound DATA queue's capacity,
+  occupancy, cumulative discards and congestion, the same observation
+  `TestDataQueueOverloadIsObservable` pins. The receiver polls it every 10 ms
+  during the cohort for the maximum occupancy and congestion episodes, reports
+  each association's discards, state and SCTP epoch at the end, and brackets
+  every `/progress` snapshot's unique count with the discard total read just
+  before and after it. `GET /overload/delivered?generation=N` serves the
+  stopped cohort's delivered ledger (one bit per scheduled message,
+  little-endian 64-bit words).
+- **Admitted backlog.** Every progress observation is bracketed by the
+  sender's attempt accounting, so the admitted-but-undelivered backlog is
+  bounded below by accepted-before minus unique minus discards-after and above
+  by started-after minus refused-before minus unique minus discards-before.
+  Refused messages are never part of it. `sender_window` keeps its nominal
+  meaning over the phased offered schedule; its backlog includes refused
+  messages and is not an acceptance input here. With `-same-host-clock` an
+  observation's instant is the receiver's capture plus or minus the clock
+  resolution on the shared clock, as for the nominal sender window, not the
+  sender's HTTP request envelope; a missing capture invalidates the trial.
+
+The sender record's `overload` object carries the per-phase and total classes,
+the per-second series, the refusals by scheduled second, the per-message
+`reconciliation`, the observed `bounds`, the per-interval `windows` (delivered,
+offered and admitted-backlog bounds between consecutive progress
+observations), the `recovery` evaluation at each switch, and the `acceptance`
+decision; the receiver record's `overload.receiver` carries the receiver
+observations above. Acceptance is machine-readable, one entry per criterion
+with the numbers in its detail:
+
+1. **fixture** — no fixture or clock failure, bounded progress observations,
+   receiver observations present, the offered load following the phased
+   schedule and the per-second series ending at the totals. A failure makes
+   the trial `invalid`.
+2. **accounting** — every offered message reached exactly one class and the
+   whole schedule was offered; the accepted and indeterminate ledgers agree
+   with the counts and never overlap; the delivered ledger agrees with the
+   receiver's unique count; no delivered message was neither accepted nor
+   indeterminate (`phantom`); accepted messages the receiver never delivered
+   are all explained by the counted library discards (`unexplained_missing`
+   bounds, `discard_excess`); and there are no duplicates, invalid or
+   mis-scoped, reordered or late deliveries. Discards are counted per
+   association, not per message, so they explain undelivered messages by count;
+   an indeterminate message may or may not have been delivered, and the bounds
+   say how many of either kind there are.
+3. **bounds** — fixture outstanding never above the cap, no fixture queue above
+   its capacity, every receiver library DATA queue at the configured capacity
+   (1,024) and never above it, every association on both sides still
+   ASP-ACTIVE on the SCTP epoch it started on, no `not_established` refusal and
+   no receiver read failure. The observed maxima are reported.
+4. **recovery** — at each switch from a phase above 1x to one at or below it,
+   the first one-second window between consecutive progress observations that
+   starts after the switch and no later than 2 s after it (the latest instant
+   its start could have been), that delivers at least the offered rate over the
+   longest interval it could have spanned less 1% and less the trend rule's
+   floor (10 ms of offered traffic), and after which the admitted backlog does
+   not grow. Non-growth is the trend rule's `not-growing` verdict from the
+   window to the end of the phase; because that rule's autocorrelation-robust
+   bounds straddle the floor across the drain of the backlog an overload phase
+   leaves behind, a window whose trend is undecided also counts when no later
+   admitted backlog exceeds the backlog at the window's start by more than the
+   floor (`non_growth_by: envelope`). A `growing` verdict is never excused. The
+   recovery time is the window's latest possible start minus the switch. An
+   observation whose bracket begins before the switch cannot start a window,
+   because the deliveries it counts may include the overload phase's: with
+   `-same-host-clock` that is the observation taken at the switch whenever
+   the clock resolution exceeds its capture delay, and the next observation's
+   window is then the first candidate.
+   Refusals scheduled after the window and the end of the phase's last refused
+   second are reported but are not part of the criterion.
+
+The acceptance `verdict` is `pass` only when all four pass, `fail` when any
+fails, `inconclusive` when one lacks evidence, and `invalid` on a fixture
+failure. The sender record's `verdict` follows it (`fail` is reported as
+`invalid` with the failed criteria in `reasons`); the receiver record passes
+only its own checks. `capacity_verdict` is always `unavailable`: every cohort
+of an overload trial, warm-up included, carries `spec.overload` (`role`
+`warmup` or `measurement`), and `internal/cmd/perfcapacity` refuses any run
+that carries that identity or an `overload` object before any other check.
+
 ## Protocol basis
 
 The protocol basis was rechecked against both the RFC Editor and IETF
@@ -434,7 +609,8 @@ schedule to match achieved throughput.
 ## Control contract
 
 The receiver exposes five bounded HTTP operations (a routed receiver also
-serves its preparation operations under `/routing/`):
+serves its preparation operations under `/routing/`, and a stopped overload
+cohort's delivered ledger is served at `/overload/delivered`):
 
 - `GET /ready` reports established association count, fatal read errors, phase,
   and the minimum negotiated outbound stream count.

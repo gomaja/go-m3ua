@@ -20,6 +20,21 @@ func scheduledMessages(rate uint64, duration time.Duration) (uint64, error) {
 }
 
 func dispatchOpenLoop(ctx context.Context, rate uint64, duration time.Duration, started time.Time, expected uint64, clock *sharedRunClock, counters *senderCounters, emit func(index uint64, offset time.Duration, scheduled time.Time)) {
+	dispatchScheduleOpenLoop(ctx, constantSchedule{rate: rate}, duration, started, expected, clock, counters, emit)
+}
+
+// dispatchScheduleOpenLoop is the open-loop scheduler. The schedule decides
+// how many messages are due at each elapsed instant and each message's
+// scheduled offset; everything else — the 100 microsecond quantum, the shared
+// clock checks, cancellation and the wait for the window end — is the same for
+// every schedule.
+func dispatchScheduleOpenLoop(ctx context.Context, schedule openLoopSchedule, duration time.Duration, started time.Time, expected uint64, clock *sharedRunClock, counters *senderCounters, emit func(index uint64, offset time.Duration, scheduled time.Time)) {
+	// An overload trial judges its offered shape by how late each message was
+	// emitted; every other cohort records nothing here.
+	var lags *emissionLags
+	if counters.overload != nil {
+		lags = &counters.overload.emission
+	}
 	var previousElapsed time.Duration
 	if clock != nil {
 		elapsed, err := clock.elapsed()
@@ -44,10 +59,7 @@ func dispatchOpenLoop(ctx context.Context, rate uint64, duration time.Duration, 
 			}
 			previousElapsed = elapsed
 		}
-		due := uint64(0)
-		if elapsed > 0 {
-			due = uint64(elapsed)*rate/uint64(time.Second) + 1
-		}
+		due := schedule.due(elapsed)
 		if due > expected {
 			due = expected
 		}
@@ -69,7 +81,10 @@ func dispatchOpenLoop(ctx context.Context, rate uint64, duration time.Duration, 
 					return
 				}
 			}
-			offset := time.Duration(index * uint64(time.Second) / rate)
+			offset := schedule.offset(index)
+			if lags != nil {
+				lags.record(elapsed-offset, offset)
+			}
 			counters.schedule()
 			emit(index, offset, started.Add(offset))
 			index++

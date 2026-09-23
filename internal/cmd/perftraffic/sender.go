@@ -64,6 +64,9 @@ type senderCounters struct {
 	dispatchLag *durationHistogram
 	series      []seriesPoint
 	limit       uint64
+	// overload is the outcome accounting of an overload measurement cohort,
+	// nil for every other cohort.
+	overload *overloadCounters
 }
 
 func newSenderCounters(limit int) *senderCounters {
@@ -114,6 +117,15 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
 		if phase == "warmup" {
 			cohortConfig.ssnmPhase = ssnmPhaseWarmup
+		}
+		if cohortConfig.overload != nil {
+			// An overload trial warms up loss-free at the profile's recovery
+			// rate; only its measurement cohort follows the phases.
+			cohortConfig.overloadRole = overloadRoleMeasurement
+			if phase == "warmup" {
+				cohortConfig.overloadRole = overloadRoleWarmup
+				cohortConfig.Rate = cohortConfig.overload.warmupRate()
+			}
 		}
 		sender, receiver, err := runSenderCohort(ctx, cohortConfig, associations, registry, cohort, duration)
 		result := newCohortResult(phase, sender, receiver, err)
@@ -320,7 +332,17 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if config.Mode == modeEcho && registry == nil {
 		return runRecord{}, runRecord{}, errors.New("echo mode requires an echo reply registry")
 	}
+	var overloadProfile *overloadProfile
+	if config.overload != nil && config.overloadRole == overloadRoleMeasurement {
+		overloadProfile = config.overload
+		if routed != nil || registry != nil || duration != overloadProfile.duration() {
+			return runRecord{}, runRecord{}, errors.New("an overload measurement cohort runs the direct throughput workload over the profile's window")
+		}
+	}
 	expected, err := scheduledMessages(config.Rate, duration)
+	if overloadProfile != nil {
+		expected, err = overloadProfile.expected(), nil
+	}
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("calculate scheduled messages: %w", err)
 	}
@@ -343,6 +365,9 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	}
 	if specification.Direction == "" {
 		specification.Direction = directionASPToSGP
+	}
+	if config.overload != nil && config.overloadRole != "" {
+		specification.Overload = config.overload.spec(config.overloadRole)
 	}
 	clock, err := prepareSharedRunClock(ctx, config, &specification)
 	if err != nil {
@@ -404,17 +429,33 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	var queues []chan sendJob
 	var routedQueues []chan routingTimedJob
 	var workersDone <-chan struct{}
-	if routed != nil {
+	var overloadEpochs []uint64
+	var mark func() overloadSenderMark
+	switch {
+	case routed != nil:
 		routedQueues, workersDone = startRoutedSendWorkers(ctx, routed, config, counters)
-	} else {
+	case overloadProfile != nil:
+		counters.overload = newOverloadCounters(overloadProfile.schedule)
+		overloadEpochs = make([]uint64, len(associations))
+		for index, association := range associations {
+			overloadEpochs[index] = association.Epoch()
+		}
+		mark = counters.overloadMark
+		initialObservation.SenderBefore, initialObservation.SenderAfter = &overloadSenderMark{}, &overloadSenderMark{}
+		queues, workersDone = startOverloadSendWorkers(associations, config, counters, drainDeadline)
+	default:
 		queues, workersDone = startSendWorkers(associations, config, counters, tracker)
 	}
 	sampleDone := make(chan struct{})
 	go sampleSharedSender(started, counters, sampleDone, clock)
-	progressDone := sampleSharedProgress(ctx, started, duration, config.PeerControl, clock)
-	if routed != nil {
+	progressDone := sampleMarkedProgress(ctx, started, duration, config.PeerControl, clock, mark)
+	var fixtureQueueMax []int
+	switch {
+	case routed != nil:
 		dispatchRouted(ctx, config, routed, cohort, duration, started, expected, routedQueues, counters, clock)
-	} else {
+	case overloadProfile != nil:
+		fixtureQueueMax = dispatchOverload(ctx, config, cohort, overloadProfile.schedule, started, queues, counters, clock)
+	default:
 		dispatchScheduled(ctx, config, cohort, duration, started, expected, queues, counters, tracker, clock)
 	}
 	outstandingAtEnd := counters.outstandingCount()
@@ -445,6 +486,15 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 			_ = association.Close()
 		}
 		<-workersDone
+	}
+	if overloadProfile != nil {
+		finalOffset := time.Since(started)
+		if clock != nil {
+			if elapsed, clockErr := clock.elapsed(); clockErr == nil {
+				finalOffset = elapsed
+			}
+		}
+		counters.finishOverloadSeries(finalOffset)
 	}
 	drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
 	receiver, pollErr := waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
@@ -515,6 +565,9 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		sender.WindowAlignment = "verified same-host CLOCK_MONOTONIC window; rate and backlog retain clock-resolution bounds"
 	}
 	sender.OutstandingScope = "legacy counters measure sender worker queues only; sender_window bounds include all scheduled but not yet validated deliveries"
+	if overloadProfile != nil {
+		sender.Overload = collectOverloadEvidence(diagnosticsContext, config, specification, overloadProfile, counters, associations, overloadEpochs, fixtureQueueMax, receiver, initialProgress.Generation, stopErr, observations, &sender)
+	}
 	sender.evaluate()
 	var cohortErrors []error
 	if pollErr != nil {
@@ -657,6 +710,9 @@ func (counters *senderCounters) abort(remaining uint64, err error) {
 	counters.scheduled += remaining
 	counters.capped += remaining
 	counters.fatal = err.Error()
+	if counters.overload != nil {
+		counters.overload.abortRemaining(remaining)
+	}
 }
 
 func (counters *senderCounters) setFatal(reason string) {
@@ -697,6 +753,17 @@ func sampleSharedSender(started time.Time, counters *senderCounters, done <-chan
 			if offset < 0 {
 				counters.mutex.Unlock()
 				continue
+			}
+			if counters.overload != nil {
+				// The overload series is judged against the schedule at the
+				// instant its counts were read. The tick time can be well
+				// before the mutex was taken, so without a shared clock the
+				// instant is read again under the mutex.
+				overloadOffset := offset
+				if clock == nil {
+					overloadOffset = time.Since(started)
+				}
+				counters.sampleOverloadLocked(overloadOffset)
 			}
 			if len(counters.series) < 601 {
 				counters.series = append(counters.series, seriesPoint{
@@ -750,6 +817,11 @@ func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCoun
 		}
 		submitted := counters.submittedCount()
 		accounted := receiver.Delivery.Unique + receiver.Delivery.Invalid + receiver.Delivery.Duplicate
+		if receiver.Overload != nil && receiver.Overload.Receiver != nil {
+			// An overload receiver may discard accepted messages; each
+			// discard is accounted for, not awaited.
+			accounted += receiver.Overload.Receiver.Discarded
+		}
 		if accounted >= submitted {
 			return receiver, nil
 		}

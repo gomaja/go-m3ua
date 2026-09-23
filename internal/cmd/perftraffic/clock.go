@@ -180,7 +180,9 @@ func sameRunSpec(first, second runSpec) bool {
 	firstSSNM, secondSSNM := first.SSNM, second.SSNM
 	first.Clock, second.Clock = nil, nil
 	first.SSNM, second.SSNM = nil, nil
-	if first != second {
+	firstOverload, secondOverload := first.Overload, second.Overload
+	first.Overload, second.Overload = nil, nil
+	if first != second || !sameOverloadSpec(firstOverload, secondOverload) {
 		return false
 	}
 	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM)
@@ -204,6 +206,7 @@ func copyRunSpec(specification runSpec) runSpec {
 		workload := *specification.SSNM
 		specification.SSNM = &workload
 	}
+	specification.Overload = copyOverloadSpec(specification.Overload)
 	return specification
 }
 
