@@ -26,8 +26,10 @@ var transportRefusals = []struct {
 	{"a full send buffer", syscall.EAGAIN, syscall.EAGAIN},
 	{"a full send buffer reported as EWOULDBLOCK", syscall.EWOULDBLOCK, syscall.EWOULDBLOCK},
 	// A write deadline the send waited out: the last attempt was refused
-	// before the wait began. Wrapped the way net.Conn-style callers see it.
-	{"an expired write deadline", &net.OpError{Op: "write", Net: "sctp", Err: os.ErrDeadlineExceeded}, os.ErrDeadlineExceeded},
+	// before the wait began. SCTPWrite returns the poller's error unwrapped;
+	// both shapes are covered so a wrapped one is classified the same way.
+	{"an expired write deadline", os.ErrDeadlineExceeded, os.ErrDeadlineExceeded},
+	{"an expired write deadline, wrapped", &net.OpError{Op: "write", Net: "sctp", Err: os.ErrDeadlineExceeded}, os.ErrDeadlineExceeded},
 }
 
 func TestWriteDataReportsATransportRefusalAsNotSent(t *testing.T) {
@@ -50,6 +52,24 @@ func TestWriteSignalOfDataReportsATransportRefusalAsNotSent(t *testing.T) {
 			conn, capture := newDataWriteAssociation(t, 1)
 			conn.signalWriter = nil
 			capture.err = refusal.err
+			_, err := conn.WriteSignal(messages.NewData(
+				params.NewNetworkAppearance(7),
+				params.NewRoutingContext(1),
+				params.NewProtocolData(0x111111, 0x222222, params.ServiceIndSCCP, 0, 0, 1, []byte("refused")),
+				nil,
+			))
+			requireDataWriteError(t, err, DataNotSent, refusal.cause)
+		})
+	}
+}
+
+// The signal seam stands in for the transport in the tests that observe
+// decoded messages; a refusal it reports is classified like the transport's.
+func TestWriteSignalSeamReportsATransportRefusalAsNotSent(t *testing.T) {
+	for _, refusal := range transportRefusals {
+		t.Run(refusal.name, func(t *testing.T) {
+			conn, _ := newDataWriteAssociation(t, 1)
+			conn.signalWriter = func(messages.M3UA) (int, error) { return 0, refusal.err }
 			_, err := conn.WriteSignal(messages.NewData(
 				params.NewNetworkAppearance(7),
 				params.NewRoutingContext(1),
