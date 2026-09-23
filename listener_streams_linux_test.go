@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"context"
+	"encoding/binary"
 	"net"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestAcceptedAssociationCapsAGreedyPeersStreams(t *testing.T) {
 			accepted <- association
 		}
 	}()
-	dialStalledASPWith(t, address, 1, sctp.InitMsg{NumOstreams: sctp.SCTP_MAX_STREAM, MaxInstreams: sctp.SCTP_MAX_STREAM})
+	peer := dialStalledASPWith(t, address, 1, sctp.InitMsg{NumOstreams: sctp.SCTP_MAX_STREAM, MaxInstreams: sctp.SCTP_MAX_STREAM})
 	var association *Association
 	select {
 	case association = <-accepted:
@@ -64,5 +65,22 @@ func TestAcceptedAssociationCapsAGreedyPeersStreams(t *testing.T) {
 	}
 	if got := association.MaxMessageStreamID(); got != sctpStreams-1 {
 		t.Fatalf("DATA streams reach %d; want %d", got, sctpStreams-1)
+	}
+
+	// The highest SLS maps to the last negotiated stream, and DATA sent there
+	// reaches the peer on it.
+	close(peer.resume)
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, 255)
+	if _, err := association.WriteData(DataRequest{AS: key, ProtocolData: params.ProtocolDataPayload{
+		OriginatingPointCode: 1, DestinationPointCode: 2, ServiceIndicator: 3, NetworkIndicator: 2,
+		SignallingLinkSelection: 255, Data: payload}}); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(func() bool { return len(peer.delivered()) == 1 }, 10*time.Second) {
+		t.Fatal("the DATA on the last stream never reached the peer")
+	}
+	if streams := peer.deliveredStreams(); len(streams) != 1 || streams[0] != sctpStreams-1 {
+		t.Fatalf("SLS 255 arrived on streams %v; want [%d]", streams, sctpStreams-1)
 	}
 }
