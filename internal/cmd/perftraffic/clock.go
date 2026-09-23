@@ -184,7 +184,9 @@ func sameRunSpec(first, second runSpec) bool {
 	first.SSNM, second.SSNM = nil, nil
 	first.SGPFailure, second.SGPFailure = nil, nil
 	first.RouteReferences, second.RouteReferences = nil, nil
-	if first != second {
+	firstOverload, secondOverload := first.Overload, second.Overload
+	first.Overload, second.Overload = nil, nil
+	if first != second || !sameOverloadSpec(firstOverload, secondOverload) {
 		return false
 	}
 	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM) && samePointee(firstFailure, secondFailure) &&
@@ -217,6 +219,7 @@ func copyRunSpec(specification runSpec) runSpec {
 		references := *specification.RouteReferences
 		specification.RouteReferences = &references
 	}
+	specification.Overload = copyOverloadSpec(specification.Overload)
 	return specification
 }
 

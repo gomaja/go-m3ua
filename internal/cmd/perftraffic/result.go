@@ -40,6 +40,28 @@ type runSpec struct {
 	// RouteReferences is the application route-reference workload of a
 	// routed-direct cohort, nil and omitted without -route-references.
 	RouteReferences *routeReferenceSpec `json:"route_references,omitempty"`
+	// Overload identifies a cohort of a DATA overload trial. It is absent from
+	// every nominal cohort.
+	Overload *overloadSpec `json:"overload,omitempty"`
+}
+
+// overloadMeasurement reports whether the specification is the phased
+// measurement cohort of an overload trial.
+func (specification runSpec) overloadMeasurement() bool {
+	return specification.Overload.measurement()
+}
+
+// overloadSchedule is the phased schedule of an overload measurement cohort,
+// or nil for every other cohort.
+func (specification runSpec) overloadSchedule() *phasedSchedule {
+	if !specification.overloadMeasurement() {
+		return nil
+	}
+	schedule, err := newPhasedSchedule(specification.Overload.Phases)
+	if err != nil {
+		return nil
+	}
+	return schedule
 }
 
 type deliveryResult struct {
@@ -124,6 +146,10 @@ type runRecord struct {
 	// verdict of a -route-references sender record. The DATA verdicts do not
 	// include it.
 	RouteReferences *routeReferenceRecord `json:"route_references,omitempty"`
+	// Overload is present only on the records of a DATA overload measurement
+	// cohort: the receiver's observations on the receiver record, the full
+	// outcome accounting and acceptance evaluation on the sender record.
+	Overload *overloadRecord `json:"overload,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -179,6 +205,10 @@ func (record *runRecord) evaluate() {
 	}
 	if record.Failover != nil {
 		record.evaluateFailover()
+		return
+	}
+	if record.Spec.overloadMeasurement() {
+		record.evaluateOverloadRecord()
 		return
 	}
 	invalid := func(reason string) {
