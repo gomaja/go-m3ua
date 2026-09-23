@@ -1,8 +1,9 @@
 // perfcapacity evaluates a bounded capacity search campaign. It reads one
 // strict JSON request from standard input: the search parameters, the per-run
 // fixture evidence for each probe in execution order, and optionally the five
-// validation repetitions at the selected rate. Shared-clock throughput uses a
-// complete sender/receiver cohort; bidirectional mode uses all four directional
+// validation repetitions at the selected rate. Shared-clock throughput and the
+// routed and routed-direct optional-router workloads use a complete
+// sender/receiver cohort; bidirectional mode uses all four directional
 // records. Each probe must have run at
 // exactly the rate the predeclared search selected; any deviation is invalid
 // input, so a campaign cannot reorder or drop inconvenient probes.
@@ -667,13 +668,13 @@ func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, erro
 		switch *sender.Spec.Mode {
 		case "bidirectional":
 			return bidirectionalFixtureRun(raw, declaredRate)
-		case "throughput":
+		case "throughput", routedMode, routedDirectMode:
 			if len(shape.ReverseSender) != 0 || len(shape.ReverseReceiver) != 0 {
 				return fixtureRun{}, errors.New("unidirectional cohort must not contain reverse_sender or reverse_receiver members")
 			}
 			return unidirectionalFixtureRun(raw, declaredRate)
 		default:
-			return fixtureRun{}, errors.New("cohort sender mode must be throughput or bidirectional")
+			return fixtureRun{}, errors.New("cohort sender mode must be throughput, bidirectional, routed or routed-direct")
 		}
 	}
 	evidence, identity, err := evidenceFromFixture(raw, declaredRate)
@@ -755,6 +756,9 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 	}
 	if workload.Outstanding != environment.OutstandingLimit || workload.Initiation != environment.Initiation {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("run environment outstanding_limit and initiation must agree with the workload spec")
+	}
+	if isRoutedWorkload(workload.Mode) && environment.FlowCount != routedFlowCount {
+		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("routed workloads require manifest flow_count %d, one ordered flow per configured route", routedFlowCount)
 	}
 	identity := runIdentity{workload: workload, environment: environment, streams: string(streams)}
 
@@ -1010,8 +1014,8 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if senderSpec != receiverSpec {
 		return fixtureRun{}, errors.New("unidirectional sender and receiver specs do not match")
 	}
-	if senderSpec.Workload.Mode != "throughput" {
-		return fixtureRun{}, errors.New("unidirectional cohort sender must use throughput mode")
+	if senderSpec.Workload.Mode != "throughput" && !isRoutedWorkload(senderSpec.Workload.Mode) {
+		return fixtureRun{}, errors.New("unidirectional cohort sender must use throughput, routed or routed-direct mode")
 	}
 	if senderSpec.Workload.Direction != "asp-to-sgp" {
 		return fixtureRun{}, errors.New("unidirectional cohort sender must use the producer direction asp-to-sgp")
@@ -1509,7 +1513,7 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 		}
 		fixtureInvalid = fixtureInvalid || *record.Echo.Validated != *record.Expected || *record.Echo.Capped != 0 ||
 			*record.Echo.DeadlineExceeded != 0 || *record.Echo.Invalid != 0 || *record.Echo.OutstandingAfterDrain != 0
-	case "throughput", "bidirectional":
+	case "throughput", "bidirectional", routedMode, routedDirectMode:
 		if record.Echo != nil || record.ReceiverEcho != nil {
 			return errors.New("throughput sender records must not carry echo evidence")
 		}
@@ -1577,7 +1581,7 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		return workloadIdentity{}, errors.New("unsupported payload workload")
 	}
 	switch *spec.Mode {
-	case "throughput", "echo", "bidirectional":
+	case "throughput", "echo", "bidirectional", routedMode, routedDirectMode:
 	default:
 		return workloadIdentity{}, errors.New("unsupported workload mode")
 	}
@@ -1593,6 +1597,11 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	}
 	if err := validateControlBaseURL(spec.PeerControl); err != nil {
 		return workloadIdentity{}, fmt.Errorf("spec.peer_control: %w", err)
+	}
+	if isRoutedWorkload(*spec.Mode) {
+		if err := validateRoutedTopology(spec); err != nil {
+			return workloadIdentity{}, err
+		}
 	}
 	instrumentation := "http-progress"
 	if spec.SharedClock != nil {
@@ -1613,6 +1622,37 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		PeerControl:     spec.PeerControl,
 		Instrumentation: instrumentation,
 	}, nil
+}
+
+// The optional-router workload (performance budgets section 2) has one fixed
+// shape: 2 SGs x 2 SGPs x 2 associations, the deterministic mixed payload, the
+// ASP dialling, traffic from ASP to SGP, and one ordered flow per configured
+// route. routed sends through Endpoint.MTPTransfer; routed-direct is the
+// matched control that writes the same traffic on the same frozen paths with
+// Association.WriteData.
+const (
+	routedMode             = "routed"
+	routedDirectMode       = "routed-direct"
+	routedAssociationCount = 8
+	routedFlowCount        = 1000
+)
+
+func isRoutedWorkload(mode string) bool {
+	return mode == routedMode || mode == routedDirectMode
+}
+
+func validateRoutedTopology(spec *fixtureSpec) error {
+	switch {
+	case *spec.Associations != routedAssociationCount:
+		return fmt.Errorf("routed workloads require exactly %d associations (2 SGs x 2 SGPs x 2 associations)", routedAssociationCount)
+	case *spec.Payload != "mix":
+		return errors.New("routed workloads require the mix payload")
+	case *spec.Initiation != "asp-dial":
+		return errors.New("routed workloads require asp-dial initiation")
+	case *spec.Direction != "asp-to-sgp":
+		return errors.New("routed workloads require direction asp-to-sgp")
+	}
+	return nil
 }
 
 func validateControlBaseURL(value string) error {

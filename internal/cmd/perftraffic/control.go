@@ -78,6 +78,9 @@ type receiverControl struct {
 	reverseSender   *runRecord
 	reverseReceiver *runRecord
 	reverseError    string
+	// routed is set only on the SGP receiver of a routed run. Its cohorts use
+	// the per-route ledger and route-aware validation instead of ledger.
+	routed *routedReceiveState
 }
 
 // reverseDriver lets the bidirectional SGP run the reverse (SGP-to-ASP)
@@ -208,6 +211,13 @@ func (control *receiverControl) reset(specification runSpec) error {
 	}
 	switch specification.Mode {
 	case "", modeThroughput, modeEcho, modeBidirectional:
+		if control.routed != nil {
+			return fmt.Errorf("%w: this receiver hosts the routed topology and accepts only %s cohorts", errInvalidRunSpec, control.routed.mode)
+		}
+	case modeRouted, modeRoutedDirect:
+		if err := control.validateRoutedSpecLocked(specification); err != nil {
+			return err
+		}
 	default:
 		return errInvalidRunSpec
 	}
@@ -236,13 +246,25 @@ func (control *receiverControl) reset(specification runSpec) error {
 			return fmt.Errorf("%w: the peer control URL is not this receiver's configured reverse control destination", errInvalidRunSpec)
 		}
 	}
+	var routedLedger *routingLedger
+	if control.routed != nil {
+		ledger, err := newRoutingLedger(specification.Expected, control.ledgerWindow)
+		if err != nil {
+			return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+		}
+		routedLedger = ledger
+	}
 	control.spec = copyRunSpec(specification)
 	control.lastClock = 0
 	control.stoppedClock = 0
 	control.measurementLower = 0
 	control.measurementUpper = 0
 	control.clockEvidence = nil
-	control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
+	if control.routed != nil {
+		control.routed.ledger = routedLedger
+	} else {
+		control.ledger = newLedger(specification.Associations, specification.Expected, control.ledgerWindow)
+	}
 	control.transportToLogical = filledInts(specification.Associations, -1)
 	control.logicalToTransport = filledInts(specification.Associations, -1)
 	control.started = time.Time{}
@@ -594,8 +616,7 @@ func (control *receiverControl) result() runRecord {
 		record.WindowAlignment = "verified same-host CLOCK_MONOTONIC window; boundary counts retain clock-resolution uncertainty"
 		record.ClockBoundary = &sharedClockSnapshot{Domain: control.spec.Clock.Domain, Captured: control.lastClock, MeasurementLower: control.measurementLower, MeasurementUpper: control.measurementUpper}
 	}
-	if control.ledger != nil {
-		snapshot := control.ledger.snapshot()
+	if snapshot, present := control.deliveryLocked(); present {
 		record.Delivery = deliveryResult{
 			Unique:            snapshot.Unique,
 			UniqueMeasurement: control.uniqueMeasurement,
@@ -651,10 +672,10 @@ func errorFromString(message string) error {
 func (control *receiverControl) sample(now time.Time) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
-	if control.phase != receiverMeasuring || control.ledger == nil || len(control.series) >= 601 {
+	snapshot, present := control.deliveryLocked()
+	if control.phase != receiverMeasuring || !present || len(control.series) >= 601 {
 		return
 	}
-	snapshot := control.ledger.snapshot()
 	origin := control.firstArrival
 	if origin.IsZero() {
 		origin = control.started

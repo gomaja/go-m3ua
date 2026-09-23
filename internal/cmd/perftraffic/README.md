@@ -1,19 +1,21 @@
 # Direct M3UA traffic baseline
 
-`perftraffic` is a two-process Linux SCTP fixture for receiver-validated direct
-DATA throughput. It measures the current association API without using Endpoint
-routing. The ASP Endpoint is constructed with a nil `ASP` configuration and
+`perftraffic` is a two-process Linux SCTP fixture for receiver-validated DATA
+throughput. The direct modes measure the association API without Endpoint
+routing: the ASP Endpoint is constructed with a nil `ASP` configuration and
 each DATA call uses a newly constructed Protocol Data parameter plus
 `WriteData`; the SGP validates messages returned by `ReadData`.
 
-The fixture currently implements three modes: one-way `throughput` (the
-default), `echo` for round-trip latency, and `bidirectional` for simultaneous
-two-way DATA. Both SCTP initiation directions are supported: ASP-dial to
-SGP-listen (the default) and SGP-dial to ASP-listen. Router/state workloads
-and independent-peer interoperability are reported as unavailable; they are
-never emitted as zero-valued successful measurements. Both processes run this
-binary, so `fixture_verdict: pass` establishes loss-free fixture validity
-only, not independent-peer, sustainable-capacity, or candidate acceptance.
+The fixture implements five modes: one-way `throughput` (the default), `echo`
+for round-trip latency, `bidirectional` for simultaneous two-way DATA, and the
+optional-router pair `routed` and `routed-direct` described under
+[Routed modes](#routed-modes). The direct modes support both SCTP initiation
+directions: ASP-dial to SGP-listen (the default) and SGP-dial to ASP-listen.
+SSNM storm, reference-churn and independent-peer workloads are reported as
+unavailable; they are never emitted as zero-valued successful measurements.
+Both processes run this binary, so `fixture_verdict: pass` establishes
+loss-free fixture validity only, not independent-peer, sustainable-capacity,
+or candidate acceptance.
 
 ## Initiation direction
 
@@ -116,6 +118,92 @@ the peer never answers, so neither side amplifies a wedge.
 
 Throughput mode does not use echo traffic.
 
+## Routed modes
+
+`-mode=routed` and `-mode=routed-direct` are the optional-router row of the
+approved performance budgets (section 2): 1,000 routes over 8 associations with
+the mixed payload, and the matched direct-send control it is compared with.
+Both run the same fixed topology, traffic, scopes, queues and resolved paths;
+only the timed send call differs.
+
+- **Topology.** One ASP Endpoint is configured with two SGs (`sg-a`, `sg-b`),
+  two SGPs per SG (`p0`, `p1`) and two associations per SGP: eight
+  associations in total. Each SGP serves two AS scopes (`primary` and
+  `secondary`, Network Appearance 7, one Routing Context each) and each SG path
+  lists them in that deterministic preference order. 1,000 exact-DPC routes
+  (`0x220000` to `0x2203e7`) use both SG paths with load sharing. The SGP
+  process hosts the four peer SGP Endpoints, one per SGP, each accepting two
+  associations.
+- **Preparation, before any cohort.** After all eight associations are
+  ASP-Active in both scopes, each peer SGP reports every destination Available
+  in each AS scope with DAVA (RFC 4666 Section 3.4.2). The ASP verifies every
+  resulting SSNM report and the final knowledge, so destinations are
+  explicitly Available rather than unknown. The ASP then sends one 128-byte
+  preflight DATA per route through `Endpoint.MTPTransfer`, the MTP-TRANSFER
+  request of RFC 4666 Section 5.5.1.1.1; the receiver returns what it received
+  and the ASP checks each receipt against the path MTPTransfer reported. That
+  resolved path map is frozen and must use all eight associations. The
+  receiver freezes its own copy from the same receipts.
+- **`routed`** sends every timed message with `Endpoint.MTPTransfer` on its
+  route and fails the send if MTPTransfer used any path other than the frozen
+  one.
+- **`routed-direct`** keeps the same routing inventory configured but performs
+  an already-resolved lookup in the frozen map and writes with
+  `Association.WriteData` on that path's association, AS scope and stream. It
+  is the matched control for the router comparison, not the zero-route direct
+  baseline, and implements no routing engine.
+- **Traffic.** Message index `i` belongs to route `i mod 1000`, so route hits
+  are uniform, and each route is one ordered flow with its own OPC, DPC, SI,
+  NI, priority and SLS. Every route maps to one sender worker, so a route's
+  messages are submitted in order. Payload generation happens before the timed
+  call. The send duration covers the same work in both variants: Protocol Data
+  construction and one library call, MTPTransfer for `routed` and WriteData
+  for `routed-direct`. Everything else runs outside it in both: `routed`
+  checks the path MTPTransfer reported after the second timestamp, and
+  `routed-direct` takes its admission slot, checks the context and
+  revalidates the frozen path's association epoch and stream bound before the
+  first timestamp and again after the second. Payloads use a route-aware
+  header (version 2) that carries the route instead of the direct fixture's
+  association and flow bytes.
+- **Validation.** The receiver checks every arrival against its route's
+  frozen transport, association epoch, AS scope, stream and label plus the
+  deterministic payload, and keeps a 1,000-flow ledger with the same rolling
+  8,192-sequence duplicate window per flow. A message on any other transport
+  or scope is invalid.
+
+Both processes pass the same `-mode`. The routed modes require
+`-associations=8`, `-payload=mix` on the ASP, and ASP-dial initiation
+(`-transport=dial` on the ASP, `-transport=listen` on the SGP). The SGP's
+`-sctp-address` names one concrete address and the first of four consecutive
+ports, one per SGP endpoint (`sgp-host:2905` listens on 2905 to 2908); a
+wildcard address is refused. The ASP dials the same `-sctp-address` and must
+bind one concrete local address with `-local-address=asp-host:0`, because the
+fixture pairs every association by its exact transport addresses. A name must
+resolve to exactly one address. `-same-host-clock` works as in throughput
+mode.
+
+The receiver serves the routing preparation under `/routing/` beside the
+ordinary control endpoints and reports `/ready` only once the paths are
+frozen; the cohorts then use the unchanged `/reset`, `/start`, `/progress`,
+`/stop` and `/results` contract. Both records use the throughput schema,
+including `sender_window`, backlog evidence, the delivery ledger,
+`send_duration`, `cpu`, `allocations` and the manifest, whose `flow_count` is
+1000. `internal/cmd/perfcapacity` accepts these cohorts for the fixed shape
+only. A campaign runs each variant separately; the router ratio compares the
+two capacities. The routing allocation increment is the difference between
+the variants' allocations per validated delivery; both are whole-process
+observations, so the fixture work common to both cancels, but the difference
+is not an isolated-library measurement.
+
+If the ASP fails at any point before its first cohort, it sends
+`/routing/stop`, so the receiver ends with that reason instead of waiting for
+a sender that has gone. A canceled preparation request never closes the SGP
+endpoints on its own.
+
+The routed modes do not cover alternate AS preference, partial path failures,
+SSNM storms or reference churn; those remain separate workloads and are
+reported as unavailable in `unsupported_modes`.
+
 ## Protocol basis
 
 The protocol basis was rechecked against both the RFC Editor and IETF
@@ -194,7 +282,8 @@ schedule to match achieved throughput.
 
 ## Control contract
 
-The receiver exposes five bounded HTTP operations:
+The receiver exposes five bounded HTTP operations (a routed receiver also
+serves its preparation operations under `/routing/`):
 
 - `GET /ready` reports established association count, fatal read errors, phase,
   and the minimum negotiated outbound stream count.
