@@ -289,13 +289,11 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 	l.restarts.setRoute(l.associationForSCTPID)
 	scfg := &sctp.SocketConfig{
 		NotificationHandler: l.restarts.handle,
-		// The same outbound stream request Dial makes. Left zero, the kernel
-		// default applies (10 on Linux), and every accepted association had
-		// nine DATA streams for its Signalling Link Selections while the
-		// dialling end of the same association had the peer's whole inbound
-		// limit. RFC 4666 Section 1.4.7 keeps stream 0 for management, and a
-		// stream per SLS is what keeps one flow from waiting behind another.
-		InitMsg: sctp.InitMsg{NumOstreams: sctp.SCTP_MAX_STREAM},
+		// The same stream request Dial makes; see sctpStreams. Left zero,
+		// the kernel default applied (10 outbound on Linux), so every
+		// accepted association had nine DATA streams for its Signalling Link
+		// Selections while the dialling end had many more.
+		InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams},
 	}
 
 	l.sctpListener, err = scfg.Listen(n, laddr)

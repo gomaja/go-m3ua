@@ -15,10 +15,9 @@ import (
 )
 
 // An accepted association must negotiate as many outbound streams as a dialled
-// one. Dial asks for the SCTP maximum; the listening socket used to ask for
-// nothing, so the kernel default of 10 applied and an accepting endpoint had
-// nine DATA streams to spread Signalling Link Selections over while the
-// dialling end of the same association had the peer's whole inbound limit.
+// one. The listening socket used to ask for nothing, so the kernel default of
+// 10 applied and an accepting endpoint had nine DATA streams to spread
+// Signalling Link Selections over while the dialling end had many more.
 func TestAcceptedAssociationNegotiatesAsManyStreamsAsADialledOne(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -67,10 +66,9 @@ func TestAcceptedAssociationNegotiatesAsManyStreamsAsADialledOne(t *testing.T) {
 		t.Fatal("the SGP never accepted the association")
 	}
 
-	// Both ends ask the kernel for SCTP_MAX_STREAM outbound streams and leave
-	// the inbound limit at the kernel default of the same value, so each end
-	// negotiates 65,535 and can use streams 1 to 65,534 for DATA.
-	const want = sctp.SCTP_MAX_STREAM - 1
+	// Both ends ask for sctpStreams in each direction, so each can use
+	// streams 1 to 256 for DATA: one per Signalling Link Selection.
+	const want = sctpStreams - 1
 	if got := dialled.MaxMessageStreamID(); got != want {
 		t.Errorf("the dialled association can use DATA streams up to %d; want %d", got, want)
 	}

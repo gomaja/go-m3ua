@@ -148,8 +148,15 @@ type stalledASP struct {
 
 func dialStalledASP(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32) *stalledASP {
 	t.Helper()
+	return dialStalledASPWith(t, sgp, routingContext, sctp.InitMsg{NumOstreams: 16, MaxInstreams: 16})
+}
+
+// dialStalledASPWith is dialStalledASP with the INIT stream request chosen by
+// the caller.
+func dialStalledASPWith(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32, init sctp.InitMsg) *stalledASP {
+	t.Helper()
 	socket := &sctp.SocketConfig{
-		InitMsg: sctp.InitMsg{NumOstreams: 16, MaxInstreams: 16},
+		InitMsg: init,
 		Control: func(_, _ string, c syscall.RawConn) error {
 			var setErr error
 			if err := c.Control(func(fd uintptr) {
