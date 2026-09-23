@@ -23,11 +23,17 @@ func ssnmRunJSON(testContext *testing.T, rate int, verdict string, mutate func(m
 			cohort[side].(map[string]any)["spec"].(map[string]any)["ssnm"] = workload
 		}
 		sender["ssnm"] = map[string]any{"verdict": verdict, "workload": workload}
+		sender["manifest"].(map[string]any)["ssnm_budgets"] = ssnmBudgetsJSON(100_000_000)
 		cohort["receiver"].(map[string]any)["ssnm"] = map[string]any{"generator": map[string]any{"state": "complete"}}
 		if mutate != nil {
 			mutate(cohort)
 		}
 	})
+}
+
+// ssnmBudgetsJSON is the ASP manifest's SSNM budget record.
+func ssnmBudgetsJSON(applyP99 float64) map[string]any {
+	return map[string]any{"apply_p99_ns": applyP99, "resync_ns": float64(100_000_000), "recovery_ns": float64(1_000_000_000), "scope": "contract"}
 }
 
 func TestSSNMLoadedProbeFoldsSSNMVerdict(testContext *testing.T) {
@@ -241,4 +247,96 @@ func TestSSNMAndRoutedWorkloadsStayApart(testContext *testing.T) {
 			}
 		})
 	}
+}
+
+// The SSNM verdict depends on the budgets the ASP judged it against, so an
+// SSNM-loaded cohort must record them and one campaign cannot mix budgets.
+func TestSSNMBudgetsAreRequiredAndPartOfTheIdentity(testContext *testing.T) {
+	sender := func(cohort map[string]any) map[string]any { return cohort["sender"].(map[string]any) }
+	manifest := func(cohort map[string]any) map[string]any { return sender(cohort)["manifest"].(map[string]any) }
+	for name, mutate := range map[string]func(map[string]any){
+		"missing budgets":  func(cohort map[string]any) { delete(manifest(cohort), "ssnm_budgets") },
+		"partial budgets":  func(cohort map[string]any) { delete(manifest(cohort)["ssnm_budgets"].(map[string]any), "resync_ns") },
+		"zero budget":      func(cohort map[string]any) { manifest(cohort)["ssnm_budgets"].(map[string]any)["recovery_ns"] = 0 },
+		"negative budget":  func(cohort map[string]any) { manifest(cohort)["ssnm_budgets"].(map[string]any)["apply_p99_ns"] = -1 },
+		"stray on control": nil,
+	} {
+		testContext.Run(name, func(testContext *testing.T) {
+			run := ssnmRunJSON(testContext, 10, "pass", mutate)
+			if mutate == nil {
+				run = mutateBidirectionalJSON(testContext, unidirectionalRunJSON(testContext, 10, "asp-to-sgp", -1, 0), func(cohort map[string]any) {
+					manifest(cohort)["ssnm_budgets"] = ssnmBudgetsJSON(100_000_000)
+				})
+			}
+			input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, run)
+			if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus {
+				testContext.Fatalf("status = %d result = %+v, want invalid input", status, decoded)
+			}
+		})
+	}
+	loosened := ssnmRunJSON(testContext, 20, "pass", func(cohort map[string]any) {
+		manifest(cohort)["ssnm_budgets"] = ssnmBudgetsJSON(200_000_000)
+	})
+	input := fmt.Sprintf(`{"initial":10,"maximum":40,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`, ssnmRunJSON(testContext, 10, "pass", nil), loosened)
+	if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "workload") {
+		testContext.Fatalf("campaign mixing SSNM budgets: status = %d result = %+v", status, decoded)
+	}
+}
+
+// Bidirectional and legacy single-record evidence never carries SSNM load,
+// so any ssnm evidence there is refused exactly as in a unidirectional cohort
+// whose spec declares none.
+func TestStraySSNMEvidenceIsRefusedOutsideLoadedCohorts(testContext *testing.T) {
+	workload := map[string]any{
+		"rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8,
+		"pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
+	}
+	for _, side := range []string{"sender", "receiver", "reverse_sender", "reverse_receiver"} {
+		testContext.Run("bidirectional "+side+" record", func(testContext *testing.T) {
+			run := mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, -1, 0, -2, -1), func(cohort map[string]any) {
+				cohort[side].(map[string]any)["ssnm"] = map[string]any{"verdict": "pass"}
+			})
+			input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, run)
+			if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "ssnm") {
+				testContext.Fatalf("stray ssnm evidence accepted: status = %d result = %+v", status, decoded)
+			}
+		})
+	}
+	// The reverse records use throughput mode, which alone would satisfy
+	// the SSNM spec rules; the pair declares the load consistently.
+	testContext.Run("bidirectional reverse spec", func(testContext *testing.T) {
+		run := mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, -1, 0, -2, -1), func(cohort map[string]any) {
+			for _, side := range []string{"reverse_sender", "reverse_receiver"} {
+				cohort[side].(map[string]any)["spec"].(map[string]any)["ssnm"] = workload
+			}
+		})
+		input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, run)
+		if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "ssnm") {
+			testContext.Fatalf("stray ssnm spec accepted: status = %d result = %+v", status, decoded)
+		}
+	})
+	testContext.Run("bidirectional budgets", func(testContext *testing.T) {
+		run := mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, -1, 0, -2, -1), func(cohort map[string]any) {
+			cohort["sender"].(map[string]any)["manifest"].(map[string]any)["ssnm_budgets"] = ssnmBudgetsJSON(100_000_000)
+		})
+		input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, run)
+		if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "ssnm") {
+			testContext.Fatalf("stray ssnm budgets accepted: status = %d result = %+v", status, decoded)
+		}
+	})
+	testContext.Run("legacy single record", func(testContext *testing.T) {
+		run := strings.Replace(passingRunJSON(), `{"side":"sender",`, `{"side":"sender","ssnm":{"verdict":"pass"},`, 1)
+		input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, run)
+		if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "ssnm") {
+			testContext.Fatalf("stray ssnm evidence accepted: status = %d result = %+v", status, decoded)
+		}
+	})
+	testContext.Run("clean evidence still accepted", func(testContext *testing.T) {
+		for _, run := range []string{bidirectionalRunJSON(10, -1, 0, -2, -1), passingRunJSON()} {
+			input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, run)
+			if status, decoded := runRequest(testContext, input); status == invalidInputExitStatus {
+				testContext.Fatalf("clean evidence refused: %+v", decoded)
+			}
+		}
+	})
 }

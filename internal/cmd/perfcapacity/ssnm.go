@@ -32,6 +32,23 @@ type ssnmIdentity struct {
 	Subscribers   int
 	PauseOffset   time.Duration
 	PauseDuration time.Duration
+	// Budgets are the time budgets the ASP judged the SSNM verdict against,
+	// from its manifest. The spec does not carry them, so they are zero in an
+	// identity derived from the spec alone.
+	Budgets ssnmBudgetIdentity
+}
+
+// ssnmBudgetsEvidence is the manifest's ssnm_budgets record.
+type ssnmBudgetsEvidence struct {
+	ApplyP99 *time.Duration `json:"apply_p99_ns"`
+	Resync   *time.Duration `json:"resync_ns"`
+	Recovery *time.Duration `json:"recovery_ns"`
+}
+
+type ssnmBudgetIdentity struct {
+	ApplyP99 time.Duration
+	Resync   time.Duration
+	Recovery time.Duration
 }
 
 // ssnmEvidence is the subset of a perftraffic ssnm record the decision reads.
@@ -95,16 +112,57 @@ func ssnmIdentityFromSpec(spec *fixtureSpec) (ssnmIdentity, error) {
 	return identity, nil
 }
 
+// ssnmBudgetsFromManifest reads and bounds the ASP's SSNM budgets.
+func ssnmBudgetsFromManifest(manifest *fixtureManifest) (ssnmBudgetIdentity, error) {
+	if manifest == nil || manifest.SSNMBudgets == nil {
+		return ssnmBudgetIdentity{}, errors.New("SSNM-loaded sender manifest requires ssnm_budgets")
+	}
+	declared := manifest.SSNMBudgets
+	if declared.ApplyP99 == nil || declared.Resync == nil || declared.Recovery == nil {
+		return ssnmBudgetIdentity{}, errors.New("manifest ssnm_budgets apply_p99_ns, resync_ns and recovery_ns are required")
+	}
+	budgets := ssnmBudgetIdentity{ApplyP99: *declared.ApplyP99, Resync: *declared.Resync, Recovery: *declared.Recovery}
+	if budgets.ApplyP99 <= 0 || budgets.Resync <= 0 || budgets.Recovery <= 0 {
+		return ssnmBudgetIdentity{}, errors.New("manifest ssnm_budgets must be positive durations")
+	}
+	return budgets, nil
+}
+
+// rejectStraySSNM refuses SSNM evidence in records whose cohort cannot carry
+// SSNM load: the bidirectional records and legacy single sender records. The
+// unidirectional path applies the same rule through ssnmCohortVerdict.
+func rejectStraySSNM(records ...*fixtureEvidence) error {
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if record.SSNM != nil || record.Spec != nil && record.Spec.SSNM != nil || record.Manifest != nil && record.Manifest.SSNMBudgets != nil {
+			return errors.New("ssnm evidence is present but this cohort cannot carry SSNM load")
+		}
+	}
+	return nil
+}
+
 // ssnmCohortVerdict validates the SSNM evidence a loaded cohort must carry
-// and returns the sender's SSNM verdict. warmup marks a failed warm-up
+// and returns the sender's SSNM verdict and the budgets it was judged
+// against. warmup marks a failed warm-up
 // accepted as probe evidence (cohortPhase): its spec declares the warm-up
 // phase, the SGP record still carries the generator view, and the ASP record
 // carries no SSNM result, because perftraffic judges SSNM for the measurement
 // cohort only. A warm-up therefore contributes no SSNM verdict; it can never
 // pass anyway.
-func ssnmCohortVerdict(identity ssnmIdentity, warmup bool, sender, receiver *fixtureEvidence) (string, error) {
+func ssnmCohortVerdict(identity ssnmIdentity, warmup bool, sender, receiver *fixtureEvidence) (string, ssnmBudgetIdentity, error) {
+	verdict, err := ssnmLoadedVerdict(identity, warmup, sender, receiver)
+	if err != nil || identity == (ssnmIdentity{}) {
+		return verdict, ssnmBudgetIdentity{}, err
+	}
+	budgets, err := ssnmBudgetsFromManifest(sender.Manifest)
+	return verdict, budgets, err
+}
+
+func ssnmLoadedVerdict(identity ssnmIdentity, warmup bool, sender, receiver *fixtureEvidence) (string, error) {
 	if identity == (ssnmIdentity{}) {
-		if sender.SSNM != nil || receiver.SSNM != nil {
+		if sender.SSNM != nil || receiver.SSNM != nil || sender.Manifest != nil && sender.Manifest.SSNMBudgets != nil {
 			return "", errors.New("ssnm evidence is present but the spec declares no SSNM load")
 		}
 		return "", nil

@@ -264,7 +264,10 @@ perftraffic -role=asp ... -same-host-clock -rate=<probe>
 Run each campaign through `perfcapacity` separately and compare the selected
 rates: the steady row needs at least 90% and the large row at least 80% of the
 control's capacity. The SSNM verdict each probe folds in includes the time
-budgets.
+budgets, and `perfcapacity` adds the manifest's `ssnm_budgets` to the workload
+identity, so one campaign cannot mix verdicts judged against different
+budgets. Bidirectional and legacy single-record evidence carrying any SSNM
+evidence is refused.
 
 ## Routed modes
 

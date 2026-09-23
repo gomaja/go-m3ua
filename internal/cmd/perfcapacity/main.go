@@ -526,6 +526,8 @@ type fixtureManifest struct {
 	OutstandingLimit         *int    `json:"outstanding_limit"`
 	Initiation               *string `json:"initiation"`
 	AccountingScope          *string `json:"accounting_scope"`
+	// SSNMBudgets is present exactly on SSNM-loaded sender records.
+	SSNMBudgets *ssnmBudgetsEvidence `json:"ssnm_budgets"`
 }
 
 // workloadIdentity excludes the per-run cohort and seed, the offered rate,
@@ -708,6 +710,9 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("decode run evidence: %w", err)
 	}
+	if err := rejectStraySSNM(&record); err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
+	}
 	return evidenceFromSenderRecord(&record, declaredRate, false)
 }
 
@@ -875,6 +880,9 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if cohort.Verdict == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort verdict is required")
 	}
+	if err := rejectStraySSNM(cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
+		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
+	}
 
 	forwardEvidence, forwardIdentity, err := evidenceFromSenderRecord(cohort.Sender, declaredRate, true)
 	if err != nil {
@@ -1038,10 +1046,13 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if err := validateCohortVerdict(&cohort, cohort.Sender, cohort.Receiver); err != nil {
 		return fixtureRun{}, err
 	}
-	ssnmVerdict, err := ssnmCohortVerdict(senderSpec.Workload.SSNM, warmup, cohort.Sender, cohort.Receiver)
+	ssnmVerdict, ssnmBudgets, err := ssnmCohortVerdict(senderSpec.Workload.SSNM, warmup, cohort.Sender, cohort.Receiver)
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("unidirectional ssnm: %w", err)
 	}
+	// The budgets join the workload identity, so one campaign never mixes
+	// SSNM verdicts judged against different budgets.
+	identity.workload.SSNM.Budgets = ssnmBudgets
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
 		forwardAchieved: achieved, cohortError: cohort.Error != "", warmup: warmup,
