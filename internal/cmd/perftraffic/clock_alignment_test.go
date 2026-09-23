@@ -327,3 +327,33 @@ func FuzzSharedClockBounds(fuzzContext *testing.F) {
 		}
 	})
 }
+
+// The clock identity is the boot's CLOCK_MONOTONIC plus the time namespace's
+// monotonic offset (time_namespaces(7)); separate container namespaces with
+// equal offsets read the same clock, different offsets do not.
+func TestMonotonicOffsetIdentity(testContext *testing.T) {
+	for _, scenario := range []struct {
+		offsets string
+		want    string
+	}{
+		{"monotonic           0         0\nboottime            0         0\n", "monotonic-offset:0.000000000"},
+		{"boottime 5 0\nmonotonic -7 250\n", "monotonic-offset:-7.000000250"},
+		{"monotonic 1 999999999\n", "monotonic-offset:1.999999999"},
+	} {
+		got, err := parseMonotonicOffset(scenario.offsets)
+		if err != nil || got != scenario.want {
+			testContext.Errorf("parseMonotonicOffset(%q) = %q, %v; want %q", scenario.offsets, got, err, scenario.want)
+		}
+	}
+	for _, offsets := range []string{
+		"", "boottime 0 0\n", "monotonic 0\n", "monotonic 0 0 0\n", "monotonic x 0\n", "monotonic 0 -1\n",
+		"monotonic 0 1000000000\n", "monotonic 0 0\nmonotonic 0 0\n",
+	} {
+		if got, err := parseMonotonicOffset(offsets); err == nil {
+			testContext.Errorf("parseMonotonicOffset(%q) = %q, want an error", offsets, got)
+		}
+	}
+	if monotonicOffsetIdentity(0, 0) == monotonicOffsetIdentity(0, 1) {
+		testContext.Fatal("different monotonic offsets share one identity")
+	}
+}
