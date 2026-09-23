@@ -29,7 +29,7 @@ the integration rows are Linux evidence. Everything else runs anywhere.
 | Typed receive | ASP, SGP, SE, DE | peer | ASP-ACTIVE, per Routing Context | `TestReadDataDeliversThePayloadWhole`, `TestReadDataDeliversEachMessageToExactlyOneReader`, `TestReceivedDataHonoursPerRoutingContextActivation` |
 | Per-message scope and routing label | ASP, SGP, DE | both | ASP-ACTIVE | `TestReadDataReportsTheReceivedScopeStreamAndEpoch`, `TestReadDataReturnsCallerOwnedData` |
 | Stream selection from SLS; stream 0 refused | ASP, SGP, SE | both | any | `TestStreamSelectionHandlesEveryNegotiatedCount`, `TestWriteSignalDoesNotPutDataOnStreamZero`, `TestDataOnStreamZeroIsRejected`, `TestMTPTransferSelectsAvailableSGPAndSLSStream` |
-| Partial and failed submission classified | ASP, SGP | local | ASP-ACTIVE | `TestWriteDataClassifiesPartialSubmissionAsIndeterminate`, `TestBroadcastPartialWriteKeepsSynchronizationPending` |
+| Partial and failed submission classified | ASP, SGP | local | ASP-ACTIVE | `TestWriteDataClassifiesPartialSubmissionAsIndeterminate`, `TestBroadcastPartialWriteKeepsSynchronizationPending`, `TestWriteDataReportsATransportRefusalAsNotSent`, `TestFullSendBufferReportsDataAsNotSent`, `TestExpiredWriteDeadlineReportsDataAsNotSent` |
 | Inbound queue overflow | ASP, SGP | peer | ASP-ACTIVE | `TestDataQueueOverloadIsObservable`, `TestFullDataQueueStillAnswersSignalling`, `TestDataQueueRecoversAfterOverflow`, `TestLocalCongestionTellsThePeerWithSCON` |
 | Admission and authorization | ASP, SGP, SE, DE | local | INACTIVE→ACTIVE barrier | `TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting` |
 | Contextless Application Server | ASP, SGP, SE, DE | both | ASP-ACTIVE | `TestEncodedDataMatchesTheCodec` (scope), and the RKM and IPSP contextless rows below |
@@ -153,6 +153,16 @@ request from deterministic replay state.
 | T(r), the AS recovery timer | `ApplicationServerConfig.RecoveryTimer` | `TestRecoveryTimerResolvesPending`, `TestASPActiveBeforeRecoveryTimerRestoresActive` |
 | M3UA handshake budget | `AssociationConfig.EstablishTimeout` | `TestEstablishTimeoutBoundsTheM3UAHandshake` |
 | One SCTP association attempt | `SCTPConfig.InitTimeout` | `dial_test.go` |
+| Send-buffer wait for messages the library sends itself | `AssociationConfig.ControlWriteTimeout` | `TestLibraryRepliesWaitForAStalledPeerToResume`, `TestStalledPeerClosesTheAssociationAfterControlWriteTimeout`, `TestSSNMPublicationWaitsOutAFullSendBuffer` |
+
+A full SCTP send buffer is backpressure, not a failure. Acknowledgements, BEAT
+Ack, Error, Notify, destination state replies and publications, registration
+responses and ASP procedure requests wait for buffer space instead of closing
+the association on the transport's EAGAIN. The wait is bounded, because a
+waiting write holds the socket and whatever ordering barrier its caller holds.
+The default of 5 s covers two consecutive T3-rtx expiries from RTO.Min (RFC 9260
+Sections 6.3.3 and 16). Writes the application asks for, such as `WriteData`
+and `WriteSignal`, still report a full buffer to the caller.
 
 T(ack) retransmission is bounded rather than unbounded. RFC 4666 says to resend
 "until it receives an ASP Up Ack message", and the equivalent for the other three

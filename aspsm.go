@@ -21,7 +21,7 @@ func (c *Association) beginASPSM() (*pendingRequest, error) {
 	// will never come while the SGP waits for a request it never saw.
 	aspUp := messages.NewAspUp(c.cfg.ASPIdentifier.Copy(), nil)
 	request := c.startTAck(aspUp, requestAspUp)
-	if _, err := c.WriteSignal(aspUp); err != nil {
+	if _, err := c.writeControl(aspUp); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}
@@ -437,7 +437,7 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 func (c *Association) initiateASPDown() (*pendingRequest, error) {
 	aspDown := messages.NewAspDown(nil)
 	request := c.startTAck(aspDown, requestAspDown)
-	if _, err := c.WriteSignal(aspDown); err != nil {
+	if _, err := c.writeControl(aspDown); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}

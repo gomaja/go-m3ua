@@ -372,9 +372,11 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 		return MTPTransferResult{}, err
 	}
 	// The concrete targets are frozen here. A target that fails is reported as
-	// it is: nothing else is tried for this request, because a failed write
-	// does not prove the peer received no DATA and a second attempt through
-	// another Application Server could duplicate it.
+	// it is and nothing else is tried for this request. An indeterminate
+	// failure does not prove the peer received no DATA, so a second attempt
+	// through another Application Server could duplicate it; even when a
+	// failure is known not sent, whether and where to resend stays the
+	// application's decision.
 	result := MTPTransferResult{SuccessfulPaths: make([]MTPTransferPath, 0, len(targets))}
 	failures := make([]MTPTransferFailure, 0)
 	for _, target := range targets {
@@ -483,7 +485,7 @@ func (r *aspRoutes) selectTransfer(
 	selectedGateways := selectASPTransferGatewaysWithPrevious(
 		gatewayCandidates,
 		r.config.signallingGatewaySelection,
-		hashASPTransferFlow(flowKey, "signalling-gateway"),
+		hashASPTransferFlow(flowKey, aspTransferGatewayHash, "", ""),
 		previousTargets,
 	)
 	targets := make([]aspTransferTarget, 0)
@@ -495,13 +497,13 @@ func (r *aspRoutes) selectTransfer(
 		selectedSGPs := selectASPTransferSGPsWithPrevious(
 			sgpCandidates,
 			gateway.config.sgpSelection,
-			hashASPTransferFlow(flowKey, string(gateway.config.id)),
+			hashASPTransferFlow(flowKey, aspTransferSGPHash, gateway.config.id, ""),
 			previousTargets,
 			gateway.config.id,
 		)
 		for _, sgp := range selectedSGPs {
-			associationHash := hashASPTransferFlow(flowKey,
-				string(sgp.identity.SignallingGateway)+"/"+string(sgp.identity.SignallingGatewayProcess))
+			associationHash := hashASPTransferFlow(flowKey, aspTransferAssociationHash,
+				sgp.identity.SignallingGateway, sgp.identity.SignallingGatewayProcess)
 			member := sgp.members[int(associationHash%uint64(len(sgp.members)))]
 			if previous, held := previousASPTransferMember(previousTargets, sgp); held {
 				member = previous
@@ -937,11 +939,23 @@ func newASPTransferFlowKey(mtpRoute MTPRouteID, protocolData *params.ProtocolDat
 	}
 }
 
-func hashASPTransferFlow(key aspTransferFlowKey, salt string) uint64 {
+type aspTransferHashDomain uint8
+
+const (
+	aspTransferGatewayHash aspTransferHashDomain = iota + 1
+	aspTransferSGPHash
+	aspTransferAssociationHash
+)
+
+func hashASPTransferFlow(key aspTransferFlowKey, domain aspTransferHashDomain, gateway SignallingGatewayID, process SignallingGatewayProcessID) uint64 {
 	hash := fnv.New64a()
-	_, _ = hash.Write([]byte(key.mtpRoute))
-	_, _ = hash.Write([]byte{0})
-	_, _ = hash.Write([]byte(salt))
+	_, _ = hash.Write([]byte{byte(domain)})
+	var length [8]byte
+	for _, component := range [...]string{string(key.mtpRoute), string(gateway), string(process)} {
+		binary.BigEndian.PutUint64(length[:], uint64(len(component)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(component))
+	}
 	var encoded [11]byte
 	binary.BigEndian.PutUint32(encoded[0:4], key.opc)
 	binary.BigEndian.PutUint32(encoded[4:8], key.dpc)
@@ -949,7 +963,12 @@ func hashASPTransferFlow(key aspTransferFlowKey, salt string) uint64 {
 	encoded[9] = key.ni
 	encoded[10] = key.sls
 	_, _ = hash.Write(encoded[:])
-	return hash.Sum64()
+	mixed := hash.Sum64()
+	mixed ^= mixed >> 33
+	mixed *= 0xff51afd7ed558ccd
+	mixed ^= mixed >> 33
+	mixed *= 0xc4ceb9fe1a85ec53
+	return mixed ^ (mixed >> 33)
 }
 
 // transferTargetsStillHeldLocked re-checks a remembered assignment against the
@@ -1079,7 +1098,7 @@ func (c *Association) writeMTPTransfer(request MTPTransferRequest, key ASKey) (i
 		return 0, newDataNotSent(key, 0, err)
 	}
 	if err := c.submitData(c.encodeDataFrame(&data), stream); err != nil {
-		return 0, newDataSendIndeterminate(key, stream, err)
+		return 0, newDataSubmissionError(key, stream, err)
 	}
 	return len(data.ProtocolData.Data), nil
 }

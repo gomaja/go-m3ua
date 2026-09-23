@@ -134,6 +134,20 @@ const DefaultInitTimeout = 5 * time.Second
 // how long Dial and Accept wait to reach ASP-ACTIVE.
 const DefaultEstablishTimeout = 10 * time.Second
 
+// DefaultControlWriteTimeout bounds how long a message the library writes on its
+// own behalf may wait for SCTP send-buffer space; see
+// AssociationConfig.ControlWriteTimeout.
+//
+// A full send buffer is ordinary transport behaviour, not a failure: it lasts
+// until the peer opens its receive window or a lost DATA chunk is retransmitted.
+// RFC 9260 Section 16 recommends RTO.Min = 1 second and Section 6.3.3 rule E2
+// doubles the RTO on each T3-rtx expiry, so two consecutive expiries of the same
+// chunk hold the buffer for about 1 + 2 = 3 seconds. Five seconds absorbs that
+// with margin while staying below DefaultEstablishTimeout and the T(ack) budget
+// of DefaultTAck times one more than DefaultTAckRetries, the time within which a
+// peer has to complete an ASP procedure.
+const DefaultControlWriteTimeout = 5 * time.Second
+
 // DefaultDataQueueSize is the number of inbound DATA messages one association
 // retains while its application is not reading. It is large enough to absorb
 // ordinary traffic bursts without the 65,535-slot allocation every Association used
@@ -468,6 +482,26 @@ type AssociationConfig struct {
 	// EstablishTimeout bounds the M3UA handshake once the association is up.
 	// Zero selects DefaultEstablishTimeout.
 	EstablishTimeout time.Duration
+	// ControlWriteTimeout bounds how long a message the library writes on its
+	// own behalf may wait for SCTP send-buffer space: acknowledgements, BEAT
+	// and BEAT Ack, Error, Notify, destination state replies and publications,
+	// registration responses, ASP procedure requests and their T(ack)
+	// retransmissions. Such a message waits while the buffer is full rather
+	// than failing; if it is still waiting when the bound expires, the
+	// association is closed with ErrControlWriteTimeout, because a peer that
+	// cannot absorb mandatory control traffic can no longer run the protocol.
+	// Values less than or equal to zero select DefaultControlWriteTimeout.
+	//
+	// A socket write deadline set with Association.SetWriteDeadline supersedes
+	// this bound: while one is in force, a library write waits only until the
+	// deadline.
+	//
+	// The Endpoint's destination state publications are the library's writes
+	// and wait. Writes the application asks for on one Association do not:
+	// WriteData, WriteSignal, DestinationStateAudit, SignallingCongestion,
+	// RegisterRoutingKeys and DeregisterApplicationServers report a full send
+	// buffer to the caller; see WriteSignal.
+	ControlWriteTimeout time.Duration
 	// DataQueueSize is the maximum number of inbound DATA messages retained for
 	// ReadData. Values less than or equal to zero select
 	// DefaultDataQueueSize. Once full, further DATA is discarded and local

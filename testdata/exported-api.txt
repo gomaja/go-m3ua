@@ -8,6 +8,7 @@ const DataNotSent
 const DataSendIndeterminate
 const DefaultBroadcastFlowCacheEntries
 const DefaultBroadcastFlowIdentifierBytes
+const DefaultControlWriteTimeout
 const DefaultDataQueueSize
 const DefaultEstablishTimeout
 const DefaultInitTimeout
@@ -170,6 +171,7 @@ field AssociationConfig.ASPProcedures
 field AssociationConfig.ApplicationServers
 field AssociationConfig.AuthorizeASP
 field AssociationConfig.Compatibility
+field AssociationConfig.ControlWriteTimeout
 field AssociationConfig.DataQueueSize
 field AssociationConfig.EstablishTimeout
 field AssociationConfig.IPSP
@@ -793,6 +795,7 @@ var ErrAmbiguousMTPRoute
 var ErrAssociationClosed
 var ErrBroadcastFlowIdentifierTooLong
 var ErrContextlessApplicationServer
+var ErrControlWriteTimeout
 var ErrDataQueueFull
 var ErrDeregistrationOutcomeUnknown
 var ErrDestinationStateUnknown
