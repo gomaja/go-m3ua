@@ -272,13 +272,18 @@ CPU/allocation accounting; it is not silently subtracted.
 ### Opt-in shared Linux clock
 
 Set `-same-host-clock` on both processes for throughput or bidirectional runs
-on the same controlled Linux host and time namespace. Echo mode rejects this
+on the same controlled Linux host. Echo mode rejects this
 option; its scheduled RTT remains a separate, process-local measurement.
 The default HTTP-interval mode is unchanged, and unsupported or mismatched
 shared-clock configurations fail rather than silently falling back.
 
 Before traffic, both sides compare `CLOCK_MONOTONIC`, kernel boot identity,
-time-namespace identity, and clock resolution. The sender declares a common
+monotonic time-namespace offset, and clock resolution. A time namespace's
+`CLOCK_MONOTONIC` is the boot's clock plus that namespace's monotonic offset
+([time_namespaces(7)](https://man7.org/linux/man-pages/man7/time_namespaces.7.html)),
+so the offset, read from `/proc/self/timens_offsets`, identifies the clock;
+the namespace inode does not, because container runtimes give each container
+its own time namespace. The sender declares a common
 future start and end; the receiver acknowledges that exact window before the
 sender schedules traffic. Missing the start during preparation invalidates the
 run. Both domains are checked again after the run. This is a controlled-host
@@ -306,7 +311,7 @@ therefore exceed the delivery allowance without extending that allowance.
 Go's Linux runtime uses `CLOCK_MONOTONIC` for its monotonic reading
 ([Go 1.25.10 arm64 runtime](https://github.com/golang/go/blob/go1.25.10/src/runtime/sys_linux_arm64.s));
 [`time.Time.Add`](https://pkg.go.dev/time#Time.Add) preserves the local monotonic
-reading used by these watchdogs. Host and time-namespace identity checks remain
+reading used by these watchdogs. Host and monotonic-offset identity checks remain
 mandatory; translating a timestamp does not establish a shared clock domain.
 
 Receiver progress timestamps and unique counters are captured under the same

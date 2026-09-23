@@ -9,6 +9,8 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +23,38 @@ type sharedClockDomain struct {
 	BootID        string `json:"boot_id"`
 	TimeNamespace string `json:"time_namespace"`
 	Resolution    int64  `json:"resolution_ns"`
+}
+
+// monotonicOffsetIdentity is the time_namespace identity of a process whose
+// CLOCK_MONOTONIC is offset by seconds and nanoseconds from its boot's clock.
+func monotonicOffsetIdentity(seconds, nanoseconds int64) string {
+	return fmt.Sprintf("monotonic-offset:%d.%09d", seconds, nanoseconds)
+}
+
+// parseMonotonicOffset reads the monotonic line of a
+// /proc/<pid>/timens_offsets file (time_namespaces(7)): "monotonic <secs>
+// <nanosecs>". Missing, repeated or malformed monotonic entries are errors.
+func parseMonotonicOffset(offsets string) (string, error) {
+	identity := ""
+	for _, line := range strings.Split(offsets, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "monotonic" {
+			continue
+		}
+		if identity != "" || len(fields) != 3 {
+			return "", errors.New("malformed monotonic time-namespace offset")
+		}
+		seconds, secondsErr := strconv.ParseInt(fields[1], 10, 64)
+		nanoseconds, nanosecondsErr := strconv.ParseInt(fields[2], 10, 64)
+		if secondsErr != nil || nanosecondsErr != nil || nanoseconds < 0 || nanoseconds >= int64(time.Second) {
+			return "", errors.New("malformed monotonic time-namespace offset")
+		}
+		identity = monotonicOffsetIdentity(seconds, nanoseconds)
+	}
+	if identity == "" {
+		return "", errors.New("time-namespace offsets name no monotonic clock")
+	}
+	return identity, nil
 }
 
 func (domain sharedClockDomain) valid() bool {
