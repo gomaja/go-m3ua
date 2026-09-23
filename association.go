@@ -396,7 +396,11 @@ type Association struct {
 	// controlTransport is the test seam for writeControlFrame's two sends.
 	// Production leaves it nil and writes through sctpConn.
 	controlTransport controlSender
-	transportCloser  func() error
+	// controlWriteWaits counts library writes that met a full send buffer and
+	// had to wait; controlWritesWaiting is how many are waiting now.
+	controlWriteWaits    atomic.Uint64
+	controlWritesWaiting atomic.Int32
+	transportCloser      func() error
 	// notificationQueue keeps peer-controlled socket backpressure out of the AS
 	// state machine and proactive SSNM paths. A full queue closes the association
 	// rather than silently dropping mandatory ordered control traffic.
@@ -739,9 +743,9 @@ func (c *Association) setUpSocket() error {
 	// writeControlFrame waits for send-buffer space through Write, the one send
 	// that carries no ancillary data, so the kernel applies these defaults to
 	// it (RFC 6458 Section 8.1.31). They are the control template every other
-	// control write names explicitly: stream 0, which RFC 4666 Section 1.4.7
-	// reserves for the management classes, and the M3UA PPID. Without them that
-	// write would leave with PPID 0.
+	// control write names explicitly: stream 0, where RFC 4666 Section 1.4.7
+	// rule 2 puts the ASPSM, MGMT and RKM classes and rule 3 permits the rest,
+	// and the M3UA PPID. Without them that write would leave with PPID 0.
 	if err := c.sctpConn.SetDefaultSndInfo(&sctp.SndInfo{
 		SID:  c.sctpInfo.Stream,
 		PPID: c.sctpInfo.PPID,
@@ -843,7 +847,8 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 // backpressure: without a write deadline, a full SCTP send buffer is reported
 // to the caller at once and the association stays up. Messages the library
 // sends on its own behalf wait for buffer space instead, bounded by
-// AssociationConfig.ControlWriteTimeout, and while one is waiting a
+// AssociationConfig.ControlWriteTimeout or, while a write deadline is in
+// force, by that deadline (see SetWriteDeadline). While one is waiting, a
 // WriteSignal or WriteData on the same association waits behind it for the
 // socket.
 func (c *Association) WriteSignal(m3 messages.M3UA) (n int, err error) {
@@ -949,6 +954,9 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndRcvInfo) err
 		return err
 	}
 
+	c.controlWriteWaits.Add(1)
+	c.controlWritesWaiting.Add(1)
+	defer c.controlWritesWaiting.Add(-1)
 	timeout := c.controlWriteTimeout()
 	expired := fmt.Errorf("%w (%s)", ErrControlWriteTimeout, timeout)
 	var state atomic.Uint32
@@ -1575,7 +1583,8 @@ func (c *Association) RemoteAddr() net.Addr {
 	return c.sctpConn.RemoteAddr()
 }
 
-// SetDeadline sets the read and write deadlines associated.
+// SetDeadline sets the read and write deadlines associated. The write half has
+// the consequences documented on SetWriteDeadline.
 func (c *Association) SetDeadline(t time.Time) error {
 	c.setReadDeadline(t)
 	return c.sctpConn.SetWriteDeadline(t)
@@ -1627,6 +1636,15 @@ func (c *Association) readTimeout() (<-chan time.Time, func(), bool) {
 }
 
 // SetWriteDeadline sets the deadline for future WriteData and WriteSignal calls.
+// A zero time removes it.
+//
+// The deadline belongs to the SCTP socket, so it also governs the messages the
+// library sends on its own behalf. While one is in force, such a message waits
+// for send-buffer space only until the deadline, not for
+// AssociationConfig.ControlWriteTimeout, and if the deadline passes while it is
+// waiting the association is closed with an error matching
+// os.ErrDeadlineExceeded rather than ErrControlWriteTimeout: the message could
+// not be sent, and nothing can wait beyond a deadline the socket enforces.
 func (c *Association) SetWriteDeadline(t time.Time) error {
 	return c.sctpConn.SetWriteDeadline(t)
 }

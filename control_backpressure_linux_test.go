@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -82,19 +81,38 @@ func TestSSNMPublicationWaitsOutAFullSendBuffer(t *testing.T) {
 	// SGP's send buffer is full. The test depends on reaching exactly that
 	// condition, so anything else stopping the loop is a failure of the setup.
 	payload := make([]byte, 4096)
-	for sent := 0; ; sent++ {
-		_, err = association.WriteData(DataRequest{AS: key, ProtocolData: params.ProtocolDataPayload{
+	writeData := func() error {
+		_, err := association.WriteData(DataRequest{AS: key, ProtocolData: params.ProtocolDataPayload{
 			OriginatingPointCode: 1, DestinationPointCode: 2, ServiceIndicator: 3, NetworkIndicator: 2, Data: payload}})
-		if err != nil {
+		return err
+	}
+	for sent := 0; ; sent++ {
+		if err = writeData(); err != nil {
 			break
 		}
 		if sent > 100000 {
-			t.Fatal("100,000 DATA never filled the send buffer")
+			t.Fatal("100,000 DATA were all accepted; the send buffer never filled")
 		}
 	}
 	if !errors.Is(err, syscall.EAGAIN) {
 		t.Fatalf("filling the send buffer stopped on %v; want EAGAIN", err)
 	}
+	// The ASP's library keeps reading, so the buffer drains again at loopback
+	// speed. Keep refilling it while the report is published, or the report
+	// may find space and never meet the condition under test.
+	stopFlood := make(chan struct{})
+	flooded := make(chan struct{})
+	go func() {
+		defer close(flooded)
+		for {
+			select {
+			case <-stopFlood:
+				return
+			default:
+				_ = writeData()
+			}
+		}
+	}()
 
 	const pointCode = 0x400001
 	report := sgp.ReportDestinationAvailability(DestinationAvailabilityRequest{
@@ -105,8 +123,13 @@ func TestSSNMPublicationWaitsOutAFullSendBuffer(t *testing.T) {
 		Destinations: []PointCodeRange{{PointCode: pointCode}},
 		Availability: DestinationUnavailable,
 	})
+	close(stopFlood)
+	<-flooded
 	if report != nil {
 		t.Fatalf("the destination report failed against a full send buffer: %v (association: %v)", report, association.Err())
+	}
+	if association.controlWriteWaits.Load() == 0 {
+		t.Fatal("the report never met a full send buffer; the test did not reach its precondition")
 	}
 
 	deadline := time.After(10 * time.Second)
@@ -382,7 +405,7 @@ func TestLibraryRepliesWaitForAStalledPeerToResume(t *testing.T) {
 	}
 	// The stream and PPID checks below only mean something if some Acks left
 	// through the waiting path.
-	if !waitFor(libraryWriteWaiting, 5*time.Second) {
+	if !waitFor(func() bool { return libraryWriteWaiting(association) }, 5*time.Second) {
 		t.Fatal("no library write waited for send-buffer space; the stall did not fill it")
 	}
 	close(peer.resume)
@@ -442,7 +465,7 @@ func TestStalledPeerClosesTheAssociationAfterControlWriteTimeout(t *testing.T) {
 func TestCloseReleasesAWaitingLibraryWrite(t *testing.T) {
 	_, association, _, _ := stallLibraryReplies(t, 3264, time.Minute)
 
-	if !waitFor(libraryWriteWaiting, 5*time.Second) {
+	if !waitFor(func() bool { return libraryWriteWaiting(association) }, 5*time.Second) {
 		t.Fatal("no library write ever waited for send-buffer space; the test did not reach its precondition")
 	}
 	select {
@@ -460,19 +483,13 @@ func TestCloseReleasesAWaitingLibraryWrite(t *testing.T) {
 	if !errors.Is(association.Err(), ErrAssociationClosed) {
 		t.Fatalf("the association ended with %v; want ErrAssociationClosed", association.Err())
 	}
-	if !waitFor(func() bool { return !libraryWriteWaiting() }, 5*time.Second) {
+	if !waitFor(func() bool { return !libraryWriteWaiting(association) }, 5*time.Second) {
 		t.Fatalf("a library write is still waiting after Close:\n%s", goroutinesBlockedIn("writeControlFrame"))
 	}
 }
 
-// libraryWriteWaiting reports a library write parked in the runtime poller for
-// send-buffer space. Being inside writeControlFrame is not enough: every
-// control write passes through it, and most never wait.
-func libraryWriteWaiting() bool {
-	for _, stack := range goroutinesBlockedIn("writeControlFrame") {
-		if strings.Contains(stack, "waitWrite") {
-			return true
-		}
-	}
-	return false
+// libraryWriteWaiting reports a library write on association waiting for
+// send-buffer space right now.
+func libraryWriteWaiting(association *Association) bool {
+	return association.controlWritesWaiting.Load() > 0
 }

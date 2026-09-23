@@ -118,6 +118,9 @@ func TestLibraryWriteWaitsOutAFullSendBuffer(t *testing.T) {
 		t.Fatalf("the library write returned %v while the send buffer was still full", err)
 	case <-time.After(50 * time.Millisecond):
 	}
+	if waiting := c.controlWritesWaiting.Load(); waiting != 1 {
+		t.Fatalf("%d library writes reported waiting, want 1", waiting)
+	}
 
 	close(transport.space)
 	select {
@@ -132,6 +135,9 @@ func TestLibraryWriteWaitsOutAFullSendBuffer(t *testing.T) {
 	case <-c.Done():
 		t.Fatalf("a full send buffer closed the association: %v", c.Err())
 	default:
+	}
+	if waiting, waits := c.controlWritesWaiting.Load(), c.controlWriteWaits.Load(); waiting != 0 || waits != 1 {
+		t.Fatalf("after the write: %d waiting, %d waits in total; want 0 and 1", waiting, waits)
 	}
 
 	// The waiting send carries no ancillary data, so it must be the very

@@ -492,8 +492,15 @@ type AssociationConfig struct {
 	// cannot absorb mandatory control traffic can no longer run the protocol.
 	// Values less than or equal to zero select DefaultControlWriteTimeout.
 	//
-	// Writes the application asks for (WriteData, WriteSignal and the typed
-	// requests such as DestinationStateAudit) do not wait; see WriteSignal.
+	// A socket write deadline set with Association.SetWriteDeadline supersedes
+	// this bound: while one is in force, a library write waits only until the
+	// deadline.
+	//
+	// The Endpoint's destination state publications are the library's writes
+	// and wait. Writes the application asks for on one Association do not:
+	// WriteData, WriteSignal, DestinationStateAudit, SignallingCongestion,
+	// RegisterRoutingKeys and DeregisterApplicationServers report a full send
+	// buffer to the caller; see WriteSignal.
 	ControlWriteTimeout time.Duration
 	// DataQueueSize is the maximum number of inbound DATA messages retained for
 	// ReadData. Values less than or equal to zero select
