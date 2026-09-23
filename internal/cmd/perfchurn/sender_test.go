@@ -47,6 +47,32 @@ func TestScheduledMessages(t *testing.T) {
 	}
 }
 
+// steppedClock is a schedule clock that moves only when the test advances it.
+type steppedClock struct {
+	mutex sync.Mutex
+	at    time.Time
+}
+
+func (clock *steppedClock) now() time.Time {
+	clock.mutex.Lock()
+	defer clock.mutex.Unlock()
+	return clock.at
+}
+
+func (clock *steppedClock) advance(step time.Duration) {
+	clock.mutex.Lock()
+	defer clock.mutex.Unlock()
+	clock.at = clock.at.Add(step)
+}
+
+// offered counts the slots offered to the writer: accepted and failed writes.
+// A refused write is offered again in the same slot.
+func (writer *fakeWriter) offered() uint64 {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	return uint64(len(writer.accepted) + len(writer.failed))
+}
+
 func TestSenderOffersTheOpenLoopScheduleOnEveryFlow(t *testing.T) {
 	fakes := make([]*fakeWriter, stableAssociations)
 	writers := make([]dataWriter, stableAssociations)
@@ -57,18 +83,45 @@ func TestSenderOffersTheOpenLoopScheduleOnEveryFlow(t *testing.T) {
 	fakes[3].refuse = 5
 	fakes[7].failAt = 3
 	const rate = 6400
-	sender := startLedgerSender(context.Background(), writers, senderPlan{Epoch: 9, Rate: rate, Workload: workloadMix, TowardSGP: true})
-	time.Sleep(500 * time.Millisecond)
+	// The schedule runs on a stepped clock, so the stop lands at an exact
+	// point of it. On the wall clock a stop catches the sender mid-wake and
+	// comes up short by however long the host held it off the CPU, which on
+	// shared CI runners has been tens of milliseconds.
+	clock := &steppedClock{at: time.Now()}
+	sender := startLedgerSenderWithClock(context.Background(), writers, senderPlan{Epoch: 9, Rate: rate, Workload: workloadMix, TowardSGP: true}, clock.now)
+	perAssociation := float64(rate) / float64(len(writers))
+	const step, steps = 100 * time.Millisecond, 5
+	// Each step leaves every association a step's worth of slots behind,
+	// which it must make up in a burst: never more than is due, and all of it.
+	for elapsed := step; elapsed <= steps*step; elapsed += step {
+		clock.advance(step)
+		due := scheduledMessages(perAssociation, elapsed)
+		deadline := time.Now().Add(10 * time.Second)
+		for caughtUp := false; !caughtUp; {
+			caughtUp = true
+			for association, fake := range fakes {
+				offered := fake.offered()
+				if offered > due {
+					t.Fatalf("association %d offered %d slots with %d due at %v", association, offered, due, elapsed)
+				}
+				caughtUp = caughtUp && offered == due
+			}
+			if !caughtUp && time.Now().After(deadline) {
+				t.Fatalf("the sender did not catch up to %d slots per association at %v", due, elapsed)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 	result := sender.stop()
 
 	var sent uint64
 	for _, count := range result.Sent {
 		sent += count
 	}
-	if result.Scheduled < rate/2*9/10 || result.Scheduled > rate/2*12/10 {
-		t.Fatalf("scheduled %d in about 500 ms at %d/s", result.Scheduled, rate)
+	if want := scheduledMessages(perAssociation, steps*step) * stableAssociations; result.Scheduled != want {
+		t.Fatalf("scheduled %d at %d/s over %v of schedule, want %d", result.Scheduled, rate, steps*step, want)
 	}
-	if sent+result.Errors+scheduleTolerance(result.Scheduled, rate) < result.Scheduled || sent > result.Scheduled {
+	if sent+result.Errors != result.Scheduled {
 		t.Fatalf("sent %d with %d errors against %d scheduled", sent, result.Errors, result.Scheduled)
 	}
 	if result.Refused != 5 || result.Errors != 1 || result.Rate != rate || result.Workload != workloadMix {
