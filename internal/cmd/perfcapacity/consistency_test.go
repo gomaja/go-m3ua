@@ -281,10 +281,10 @@ func TestNegotiatedStreamInventoryMustBeValidAndStable(testContext *testing.T) {
 			testContext.Fatal(parseErr)
 		}
 		var campaign campaignIdentity
-		if err := campaign.add(original); err != nil {
+		if err := campaign.add(original, false); err != nil {
 			testContext.Fatal(err)
 		}
-		if err := campaign.add(changed); err == nil {
+		if err := campaign.add(changed, false); err == nil {
 			testContext.Fatalf("mixed negotiated stream inventories with %s", streams)
 		}
 	}
