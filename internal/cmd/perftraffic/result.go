@@ -21,12 +21,38 @@ type runSpec struct {
 	// carried in the specification rather than taken from each side's own
 	// flags so that both directions of a bidirectional run are bounded
 	// identically and report the same manifest.
-	Outstanding int      `json:"outstanding"`
-	Payload     workload `json:"payload,omitempty"`
-	Mode        string   `json:"mode,omitempty"`
-	Direction   string   `json:"direction,omitempty"`
-	Initiation  string   `json:"initiation,omitempty"`
-	PeerControl string   `json:"peer_control,omitempty"`
+	Outstanding int                `json:"outstanding"`
+	Payload     workload           `json:"payload,omitempty"`
+	Mode        string             `json:"mode,omitempty"`
+	Direction   string             `json:"direction,omitempty"`
+	Initiation  string             `json:"initiation,omitempty"`
+	PeerControl string             `json:"peer_control,omitempty"`
+	Clock       *sharedClockWindow `json:"shared_clock,omitempty"`
+	// SSNM is the opt-in SSNM load declaration, nil and omitted when off. A
+	// pointer rather than omitzero, which Go 1.23 does not implement.
+	SSNM *ssnmWorkload `json:"ssnm,omitempty"`
+	// Overload identifies a cohort of a DATA overload trial. It is absent from
+	// every nominal cohort.
+	Overload *overloadSpec `json:"overload,omitempty"`
+}
+
+// overloadMeasurement reports whether the specification is the phased
+// measurement cohort of an overload trial.
+func (specification runSpec) overloadMeasurement() bool {
+	return specification.Overload.measurement()
+}
+
+// overloadSchedule is the phased schedule of an overload measurement cohort,
+// or nil for every other cohort.
+func (specification runSpec) overloadSchedule() *phasedSchedule {
+	if !specification.overloadMeasurement() {
+		return nil
+	}
+	schedule, err := newPhasedSchedule(specification.Overload.Phases)
+	if err != nil {
+		return nil
+	}
+	return schedule
 }
 
 type deliveryResult struct {
@@ -59,8 +85,8 @@ type runRecord struct {
 	Spec      runSpec `json:"spec"`
 	Expected  uint64  `json:"expected"`
 	Scheduled uint64  `json:"scheduled,omitempty"`
-	Sent      uint64  `json:"sent,omitempty"`
-	Submitted uint64  `json:"submitted,omitempty"`
+	Sent      uint64  `json:"sent"`
+	Submitted uint64  `json:"submitted"`
 	// send_errors and capped are always serialized, including at zero. The
 	// acceptance CLI at internal/cmd/perfcapacity requires both and treats an
 	// absent counter as invalid input rather than as zero, and a loss-free run
@@ -99,6 +125,13 @@ type runRecord struct {
 	Reverse                   *runRecord            `json:"reverse,omitempty"`
 	ReverseReceiver           *runRecord            `json:"reverse_receiver,omitempty"`
 	ReverseError              string                `json:"reverse_error,omitempty"`
+	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
+	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
+	SSNM                      *ssnmRecord           `json:"ssnm,omitempty"`
+	// Overload is present only on the records of a DATA overload measurement
+	// cohort: the receiver's observations on the receiver record, the full
+	// outcome accounting and acceptance evaluation on the sender record.
+	Overload *overloadRecord `json:"overload,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -125,6 +158,9 @@ type fixtureManifest struct {
 	OutstandingLimit         int    `json:"outstanding_limit"`
 	Initiation               string `json:"initiation,omitempty"`
 	AccountingScope          string `json:"accounting_scope"`
+	// SSNMBudgets are the SSNM time budgets an SSNM-loaded ASP judged its
+	// run against, omitted otherwise.
+	SSNMBudgets *ssnmBudgetsRecord `json:"ssnm_budgets,omitempty"`
 }
 
 func (record *runRecord) evaluate() {
@@ -136,11 +172,22 @@ func (record *runRecord) evaluate() {
 	if record.OutstandingScope == "" {
 		record.OutstandingScope = "legacy local counters only; not end-to-end boundary observations"
 	}
-	if record.UnsupportedModes == nil {
+	if record.UnsupportedModes == nil && routedMode(record.Spec.Mode) {
 		record.UnsupportedModes = map[string]string{
-			"router_or_ssnm_workload":     "unavailable: requires future routing and state APIs",
+			"ssnm_or_churn_workload":      "unavailable: the routed workload keeps destinations Available and exercises neither SSNM storms nor reference churn",
+			"alternate_or_partial_paths":  "unavailable: the routed workload uses the preferred AS on every path; alternate preference and partial failures are separate correctness cases",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}
+	}
+	if record.UnsupportedModes == nil {
+		record.UnsupportedModes = map[string]string{
+			"router_or_ssnm_workload":     "unavailable: this fixture does not exercise the existing routing and state APIs",
+			"independent_peer_validation": "unavailable: both endpoints use this binary",
+		}
+	}
+	if record.Spec.overloadMeasurement() {
+		record.evaluateOverloadRecord()
+		return
 	}
 	invalid := func(reason string) {
 		record.Reasons = append(record.Reasons, reason)

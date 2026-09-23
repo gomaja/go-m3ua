@@ -11,6 +11,14 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
+// receivedDataMessage coallocates the public message and its decoded payload.
+// Retaining either pointer retains this one holder, but no other message and no
+// library-owned shared buffer.
+type receivedDataMessage struct {
+	message      DataMessage
+	protocolData params.ProtocolDataPayload
+}
+
 // raw is the message as received, carried so an error reported against it can
 // quote the octets without marshalling the decoded message; see sendErrForMessage.
 func (c *Association) handleData(ctx context.Context, data *messages.Data, raw []byte) {
@@ -76,8 +84,12 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 		return
 	}
 
-	pd, err := data.ProtocolData.ProtocolData()
-	if err != nil {
+	message := &receivedDataMessage{}
+	if data.ProtocolData.Tag != params.ProtocolData {
+		c.sendErrForMessage(data, raw, ErrFailedToPeelOff)
+		return
+	}
+	if err := message.protocolData.UnmarshalBinary(data.ProtocolData.Data); err != nil {
 		c.sendErrForMessage(data, raw, ErrFailedToPeelOff)
 		return
 	}
@@ -88,8 +100,9 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 	// correlation, and the association and SCTP epoch that carried it.
 	// validateDataRoutingContext has already established that a present DATA
 	// Routing Context contains exactly one value.
-	msg := &DataMessage{
-		ProtocolData: pd,
+	msg := &message.message
+	*msg = DataMessage{
+		ProtocolData: &message.protocolData,
 		Scope:        receivedDataScope(data),
 		AS:           c.receivedASKey(data),
 		Stream:       c.receivedStreamID(),
@@ -141,8 +154,8 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 	// makes the Affected Point Code of the SCON that follows Mandatory.
 	if !c.dataOverflow.Swap(true) {
 		c.sendErr(&DataQueueOverflowError{
-			DestinationPointCode: pd.DestinationPointCode,
-			NetworkIndicator:     pd.NetworkIndicator,
+			DestinationPointCode: message.protocolData.DestinationPointCode,
+			NetworkIndicator:     message.protocolData.NetworkIndicator,
 		})
 	}
 }
@@ -168,9 +181,8 @@ func (c *Association) validateDataRoutingContext(peer *params.Param) error {
 	if err := validateRoutingContextAgainst(peer, configured); err != nil {
 		return err
 	}
-	routingContexts := peer.RoutingContexts()
-	if len(routingContexts) != 1 {
-		return NewInvalidRoutingContextError(routingContexts...)
+	if len(peer.Data) != 4 {
+		return NewInvalidRoutingContextError(peer.RoutingContexts()...)
 	}
 	return nil
 }
