@@ -261,6 +261,15 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 // message. That message is the preload's: min(records, 1,024) destinations.
 // A queue that cannot hold it loses continuity on every subscriber, the
 // healthy ones included, before any traffic starts.
+//
+// The rule is necessary, not sufficient. Every SGP message becomes one event
+// per association in each subscription, and a large store preloads several
+// messages, so a subscriber that falls behind during the preload can still
+// lose continuity with a limit this accepts. That aborts the run at setup
+// ("SSNM preload was not consumed"); it never yields a verdict. Requiring room
+// for the whole preload would refuse the approved 1 MiB default at the full
+// store from four associations up, although subscribers drain it
+// concurrently.
 func validateSSNMQueueBytes(ssnm *ssnmConfig) error {
 	switch {
 	case ssnm.QueueBytes < 0:

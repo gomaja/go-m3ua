@@ -231,7 +231,12 @@ With the default limit the one-APC F3 run retains 256 events of 784 bytes,
 200,704 bytes, so the count cap binds. The byte cap binds below 256 x 784
 bytes, but the limit must also hold the workload's largest message, the
 preload's min(`-ssnm-records`, 1,024) destinations, or every subscriber would
-lose continuity before traffic starts; the ASP refuses such a limit. At the full
+lose continuity before traffic starts; the ASP refuses such a limit. That is
+necessary but not sufficient: each SGP message becomes one event per association
+in every subscription, and a large store preloads several messages, so a tight
+limit with several associations can still lose continuity during the preload.
+The run then aborts at setup with "SSNM preload was not consumed" and yields no
+verdict. At the full
 16,384-record store that message is 274,948 bytes, more than 256 one-APC
 events, so the one-APC byte-binding run uses a 256-record store, whose single
 preload message is 69,124 bytes, and a 96 KiB limit. It retains 125 events,
