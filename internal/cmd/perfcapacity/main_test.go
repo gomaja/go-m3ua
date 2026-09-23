@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
@@ -119,6 +120,120 @@ func runRequest(testContext *testing.T, input string) (int, response) {
 	return status, decoded
 }
 
+func TestWorkloadFromSpecEnforcesProducerLimits(testContext *testing.T) {
+	testCases := []struct {
+		name         string
+		declaredRate int
+		mutate       func(*fixtureSpec)
+		wantError    string
+	}{
+		{
+			name: "maximum values",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Associations = 32
+				*spec.Outstanding = 8192
+			},
+		},
+		{
+			name:         "maximum rate",
+			declaredRate: 1_000_000,
+			mutate: func(spec *fixtureSpec) {
+				*spec.Rate = 1_000_000
+				*spec.Expected = 120_000_000
+			},
+		},
+		{
+			name: "maximum duration",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 10 * time.Minute
+				*spec.Expected = 6_000
+				spec.Drain = 0
+			},
+		},
+		{
+			name: "maximum combined run window",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 2 * time.Second
+				*spec.Expected = 20
+				spec.Drain = 4*time.Minute + 59*time.Second
+			},
+		},
+		{
+			name: "too many associations",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Associations = 33
+			},
+			wantError: "associations must not exceed 32",
+		},
+		{
+			name:         "rate above maximum",
+			declaredRate: 1_000_001,
+			mutate: func(spec *fixtureSpec) {
+				*spec.Rate = 1_000_001
+				*spec.Expected = 120_000_120
+			},
+			wantError: "rate must not exceed 1000000",
+		},
+		{
+			name: "too many outstanding sends",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Outstanding = 8193
+			},
+			wantError: "outstanding must not exceed 8192",
+		},
+		{
+			name: "duration above maximum",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 10*time.Minute + time.Nanosecond
+				*spec.Expected = 6_000
+				spec.Drain = 0
+			},
+			wantError: "duration_ns must not exceed 10m0s",
+		},
+		{
+			name: "drain above maximum",
+			mutate: func(spec *fixtureSpec) {
+				spec.Drain = 10*time.Minute + time.Nanosecond
+			},
+			wantError: "drain_ns must not exceed 10m0s",
+		},
+		{
+			name: "combined run window above maximum",
+			mutate: func(spec *fixtureSpec) {
+				*spec.Duration = 2*time.Second + time.Nanosecond
+				*spec.Expected = 20
+				spec.Drain = 4*time.Minute + 59*time.Second
+			},
+			wantError: "duration_ns plus twice drain_ns must not exceed 10m0s",
+		},
+	}
+
+	for _, testCase := range testCases {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			var record fixtureEvidence
+			if err := json.Unmarshal([]byte(passingRunJSON()), &record); err != nil {
+				testContext.Fatal(err)
+			}
+			declaredRate := testCase.declaredRate
+			if declaredRate == 0 {
+				declaredRate = 10
+			}
+			testCase.mutate(record.Spec)
+
+			_, err := workloadFromSpec(record.Spec, declaredRate)
+			if testCase.wantError == "" {
+				if err != nil {
+					testContext.Fatalf("workloadFromSpec() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != "spec "+testCase.wantError {
+				testContext.Fatalf("workloadFromSpec() error = %v, want %q", err, "spec "+testCase.wantError)
+			}
+		})
+	}
+}
+
 func TestBracketedSearchWithFivePassingRepetitionsPasses(testContext *testing.T) {
 	input := requestJSON(10, capacity37Schedule, repetitionsJSON(37, 5, passingRunJSON()))
 	status, decoded := runRequest(testContext, input)
@@ -230,11 +345,95 @@ func TestMissingWindowEvidenceNeverPasses(testContext *testing.T) {
 }
 
 func TestInsufficientSampleBacklogChangeIsMissingEvidence(testContext *testing.T) {
-	insufficient := strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated","sample_count":120`, `"status":"insufficient-samples","sample_count":4`, 1)
+	insufficient := strings.Replace(passingRunJSON(),
+		`"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5`,
+		`"status":"insufficient-samples","sample_count":7,"mean_change_lower":0,"mean_change_upper":0`, 1)
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, insufficient)
 	status, decoded := runRequest(testContext, input)
 	if status != inconclusiveExitStatus || decoded.ProbeDecisions[0].Decision != "inconclusive" {
 		testContext.Fatalf("status %d decision %+v, want inconclusive probe", status, decoded)
+	}
+}
+
+func TestBacklogChangeStatusMustMatchProducerClassification(testContext *testing.T) {
+	testCases := []struct {
+		name string
+		run  string
+	}{
+		{name: "growth label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"increase-demonstrated"`, 1)},
+		{name: "unresolved label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"unresolved"`, 1)},
+		{name: "unknown label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"unknown"`, 1)},
+		{name: "missing label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":""`, 1)},
+		{name: "nonincrease label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"nonincrease-demonstrated"`, 1)},
+		{name: "unresolved label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"unresolved"`, 1)},
+		{name: "unknown label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"unknown"`, 1)},
+		{name: "growth label on unresolved interval", run: strings.Replace(straddlingRunJSON(), `"status":"unresolved"`, `"status":"increase-demonstrated"`, 1)},
+		{name: "nonincrease label on unresolved interval", run: strings.Replace(straddlingRunJSON(), `"status":"unresolved"`, `"status":"nonincrease-demonstrated"`, 1)},
+		{name: "demonstrated label with too few samples", run: strings.Replace(passingRunJSON(), `"sample_count":120`, `"sample_count":7`, 1)},
+		{name: "insufficient label with enough samples", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"insufficient-samples"`, 1)},
+	}
+	for _, testCase := range testCases {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			if _, _, err := evidenceFromFixture(json.RawMessage(testCase.run), 10); err == nil {
+				testContext.Fatal("evidenceFromFixture accepted contradictory backlog_change status")
+			}
+		})
+	}
+}
+
+func TestCanonicalAndUnavailableBacklogChangeEvidence(testContext *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		run          string
+		wantInterval bool
+		wantDecision perfstats.Decision
+	}{
+		{name: "nonincrease", run: passingRunJSON(), wantInterval: true, wantDecision: perfstats.Pass},
+		{
+			name:         "exact zero is nonincrease",
+			run:          strings.Replace(passingRunJSON(), `"mean_change_lower":-2.5,"mean_change_upper":-0.5`, `"mean_change_lower":0,"mean_change_upper":0`, 1),
+			wantInterval: true,
+			wantDecision: perfstats.Pass,
+		},
+		{name: "growth", run: failingRunJSON(), wantInterval: true, wantDecision: perfstats.Fail},
+		{name: "unresolved", run: straddlingRunJSON(), wantInterval: true, wantDecision: perfstats.Inconclusive},
+		{
+			name:         "zero lower bound is unresolved",
+			run:          strings.Replace(straddlingRunJSON(), `"mean_change_lower":-3.4`, `"mean_change_lower":0`, 1),
+			wantInterval: true,
+			wantDecision: perfstats.Inconclusive,
+		},
+		{
+			name: "insufficient samples",
+			run: strings.Replace(passingRunJSON(),
+				`"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5`,
+				`"status":"insufficient-samples","sample_count":7,"mean_change_lower":0,"mean_change_upper":0`, 1),
+			wantDecision: perfstats.Inconclusive,
+		},
+		{
+			name: "missing backlog object",
+			run: strings.Replace(passingRunJSON(),
+				`,"backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}`, "", 1),
+			wantDecision: perfstats.Inconclusive,
+		},
+		{
+			name:         "missing backlog bound",
+			run:          strings.Replace(passingRunJSON(), `"mean_change_lower":-2.5,`, "", 1),
+			wantDecision: perfstats.Inconclusive,
+		},
+	} {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			evidence, _, err := evidenceFromFixture(json.RawMessage(testCase.run), 10)
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			if (evidence.Interval != nil) != testCase.wantInterval {
+				testContext.Fatalf("interval = %+v, want presence %t", evidence.Interval, testCase.wantInterval)
+			}
+			if decision := perfstats.DecideRun(evidence); decision.Decision != testCase.wantDecision {
+				testContext.Fatalf("decision = %+v, want %q", decision, testCase.wantDecision)
+			}
+		})
 	}
 }
 
@@ -305,7 +504,8 @@ func TestFoldJSONKeyMatchesEncodingJSONUnicodeFolding(testContext *testing.T) {
 
 func FuzzRunNeverPanicsAndAlwaysWritesJSON(fuzzContext *testing.F) {
 	fuzzContext.Add([]byte(`{}`))
-	fuzzContext.Add([]byte(fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, passingRunJSON())))
+	fuzzContext.Add(fmt.Appendf(nil, `{"initial":10,"probes":[{"rate":10,"run":%s}]}`, passingRunJSON()))
+	fuzzContext.Add(fmt.Appendf(nil, `{"initial":10,"probes":[{"rate":10,"run":%s}]}`, bidirectionalRunJSON(10, -1, 0, -1, 0)))
 	fuzzContext.Add([]byte(`{"initial":10,"probes":null,"repetitions":null}`))
 	fuzzContext.Add([]byte{0xff, 0x00, '{', '}'})
 	fuzzContext.Fuzz(func(testContext *testing.T, input []byte) {
