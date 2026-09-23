@@ -505,3 +505,150 @@ func TestRoutedReceiverHTTPCompositionResetsAFreshRoutingLedger(testContext *tes
 		testContext.Fatalf("reset reused the routing ledger: %p", ledgers)
 	}
 }
+
+// routedTestSenderPreparation wraps the SSNM preparation fake so a test can
+// fail or contradict the sender inventory read after SSNM preparation.
+type routedTestSenderPreparation struct {
+	*fakeRoutingPreparationSender
+	calls  int
+	failAt int
+	mutate func([]routingSenderInventory) []routingSenderInventory
+}
+
+func (sender *routedTestSenderPreparation) Inventory() ([]routingSenderInventory, error) {
+	sender.calls++
+	inventory, err := sender.fakeRoutingPreparationSender.Inventory()
+	if sender.calls == sender.failAt {
+		if sender.mutate == nil {
+			return nil, errors.New("sender inventory unavailable")
+		}
+		inventory = sender.mutate(inventory)
+	}
+	return inventory, err
+}
+
+// routedTestSenderPeer is the receiver side of the routed preparation as the
+// sender sees it: the production routing control over the SSNM fake, with
+// every /routing/stop counted and checked against the sender's own
+// associations.
+type routedTestSenderPeer struct {
+	control           *fakeRoutingPreparationControl
+	senderEndpoint    *fakeRoutingEndpoint
+	inventoryCalls    atomic.Int32
+	failInventoryFrom int32
+	stops             atomic.Int32
+	stopsAfterClose   atomic.Int32
+}
+
+func (peer *routedTestSenderPeer) operations() routingControlOperations {
+	return routingControlOperations{
+		Inventory: func(ctx context.Context) (routingInventoryDTO, error) {
+			if call := peer.inventoryCalls.Add(1); peer.failInventoryFrom > 0 && call >= peer.failInventoryFrom {
+				return routingInventoryDTO{}, errors.New("peer inventory unavailable")
+			}
+			return peer.control.Inventory(ctx)
+		},
+		Prepare: peer.control.Prepare,
+		Publish: peer.control.Publish,
+		Stop: func(context.Context) error {
+			peer.stops.Add(1)
+			select {
+			case <-peer.senderEndpoint.closed:
+				peer.stopsAfterClose.Add(1)
+			default:
+			}
+			return nil
+		},
+	}
+}
+
+// Every failure between starting the sender topology and the first cohort
+// sends /routing/stop to the receiver, before the sender closes its own
+// associations, so the receiver never waits on a sender that has given up.
+// The exits past the sender DATA plane need concrete M3UA associations and
+// are covered by the loopback test of the production entry points; they
+// share the one deferred stop exercised here.
+func TestRoutedSenderStopsThePeerOnEveryPreparationFailure(testContext *testing.T) {
+	for _, test := range []struct {
+		name          string
+		setup         func(*routedSenderEnvironment, *routedTestSenderPeer, *routingPreparationFixture, *fakeRoutingFactory, *routedTestSenderPreparation)
+		timeout       time.Duration
+		want          string
+		setClosedByIt bool
+	}{
+		{name: "start", want: "start routed associations", setup: func(environment *routedSenderEnvironment, _ *routedTestSenderPeer, _ *routingPreparationFixture, factory *fakeRoutingFactory, _ *routedTestSenderPreparation) {
+			factory.failAt, factory.err = 1, errors.New("endpoint unavailable")
+		}},
+		{name: "establish", want: "establish routed associations", setClosedByIt: true, setup: func(_ *routedSenderEnvironment, _ *routedTestSenderPeer, _ *routingPreparationFixture, factory *fakeRoutingFactory, _ *routedTestSenderPreparation) {
+			factory.endpoints[0].failDial, factory.endpoints[0].dialErr = 3, errors.New("dial refused")
+		}},
+		{name: "preparation adapter", want: "does not expose SSNM", setup: func(environment *routedSenderEnvironment, _ *routedTestSenderPeer, _ *routingPreparationFixture, _ *fakeRoutingFactory, _ *routedTestSenderPreparation) {
+			environment.preparation = nil
+		}},
+		// The run context's end also ends the sender topology it owns, so
+		// the associations may close before the stop is sent.
+		{name: "peer never ready", want: context.DeadlineExceeded.Error(), timeout: 300 * time.Millisecond, setClosedByIt: true, setup: func(_ *routedSenderEnvironment, peer *routedTestSenderPeer, _ *routingPreparationFixture, _ *fakeRoutingFactory, _ *routedTestSenderPreparation) {
+			peer.failInventoryFrom = 1
+		}},
+		{name: "ssnm", want: "routed SSNM preparation", setup: func(_ *routedSenderEnvironment, _ *routedTestSenderPeer, fixture *routingPreparationFixture, _ *fakeRoutingFactory, _ *routedTestSenderPreparation) {
+			fixture.control.publishErr[3] = errors.New("publication refused")
+		}},
+		{name: "peer inventory after ssnm", want: "routed peer inventory", setup: func(_ *routedSenderEnvironment, peer *routedTestSenderPeer, _ *routingPreparationFixture, _ *fakeRoutingFactory, _ *routedTestSenderPreparation) {
+			peer.failInventoryFrom = 3
+		}},
+		{name: "sender inventory after ssnm", want: "sender inventory unavailable", setup: func(_ *routedSenderEnvironment, _ *routedTestSenderPeer, _ *routingPreparationFixture, _ *fakeRoutingFactory, sender *routedTestSenderPreparation) {
+			sender.failAt = 2
+		}},
+		{name: "pairing", want: "routing pairing requires", setup: func(_ *routedSenderEnvironment, _ *routedTestSenderPeer, _ *routingPreparationFixture, _ *fakeRoutingFactory, sender *routedTestSenderPreparation) {
+			sender.failAt = 2
+			sender.mutate = func(inventory []routingSenderInventory) []routingSenderInventory { return inventory[1:] }
+		}},
+		{name: "sender plane", want: "MTPTransfer", setup: func(*routedSenderEnvironment, *routedTestSenderPeer, *routingPreparationFixture, *fakeRoutingFactory, *routedTestSenderPreparation) {
+		}},
+	} {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			fixture := newRoutingPreparationFixture(testContext)
+			_, _, _, factory := routingSetupFixture(testContext)
+			peer := &routedTestSenderPeer{control: fixture.control, senderEndpoint: factory.endpoints[0]}
+			sender := &routedTestSenderPreparation{fakeRoutingPreparationSender: fixture.sender}
+			environment := routedSenderEnvironment{
+				factory:     factory.create,
+				preparation: func(*routingSenderSet) (routingPreparationSender, error) { return sender, nil },
+			}
+			test.setup(&environment, peer, &fixture, factory, sender)
+			routing, err := newRoutingControl(routedPreparationID, peer.operations())
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			server := httptest.NewServer(routing.handler())
+			defer server.Close()
+			config, err := parseConfig(routedSenderArguments(modeRouted, "-sctp-address=192.0.2.2:2905", "-local-address=192.0.2.1:0", "-peer-control="+server.URL))
+			if err != nil {
+				testContext.Fatal(err)
+			}
+			timeout := test.timeout
+			if timeout == 0 {
+				timeout = 10 * time.Second
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			result, err := runRoutedSenderWith(ctx, config, environment)
+			if err == nil || !strings.Contains(err.Error(), test.want) || result.Measurement != nil || result.Warmup != nil {
+				testContext.Fatalf("warm-up=%v measurement=%v error=%v, want a %q preparation failure", result.Warmup, result.Measurement, err, test.want)
+			}
+			if peer.stops.Load() == 0 {
+				testContext.Fatalf("the sender failed at %s without stopping the receiver's routed topology", test.name)
+			}
+			if test.name != "start" && !test.setClosedByIt && peer.stopsAfterClose.Load() != 0 {
+				testContext.Fatal("the sender closed its associations before stopping the receiver")
+			}
+			if test.name != "start" {
+				select {
+				case <-factory.endpoints[0].closed:
+				default:
+					testContext.Fatal("the sender left its associations open after a failed preparation")
+				}
+			}
+		})
+	}
+}

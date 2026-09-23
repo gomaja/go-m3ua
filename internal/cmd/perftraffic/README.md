@@ -195,6 +195,10 @@ the variants' allocations per validated delivery; both are whole-process
 observations, so the fixture work common to both cancels, but the difference
 is not an isolated-library measurement.
 
+If the ASP fails at any point before its first cohort, it sends
+`/routing/stop`, so the receiver ends with that reason instead of waiting for
+a sender that has gone.
+
 The routed modes do not cover alternate AS preference, partial path failures,
 SSNM storms or reference churn; those remain separate workloads and are
 reported as unavailable in `unsupported_modes`.

@@ -31,6 +31,37 @@ const routedPeerReadyTimeout = 30 * time.Second
 // Both variants share topology, scopes, traffic, queues and paths; only the
 // timed send call differs.
 func runRoutedSender(ctx context.Context, config commandConfig) (combinedResult, error) {
+	return runRoutedSenderWith(ctx, config, routedSenderEnvironment{})
+}
+
+// routedSenderEnvironment supplies the sender's M3UA dependencies. The zero
+// value uses real endpoints; tests substitute them to reach every preparation
+// exit without SCTP.
+type routedSenderEnvironment struct {
+	factory     routingSetupFactory
+	preparation func(*routingSenderSet) (routingPreparationSender, error)
+}
+
+func runRoutedSenderWith(ctx context.Context, config commandConfig, environment routedSenderEnvironment) (result combinedResult, err error) {
+	client, err := newRoutingPreparationHTTPClient(config.PeerControl, routedPreparationID)
+	if err != nil {
+		return combinedResult{}, err
+	}
+	// Until the cohorts start, every failure exit tears the receiver's routed
+	// topology down through /routing/stop, so a failed preparation never
+	// leaves the receiver waiting for a sender that has gone. The stop
+	// precedes closing the sender's own associations, so the receiver reports
+	// the sender's stop rather than the resulting association failures.
+	var set *routingSenderSet
+	prepared := false
+	defer func() {
+		if !prepared {
+			err = stopRoutedPeer(client, err)
+		}
+		if set != nil {
+			_ = set.Close()
+		}
+	}()
 	topology, err := newRoutingTopology("primary")
 	if err != nil {
 		return combinedResult{}, err
@@ -43,67 +74,59 @@ func runRoutedSender(ctx context.Context, config commandConfig) (combinedResult,
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("resolve routed SGP addresses: %w", err)
 	}
-	set, err := startRoutingSenderSet(ctx, topology, local, peers, nil)
+	set, err = startRoutingSenderSet(ctx, topology, local, peers, environment.factory)
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("start routed associations: %w", err)
 	}
-	defer func() { _ = set.Close() }()
 	waitContext, cancelWait := context.WithTimeout(ctx, associationAcceptTimeout)
 	err = set.WaitReady(waitContext)
 	cancelWait()
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("establish routed associations: %w", err)
 	}
-	preparation, err := newRoutingM3UASenderPreparation(set)
+	newPreparation := environment.preparation
+	if newPreparation == nil {
+		newPreparation = func(set *routingSenderSet) (routingPreparationSender, error) {
+			return newRoutingM3UASenderPreparation(set)
+		}
+	}
+	preparation, err := newPreparation(set)
 	if err != nil {
 		return combinedResult{}, err
-	}
-	client, err := newRoutingPreparationHTTPClient(config.PeerControl, routedPreparationID)
-	if err != nil {
-		return combinedResult{}, err
-	}
-	var stopOnce sync.Once
-	abort := func(cause error) (combinedResult, error) {
-		stopOnce.Do(func() {
-			stopContext, cancelStop := context.WithTimeout(context.Background(), routingControlTimeout)
-			cause = errors.Join(cause, client.Stop(stopContext))
-			cancelStop()
-		})
-		return combinedResult{}, cause
 	}
 	if err := waitRoutedPeerInventory(ctx, client, routedPeerReadyTimeout); err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
 	if _, err := prepareRoutingSSNM(ctx, topology, preparation, client); err != nil {
-		return abort(fmt.Errorf("routed SSNM preparation: %w", err))
+		return combinedResult{}, fmt.Errorf("routed SSNM preparation: %w", err)
 	}
 	remote, err := client.Inventory(ctx)
 	if err != nil {
-		return abort(fmt.Errorf("routed peer inventory: %w", err))
+		return combinedResult{}, fmt.Errorf("routed peer inventory: %w", err)
 	}
 	peerInventory, err := routingPeerInventoryFromDTOs(remote.Transports)
 	if err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
 	senderInventory, err := preparation.Inventory()
 	if err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
 	pairs, err := pairRoutingInventory(topology, senderInventory, peerInventory)
 	if err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
 	plane, associations, err := routedSenderPlane(set, pairs)
 	if err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
 	dataClient, err := newRoutingDataHTTPClient(config.PeerControl, routedPreparationID)
 	if err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
 	paths, writer, err := prepareRoutingData(ctx, topology, config.Cohort+"-preflight", config.Seed, config.Outstanding, plane, dataClient)
 	if err != nil {
-		return abort(fmt.Errorf("routed preflight: %w", err))
+		return combinedResult{}, fmt.Errorf("routed preflight: %w", err)
 	}
 	variant := routingTimedRouted
 	if config.Mode == modeRoutedDirect {
@@ -111,16 +134,26 @@ func runRoutedSender(ctx context.Context, config commandConfig) (combinedResult,
 	}
 	timed, err := newRoutingTimedSender(variant, plane, writer, paths, config.Workload)
 	if err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
 	if err := waitForReady(ctx, config.PeerControl, config.Associations); err != nil {
-		return abort(err)
+		return combinedResult{}, err
 	}
+	prepared = true
 	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
 		sender, receiver, err := runSenderCohortWith(ctx, cohortConfig, associations, nil, timed, cohort, duration)
 		return newCohortResult(phase, sender, receiver, err), err
 	}
 	return runWarmupAndMeasurement(config, runCohort, nil)
+}
+
+// stopRoutedPeer asks the receiver to tear its routed topology down after a
+// failed preparation. It uses its own deadline, so a canceled run still
+// reaches the receiver.
+func stopRoutedPeer(client *routingPreparationHTTPClient, cause error) error {
+	stopContext, cancelStop := context.WithTimeout(context.Background(), routingControlTimeout)
+	defer cancelStop()
+	return errors.Join(cause, client.Stop(stopContext))
 }
 
 // waitRoutedPeerInventory polls the receiver until its four SGP endpoints have
