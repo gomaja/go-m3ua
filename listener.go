@@ -287,7 +287,14 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 	// routes by association ID; see restartWatcher.
 	l.restarts = &restartWatcher{}
 	l.restarts.setRoute(l.associationForSCTPID)
-	scfg := &sctp.SocketConfig{NotificationHandler: l.restarts.handle}
+	scfg := &sctp.SocketConfig{
+		NotificationHandler: l.restarts.handle,
+		// The same stream request Dial makes; see sctpStreams. Left zero,
+		// the kernel default applied (10 outbound on Linux), so every
+		// accepted association had nine DATA streams for its Signalling Link
+		// Selections while the dialling end had many more.
+		InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams},
+	}
 
 	l.sctpListener, err = scfg.Listen(n, laddr)
 	if err != nil {
