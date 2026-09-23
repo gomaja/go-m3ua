@@ -187,13 +187,33 @@ sender submissions. Direction must be `asp-to-sgp` or `sgp-to-asp`; initiation
 must be `asp-dial` or `sgp-dial`. Non-echo sender records must not carry echo
 evidence.
 
-Standalone sender records are supported only for unaligned throughput and echo
-runs. A sender with `spec.shared_clock` requires a complete cohort; extracting a
-throughput-mode `reverse_sender` from a bidirectional run does not make it a
-standalone unidirectional run. Shared-clock unidirectional capacity evaluation
-is currently unsupported: the producer emits a two-record measurement cohort,
-but this evaluator supports only the four-record shared-clock contract below.
-Two-record cohort support is tracked in
+Standalone sender records remain supported only for unaligned throughput and
+echo runs. A sender with `spec.shared_clock` requires a complete cohort.
+Shared-clock unidirectional throughput uses the fixture's actual `measurement`
+cohort object as `run`, containing exactly `sender` and `receiver` records. Its
+phase must be `measurement`, its sender must use the producer's throughput
+ASP-to-SGP specification, and both records must agree on the complete run
+specification, delivery counters, verified clock domain and window. Raw
+`reverse_sender` or `reverse_receiver` members are forbidden even when their
+value is `null`; SGP-to-ASP sender records are produced only by the
+bidirectional reverse driver and require the complete four-record contract.
+
+The recorded `spec.peer_control` comes from the producer's optional
+`-control-url`, not its required `-peer-control` destination. It may be omitted
+for unidirectional throughput; bidirectional forward records need it so the
+reverse driver can reach the ASP. A nonempty value must be a valid control URL.
+
+A valid two-record decision reports one `directions` entry for `asp-to-sgp`.
+Bounded achieved-rate evidence is reported on that entry; producer-shaped
+unavailable accounting remains inconclusive with omitted bounds rather than an
+invented zero. Unidirectional entries do not report aggregate offered or
+achieved-rate fields. A detected transport stall takes precedence as
+inconclusive. Otherwise a reconciled cohort error fails the probe while the
+single directional decision remains available as diagnostic evidence.
+Completed loss is retained as a failed probe, while missing records,
+contradictory verdicts or reverse members are invalid input. This consumer
+contract still depends on the aligned producer from issue #84, and actual
+producer-to-consumer Linux round-trip evidence remains a merge gate for
 [issue #97](https://github.com/gomaja/go-m3ua/issues/97).
 
 Bidirectional entries use the fixture's actual `measurement` cohort object as
