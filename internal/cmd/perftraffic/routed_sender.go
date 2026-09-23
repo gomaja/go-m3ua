@@ -139,15 +139,69 @@ func runRoutedSenderWith(ctx context.Context, config commandConfig, environment 
 	if err := waitForReady(ctx, config.PeerControl, config.Associations); err != nil {
 		return combinedResult{}, err
 	}
+	var references *routeReferenceRun
+	if config.RouteReferences.enabled() {
+		if references, err = startRouteReferences(ctx, config, set, associations, paths, writer); err != nil {
+			return combinedResult{}, err
+		}
+		defer references.churner.stop()
+	}
 	prepared = true
 	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
 		// Only the measurement cohort of a failure trial declares the
 		// failure; the warm-up runs the nominal routed workload.
 		cohortConfig.sgpFailureCohort = cohortConfig.SGPFailure > 0 && phase == "measurement"
+		var before routeReferenceSnapshot
+		if references != nil {
+			before = references.snapshot(ctx)
+		}
 		sender, receiver, err := runSenderCohortWith(ctx, cohortConfig, associations, nil, timed, cohort, duration)
+		if references != nil {
+			sender.RouteReferences = references.evaluate(sender.Spec, before, references.snapshot(ctx))
+			if _, nominal := sender.UnsupportedModes["ssnm_or_churn_workload"]; nominal {
+				delete(sender.UnsupportedModes, "ssnm_or_churn_workload")
+				sender.UnsupportedModes["ssnm_workload"] = "unavailable: this cohort exercises application route-reference churn, not SSNM storms"
+			}
+		}
 		return newCohortResult(phase, sender, receiver, err), err
 	}
 	return runWarmupAndMeasurement(config, runCohort, nil)
+}
+
+// startRouteReferences puts the application route table on the direct
+// writer's path, starts draining every association's indications, and for
+// churn starts the reference churn. Nothing it does calls a library routing
+// API: the table is the application's own.
+func startRouteReferences(ctx context.Context, config commandConfig, set *routingSenderSet, associations []*m3ua.Association, paths routingPathMap, writer *routingDirectWriter) (*routeReferenceRun, error) {
+	clock, err := newMeasurementClock()
+	if err != nil {
+		return nil, fmt.Errorf("route references: %w", err)
+	}
+	table, err := newApplicationRouteTable(paths)
+	if err != nil {
+		return nil, err
+	}
+	endpoint, valid := set.endpoints[0].(routeReferenceStatusSource)
+	if !valid || writer == nil {
+		return nil, errors.New("route references need the ASP Endpoint status and the direct writer")
+	}
+	run := &routeReferenceRun{
+		spec: *config.RouteReferences.spec(), observer: newRouteReferenceObserver(clock, associations),
+		endpoint: endpoint, associations: associations, peerControl: config.PeerControl,
+	}
+	writer.table = table
+	if config.RouteReferences.Mode != routeReferencesChurn {
+		return run, nil
+	}
+	targets := make([]routeReferenceTarget, len(associations))
+	for index, association := range associations {
+		targets[index] = association
+	}
+	horizon := config.Warmup + config.Duration + 2*config.Drain + time.Minute
+	if run.churner, err = newRouteReferenceChurner(table, targets, clock, config.RouteReferences.Rate, horizon); err != nil {
+		return nil, err
+	}
+	return run, run.churner.start(ctx)
 }
 
 // stopRoutedPeer asks the receiver to tear its routed topology down after a

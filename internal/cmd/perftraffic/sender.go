@@ -349,6 +349,9 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if config.sgpFailureCohort {
 		specification.SGPFailure = newSGPFailureSpec(config.SGPFailure)
 	}
+	if config.RouteReferences.enabled() {
+		specification.RouteReferences = config.RouteReferences.spec()
+	}
 	clock, err := prepareSharedRunClock(ctx, config, &specification)
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("prepare shared clock: %w", err)

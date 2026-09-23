@@ -259,6 +259,9 @@ func (control *receiverControl) reset(specification runSpec) error {
 	if err := control.acceptFailoverSpecLocked(specification); err != nil {
 		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
 	}
+	if err := validateRouteReferenceSpec(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
 	// acceptSpec commits the generator to the cohort, so it runs after every
 	// check that can still refuse the specification.
 	if err := control.ssnm.acceptSpec(specification); err != nil {

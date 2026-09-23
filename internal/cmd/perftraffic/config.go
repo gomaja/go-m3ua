@@ -113,6 +113,9 @@ type commandConfig struct {
 	// sgpFailureCohort marks the measurement cohort of an SGP failure trial,
 	// the only cohort that declares the failure.
 	sgpFailureCohort bool
+	// RouteReferences is the routed-direct application route table workload;
+	// zero when -route-references is unset.
+	RouteReferences routeReferenceConfig
 }
 
 func parseConfig(arguments []string) (commandConfig, error) {
@@ -144,6 +147,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	flagSet.StringVar(&config.CPUStatPath, "cpu-stat", "/sys/fs/cgroup/cpu.stat", "cgroup v2 cpu.stat path")
 	flagSet.BoolVar(&config.SameHostClock, "same-host-clock", false, "verify a shared Linux monotonic clock for throughput measurement")
 	registerSSNMFlags(flagSet, &config.SSNM)
+	registerRouteReferenceFlags(flagSet, &config.RouteReferences)
 	flagSet.DurationVar(&config.SGPFailure, "sgp-failure", 0, "routed one-SGP failure trial: offset into the measurement window at which SGP sg-a/p0 fails (0 disables)")
 	if err := flagSet.Parse(arguments); err != nil {
 		return commandConfig{}, err
@@ -230,6 +234,9 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 		return commandConfig{}, err
 	}
 	if err := validateSGPFailureConfig(config); err != nil {
+		return commandConfig{}, err
+	}
+	if err := validateRouteReferenceConfig(flagSet, &config); err != nil {
 		return commandConfig{}, err
 	}
 	return config, nil

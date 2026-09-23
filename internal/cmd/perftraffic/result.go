@@ -37,6 +37,9 @@ type runSpec struct {
 	// SGPFailure is the one-SGP failure declaration of a failure trial's
 	// measurement cohort, nil and omitted for every other cohort.
 	SGPFailure *sgpFailureSpec `json:"failure_trial,omitempty"`
+	// RouteReferences is the application route-reference workload of a
+	// routed-direct cohort, nil and omitted without -route-references.
+	RouteReferences *routeReferenceSpec `json:"route_references,omitempty"`
 }
 
 type deliveryResult struct {
@@ -117,6 +120,10 @@ type runRecord struct {
 	// the receiver record, the outcome accounting and per-criterion
 	// evaluation on the sender record.
 	Failover *failoverRecord `json:"failover,omitempty"`
+	// RouteReferences is the application route-reference evidence and
+	// verdict of a -route-references sender record. The DATA verdicts do not
+	// include it.
+	RouteReferences *routeReferenceRecord `json:"route_references,omitempty"`
 }
 
 type fixtureManifest struct {

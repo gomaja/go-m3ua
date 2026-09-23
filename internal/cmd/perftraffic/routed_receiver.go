@@ -310,7 +310,12 @@ func (operations *routedPeerOperations) handler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return routedControlHandler(operations.control.handler(), routingHandler), nil
+	mux := http.NewServeMux()
+	mux.Handle(routedPeerStatePath, peerStateHandler(func() (routeReferenceState, error) {
+		return capturePeerRouteReferenceState(operations.peers)
+	}))
+	mux.Handle("/", routedControlHandler(operations.control.handler(), routingHandler))
+	return mux, nil
 }
 
 func (operations *routedPeerOperations) prepare(ctx context.Context, values []routingTransportDTO) error {

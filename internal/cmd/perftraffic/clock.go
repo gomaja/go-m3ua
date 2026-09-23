@@ -179,13 +179,16 @@ func sameRunSpec(first, second runSpec) bool {
 	firstClock, secondClock := first.Clock, second.Clock
 	firstSSNM, secondSSNM := first.SSNM, second.SSNM
 	firstFailure, secondFailure := first.SGPFailure, second.SGPFailure
+	firstReferences, secondReferences := first.RouteReferences, second.RouteReferences
 	first.Clock, second.Clock = nil, nil
 	first.SSNM, second.SSNM = nil, nil
 	first.SGPFailure, second.SGPFailure = nil, nil
+	first.RouteReferences, second.RouteReferences = nil, nil
 	if first != second {
 		return false
 	}
-	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM) && samePointee(firstFailure, secondFailure)
+	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM) && samePointee(firstFailure, secondFailure) &&
+		samePointee(firstReferences, secondReferences)
 }
 
 // samePointee compares two optional values: both absent, or both present and
@@ -209,6 +212,10 @@ func copyRunSpec(specification runSpec) runSpec {
 	if specification.SGPFailure != nil {
 		failure := *specification.SGPFailure
 		specification.SGPFailure = &failure
+	}
+	if specification.RouteReferences != nil {
+		references := *specification.RouteReferences
+		specification.RouteReferences = &references
 	}
 	return specification
 }

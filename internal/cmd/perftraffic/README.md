@@ -351,10 +351,10 @@ If the ASP fails at any point before its first cohort, it sends
 a sender that has gone. A canceled preparation request never closes the SGP
 endpoints on its own.
 
-The routed modes do not cover alternate AS preference, SSNM storms or
-reference churn; those remain separate workloads and are reported as
-unavailable in `unsupported_modes`. One SGP failure is the opt-in trial
-described next.
+The routed modes do not cover alternate AS preference or SSNM storms; those
+remain separate workloads and are reported as unavailable in
+`unsupported_modes`. One SGP failure and application route-reference churn
+are the opt-in workloads described next.
 
 ### One SGP failure
 
@@ -431,6 +431,83 @@ evidence.
 ```sh
 perftraffic -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s
 perftraffic -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -rate=20000 -duration=30s
+```
+
+### Application route-reference churn
+
+`-route-references=churn|static` on the ASP of a shared-clock
+`-mode=routed-direct` run is the section 4 "Application route-reference
+churn" row and its matched control. Route references belong to the
+application: the library has no route-reference call and its route inventory
+is immutable, so the workload is an application route table and proves that
+changing it causes no library or protocol activity and costs little DATA
+capacity.
+
+- **Table.** After preflight the ASP builds an application route table: one
+  stable reference per route (the frozen path), and a churned set of
+  references to live associations, behind one read-write lock. Every timed
+  message resolves its route through the table under the read lock before
+  `Association.WriteData`, in both variants, so the churn contends with the
+  DATA path exactly as an application table would. Nothing the table does
+  calls the library: adding a reference only reads the association's `Done`
+  and `Epoch` to refuse a dead or replaced association, and removing one —
+  including an association's last reference — only deletes it.
+- **Churn.** `-route-references=churn` performs `-route-reference-rate`
+  add/remove operations per second (default 1,000) open-loop on the shared
+  clock from the first cohort through the last: operation `k` is due at
+  `anchor + floor(k * 1s / rate)`, a late churner catches up in order and
+  never skips. Each cycle adds 1,000 references (the first makes the set
+  0 -> 1), round-robin over the eight associations, then removes them last
+  added first back to 0, so every association gains a first reference and
+  loses its last one every cycle. `-route-references=static` is the
+  unchanged-reference control: the same table on the same DATA path, the same
+  observation, no operation.
+- **Observation.** For the whole run the ASP drains every association's
+  `StateChanges` and `ManagementIndications` and watches `Done`, timestamping
+  each on the shared clock. Before and after every cohort it captures, on
+  both ends, each association's identity, epoch and state, every ASP status
+  and every Application Server status; the SGP side serves its own through a
+  read-only `GET /routing/peer-state` on the routed receiver.
+
+The ASP record's `route_references` carries the workload, the churn evidence
+over the cohort window (operations due in it and how many completed, the latest
+completion relative to its due instant, completed cycles, first-reference
+additions and last-reference removals, operation durations), both snapshots,
+the library events inside the window (declared start through the drain), one
+entry per criterion and `verdict`:
+
+| Criterion | Rule |
+| --- | --- |
+| `churn_intensity` (churn) | every operation due in the window completed, none later than one interval and at least 100 ms after its due instant, the set reached 1,000 and at least one cycle and one last-reference removal completed in the window; otherwise `not-measured` |
+| `references_to_live_associations` (churn) | every added reference named a live association with its original epoch |
+| `no_association_reconnection` | the same eight association identities and epochs at both ends before and after, and no association ended in the window |
+| `no_as_deactivation` | no ASP state change in the window; every ASP status ASP-ACTIVE and every SGP-side AS AS-ACTIVE before, and all of it identical after |
+| `no_library_indications` | no management indication (Notify, Error, SCTP restart or release) on any ASP association in the window |
+
+A violated criterion makes the verdict `fail`, an unmeasured one
+`inconclusive`. The DATA verdicts do not include it: zero unexpected DATA
+loss and a non-growing backlog are the ordinary routed-direct record
+evidence. Registration traffic has no in-process observation point: the
+library sends REG REQ and DEREG REQ only from
+`Association.RegisterRoutingKeys` and `DeregisterApplicationServers`, which
+the fixture never calls; a capture of the association traffic is the direct
+evidence.
+
+The cohort specification declares the workload as `spec.route_references`
+(`mode`, `rate`, `peak`, `stable`, `cycle`) on both records; the SGP refuses
+any other shape and refuses it outside routed-direct. `perfcapacity` adds it
+to the workload identity, so a churned campaign, its static control and a
+plain routed-direct campaign can never be mixed, requires the sender record's
+`route_references` verdict, and folds it in like SSNM load: `fail` fails the
+probe and `inconclusive` turns a passing probe inconclusive. Compare the
+churned campaign's selected capacity with the control's: the row needs at
+least 90%.
+
+```sh
+perftraffic -role=sgp -mode=routed-direct ... -same-host-clock
+perftraffic -role=asp -mode=routed-direct ... -same-host-clock -route-references=churn -rate=<probe>
+# matched unchanged-reference control
+perftraffic -role=asp -mode=routed-direct ... -same-host-clock -route-references=static -rate=<probe>
 ```
 
 ## Protocol basis
