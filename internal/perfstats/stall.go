@@ -49,7 +49,7 @@ const (
 // already records it: startSendWorkers times every
 // WriteData call and senderCounters.complete feeds the result
 // to the send-duration histogram, whose Max is the exact observed maximum and
-// not a power-of-two bucket bound (only p50, p95 and p99 are bucket bounds).
+// not a histogram bucket bound (only p50, p95 and p99 are bucket bounds).
 //
 // It is the signal because it measures the transport blocking the sender
 // directly. The offered schedule is open loop, so a transport block shows up

@@ -23,7 +23,7 @@ type durationPercentiles struct {
 }
 
 type durationHistogram struct {
-	buckets [65]uint64
+	buckets [128 + 56*64]uint64
 	count   uint64
 	maximum time.Duration
 }
@@ -37,9 +37,10 @@ func (histogram *durationHistogram) record(duration time.Duration) {
 		duration = 0
 	}
 	value := uint64(duration)
-	bucket := 0
-	if value > 0 {
-		bucket = bits.Len64(value)
+	bucket := int(value)
+	if value >= 128 {
+		exponent := bits.Len64(value) - 1
+		bucket = 128 + (exponent-7)*64 + int(value>>uint(exponent-6)) - 64
 	}
 	histogram.buckets[bucket]++
 	histogram.count++
@@ -62,17 +63,18 @@ func (histogram *durationHistogram) quantile(percent uint64) time.Duration {
 	if histogram.count == 0 {
 		return 0
 	}
-	target := (histogram.count*percent + 99) / 100
+	target := histogram.count/100*percent + (histogram.count%100*percent+99)/100
 	var cumulative uint64
 	for bucket, count := range histogram.buckets {
 		cumulative += count
 		if cumulative < target {
 			continue
 		}
-		if bucket == 0 {
-			return 0
+		upper := time.Duration(bucket)
+		if bucket >= 128 {
+			exponent := (bucket-128)/64 + 7
+			upper = time.Duration((uint64((bucket-128)%64+65) << uint(exponent-6)) - 1)
 		}
-		upper := time.Duration(uint64(1) << bucket)
 		if upper > histogram.maximum {
 			return histogram.maximum
 		}

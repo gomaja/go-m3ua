@@ -724,6 +724,12 @@ func (r *aspRoutes) mtpDestinationStatus(destination MTPDestination) (MTPDestina
 	return newMTPDestinationStatus(destination, status), true
 }
 
+// mtpDestinationStatuses returns every derived destination in configuration
+// order. It groups r.derived by MTP Route in one pass
+// instead of scanning it once per route, so this costs O(derived records x
+// log(derived records)) for the sort rather than O(routes x derived records).
+// It reads r.derived without changing how or where that map, or any other
+// route state, is mutated.
 func (r *aspRoutes) mtpDestinationStatuses() []MTPDestinationStatus {
 	if r == nil {
 		return nil
@@ -731,27 +737,41 @@ func (r *aspRoutes) mtpDestinationStatuses() []MTPDestinationStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	keysByRoute := make(map[MTPRouteID][]aspDerivedRangeKey, len(r.config.mtpRoutes))
+	for key := range r.derived {
+		keysByRoute[key.mtpRoute] = append(keysByRoute[key.mtpRoute], key)
+	}
+
 	statuses := make([]MTPDestinationStatus, 0, len(r.derived))
 	for _, mtpRoute := range r.config.mtpRoutes {
-		keys := make([]aspDerivedRangeKey, 0)
-		for key := range r.derived {
-			if key.mtpRoute == mtpRoute.id {
-				keys = append(keys, key)
-			}
+		statuses = append(statuses, sortedDestinationStatuses(r.derived, keysByRoute[mtpRoute.id])...)
+	}
+	return statuses
+}
+
+// sortedDestinationStatuses builds one MTP Route's destinations, in
+// point-code then mask order, from a set of aspRoutes.derived keys the caller
+// already knows belong to that one route. keys is sorted in place; the caller
+// must not still need its original order. The returned slice is freshly
+// built and owned by the caller. The caller must already hold aspRoutes.mu
+// for reading.
+func sortedDestinationStatuses(
+	derived map[aspDerivedRangeKey]aspDestinationStatus,
+	keys []aspDerivedRangeKey,
+) []MTPDestinationStatus {
+	sort.Slice(keys, func(first, second int) bool {
+		if keys[first].pointCode != keys[second].pointCode {
+			return keys[first].pointCode < keys[second].pointCode
 		}
-		sort.Slice(keys, func(first, second int) bool {
-			if keys[first].pointCode != keys[second].pointCode {
-				return keys[first].pointCode < keys[second].pointCode
-			}
-			return keys[first].mask < keys[second].mask
-		})
-		for _, key := range keys {
-			statuses = append(statuses, newMTPDestinationStatus(MTPDestination{
-				MTPRoute:  key.mtpRoute,
-				PointCode: key.pointCode,
-				Mask:      key.mask,
-			}, r.derived[key]))
-		}
+		return keys[first].mask < keys[second].mask
+	})
+	statuses := make([]MTPDestinationStatus, 0, len(keys))
+	for _, key := range keys {
+		statuses = append(statuses, newMTPDestinationStatus(MTPDestination{
+			MTPRoute:  key.mtpRoute,
+			PointCode: key.pointCode,
+			Mask:      key.mask,
+		}, derived[key]))
 	}
 	return statuses
 }

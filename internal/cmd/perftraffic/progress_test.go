@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -414,34 +416,87 @@ func TestIdealOfferedScheduleIncludesSchedulerBacklog(testContext *testing.T) {
 	}
 }
 
-func TestBacklogChangeExcludesDrainAndPreservesUncertainty(testContext *testing.T) {
+func TestBacklogTrendExcludesDrainAndPreservesUncertainty(testContext *testing.T) {
 	for _, scenario := range []struct {
-		name                                         string
-		firstLower, firstUpper, lastLower, lastUpper uint64
-		want                                         string
+		name         string
+		lower, width func(index int) uint64
+		want         string
 	}{
-		{"growth", 5, 10, 20, 30, "increase-demonstrated"},
-		{"recovery", 20, 30, 5, 10, "nonincrease-demonstrated"},
-		{"exact-constant", 5, 5, 5, 5, "nonincrease-demonstrated"},
-		{"noise", 5, 10, 5, 10, "unresolved"},
+		{"growth", func(index int) uint64 { return uint64(10 * index) }, func(int) uint64 { return 0 }, "growing"},
+		{"recovery", func(index int) uint64 { return uint64(70 - 10*index) }, func(int) uint64 { return 0 }, "not-growing"},
+		{"exact-constant", func(int) uint64 { return 5 }, func(int) uint64 { return 0 }, "not-growing"},
+		{"bracket-uncertainty", func(int) uint64 { return 5 }, func(int) uint64 { return 55 }, "indeterminate"},
 	} {
 		testContext.Run(scenario.name, func(testContext *testing.T) {
 			samples := make([]backlogInterval, 8)
 			for index := range samples {
-				samples[index] = backlogInterval{Before: time.Duration(index+1) * time.Second, After: time.Duration(index+1)*time.Second + time.Millisecond, BacklogLower: scenario.firstLower, BacklogUpper: scenario.firstUpper}
-				if index >= 6 {
-					samples[index].BacklogLower = scenario.lastLower
-					samples[index].BacklogUpper = scenario.lastUpper
+				samples[index] = backlogInterval{
+					Before: time.Duration(index+1) * time.Second, After: time.Duration(index+1)*time.Second + time.Millisecond,
+					BacklogLower: scenario.lower(index), BacklogUpper: scenario.lower(index) + scenario.width(index),
 				}
 			}
-			samples = append(samples, backlogInterval{Before: 10 * time.Second, After: 11 * time.Second})
-			result := describeBacklogChange(samples, 10*time.Second)
-			if result.Status != scenario.want || result.SampleCount != 8 || result.MeanChangeLower != float64(scenario.lastLower)-float64(scenario.firstUpper) || result.MeanChangeUpper != float64(scenario.lastUpper)-float64(scenario.firstLower) {
-				testContext.Fatalf("change = %+v", result)
+			samples = append(samples, backlogInterval{Before: 10 * time.Second, After: 11 * time.Second, BacklogLower: 1_000_000, BacklogUpper: 1_000_000})
+			result := describeBacklogTrend(samples, 10*time.Second, 1000)
+			if result.Status != scenario.want || result.SampleCount != 8 || result.Floor != 10 || result.Window != 10*time.Second {
+				testContext.Fatalf("trend = %+v", result)
 			}
 		})
 	}
-	if result := describeBacklogChange(nil, time.Second); result.Status != "insufficient-samples" {
+	if result := describeBacklogTrend(nil, time.Second, 1000); result.Status != "insufficient-samples" || result.SampleCount != 0 {
 		testContext.Fatalf("missing samples = %+v", result)
 	}
+	repeated := make([]backlogInterval, 8)
+	for index := range repeated {
+		repeated[index] = backlogInterval{Before: time.Second, After: time.Second}
+	}
+	if result := describeBacklogTrend(repeated, 10*time.Second, 1000); result.Status != "invalid-samples" || result.SampleCount != 8 {
+		testContext.Fatalf("unfittable samples = %+v", result)
+	}
+}
+
+// A sustainable offered rate leaves a queue that wobbles by a few messages
+// around a constant level. Under the former first-to-last-quarter rule with no
+// tolerance, 101 of these 200 loss-free runs were classified as growing.
+func TestStationaryRunsAreNotGrowing(testContext *testing.T) {
+	for seed := uint64(1); seed <= 200; seed++ {
+		specification, observations := stationaryProgress(seed, 25_000, 120, 40, 6, 0)
+		result := analyzeProgress(specification, observations)
+		if result.Status != "bounded" || result.BacklogTrend.Status != "not-growing" {
+			testContext.Fatalf("seed %d: status %q, trend %+v", seed, result.Status, result.BacklogTrend)
+		}
+	}
+}
+
+// 5,000 messages/s offered against 4,998 served accumulates about 240
+// messages over the window, above the 50-message floor.
+func TestUnderServedRunIsGrowing(testContext *testing.T) {
+	for seed := uint64(1); seed <= 200; seed++ {
+		specification, observations := stationaryProgress(seed, 5_000, 120, 30, 6, 2)
+		result := analyzeProgress(specification, observations)
+		if result.Status != "bounded" || result.BacklogTrend.Status != "growing" {
+			testContext.Fatalf("seed %d: status %q, trend %+v", seed, result.Status, result.BacklogTrend)
+		}
+	}
+}
+
+// stationaryProgress returns one observation per second of a loss-free run
+// whose outstanding work wobbles around a constant level, as a sustainable
+// offered rate produces: a pre-start zero observation, 1 Hz tightly bracketed
+// in-window observations and one post-window observation.
+func stationaryProgress(seed uint64, rate uint64, seconds int, level, jitter, growthPerSecond float64) (runSpec, []progressObservation) {
+	duration := time.Duration(seconds) * time.Second
+	expected := rate * uint64(seconds)
+	specification := runSpec{Cohort: "stationary", Rate: rate, Expected: expected, Duration: duration, Associations: 1, Payload: workload128, Outstanding: maxOutstanding}
+	observation := func(before, after time.Duration, unique uint64) progressObservation {
+		return progressObservation{Before: before, After: after, Snapshot: &receiverProgress{Spec: specification, Generation: 1, Phase: receiverMeasuring, Delivery: ledgerSnapshot{Unique: unique, Missing: expected - unique}}}
+	}
+	random := rand.New(rand.NewPCG(seed, ^seed))
+	observations := []progressObservation{observation(-time.Millisecond, 0, 0)}
+	for second := 1; second < seconds; second++ {
+		before := time.Duration(second) * time.Second
+		offered := offeredAt(specification, before)
+		backlog := uint64(math.Max(0, math.Round(level+growthPerSecond*float64(second)+jitter*(2*random.Float64()-1))))
+		observations = append(observations, observation(before, before+20*time.Microsecond, offered-min(offered, backlog)))
+	}
+	return specification, append(observations, observation(duration+time.Millisecond, duration+2*time.Millisecond, expected))
 }
