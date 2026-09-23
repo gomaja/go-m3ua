@@ -187,23 +187,8 @@ func prepareRoutingData(ctx context.Context, topology routingTopology, cohort st
 			return routingPathMap{}, nil, finish(errors.New("routing DATA receipt route is invalid or duplicated"))
 		}
 		seen[receipt.Route] = true
-		data := receipt.ProtocolData
-		data.Data = append([]byte(nil), data.Data...)
-		var routingContexts []uint32
-		if receipt.RoutingContextSet {
-			routingContexts = []uint32{receipt.RoutingContext}
-		}
-		message := &m3ua.DataMessage{
-			ProtocolData: &data,
-			Scope: m3ua.WireScope{
-				NetworkAppearance: receipt.NetworkAppearance, NetworkAppearanceSet: receipt.NetworkAppearanceSet,
-				RoutingContexts: routingContexts, RoutingContextSet: receipt.RoutingContextSet,
-			},
-			AS: receipt.AS, Stream: receipt.Stream, CorrelationID: receipt.CorrelationID,
-			CorrelationIDSet: receipt.CorrelationIDSet, Association: receipt.Association, Epoch: receipt.Epoch,
-		}
 		observations[receipt.Route].Transport = routingTransport{SGP: receipt.SGP, Association: receipt.Association}
-		observations[receipt.Route].Message = message
+		observations[receipt.Route].Message = routingDataMessageFromReceipt(receipt)
 	}
 	paths, err := freezeRoutingPaths(topology, sender.bindings, observations, cohort, seed)
 	if err != nil {
@@ -492,4 +477,25 @@ func routingDataReceiptFromMessage(transport routingTransport, message *m3ua.Dat
 		RoutingContextSet: message.Scope.RoutingContextSet, AS: message.AS, Stream: message.Stream,
 		CorrelationID: message.CorrelationID, CorrelationIDSet: message.CorrelationIDSet,
 	}, identity, nil
+}
+
+// routingDataMessageFromReceipt rebuilds the delivered DATA a peer receipt
+// describes, with owned payload bytes, so the same validation applies to it as
+// to a message read from an association.
+func routingDataMessageFromReceipt(receipt routingDataReceiptDTO) *m3ua.DataMessage {
+	data := receipt.ProtocolData
+	data.Data = append([]byte(nil), data.Data...)
+	var routingContexts []uint32
+	if receipt.RoutingContextSet {
+		routingContexts = []uint32{receipt.RoutingContext}
+	}
+	return &m3ua.DataMessage{
+		ProtocolData: &data,
+		Scope: m3ua.WireScope{
+			NetworkAppearance: receipt.NetworkAppearance, NetworkAppearanceSet: receipt.NetworkAppearanceSet,
+			RoutingContexts: routingContexts, RoutingContextSet: receipt.RoutingContextSet,
+		},
+		AS: receipt.AS, Stream: receipt.Stream, CorrelationID: receipt.CorrelationID,
+		CorrelationIDSet: receipt.CorrelationIDSet, Association: receipt.Association, Epoch: receipt.Epoch,
+	}
 }

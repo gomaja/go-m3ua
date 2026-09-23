@@ -71,6 +71,9 @@ func newSenderCounters(limit int) *senderCounters {
 }
 
 func runSender(ctx context.Context, config commandConfig) (combinedResult, error) {
+	if routedMode(config.Mode) {
+		return runRoutedSender(ctx, config)
+	}
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: nil})
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("create standalone ASP endpoint: %w", err)
@@ -111,6 +114,29 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		}
 		return result, err
 	}
+	return runWarmupAndMeasurement(config, runCohort, func(measurement *cohortResult) {
+		if config.Mode == modeBidirectional {
+			select {
+			case readErr := <-localFatal:
+				if measurement.Error == "" {
+					measurement.Error = readErr.Error()
+				}
+				measurement.Verdict = verdictInvalid
+			default:
+			}
+		}
+	})
+}
+
+// cohortRunner runs one cohort of the configured workload against the
+// receiver and returns its paired records.
+type cohortRunner func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error)
+
+// runWarmupAndMeasurement runs the optional warm-up cohort and then the
+// measurement cohort. A warm-up that does not drain cleanly ends the run with
+// both raw warm-up records. inspect may amend the measurement cohort before
+// the combined result is assembled.
+func runWarmupAndMeasurement(config commandConfig, runCohort cohortRunner, inspect func(*cohortResult)) (combinedResult, error) {
 	var warmup *cohortResult
 	if config.Warmup > 0 {
 		warmupConfig := config
@@ -125,15 +151,8 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		}
 	}
 	measurement, err := runCohort(config, "measurement", config.Cohort, config.Duration)
-	if config.Mode == modeBidirectional {
-		select {
-		case readErr := <-localFatal:
-			if measurement.Error == "" {
-				measurement.Error = readErr.Error()
-			}
-			measurement.Verdict = verdictInvalid
-		default:
-		}
+	if inspect != nil {
+		inspect(&measurement)
 	}
 	result := combinedResult{
 		Phase:       "measurement",
@@ -277,6 +296,15 @@ func failedCohortResult(phase string, sender, receiver runRecord, err error) com
 }
 
 func runSenderCohort(ctx context.Context, config commandConfig, associations []*m3ua.Association, registry *echoRegistry, cohort string, duration time.Duration) (runRecord, runRecord, error) {
+	return runSenderCohortWith(ctx, config, associations, registry, nil, cohort, duration)
+}
+
+// runSenderCohortWith runs one sender cohort. routed is nil for the direct
+// workloads; for the routed modes it is the timed sender over the frozen
+// routed paths, and associations are its eight sender associations in queue
+// order. Everything else — the receiver control protocol, the shared clock,
+// the drain, and the evidence — is the same code path for every mode.
+func runSenderCohortWith(ctx context.Context, config commandConfig, associations []*m3ua.Association, registry *echoRegistry, routed *routingTimedSender, cohort string, duration time.Duration) (runRecord, runRecord, error) {
 	// runSender creates the reply registry exactly when the mode is echo;
 	// every other caller (throughput, the bidirectional reverse driver, tests)
 	// passes nil. Name a mismatched call instead of dereferencing nil.
@@ -361,15 +389,29 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		go sweepEchoRequests(tracker, sweepDone)
 	}
 	counters := newSenderCounters(config.Outstanding)
-	queues, workersDone := startSendWorkers(associations, config, counters, tracker)
+	var queues []chan sendJob
+	var routedQueues []chan routingTimedJob
+	var workersDone <-chan struct{}
+	if routed != nil {
+		routedQueues, workersDone = startRoutedSendWorkers(ctx, routed, config, counters)
+	} else {
+		queues, workersDone = startSendWorkers(associations, config, counters, tracker)
+	}
 	sampleDone := make(chan struct{})
 	go sampleSharedSender(started, counters, sampleDone, clock)
 	progressDone := sampleSharedProgress(ctx, started, duration, config.PeerControl, clock)
-	dispatchScheduled(ctx, config, cohort, duration, started, expected, queues, counters, tracker, clock)
+	if routed != nil {
+		dispatchRouted(ctx, config, routed, cohort, duration, started, expected, routedQueues, counters, clock)
+	} else {
+		dispatchScheduled(ctx, config, cohort, duration, started, expected, queues, counters, tracker, clock)
+	}
 	outstandingAtEnd := counters.outstandingCount()
 	close(sampleDone)
 	observations := append([]progressObservation{initialObservation}, (<-progressDone)...)
 	for _, queue := range queues {
+		close(queue)
+	}
+	for _, queue := range routedQueues {
 		close(queue)
 	}
 	drainStarted := time.Now()
@@ -440,6 +482,9 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 		sender.NegotiatedOutboundStreams[index] = int(association.MaxMessageStreamID()) + 1
 	}
 	sender.Manifest = currentManifest(config.Outstanding, config.Initiation)
+	if routed != nil {
+		sender.Manifest.FlowCount = routingRouteCount
+	}
 	sender.ProgressObservations = observations
 	accounting := analyzeProgress(specification, observations)
 	sender.SenderWindow = &accounting

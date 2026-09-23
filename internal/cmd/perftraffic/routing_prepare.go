@@ -675,7 +675,7 @@ func (client *routingPreparationHTTPClient) Publish(ctx context.Context, ordinal
 }
 
 func (client *routingPreparationHTTPClient) Stop(ctx context.Context) error {
-	return client.post(ctx, "/stop", nil, nil)
+	return client.post(ctx, "/routing/stop", nil, nil)
 }
 
 func (client *routingPreparationHTTPClient) post(ctx context.Context, path string, ordinal *uint8, transports []routingTransportDTO) error {

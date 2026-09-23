@@ -115,8 +115,8 @@ func (control *receiverControl) progress() receiverProgress {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	result := receiverProgress{Spec: copyRunSpec(control.spec), Generation: control.generation, Phase: control.phase, FatalError: control.fatal}
-	if control.ledger != nil {
-		result.Delivery = control.ledger.snapshot()
+	if snapshot, present := control.deliveryLocked(); present {
+		result.Delivery = snapshot
 	}
 	if control.spec.Clock != nil {
 		now, err := control.sharedNowLocked()

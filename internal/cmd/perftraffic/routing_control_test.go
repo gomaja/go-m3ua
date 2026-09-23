@@ -125,13 +125,13 @@ func TestRoutingControlSerializesExactlyEightPublications(testContext *testing.T
 		}
 	}
 	ready := httptest.NewRecorder()
-	control.handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	control.handler().ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/routing/ready", nil))
 	var status readyResult
 	if err := json.Unmarshal(ready.Body.Bytes(), &status); err != nil || status.Phase != "prepared" {
 		testContext.Fatalf("ready=%s error=%v", ready.Body.String(), err)
 	}
 	for count := 0; count < 2; count++ {
-		response := routingControlRequest(testContext, control.handler(), "/stop", map[string]any{"preparation_id": "prep-a"})
+		response := routingControlRequest(testContext, control.handler(), "/routing/stop", map[string]any{"preparation_id": "prep-a"})
 		if response.Code != http.StatusNoContent {
 			testContext.Fatalf("stop: %d", response.Code)
 		}
@@ -322,7 +322,7 @@ func TestRoutingControlConcurrentCommandAndStopDoNotJoinHandler(testContext *tes
 	stopped := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		response := httptest.NewRecorder()
-		control.handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/stop", strings.NewReader(`{"preparation_id":"prep-a"}`)).WithContext(ctx))
+		control.handler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/routing/stop", strings.NewReader(`{"preparation_id":"prep-a"}`)).WithContext(ctx))
 		stopped <- response
 	}()
 	select {
@@ -504,7 +504,7 @@ func TestRoutingControlBoundsTransportReadAndWrite(testContext *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	request := httptest.NewRequest(http.MethodGet, "/ready", nil).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodGet, "/routing/ready", nil).WithContext(ctx)
 	response := &routingDeadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	control.handler().ServeHTTP(response, request)
 	want, _ := ctx.Deadline()
@@ -528,7 +528,7 @@ func TestRoutingControlStopFailureIsRetained(testContext *testing.T) {
 		testContext.Fatal(err)
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		response := routingControlRequest(testContext, control.handler(), "/stop", map[string]any{"preparation_id": "prep-a"})
+		response := routingControlRequest(testContext, control.handler(), "/routing/stop", map[string]any{"preparation_id": "prep-a"})
 		if response.Code < 500 || !strings.Contains(response.Body.String(), "cleanup failed") {
 			testContext.Fatalf("stop failure lost: %d %s", response.Code, response.Body.String())
 		}

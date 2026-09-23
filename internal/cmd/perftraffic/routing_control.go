@@ -144,9 +144,9 @@ func (control *routingControl) handler() http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		method := http.MethodPost
 		switch request.URL.Path {
-		case "/ready", "/routing/inventory":
+		case "/routing/ready", "/routing/inventory":
 			method = http.MethodGet
-		case "/routing/prepare", "/routing/publication", "/stop":
+		case "/routing/prepare", "/routing/publication", "/routing/stop":
 		default:
 			http.NotFound(writer, request)
 			return
@@ -214,7 +214,7 @@ func (control *routingControl) inventory(writer http.ResponseWriter, request *ht
 		routingControlStatusError(writer, "routing control stopped", http.StatusConflict)
 		return
 	}
-	if request.URL.Path == "/ready" {
+	if request.URL.Path == "/routing/ready" {
 		writeJSON(writer, http.StatusOK, readyResult{Ready: inventory.Ready && phase != "failed", Phase: phase, Associations: len(inventory.Transports), ExpectedAssociations: 8})
 		return
 	}
@@ -247,7 +247,7 @@ func (control *routingControl) command(writer http.ResponseWriter, request *http
 		routingControlStatusError(writer, "routing preparation identity mismatch", http.StatusConflict)
 		return
 	}
-	if request.URL.Path == "/stop" {
+	if request.URL.Path == "/routing/stop" {
 		if command.Ordinal != nil || command.SenderInventory != nil {
 			routingControlStatusError(writer, "stop contains command fields", http.StatusBadRequest)
 			return
