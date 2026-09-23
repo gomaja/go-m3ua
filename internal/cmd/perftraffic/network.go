@@ -55,6 +55,14 @@ func newRunReceiverControl(ctx context.Context, config commandConfig) *receiverC
 	control.cpuStatPath = config.CPUStatPath
 	control.driver = &reverseDriver{ctx: ctx, cpuStatPath: config.CPUStatPath}
 	control.reverseControl = config.PeerControl
+	if config.SSNM.enabled() {
+		clock, err := newMeasurementClock()
+		if err != nil {
+			control.fatal = "SSNM load clock: " + err.Error()
+			return control
+		}
+		control.ssnm = newSSNMGenerator(ctx, config, clock)
+	}
 	return control
 }
 
@@ -82,6 +90,7 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 		return runRecord{}, fmt.Errorf("startup endpoint: %w", err)
 	}
 	defer func() { _ = endpoint.Close() }()
+	control.ssnm.setReporter(endpoint)
 
 	fatal := make(chan error, 1)
 	if config.Transport == "dial" {

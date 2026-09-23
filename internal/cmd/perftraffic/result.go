@@ -28,6 +28,8 @@ type runSpec struct {
 	Initiation  string             `json:"initiation,omitempty"`
 	PeerControl string             `json:"peer_control,omitempty"`
 	Clock       *sharedClockWindow `json:"shared_clock,omitempty"`
+	// SSNM is the opt-in SSNM load declaration, omitted when off.
+	SSNM ssnmWorkload `json:"ssnm,omitzero"`
 }
 
 type deliveryResult struct {
@@ -102,6 +104,7 @@ type runRecord struct {
 	ReverseError              string                `json:"reverse_error,omitempty"`
 	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
 	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
+	SSNM                      *ssnmRecord           `json:"ssnm,omitempty"`
 }
 
 type fixtureManifest struct {

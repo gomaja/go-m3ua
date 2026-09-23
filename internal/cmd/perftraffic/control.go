@@ -78,6 +78,8 @@ type receiverControl struct {
 	reverseSender   *runRecord
 	reverseReceiver *runRecord
 	reverseError    string
+	// ssnm is the SGP's SSNM load generator, nil without SSNM load.
+	ssnm *ssnmGenerator
 }
 
 // reverseDriver lets the bidirectional SGP run the reverse (SGP-to-ASP)
@@ -236,6 +238,9 @@ func (control *receiverControl) reset(specification runSpec) error {
 			return fmt.Errorf("%w: the peer control URL is not this receiver's configured reverse control destination", errInvalidRunSpec)
 		}
 	}
+	if err := control.ssnm.acceptSpec(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
 	control.spec = copyRunSpec(specification)
 	control.lastClock = 0
 	control.stoppedClock = 0
@@ -295,6 +300,9 @@ func (control *receiverControl) start() error {
 	// mutex that commits the cohort.
 	run := reverseRun{specification: specification, reverseControl: control.reverseControl, generation: control.generation}
 	control.mutex.Unlock()
+	if specification.SSNM.enabled() {
+		control.ssnm.begin()
+	}
 	if specification.Mode == modeBidirectional && driver != nil {
 		go control.runReverseCohort(driver, run)
 	}
@@ -629,6 +637,10 @@ func (control *receiverControl) result() runRecord {
 			record.DrainDuration = control.stopped.Sub(measurementEnd)
 		}
 	}
+	if generator := control.ssnm.cohortRecord(control.spec); generator != nil {
+		record.SSNM = &ssnmRecord{Generator: generator}
+		record.UnsupportedModes = ssnmUnsupportedModes()
+	}
 	record.CPU = newCPUObservation(record.CPU.Before, record.CPU.After, errorFromString(record.CPU.Error), nil, record.Delivery.Unique)
 	record.Allocations.Delta = runtimeDelta(record.Allocations.Before, record.Allocations.After)
 	if record.MeasurementDuration > 0 {
@@ -772,6 +784,7 @@ func (control *receiverControl) handler() http.Handler {
 	mux.HandleFunc("GET /results", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, control.result())
 	})
+	control.ssnm.register(mux)
 	return mux
 }
 

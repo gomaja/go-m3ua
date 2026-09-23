@@ -73,7 +73,7 @@ func newSenderCounters(limit int) *senderCounters {
 }
 
 func runSender(ctx context.Context, config commandConfig) (combinedResult, error) {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: nil})
+	endpoint, err := m3ua.NewEndpoint(senderEndpointConfig(config))
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("create standalone ASP endpoint: %w", err)
 	}
@@ -88,6 +88,11 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 	if err := waitForReady(ctx, config.PeerControl, config.Associations); err != nil {
 		return combinedResult{}, err
 	}
+	config.ssnmRun, err = startSSNMLoad(ctx, config, endpoint)
+	if err != nil {
+		return combinedResult{}, err
+	}
+	defer config.ssnmRun.close()
 	var registry *echoRegistry
 	if config.Mode == modeEcho {
 		registry = newEchoRegistry()
@@ -117,6 +122,7 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 	if config.Warmup > 0 {
 		warmupConfig := config
 		warmupConfig.Cohort += "-warmup"
+		warmupConfig.ssnmPhase = ssnmPhaseWarmup
 		warmupResult, warmupErr := runCohort(warmupConfig, "warmup", warmupConfig.Cohort, config.Warmup)
 		warmup = &warmupResult
 		if warmupErr != nil || warmupResult.Verdict == verdictInvalid {
@@ -127,6 +133,7 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		}
 	}
 	measurement, err := runCohort(config, "measurement", config.Cohort, config.Duration)
+	config.ssnmRun.finish(ctx, &measurement)
 	if config.Mode == modeBidirectional {
 		select {
 		case readErr := <-localFatal:
@@ -312,6 +319,9 @@ func runSenderCohort(ctx context.Context, config commandConfig, associations []*
 	clock, err := prepareSharedRunClock(ctx, config, &specification)
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("prepare shared clock: %w", err)
+	}
+	if err := config.ssnmRun.attach(&specification, config.ssnmPhase); err != nil {
+		return runRecord{}, runRecord{}, fmt.Errorf("declare SSNM load: %w", err)
 	}
 	if err := postJSON(ctx, config.PeerControl+"/reset", specification); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("reset receiver: %w", err)

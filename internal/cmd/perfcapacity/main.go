@@ -243,6 +243,7 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 					result.Reason = "unidirectional-cohort-error"
 				}
 			}
+			applySSNMDecision(&result, fixture.ssnmVerdict, forward.Stall != nil && forward.Stall.Stalled())
 		}
 		return result
 	}
@@ -336,6 +337,7 @@ type fixtureEvidence struct {
 	ClockEvidence      *sharedClockEvidence `json:"shared_clock_evidence"`
 	ClockBoundary      *sharedClockBoundary `json:"shared_clock_boundary"`
 	ValidatedPerSecond *float64             `json:"validated_per_second"`
+	SSNM               *ssnmEvidence        `json:"ssnm"`
 }
 
 type deliveryEvidence struct {
@@ -455,6 +457,7 @@ type fixtureSpec struct {
 	Initiation   *string            `json:"initiation"`
 	PeerControl  string             `json:"peer_control"`
 	SharedClock  *sharedClockWindow `json:"shared_clock"`
+	SSNM         *ssnmSpecEvidence  `json:"ssnm"`
 }
 
 type fixtureManifest struct {
@@ -490,6 +493,7 @@ type workloadIdentity struct {
 	Initiation      string
 	PeerControl     string
 	Instrumentation string
+	SSNM            ssnmIdentity
 }
 
 type fixtureRun struct {
@@ -502,6 +506,7 @@ type fixtureRun struct {
 	reverseAchieved      *achievedRateBounds
 	aggregateAchieved    *achievedRateBounds
 	cohortError          bool
+	ssnmVerdict          string
 }
 
 type achievedRateBounds struct {
@@ -964,9 +969,13 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	if err := validateCohortVerdict(&cohort, cohort.Sender, cohort.Receiver); err != nil {
 		return fixtureRun{}, err
 	}
+	ssnmVerdict, err := ssnmCohortVerdict(senderSpec.Workload.SSNM, cohort.Sender, cohort.Receiver)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional ssnm: %w", err)
+	}
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
-		forwardAchieved: achieved, cohortError: cohort.Error != "",
+		forwardAchieved: achieved, cohortError: cohort.Error != "", ssnmVerdict: ssnmVerdict,
 	}, nil
 }
 
@@ -1481,6 +1490,10 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		}
 		instrumentation = "shared-clock"
 	}
+	ssnm, err := ssnmIdentityFromSpec(spec)
+	if err != nil {
+		return workloadIdentity{}, err
+	}
 	return workloadIdentity{
 		Associations:    *spec.Associations,
 		Duration:        *spec.Duration,
@@ -1492,6 +1505,7 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		Initiation:      *spec.Initiation,
 		PeerControl:     spec.PeerControl,
 		Instrumentation: instrumentation,
+		SSNM:            ssnm,
 	}, nil
 }
 

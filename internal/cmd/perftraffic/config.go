@@ -87,6 +87,13 @@ type commandConfig struct {
 	CPUStatPath    string
 	SameHostClock  bool
 	clockWindow    *sharedClockWindow
+	// SSNM is the opt-in SSNM load workload; zero when -ssnm-rate is unset.
+	SSNM ssnmConfig
+	// ssnmPhase names the cohort phase an SSNM cohort declares; empty is the
+	// measurement cohort.
+	ssnmPhase string
+	// ssnmRun is the ASP's SSNM subscriber run, nil without SSNM load.
+	ssnmRun *ssnmSenderRun
 }
 
 func parseConfig(arguments []string) (commandConfig, error) {
@@ -117,6 +124,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	flagSet.IntVar(&config.Outstanding, "outstanding", maxOutstanding, "maximum scheduled but unfinished sends")
 	flagSet.StringVar(&config.CPUStatPath, "cpu-stat", "/sys/fs/cgroup/cpu.stat", "cgroup v2 cpu.stat path")
 	flagSet.BoolVar(&config.SameHostClock, "same-host-clock", false, "verify a shared Linux monotonic clock for throughput measurement")
+	registerSSNMFlags(flagSet, &config.SSNM)
 	if err := flagSet.Parse(arguments); err != nil {
 		return commandConfig{}, err
 	}
@@ -192,6 +200,9 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	}
 	if config.Role == "sgp" && config.ControlAddress == "" {
 		return commandConfig{}, errors.New("control-address is required for the SGP receiver")
+	}
+	if err := validateSSNMConfig(flagSet, &config); err != nil {
+		return commandConfig{}, err
 	}
 	return config, nil
 }
