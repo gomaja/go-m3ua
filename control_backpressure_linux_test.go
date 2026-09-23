@@ -136,12 +136,14 @@ func TestSSNMPublicationWaitsOutAFullSendBuffer(t *testing.T) {
 
 // stalledASP is an ASP built directly on SCTP: it completes ASP Up and ASP
 // Active against a library SGP and then reads nothing until resume is closed,
-// after which it drains and records the DUNAs it receives.
+// after which it drains and records the DUNAs it receives and the sequence
+// number in the first eight octets of every DATA payload.
 type stalledASP struct {
 	resume chan struct{}
 
 	mu    sync.Mutex
 	dunas []stalledAck
+	data  []uint64
 }
 
 func dialStalledASP(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32) *stalledASP {
@@ -221,6 +223,14 @@ func dialStalledASP(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32) *st
 			if err != nil {
 				continue
 			}
+			if data, ok := message.(*messages.Data); ok {
+				if payload, err := data.ProtocolData.ProtocolData(); err == nil && len(payload.Data) >= 8 {
+					peer.mu.Lock()
+					peer.data = append(peer.data, binary.BigEndian.Uint64(payload.Data))
+					peer.mu.Unlock()
+				}
+				continue
+			}
 			if _, ok := message.(*messages.DestinationUnavailable); ok {
 				received := stalledAck{}
 				if info != nil {
@@ -233,6 +243,12 @@ func dialStalledASP(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32) *st
 		}
 	}()
 	return peer
+}
+
+func (p *stalledASP) delivered() []uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]uint64(nil), p.data...)
 }
 
 func (p *stalledASP) unavailable() []stalledAck {

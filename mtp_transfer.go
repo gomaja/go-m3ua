@@ -372,9 +372,11 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 		return MTPTransferResult{}, err
 	}
 	// The concrete targets are frozen here. A target that fails is reported as
-	// it is: nothing else is tried for this request, because a failed write
-	// does not prove the peer received no DATA and a second attempt through
-	// another Application Server could duplicate it.
+	// it is and nothing else is tried for this request. An indeterminate
+	// failure does not prove the peer received no DATA, so a second attempt
+	// through another Application Server could duplicate it; even when a
+	// failure is known not sent, whether and where to resend stays the
+	// application's decision.
 	result := MTPTransferResult{SuccessfulPaths: make([]MTPTransferPath, 0, len(targets))}
 	failures := make([]MTPTransferFailure, 0)
 	for _, target := range targets {
@@ -1096,7 +1098,7 @@ func (c *Association) writeMTPTransfer(request MTPTransferRequest, key ASKey) (i
 		return 0, newDataNotSent(key, 0, err)
 	}
 	if err := c.submitData(c.encodeDataFrame(&data), stream); err != nil {
-		return 0, newDataSendIndeterminate(key, stream, err)
+		return 0, newDataSubmissionError(key, stream, err)
 	}
 	return len(data.ProtocolData.Data), nil
 }

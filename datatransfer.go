@@ -108,13 +108,14 @@ func (c *Association) WriteData(request DataRequest) (int, error) {
 	defer release()
 
 	if err := c.submitData(frame, stream); err != nil {
-		return 0, newDataSendIndeterminate(request.AS, stream, err)
+		return 0, newDataSubmissionError(request.AS, stream, err)
 	}
 	return len(request.ProtocolData.Data), nil
 }
 
-// submitData hands one encoded message to the transport. Every error from here
-// on is indeterminate: the transport has seen the message.
+// submitData hands one encoded message to the transport. The transport has seen
+// the message, so its errors are indeterminate unless the transport refused
+// the message whole; newDataSubmissionError tells the two apart.
 func (c *Association) submitData(frame []byte, stream uint16) error {
 	// Copied by value: the template is shared by every send on this
 	// association, and only the stream varies per message.
@@ -268,12 +269,12 @@ func (c *Association) writeRawData(
 	if c.signalWriter != nil {
 		written, err := c.signalWriter(message)
 		if err != nil {
-			return 0, newDataSendIndeterminate(scope, stream, err)
+			return 0, newDataSubmissionError(scope, stream, err)
 		}
 		return written, nil
 	}
 	if err := c.submitData(frame, stream); err != nil {
-		return 0, newDataSendIndeterminate(scope, stream, err)
+		return 0, newDataSubmissionError(scope, stream, err)
 	}
 	return encoded, nil
 }
