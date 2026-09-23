@@ -48,25 +48,80 @@ func sendDurationJSON(maximumNanoseconds int64) string {
 	return fmt.Sprintf(`"send_duration":{"count":100000,"p50_ns":32768,"p95_ns":131072,"p99_ns":262144,"max_ns":%d}`, maximumNanoseconds)
 }
 
+// backlogWindowJSON returns the sender_window samples and backlog_trend that
+// perftraffic emits for a window of the given length at rate. The per-second
+// series is flat when upper <= 0, grows by one message per second when
+// lower > 0, and is otherwise flat but bracketed one message wide, so the
+// recomputed verdict is not-growing, growing and indeterminate respectively.
+// One observation before the window and one after it exercise the in-window
+// filter.
+func backlogWindowJSON(rate uint64, window time.Duration, lower, upper float64) string {
+	type sample struct {
+		Before time.Duration `json:"before_ns"`
+		After  time.Duration `json:"after_ns"`
+		Unique uint64        `json:"unique"`
+		Lower  uint64        `json:"backlog_lower"`
+		Upper  uint64        `json:"backlog_upper"`
+	}
+	samples := []sample{{Before: -time.Millisecond}}
+	for second := time.Second; second < window; second += time.Second {
+		backlog, width := uint64(3), uint64(0)
+		switch {
+		case lower > 0:
+			backlog += uint64(second / time.Second)
+		case upper > 0:
+			width = 1
+		}
+		offered := rate * uint64(second/time.Second)
+		samples = append(samples, sample{Before: second, After: second + time.Microsecond, Unique: offered - min(offered, backlog), Lower: backlog, Upper: backlog + width})
+	}
+	samples = append(samples, sample{Before: window + time.Millisecond, After: window + 2*time.Millisecond, Unique: rate * uint64(window/time.Second)})
+	observations := make([]perfstats.BacklogObservation, len(samples))
+	for index, value := range samples {
+		observations[index] = perfstats.BacklogObservation{Before: value.Before, After: value.After, Lower: value.Lower, Upper: value.Upper}
+	}
+	status, trend := perfstats.DescribeBacklogTrend(observations, window, rate)
+	encodedSamples, err := json.Marshal(samples)
+	if err != nil {
+		panic(err)
+	}
+	encodedTrend, err := json.Marshal(struct {
+		Status string `json:"status"`
+		perfstats.BacklogTrend
+	}{status, trend})
+	if err != nil {
+		panic(err)
+	}
+	return `"samples":` + string(encodedSamples) + `,"backlog_trend":` + string(encodedTrend)
+}
+
+func singleWindowJSON(lower, upper float64) string {
+	return singleWindowAtRateJSON(10, lower, upper)
+}
+
+func singleWindowAtRateJSON(rate int, lower, upper float64) string {
+	return `"sender_window":{"duration_ns":120000000000,"status":"bounded",` + backlogWindowJSON(uint64(rate), 120*time.Second, lower, upper) + `}`
+}
+
 func passingRunJSON() string {
 	return `{"side":"sender",` + specJSON(10) + `,"scheduled":1200,"sent":1200,"submitted":1200,` +
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}}`
+		singleWindowJSON(-2.5, -0.5) + `}`
 }
 
 func failingRunJSON() string {
 	return `{"side":"sender",` + specJSON(10) + `,"scheduled":1200,"sent":1200,"submitted":1200,` +
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
+		singleWindowJSON(1.5, 3.5) + `}`
 }
 
 func straddlingRunJSON() string {
 	return `{"side":"sender",` + specJSON(10) + `,"scheduled":1200,"sent":1200,"submitted":1200,` +
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(262144) + `,"fixture_verdict":"pass","capped":0,"send_errors":0,` +
 		`"delivery":{"unique":1200,"unique_measurement":1200,"unique_drain":0,"missing":0,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"unresolved","sample_count":120,"mean_change_lower":-3.4,"mean_change_upper":3.53}}}`
+		singleWindowJSON(-3.4, 3.53) + `}`
 }
 
 func requestJSON(initial int, schedule []struct {
@@ -102,6 +157,9 @@ func repetitionsJSON(rate, count int, run string) string {
 
 func runAtRateJSON(run string, rate int) string {
 	run = strings.Replace(run, specJSON(10), specJSON(rate), 1)
+	for _, bounds := range [][2]float64{{-2.5, -0.5}, {1.5, 3.5}, {-3.4, 3.53}} {
+		run = strings.Replace(run, singleWindowJSON(bounds[0], bounds[1]), singleWindowAtRateJSON(rate, bounds[0], bounds[1]), 1)
+	}
 	run = strings.Replace(run, `"scheduled":1200`, fmt.Sprintf(`"scheduled":%d`, rate*120), 1)
 	run = strings.Replace(run, `"sent":1200`, fmt.Sprintf(`"sent":%d`, rate*120), 1)
 	run = strings.Replace(run, `"submitted":1200`, fmt.Sprintf(`"submitted":%d`, rate*120), 1)
@@ -335,8 +393,7 @@ func TestFourRepetitionsDoNotValidate(testContext *testing.T) {
 }
 
 func TestMissingWindowEvidenceNeverPasses(testContext *testing.T) {
-	noWindow := strings.Replace(passingRunJSON(),
-		`,"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}}`, "", 1)
+	noWindow := strings.Replace(passingRunJSON(), ","+singleWindowJSON(-2.5, -0.5), "", 1)
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, noWindow)
 	status, decoded := runRequest(testContext, input)
 	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" {
@@ -344,10 +401,29 @@ func TestMissingWindowEvidenceNeverPasses(testContext *testing.T) {
 	}
 }
 
-func TestInsufficientSampleBacklogChangeIsMissingEvidence(testContext *testing.T) {
-	insufficient := strings.Replace(passingRunJSON(),
-		`"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5`,
-		`"status":"insufficient-samples","sample_count":7,"mean_change_lower":0,"mean_change_upper":0`, 1)
+// mutateRunJSON decodes one run record, applies mutate and re-encodes it.
+func mutateRunJSON(testContext *testing.T, run string, mutate func(window map[string]any)) string {
+	testContext.Helper()
+	return mutateBidirectionalJSON(testContext, run, func(record map[string]any) {
+		mutate(record["sender_window"].(map[string]any))
+	})
+}
+
+func backlogTrendField(window map[string]any) map[string]any {
+	return window["backlog_trend"].(map[string]any)
+}
+
+func TestInsufficientSampleBacklogTrendIsMissingEvidence(testContext *testing.T) {
+	insufficient := mutateRunJSON(testContext, passingRunJSON(), func(window map[string]any) {
+		window["samples"] = window["samples"].([]any)[:8]
+		backlogTrendField(window)["status"] = perfstats.BacklogTrendInsufficientSamples
+		for field, value := range map[string]float64{"sample_count": 7, "window_ns": 0, "floor": 0, "lag": 0, "slope_lower": 0, "slope_upper": 0, "growth_lower": 0, "growth_upper": 0} {
+			backlogTrendField(window)[field] = value
+		}
+	})
+	if _, _, err := evidenceFromFixture(json.RawMessage(insufficient), 10); err != nil {
+		testContext.Fatalf("canonical insufficient-sample trend rejected: %v", err)
+	}
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, insufficient)
 	status, decoded := runRequest(testContext, input)
 	if status != inconclusiveExitStatus || decoded.ProbeDecisions[0].Decision != "inconclusive" {
@@ -355,70 +431,82 @@ func TestInsufficientSampleBacklogChangeIsMissingEvidence(testContext *testing.T
 	}
 }
 
-func TestBacklogChangeStatusMustMatchProducerClassification(testContext *testing.T) {
+// The evaluator recomputes the trend from the producer's own observations; a
+// reported status or bound those observations do not support is rejected, so a
+// producer cannot pass a run by relabelling it.
+func TestBacklogTrendMustMatchItsSamples(testContext *testing.T) {
+	setTrend := func(field string, value any) func(map[string]any) {
+		return func(window map[string]any) { backlogTrendField(window)[field] = value }
+	}
 	testCases := []struct {
-		name string
-		run  string
+		name   string
+		run    string
+		mutate func(map[string]any)
 	}{
-		{name: "growth label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"increase-demonstrated"`, 1)},
-		{name: "unresolved label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"unresolved"`, 1)},
-		{name: "unknown label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"unknown"`, 1)},
-		{name: "missing label on nonincrease interval", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":""`, 1)},
-		{name: "nonincrease label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"nonincrease-demonstrated"`, 1)},
-		{name: "unresolved label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"unresolved"`, 1)},
-		{name: "unknown label on growth interval", run: strings.Replace(failingRunJSON(), `"status":"increase-demonstrated"`, `"status":"unknown"`, 1)},
-		{name: "growth label on unresolved interval", run: strings.Replace(straddlingRunJSON(), `"status":"unresolved"`, `"status":"increase-demonstrated"`, 1)},
-		{name: "nonincrease label on unresolved interval", run: strings.Replace(straddlingRunJSON(), `"status":"unresolved"`, `"status":"nonincrease-demonstrated"`, 1)},
-		{name: "demonstrated label with too few samples", run: strings.Replace(passingRunJSON(), `"sample_count":120`, `"sample_count":7`, 1)},
-		{name: "insufficient label with enough samples", run: strings.Replace(passingRunJSON(), `"status":"nonincrease-demonstrated"`, `"status":"insufficient-samples"`, 1)},
+		{name: "growing label on a flat series", run: passingRunJSON(), mutate: setTrend("status", "growing")},
+		{name: "indeterminate label on a flat series", run: passingRunJSON(), mutate: setTrend("status", "indeterminate")},
+		{name: "unknown label on a flat series", run: passingRunJSON(), mutate: setTrend("status", "unknown")},
+		{name: "empty label on a flat series", run: passingRunJSON(), mutate: setTrend("status", "")},
+		{name: "insufficient label with enough samples", run: passingRunJSON(), mutate: setTrend("status", perfstats.BacklogTrendInsufficientSamples)},
+		{name: "not-growing label on a growing series", run: failingRunJSON(), mutate: setTrend("status", "not-growing")},
+		{name: "indeterminate label on a growing series", run: failingRunJSON(), mutate: setTrend("status", "indeterminate")},
+		{name: "growing label on an uncertain series", run: straddlingRunJSON(), mutate: setTrend("status", "growing")},
+		{name: "not-growing label on an uncertain series", run: straddlingRunJSON(), mutate: setTrend("status", "not-growing")},
+		{name: "understated upper growth bound", run: straddlingRunJSON(), mutate: setTrend("growth_upper", float64(0))},
+		{name: "overstated lower growth bound", run: passingRunJSON(), mutate: setTrend("growth_lower", float64(1))},
+		{name: "raised floor", run: failingRunJSON(), mutate: setTrend("floor", float64(1000))},
+		{name: "altered slope bound", run: failingRunJSON(), mutate: setTrend("slope_lower", float64(0))},
+		{name: "altered sample count", run: passingRunJSON(), mutate: setTrend("sample_count", float64(120))},
+		{name: "altered window", run: passingRunJSON(), mutate: setTrend("window_ns", float64(60000000000))},
+		{name: "altered lag", run: passingRunJSON(), mutate: setTrend("lag", float64(3))},
+		{name: "flattened growing samples", run: failingRunJSON(), mutate: func(window map[string]any) {
+			for _, value := range window["samples"].([]any) {
+				value.(map[string]any)["backlog_lower"], value.(map[string]any)["backlog_upper"] = float64(3), float64(3)
+			}
+		}},
+		{name: "dropped samples", run: passingRunJSON(), mutate: func(window map[string]any) {
+			window["samples"] = window["samples"].([]any)[:60]
+		}},
 	}
 	for _, testCase := range testCases {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
-			if _, _, err := evidenceFromFixture(json.RawMessage(testCase.run), 10); err == nil {
-				testContext.Fatal("evidenceFromFixture accepted contradictory backlog_change status")
+			run := mutateRunJSON(testContext, testCase.run, testCase.mutate)
+			if _, _, err := evidenceFromFixture(json.RawMessage(run), 10); err == nil {
+				testContext.Fatal("evidenceFromFixture accepted a backlog_trend its samples contradict")
 			}
 		})
 	}
 }
 
-func TestCanonicalAndUnavailableBacklogChangeEvidence(testContext *testing.T) {
+func TestCanonicalAndUnavailableBacklogTrendEvidence(testContext *testing.T) {
 	for _, testCase := range []struct {
 		name         string
 		run          string
-		wantInterval bool
+		wantTrend    bool
 		wantDecision perfstats.Decision
 	}{
-		{name: "nonincrease", run: passingRunJSON(), wantInterval: true, wantDecision: perfstats.Pass},
+		{name: "not growing", run: passingRunJSON(), wantTrend: true, wantDecision: perfstats.Pass},
+		{name: "growing", run: failingRunJSON(), wantTrend: true, wantDecision: perfstats.Fail},
+		{name: "indeterminate", run: straddlingRunJSON(), wantTrend: true, wantDecision: perfstats.Inconclusive},
 		{
-			name:         "exact zero is nonincrease",
-			run:          strings.Replace(passingRunJSON(), `"mean_change_lower":-2.5,"mean_change_upper":-0.5`, `"mean_change_lower":0,"mean_change_upper":0`, 1),
-			wantInterval: true,
-			wantDecision: perfstats.Pass,
-		},
-		{name: "growth", run: failingRunJSON(), wantInterval: true, wantDecision: perfstats.Fail},
-		{name: "unresolved", run: straddlingRunJSON(), wantInterval: true, wantDecision: perfstats.Inconclusive},
-		{
-			name:         "zero lower bound is unresolved",
-			run:          strings.Replace(straddlingRunJSON(), `"mean_change_lower":-3.4`, `"mean_change_lower":0`, 1),
-			wantInterval: true,
+			name: "missing trend object",
+			run: mutateRunJSON(testContext, passingRunJSON(), func(window map[string]any) {
+				delete(window, "backlog_trend")
+			}),
 			wantDecision: perfstats.Inconclusive,
 		},
 		{
-			name: "insufficient samples",
-			run: strings.Replace(passingRunJSON(),
-				`"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5`,
-				`"status":"insufficient-samples","sample_count":7,"mean_change_lower":0,"mean_change_upper":0`, 1),
+			name: "missing trend bound",
+			run: mutateRunJSON(testContext, passingRunJSON(), func(window map[string]any) {
+				delete(backlogTrendField(window), "growth_upper")
+			}),
 			wantDecision: perfstats.Inconclusive,
 		},
 		{
-			name: "missing backlog object",
-			run: strings.Replace(passingRunJSON(),
-				`,"backlog_change":{"status":"nonincrease-demonstrated","sample_count":120,"mean_change_lower":-2.5,"mean_change_upper":-0.5}`, "", 1),
-			wantDecision: perfstats.Inconclusive,
-		},
-		{
-			name:         "missing backlog bound",
-			run:          strings.Replace(passingRunJSON(), `"mean_change_lower":-2.5,`, "", 1),
+			name: "missing sample bound",
+			run: mutateRunJSON(testContext, passingRunJSON(), func(window map[string]any) {
+				delete(window["samples"].([]any)[5].(map[string]any), "backlog_upper")
+			}),
 			wantDecision: perfstats.Inconclusive,
 		},
 	} {
@@ -427,8 +515,8 @@ func TestCanonicalAndUnavailableBacklogChangeEvidence(testContext *testing.T) {
 			if err != nil {
 				testContext.Fatal(err)
 			}
-			if (evidence.Interval != nil) != testCase.wantInterval {
-				testContext.Fatalf("interval = %+v, want presence %t", evidence.Interval, testCase.wantInterval)
+			if (evidence.Trend != nil) != testCase.wantTrend {
+				testContext.Fatalf("trend = %+v, want presence %t", evidence.Trend, testCase.wantTrend)
 			}
 			if decision := perfstats.DecideRun(evidence); decision.Decision != testCase.wantDecision {
 				testContext.Fatalf("decision = %+v, want %q", decision, testCase.wantDecision)
@@ -437,7 +525,7 @@ func TestCanonicalAndUnavailableBacklogChangeEvidence(testContext *testing.T) {
 	}
 }
 
-func TestLossCountersFailEvenWithCleanInterval(testContext *testing.T) {
+func TestLossCountersFailEvenWithCleanTrend(testContext *testing.T) {
 	lossy := strings.Replace(passingRunJSON(), `"fixture_verdict":"pass"`, `"fixture_verdict":"invalid"`, 1)
 	lossy = strings.Replace(lossy, `"unique":1200`, `"unique":1199`, 1)
 	lossy = strings.Replace(lossy, `"unique_measurement":1200`, `"unique_measurement":1199`, 1)
@@ -534,7 +622,7 @@ func stalledRunJSON() string {
 		`"outstanding_at_window_start":0,"outstanding_after_drain":0,` + manifestJSON() + `,` + sendDurationJSON(1200000000) + `,` +
 		`"fixture_verdict":"invalid","capped":200,"send_errors":0,` +
 		`"delivery":{"unique":1000,"unique_measurement":1000,"unique_drain":0,"missing":200,"duplicate":0,"invalid":0,"reordered":0,"late_after_stop":0},` +
-		`"sender_window":{"duration_ns":120000000000,"status":"bounded","backlog_change":{"status":"increase-demonstrated","sample_count":120,"mean_change_lower":1.5,"mean_change_upper":3.5}}}`
+		singleWindowJSON(1.5, 3.5) + `}`
 }
 
 func TestDetectedTransportStallIsReportedInconclusiveAndNamed(testContext *testing.T) {

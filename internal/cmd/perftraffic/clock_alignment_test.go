@@ -142,7 +142,7 @@ func sharedProgressFixture(testContext *testing.T) (runSpec, []progressObservati
 func TestSharedClockProgressRemovesHTTPDelayButKeepsResolution(testContext *testing.T) {
 	specification, observations := sharedProgressFixture(testContext)
 	result := analyzeProgress(specification, observations)
-	if result.Status != "bounded" || result.DeliveredLower != 995 || result.DeliveredUpper != 996 || result.OutstandingLower != 4 || result.OutstandingUpper != 5 || result.BacklogChange.Status != "nonincrease-demonstrated" || result.BacklogChange.MeanChangeLower != 0 || result.BacklogChange.MeanChangeUpper != 0 {
+	if result.Status != "bounded" || result.DeliveredLower != 995 || result.DeliveredUpper != 996 || result.OutstandingLower != 4 || result.OutstandingUpper != 5 || result.BacklogTrend.Status != "not-growing" || result.BacklogTrend.GrowthLower != 0 || result.BacklogTrend.GrowthUpper != 0 {
 		testContext.Fatalf("aligned accounting: %+v", result)
 	}
 	for index := 1; index < len(result.Samples)-1; index++ {
@@ -156,7 +156,7 @@ func TestSharedClockProgressRemovesHTTPDelayButKeepsResolution(testContext *test
 	}
 	specification.Clock.Domain.Resolution = int64(time.Millisecond)
 	result = analyzeProgress(specification, observations)
-	if result.Status != "bounded" || result.BacklogChange.Status != "unresolved" || result.BacklogChange.MeanChangeUpper <= 0 {
+	if result.Status != "bounded" || result.BacklogTrend.GrowthLower >= 0 || result.BacklogTrend.GrowthUpper <= 0 {
 		testContext.Fatalf("clock resolution uncertainty was erased: %+v", result)
 	}
 }
@@ -202,7 +202,7 @@ func TestSharedClockGrowingSeriesCannotBeHiddenByDrain(testContext *testing.T) {
 		snapshot.Clock.MeasurementUpper -= uint64(index)
 	}
 	result := analyzeProgress(specification, observations)
-	if observations[len(observations)-1].Snapshot.Delivery.Missing != 0 || result.Status != "bounded" || result.BacklogChange.Status != "increase-demonstrated" || result.BacklogChange.MeanChangeLower <= 0 {
+	if observations[len(observations)-1].Snapshot.Delivery.Missing != 0 || result.Status != "bounded" || result.BacklogTrend.Status != "growing" || result.BacklogTrend.GrowthLower <= result.BacklogTrend.Floor {
 		testContext.Fatalf("complete drain hid positive measurement growth: %+v", result)
 	}
 }
