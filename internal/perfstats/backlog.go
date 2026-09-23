@@ -234,12 +234,16 @@ type BacklogObservation struct {
 // DescribeBacklogTrend fits the trend of the observations taken strictly
 // inside the measurement window, each placed at the midpoint of its request
 // bracket. Producer and evaluator both call it, so the evaluator can recompute
-// a producer's reported trend from its raw observations. The status is the
-// fitted trend's verdict, or BacklogTrendInsufficientSamples or
+// a producer's reported trend from its raw observations. A reversed request
+// bracket or backlog bound anywhere makes the whole series invalid. The status
+// is the fitted trend's verdict, or BacklogTrendInsufficientSamples or
 // BacklogTrendInvalidSamples with only the sample count set.
 func DescribeBacklogTrend(observations []BacklogObservation, window time.Duration, rate uint64) (string, BacklogTrend) {
 	samples := make([]BacklogSample, 0, len(observations))
 	for _, observation := range observations {
+		if observation.After < observation.Before || observation.Upper < observation.Lower {
+			return BacklogTrendInvalidSamples, BacklogTrend{SampleCount: len(samples)}
+		}
 		if observation.Before > 0 && observation.After < window {
 			samples = append(samples, BacklogSample{
 				At:    observation.Before + (observation.After-observation.Before)/2,

@@ -130,7 +130,7 @@ so it reaches the report.
 3. **missing** stall evidence is `inconclusive`: a run whose freedom from
    stalls was never observed is not credited with a sustained rate;
 4. missing or invalid backlog evidence is `inconclusive`;
-5. the predeclared interval rule above.
+5. the predeclared trend rule above.
 
 The threshold must not be tuned after observing results. Raising it so a
 stalled row reports clean, and lowering it so an inconvenient row can be

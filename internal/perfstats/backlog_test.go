@@ -435,3 +435,28 @@ func TestDecideRunNeverPassesALossyRunWhoseCountersWrap(testContext *testing.T) 
 		testContext.Fatalf("DecideRun() = %+v, want Fail with %q", decision, DeliveryFailuresReason)
 	}
 }
+
+// The producer rejects a reversed request bracket before it fits anything; the
+// evaluator must not fit one either, even when its midpoint falls inside the
+// window.
+func TestDescribeBacklogTrendRejectsReversedObservations(testContext *testing.T) {
+	observations := make([]BacklogObservation, 10)
+	for index := range observations {
+		at := time.Duration(index+1) * time.Second
+		observations[index] = BacklogObservation{Before: at, After: at + time.Millisecond, Lower: 5, Upper: 5}
+	}
+	if status, _ := DescribeBacklogTrend(observations, 12*time.Second, 1000); status != string(BacklogNotGrowing) {
+		testContext.Fatalf("valid series status = %q", status)
+	}
+	for name, mutate := range map[string]func([]BacklogObservation){
+		"reversed bracket":        func(values []BacklogObservation) { values[4].Before, values[4].After = 11*time.Second, 1*time.Second },
+		"reversed backlog bounds": func(values []BacklogObservation) { values[4].Lower, values[4].Upper = 9, 2 },
+		"reversed outside window": func(values []BacklogObservation) { values[9].Before, values[9].After = 20*time.Second, 19*time.Second },
+	} {
+		changed := append([]BacklogObservation(nil), observations...)
+		mutate(changed)
+		if status, _ := DescribeBacklogTrend(changed, 12*time.Second, 1000); status != BacklogTrendInvalidSamples {
+			testContext.Errorf("%s: status = %q, want %q", name, status, BacklogTrendInvalidSamples)
+		}
+	}
+}
