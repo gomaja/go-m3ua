@@ -167,7 +167,7 @@ func TestASPDerivedStatusIndicationsComparePartitionUnion(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			routes.derived = test.previous
+			routes.derived = map[MTPRouteID]map[aspDerivedRangeKey]aspDestinationStatus{"sccp-a": test.previous}
 			indications := routes.derivedStatusIndicationsLocked(mtpRoute, test.current)
 			if len(indications) != test.want {
 				t.Fatalf("indications = %#v, want %d", indications, test.want)
