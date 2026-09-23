@@ -697,10 +697,10 @@ func TestCampaignIdentityDistinguishesSharedClockInstrumentation(testContext *te
 		testContext.Fatalf("instrumentation identities both equal %q", httpWorkload.Instrumentation)
 	}
 	var campaign campaignIdentity
-	if err := campaign.add(runIdentity{workload: httpWorkload}); err != nil {
+	if err := campaign.add(runIdentity{workload: httpWorkload}, false); err != nil {
 		testContext.Fatal(err)
 	}
-	if err := campaign.add(runIdentity{workload: sharedWorkload}); err == nil {
+	if err := campaign.add(runIdentity{workload: sharedWorkload}, false); err == nil {
 		testContext.Fatal("campaign mixed HTTP and shared-clock instrumentation")
 	}
 }

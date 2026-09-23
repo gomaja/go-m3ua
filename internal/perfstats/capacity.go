@@ -6,10 +6,10 @@ import (
 	"math"
 )
 
-// This file mirrors the predeclared bounded capacity search semantics of the
-// local capacity.py probe driver: integer rates, a pass/fail bracket refined
-// to within five percent, no probe retries after an inconclusive outcome, and
-// a fixed probe budget. It deliberately does not widen those semantics: a
+// This file implements the predeclared bounded capacity search: integer
+// rates, a bracket between the highest demonstrated rate and the lowest rate
+// that failed or was not demonstrated, refined to within five percent, no
+// probe retries, and a fixed probe budget. It deliberately does not widen those semantics: a
 // search that cannot refine the bracket, finds no upper failure bound, or
 // exhausts its budget is not a capacity measurement.
 //
@@ -39,8 +39,16 @@ const (
 type ProbeOutcome string
 
 const (
-	ProbePassing      ProbeOutcome = "pass"
-	ProbeFailing      ProbeOutcome = "fail"
+	ProbePassing ProbeOutcome = "pass"
+	ProbeFailing ProbeOutcome = "fail"
+	// ProbeNotDemonstrated is a probe that did not demonstrate a sustained
+	// rate for a rate-related reason: a transport stall, or backlog growth
+	// bounds that straddle the floor. Near and above capacity those are the
+	// expected outcomes, so the rate bounds the bracket from above exactly as a
+	// failure does, and the search continues. Only demonstrated rates pass.
+	ProbeNotDemonstrated ProbeOutcome = "not-demonstrated"
+	// ProbeInconclusive is a probe whose evidence was missing or invalid. It
+	// says nothing about the rate, so it terminates the search.
 	ProbeInconclusive ProbeOutcome = "inconclusive"
 )
 
@@ -74,9 +82,8 @@ type CapacitySearch struct {
 	maxProbes int
 }
 
-// NewCapacitySearch validates the search bounds exactly as capacity.py does:
-// positive integer initial, maximum and probe budget, initial not above
-// maximum.
+// NewCapacitySearch validates the search bounds: positive integer initial,
+// maximum and probe budget, initial not above maximum.
 func NewCapacitySearch(initial, maximum, maxProbes int) (*CapacitySearch, error) {
 	for name, value := range map[string]int{"initial": initial, "maximum": maximum, "max_probes": maxProbes} {
 		if value <= 0 {
@@ -126,8 +133,9 @@ func (search *CapacitySearch) NextRate() (int, bool) {
 }
 
 // Record adds one probe outcome. The rate must equal the selected NextRate;
-// an unknown outcome or a finished search is an error. An inconclusive probe
-// terminates the search without retry, matching capacity.py.
+// an unknown outcome or a finished search is an error. A not-demonstrated
+// probe bounds the bracket from above like a failure; an inconclusive probe
+// terminates the search. No probe is ever retried.
 func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 	if search.status != SearchRunning {
 		return fmt.Errorf("search already terminated with status %q", search.status)
@@ -136,7 +144,7 @@ func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 		return fmt.Errorf("probe rate %d does not match the selected rate %d", rate, search.next)
 	}
 	switch outcome {
-	case ProbePassing, ProbeFailing, ProbeInconclusive:
+	case ProbePassing, ProbeFailing, ProbeNotDemonstrated, ProbeInconclusive:
 	default:
 		return fmt.Errorf("probe returned an unknown outcome %q", outcome)
 	}
@@ -197,6 +205,7 @@ const (
 	SearchIncompleteReason       = "search-incomplete"
 	SearchNotRefinedReason       = "search-did-not-refine-a-pass-fail-bracket"
 	NoPassingRateReason          = "no-passing-rate"
+	NoDemonstratedRateReason     = "no-demonstrated-rate-with-undemonstrated-probes"
 	RepetitionsMissingReason     = "validation-repetitions-missing"
 	RepetitionCountReason        = "validation-repetition-count-mismatch"
 	RepetitionRateReason         = "validation-repetition-rate-mismatch"
@@ -216,6 +225,14 @@ func DecideCapacity(search *CapacitySearch, repetitionRates []int, repetitionDec
 	case SearchRunning:
 		return CapacityDecision{Decision: Inconclusive, Status: status, Reason: SearchIncompleteReason}
 	case SearchNoPassingRate:
+		// Failure needs demonstrated failures. A search that found no
+		// demonstrated rate only because some probes were not demonstrated
+		// has not shown that the workload cannot be sustained.
+		for _, probe := range search.probes {
+			if probe.Outcome == ProbeNotDemonstrated {
+				return CapacityDecision{Decision: Inconclusive, Status: status, Reason: NoDemonstratedRateReason}
+			}
+		}
 		return CapacityDecision{Decision: Fail, Status: status, Reason: NoPassingRateReason}
 	case SearchBracketed:
 	default:

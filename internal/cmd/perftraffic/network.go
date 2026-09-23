@@ -67,6 +67,9 @@ func newRunReceiverControl(ctx context.Context, config commandConfig) *receiverC
 }
 
 func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
+	if routedMode(config.Mode) {
+		return runRoutedReceiver(ctx, config)
+	}
 	control := newRunReceiverControl(ctx, config)
 	if control.fatal != "" {
 		return runRecord{}, errors.New(control.fatal)

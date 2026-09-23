@@ -21,7 +21,20 @@ const (
 	modeThroughput    = "throughput"
 	modeEcho          = "echo"
 	modeBidirectional = "bidirectional"
+	// modeRouted sends through Endpoint.MTPTransfer over the fixed optional
+	// router topology; modeRoutedDirect is its matched direct control on the
+	// same topology and frozen paths through Association.WriteData.
+	modeRouted       = "routed"
+	modeRoutedDirect = "routed-direct"
 )
+
+// routedAssociations is the fixed optional-router topology: 2 SGs x 2 SGPs x
+// 2 associations.
+const routedAssociations = 8
+
+func routedMode(mode string) bool {
+	return mode == modeRouted || mode == modeRoutedDirect
+}
 
 const (
 	directionASPToSGP = "asp-to-sgp"
@@ -107,7 +120,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	var workloadValue string
 	flagSet.StringVar(&config.Role, "role", "sgp", "M3UA endpoint role: asp or sgp")
 	flagSet.StringVar(&config.Transport, "transport", "listen", "SCTP initiation: listen or dial")
-	flagSet.StringVar(&config.Mode, "mode", "throughput", "measurement mode: throughput, echo, or bidirectional")
+	flagSet.StringVar(&config.Mode, "mode", "throughput", "measurement mode: throughput, echo, bidirectional, routed, or routed-direct")
 	flagSet.StringVar(&config.SCTPAddress, "sctp-address", "0.0.0.0:2905", "listen address or remote dial address")
 	flagSet.StringVar(&config.LocalAddress, "local-address", "", "optional local SCTP dial address")
 	flagSet.StringVar(&config.ControlAddress, "control-address", "0.0.0.0:8080", "receiver HTTP control address")
@@ -139,9 +152,9 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 		return commandConfig{}, errors.New("same-host clock mode supports throughput and bidirectional measurement, not echo")
 	}
 	switch config.Mode {
-	case modeThroughput, modeEcho, modeBidirectional:
+	case modeThroughput, modeEcho, modeBidirectional, modeRouted, modeRoutedDirect:
 	default:
-		return commandConfig{}, fmt.Errorf("mode %q is unavailable; throughput, echo and bidirectional are implemented", config.Mode)
+		return commandConfig{}, fmt.Errorf("mode %q is unavailable; throughput, echo, bidirectional, routed and routed-direct are implemented", config.Mode)
 	}
 	config.Direction = directionASPToSGP
 	if config.Role != "asp" && config.Role != "sgp" {
@@ -201,10 +214,47 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	if config.Role == "sgp" && config.ControlAddress == "" {
 		return commandConfig{}, errors.New("control-address is required for the SGP receiver")
 	}
+	if routedMode(config.Mode) {
+		if err := validateRoutedConfig(config); err != nil {
+			return commandConfig{}, err
+		}
+	}
 	if err := validateSSNMConfig(flagSet, &config); err != nil {
 		return commandConfig{}, err
 	}
 	return config, nil
+}
+
+// validateRoutedConfig bounds the routed modes to their one approved shape
+// (performance budgets section 2): eight associations from one ASP to four SGP
+// endpoints, the mixed payload, and the ASP dialling. The four SGP endpoints
+// listen on four consecutive ports of one concrete address, and the ASP binds
+// one concrete local address, because the fixture pairs every association by
+// its exact transport addresses.
+func validateRoutedConfig(config commandConfig) error {
+	if config.Associations != routedAssociations {
+		return fmt.Errorf("mode %s requires exactly %d associations (2 SGs x 2 SGPs x 2 associations)", config.Mode, routedAssociations)
+	}
+	if config.Initiation != initiationASPDial {
+		return fmt.Errorf("mode %s supports asp-dial initiation only: the ASP dials and the SGP listens", config.Mode)
+	}
+	if _, _, err := splitRoutedAddress(config.SCTPAddress); err != nil {
+		return fmt.Errorf("sctp-address: %w", err)
+	}
+	if config.Role == "sgp" {
+		_, err := routedPeerAddresses(config.SCTPAddress)
+		return err
+	}
+	if config.Workload != workloadMix {
+		return fmt.Errorf("mode %s requires the mix payload", config.Mode)
+	}
+	if config.LocalAddress == "" {
+		return fmt.Errorf("mode %s requires local-address: one concrete local IP with port 0", config.Mode)
+	}
+	if _, err := routedLocalAddress(config.LocalAddress); err != nil {
+		return fmt.Errorf("local-address: %w", err)
+	}
+	return nil
 }
 
 // validateControlBaseURL bounds a control base URL to the shape the fixture

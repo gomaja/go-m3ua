@@ -142,6 +142,13 @@ func (record *runRecord) evaluate() {
 	if record.OutstandingScope == "" {
 		record.OutstandingScope = "legacy local counters only; not end-to-end boundary observations"
 	}
+	if record.UnsupportedModes == nil && routedMode(record.Spec.Mode) {
+		record.UnsupportedModes = map[string]string{
+			"ssnm_or_churn_workload":      "unavailable: the routed workload keeps destinations Available and exercises neither SSNM storms nor reference churn",
+			"alternate_or_partial_paths":  "unavailable: the routed workload uses the preferred AS on every path; alternate preference and partial failures are separate correctness cases",
+			"independent_peer_validation": "unavailable: both endpoints use this binary",
+		}
+	}
 	if record.UnsupportedModes == nil {
 		record.UnsupportedModes = map[string]string{
 			"router_or_ssnm_workload":     "unavailable: this fixture does not exercise the existing routing and state APIs",
