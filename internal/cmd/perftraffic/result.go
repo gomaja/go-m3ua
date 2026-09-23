@@ -31,6 +31,28 @@ type runSpec struct {
 	// SSNM is the opt-in SSNM load declaration, nil and omitted when off. A
 	// pointer rather than omitzero, which Go 1.23 does not implement.
 	SSNM *ssnmWorkload `json:"ssnm,omitempty"`
+	// Overload identifies a cohort of a DATA overload trial. It is absent from
+	// every nominal cohort.
+	Overload *overloadSpec `json:"overload,omitempty"`
+}
+
+// overloadMeasurement reports whether the specification is the phased
+// measurement cohort of an overload trial.
+func (specification runSpec) overloadMeasurement() bool {
+	return specification.Overload.measurement()
+}
+
+// overloadSchedule is the phased schedule of an overload measurement cohort,
+// or nil for every other cohort.
+func (specification runSpec) overloadSchedule() *phasedSchedule {
+	if !specification.overloadMeasurement() {
+		return nil
+	}
+	schedule, err := newPhasedSchedule(specification.Overload.Phases)
+	if err != nil {
+		return nil
+	}
+	return schedule
 }
 
 type deliveryResult struct {
@@ -106,6 +128,10 @@ type runRecord struct {
 	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
 	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
 	SSNM                      *ssnmRecord           `json:"ssnm,omitempty"`
+	// Overload is present only on the records of a DATA overload measurement
+	// cohort: the receiver's observations on the receiver record, the full
+	// outcome accounting and acceptance evaluation on the sender record.
+	Overload *overloadRecord `json:"overload,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -158,6 +184,10 @@ func (record *runRecord) evaluate() {
 			"router_or_ssnm_workload":     "unavailable: this fixture does not exercise the existing routing and state APIs",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}
+	}
+	if record.Spec.overloadMeasurement() {
+		record.evaluateOverloadRecord()
+		return
 	}
 	invalid := func(reason string) {
 		record.Reasons = append(record.Reasons, reason)
