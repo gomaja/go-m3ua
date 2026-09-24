@@ -6,9 +6,7 @@ package m3ua
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"syscall"
 	"testing"
 	"time"
 
@@ -117,80 +115,15 @@ func TestWriteOfLargePayloadReportsItsOwnLength(t *testing.T) {
 	}
 }
 
-// Deliberate behaviour, pinned so a change to it is noticed.
-//
-// Sends pass MSG_DONTWAIT, so with no write deadline in force a full send
-// buffer reports syscall.EAGAIN rather than blocking. The send classifies it as
-// indeterminate — submission to the transport had begun — and errors.Is still
-// reaches EAGAIN through that classification. The dependency documents
-// why that stays: a blocking sendmsg to a peer that has stopped reading does
-// not come back for many minutes, bounded by the retransmission backoff rather
-// than by anything the caller can set, and there is no way to interrupt it.
-// Reporting EAGAIN keeps the descriptor under the caller's control.
-//
-// The remedy is a write deadline, which is no longer inert — see
-// TestWriteDeadlineTurnsAFullBufferIntoBackpressure. This test covers the
-// no-deadline path, where the association survives the refusal and recovers
-// once the far side drains.
-func TestWriteReportsEAGAINWhenTheSendBufferIsFull(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	const port = 3092
-	ln := mcListen(t, mcAddr(port, "127.0.0.1"))
-	asps := mcConnect(t, ctx, ln, mcAddr(port, "127.0.0.1"), []string{"127.0.0.2"}, port)
-
-	// Nobody reads on the far side, so the send buffer fills.
-	payload := make([]byte, 512)
-	sent := 0
-	var failure error
-	for i := 0; i < 20000; i++ {
-		if _, err := writePayloadToStream(asps[0].asp, 1, 1, payload); err != nil {
-			failure = err
-			break
-		}
-		sent++
-	}
-
-	if failure == nil {
-		t.Fatalf("Write accepted %d messages without ever reporting a full send buffer. "+
-			"If Write now blocks or waits for writability, this test and the writeRetrying "+
-			"helper in ordering_test.go are obsolete and should be removed.", sent)
-	}
-	if !errors.Is(failure, syscall.EAGAIN) {
-		t.Fatalf("after %d writes the failure was %v, want syscall.EAGAIN", sent, failure)
-	}
-	t.Logf("send buffer filled after %d messages of %d bytes", sent, len(payload))
-
-	// Congestion must not be mistaken for a broken association.
-	if got := asps[0].asp.State(); got != StateASPActive {
-		t.Errorf("state = %v after a full send buffer, want %v: congestion tore the association down",
-			got, StateASPActive)
-	}
-
-	// And it must recover once the far side drains.
-	for i := 0; i < sent; i++ {
-		if _, err := readWithin(t, asps[0].sgp, 5*time.Second); err != nil {
-			break
-		}
-	}
-	if !waitFor(func() bool {
-		_, err := writePayloadToStream(asps[0].asp, 1, 1, payload)
-		return err == nil
-	}, 10*time.Second) {
-		t.Error("the send path never recovered after the far side drained")
-	}
-}
-
 // A write deadline buys what a deadline should: carry on until the message
 // is accepted, or until the deadline.
 //
 // Sends still pass MSG_DONTWAIT, so a full send buffer with no deadline set
-// reports EAGAIN exactly as before — see the test above. What changed in the
+// reports EAGAIN exactly as before — see TestWriteReportsEAGAINWhenTheSendBufferIsFull. What changed in the
 // dependency is that SetWriteDeadline is no longer inert: with one in force the
 // send waits for buffer space rather than refusing, so a burst larger than the
 // send buffer becomes backpressure instead of a write failure. That is the
-// remedy for the congestion the test above pins.
+// remedy for the congestion that test pins.
 func TestWriteDeadlineTurnsAFullBufferIntoBackpressure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
