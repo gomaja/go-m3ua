@@ -25,7 +25,23 @@ import (
 // O(routes) x O(derived) x O(routes) algorithm regardless of how the live
 // implementation in asp_routes.go / endpoint_status.go changes. They are the
 // equivalence oracle every fix in this file is checked against.
+//
+// aspRoutes.derived has since been keyed by MTP Route (GitHub issue #125), so
+// the oracle reads it through flatASPDerived, the single map it was before.
 // ---------------------------------------------------------------------------
+
+// flatASPDerived returns every route's derived destinations in one map, the
+// shape aspRoutes.derived had before GitHub issue #125. The caller must hold
+// aspRoutes.mu.
+func flatASPDerived(r *aspRoutes) map[aspDerivedRangeKey]aspDestinationStatus {
+	flat := make(map[aspDerivedRangeKey]aspDestinationStatus)
+	for _, destinations := range r.derived {
+		for key, status := range destinations {
+			flat[key] = status
+		}
+	}
+	return flat
+}
 
 func referenceMTPDestinationStatuses(r *aspRoutes) []MTPDestinationStatus {
 	if r == nil {
@@ -34,10 +50,11 @@ func referenceMTPDestinationStatuses(r *aspRoutes) []MTPDestinationStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	statuses := make([]MTPDestinationStatus, 0, len(r.derived))
+	derived := flatASPDerived(r)
+	statuses := make([]MTPDestinationStatus, 0, len(derived))
 	for _, mtpRoute := range r.config.mtpRoutes {
 		keys := make([]aspDerivedRangeKey, 0)
-		for key := range r.derived {
+		for key := range derived {
 			if key.mtpRoute == mtpRoute.id {
 				keys = append(keys, key)
 			}
@@ -53,7 +70,7 @@ func referenceMTPDestinationStatuses(r *aspRoutes) []MTPDestinationStatus {
 				MTPRoute:  key.mtpRoute,
 				PointCode: key.pointCode,
 				Mask:      key.mask,
-			}, r.derived[key]))
+			}, derived[key]))
 		}
 	}
 	return statuses
