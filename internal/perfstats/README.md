@@ -163,10 +163,28 @@ between bounds, no probe retries, and a fixed probe budget. Rates are bounded by
 a maximum above it is rejected by the constructor rather than allowed to wrap
 a comparison and report a bracket that was never refined. Probes must be recorded in
 execution order at exactly the selected rate. Only a refined bracket proceeds
-to validation: exactly five full repetitions at the lower passing rate must
-all pass, and that lower rate is the result. `lower-bound-only`,
-`integer-resolution-limit` and `probe-budget-exhausted` are inconclusive,
-never widened into a pass.
+to validation: five full repetitions at the lower passing rate must all pass,
+and that lower rate is the result. `lower-bound-only`,
+`integer-resolution-limit`, `probe-budget-exhausted` and
+`validation-rounds-exhausted` are inconclusive, never widened into a pass.
+
+The budget asks for "the lower passing rate, not a transient peak". A bracket
+refined to within five percent puts the selected rate within five percent of
+one that failed, and on the reference environment run-to-run capacity varies
+by about as much: in the smoke searches of 2026-09-24 two of four brackets
+closed on a rate whose repetitions then failed, and a campaign row whose
+searches must all validate would almost never be evaluated. A repetition that
+fails or does not demonstrate the selected rate therefore shows that the rate
+was a transient peak. It bounds the bracket from above exactly as a failed
+probe does, the highest passing probe below it becomes the lower bound, and
+the search resumes: it refines the new bracket and validates the rate it
+selects there with a fresh round of five. A round ends at its first repetition
+that does not pass; repetitions are never retried and a rejected rate is never
+probed again. After `MaxValidationRounds` (3) rounds that did not validate the
+search ends `validation-rounds-exhausted`. An inconclusive repetition (missing
+or invalid evidence) says nothing about the rate and ends validation
+inconclusive, as an inconclusive probe ends the search. If no rate below the
+rejected one passes, the search ends `no-passing-rate` under the rule below.
 
 Each probe contributes one of four outcomes:
 
@@ -187,7 +205,7 @@ Each probe contributes one of four outcomes:
   rate and ends the search.
 
 `no-passing-rate` is a failure when every probe failed, and inconclusive when
-any probe was only not demonstrated.
+any probe or validation repetition was only not demonstrated.
 
 A probe whose warm-up could not sustain the rate never reaches measurement; its
 failed warm-up cohort is accepted as that probe's evidence, and it can only fail
@@ -212,7 +230,7 @@ decided: a fixture fault says nothing about the rate. Loss counts alone are not 
 abort for another reason, such as a failed control request or a receiver read
 failure, also strands messages but says nothing about the rate, and is rejected
 as invalid input. The same failed warm-up in a validation repetition is a failed
-repetition, never a pass. Campaign identity compares a warm-up cohort with the
+(or not-demonstrated) repetition, never a pass: it rejects the selected rate. Campaign identity compares a warm-up cohort with the
 measurement workload in every field except its duration; the fixture runs its
 warm-up with the measurement's drain, outstanding limit, payload and
 instrumentation, and a warm-up that differed in any of them would be rejected.
@@ -226,10 +244,15 @@ inconclusive. Exit statuses are 0 pass, 1 fail, 2 inconclusive, 3 invalid
 input.
 
 While the search is still running, the response carries `next_probe_rate`,
-the rate the search selected for its next probe. A campaign driver runs one
-probe at that rate, appends it and asks again, so the probe order is always
-the search's own; once the search terminates the field is absent and
-`selected_rate` names the rate for the five validation repetitions.
+the rate the search selected for its next probe. Once the bracket is refined
+it carries `next_repetition_rate` instead, the rate of the next validation
+repetition, until the round validates or ends. A campaign driver runs one probe
+or repetition at the rate named, appends it to `probes` or `repetitions` and
+asks again, so the order is always the search's own; when neither field is
+present the search is decided. The request lists probes and repetitions each
+in execution order, and the CLI replays them interleaved as the search asked
+for them; a run at another rate, or one the search did not ask for, is invalid
+input. `validation_rounds` records each round's rate and repetition outcomes.
 
 Each run record must carry `send_duration.max_ns` and a `manifest`. Neither is
 optional: a record without the send-duration maximum cannot show whether a
