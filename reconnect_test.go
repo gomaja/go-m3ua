@@ -6,10 +6,15 @@ package m3ua
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
 )
 
 // An ASP that reboots is the most ordinary event on a live SGP link, and the
@@ -45,19 +50,18 @@ func (p *rawPeer) abort(t *testing.T) {
 	}
 }
 
-// Once traffic resumes, a peer that aborted must take the Association out of
-// ASP-ACTIVE, so an owner polling State() learns its association is gone and
-// can redial.
+// A peer that aborted must take the Association out of ASP-ACTIVE while the
+// application keeps offering traffic, so an owner polling State() learns its
+// association is gone and can redial.
 //
-// The detection is traffic-driven, and deliberately asserted that way. go-m3ua
-// never subscribes to SCTP events (there is no SubscribeEvents/SubscribeEvent
-// call anywhere in the package), so an ABORT arriving at an idle association
-// raises no notification: the reader stays parked in its read, and nothing
-// reports the loss until either a write draws an out-of-the-blue ABORT back —
-// what this test does — or M3UA's own T(beat) expires, which is the case
-// TestPeerAbortWithHeartbeatIsDetectedWhileIdle covers. An association that is
-// both idle and has BEAT disabled falls back on the kernel's SCTP path
-// heartbeats, which on Linux defaults take minutes.
+// The detection does not depend on the traffic. The peer's Abort puts an ABORT
+// on the wire at once, and the reader learns of it from the SCTP_COMM_LOST
+// notification setUpSocket subscribes to. The writes are what make this hard:
+// any of them can take the socket's pending ECONNRESET before the reader asks
+// for it, and until COMM_LOST ended the read, one that did left the reader
+// parked and the Association ASP-ACTIVE indefinitely.
+// TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError forces that
+// interleaving; this test races it the way an application does.
 func TestPeerAbortIsDetectedOnceTrafficResumes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -87,8 +91,12 @@ func TestPeerAbortIsDetectedOnceTrafficResumes(t *testing.T) {
 }
 
 // With BEAT enabled, an aborted peer must be detected without any traffic at
-// all: T(beat) is M3UA's liveness mechanism (RFC 4666 Section 4.3.4.6) and the
-// only thing covering an idle association.
+// all. SCTP_COMM_LOST normally reports the ABORT before T(beat) can expire:
+// RFC 4666 Section 4.3.4.6 offers Heartbeat for "transport layers that do not
+// have their own heartbeat mechanism for detecting loss of the transport
+// association (i.e., other than SCTP)". T(beat) is what covers a peer whose
+// association stays up while its M3UA goes silent;
+// TestHeartbeatExpiryIsDetectedAgainstSilentPeer pins that.
 func TestPeerAbortWithHeartbeatIsDetectedWhileIdle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -106,9 +114,86 @@ func TestPeerAbortWithHeartbeatIsDetectedWhileIdle(t *testing.T) {
 
 	peer.abort(t)
 
-	// No writes here: the heartbeat must find it on its own.
+	// No writes here: the association must find it on its own.
 	if !waitFor(func() bool { return conn.State() != StateASPActive }, 15*time.Second) {
-		t.Fatalf("state is still %v fifteen seconds after the peer aborted; T(beat) did not detect it", conn.State())
+		t.Fatalf("state is still %v fifteen seconds after the peer aborted, with no traffic", conn.State())
+	}
+}
+
+// A peer's ABORT reaches a one-to-one SCTP socket twice: as the socket's
+// pending error, ECONNRESET, and as an SCTP_COMM_LOST notification queued for
+// the reader. The pending error is handed to whichever call asks first and then
+// forgotten, and a write asks too: Linux turns a send's EPIPE into the pending
+// error when there is one (sctp_error in net/sctp/socket.c). Once a write has
+// taken it, the reader's next recvmsg finds nothing -- an aborted association
+// leaves no RCV_SHUTDOWN behind, so a non-blocking read answers EAGAIN -- and
+// the reader parks for good. The Association then stayed ASP-ACTIVE with every
+// write failing, which is how TestPeerAbortIsDetectedOnceTrafficResumes and
+// TestRedialAfterPeerAbortEstablishes timed out under load.
+//
+// The notification is the one report a writer cannot take, so it has to end
+// the read. This forces the losing interleaving, starting the reader only after
+// a write has taken the error, with the library's own socket set-up,
+// notification handler and reader.
+func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	peer := newRawPeer(t, 3056, handshakeOnly)
+	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:3056")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	association := newAssociation(RoleASP, newASPAssociationConfigForTest(
+		&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2}))
+	restarts := &restartWatcher{}
+	restarts.setRoute(func(sctp.SCTPAssocID) *Association { return association })
+	conn, err := dialAssociation(ctx, "sctp", laddr, peer.addr, 5*time.Second, restarts)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	association.sctpConn = conn
+	if err := association.setUpSocket(); err != nil {
+		t.Fatalf("setting up the socket: %v", err)
+	}
+	t.Cleanup(func() { _ = association.Close() })
+
+	peer.abort(t)
+
+	// Nothing reads yet, so the first write to fail is the one the socket
+	// hands the abort to. An earlier write can still succeed if it beats the
+	// ABORT in; the peer then answers it with one of its own.
+	frame := association.encodeDataFrame(&DataRequest{
+		AS:           associationScope(association, 1),
+		ProtocolData: testProtocolData([]byte("after-abort")),
+	})
+	info := *association.sctpInfo
+	info.Stream = 1
+	var writeErr error
+	if !waitFor(func() bool {
+		_, writeErr = association.writeSCTPData(frame, &info)
+		return writeErr != nil
+	}, 5*time.Second) {
+		t.Fatal("writes still succeed five seconds after the peer aborted")
+	}
+	if !errors.Is(writeErr, syscall.ECONNRESET) {
+		t.Fatalf("the first failed write returned %v, want the abort's ECONNRESET; "+
+			"without it this test is not exercising a write that took the socket error", writeErr)
+	}
+
+	readErr := make(chan error, 1)
+	go association.readLoop(make(chan inbound), readErr)
+
+	// Generous on purpose: the read ends at once or never.
+	select {
+	case err := <-readErr:
+		if !errors.Is(err, ErrSCTPNotAlive) {
+			t.Errorf("the read ended with %v, want the lost association reported as %v", err, ErrSCTPNotAlive)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reader is still parked ten seconds after the peer aborted; " +
+			"SCTP_COMM_LOST did not end the read, so nothing will report the loss")
 	}
 }
 
@@ -123,7 +208,7 @@ func TestRedialAfterPeerAbortEstablishes(t *testing.T) {
 
 	first := dialRawPeer(t, ctx, peer, 3052, &HeartbeatInfo{Enabled: false})
 	peer.abort(t)
-	// Traffic-driven detection, as above.
+	// Traffic keeps flowing while the abort is detected, as above.
 	if !waitFor(func() bool {
 		_, _ = writePayload(first, 1, []byte("after-abort"))
 		return first.State() != StateASPActive

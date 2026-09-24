@@ -7,6 +7,7 @@ package m3ua
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -541,10 +542,13 @@ func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
 	}
 }
 
-// Every other association state already reaches the user by another route --
-// COMM_LOST and SHUTDOWN_COMP fail the read, which surfaces through Err() --
-// so reporting them here would double-report them under a name that does not
-// fit.
+// Every other association state reaches the user by another route, so
+// reporting it here would double-report it under a name that does not fit.
+// SCTP_COMM_LOST's route is the handler's own error, which fails the read and
+// surfaces through Err(); see
+// TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError for why the read that
+// follows it cannot be relied on to fail instead. SHUTDOWN_COMP's read fails by
+// itself.
 func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
 	for _, st := range []sctp.SCTPState{
 		sctp.SCTP_COMM_UP, sctp.SCTP_COMM_LOST,
@@ -554,7 +558,12 @@ func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
 		w := &restartWatcher{}
 		w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
 
-		if err := w.handle(assocChangeEvent(st, 1)); err != nil {
+		err := w.handle(assocChangeEvent(st, 1))
+		if st == sctp.SCTP_COMM_LOST {
+			if !errors.Is(err, ErrSCTPNotAlive) {
+				t.Fatalf("handle(%v) returned %v, want the read failed with %v", st, err, ErrSCTPNotAlive)
+			}
+		} else if err != nil {
 			t.Fatalf("handle(%v) returned %v", st, err)
 		}
 
@@ -637,5 +646,21 @@ func TestUnparseableOrUnknownEventsDoNotFailTheRead(t *testing.T) {
 	empty := &restartWatcher{}
 	if err := empty.handle(assocChangeEvent(sctp.SCTP_RESTART, 1)); err != nil {
 		t.Errorf("handle with no route = %v, want nil", err)
+	}
+}
+
+// SCTP_COMM_LOST is the exception: a one-to-one socket carries one
+// association, so the loss read from it is the loss of the association being
+// read, whether or not the route knows the ID it names.
+func TestCommunicationLostFailsTheReadWhateverTheRoute(t *testing.T) {
+	unknown := &restartWatcher{}
+	unknown.setRoute(func(sctp.SCTPAssocID) *Association { return nil })
+	for name, w := range map[string]*restartWatcher{
+		"unknown association": unknown,
+		"no route":            {},
+	} {
+		if err := w.handle(assocChangeEvent(sctp.SCTP_COMM_LOST, 999)); !errors.Is(err, ErrSCTPNotAlive) {
+			t.Errorf("%s: handle(SCTP_COMM_LOST) = %v, want the read failed with %v", name, err, ErrSCTPNotAlive)
+		}
 	}
 }

@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/gomaja/go-sctp"
@@ -45,10 +46,11 @@ func (w *restartWatcher) setRoute(f func(sctp.SCTPAssocID) *Association) {
 // handle is the sctp.NotificationHandler. It runs on the goroutine that read
 // the notification, which is the reader of the association it concerns.
 //
-// It never returns an error. The dependency propagates one out of the read, so
-// returning it would turn an unparseable event -- something this layer neither
-// caused nor can fix -- into a failed read and a dead association. An event we
-// cannot make sense of is worth strictly less than the association carrying it.
+// It returns an error for SCTP_COMM_LOST alone. The dependency propagates one
+// out of the read, so returning it for an unparseable event -- something this
+// layer neither caused nor can fix -- would turn it into a failed read and a
+// dead association. An event we cannot make sense of is worth strictly less
+// than the association carrying it.
 func (w *restartWatcher) handle(b []byte) error {
 	n, err := sctp.ParseNotification(b)
 	if err != nil {
@@ -56,11 +58,35 @@ func (w *restartWatcher) handle(b []byte) error {
 	}
 
 	ac, ok := n.(*sctp.AssocChange)
+	if ok && ac.State == sctp.SCTP_COMM_LOST {
+		// RFC 6458 Section 6.1.1: "The association has failed. The association
+		// is now in the closed state." RFC 4666 Section 4.3.1: "SCTP CDI is
+		// understood as either a SHUTDOWN_COMPLETE notification or a
+		// COMMUNICATION_LOST notification from the SCTP layer." The read has to
+		// end on it.
+		//
+		// It used to be left to the read that follows, which was expected to
+		// fail with the socket's pending error. Linux hands that error to
+		// whichever call asks first, a send included (sctp_error in
+		// net/sctp/socket.c), and then forgets it. When a write asked first,
+		// the next read found nothing -- an abort leaves no RCV_SHUTDOWN, so a
+		// non-blocking read answers EAGAIN -- and the reader parked for good:
+		// ASP-ACTIVE indefinitely, every write failing. This notification is
+		// the one report no other call can take.
+		//
+		// A one-to-one socket carries one association, so the event concerns
+		// the association being read whatever the route knows. SHUTDOWN_COMP,
+		// the other half of SCTP CDI, needs no such help: the SHUTDOWN before it
+		// set RCV_SHUTDOWN, and the read then returns EOF whatever other calls
+		// were made.
+		return fmt.Errorf("%w: SCTP association lost (SCTP_COMM_LOST, %s)",
+			ErrSCTPNotAlive, sctp.ErrorCauseString(uint32(ac.Error)))
+	}
 	if !ok || ac.State != sctp.SCTP_RESTART {
-		// Every other association event already has a route to the user:
-		// COMM_LOST and SHUTDOWN_COMP fail the read, which monitor() reports
-		// through Err(). Only a restart leaves the association usable and would
-		// otherwise pass unmentioned.
+		// Every other association event is either followed by a read that
+		// fails on its own, as SHUTDOWN_COMP is, or leaves nothing to act on.
+		// Only a restart leaves the association usable and would otherwise
+		// pass unmentioned.
 		return nil
 	}
 
@@ -178,15 +204,20 @@ func (c *Association) initiatesASPSM() bool {
 // names one event and leaves the rest alone, which is also why the dependency
 // documents the plural form as deprecated.
 //
-// A failure here is not fatal. The association works exactly as it did before;
-// only the restart indication is unavailable, and losing an optional Layer
-// Management report is not worth refusing to serve traffic.
+// The same subscription delivers SCTP_COMM_LOST, which is what reliably ends
+// the read when the association fails; see restartWatcher.handle.
+//
+// A failure here is not fatal. The association still serves traffic; the
+// restart indication is unavailable, and a lost association is then noticed
+// only through the socket's pending error, which a concurrent write can take
+// before the reader does. That is logged rather than refused.
 func (c *Association) subscribeRestart() {
 	if c.sctpConn == nil {
 		return
 	}
 	if err := c.sctpConn.SubscribeEvent(sctp.SCTP_ASSOC_CHANGE, true); err != nil {
 		logf("m3ua: could not subscribe to SCTP association events, "+
-			"M-SCTP_RESTART will not be reported: %v", err)
+			"M-SCTP_RESTART will not be reported and a lost association "+
+			"may go unnoticed while writes fail: %v", err)
 	}
 }
