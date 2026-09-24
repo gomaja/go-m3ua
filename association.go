@@ -3116,9 +3116,11 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 // getsockopt(2)", after capping the request at net.core.rmem_max. A 1 MiB
 // request therefore reads back as 2 MiB, and one above the cap as twice the
 // cap, which is how an operator sees that the cap applied. A socket left at the
-// default reports net.core.rmem_default undoubled. The receive window the
-// association announced at setup was half the size reported here, but never
-// below the 1500 octets RFC 9260 Sections 3.3.2 and 3.3.3 require.
+// default reports net.core.rmem_default undoubled, which can be more than a
+// capped request gives, so compare the two before concluding that a request
+// enlarged anything. The receive window the association announced at setup
+// was half the size reported here, but never below the 1500 octets RFC 9260
+// Sections 3.3.2 and 3.3.3 require.
 //
 // It returns an error once the association is gone.
 func (c *Association) SocketReceiveBuffer() (int, error) {

@@ -7,6 +7,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -337,4 +338,126 @@ func TestSelectedSocketBuffersAfterAccept(t *testing.T) {
 		requireSocketBuffers(t, c.sgp, kernel.receive(listenerReceive), kernel.send(selectedSend))
 		requireWindow(t, c.asp, kernel.receive(listenerReceive))
 	})
+}
+
+// A Listener's socket sizes are fixed when Listen is called. Changing its
+// default configuration afterwards, with no selector involved, neither refuses
+// later peers nor resizes their sockets.
+func TestListenerSocketBuffersAreFixedAtListen(t *testing.T) {
+	kernel := readSocketBufferKernel(t)
+	receive, send := kernel.rmemMax/8, kernel.wmemMax/8
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), NewListenerConfig(socketBufferConfig(receive, send)))
+	if err != nil {
+		skipIfSCTPUnsupported(t, err)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	ln.SocketReceiveBuffer = 2 * receive
+	ln.SocketSendBuffer = 2 * send
+
+	type acceptResult struct {
+		association *Association
+		err         error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		association, err := ln.Accept(ctx)
+		accepted <- acceptResult{association, err}
+	}()
+	asp, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), ln.Addr().(*sctp.SCTPAddr), mcASPConfig(0xEE000020))
+	if asp != nil {
+		t.Cleanup(func() { _ = asp.Close() })
+	}
+	var result acceptResult
+	select {
+	case result = <-accepted:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Accept never returned")
+	}
+	if result.association != nil {
+		t.Cleanup(func() { _ = result.association.Close() })
+	}
+	if result.err != nil {
+		t.Fatalf("Accept: %v", result.err)
+	}
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	requireSocketBuffers(t, result.association, kernel.receive(receive), kernel.send(send))
+	requireWindow(t, asp, kernel.receive(receive))
+}
+
+// Refusing a peer for its selected receive size releases what Accept took for
+// it: the SCTP association is closed, so the peer's read ends, nothing is left
+// in the Listener's pre-M3UA set or counted as an Accept in progress, and
+// refusing several peers opens no descriptors.
+func TestRefusedReceiveBufferReleasesTheAcceptedSocket(t *testing.T) {
+	kernel := readSocketBufferKernel(t)
+	listenerConfig := NewListenerConfig(socketBufferConfig(kernel.rmemMax/8, 0))
+	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
+		return socketBufferConfig(kernel.rmemMax/4, 0), nil
+	}
+	ln, err := listenSGP("m3ua", mcAddr(0, "127.0.0.1"), listenerConfig)
+	if err != nil {
+		skipIfSCTPUnsupported(t, err)
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	refuse := func(t *testing.T) {
+		t.Helper()
+		refused := make(chan error, 1)
+		go func() {
+			association, err := ln.Accept(context.Background())
+			if association != nil {
+				_ = association.Close()
+			}
+			refused <- err
+		}()
+		peer, err := sctp.DialSCTP("sctp", nil, ln.Addr().(*sctp.SCTPAddr))
+		if err != nil {
+			t.Fatalf("peer dial: %v", err)
+		}
+		defer func() { _ = peer.Close() }()
+		select {
+		case err := <-refused:
+			if !errors.Is(err, ErrInvalidSCTPConfig) {
+				t.Fatalf("Accept error = %v, want ErrInvalidSCTPConfig", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Accept never refused the peer")
+		}
+
+		if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := peer.SCTPRead(make([]byte, 64)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+			t.Fatalf("peer read after the refusal = %v; want the association ended", err)
+		}
+		ln.muConns.Lock()
+		pending, inAccept := len(ln.pendingSCTP), ln.activeAccept
+		ln.muConns.Unlock()
+		if pending != 0 || inAccept != 0 {
+			t.Fatalf("after the refusal the Listener holds %d pending SCTP associations and %d Accepts in progress; want none",
+				pending, inAccept)
+		}
+	}
+
+	// One refusal first, so descriptors the runtime opens lazily on first
+	// network use are in the baseline; see openDescriptors.
+	refuse(t)
+	baseline, haveFDs := openDescriptors()
+	const rounds = 5
+	for range rounds {
+		refuse(t)
+	}
+	if haveFDs {
+		if got, _ := openDescriptors(); got > baseline {
+			t.Fatalf("open descriptors = %d after %d refused peers, baseline %d: a refused association's socket is not released",
+				got, rounds, baseline)
+		}
+	}
 }

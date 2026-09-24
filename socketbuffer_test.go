@@ -156,3 +156,15 @@ func TestSocketBufferControlOnlyWhenRequested(t *testing.T) {
 		t.Fatal("a send size installed no Control hook")
 	}
 }
+
+// Without a selector an accepted association's configuration is the default
+// the listening socket was sized from when Listen was called. Changing that
+// default later resizes nothing, so there is no mismatch to refuse.
+func TestUnselectedAcceptKeepsTheListenSizes(t *testing.T) {
+	listener := newSGPListener(NewListenerConfig(socketBufferConfig(1<<20, 256<<10)))
+	listener.SocketReceiveBuffer = 2 << 20
+	listener.SocketSendBuffer = 512 << 10
+	if _, err := listener.resolveAcceptedAssociationConfig(RoleSGP, AcceptInfo{}); err != nil {
+		t.Fatalf("resolve error = %v, want nil", err)
+	}
+}

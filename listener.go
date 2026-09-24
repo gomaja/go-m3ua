@@ -275,14 +275,16 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 	}
 	l := newListener(e, cfg)
 	// The default sizes the listening socket even when a selector chooses every
-	// accepted association's configuration; see ListenerConfig.
+	// accepted association's configuration, so its socket sizes are validated
+	// either way; see ListenerConfig.
 	if err := validateSCTPConfig(l.AssociationConfig.SCTPConfig); err != nil {
 		return nil, err
 	}
-	// A selector-only Listener has no meaningful default association policy.
-	// Its selected snapshot is validated in Accept, before any socket setup or
-	// M3UA parsing. Validate the default here only when it can actually be used.
-	if l.listenerConfig.SelectAssociationConfig == nil {
+	// With a selector, the default's association policy is never used for an
+	// accepted association: the selected snapshot is validated in Accept,
+	// before any socket setup or M3UA parsing. Validate the default's policy
+	// here only when it can actually be used.
+	if !l.selectsAssociationConfig() {
 		if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
 			return nil, err
 		}
@@ -386,10 +388,22 @@ func (l *Listener) resolveAcceptedAssociationConfig(
 	return associationConfig, nil
 }
 
-// validateSelectedReceiveBuffer refuses a selected SocketReceiveBuffer the
-// accepted association cannot have. The INIT ACK announced the listening
-// socket's receive window before the selector ran; see ListenerConfig.
+// selectsAssociationConfig reports whether SelectAssociationConfig, rather than
+// the default the listening socket was sized from, chooses each accepted
+// association's configuration.
+func (l *Listener) selectsAssociationConfig() bool {
+	return l.listenerConfig != nil && l.listenerConfig.SelectAssociationConfig != nil
+}
+
+// validateSelectedReceiveBuffer refuses a SocketReceiveBuffer returned by
+// SelectAssociationConfig that the accepted association cannot have: the INIT
+// ACK announced the listening socket's receive window before the selector ran;
+// see ListenerConfig. Without a selector there is nothing to compare, since the
+// sizes fixed at Listen simply apply.
 func (l *Listener) validateSelectedReceiveBuffer(selected *AssociationConfig) error {
+	if !l.selectsAssociationConfig() {
+		return nil
+	}
 	requested := socketBuffersFor(selected.SCTPConfig).receive
 	if requested == 0 || requested == l.buffers.receive {
 		return nil
@@ -399,10 +413,14 @@ func (l *Listener) validateSelectedReceiveBuffer(selected *AssociationConfig) er
 }
 
 // applySelectedSendBuffer gives an accepted association the SocketSendBuffer
-// its selected configuration asks for, where that differs from the size it
+// SelectAssociationConfig asks for, where that differs from the size it
 // inherited from the listening socket. Unlike the receive buffer, the send
-// buffer is announced to no one, so applying it now is exact.
+// buffer is announced to no one, so applying it now is exact. Without a
+// selector the size fixed at Listen applies, as the receive size does.
 func (l *Listener) applySelectedSendBuffer(sctpAssociation *sctp.SCTPConn, selected *AssociationConfig) error {
+	if !l.selectsAssociationConfig() {
+		return nil
+	}
 	send := socketBuffersFor(selected.SCTPConfig).send
 	if send == 0 || send == l.buffers.send {
 		return nil

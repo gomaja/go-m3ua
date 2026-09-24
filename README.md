@@ -578,30 +578,42 @@ default (RFC 9260 Sections 6.3.1 and 16). Size the buffer for what arrives
 during the longest pause the receiver has to ride out, roughly rate × pause ×
 (payload + 232 bytes). One association carrying 25,000 messages/s with 128-byte
 payloads stalled that way in 5 of 6 two-minute runs at the default buffer, and
-in none of 6 with a 16 MiB receive buffer.
+in none of 6 with `net.core.rmem_default` raised to 16 MiB.
 
 Linux caps a request at `net.core.rmem_max` (`wmem_max` for the send buffer) and
-doubles it, as `socket(7)` describes. The library never exceeds the cap with
-`SO_RCVBUFFORCE`, so check what took effect: a reported size below twice the
-request means the cap applied, and raising it is the operator's decision.
+then doubles it, as `socket(7)` describes, so where the cap allows, the 8 MiB
+request above gives a 16 MiB buffer and an 8 MiB window. A socket left unset
+takes `net.core.rmem_default` as it is, undoubled, and the cap applies even when
+`rmem_default` is the larger. On such a host a request can shrink the buffer:
+with `rmem_default` at 16 MiB and `rmem_max` at 4 MiB, the 8 MiB request gives
+an 8 MiB buffer and a 4 MiB window, where leaving it unset gave 16 MiB and
+8 MiB. The library never exceeds the cap with `SO_RCVBUFFORCE`, so compare what
+took effect with what an unset socket gets; raising the cap is the operator's
+decision.
 
 ```go
 if size, err := association.SocketReceiveBuffer(); err == nil {
-    log.Printf("SO_RCVBUF is %d bytes; the window announced at setup was %d", size, size/2)
+    log.Printf("SO_RCVBUF %d bytes, window announced at setup %d", size, size/2)
 }
 ```
 
-This replaces raising `net.core.rmem_default`, which resizes every socket on the
-host. `SocketReceiveBuffer` sizes only the associations that need it, and
-`rmem_max` only has to permit the request.
+`SocketReceiveBuffer` is an alternative to raising `net.core.rmem_default`,
+which resizes every socket on the host: it sizes only the associations that
+need it, provided `rmem_max` is at least the request. The two are counted
+differently. The 16 MiB measured above was set through `rmem_default`, which a
+socket takes undoubled; `SocketReceiveBuffer = 16 << 20` gives twice that, a
+32 MiB buffer, where `rmem_max` allows it, and the equivalent request is
+`8 << 20`.
 
-A Listener sizes its listening socket from `DefaultAssociationConfig`, and every
-association it accepts inherits those sizes. `SelectAssociationConfig` runs
-after the INIT ACK has announced the window, so a selected
-`SocketReceiveBuffer` must be zero or the default's; anything else refuses that
-peer with `ErrInvalidSCTPConfig`, and a peer that needs a different receive size
-needs a Listener of its own. A selected `SocketSendBuffer` is applied to the
-accepted socket.
+A Listener sizes its listening socket from `DefaultAssociationConfig` when
+`Listen` is called, and every association it accepts inherits those sizes;
+changing the default afterwards resizes nothing. An accepted association's
+receive size can only come from there. `SelectAssociationConfig` runs after the
+INIT ACK has announced the window, so a selected `SocketReceiveBuffer` cannot
+raise it: it must be zero or the default's, and anything else refuses that peer
+with `ErrInvalidSCTPConfig`, on a Listener configured with a selector alone
+too. A peer that needs a different receive size needs a Listener of its own. A
+selected `SocketSendBuffer` is applied to the accepted socket.
 
 ## Routing Key Management
 

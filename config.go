@@ -131,23 +131,32 @@ type SCTPConfig struct {
 	// changes the buffer and not the window the peer was given.
 	//
 	// socket(7) describes what Linux does with the request: it caps it at
-	// net.core.rmem_max and doubles it for bookkeeping overhead. The library
-	// never uses SO_RCVBUFFORCE to exceed the cap; raising the cap is the
-	// operator's decision. Association.SocketReceiveBuffer reports the size
-	// that took effect.
+	// net.core.rmem_max and then doubles it for bookkeeping overhead, so the
+	// socket gets twice the smaller of the two. A socket left unset gets
+	// net.core.rmem_default as it is, undoubled, and the cap applies even where
+	// rmem_default is the larger, so on such a host a request can leave the
+	// socket smaller than the default did: with rmem_default at 16 MiB and
+	// rmem_max at 4 MiB, a request of 8 MiB gives an 8 MiB buffer and a 4 MiB
+	// window where leaving it unset gave 16 MiB and 8 MiB. Compare
+	// Association.SocketReceiveBuffer, which reports the size that took effect,
+	// with what an unset socket reports. The library never uses SO_RCVBUFFORCE
+	// to exceed the cap; raising the cap is the operator's decision.
 	//
 	// A Listener applies its DefaultAssociationConfig's value to the listening
-	// socket; see ListenerConfig for what a selected configuration may change.
+	// socket when Listen is called, and an accepted association's receive size
+	// can only come from there; see ListenerConfig.
 	SocketReceiveBuffer int
 
 	// SocketSendBuffer is the SO_SNDBUF size, in bytes, requested for the
-	// association's SCTP socket: how much it may hold waiting to be sent and
-	// acknowledged (RFC 6458 Section 8.1.7). Zero leaves the size the socket
-	// starts with, as for SocketReceiveBuffer.
+	// association's SCTP socket: RFC 6458 Section 8.1.7 has it control "the
+	// amount of data SCTP may have waiting in internal buffers to be sent".
+	// Linux goes on charging DATA against it after sending it, until the peer
+	// acknowledges it. Zero leaves the size the socket starts with, as for
+	// SocketReceiveBuffer.
 	//
-	// Linux caps the request at net.core.wmem_max and doubles it, as socket(7)
-	// describes; Association.SocketSendBuffer reports the size that took
-	// effect.
+	// Linux caps the request at net.core.wmem_max and then doubles it, as
+	// socket(7) describes, even where net.core.wmem_default is the larger;
+	// Association.SocketSendBuffer reports the size that took effect.
 	SocketSendBuffer int
 }
 
@@ -602,19 +611,30 @@ type AssociationConfigSelector func(AcceptInfo) (*AssociationConfig, error)
 // DefaultAssociationConfig also sizes the listening socket, whether or not
 // SelectAssociationConfig is set: its SCTPConfig.SocketReceiveBuffer and
 // SocketSendBuffer are applied before listen, and every accepted association
-// inherits them.
+// inherits them. The sizes are fixed when Listen is called; changing the
+// default afterwards resizes nothing.
 //
-// The INIT ACK has announced the receive window by the time
-// SelectAssociationConfig runs, so a selected SocketReceiveBuffer must be zero
-// or the default's own; any other value refuses that association with
-// ErrInvalidSCTPConfig, and the Listener carries on serving. Applying it to the
-// accepted socket instead could not honour it, because Linux keeps the window
-// it announced. A larger buffer would give the peer no more window, and a
-// smaller one would leave the peer entitled to more than the buffer holds,
-// which is the overflow the setting exists to prevent and what RFC 9260
-// Sections 3.3.2 and 3.3.3 advise against: "During the life of the
-// association, this buffer space SHOULD NOT be reduced". A peer that needs a
-// different receive size needs a Listener of its own.
+// An accepted association's receive size can therefore only come from
+// DefaultAssociationConfig, and a selector cannot raise it. That holds for a
+// Listener configured with a selector alone as well, whose default from
+// NewListenerConfig(nil) leaves the kernel's size. The INIT ACK has announced
+// the receive window by the time SelectAssociationConfig runs, so a selected
+// SocketReceiveBuffer must be zero or the default's own. Any other value
+// refuses that association with ErrInvalidSCTPConfig once its SCTP association
+// is up, and the Listener carries on serving.
+//
+// Applying a different size to the accepted socket could not honour it, because
+// Linux keeps the window it announced. A larger buffer would give the peer no
+// more window, and would hold back the window updates that reopen it: Linux
+// sends one only once the window has grown by the larger of the path MTU and
+// the socket buffer shifted right by net.sctp.rwnd_update_shift, 4 by default
+// (sctp_peer_needs_update in net/sctp/associola.c). A 32 MiB buffer behind the
+// 106,496-octet window a 212,992-byte default announces would wait for 2 MiB of
+// growth, more than the whole window. A smaller buffer would leave the peer
+// entitled to more than it holds, which is the overflow the setting exists to
+// prevent and what RFC 9260 Sections 3.3.2 and 3.3.3 advise against: "During
+// the life of the association, this buffer space SHOULD NOT be reduced". A peer
+// that needs a different receive size needs a Listener of its own.
 //
 // A selected SocketSendBuffer is announced to no one, so a non-zero one is
 // applied to the accepted socket exactly.
