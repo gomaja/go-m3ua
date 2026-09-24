@@ -5,16 +5,19 @@
 package m3ua
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"syscall"
 
 	"github.com/gomaja/go-sctp"
 )
 
-// restartWatcher turns SCTP association-change notifications into the
-// M-SCTP_RESTART indication of RFC 4666 Section 1.6.3: "M3UA informs LM that an
-// SCTP restart indication has been received."
+// restartWatcher handles SCTP_ASSOC_CHANGE, the one notification this package
+// subscribes to (see associationEvents), and acts on two of its states.
 //
+// SCTP_RESTART becomes the M-SCTP_RESTART indication of RFC 4666 Section
+// 1.6.3: "M3UA informs LM that an SCTP restart indication has been received."
 // An SCTP restart is the peer re-establishing the same association without
 // tearing the old one down first -- a peer process that died and came back on
 // the same five-tuple, most often. RFC 9260 Section 5.2.4 has the receiver keep
@@ -22,6 +25,10 @@ import (
 // to move the ASP to ASP-DOWN. At an ASP it must also pause affected SS7
 // destinations and begin recovery with ASP Up; at an SGP the transition removes
 // the remote ASP from every Application Server it previously served.
+//
+// SCTP_COMM_LOST ends the read, which is what closes the Association when the
+// SCTP association fails; handle says why the read cannot be left to do that
+// by itself.
 //
 // A watcher is shared by every association a Listener accepts, because the
 // dependency fixes a listener's notification handler at construction and hands
@@ -196,28 +203,44 @@ func (c *Association) initiatesASPSM() bool {
 		c.aspProcedureMode(aspProcedureUp) == ASPProcedureAutomatic
 }
 
-// subscribeRestart asks the kernel for SCTP_ASSOC_CHANGE on this association.
+// associationEvents is the subscription every socket this package opens makes
+// before it connects or listens: SCTP_ASSOC_CHANGE, which carries both states
+// restartWatcher acts on, through RFC 6458 Section 6.2.2's SCTP_EVENT. That
+// option names one event and leaves the others alone; the deprecated
+// SCTP_EVENTS rewrites them all.
 //
-// SubscribeEvent, not SubscribeEvents: the plural form writes the whole
-// sctp_event_subscribe struct and would clear every subscription it was not
-// told about, including the data-io flag. RFC 6458 Section 6.2.2's SCTP_EVENT
-// names one event and leaves the rest alone, which is also why the dependency
-// documents the plural form as deprecated.
-//
-// The same subscription delivers SCTP_COMM_LOST, which is what reliably ends
-// the read when the association fails; see restartWatcher.handle.
-//
-// A failure here is not fatal. The association still serves traffic; the
-// restart indication is unavailable, and a lost association is then noticed
-// only through the socket's pending error, which a concurrent write can take
-// before the reader does. That is logged rather than refused.
-func (c *Association) subscribeRestart() {
-	if c.sctpConn == nil {
-		return
+// Before, not after. Linux gives an association a copy of its socket's
+// subscriptions when it creates it (sctp_association_init in
+// net/sctp/associola.c) and filters each event against that copy
+// (sctp_ulpq_tail_event in net/sctp/ulpqueue.c). A subscription made once Dial
+// or Accept had the association applied only from then on, so an ABORT that
+// arrived first raised no SCTP_COMM_LOST. An accepted association is created
+// on the listening socket, so the listener's subscription is the one it
+// carries into accept.
+func associationEvents() []sctp.NotificationSubscription {
+	return []sctp.NotificationSubscription{
+		{Type: sctp.SCTP_ASSOC_CHANGE, State: sctp.SocketOptionEnable},
 	}
-	if err := c.sctpConn.SubscribeEvent(sctp.SCTP_ASSOC_CHANGE, true); err != nil {
-		logf("m3ua: could not subscribe to SCTP association events, "+
-			"M-SCTP_RESTART will not be reported and a lost association "+
-			"may go unnoticed while writes fail: %v", err)
+}
+
+// withAssociationEvents opens a socket with associationEvents, and again
+// without them if the kernel has no SCTP_EVENT: Linux added the option in 5.0
+// and refuses it with ENOPROTOOPT before that. The dependency applies the
+// subscription before bind, connect or listen, so the refused attempt put
+// nothing on the wire; Dial still sends at most one INIT.
+//
+// Such a kernel still serves traffic, as it did when the subscription was made
+// on the established association and allowed to fail. What it loses is logged
+// rather than refused: no restart is reported as M-SCTP_RESTART, and a lost
+// association is noticed only through the socket's pending error, which a
+// concurrent write can take before the reader does.
+func withAssociationEvents[T any](open func(subscribe bool) (T, error)) (T, error) {
+	opened, err := open(true)
+	if err == nil || !errors.Is(err, syscall.ENOPROTOOPT) {
+		return opened, err
 	}
+	logf("m3ua: this kernel cannot subscribe to SCTP association events (%v); "+
+		"M-SCTP_RESTART will not be reported and a lost association "+
+		"may go unnoticed while writes fail", err)
+	return open(false)
 }

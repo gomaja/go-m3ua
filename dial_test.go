@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"syscall"
@@ -69,6 +70,9 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 			}
 			if policy.abandon != sctp.DialAbandonQuiet {
 				t.Errorf("abandon policy = %v, want DialAbandonQuiet", policy.abandon)
+			}
+			if !reflect.DeepEqual(policy.events, associationEvents()) {
+				t.Errorf("events = %v, want %v subscribed before connect", policy.events, associationEvents())
 			}
 		})
 	}

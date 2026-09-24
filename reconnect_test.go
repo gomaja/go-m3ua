@@ -56,7 +56,7 @@ func (p *rawPeer) abort(t *testing.T) {
 //
 // The detection does not depend on the traffic. The peer's Abort puts an ABORT
 // on the wire at once, and the reader learns of it from the SCTP_COMM_LOST
-// notification setUpSocket subscribes to. The writes are what make this hard:
+// notification Dial subscribes to. The writes are what make this hard:
 // any of them can take the socket's pending ECONNRESET before the reader asks
 // for it, and until COMM_LOST ended the read, one that did left the reader
 // parked and the Association ASP-ACTIVE indefinitely.
@@ -132,9 +132,12 @@ func TestPeerAbortWithHeartbeatIsDetectedWhileIdle(t *testing.T) {
 // TestRedialAfterPeerAbortEstablishes timed out under load.
 //
 // The notification is the one report a writer cannot take, so it has to end
-// the read. This forces the losing interleaving, starting the reader only after
-// a write has taken the error, with the library's own socket set-up,
-// notification handler and reader.
+// the read, and it has to exist: the kernel queues it only if the association
+// was subscribed when the ABORT arrived. These tests force the losing
+// interleaving -- the reader starts only after a write has taken the error --
+// and abort before anything is done to the established association, so the
+// subscription can only be the one made before connect or listen. They use the
+// library's own socket configuration, notification handler and reader.
 func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -154,12 +157,78 @@ func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	association.sctpConn = conn
-	if err := association.setUpSocket(); err != nil {
-		t.Fatalf("setting up the socket: %v", err)
-	}
 	t.Cleanup(func() { _ = association.Close() })
 
+	// Before setUpSocket, which is where the subscription used to be made.
 	peer.abort(t)
+
+	requireAbortEndsTheRead(t, association)
+}
+
+// The accepting side of the same race, where the window was between accept and
+// setUpSocket.
+func TestPeerAbortOnAnAcceptedAssociationEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
+	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:3059")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := listenSCTP("sctp", laddr, &restartWatcher{})
+	if err != nil {
+		skipIfSCTPUnsupported(t, err)
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	type acceptResult struct {
+		conn *sctp.SCTPConn
+		err  error
+	}
+	accepted := make(chan acceptResult, 1)
+	go func() {
+		conn, err := ln.AcceptSCTP()
+		accepted <- acceptResult{conn, err}
+	}()
+
+	// A plain SCTP peer: nothing it does can subscribe this end to anything.
+	peer, err := sctp.DialSCTP("sctp", nil, laddr)
+	if err != nil {
+		t.Fatalf("peer dial: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+
+	var result acceptResult
+	select {
+	case result = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the listener accepted nothing")
+	}
+	if result.err != nil {
+		t.Fatalf("accept: %v", result.err)
+	}
+
+	association := newAssociation(RoleSGP, newSGPAssociationConfigForTest(
+		&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2}))
+	association.sctpConn = result.conn
+	t.Cleanup(func() { _ = association.Close() })
+
+	// Nothing has subscribed the accepted socket itself: whatever it carries
+	// came from the listening socket.
+	if on, err := result.conn.EventSubscribed(sctp.SCTP_ASSOC_CHANGE); err != nil || !on {
+		t.Errorf("accepted association SCTP_ASSOC_CHANGE subscribed = %v (%v), want it inherited from the listener", on, err)
+	}
+
+	if err := peer.Abort(); err != nil {
+		t.Fatalf("aborting the peer association: %v", err)
+	}
+
+	requireAbortEndsTheRead(t, association)
+}
+
+// requireAbortEndsTheRead writes until the socket hands a write the abort's
+// pending error, then starts the library's reader and requires the read to end
+// on SCTP_COMM_LOST.
+func requireAbortEndsTheRead(t *testing.T, association *Association) {
+	t.Helper()
 
 	// Nothing reads yet, so the first write to fail is the one the socket
 	// hands the abort to. An earlier write can still succeed if it beats the
@@ -193,7 +262,7 @@ func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the reader is still parked ten seconds after the peer aborted; " +
-			"SCTP_COMM_LOST did not end the read, so nothing will report the loss")
+			"no SCTP_COMM_LOST ended the read, so nothing will report the loss")
 	}
 }
 

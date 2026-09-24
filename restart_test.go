@@ -8,7 +8,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"net"
+	"reflect"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -662,5 +666,47 @@ func TestCommunicationLostFailsTheReadWhateverTheRoute(t *testing.T) {
 		if err := w.handle(assocChangeEvent(sctp.SCTP_COMM_LOST, 999)); !errors.Is(err, ErrSCTPNotAlive) {
 			t.Errorf("%s: handle(SCTP_COMM_LOST) = %v, want the read failed with %v", name, err, ErrSCTPNotAlive)
 		}
+	}
+}
+
+// A kernel without SCTP_EVENT (Linux before 5.0) refuses the pre-association
+// subscription with ENOPROTOOPT, wrapped by the dependency. The socket is then
+// opened again without it, as the association served traffic before the
+// subscription existed; any other failure is the caller's to see, unretried.
+func TestAssociationEventsFallBackOnlyWhenTheKernelLacksSCTPEvent(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "sctp",
+		Err: fmt.Errorf("sctp: apply PreAssociation.Notification: %w", syscall.ENOPROTOOPT)}
+	for _, test := range []struct {
+		name  string
+		first error
+		want  []bool
+		err   error
+	}{
+		{name: "subscribed", want: []bool{true}},
+		{name: "no SCTP_EVENT", first: refused, want: []bool{true, false}},
+		{name: "other failure", first: syscall.ECONNREFUSED, want: []bool{true}, err: syscall.ECONNREFUSED},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []bool
+			opened, err := withAssociationEvents(func(subscribe bool) (int, error) {
+				calls = append(calls, subscribe)
+				if subscribe && test.first != nil {
+					return 0, test.first
+				}
+				return 1, nil
+			})
+			if !reflect.DeepEqual(calls, test.want) {
+				t.Errorf("opened with subscribe = %v, want %v", calls, test.want)
+			}
+			if test.err != nil {
+				if !errors.Is(err, test.err) {
+					t.Errorf("error = %v, want %v", err, test.err)
+				}
+				return
+			}
+			if err != nil || opened != 1 {
+				t.Errorf("opened = %d, %v; want the socket", opened, err)
+			}
+		})
 	}
 }

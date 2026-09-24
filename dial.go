@@ -64,6 +64,8 @@ type sctpDialPolicy struct {
 	init    sctp.InitMsg
 	rto     sctp.RtoInfo
 	abandon sctp.DialAbandonPolicy
+	// events are subscribed before the socket connects; see associationEvents.
+	events []sctp.NotificationSubscription
 }
 
 func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
@@ -86,6 +88,7 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 			Max: rtoMillis,
 		},
 		abandon: sctp.DialAbandonQuiet,
+		events:  associationEvents(),
 	}
 }
 
@@ -97,7 +100,8 @@ func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.Preconfigur
 		InitMsg:             p.init,
 	}
 	return base.WithPreAssociation(sctp.PreAssociationConfig{
-		RTOInfo: &p.rto,
+		RTOInfo:       &p.rto,
+		Notifications: p.events,
 	})
 }
 
@@ -128,15 +132,19 @@ func (p sctpDialPolicy) dialContext(
 // ABORT. What is left here is keeping the attempt to a single INIT, which needs
 // the initial RTO raised past the budget before the socket is connected.
 // PreAssociation.RTOInfo applies that through SCTP_FUTURE_ASSOC without
-// wrapping or taking ownership of the raw descriptor that go-sctp still owns.
+// wrapping or taking ownership of the raw descriptor that go-sctp still owns,
+// and PreAssociation.Notifications subscribes associationEvents the same way.
 func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, timeout time.Duration, restarts *restartWatcher) (*sctp.SCTPConn, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	policy := oneShotSCTPDialPolicy(timeout)
-	cfg := policy.socketConfig(restarts)
-
-	sctpAssociation, err := policy.dialContext(attemptCtx, cfg, network, laddr, raddr)
+	sctpAssociation, err := withAssociationEvents(func(subscribe bool) (*sctp.SCTPConn, error) {
+		if !subscribe {
+			policy.events = nil
+		}
+		return policy.dialContext(attemptCtx, policy.socketConfig(restarts), network, laddr, raddr)
+	})
 	if err != nil {
 		// Our own budget expiring is reported as such; the caller's context
 		// ending is reported as the caller's error.

@@ -774,8 +774,8 @@ func (c *Association) setUpSocket() error {
 	// event belongs to: a Listener installs one handler for every association
 	// it accepts, and the kernel names the association only by this ID.
 	c.assocID.Store(int32(r.AssocID))
-	// Optional, and deliberately not fatal; see subscribeRestart.
-	c.subscribeRestart()
+	// SCTP_ASSOC_CHANGE is already subscribed: Dial and Listen subscribe it
+	// before the association exists; see associationEvents.
 
 	return nil
 }
