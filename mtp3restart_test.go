@@ -420,7 +420,7 @@ func TestMTP3RestartForcesDAUDUnavailableUntilCompletion(t *testing.T) {
 	if err := restart.Update(destination, availabilityState(DestinationAvailable)); err != nil {
 		t.Fatalf("stage available: %v", err)
 	}
-	listener.destinations.setRanges([]DestinationRange{{
+	listener.destinations.setRanges([]destinationRange{{
 		NetworkAppearance:    7,
 		NetworkAppearanceSet: true,
 		RoutingContext:       1,
@@ -699,7 +699,7 @@ func TestMTP3RestartReportRacingCompletionCannotBeLost(t *testing.T) {
 }
 
 func TestDestinationStateSSNMOmitsEmptyRoutingContext(t *testing.T) {
-	messagesToWrite := destinationStateSSNMs(DestinationRange{
+	messagesToWrite := destinationStateSSNMs(destinationRange{
 		PointCode: 0x123456,
 		State:     availabilityState(DestinationUnavailable),
 	}, nil, destinationAvailabilityDimension)

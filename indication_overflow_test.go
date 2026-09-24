@@ -10,19 +10,6 @@ import (
 	"time"
 )
 
-func TestSignallingStatusOverflowRequiresResynchronization(t *testing.T) {
-	connection, _ := newTestConn(t, StateASPActive, RoleASP)
-	connection.statusChan = make(chan *DestinationStatus, 1)
-
-	connection.notifyStatus(&DestinationStatus{PointCode: 1, State: availabilityState(DestinationUnavailable)})
-	connection.notifyStatus(&DestinationStatus{PointCode: 2, State: availabilityState(DestinationAvailable)})
-
-	status := <-connection.SignallingStatus()
-	if status == nil || !status.ResyncRequired {
-		t.Fatalf("overflow status = %#v, want ResyncRequired marker", status)
-	}
-}
-
 func TestStateChangesOverflowClosesWithAnExplicitCause(t *testing.T) {
 	connection, _ := newTestConn(t, StateASPActive, RoleASP)
 	connection.stateEventChan = make(chan State, 1)

@@ -523,7 +523,6 @@ func (asp *aspRun) warm(record *aspRecord) error {
 		record.Manifest.Limits.ObservedChannelCapacities = map[string]int{
 			"state_changes":          cap(association.StateChanges()),
 			"management_indications": cap(association.ManagementIndications()),
-			"signalling_status":      cap(association.SignallingStatus()),
 			"data_queue":             association.DataQueueStats().Capacity,
 			"mtp_indications":        record.MTPIndication.Capacity,
 		}
