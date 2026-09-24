@@ -316,6 +316,7 @@ func ssnmStateConfig() *m3ua.SSNMStateConfig {
 		MaxPartitions:          partitionCount,
 		MaxSubscribers:         subscriberCount,
 		SubscriptionQueueSize:  subscriptionQueueSize,
+		SubscriptionQueueBytes: subscriptionByteCap,
 		MaxAffectedPointCodes:  maxAffectedPointCodes,
 	}
 }

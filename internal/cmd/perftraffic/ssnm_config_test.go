@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestSSNMFlagsApplyDefaults(testContext *testing.T) {
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
-	want := ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8,
+	want := ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8, QueueBytes: 1 << 20,
 		Budgets: ssnmBudgets{ApplyP99: 100 * time.Millisecond, Resync: 100 * time.Millisecond, Recovery: time.Second}}
 	if config.SSNM != want {
 		testContext.Fatalf("SSNM config = %+v, want %+v", config.SSNM, want)
@@ -113,6 +114,14 @@ func TestSSNMFlagsRejectInvalidCombinations(testContext *testing.T) {
 		"receiver budget":           {ssnmReceiverArguments("-ssnm-rate=10", "-ssnm-apply-p99-budget=1s"), "not an SGP flag"},
 		"zero budget":               {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-recovery-budget=0s"), "budgets must be positive"},
 		"negative budget":           {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apply-p99-budget=-1ms"), "budgets must be positive"},
+		"queue bytes without rate":  {ssnmSenderArguments("-ssnm-subscription-queue-bytes=98304"), "requires -ssnm-rate"},
+		"receiver queue bytes":      {ssnmReceiverArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=98304"), "not SGP flags"},
+		"negative queue bytes":      {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=-1"), "must not be negative"},
+		"queue bytes below library": {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=511"), "at least 512"},
+		// The full store's preload message names 1,024 destinations:
+		// 516 + 1,024 x 268 accounted bytes.
+		"queue bytes below preload": {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=274947"), "cannot hold the 1024-destination preload message, 274948 accounted bytes"},
+		"small store preload":       {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69123"), "cannot hold the 256-destination preload message, 69124"},
 	}
 	for name, testCase := range cases {
 		testContext.Run(name, func(testContext *testing.T) {
@@ -158,6 +167,48 @@ func TestSSNMRunSpecRoundTripsAndCompares(testContext *testing.T) {
 	decoded.SSNM.Records = 8192
 	if sameRunSpec(specification, decoded) {
 		testContext.Fatal("specs with different SSNM workloads compare equal")
+	}
+}
+
+// The byte limit resolves to the library default when unset and reaches the
+// store configuration, the recorded limits and every cohort specification.
+func TestSSNMSubscriptionQueueBytesReachStoreAndSpec(testContext *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		arguments []string
+		want      int
+	}{
+		{"library default", ssnmSenderArguments("-ssnm-rate=1000"), 1 << 20},
+		{"byte-binding F3", ssnmSenderArguments("-ssnm-rate=1000", "-ssnm-records=256", "-pause-subscriber=5s/10s", "-ssnm-subscription-queue-bytes=98304"), 98_304},
+		{"exactly one preload message", ssnmSenderArguments("-ssnm-rate=1000", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69124"), 69_124},
+	} {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			config, err := parseConfig(testCase.arguments)
+			if err != nil {
+				testContext.Fatalf("parseConfig: %v", err)
+			}
+			limits := ssnmStoreLimits(config.SSNM, config.Associations)
+			workload := config.SSNM.workload(ssnmPhaseMeasurement, 1)
+			if config.SSNM.QueueBytes != testCase.want || limits.SubscriptionQueueBytes != testCase.want || limits.SubscriptionQueueSize != 256 ||
+				limitsRecord(limits).SubscriptionQueueBytes != testCase.want || workload.SubscriptionQueueBytes != testCase.want {
+				testContext.Fatalf("queue bytes %d, limits %+v, workload %+v, want %d", config.SSNM.QueueBytes, limits, workload, testCase.want)
+			}
+			encoded, err := json.Marshal(runSpec{SSNM: &workload})
+			if err != nil || !strings.Contains(string(encoded), fmt.Sprintf(`"subscription_queue_bytes":%d`, testCase.want)) {
+				testContext.Fatalf("spec encoding %s, %v", encoded, err)
+			}
+		})
+	}
+	receiver, err := parseConfig(ssnmReceiverArguments("-ssnm-rate=1000"))
+	if err != nil || receiver.SSNM.QueueBytes != 0 {
+		testContext.Fatalf("receiver queue bytes %d, %v", receiver.SSNM.QueueBytes, err)
+	}
+	specification := runSpec{SSNM: workloadRef(ssnmConfig{Rate: 1000, APCs: 1, Records: 256, Subscribers: 8, QueueBytes: 98_304}.workload(ssnmPhaseMeasurement, 1))}
+	other := specification
+	other.SSNM = workloadRef(*specification.SSNM)
+	other.SSNM.SubscriptionQueueBytes = 1 << 20
+	if sameRunSpec(specification, other) {
+		testContext.Fatal("specs with different subscription byte limits compare equal")
 	}
 }
 

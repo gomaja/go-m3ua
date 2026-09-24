@@ -48,7 +48,8 @@ func senderEndpointConfig(config commandConfig) m3ua.EndpointConfig {
 // Association is one partition and its own retention peer, and the generator
 // reports every destination in every association's scope, so each partition
 // must hold all records and the store all partitions. Subscriptions keep the
-// approved 256-event queue.
+// approved 256-event queue, and the byte limit in force: the library's
+// approved 1 MiB default unless -ssnm-subscription-queue-bytes sets another.
 func ssnmStoreLimits(config ssnmConfig, associations int) m3ua.SSNMStateConfig {
 	needed := associations * (ssnmAccountedPartitionBytes + config.Records*ssnmAccountedRecordBytes)
 	return m3ua.SSNMStateConfig{
@@ -59,6 +60,7 @@ func ssnmStoreLimits(config ssnmConfig, associations int) m3ua.SSNMStateConfig {
 		MaxPartitions:          m3ua.DefaultMaxSSNMPartitions,
 		MaxSubscribers:         config.Subscribers,
 		SubscriptionQueueSize:  m3ua.DefaultSSNMSubscriptionQueueSize,
+		SubscriptionQueueBytes: config.subscriptionQueueBytes(),
 		MaxAffectedPointCodes:  ssnmMaxAPCs,
 	}
 }
@@ -122,7 +124,7 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 		cancel:       cancel,
 	}
 	for index := 0; index < config.SSNM.Subscribers; index++ {
-		subscriber := newSSNMSubscriber(index, index == 0 && config.SSNM.Pause.enabled(), run.plan, config.SSNM.Rate, config.Associations, run.limits.SubscriptionQueueSize)
+		subscriber := newSSNMSubscriber(index, index == 0 && config.SSNM.Pause.enabled(), run.plan, config.SSNM.Rate, config.Associations, run.limits.SubscriptionQueueSize, run.limits.SubscriptionQueueBytes)
 		snapshot, subscription, err := endpoint.SubscribeSSNM()
 		if err != nil {
 			run.close()
@@ -378,6 +380,7 @@ type ssnmLimitsRecord struct {
 	MaxPartitions          int `json:"max_partitions"`
 	MaxSubscribers         int `json:"max_subscribers"`
 	SubscriptionQueueSize  int `json:"subscription_queue_size"`
+	SubscriptionQueueBytes int `json:"subscription_queue_bytes"`
 	MaxAffectedPointCodes  int `json:"max_affected_point_codes"`
 }
 
@@ -528,7 +531,8 @@ func limitsRecord(limits m3ua.SSNMStateConfig) ssnmLimitsRecord {
 		MaxRecords: limits.MaxRecords, MaxBytes: limits.MaxBytes,
 		MaxRecordsPerPartition: limits.MaxRecordsPerPartition, MaxRecordsPerPeer: limits.MaxRecordsPerPeer,
 		MaxPartitions: limits.MaxPartitions, MaxSubscribers: limits.MaxSubscribers,
-		SubscriptionQueueSize: limits.SubscriptionQueueSize, MaxAffectedPointCodes: limits.MaxAffectedPointCodes,
+		SubscriptionQueueSize: limits.SubscriptionQueueSize, SubscriptionQueueBytes: limits.SubscriptionQueueBytes,
+		MaxAffectedPointCodes: limits.MaxAffectedPointCodes,
 	}
 }
 
@@ -644,21 +648,19 @@ func positionFailures(prefix string, record ssnmSubscriberRecord, associations i
 }
 
 // pausedSubscriberFailures checks the F3 contract: the paused subscriber
-// observes its loss at the enforced cap, recovers by an authoritative
-// snapshot and is lossless again afterwards.
+// observes its loss at an enforced cap, count or bytes (ssnmCapFailure),
+// recovers by an authoritative snapshot and is lossless again afterwards.
 func pausedSubscriberFailures(record ssnmSubscriberRecord, pause *ssnmPauseRecord, associations int) []string {
 	prefix := fmt.Sprintf("fail: paused subscriber %d ", record.Index)
 	if pause == nil {
 		return []string{prefix + "never paused"}
 	}
 	var reasons []string
-	switch {
+	switch capFailure := ssnmCapFailure(pause); {
 	case pause.Error != "":
 		reasons = append(reasons, prefix+"recovery failed: "+pause.Error)
-	case !pause.ContinuityLossObserved:
-		reasons = append(reasons, prefix+"observed no continuity loss")
-	case !pause.CountCapEnforced:
-		reasons = append(reasons, prefix+fmt.Sprintf("retained %d events at loss, cap %d", pause.QueuedAtLoss, pause.QueueLimit))
+	case capFailure != "":
+		reasons = append(reasons, prefix+capFailure)
 	case pause.SnapshotValidated != associations:
 		reasons = append(reasons, prefix+fmt.Sprintf("validated %d of %d resynchronized partitions", pause.SnapshotValidated, associations))
 	}
