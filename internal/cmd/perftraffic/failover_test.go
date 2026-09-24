@@ -463,6 +463,10 @@ func TestFailoverEvaluationFailsEveryViolatedCriterion(testContext *testing.T) {
 		{name: "an injected call failed", criterion: "fault_injected", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
 			scenario.inputs.receiver.Failover.Receiver.Fault.Associations[1].Error = "setsockopt: invalid argument"
 		}},
+		{name: "a close that ran into the ABORT fallback", criterion: "failure_kind_observed", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
+			fault := scenario.inputs.receiver.Failover.Receiver.Fault
+			fault.Associations[1] = failoverClose{Association: 2, Started: fault.Before, Returned: fault.Before + int64(3*time.Second)}
+		}},
 		{name: "a close that ended in an ABORT", criterion: "failure_kind_observed", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
 			scenario.tracker.notifications[0] = newFailoverNotification(101, sgpFailureFailed, scenario.tracker.notifications[0].At, errFailoverUserAbort)
 		}},
@@ -514,6 +518,39 @@ func failoverScenarioOfKind(scenario *failoverScenario, kind string) {
 	}
 	for index, notification := range scenario.tracker.notifications {
 		scenario.tracker.notifications[index] = newFailoverNotification(notification.Association, notification.SGP, notification.At, end)
+	}
+}
+
+// A close trial's Close calls must return before the SCTP dependency's
+// three-second ABORT fallback could have run: the ASP reads the end of stream
+// as soon as the SHUTDOWN arrives, so the end it saw cannot show the fallback.
+// An abort trial's Abort does not wait, and is not held to it.
+func TestFailoverCloseMustReturnBeforeTheAbortFallback(testContext *testing.T) {
+	for _, test := range []struct {
+		name    string
+		kind    string
+		took    time.Duration
+		outcome string
+	}{
+		{name: "close returning just under the bound", kind: sgpFailureKindClose, took: sgpFailureShutdownFallback - 1, outcome: failoverPass},
+		{name: "close returning at the bound", kind: sgpFailureKindClose, took: sgpFailureShutdownFallback, outcome: failoverFail},
+		{name: "close returning after the fallback", kind: sgpFailureKindClose, took: 3 * time.Second, outcome: failoverFail},
+		{name: "abort", kind: sgpFailureKindAbort, took: 3 * time.Second, outcome: failoverPass},
+	} {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			scenario := newFailoverScenario(testContext)
+			failoverScenarioOfKind(scenario, test.kind)
+			fault := scenario.inputs.receiver.Failover.Receiver.Fault
+			fault.Associations[0] = failoverClose{Association: 1, Started: fault.Before, Returned: fault.Before + int64(test.took)}
+			record := scenario.tracker.evaluate(scenario.inputs)
+			got := failoverCriterionByName(record, "failure_kind_observed")
+			if got.Outcome != test.outcome {
+				testContext.Fatalf("failure_kind_observed %s (%s), want %s", got.Outcome, got.Detail, test.outcome)
+			}
+			if test.kind == sgpFailureKindClose && (got.Measured == nil || *got.Measured != int64(test.took) || got.Budget == nil || *got.Budget != int64(sgpFailureShutdownFallback)) {
+				testContext.Fatalf("close trial measured %v against budget %v, want %d against %d", got.Measured, got.Budget, test.took, sgpFailureShutdownFallback)
+			}
+		})
 	}
 }
 

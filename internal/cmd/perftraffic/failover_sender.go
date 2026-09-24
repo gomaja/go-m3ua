@@ -690,16 +690,30 @@ func (tracker *failoverTracker) faultCriterion(receiver *failoverReceiverRecord,
 	return criterion
 }
 
+// sgpFailureShutdownFallback bounds how long a close trial's Association.Close
+// may take. The SCTP dependency's Close waits up to three seconds for the peer
+// to complete the SHUTDOWN, then aborts the association and still returns nil.
+// Linux ends the ASP's reads as soon as the SHUTDOWN arrives, so the ASP has
+// already seen the end of stream when that ABORT follows: how long the call
+// took is the only evidence of the fallback. A call that returned half a
+// second short of it cannot have reached it.
+const sgpFailureShutdownFallback = 2500 * time.Millisecond
+
 // failureKindCriterionLocked requires the failure that reached the ASP to be
-// the declared one. The declaration says what the SGP was asked to do; how
-// both failed-SGP associations ended says what its SCTP layer did. A close
-// trial needs the end of stream a completed SHUTDOWN leaves, and an abort
-// trial the SCTP_COMM_LOST with the User-Initiated Abort cause an ABORT raises
-// (RFC 9260 Section 9.1). An SGP whose Abort fell back to a SHUTDOWN, or
-// whose Close ended in the dependency's ABORT fallback, fails here. An abort
-// is visible as SCTP_COMM_LOST only where the kernel reports association
-// events, so an abort trial on a kernel without them is not measured rather
-// than passed; a SHUTDOWN's end of stream needs no events.
+// the declared one, as far as the ASP and the SGP's own calls can show it. The
+// declaration says what the SGP was asked to do.
+//
+// An abort trial needs both failed-SGP associations to have ended on the
+// SCTP_COMM_LOST with the User-Initiated Abort cause that an ABORT the peer
+// requested raises (RFC 9260 Section 9.1): an Abort that fell back to a
+// SHUTDOWN leaves the end of stream instead. That loss is visible only where
+// the kernel reports association events, so an abort trial on a kernel
+// without them is not measured rather than passed.
+//
+// A close trial needs both to have ended at the end of stream, which shows a
+// SHUTDOWN reached the ASP, and both Close calls to have returned within
+// sgpFailureShutdownFallback, which shows the dependency's ABORT fallback did
+// not run. Neither shows that the SHUTDOWN handshake completed.
 func (tracker *failoverTracker) failureKindCriterionLocked(record *failoverRecord, receiver *failoverReceiverRecord) failoverCriterion {
 	criterion := failoverCriterion{Name: "failure_kind_observed", Outcome: failoverNotMeasured}
 	if receiver.Fault == nil {
@@ -728,15 +742,29 @@ func (tracker *failoverTracker) failureKindCriterionLocked(record *failoverRecor
 			criterion.Detail = fmt.Sprintf("association %d ended with %q, not the SCTP_COMM_LOST with the User-Initiated Abort cause an ABORT raises", notification.Association, notification.Error)
 			return criterion
 		case !abort && !notification.EndOfStream:
-			criterion.Detail = fmt.Sprintf("association %d ended with %q, not the end of stream a completed SHUTDOWN leaves", notification.Association, notification.Error)
+			criterion.Detail = fmt.Sprintf("association %d ended with %q, not the end of stream a SHUTDOWN leaves", notification.Association, notification.Error)
 			return criterion
 		}
 	}
-	criterion.Outcome = failoverPass
-	criterion.Detail = "both failed-SGP associations ended at the end of stream: the SGP's SHUTDOWN completed"
 	if abort {
-		criterion.Detail = "both failed-SGP associations ended on SCTP_COMM_LOST with the User-Initiated Abort cause: the SGP's ABORT reached the ASP"
+		criterion.Outcome = failoverPass
+		criterion.Detail = "both failed-SGP associations ended on SCTP_COMM_LOST with the User-Initiated Abort cause: an ABORT the SGP requested reached the ASP"
+		return criterion
 	}
+	budget := int64(sgpFailureShutdownFallback)
+	var longest int64
+	for _, closed := range receiver.Fault.Associations {
+		took := closed.Returned - closed.Started
+		longest = max(longest, took)
+		if took >= budget {
+			criterion.Budget, criterion.Measured = &budget, &longest
+			criterion.Detail = fmt.Sprintf("association %d's Close took %d ns, long enough for the SCTP dependency's three-second ABORT fallback to have replaced the SHUTDOWN", closed.Association, took)
+			return criterion
+		}
+	}
+	criterion.Budget, criterion.Measured = &budget, &longest
+	criterion.Outcome = failoverPass
+	criterion.Detail = fmt.Sprintf("both failed-SGP associations ended at the end of stream a SHUTDOWN leaves, and the longer Close returned in %d ns, before the SCTP dependency's three-second ABORT fallback could run", longest)
 	return criterion
 }
 
