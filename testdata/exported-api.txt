@@ -390,6 +390,8 @@ field SCTPConfig.<embedded *SCTPNoDelayInfo>
 field SCTPConfig.<embedded *SCTPSACKInfo>
 field SCTPConfig.InitTimeout
 field SCTPConfig.ReadBufferSize
+field SCTPConfig.SocketReceiveBuffer
+field SCTPConfig.SocketSendBuffer
 field SCTPNoDelayInfo.Enabled
 field SCTPNoDelayInfo.NoDelay
 field SCTPSACKInfo.Enabled
@@ -529,6 +531,7 @@ method Association.ASPActive
 method Association.ASPDown
 method Association.ASPInactive
 method Association.ASPUp
+method Association.Abort
 method Association.ActivateRoutingContexts
 method Association.ApplicationServerState
 method Association.ApplicationServerStateForAS
@@ -564,6 +567,8 @@ method Association.SetWriteDeadline
 method Association.Shutdown
 method Association.ShutdownContext
 method Association.SignallingCongestion
+method Association.SocketReceiveBuffer
+method Association.SocketSendBuffer
 method Association.State
 method Association.StateChanges
 method Association.StreamID
@@ -792,6 +797,7 @@ type WireScope struct
 var ErrASPIdentifierRequired
 var ErrASPRouteStateLimit
 var ErrAmbiguousMTPRoute
+var ErrAssociationAborted
 var ErrAssociationClosed
 var ErrBroadcastFlowIdentifierTooLong
 var ErrContextlessApplicationServer
@@ -815,6 +821,7 @@ var ErrInvalidNetworkAppearance
 var ErrInvalidParameterValue
 var ErrInvalidRoleConfiguration
 var ErrInvalidRoutingContext
+var ErrInvalidSCTPConfig
 var ErrInvalidSSNMStateConfig
 var ErrInvalidState
 var ErrMTP3RestartInProgress

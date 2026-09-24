@@ -153,7 +153,15 @@ var (
 
 	// ErrAssociationClosed is reported by Association.Err when the association
 	// ended because the owner closed it, rather than through any failure.
+	// Association.Abort reports ErrAssociationAborted, which matches it.
 	ErrAssociationClosed = errors.New("association closed by the local endpoint")
+
+	// ErrAssociationAborted is reported by Association.Err when the owner ended
+	// the association with Association.Abort: an SCTP ABORT (RFC 9260 Section
+	// 9.1) rather than a SHUTDOWN. It wraps ErrAssociationClosed, because the
+	// owner still closed it, so errors.Is matches both; only a caller that
+	// needs to tell the abortive release from the graceful one asks for this.
+	ErrAssociationAborted = fmt.Errorf("%w with an SCTP ABORT", ErrAssociationClosed)
 
 	// ErrNilAssociationConfig reports a Dial without the immutable M3UA policy
 	// required to construct the Association.
@@ -162,6 +170,10 @@ var (
 	// ErrInvalidRoleConfiguration reports an AssociationConfig field that has
 	// no RFC 4666 meaning for the selected endpoint role.
 	ErrInvalidRoleConfiguration = errors.New("invalid M3UA role configuration")
+
+	// ErrInvalidSCTPConfig reports an SCTPConfig socket setting that cannot be
+	// applied as configured.
+	ErrInvalidSCTPConfig = errors.New("invalid SCTP configuration")
 
 	// ErrInvalidASPConfig reports an invalid ASP-wide MTP Route, Signalling
 	// Gateway, Signalling Gateway Process, or route inventory.

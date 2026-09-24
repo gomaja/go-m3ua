@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/internal/perfstats"
+	"github.com/gomaja/go-m3ua/internal/sctpevents"
+	"github.com/gomaja/go-sctp"
 )
 
 // Failed-path and path-selection outcome classes of one MTPTransfer call.
@@ -81,11 +85,32 @@ type failoverOutcomeSample struct {
 
 // failoverNotification is one sender association ending during the cohort:
 // the earliest public observation of the transport failure, Association.Done.
+// The flags classify Error when the watch fired, and are what the
+// failure_kind_observed criterion judges.
 type failoverNotification struct {
 	Association m3ua.AssociationID `json:"association"`
 	SGP         m3ua.SGPIdentity   `json:"sgp"`
 	At          int64              `json:"at_ns"`
 	Error       string             `json:"error"`
+	// EndOfStream is the io.EOF a completed SHUTDOWN leaves the reader.
+	EndOfStream bool `json:"end_of_stream"`
+	// CommunicationLost is the SCTP_COMM_LOST an ABORT or a path failure
+	// raises, which the library reports as ErrSCTPNotAlive.
+	CommunicationLost bool `json:"communication_lost"`
+	// UserAbort is that loss carrying the User-Initiated Abort cause RFC 9260
+	// Section 9.1 has an ABORT the peer's upper layer requested carry. The
+	// library names the cause only in the error text.
+	UserAbort bool `json:"user_abort"`
+}
+
+// newFailoverNotification records how one sender association ended.
+func newFailoverNotification(association m3ua.AssociationID, sgp m3ua.SGPIdentity, at int64, err error) failoverNotification {
+	lost := errors.Is(err, m3ua.ErrSCTPNotAlive)
+	return failoverNotification{
+		Association: association, SGP: sgp, At: at, Error: fmt.Sprint(err),
+		EndOfStream: errors.Is(err, io.EOF), CommunicationLost: lost,
+		UserAbort: lost && strings.Contains(err.Error(), sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT))),
+	}
 }
 
 // failoverAssociation is one sender association's submissions and the
@@ -116,7 +141,10 @@ type failoverSenderRecord struct {
 	Recovery          failoverRecovery        `json:"recovery"`
 	Samples           []failoverOutcomeSample `json:"failed_path_samples,omitempty"`
 	TransportTimers   failoverTimers          `json:"transport_timers"`
-	UnexpectedError   string                  `json:"unexpected_error,omitempty"`
+	// AssociationEvents is whether this kernel reports SCTP association
+	// events, without which an ABORT is not seen as SCTP_COMM_LOST.
+	AssociationEvents string `json:"kernel_association_events"`
+	UnexpectedError   string `json:"unexpected_error,omitempty"`
 	// LongestCallAfterFault is the MTPTransfer call that took longest among
 	// those started at or after the declared fault instant.
 	LongestCallAfterFault *failoverCall `json:"longest_call_after_fault,omitempty"`
@@ -192,6 +220,35 @@ var failoverKernelTimers = []string{
 	"rto_initial", "rto_min", "rto_max", "path_max_retrans", "association_max_retrans", "hb_interval", "pf_retrans",
 }
 
+// The answers of the association events probe other than an error.
+const (
+	associationEventsSupported   = "supported"
+	associationEventsUnsupported = "unsupported"
+)
+
+// failoverAssociationEventsProbe asks whether this kernel lets a socket
+// subscribe to SCTP_ASSOC_CHANGE through SCTP_EVENT (RFC 6458 Section 6.2.2),
+// which the library needs to report an ABORT as SCTP_COMM_LOST. It asks the
+// way the library does, through the same internal probe: an SCTP socket that
+// is never bound or connected, so nothing reaches the network. The answer is
+// the kernel's, the same for an IPv4 or an IPv6 configuration. A variable so a
+// test can stand in for the kernel.
+var failoverAssociationEventsProbe = func() string { return associationEventsAnswer(sctpevents.Probe()) }
+
+// associationEventsAnswer reads the probe as the library does: only
+// ENOPROTOOPT means a kernel without SCTP_EVENT (Linux before 5.0). Any other
+// failure leaves the question open.
+func associationEventsAnswer(probeErr error) string {
+	switch {
+	case probeErr == nil:
+		return associationEventsSupported
+	case errors.Is(probeErr, syscall.ENOPROTOOPT):
+		return associationEventsUnsupported
+	default:
+		return "unknown: " + probeErr.Error()
+	}
+}
+
 // failoverTracker classifies every MTPTransfer call of a failure cohort and
 // watches the sender associations for the transport-failure notification.
 type failoverTracker struct {
@@ -221,6 +278,7 @@ type failoverTracker struct {
 	unexpectedError   string
 	notifications     []failoverNotification
 	timers            failoverTimers
+	associationEvents string
 
 	stop    chan struct{}
 	watches sync.WaitGroup
@@ -235,6 +293,9 @@ func newFailoverTracker(spec sgpFailureSpec, clock *sharedRunClock, plane *routi
 		spec: spec, clock: clock, due: clock.window.Start + int64(spec.Offset), bindings: append([]routingBinding(nil), plane.bindings...),
 		sgps: make(map[m3ua.AssociationID]m3ua.SGPIdentity), failedSenders: make(map[m3ua.AssociationID]bool), alternativeSenders: make(map[m3ua.AssociationID]bool),
 		submitted: make(map[m3ua.AssociationID]uint64), indeterminate: make(map[m3ua.AssociationID]uint64), stop: make(chan struct{}),
+		// Asked here, before the cohort's measured window opens, so the probe's
+		// socket is no part of what the window measures.
+		associationEvents: failoverAssociationEventsProbe(),
 	}
 	for _, binding := range plane.bindings {
 		tracker.sgps[binding.SenderAssociation] = binding.Peer.SGP
@@ -277,7 +338,7 @@ func (tracker *failoverTracker) watch(associations []*m3ua.Association) {
 			select {
 			case <-association.Done():
 				now, _ := tracker.clock.source.Now()
-				notification := failoverNotification{Association: association.ID(), SGP: tracker.sgps[association.ID()], At: now, Error: fmt.Sprint(association.Err())}
+				notification := newFailoverNotification(association.ID(), tracker.sgps[association.ID()], now, association.Err())
 				tracker.mutex.Lock()
 				tracker.notifications = append(tracker.notifications, notification)
 				tracker.mutex.Unlock()
@@ -524,8 +585,9 @@ func (tracker *failoverTracker) evaluate(inputs failoverInputs) *failoverRecord 
 	defer tracker.mutex.Unlock()
 	record := &failoverRecord{Spec: tracker.spec, Sender: &failoverSenderRecord{
 		Outcomes: tracker.outcomes, LastFailedSGPCall: tracker.lastFailedSGPCall, LastFailureCall: tracker.lastFailureCall,
-		Samples: append([]failoverOutcomeSample(nil), tracker.samples...), TransportTimers: tracker.timers, UnexpectedError: tracker.unexpectedError,
-		Notifications: append([]failoverNotification(nil), tracker.notifications...),
+		Samples: append([]failoverOutcomeSample(nil), tracker.samples...), TransportTimers: tracker.timers, AssociationEvents: tracker.associationEvents,
+		UnexpectedError: tracker.unexpectedError,
+		Notifications:   append([]failoverNotification(nil), tracker.notifications...),
 	}}
 	if tracker.longest != nil {
 		longest := *tracker.longest
@@ -546,7 +608,7 @@ func (tracker *failoverTracker) evaluate(inputs failoverInputs) *failoverRecord 
 	tracker.accountLocked(record, inputs)
 	record.Criteria = append(record.Criteria, tracker.faultCriterion(receiver, clock))
 	notified := tracker.notificationCriterionLocked(record, receiver)
-	record.Criteria = append(record.Criteria, notified)
+	record.Criteria = append(record.Criteria, notified, tracker.failureKindCriterionLocked(record, receiver))
 	notification := sender.Notification
 	if notified.Outcome != failoverPass {
 		notification = 0
@@ -613,14 +675,96 @@ func (tracker *failoverTracker) faultCriterion(receiver *failoverReceiverRecord,
 		lateness := fault.Before - fault.Due
 		criterion.Outcome = failoverPass
 		criterion.Measured = &lateness
-		criterion.Detail = fmt.Sprintf("%s of %s/%s at offset %s (%d ns after due); both Association.Close calls returned within %d ns",
-			fault.Kind, fault.SGP.SignallingGateway, fault.SGP.SignallingGatewayProcess, time.Duration(fault.Before-clock.Start), lateness, fault.After-fault.Before)
+		method := sgpFailureMethod(fault.Kind)
+		criterion.Detail = fmt.Sprintf("%s of %s/%s at offset %s (%d ns after due); both Association.%s calls returned within %d ns",
+			fault.Kind, fault.SGP.SignallingGateway, fault.SGP.SignallingGatewayProcess, time.Duration(fault.Before-clock.Start), lateness, method, fault.After-fault.Before)
+		// A call that returned an error may not have done what the kind
+		// declares: an Abort whose SO_LINGER failed closes gracefully.
 		for _, closed := range fault.Associations {
 			if closed.Error != "" {
-				criterion.Detail += fmt.Sprintf("; association %d Close: %s", closed.Association, closed.Error)
+				criterion.Outcome = failoverFail
+				criterion.Detail += fmt.Sprintf("; association %d %s: %s", closed.Association, method, closed.Error)
 			}
 		}
 	}
+	return criterion
+}
+
+// sgpFailureShutdownFallback bounds how long a close trial's Association.Close
+// may take. The SCTP dependency's Close waits up to three seconds for the peer
+// to complete the SHUTDOWN, then aborts the association and still returns nil.
+// Linux ends the ASP's reads as soon as the SHUTDOWN arrives, so the ASP has
+// already seen the end of stream when that ABORT follows: how long the call
+// took is the only evidence of the fallback. A call that returned half a
+// second short of it cannot have reached it.
+const sgpFailureShutdownFallback = 2500 * time.Millisecond
+
+// failureKindCriterionLocked requires the failure that reached the ASP to be
+// the declared one, as far as the ASP and the SGP's own calls can show it. The
+// declaration says what the SGP was asked to do.
+//
+// An abort trial needs both failed-SGP associations to have ended on the
+// SCTP_COMM_LOST with the User-Initiated Abort cause that an ABORT the peer
+// requested raises (RFC 9260 Section 9.1): an Abort that fell back to a
+// SHUTDOWN leaves the end of stream instead. That loss is visible only where
+// the kernel reports association events, so an abort trial on a kernel
+// without them is not measured rather than passed.
+//
+// A close trial needs both to have ended at the end of stream, which shows a
+// SHUTDOWN reached the ASP, and both Close calls to have returned within
+// sgpFailureShutdownFallback, which shows the dependency's ABORT fallback did
+// not run. Neither shows that the SHUTDOWN handshake completed.
+func (tracker *failoverTracker) failureKindCriterionLocked(record *failoverRecord, receiver *failoverReceiverRecord) failoverCriterion {
+	criterion := failoverCriterion{Name: "failure_kind_observed", Outcome: failoverNotMeasured}
+	if receiver.Fault == nil {
+		criterion.Detail = "no fault was injected"
+		return criterion
+	}
+	var ended []failoverNotification
+	for _, notification := range record.Sender.Notifications {
+		if tracker.failedSenders[notification.Association] {
+			ended = append(ended, notification)
+		}
+	}
+	if len(ended) != 2 {
+		criterion.Detail = fmt.Sprintf("%d of the 2 failed-SGP associations reported their end", len(ended))
+		return criterion
+	}
+	abort := tracker.spec.Kind == sgpFailureKindAbort
+	if abort && record.Sender.AssociationEvents != associationEventsSupported {
+		criterion.Detail = fmt.Sprintf("SCTP association events are %s on this kernel, so an ABORT cannot be told from any other loss", record.Sender.AssociationEvents)
+		return criterion
+	}
+	criterion.Outcome = failoverFail
+	for _, notification := range ended {
+		switch {
+		case abort && (!notification.CommunicationLost || !notification.UserAbort):
+			criterion.Detail = fmt.Sprintf("association %d ended with %q, not the SCTP_COMM_LOST with the User-Initiated Abort cause an ABORT raises", notification.Association, notification.Error)
+			return criterion
+		case !abort && !notification.EndOfStream:
+			criterion.Detail = fmt.Sprintf("association %d ended with %q, not the end of stream a SHUTDOWN leaves", notification.Association, notification.Error)
+			return criterion
+		}
+	}
+	if abort {
+		criterion.Outcome = failoverPass
+		criterion.Detail = "both failed-SGP associations ended on SCTP_COMM_LOST with the User-Initiated Abort cause: an ABORT the SGP requested reached the ASP"
+		return criterion
+	}
+	budget := int64(sgpFailureShutdownFallback)
+	var longest int64
+	for _, closed := range receiver.Fault.Associations {
+		took := closed.Returned - closed.Started
+		longest = max(longest, took)
+		if took >= budget {
+			criterion.Budget, criterion.Measured = &budget, &longest
+			criterion.Detail = fmt.Sprintf("association %d's Close took %d ns, long enough for the SCTP dependency's three-second ABORT fallback to have replaced the SHUTDOWN", closed.Association, took)
+			return criterion
+		}
+	}
+	criterion.Budget, criterion.Measured = &budget, &longest
+	criterion.Outcome = failoverPass
+	criterion.Detail = fmt.Sprintf("both failed-SGP associations ended at the end of stream a SHUTDOWN leaves, and the longer Close returned in %d ns, before the SCTP dependency's three-second ABORT fallback could run", longest)
 	return criterion
 }
 
@@ -942,8 +1086,13 @@ func failoverAccountingCriterion(record *failoverRecord, inputs failoverInputs) 
 func (record *runRecord) evaluateFailover() {
 	record.UnsupportedModes = map[string]string{
 		"capacity":                    "unavailable: a failure trial is correctness and recovery evidence, not a capacity probe",
-		"abortive_failure":            "unavailable: the library has no public abortive close; the failed SGP ends its associations with Association.Close (SCTP SHUTDOWN)",
 		"independent_peer_validation": "unavailable: both endpoints use this binary",
+	}
+	// Each trial measures one kind of failure; the record names the other.
+	if record.Failover.Spec.Kind == sgpFailureKindAbort {
+		record.UnsupportedModes["graceful_failure"] = "unavailable in this trial: the failed SGP ends its associations with Association.Abort (SCTP ABORT); -sgp-failure-kind=close measures Association.Close (SCTP SHUTDOWN)"
+	} else {
+		record.UnsupportedModes["abortive_failure"] = "unavailable in this trial: the failed SGP ends its associations with Association.Close (SCTP SHUTDOWN); -sgp-failure-kind=abort measures Association.Abort (SCTP ABORT)"
 	}
 	record.CapacityVerdict = "unavailable"
 	record.Reasons = nil

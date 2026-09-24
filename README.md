@@ -521,6 +521,38 @@ if err := association.ShutdownContext(shutdownCtx); err != nil {
 _ = endpoint.Close()
 ```
 
+Both options end in the SCTP SHUTDOWN procedure. `Association.Abort` is the
+abortive release, the SCTP ABORT primitive of RFC 9260 Section 11.1.4, for an
+association that has to go at once: a misbehaving peer, or one that is not
+completing the shutdown. Locally it tears the association down exactly as
+`Close` does; what differs is what the peer is sent:
+
+| Call | M3UA sent first | SCTP release | Peer's SCTP layer reports | Waits for the peer |
+| --- | --- | --- | --- | --- |
+| `Association.Close` | nothing | SHUTDOWN (RFC 9260 Section 9.2) | SHUTDOWN_COMPLETE | for the SHUTDOWN exchange, aborting after three seconds |
+| `Association.ShutdownContext` | the automatic ASP Inactive and ASP Down | SHUTDOWN | SHUTDOWN_COMPLETE | for each T(ack), then as `Close` |
+| `Association.Abort` | nothing | ABORT with the User-Initiated Abort cause (Section 9.1) | COMMUNICATION LOST (`SCTP_COMM_LOST`) | no |
+
+An ABORT discards whatever either end still had queued instead of delivering
+it. A go-m3ua peer reports the loss through `Err` as `ErrSCTPNotAlive` on
+Linux 5.0 and later, where it receives SCTP association events. Either way the
+peer's M3UA moves the ASP to ASP-DOWN, as it does after a SHUTDOWN: RFC 4666
+Section 4.3.3 does so on SCTP-COMMUNICATION_DOWN and, at an ASP, pauses the
+affected SS7 destinations with MTP-PAUSE, and Section 4.3.1 counts
+COMMUNICATION LOST as SCTP CDI at an SGP just as it counts SHUTDOWN_COMPLETE.
+
+Locally, `Err` reports `ErrAssociationAborted` after `Abort`. It matches
+`ErrAssociationClosed`, so code that only asks whether the owner closed the
+association is unaffected, and the `ManagementSCTPRelease` indication carries
+it, so Layer Management can tell the abortive release from the graceful one.
+`Abort` and `Close` share one teardown with every other way an association
+ends, so only the first performs it and later calls return nil. An `Abort`
+while `ShutdownContext` waits for an acknowledgement ends that wait, and
+`ShutdownContext` returns what `Err` reports; one that finds `Close` already
+releasing SCTP waits for that release instead. Like `ShutdownContext`, nothing
+calls `Abort` for the application: `Listener.Close` and `Endpoint.Close`
+release gracefully.
+
 The `ctx` passed to `Dial` and `Accept` is the association's lifetime, not just
 its handshake. Cancelling it closes the associations it produced, so an accept
 loop that wants to stop accepting without dropping live traffic closes the
@@ -529,9 +561,10 @@ Listener instead.
 That also makes it the wrong context to derive from an interrupt signal when the
 application wants a graceful withdrawal. The association's monitor closes it as
 soon as the context is done, so `ShutdownContext` finds an association already
-in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns nil — option
-(a) silently becomes option (b). Give the association a context of its own and
-cancel it only after the withdrawal has returned:
+in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns the
+cancellation that closed it — option (a) becomes option (b). Give the
+association a context of its own and cancel it only after the withdrawal has
+returned:
 
 ```go
 notifyCtx, stopNotify := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -545,6 +578,75 @@ association, err := endpoint.Dial(associationCtx, "m3ua", nil, remote, config)
 <-notifyCtx.Done()            // The signal stops the work, not the association.
 _ = association.ShutdownContext(shutdownCtx) // Written while associationCtx is live.
 ```
+
+### SCTP tuning
+
+`AssociationConfig.SetSCTPSACK` and `SetSCTPNoDelay` set the delayed-SACK timer
+and `SCTP_NODELAY` once an association exists. Its socket buffers are sized in
+`SCTPConfig`, in bytes, before it exists; zero keeps the kernel default:
+
+```go
+config := m3ua.NewAssociationConfig()
+config.SocketReceiveBuffer = 8 << 20 // SO_RCVBUF
+config.SocketSendBuffer = 1 << 20    // SO_SNDBUF
+```
+
+`SocketReceiveBuffer` is not `ReadBufferSize`. That bounds one M3UA message
+read from the socket; this is the kernel queue those reads drain.
+
+The sizes are applied before the socket connects or listens, which is what makes
+the receive buffer matter: the INIT or INIT ACK announces the receive window
+(RFC 9260 Sections 3.3.2 and 3.3.3), and Linux announces half the socket's
+receive buffer. A size applied to an established socket would change the buffer
+and not the window.
+
+Raise the receive buffer when small messages arrive at a high rate. Linux
+charges each queued message its payload plus about 232 bytes of `sk_buff`
+bookkeeping against the buffer, while the window counts payload alone, so for
+payloads under about 232 bytes the window admits more than the buffer can hold.
+A receiver that pauses, for a garbage collection or a scheduling delay, then
+overflows it. The kernel drops DATA, and when fast retransmit cannot recover it
+the sender waits for a T3-rtx timeout, never shorter than RTO.Min, one second by
+default (RFC 9260 Sections 6.3.1 and 16). Size the buffer for what arrives
+during the longest pause the receiver has to ride out, roughly rate × pause ×
+(payload + 232 bytes). One association carrying 25,000 messages/s with 128-byte
+payloads stalled that way in 5 of 6 two-minute runs at the default buffer, and
+in none of 6 with `net.core.rmem_default` raised to 16 MiB.
+
+Linux caps a request at `net.core.rmem_max` (`wmem_max` for the send buffer) and
+then doubles it, as `socket(7)` describes, so where the cap allows, the 8 MiB
+request above gives a 16 MiB buffer and an 8 MiB window. A socket left unset
+takes `net.core.rmem_default` as it is, undoubled, and the cap applies even when
+`rmem_default` is the larger. On such a host a request can shrink the buffer:
+with `rmem_default` at 16 MiB and `rmem_max` at 4 MiB, the 8 MiB request gives
+an 8 MiB buffer and a 4 MiB window, where leaving it unset gave 16 MiB and
+8 MiB. The library never exceeds the cap with `SO_RCVBUFFORCE`, so compare what
+took effect with what an unset socket gets; raising the cap is the operator's
+decision.
+
+```go
+if size, err := association.SocketReceiveBuffer(); err == nil {
+    log.Printf("SO_RCVBUF %d bytes, window announced at setup %d", size, size/2)
+}
+```
+
+`SocketReceiveBuffer` is an alternative to raising `net.core.rmem_default`,
+which resizes every socket on the host: it sizes only the associations that
+need it, provided `rmem_max` is at least the request. The two are counted
+differently. The 16 MiB measured above was set through `rmem_default`, which a
+socket takes undoubled; `SocketReceiveBuffer = 16 << 20` gives twice that, a
+32 MiB buffer, where `rmem_max` allows it, and the equivalent request is
+`8 << 20`.
+
+A Listener sizes its listening socket from `DefaultAssociationConfig` when
+`Listen` is called, and every association it accepts inherits those sizes;
+changing the default afterwards resizes nothing. An accepted association's
+receive size can only come from there. `SelectAssociationConfig` runs after the
+INIT ACK has announced the window, so a selected `SocketReceiveBuffer` cannot
+raise it: it must be zero or the default's, and anything else refuses that peer
+with `ErrInvalidSCTPConfig`, on a Listener configured with a selector alone
+too. A peer that needs a different receive size needs a Listener of its own. A
+selected `SocketSendBuffer` is applied to the accepted socket.
 
 ## Routing Key Management
 

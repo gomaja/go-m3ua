@@ -191,6 +191,7 @@ instead of indefinite load on a network already in trouble.
 | NIF unavailable, Section 4.7 | SGP | `nif_test.go`, `nif_quiescence_test.go`, `nif_askey_test.go` |
 | Graceful ASP withdrawal, Sections 4.9 and 5.3 | ASP, SE, DE | `shutdown_test.go` |
 | Association, Listener and Endpoint close scopes | all | `TestClosingOneSGPAssociationKeepsEndpointAndSiblingAlive`, `TestClosedAssociationIsForgottenByItsListener`, `endpoint_role_test.go` |
+| Abortive release, SCTP ABORT of RFC 9260 Sections 9.1 and 11.1.4 | all | `TestAbortSendsABORTWhereCloseCompletesASHUTDOWN`, `TestAbortedAssociationIsLostAtItsGoM3UAPeer`, `abort_test.go` |
 | Concurrent accepts stay independent | SGP | `TestConcurrentAcceptsAreIndependent` |
 
 ## 10. Multi-SG ASP routing

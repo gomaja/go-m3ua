@@ -110,6 +110,9 @@ type commandConfig struct {
 	// SGPFailure is the one-SGP failure offset into the measurement window;
 	// zero disables the trial.
 	SGPFailure time.Duration
+	// SGPFailureKind is how the failed SGP ends its associations: close, the
+	// default, or abort.
+	SGPFailureKind string
 	// sgpFailureCohort marks the measurement cohort of an SGP failure trial,
 	// the only cohort that declares the failure.
 	sgpFailureCohort bool
@@ -155,6 +158,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	registerSSNMFlags(flagSet, &config.SSNM)
 	registerRouteReferenceFlags(flagSet, &config.RouteReferences)
 	flagSet.DurationVar(&config.SGPFailure, "sgp-failure", 0, "routed one-SGP failure trial: offset into the measurement window at which SGP sg-a/p0 fails (0 disables)")
+	flagSet.StringVar(&config.SGPFailureKind, "sgp-failure-kind", sgpFailureKindClose, "routed one-SGP failure trial: how SGP sg-a/p0 fails, close (Association.Close, SCTP SHUTDOWN) or abort (Association.Abort, SCTP ABORT)")
 	flagSet.StringVar(&config.OverloadProfile, "overload-profile", "", "DATA overload trial: comma-separated MULTIPLIERx:DURATION phases of -rate, e.g. 2x:60s,0.5x:60s (ASP sender, throughput mode)")
 	if err := flagSet.Parse(arguments); err != nil {
 		return commandConfig{}, err
@@ -251,7 +255,7 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 	if err := validateSSNMConfig(flagSet, &config); err != nil {
 		return commandConfig{}, err
 	}
-	if err := validateSGPFailureConfig(config); err != nil {
+	if err := validateSGPFailureConfig(flagSet, config); err != nil {
 		return commandConfig{}, err
 	}
 	if err := validateRouteReferenceConfig(flagSet, &config); err != nil {
