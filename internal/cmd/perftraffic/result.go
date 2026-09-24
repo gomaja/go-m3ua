@@ -3,9 +3,12 @@ package main
 import "time"
 
 const (
-	verdictPass          = "pass"
-	verdictInvalid       = "invalid"
-	verdictInconclusive  = "inconclusive"
+	verdictPass         = "pass"
+	verdictInvalid      = "invalid"
+	verdictInconclusive = "inconclusive"
+	// verdictFail is an acceptance failure of a fault trial whose fixture is
+	// valid; nominal cohorts never report it.
+	verdictFail          = "fail"
 	baselineFixtureScope = "baseline fixture validity only; not independent-peer or candidate acceptance"
 )
 
@@ -31,6 +34,12 @@ type runSpec struct {
 	// SSNM is the opt-in SSNM load declaration, nil and omitted when off. A
 	// pointer rather than omitzero, which Go 1.23 does not implement.
 	SSNM *ssnmWorkload `json:"ssnm,omitempty"`
+	// SGPFailure is the one-SGP failure declaration of a failure trial's
+	// measurement cohort, nil and omitted for every other cohort.
+	SGPFailure *sgpFailureSpec `json:"failure_trial,omitempty"`
+	// RouteReferences is the application route-reference workload of a
+	// routed-direct cohort, nil and omitted without -route-references.
+	RouteReferences *routeReferenceSpec `json:"route_references,omitempty"`
 	// Overload identifies a cohort of a DATA overload trial. It is absent from
 	// every nominal cohort.
 	Overload *overloadSpec `json:"overload,omitempty"`
@@ -128,6 +137,15 @@ type runRecord struct {
 	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
 	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
 	SSNM                      *ssnmRecord           `json:"ssnm,omitempty"`
+	// Failover is present only on the records of an SGP failure trial's
+	// measurement cohort: the receiver's fault and delivery observations on
+	// the receiver record, the outcome accounting and per-criterion
+	// evaluation on the sender record.
+	Failover *failoverRecord `json:"failover,omitempty"`
+	// RouteReferences is the application route-reference evidence and
+	// verdict of a -route-references sender record. The DATA verdicts do not
+	// include it.
+	RouteReferences *routeReferenceRecord `json:"route_references,omitempty"`
 	// Overload is present only on the records of a DATA overload measurement
 	// cohort: the receiver's observations on the receiver record, the full
 	// outcome accounting and acceptance evaluation on the sender record.
@@ -184,6 +202,10 @@ func (record *runRecord) evaluate() {
 			"router_or_ssnm_workload":     "unavailable: this fixture does not exercise the existing routing and state APIs",
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}
+	}
+	if record.Failover != nil {
+		record.evaluateFailover()
+		return
 	}
 	if record.Spec.overloadMeasurement() {
 		record.evaluateOverloadRecord()

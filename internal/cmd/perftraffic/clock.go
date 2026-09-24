@@ -178,14 +178,19 @@ func (job sendJob) dispatchDelay() (time.Duration, error) {
 func sameRunSpec(first, second runSpec) bool {
 	firstClock, secondClock := first.Clock, second.Clock
 	firstSSNM, secondSSNM := first.SSNM, second.SSNM
+	firstFailure, secondFailure := first.SGPFailure, second.SGPFailure
+	firstReferences, secondReferences := first.RouteReferences, second.RouteReferences
 	first.Clock, second.Clock = nil, nil
 	first.SSNM, second.SSNM = nil, nil
+	first.SGPFailure, second.SGPFailure = nil, nil
+	first.RouteReferences, second.RouteReferences = nil, nil
 	firstOverload, secondOverload := first.Overload, second.Overload
 	first.Overload, second.Overload = nil, nil
 	if first != second || !sameOverloadSpec(firstOverload, secondOverload) {
 		return false
 	}
-	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM)
+	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM) && samePointee(firstFailure, secondFailure) &&
+		samePointee(firstReferences, secondReferences)
 }
 
 // samePointee compares two optional values: both absent, or both present and
@@ -205,6 +210,14 @@ func copyRunSpec(specification runSpec) runSpec {
 	if specification.SSNM != nil {
 		workload := *specification.SSNM
 		specification.SSNM = &workload
+	}
+	if specification.SGPFailure != nil {
+		failure := *specification.SGPFailure
+		specification.SGPFailure = &failure
+	}
+	if specification.RouteReferences != nil {
+		references := *specification.RouteReferences
+		specification.RouteReferences = &references
 	}
 	specification.Overload = copyOverloadSpec(specification.Overload)
 	return specification
