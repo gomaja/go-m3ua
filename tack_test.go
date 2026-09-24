@@ -207,6 +207,63 @@ func TestTAckGivesUpAndReportsFailure(t *testing.T) {
 	}
 }
 
+// The final resend is owed a full T(ack) like every other send (RFC 4666
+// Section 4.3.4.1: "restart T(ack) and resend"). Expiry reported the moment the
+// last resend is written leaves that resend no chance to be answered. The
+// bound is one-sided, so a slow host can only lengthen the measured gap.
+func TestTAckGivesTheFinalResendAFullInterval(t *testing.T) {
+	const interval = 150 * time.Millisecond
+	conn, _ := newTestConn(t, StateASPDown, RoleASP)
+	conn.cfg.TAck = interval
+	conn.cfg.TAckRetries = 2
+	var (
+		mu     sync.Mutex
+		writes []time.Time
+	)
+	conn.signalWriter = func(message messages.M3UA) (int, error) {
+		mu.Lock()
+		writes = append(writes, time.Now())
+		mu.Unlock()
+		return message.MarshalLen(), nil
+	}
+	if err := conn.initiateASPSM(); err != nil {
+		t.Fatal(err)
+	}
+	var expired time.Time
+	deadline := time.After(5 * time.Second)
+	for expired.IsZero() {
+		select {
+		case err := <-conn.errChan:
+			if errors.Is(err, ErrTAckExpired) {
+				expired = time.Now()
+			}
+		case <-deadline:
+			t.Fatal("T(ack) never reported expiry")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(writes) != 3 {
+		t.Fatalf("ASP Up written %d times, want the first send and 2 resends", len(writes))
+	}
+	if gap := expired.Sub(writes[len(writes)-1]); gap < interval {
+		t.Fatalf("expiry reported %v after the last resend, before its %v T(ack) ran out", gap, interval)
+	}
+}
+
+// The default T(ack) budget, DefaultTAck for every send including the last
+// resend, must outlast DefaultEstablishTimeout. When the two coincided, Dial
+// against a peer that accepts the association and never answers returned
+// ErrTimeout or ErrTAckExpired depending on which timer ran first. This pins
+// the constants only; TestDialAgainstMuteePeerTimesOut exercises Dial with the
+// default timers against such a peer over real SCTP on Linux.
+func TestDefaultTAckBudgetOutlastsTheEstablishTimeout(t *testing.T) {
+	budget := DefaultTAck * time.Duration(DefaultTAckRetries+1)
+	if budget <= DefaultEstablishTimeout {
+		t.Fatalf("T(ack) budget %v does not outlast DefaultEstablishTimeout %v", budget, DefaultEstablishTimeout)
+	}
+}
+
 // ASP Active gets the same treatment (RFC 4666 Section 4.3.4.3), and its Ack
 // must stop it. This is the request that carries traffic mode and routing
 // context, so a lost one leaves an ASP that is up but never carries traffic.

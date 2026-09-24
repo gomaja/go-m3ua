@@ -89,6 +89,9 @@ type aspTransferFlowLock struct {
 	references int
 }
 
+// maxIdleTransferFlowLocks bounds the released flow locks kept for reuse.
+const maxIdleTransferFlowLocks = 64
+
 // aspRoutes owns ASP-wide route state. RFC 4666 Section 4.5.2.2 scopes SSNM
 // updates to the originating SG, while Section 1.3.2.5 requires the ASP to
 // derive one destination state from all such routes.
@@ -110,7 +113,7 @@ type aspRoutes struct {
 	stateRecordsPerRoute             map[aspRouteStateBudgetKey]int
 	stateRecordsPerSignallingGateway map[SignallingGatewayID]int
 	stateRecordCount                 int
-	derived                          map[aspDerivedRangeKey]aspDestinationStatus
+	derived                          map[MTPRouteID]map[aspDerivedRangeKey]aspDestinationStatus
 	sequence                         uint64
 	transferFlows                    map[aspTransferFlowKey]*list.Element
 	transferFlowLRU                  *list.List
@@ -120,6 +123,9 @@ type aspRoutes struct {
 	// when minimizing missequencing.
 	transferSequenceMu sync.Mutex
 	transferSequences  map[aspTransferFlowKey]*aspTransferFlowLock
+	// idleTransferFlowLocks keeps released flow locks for reuse, so an
+	// uncontended transfer does not allocate one per request.
+	idleTransferFlowLocks []*aspTransferFlowLock
 
 	indicationMu      sync.Mutex
 	indications       chan *MTPIndication
@@ -147,19 +153,20 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		stateIndex:                       make(map[MTPRouteID]*aspRouteStateIndexNode, len(snapshot.mtpRoutes)),
 		stateRecordsPerRoute:             make(map[aspRouteStateBudgetKey]int),
 		stateRecordsPerSignallingGateway: make(map[SignallingGatewayID]int),
-		derived:                          make(map[aspDerivedRangeKey]aspDestinationStatus),
+		derived:                          make(map[MTPRouteID]map[aspDerivedRangeKey]aspDestinationStatus, len(snapshot.mtpRoutes)),
 		transferFlows:                    make(map[aspTransferFlowKey]*list.Element),
 		transferFlowLRU:                  list.New(),
 		transferSequences:                make(map[aspTransferFlowKey]*aspTransferFlowLock),
+		idleTransferFlowLocks:            make([]*aspTransferFlowLock, 0, maxIdleTransferFlowLocks),
 		indications:                      make(chan *MTPIndication, queueSize),
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {
 		routes.stateIndex[mtpRoute.id] = &aspRouteStateIndexNode{}
-		routes.derived[aspDerivedRangeKey{
+		routes.derived[mtpRoute.id] = map[aspDerivedRangeKey]aspDestinationStatus{{
 			mtpRoute:  mtpRoute.id,
 			pointCode: mtpRoute.destinationPointCode,
 			mask:      mtpRoute.mask,
-		}] = aspDestinationStatus{availability: DestinationUnavailable}
+		}: {availability: DestinationUnavailable}}
 	}
 	return routes, nil
 }
@@ -282,10 +289,17 @@ func (c aspRoutingConfig) eligibleCandidate(
 		return aspRouteCandidate{}, ASKey{}, false
 	}
 	for _, candidate := range sgp.candidatesFor(mtpRoute) {
-		for _, key := range c.asKeysFor(association, identity, candidate.applicationServer) {
+		var eligible ASKey
+		found := false
+		c.visitASKeys(association, identity, candidate.applicationServer, func(key ASKey) bool {
 			if aspAssociationEligibleForAS(association, key) {
-				return candidate, key, true
+				eligible, found = key, true
+				return false
 			}
+			return true
+		})
+		if found {
+			return candidate, eligible, true
 		}
 	}
 	return aspRouteCandidate{}, ASKey{}, false
@@ -699,8 +713,8 @@ func (r *aspRoutes) destinationStatus(mtpRouteID MTPRouteID, pointCode uint32, m
 	defer r.mu.RUnlock()
 	var result aspDestinationStatus
 	found := false
-	for key, status := range r.derived {
-		if key.mtpRoute != mtpRouteID || !aspRangesOverlap(key.pointCode, key.mask, pointCode, mask) {
+	for key, status := range r.derived[mtpRouteID] {
+		if !aspRangesOverlap(key.pointCode, key.mask, pointCode, mask) {
 			continue
 		}
 		if found && status != result {
@@ -725,11 +739,9 @@ func (r *aspRoutes) mtpDestinationStatus(destination MTPDestination) (MTPDestina
 }
 
 // mtpDestinationStatuses returns every derived destination in configuration
-// order. It groups r.derived by MTP Route in one pass
-// instead of scanning it once per route, so this costs O(derived records x
-// log(derived records)) for the sort rather than O(routes x derived records).
-// It reads r.derived without changing how or where that map, or any other
-// route state, is mutated.
+// order. r.derived already holds each MTP Route's destinations under that
+// route, so this costs O(derived records x log(derived records)) for the sort
+// rather than O(routes x derived records).
 func (r *aspRoutes) mtpDestinationStatuses() []MTPDestinationStatus {
 	if r == nil {
 		return nil
@@ -737,28 +749,28 @@ func (r *aspRoutes) mtpDestinationStatuses() []MTPDestinationStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	keysByRoute := make(map[MTPRouteID][]aspDerivedRangeKey, len(r.config.mtpRoutes))
-	for key := range r.derived {
-		keysByRoute[key.mtpRoute] = append(keysByRoute[key.mtpRoute], key)
+	count := 0
+	for _, destinations := range r.derived {
+		count += len(destinations)
 	}
-
-	statuses := make([]MTPDestinationStatus, 0, len(r.derived))
+	statuses := make([]MTPDestinationStatus, 0, count)
 	for _, mtpRoute := range r.config.mtpRoutes {
-		statuses = append(statuses, sortedDestinationStatuses(r.derived, keysByRoute[mtpRoute.id])...)
+		statuses = append(statuses, sortedDestinationStatuses(r.derived[mtpRoute.id])...)
 	}
 	return statuses
 }
 
 // sortedDestinationStatuses builds one MTP Route's destinations, in
-// point-code then mask order, from a set of aspRoutes.derived keys the caller
-// already knows belong to that one route. keys is sorted in place; the caller
-// must not still need its original order. The returned slice is freshly
-// built and owned by the caller. The caller must already hold aspRoutes.mu
-// for reading.
+// point-code then mask order, from that route's aspRoutes.derived set. The
+// returned slice is freshly built and owned by the caller. The caller must
+// already hold aspRoutes.mu for reading.
 func sortedDestinationStatuses(
 	derived map[aspDerivedRangeKey]aspDestinationStatus,
-	keys []aspDerivedRangeKey,
 ) []MTPDestinationStatus {
+	keys := make([]aspDerivedRangeKey, 0, len(derived))
+	for key := range derived {
+		keys = append(keys, key)
+	}
 	sort.Slice(keys, func(first, second int) bool {
 		if keys[first].pointCode != keys[second].pointCode {
 			return keys[first].pointCode < keys[second].pointCode
@@ -787,14 +799,11 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 		updated := r.recomputeMTPRouteLocked(mtpRoute)
 		routeIndications := r.derivedStatusIndicationsLocked(mtpRoute, updated)
 		indications = append(indications, routeIndications...)
-		for key := range r.derived {
-			if key.mtpRoute == mtpRoute.id {
-				delete(r.derived, key)
-			}
-		}
-		for key, status := range updated {
-			r.derived[key] = status
-		}
+		// updated is built fresh for this route and nothing else retains it,
+		// so it replaces the route's set whole. This runs under the routing
+		// lock every MTP-TRANSFER takes, so it must cost this route's
+		// destinations rather than every route's.
+		r.derived[mtpRoute.id] = updated
 	}
 	return indications
 }
@@ -950,7 +959,7 @@ func (r *aspRoutes) derivedStatusIndicationsLocked(
 	mtpRoute aspMTPRoute,
 	updated map[aspDerivedRangeKey]aspDestinationStatus,
 ) []*MTPIndication {
-	previousTree := derivedStatusTree(mtpRoute, r.derived)
+	previousTree := derivedStatusTree(mtpRoute, r.derived[mtpRoute.id])
 	currentTree := derivedStatusTree(mtpRoute, updated)
 	indications := make([]*MTPIndication, 0)
 	appendDerivedStatusIndications(
@@ -1340,10 +1349,13 @@ func (c aspRoutingConfig) routeCandidateMatchesStatus(
 		return false
 	}
 	for _, candidate := range sgp.candidatesFor(mtpRoute) {
-		for _, key := range c.asKeysFor(association, identity, candidate.applicationServer) {
-			if aspRouteASMatchesStatus(association, key, status) {
-				return true
-			}
+		matched := false
+		c.visitASKeys(association, identity, candidate.applicationServer, func(key ASKey) bool {
+			matched = aspRouteASMatchesStatus(association, key, status)
+			return !matched
+		})
+		if matched {
+			return true
 		}
 	}
 	return false
@@ -1381,15 +1393,7 @@ func (c *Association) dynamicASKeysForRemoteAS(id RemoteASID) []ASKey {
 // has registered, one Application Server scope. It is the binding and
 // authorization question, asked before the active-state one.
 func aspAssociationBoundToAS(association *Association, key ASKey) bool {
-	if association == nil {
-		return false
-	}
-	for _, configuredKey := range association.configuredASKeys() {
-		if configuredKey == key {
-			return true
-		}
-	}
-	return false
+	return association.configuredASKeysContain(key)
 }
 
 func aspAssociationEligibleForAS(association *Association, key ASKey) bool {
