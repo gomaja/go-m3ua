@@ -7,7 +7,9 @@ package m3ua
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"runtime"
 	"strings"
 	"sync"
@@ -36,6 +38,10 @@ type rawPeer struct {
 	// reply returns the message to send in response to msg, or nil to stay
 	// silent. It runs on the peer's goroutine.
 	reply func(msg messages.M3UA) messages.M3UA
+	// ended, when set, reports whether the peer's SCTP layer has delivered
+	// the association's end. serveConn then keeps reading past the end of
+	// stream until it has, see drainAfterEnd.
+	ended func() bool
 }
 
 // newRawPeer starts a peer on 127.0.0.2:port. The calling test is skipped on
@@ -88,6 +94,7 @@ func (p *rawPeer) serveConn(conn *sctp.SCTPConn) {
 	for {
 		n, _, err := conn.SCTPRead(buf)
 		if err != nil {
+			p.drainAfterEnd(conn, buf, err)
 			return
 		}
 		msg, err := messages.Parse(buf[:n])
@@ -110,6 +117,25 @@ func (p *rawPeer) serveConn(conn *sctp.SCTPConn) {
 		if _, err := conn.SCTPWrite(b, info); err != nil {
 			return
 		}
+	}
+}
+
+// drainAfterEnd keeps an association-event peer's socket open and read after
+// its end of stream until the SCTP layer has delivered how the association
+// ended. A SHUTDOWN shuts the socket for reading as soon as it arrives, so the
+// read loop sees the end of stream at once, while SCTP_SHUTDOWN_COMP is queued
+// only when the SHUTDOWN COMPLETE arrives (RFC 9260 Section 9.2). Closing the
+// socket on the end of stream discarded that notification whenever it came
+// later than the reader woke. Notifications are delivered only by reads.
+func (p *rawPeer) drainAfterEnd(conn *sctp.SCTPConn, buf []byte, err error) {
+	if p.ended == nil || !errors.Is(err, io.EOF) {
+		return
+	}
+	for deadline := time.Now().Add(10 * time.Second); !p.ended() && time.Now().Before(deadline); {
+		if _, _, err := conn.SCTPRead(buf); err != nil && !errors.Is(err, io.EOF) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
