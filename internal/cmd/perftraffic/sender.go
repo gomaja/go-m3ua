@@ -434,7 +434,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		specification.Direction = directionASPToSGP
 	}
 	if config.sgpFailureCohort {
-		specification.SGPFailure = newSGPFailureSpec(config.SGPFailure)
+		specification.SGPFailure = newSGPFailureSpec(config.SGPFailure, config.SGPFailureKind)
 	}
 	if config.RouteReferences.enabled() {
 		specification.RouteReferences = config.RouteReferences.spec()

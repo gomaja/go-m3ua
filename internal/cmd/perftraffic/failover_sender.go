@@ -613,11 +613,12 @@ func (tracker *failoverTracker) faultCriterion(receiver *failoverReceiverRecord,
 		lateness := fault.Before - fault.Due
 		criterion.Outcome = failoverPass
 		criterion.Measured = &lateness
-		criterion.Detail = fmt.Sprintf("%s of %s/%s at offset %s (%d ns after due); both Association.Close calls returned within %d ns",
-			fault.Kind, fault.SGP.SignallingGateway, fault.SGP.SignallingGatewayProcess, time.Duration(fault.Before-clock.Start), lateness, fault.After-fault.Before)
+		method := sgpFailureMethod(fault.Kind)
+		criterion.Detail = fmt.Sprintf("%s of %s/%s at offset %s (%d ns after due); both Association.%s calls returned within %d ns",
+			fault.Kind, fault.SGP.SignallingGateway, fault.SGP.SignallingGatewayProcess, time.Duration(fault.Before-clock.Start), lateness, method, fault.After-fault.Before)
 		for _, closed := range fault.Associations {
 			if closed.Error != "" {
-				criterion.Detail += fmt.Sprintf("; association %d Close: %s", closed.Association, closed.Error)
+				criterion.Detail += fmt.Sprintf("; association %d %s: %s", closed.Association, method, closed.Error)
 			}
 		}
 	}
@@ -942,8 +943,13 @@ func failoverAccountingCriterion(record *failoverRecord, inputs failoverInputs) 
 func (record *runRecord) evaluateFailover() {
 	record.UnsupportedModes = map[string]string{
 		"capacity":                    "unavailable: a failure trial is correctness and recovery evidence, not a capacity probe",
-		"abortive_failure":            "unavailable: the library has no public abortive close; the failed SGP ends its associations with Association.Close (SCTP SHUTDOWN)",
 		"independent_peer_validation": "unavailable: both endpoints use this binary",
+	}
+	// Each trial measures one kind of failure; the record names the other.
+	if record.Failover.Spec.Kind == sgpFailureKindAbort {
+		record.UnsupportedModes["graceful_failure"] = "unavailable in this trial: the failed SGP ends its associations with Association.Abort (SCTP ABORT); -sgp-failure-kind=close measures Association.Close (SCTP SHUTDOWN)"
+	} else {
+		record.UnsupportedModes["abortive_failure"] = "unavailable in this trial: the failed SGP ends its associations with Association.Close (SCTP SHUTDOWN); -sgp-failure-kind=abort measures Association.Abort (SCTP ABORT)"
 	}
 	record.CapacityVerdict = "unavailable"
 	record.Reasons = nil

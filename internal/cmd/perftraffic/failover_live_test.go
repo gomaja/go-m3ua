@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,25 +16,77 @@ import (
 // end, MTPTransfer moves the 250 affected routes to sg-a/p1, and every
 // criterion of the trial is judged from the records.
 func TestSGPFailureLiveOverLoopback(testContext *testing.T) {
+	result := runSGPFailureLive(testContext)
+	failover := result.Sender.Failover
+	for _, notification := range failover.Sender.Notifications {
+		testContext.Logf("association %d ended: %s", notification.Association, notification.Error)
+	}
+}
+
+// TestSGPAbortFailureLiveOverLoopback is the same trial with
+// -sgp-failure-kind=abort on both processes. The receiver ends sg-a/p0's
+// associations with Association.Abort, both records declare and record the
+// abort, and the ASP's two failed associations end on the SCTP_COMM_LOST the
+// ABORT raises, carrying its User-Initiated Abort cause, which is what makes
+// this the abortive failure rather than the graceful one.
+func TestSGPAbortFailureLiveOverLoopback(testContext *testing.T) {
+	result := runSGPFailureLive(testContext, "-sgp-failure-kind=abort")
+	for side, record := range map[string]runRecord{"sender": result.Sender, "receiver": result.Receiver} {
+		if record.Spec.SGPFailure == nil || record.Spec.SGPFailure.Kind != sgpFailureKindAbort {
+			testContext.Errorf("the %s record declares %+v, want an abort", side, record.Spec.SGPFailure)
+		}
+		if _, listed := record.UnsupportedModes["abortive_failure"]; listed {
+			testContext.Errorf("the %s record lists the abortive failure it measured as unavailable", side)
+		}
+	}
+	failover := result.Sender.Failover
+	if failover.Receiver.Fault == nil {
+		testContext.Fatal("the receiver recorded no fault")
+	}
+	if failover.Receiver.Fault.Kind != sgpFailureKindAbort {
+		testContext.Errorf("the receiver recorded a %q fault, want %q", failover.Receiver.Fault.Kind, sgpFailureKindAbort)
+	}
+	failed := 0
+	for _, notification := range failover.Sender.Notifications {
+		testContext.Logf("association %d ended: %s", notification.Association, notification.Error)
+		if notification.SGP != sgpFailureFailed {
+			continue
+		}
+		failed++
+		for _, want := range []string{"SCTP_COMM_LOST", "SCTP_ERROR_USER_ABORT"} {
+			if !strings.Contains(notification.Error, want) {
+				testContext.Errorf("failed-SGP association %d ended with %q, which does not name %s", notification.Association, notification.Error, want)
+			}
+		}
+	}
+	if failed != 2 {
+		testContext.Errorf("%d failed-SGP associations reported their end, want 2", failed)
+	}
+}
+
+// runSGPFailureLive runs one failure trial at a two-second offset, both
+// processes taking the extra flags, and judges it.
+func runSGPFailureLive(testContext *testing.T, extra ...string) combinedResult {
+	testContext.Helper()
 	if testing.Short() {
 		testContext.Skip("the SGP failure trial needs a twelve-second window")
 	}
 	base := routedLoopbackPortBase(testContext)
 	control := routedLoopbackControlAddress(testContext)
 	sctpAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(base))
-	receiverConfig, err := parseConfig([]string{
+	receiverConfig, err := parseConfig(append([]string{
 		"-role=sgp", "-transport=listen", "-mode=routed", "-sctp-address=" + sctpAddress,
 		"-control-address=" + control, "-associations=8", "-same-host-clock", "-sgp-failure=2s",
-	})
+	}, extra...))
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	senderConfig, err := parseConfig([]string{
+	senderConfig, err := parseConfig(append([]string{
 		"-role=asp", "-transport=dial", "-mode=routed", "-sctp-address=" + sctpAddress,
 		"-local-address=127.0.0.1:0", "-peer-control=http://" + control, "-associations=8",
 		"-payload=mix", "-rate=2000", "-warmup=1s", "-duration=12s", "-drain=2s",
 		"-cohort=sgp-failure-live", "-seed=9", "-same-host-clock", "-sgp-failure=2s",
-	})
+	}, extra...))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -102,4 +155,5 @@ func TestSGPFailureLiveOverLoopback(testContext *testing.T) {
 	testContext.Logf("notification %d ns after the fault; first alternative %+v; longest call after the fault %+v; outcomes %+v; failed path %+v; send duration %+v",
 		failover.Sender.Notification-failover.Receiver.Fault.Before, *failover.Sender.FirstAlternative, failover.Sender.LongestCallAfterFault,
 		failover.Sender.Outcomes, failover.Sender.FailedPath, result.Sender.SendDuration)
+	return result
 }
