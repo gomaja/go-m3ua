@@ -268,6 +268,12 @@ func (control *receiverControl) reset(specification runSpec) error {
 		}
 		routedLedger = ledger
 	}
+	if err := control.acceptFailoverSpecLocked(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
+	if err := validateRouteReferenceSpec(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
 	// acceptSpec commits the generator to the cohort, so it runs after every
 	// check that can still refuse the specification.
 	if err := control.ssnm.acceptSpec(specification); err != nil {
@@ -314,6 +320,7 @@ func (control *receiverControl) reset(specification runSpec) error {
 	control.cpuError = ""
 	control.series = nil
 	control.generation++
+	control.resetFailoverLocked(specification)
 	control.phase = receiverArmed
 	return nil
 }
@@ -342,6 +349,7 @@ func (control *receiverControl) start() error {
 		control.cpuError = err.Error()
 	}
 	control.phase = receiverMeasuring
+	control.startFailoverLocked()
 	control.startOverloadLocked()
 	specification := control.spec
 	driver := control.driver
@@ -428,6 +436,7 @@ func (control *receiverControl) stop() error {
 		control.stoppedClock, clockErr = control.sharedNowLocked()
 		if clockErr != nil {
 			control.phase = receiverStopped
+			control.stopFailoverLocked()
 			control.stopOverloadLocked()
 			return clockErr
 		}
@@ -439,6 +448,7 @@ func (control *receiverControl) stop() error {
 	}
 	control.allocAfter = readRuntimeCounters()
 	control.phase = receiverStopped
+	control.stopFailoverLocked()
 	control.stopOverloadLocked()
 	if control.overload != nil && control.overload.begun {
 		control.overload.finish()
@@ -736,6 +746,7 @@ func (control *receiverControl) result() runRecord {
 		record.SSNM = &ssnmRecord{Generator: generator}
 		record.UnsupportedModes = ssnmUnsupportedModes()
 	}
+	record.Failover = control.failoverRecordLocked()
 	record.CPU = newCPUObservation(record.CPU.Before, record.CPU.After, errorFromString(record.CPU.Error), nil, record.Delivery.Unique)
 	record.Allocations.Delta = runtimeDelta(record.Allocations.Before, record.Allocations.After)
 	if record.MeasurementDuration > 0 {

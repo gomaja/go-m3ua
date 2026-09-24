@@ -29,6 +29,8 @@ type routedReceiveState struct {
 	mode   string
 	paths  routingPathMap
 	ledger *routingLedger
+	// failover is the SGP failure trial state, nil without -sgp-failure.
+	failover *failoverReceiver
 }
 
 func (control *receiverControl) enableRouted(mode string) {
@@ -101,9 +103,17 @@ func (control *receiverControl) recordRouted(transport routingTransport, message
 	specification := control.spec
 	generation := control.generation
 	paths := &control.routed.paths
+	failover := control.routed.failover
 	control.mutex.Unlock()
 
-	identity, err := validateRouteMessage(message, transport, specification.Cohort, specification.Seed, specification.Payload, paths)
+	var identity routingIdentity
+	var alternative bool
+	var err error
+	if failover != nil && specification.SGPFailure != nil {
+		identity, alternative, err = failover.validate(message, transport, specification, paths)
+	} else {
+		identity, err = validateRouteMessage(message, transport, specification.Cohort, specification.Seed, specification.Payload, paths)
+	}
 	var received time.Time
 	if specification.Clock == nil {
 		received = control.now()
@@ -121,11 +131,19 @@ func (control *receiverControl) recordRouted(transport routingTransport, message
 		ledger.snapshotData.Invalid++
 		return recordInvalid
 	}
+	if alternative && !failover.claimAlternativeLocked(identity.Route, transport) {
+		ledger.snapshotData.Invalid++
+		return recordInvalid
+	}
 	if control.firstArrival.IsZero() {
 		control.firstArrival = received
 	}
+	reorderedBefore := ledger.snapshotData.Reordered
 	if ledger.record(identity) != ledgerUnique {
 		return recordNotUnique
+	}
+	if failover != nil && specification.SGPFailure != nil {
+		failover.uniqueLocked(ledger, identity, reorderedBefore, alternative, transport)
 	}
 	if control.spec.Clock != nil {
 		sharedReceived, clockErr := control.sharedNowLocked()
@@ -138,6 +156,9 @@ func (control *receiverControl) recordRouted(transport routingTransport, message
 			return recordInvalid
 		}
 		control.classifySharedDeliveryLocked(sharedReceived)
+		if failover != nil && specification.SGPFailure != nil {
+			failover.deliveredLocked(specification, sharedReceived, transport, identity)
+		}
 		return recordUnique
 	}
 	if received.Before(control.firstArrival.Add(control.spec.Duration)) {
@@ -289,7 +310,12 @@ func (operations *routedPeerOperations) handler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return routedControlHandler(operations.control.handler(), routingHandler), nil
+	mux := http.NewServeMux()
+	mux.Handle(routedPeerStatePath, peerStateHandler(func() (routeReferenceState, error) {
+		return capturePeerRouteReferenceState(operations.peers)
+	}))
+	mux.Handle("/", routedControlHandler(operations.control.handler(), routingHandler))
+	return mux, nil
 }
 
 func (operations *routedPeerOperations) prepare(ctx context.Context, values []routingTransportDTO) error {
@@ -410,6 +436,9 @@ func (operations *routedPeerOperations) completePreflight(ctx context.Context) (
 	if err := operations.control.freezeRoutes(paths); err != nil {
 		return nil, err
 	}
+	if err := operations.control.freezeFailover(operations.topology, pairs, associations); err != nil {
+		return nil, err
+	}
 	writeRoutedPathDiagnostic(&paths)
 	operations.mutex.Lock()
 	operations.preflightDone = true
@@ -502,6 +531,9 @@ func readRoutedAssociation(ctx context.Context, index int, transport routingTran
 			if ctx.Err() != nil || control.isStopped() && errors.Is(err, m3ua.ErrNotEstablished) {
 				return
 			}
+			if control.failoverReaderEnded(transport, err) {
+				return
+			}
 			phase := control.phaseName()
 			writeStartupDiagnostic("read-fatal", index, phase, err)
 			nonblockingError(fatal, readFatalError(index, phase, err))
@@ -537,6 +569,7 @@ func runRoutedReceiver(ctx context.Context, config commandConfig) (runRecord, er
 	}
 	lifetime, cancel := context.WithCancel(ctx)
 	defer cancel()
+	control.enableFailover(lifetime, config.SGPFailure)
 	peers, err := startRoutingPeerSet(lifetime, topology, addresses, nil)
 	if err != nil {
 		return runRecord{}, fmt.Errorf("startup listen: %w", err)

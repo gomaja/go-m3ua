@@ -293,6 +293,7 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 				}
 			}
 			applySSNMDecision(&result, fixture.ssnmVerdict, forward.Stall != nil && forward.Stall.Stalled())
+			applyRouteReferenceDecision(&result, fixture.referenceVerdict, forward.Stall != nil && forward.Stall.Stalled())
 		}
 		return result
 	}
@@ -393,6 +394,12 @@ type fixtureEvidence struct {
 	// SenderDrainTimeout is present only on a sender record whose drain
 	// deadline passed while the sender still held scheduled work.
 	SenderDrainTimeout *senderDrainTimeoutEvidence `json:"sender_drain_timeout"`
+	// Failover is the evidence of a perftraffic SGP failure trial. Such a
+	// record is never capacity evidence.
+	Failover json.RawMessage `json:"failover"`
+	// RouteReferences is the route-reference result of a routed-direct
+	// sender record that declared the workload.
+	RouteReferences *routeReferenceEvidence `json:"route_references"`
 }
 
 // senderDrainTimeoutCause is the fixed cause perftraffic records on every
@@ -630,6 +637,12 @@ type fixtureSpec struct {
 	PeerControl  string             `json:"peer_control"`
 	SharedClock  *sharedClockWindow `json:"shared_clock"`
 	SSNM         *ssnmSpecEvidence  `json:"ssnm"`
+	// SGPFailure declares a perftraffic SGP failure trial cohort, which is
+	// correctness and recovery evidence, never a capacity probe.
+	SGPFailure json.RawMessage `json:"failure_trial"`
+	// RouteReferences declares the application route-reference workload of
+	// a routed-direct cohort.
+	RouteReferences *routeReferenceSpecEvidence `json:"route_references"`
 	// Overload is the identity of a DATA overload trial's cohorts. Its mere
 	// presence refuses the record: an overload trial is never a capacity probe.
 	Overload json.RawMessage `json:"overload"`
@@ -671,6 +684,7 @@ type workloadIdentity struct {
 	PeerControl     string
 	Instrumentation string
 	SSNM            ssnmIdentity
+	RouteReferences routeReferenceIdentity
 }
 
 type fixtureRun struct {
@@ -687,6 +701,9 @@ type fixtureRun struct {
 	// stall, so it never reached measurement. It can never pass.
 	warmup      bool
 	ssnmVerdict string
+	// referenceVerdict is the route-reference verdict of a route-reference
+	// cohort, empty otherwise.
+	referenceVerdict string
 }
 
 type achievedRateBounds struct {
@@ -842,10 +859,21 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if err := rejectStraySSNM(&record); err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
+	if err := rejectStrayRouteReferences(&record); err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
+	}
 	return evidenceFromSenderRecord(&record, declaredRate, false)
 }
 
+// errSGPFailureTrial refuses the records of a perftraffic SGP failure trial:
+// the trial deliberately loses the failed path's traffic, so its throughput
+// is not a sustainable-capacity measurement.
+var errSGPFailureTrial = errors.New("an SGP failure trial record is not capacity evidence")
+
 func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, completeCohort bool) (perfstats.RunEvidence, runIdentity, error) {
+	if len(record.Failover) != 0 {
+		return perfstats.RunEvidence{}, runIdentity{}, errSGPFailureTrial
+	}
 	if record.Spec == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("spec is required to identify the measured run")
 	}
@@ -1008,6 +1036,9 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	}
 	if cohort.Verdict == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort verdict is required")
+	}
+	if err := rejectStrayRouteReferences(cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
+		return fixtureRun{}, err
 	}
 	if err := rejectStraySSNM(cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
 		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
@@ -1182,10 +1213,14 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	// The budgets join the workload identity, so one campaign never mixes
 	// SSNM verdicts judged against different budgets.
 	identity.workload.SSNM.Budgets = ssnmBudgets
+	referenceVerdict, err := routeReferenceCohortVerdict(senderSpec.Workload.RouteReferences, cohort.Sender, cohort.Receiver)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional route_references: %w", err)
+	}
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
 		forwardAchieved: achieved, cohortError: cohort.Error != "", warmup: warmup,
-		ssnmVerdict: ssnmVerdict,
+		ssnmVerdict: ssnmVerdict, referenceVerdict: referenceVerdict,
 	}, nil
 }
 
@@ -1273,6 +1308,9 @@ func completeSpecIdentity(spec *fixtureSpec, declaredRate int) (specIdentity, er
 }
 
 func validateCohortReceiver(record *fixtureEvidence, declaredRate int) (specIdentity, error) {
+	if len(record.Failover) != 0 {
+		return specIdentity{}, errSGPFailureTrial
+	}
 	if record.Spec == nil {
 		return specIdentity{}, errors.New("spec is required")
 	}
@@ -1701,6 +1739,9 @@ func sumEquals(total uint64, parts ...uint64) bool {
 }
 
 func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, error) {
+	if len(spec.SGPFailure) != 0 {
+		return workloadIdentity{}, errSGPFailureTrial
+	}
 	if spec.Rate == nil {
 		return workloadIdentity{}, errors.New("spec.rate is required and cannot be null")
 	}
@@ -1781,6 +1822,10 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	if err != nil {
 		return workloadIdentity{}, err
 	}
+	references, err := routeReferenceIdentityFromSpec(spec)
+	if err != nil {
+		return workloadIdentity{}, err
+	}
 	return workloadIdentity{
 		Associations:    *spec.Associations,
 		Duration:        *spec.Duration,
@@ -1793,6 +1838,7 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		PeerControl:     spec.PeerControl,
 		Instrumentation: instrumentation,
 		SSNM:            ssnm,
+		RouteReferences: references,
 	}, nil
 }
 
