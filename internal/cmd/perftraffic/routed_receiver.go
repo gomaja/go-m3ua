@@ -598,10 +598,7 @@ func runRoutedReceiver(ctx context.Context, config commandConfig) (runRecord, er
 		}
 	}()
 	go sampleReceiver(lifetime, control)
-	err = routedReceiverEnd(ctx, fatal, httpFailure, peers.Done())
-	if err != nil {
-		control.setFatal(err.Error())
-	}
+	err = routedReceiverCause(control, routedReceiverEnd(ctx, fatal, httpFailure, peers.Done()))
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelShutdown()
 	_ = httpServer.Shutdown(shutdownContext)
@@ -611,6 +608,22 @@ func runRoutedReceiver(ctx context.Context, config commandConfig) (runRecord, er
 	record.Manifest = currentManifest(config.Outstanding, config.Initiation)
 	record.Manifest.FlowCount = routingRouteCount
 	return record, err
+}
+
+// routedReceiverCause records err as the control's fault and returns the fault
+// the run ends with: the first one the control recorded. A sender's
+// /routing/stop, for one, records why it stopped the topology and only then
+// closes the SGP endpoints, so "routed SGP endpoints closed" is its
+// consequence and the stop reason is the cause.
+func routedReceiverCause(control *receiverControl, err error) error {
+	if err == nil {
+		return nil
+	}
+	control.setFatal(err.Error())
+	if reason := control.fatalError(); reason != err.Error() {
+		return errors.New(reason)
+	}
+	return err
 }
 
 // routedReceiverEnd waits for the routed receiver's run to end and reports
