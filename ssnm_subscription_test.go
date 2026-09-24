@@ -772,7 +772,7 @@ func TestResyncDoesNotReconstructDUPUOrPeerCongestion(t *testing.T) {
 // subscriber missed nor completes its recovery.
 func TestDAUDIsNotAnEventReplayOrCompletionPrimitive(t *testing.T) {
 	endpoint, sgp := newSGPSSNMFixture(t)
-	endpoint.destinations.setRanges([]DestinationRange{{
+	endpoint.destinations.setRanges([]destinationRange{{
 		RoutingContext: 1, RoutingContextSet: true,
 		PointCode: 0x123456, State: availabilityState(DestinationUnavailable),
 	}})

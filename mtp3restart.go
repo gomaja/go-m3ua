@@ -47,7 +47,7 @@ type MTP3Restart struct {
 type mtp3RestartTarget struct {
 	registry     *mtp3RestartRegistry
 	closed       func() bool
-	prepare      func(DestinationRange) (DestinationRange, error)
+	prepare      func(destinationRange) (destinationRange, error)
 	destinations func() *destinations
 	publish      func(staged []stagedDestination, completion, wait bool) *SSNMDeliveryError
 }
@@ -65,18 +65,18 @@ type mtp3RestartRegistry struct {
 // congestion report staged during a restart must not publish an availability
 // nobody asked for, and the reverse.
 type stagedDestination struct {
-	rangeValue DestinationRange
+	rangeValue destinationRange
 	dimensions destinationDimensions
 }
 
 type mtp3RestartEpoch struct {
-	affected []DestinationRange
+	affected []destinationRange
 	updates  []stagedDestination
 	// completed are the destinations whose recovery has already been published.
 	// A partially delivered completion keeps the rest outstanding, and these
 	// are released from the restart's DUNA isolation so a later audit answers
 	// what was published rather than the isolation state.
-	completed []DestinationRange
+	completed []destinationRange
 	// attempted records that a completion has run and left work behind, which
 	// is what distinguishes a staged destination from an outstanding one.
 	attempted bool
@@ -102,9 +102,9 @@ func beginMTP3Restart(target mtp3RestartTarget, affected ...AffectedDestination)
 		return nil, ErrNotEstablished
 	}
 
-	ranges := make([]DestinationRange, len(affected))
+	ranges := make([]destinationRange, len(affected))
 	for index, destination := range affected {
-		rangeValue, err := target.prepare(DestinationRange{
+		rangeValue, err := target.prepare(destinationRange{
 			NetworkAppearance:    destination.NetworkAppearance,
 			NetworkAppearanceSet: destination.NetworkAppearanceSet,
 			RoutingContext:       destination.RoutingContext,
@@ -155,7 +155,7 @@ func beginMTP3Restart(target mtp3RestartTarget, affected ...AffectedDestination)
 		registry.active = make(map[uint64]*mtp3RestartEpoch)
 	}
 	registry.active[generation] = &mtp3RestartEpoch{
-		affected: append([]DestinationRange(nil), ranges...),
+		affected: append([]destinationRange(nil), ranges...),
 	}
 	registry.mu.Unlock()
 
@@ -185,7 +185,7 @@ func (r *MTP3Restart) Update(destination AffectedDestination, state DestinationN
 	if r.completed {
 		return ErrStaleMTP3Restart
 	}
-	rangeValue, err := r.target.prepare(DestinationRange{
+	rangeValue, err := r.target.prepare(destinationRange{
 		NetworkAppearance:    destination.NetworkAppearance,
 		NetworkAppearanceSet: destination.NetworkAppearanceSet,
 		RoutingContext:       destination.RoutingContext,
@@ -278,7 +278,7 @@ func (r *MTP3Restart) Completed() []AffectedDestination {
 	return completed
 }
 
-func affectedDestinationOf(rangeValue DestinationRange) AffectedDestination {
+func affectedDestinationOf(rangeValue destinationRange) AffectedDestination {
 	return AffectedDestination{
 		NetworkAppearance:    rangeValue.NetworkAppearance,
 		NetworkAppearanceSet: rangeValue.NetworkAppearanceSet,
@@ -301,7 +301,7 @@ func stageMTP3RestartRange(registry *mtp3RestartRegistry, store *destinations, g
 	if !restartEpochCovers(epoch, staged.rangeValue) {
 		return ErrMTP3RestartScope
 	}
-	if err := retainMTP3RestartIsolation(store, []DestinationRange{staged.rangeValue}, false); err != nil {
+	if err := retainMTP3RestartIsolation(store, []destinationRange{staged.rangeValue}, false); err != nil {
 		return err
 	}
 	epoch.updates = appendRestartUpdate(epoch.updates, staged)
@@ -318,7 +318,7 @@ func stageAnyMTP3RestartRangeLocked(registry *mtp3RestartRegistry, store *destin
 	defer registry.mu.Unlock()
 	for _, epoch := range registry.active {
 		if restartEpochIsolates(epoch, staged.rangeValue) {
-			if err := retainMTP3RestartIsolation(store, []DestinationRange{staged.rangeValue}, false); err != nil {
+			if err := retainMTP3RestartIsolation(store, []destinationRange{staged.rangeValue}, false); err != nil {
 				return true, err
 			}
 			epoch.updates = appendRestartUpdate(epoch.updates, staged)
@@ -330,7 +330,7 @@ func stageAnyMTP3RestartRangeLocked(registry *mtp3RestartRegistry, store *destin
 
 // RFC 4666 Sections 4.6 and 4.5.3 require retained restart isolation and
 // recovery knowledge to agree with the SSNM published and later audited.
-func retainMTP3RestartIsolation(store *destinations, ranges []DestinationRange, replace bool) error {
+func retainMTP3RestartIsolation(store *destinations, ranges []destinationRange, replace bool) error {
 	if store == nil {
 		return ErrNotEstablished
 	}
@@ -408,11 +408,11 @@ func completeMTP3Restart(target mtp3RestartTarget, generation uint64) error {
 
 	destinations := target.destinations()
 	outstanding := make([]stagedDestination, 0, len(updates))
-	completed := make([]DestinationRange, 0, len(updates))
+	completed := make([]destinationRange, 0, len(updates))
 	failure := &SSNMDeliveryError{}
 	var retentionFailure error
 	for _, staged := range updates {
-		if err := retainMTP3RestartIsolation(destinations, []DestinationRange{staged.rangeValue}, false); err != nil {
+		if err := retainMTP3RestartIsolation(destinations, []destinationRange{staged.rangeValue}, false); err != nil {
 			retentionFailure = errors.Join(retentionFailure, err)
 			outstanding = append(outstanding, staged)
 			continue
@@ -561,9 +561,9 @@ func (l *Listener) destinationRegistry() *destinations {
 // against the Application Servers this Endpoint knows about. An omitted Network
 // Appearance is filled in only when every candidate agrees on one; a named
 // Routing Context must be one the Endpoint serves.
-func (e *Endpoint) prepareLocalDestinationRange(rangeValue DestinationRange) (DestinationRange, error) {
+func (e *Endpoint) prepareLocalDestinationRange(rangeValue destinationRange) (destinationRange, error) {
 	if !validDestinationNetworkState(rangeValue.State) {
-		return DestinationRange{}, fmt.Errorf(
+		return destinationRange{}, fmt.Errorf(
 			"%w: destination availability %d congestion level %d",
 			ErrInvalidParameterValue, rangeValue.State.Availability, rangeValue.State.Congestion.Level,
 		)
@@ -577,13 +577,13 @@ func (e *Endpoint) prepareLocalDestinationRange(rangeValue DestinationRange) (De
 		scope.RoutingContextSet = true
 	}
 	if err := validateEndpointSSNMScope(e, scope); err != nil {
-		return DestinationRange{}, err
+		return destinationRange{}, err
 	}
 	if !rangeValue.NetworkAppearanceSet {
 		networkAppearance, networkAppearanceSet, err :=
 			resolveEndpointSSNMNetworkAppearance(e, scope)
 		if err != nil {
-			return DestinationRange{}, err
+			return destinationRange{}, err
 		}
 		rangeValue.NetworkAppearance, rangeValue.NetworkAppearanceSet =
 			networkAppearance, networkAppearanceSet
@@ -595,7 +595,7 @@ func (e *Endpoint) prepareLocalDestinationRange(rangeValue DestinationRange) (De
 // restart. A destination whose recovery has already been published has left the
 // isolation even while the restart runs on, so a later statement about it is
 // published rather than staged again.
-func restartEpochIsolates(epoch *mtp3RestartEpoch, rangeValue DestinationRange) bool {
+func restartEpochIsolates(epoch *mtp3RestartEpoch, rangeValue destinationRange) bool {
 	if !restartEpochCovers(epoch, rangeValue) {
 		return false
 	}
@@ -607,7 +607,7 @@ func restartEpochIsolates(epoch *mtp3RestartEpoch, rangeValue DestinationRange) 
 	return true
 }
 
-func restartEpochCovers(epoch *mtp3RestartEpoch, rangeValue DestinationRange) bool {
+func restartEpochCovers(epoch *mtp3RestartEpoch, rangeValue destinationRange) bool {
 	for _, affected := range epoch.affected {
 		if destinationRangeContains(affected, rangeValue) {
 			return true
@@ -616,7 +616,7 @@ func restartEpochCovers(epoch *mtp3RestartEpoch, rangeValue DestinationRange) bo
 	return false
 }
 
-func destinationRangeContains(outer, inner DestinationRange) bool {
+func destinationRangeContains(outer, inner destinationRange) bool {
 	if outer.NetworkAppearance != inner.NetworkAppearance ||
 		outer.NetworkAppearanceSet != inner.NetworkAppearanceSet {
 		return false
@@ -628,7 +628,7 @@ func destinationRangeContains(outer, inner DestinationRange) bool {
 	return destinationRangeCovers(outer, inner.PointCode, inner.Mask)
 }
 
-func destinationRangesOverlap(first, second DestinationRange) bool {
+func destinationRangesOverlap(first, second destinationRange) bool {
 	if first.NetworkAppearance != second.NetworkAppearance ||
 		first.NetworkAppearanceSet != second.NetworkAppearanceSet {
 		return false
@@ -647,7 +647,7 @@ func restartForcesUnavailable(registry *mtp3RestartRegistry, scope destinationKe
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	query := DestinationRange{
+	query := destinationRange{
 		NetworkAppearance:    scope.networkAppearance,
 		NetworkAppearanceSet: scope.networkAppearanceSet,
 		RoutingContext:       scope.routingContext,
@@ -691,7 +691,7 @@ func writeMTP3RestartStatusBeforeAck(registry *mtp3RestartRegistry, association 
 	registry.procedureMu.RLock()
 	defer registry.procedureMu.RUnlock()
 	registry.mu.Lock()
-	var affected []DestinationRange
+	var affected []destinationRange
 	generations := make([]uint64, 0, len(registry.active))
 	for generation := range registry.active {
 		generations = append(generations, generation)
@@ -831,7 +831,7 @@ func ssnmTargetRoutingContextScopes(target activeSSNMTarget) [][]uint32 {
 // congestion report says nothing about reachability, so the DAVA that follows
 // it is what confirms the congested route is still there.
 func destinationStateSSNMs(
-	rangeValue DestinationRange,
+	rangeValue destinationRange,
 	routingContexts []uint32,
 	dimensions destinationDimensions,
 ) []messages.M3UA {

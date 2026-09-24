@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -148,7 +149,11 @@ func TestMTPTransferHonorsDUNAWithOmittedNetworkAppearance(test *testing.T) {
 	}
 	sendDAVA(test, association, 7, 1, 123)
 	drainMTPIndications(endpoint.MTPIndications())
-	drainSignallingStatuses(association.SignallingStatus())
+	_, subscription, err := endpoint.SubscribeSSNM()
+	if err != nil {
+		test.Fatal(err)
+	}
+	defer func() { _ = subscription.Close() }()
 	request := MTPTransferRequest{ProtocolData: transferProtocolData(123, 1, []byte("payload"))}
 	if _, err := endpoint.MTPTransfer(request); err != nil {
 		test.Fatalf("initial available transfer: %v", err)
@@ -156,7 +161,7 @@ func TestMTPTransferHonorsDUNAWithOmittedNetworkAppearance(test *testing.T) {
 	if err := association.handleDestinationUnavailable(messages.NewDestinationUnavailable(nil, params.NewRoutingContext(1), params.NewAffectedPointCode(123), nil)); err != nil {
 		test.Fatalf("DUNA: %v", err)
 	}
-	_, err := endpoint.MTPTransfer(request)
+	_, err = endpoint.MTPTransfer(request)
 	if !errors.Is(err, ErrNoMTPRoute) || capture.submissions() != 1 {
 		test.Fatalf("transfer after DUNA: error=%v submissions=%d", err, capture.submissions())
 	}
@@ -176,13 +181,24 @@ func TestMTPTransferHonorsDUNAWithOmittedNetworkAppearance(test *testing.T) {
 	if len(statuses) != 1 || statuses[0] != status {
 		test.Errorf("aggregate snapshot after DUNA: %+v", statuses)
 	}
-	select {
-	case status := <-association.SignallingStatus():
-		if status.NetworkAppearanceSet || !status.RoutingContextSet || !reflect.DeepEqual(status.RoutingContexts, []uint32{1}) {
-			test.Errorf("DUNA wire scope changed: %+v", status)
+	// The DUNA's report keeps the scope it arrived with: no Network
+	// Appearance, Routing Context 1.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for {
+		event, err := subscription.Next(ctx)
+		if err != nil {
+			test.Fatalf("DUNA did not publish an SSNM report: %v", err)
 		}
-	default:
-		test.Error("DUNA did not emit a signalling status")
+		if event.Kind != SSNMReportEvent || !event.ReportSet {
+			continue
+		}
+		scope := event.Report.Scope
+		if event.Report.Kind != SSNMDestinationUnavailableReport || scope.NetworkAppearanceSet || !scope.RoutingContextSet ||
+			!reflect.DeepEqual(scope.RoutingContexts, []uint32{1}) {
+			test.Errorf("DUNA report or its wire scope changed: %+v", event.Report)
+		}
+		break
 	}
 	if err := association.handleDestinationAvailable(messages.NewDestinationAvailable(nil, params.NewRoutingContext(1), params.NewAffectedPointCode(123), nil)); err != nil {
 		test.Fatalf("DAVA: %v", err)
@@ -201,7 +217,7 @@ func TestASPRouteStatusResolvesNetworkAppearanceByRoutingContext(test *testing.T
 					name := fmt.Sprintf("appearance=%d/explicit=%t/dynamic=%t/contexts=%v", appearance, explicit, dynamic, contexts)
 					test.Run(name, func(test *testing.T) {
 						_, association := newMixedNetworkScopeAssociation(test, appearance, dynamic)
-						status := &DestinationStatus{RoutingContexts: contexts, RoutingContextSet: true}
+						status := &destinationStatus{RoutingContexts: contexts, RoutingContextSet: true}
 						if explicit {
 							status.NetworkAppearance, status.NetworkAppearanceSet = appearance, true
 						}
@@ -235,7 +251,7 @@ func TestASPRouteStatusResolvesOmittedRoutingContext(test *testing.T) {
 	} {
 		test.Run(scenario.name, func(test *testing.T) {
 			association := &Association{cfg: &AssociationConfig{ApplicationServers: scenario.servers}}
-			if got := aspRouteASMatchesStatus(association, scenario.key, &DestinationStatus{}); got != scenario.want {
+			if got := aspRouteASMatchesStatus(association, scenario.key, &destinationStatus{}); got != scenario.want {
 				test.Errorf("matched=%t, want %t", got, scenario.want)
 			}
 		})
@@ -355,7 +371,7 @@ func FuzzSSNMScopedNetworkAppearance(fuzz *testing.F) {
 		if got := association.ssnmASKeys(scope); !reflect.DeepEqual(got, []ASKey{first, second}) {
 			test.Fatalf("resolved=%+v, want %+v", got, []ASKey{first, second})
 		}
-		status := &DestinationStatus{NetworkAppearance: scope.NetworkAppearance, NetworkAppearanceSet: explicit,
+		status := &destinationStatus{NetworkAppearance: scope.NetworkAppearance, NetworkAppearanceSet: explicit,
 			RoutingContexts: scope.RoutingContexts, RoutingContextSet: true}
 		for _, candidate := range []ASKey{first, second} {
 			if !aspRouteASMatchesStatus(association, candidate, status) {

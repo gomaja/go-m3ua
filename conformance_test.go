@@ -117,16 +117,12 @@ func TestDUPUWithUserCauseIsAccepted(t *testing.T) {
 		t.Fatalf("DUPU with User/Cause: %v", err)
 	}
 
-	select {
-	case st := <-conn.SignallingStatus():
-		if !st.UserPartUnavailable {
-			t.Error("status did not report a user part unavailable")
-		}
-		if st.UserCause != params.NewUserCause(3, 2).UserCause() {
-			t.Errorf("UserCause = %#x, want %#x", st.UserCause, params.NewUserCause(3, 2).UserCause())
-		}
-	default:
-		t.Error("no status was published for a valid DUPU")
+	st := nextSSNMReport(t, conn)
+	if st.Kind != SSNMDestinationUserPartUnavailableReport {
+		t.Error("status did not report a user part unavailable")
+	}
+	if st.UserCause != params.NewUserCause(3, 2).UserCause() {
+		t.Errorf("UserCause = %#x, want %#x", st.UserCause, params.NewUserCause(3, 2).UserCause())
 	}
 }
 

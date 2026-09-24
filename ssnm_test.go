@@ -7,6 +7,7 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -19,8 +20,7 @@ import (
 // it wrongly is what takes traffic down in production: a missed DUNA keeps an
 // MTP3-User pumping messages at an unreachable point code, and a spurious one
 // stops traffic that should be flowing. These messages carry no acknowledgement,
-// so the only observable effects are the destination state and the status
-// channel.
+// so the observable effects include retained destination state and typed reports.
 
 // ssnmConn builds an ASP in ASP-ACTIVE, the only state in which SSNM may be
 // acted on (RFC 4666 Section 4.3.1).
@@ -35,7 +35,14 @@ func ssnmConn(t *testing.T) (*Association, *[]messages.M3UA) {
 // their scope explicitly.
 func newSSNMTestConn(t *testing.T, state State, role Role) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	conn, sent := newTestConn(t, state, role)
+	conn, sent := newUnobservedSSNMTestConn(t, state, role)
+	observeSSNM(t, conn)
+	return conn, sent
+}
+
+func newUnobservedSSNMTestConn(testContext *testing.T, state State, role Role) (*Association, *[]messages.M3UA) {
+	testContext.Helper()
+	conn, sent := newTestConn(testContext, state, role)
 	setInventoryRoutingContexts(&conn.cfg.ApplicationServers, params.NewRoutingContext(1))
 	return conn, sent
 }
@@ -51,7 +58,7 @@ func apc(pcs ...uint32) *params.Param {
 // seeding a congested destination takes one of each.
 func seedDestinationNetworkState(c *Association, pointCode uint32, state DestinationNetworkState) {
 	scope := associationDestinationScope(c, nil)
-	rangeValue := DestinationRange{
+	rangeValue := destinationRange{
 		NetworkAppearance:    scope.networkAppearance,
 		NetworkAppearanceSet: scope.networkAppearanceSet,
 		RoutingContext:       scope.routingContext,
@@ -59,8 +66,8 @@ func seedDestinationNetworkState(c *Association, pointCode uint32, state Destina
 		PointCode:            pointCode,
 		State:                state,
 	}
-	c.destinations.setRanges([]DestinationRange{rangeValue})
-	_ = c.destinations.setCongestionRangesWithinBudget([]DestinationRange{rangeValue})
+	c.destinations.setRanges([]destinationRange{rangeValue})
+	_ = c.destinations.setCongestionRangesWithinBudget([]destinationRange{rangeValue})
 }
 
 // retainedSnapshot is the exact, Mask-zero destination records an Association
@@ -72,21 +79,8 @@ func retainedSnapshot(c *Association, networkAppearance *params.Param) map[uint3
 
 // retainedRanges is every range an Association holds in that same scope,
 // including the ones a Mask-zero snapshot cannot represent.
-func retainedRanges(c *Association) []DestinationRange {
+func retainedRanges(c *Association) []destinationRange {
 	return c.destinations.rangesForScope(associationDestinationScope(c, nil))
-}
-
-// nextStatus returns the next SSNM status, or fails if none arrives.
-func nextStatus(t *testing.T, c *Association) *DestinationStatus {
-	t.Helper()
-
-	select {
-	case s := <-c.SignallingStatus():
-		return s
-	case <-time.After(2 * time.Second):
-		t.Fatal("no SSNM status delivered to the user")
-		return nil
-	}
 }
 
 // RFC 4666 Section 3.4.1: DUNA tells the ASP that destinations are unreachable
@@ -105,7 +99,7 @@ func TestDUNAMarksDestinationUnavailable(t *testing.T) {
 	if got := retainedAvailability(conn, 0x1234); got != DestinationUnavailable {
 		t.Errorf("retained availability for 0x1234 = %v, want %v", got, DestinationUnavailable)
 	}
-	if s := nextStatus(t, conn); s.PointCode != 0x1234 || s.State.Availability != DestinationUnavailable {
+	if s := nextSSNMReport(t, conn); s.Destinations[0].PointCode != 0x1234 || reportedSSNMAvailability(t, s) != DestinationUnavailable {
 		t.Errorf("status = %+v, want point code 0x1234 Unavailable", s)
 	}
 	// SSNM is not acknowledged.
@@ -186,8 +180,8 @@ func TestSCONReportsCongestion(t *testing.T) {
 			got.Availability != DestinationAvailable {
 			t.Errorf("state = %+v, want a congested destination that is still available", got)
 		}
-		if s := nextStatus(t, conn); s.State.Congestion.Level != 2 {
-			t.Errorf("congestion level = %d, want 2", s.State.Congestion.Level)
+		if s := nextSSNMReport(t, conn); reportedSSNMCongestion(t, s).Level != 2 {
+			t.Errorf("congestion level = %d, want 2", reportedSSNMCongestion(t, s).Level)
 		}
 	})
 
@@ -222,8 +216,8 @@ func TestDUPULeavesDestinationReachable(t *testing.T) {
 			got, DestinationAvailable)
 	}
 
-	s := nextStatus(t, conn)
-	if !s.UserPartUnavailable {
+	s := nextSSNMReport(t, conn)
+	if s.Kind != SSNMDestinationUserPartUnavailableReport {
 		t.Error("status.UserPartUnavailable = false, want true for a DUPU")
 	}
 	if s.UserCause == 0 {
@@ -470,7 +464,7 @@ func TestDAVAAcceptedOnlyDuringPendingActivationAndDUPURejected(t *testing.T) {
 		messages.NewDestinationAvailable(nil, nil, apc(0x1234), nil)); err != nil {
 		t.Fatalf("DAVA with ASP Active pending: %v", err)
 	}
-	_ = nextStatus(t, conn)
+	_ = nextSSNMReport(t, conn)
 	if err := conn.handleDestinationUserPartUnavailable(
 		messages.NewDestinationUserPartUnavailable(
 			nil, nil, apc(0x1234), params.NewUserCause(3, 2), nil,
@@ -699,31 +693,8 @@ func FuzzSSNMHandlers(f *testing.F) {
 				}
 			}
 
-			// Drain the lossy status channel so a long fuzz run does not simply
-			// fill it and stop exercising notifyStatus.
-			drainSignallingStatuses(tt.conn.SignallingStatus())
 		}
 	})
-}
-
-func TestDrainSignallingStatusesReturnsWhenClosed(t *testing.T) {
-	statuses := make(chan *DestinationStatus)
-	close(statuses)
-
-	drainSignallingStatuses(statuses)
-}
-
-func drainSignallingStatuses(statuses <-chan *DestinationStatus) {
-	for {
-		select {
-		case _, open := <-statuses:
-			if !open {
-				return
-			}
-		default:
-			return
-		}
-	}
 }
 
 // newFuzzConn builds a minimal ASP-ACTIVE Association without the per-test
@@ -748,7 +719,7 @@ func newFuzzConn(t testing.TB, role Role) *Association {
 		cfg:          cfg,
 		destinations: newDestinations(),
 		tack:         newTAckRetransmitter(),
-		statusChan:   make(chan *DestinationStatus, 8),
+
 		// See newTestConn: nil here drops every transition and panics on close.
 		stateEventChan: make(chan State, 16),
 		mgmtChan:       make(chan *ManagementIndication, 64),
@@ -842,13 +813,9 @@ func TestSCONFromAnASPIsAcceptedAtAnSGP(t *testing.T) {
 	}
 
 	// It is still surfaced to the user, marked as the peer's report.
-	select {
-	case st := <-conn.SignallingStatus():
-		if !st.PeerReported {
-			t.Error("the ASP's SCON was reported as SS7 state rather than as the peer's own")
-		}
-	default:
-		t.Error("the ASP's SCON was not reported at all")
+	st := nextSSNMReport(t, conn)
+	if !st.PeerReported {
+		t.Error("the ASP's SCON was reported as SS7 state rather than as the peer's own")
 	}
 }
 
@@ -929,14 +896,10 @@ func TestSSNMPreservesNetworkAppearance(t *testing.T) {
 			if err := tt.handle(conn, params.NewNetworkAppearance(8)); err != nil {
 				t.Fatalf("valid SSNM was rejected: %v", err)
 			}
-			select {
-			case status := <-conn.SignallingStatus():
-				if !status.NetworkAppearanceSet || status.NetworkAppearance != 8 {
-					t.Errorf("Network Appearance = %d (set=%v), want 8",
-						status.NetworkAppearance, status.NetworkAppearanceSet)
-				}
-			default:
-				t.Fatal("valid SSNM produced no status")
+			status := nextSSNMReport(t, conn)
+			if !status.Scope.NetworkAppearanceSet || status.Scope.NetworkAppearance != 8 {
+				t.Errorf("Network Appearance = %d (set=%v), want 8",
+					status.Scope.NetworkAppearance, status.Scope.NetworkAppearanceSet)
 			}
 		})
 	}
@@ -956,10 +919,10 @@ func TestSSNMPreservesNetworkAppearance(t *testing.T) {
 				messages.NewDestinationUnavailable(tt.value, nil, apc(0x222222), nil)); err != nil {
 				t.Fatal(err)
 			}
-			status := <-conn.SignallingStatus()
-			if status.NetworkAppearance != tt.want || status.NetworkAppearanceSet != tt.wantSet {
+			status := nextSSNMReport(t, conn)
+			if status.Scope.NetworkAppearance != tt.want || status.Scope.NetworkAppearanceSet != tt.wantSet {
 				t.Errorf("Network Appearance = %d (set=%v), want %d (set=%v)",
-					status.NetworkAppearance, status.NetworkAppearanceSet, tt.want, tt.wantSet)
+					status.Scope.NetworkAppearance, status.Scope.NetworkAppearanceSet, tt.want, tt.wantSet)
 			}
 		})
 	}
@@ -994,11 +957,7 @@ func TestSSNMRejectsMalformedNetworkAppearance(t *testing.T) {
 			if !errors.As(reported, &parameterFault) || parameterFault.Code != params.ErrParameterFieldError {
 				t.Fatalf("error = %v, want Parameter Field Error", reported)
 			}
-			select {
-			case status := <-conn.SignallingStatus():
-				t.Errorf("malformed SSNM was applied: %#v", status)
-			default:
-			}
+			assertNoSSNMReport(t, conn)
 		})
 	}
 }
@@ -1122,13 +1081,7 @@ func TestDAUDResponsesKeepTheRequestedRoutingContext(t *testing.T) {
 	}
 }
 
-// TestSignallingStatusCarriesBothDimensionsAfterEachMessage pins what an
-// MTP3-User is told: each SSNM message moves one dimension, and the status it
-// produces reports the other as this node currently holds it rather than as its
-// zero value. RFC 4666 Section 4.5.3 has the two answered together, so a
-// receiver that is told only the dimension that moved cannot reconstruct the
-// destination's state without auditing for it.
-func TestSignallingStatusCarriesBothDimensionsAfterEachMessage(t *testing.T) {
+func TestTypedSSNMReportsPreserveBothRetainedDimensions(t *testing.T) {
 	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 	const pointCode = 0x222222
 	affected := params.NewAffectedPointCodeWithMask(0, pointCode)
@@ -1164,21 +1117,33 @@ func TestSignallingStatusCarriesBothDimensionsAfterEachMessage(t *testing.T) {
 
 func assertStatusState(t *testing.T, conn *Association, want DestinationNetworkState) {
 	t.Helper()
-	select {
-	case status := <-conn.SignallingStatus():
-		if status.State != want {
-			t.Fatalf("status state = %+v, want %+v", status.State, want)
+	report := nextSSNMReport(t, conn)
+	if report.Kind == SSNMSignallingCongestionReport {
+		if got := reportedSSNMCongestion(t, report); got != want.Congestion {
+			t.Fatalf("reported congestion = %+v, want %+v", got, want.Congestion)
 		}
-	default:
-		t.Fatal("no destination status was published")
+	} else if reportedSSNMAvailability(t, report) != want.Availability {
+		t.Fatalf("availability report = %+v, want %v", report, want.Availability)
+	}
+	if len(report.Scope.RoutingContexts) > 1 {
+		t.Fatal("single-scope retained-state assertion received multiple Routing Contexts")
+	}
+	scope := associationDestinationScope(conn, nil)
+	if report.Scope.NetworkAppearanceSet {
+		scope.networkAppearance, scope.networkAppearanceSet = report.Scope.NetworkAppearance, true
+	}
+	if report.Scope.RoutingContextSet {
+		scope.routingContext, scope.routingContextSet = report.Scope.RoutingContexts[0], true
+	}
+	for _, destination := range report.Destinations {
+		state, known := conn.destinations.lookupRange(scope, destination.PointCode, destination.Mask)
+		if !known || state != want {
+			t.Fatalf("retained state = %+v, %v; want %+v", state, known, want)
+		}
 	}
 }
 
-// TestSignallingStatusFillsEachDimensionFromItsOwnRecord covers the case a
-// single covering record cannot answer: a broad DUNA and a narrow SCON are two
-// statements about the same point code, and the status has to take each
-// dimension from the record that actually made that statement.
-func TestSignallingStatusFillsEachDimensionFromItsOwnRecord(t *testing.T) {
+func TestTypedSSNMReportsPreserveIndependentlyCoveringDimensions(t *testing.T) {
 	conn, _ := newSSNMTestConn(t, StateASPActive, RoleASP)
 	const pointCode = 0x123456
 
@@ -1207,13 +1172,8 @@ func TestSignallingStatusFillsEachDimensionFromItsOwnRecord(t *testing.T) {
 	})
 }
 
-// TestSignallingStatusLeavesTheUntouchedDimensionUnsetAcrossRoutingContexts
-// covers a message naming several Application Servers, which need not agree
-// about the destination. One status carries one value, so the dimension the
-// message did not move is left unset rather than taken from whichever context
-// happened to come first.
-func TestSignallingStatusLeavesTheUntouchedDimensionUnsetAcrossRoutingContexts(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+func TestTypedSSNMMultiContextReportPreservesIndependentAvailability(t *testing.T) {
+	conn, _ := newObservedSSNMConn(t, StateASPActive, RoleASP, 1, 2)
 	conn.noteRoutingContextsActive([]uint32{1, 2})
 	const pointCode = 0x123456
 
@@ -1230,17 +1190,30 @@ func TestSignallingStatusLeavesTheUntouchedDimensionUnsetAcrossRoutingContexts(t
 	)); err != nil {
 		t.Fatalf("handleSignallingCongestion across two Routing Contexts: %v", err)
 	}
-	assertStatusState(t, conn, DestinationNetworkState{
-		Congestion: CongestionState{Congested: true, Level: 2, LevelSet: true},
-	})
+	report := nextSSNMReport(t, conn)
+	wantCongestion := CongestionState{Congested: true, Level: 2, LevelSet: true}
+	if got := reportedSSNMCongestion(t, report); got != wantCongestion {
+		t.Fatalf("reported congestion = %+v, want %+v", got, wantCongestion)
+	}
+	if !report.Scope.RoutingContextSet || !slices.Equal(report.Scope.RoutingContexts, []uint32{1, 2}) {
+		t.Fatalf("reported scope = %+v", report.Scope)
+	}
+	for _, routingContext := range []uint32{1, 2} {
+		scope := associationDestinationScope(conn, nil)
+		scope.routingContext, scope.routingContextSet = routingContext, true
+		state, known := conn.destinations.lookupRange(scope, pointCode, 0)
+		wantAvailability := DestinationAvailable
+		if routingContext == 1 {
+			wantAvailability = DestinationUnavailable
+		}
+		if !known || state.Availability != wantAvailability || state.Congestion != wantCongestion {
+			t.Fatalf("Routing Context %d state = %+v, known=%v", routingContext, state, known)
+		}
+	}
 }
 
-// TestSignallingStatusResolvesTheDimensionInItsOwnRoutingContext pins that the
-// dimension a message did not move is read back in the Application Server the
-// message named. RFC 4666 Section 4.3.1 keeps state per AS, so another context's
-// DUNA is not an answer about this one.
-func TestSignallingStatusResolvesTheDimensionInItsOwnRoutingContext(t *testing.T) {
-	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+func TestTypedSSNMReportsPreserveDimensionsInTheirOwnRoutingContext(t *testing.T) {
+	conn, _ := newObservedSSNMConn(t, StateASPActive, RoleASP, 1, 2)
 	conn.noteRoutingContextsActive([]uint32{1, 2})
 	const pointCode = 0x123456
 
@@ -1291,16 +1264,12 @@ func TestDUPUStatusLeavesTheDestinationStateAlone(t *testing.T) {
 		t.Fatalf("handleDestinationUserPartUnavailable: %v", err)
 	}
 
-	select {
-	case status := <-conn.SignallingStatus():
-		if !status.UserPartUnavailable {
-			t.Fatal("DUPU status did not report an unavailable user part")
-		}
-		if status.State != (DestinationNetworkState{}) {
-			t.Fatalf("DUPU status carried destination state %+v, want none", status.State)
-		}
-	default:
-		t.Fatal("no destination status was published for the DUPU")
+	status := nextSSNMReport(t, conn)
+	if status.Kind != SSNMDestinationUserPartUnavailableReport {
+		t.Fatal("DUPU status did not report an unavailable user part")
+	}
+	if !status.UserCauseSet {
+		t.Fatal("DUPU report omitted User/Cause")
 	}
 
 	// The DUNA still stands underneath it: DUPU changed nothing it is retained.
