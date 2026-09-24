@@ -1500,7 +1500,8 @@ func (c *Association) Close() error {
 // Neither Listener.Close nor Endpoint.Close calls it. An application that wants
 // every association aborted calls Abort on each before closing their owner.
 func (c *Association) Abort() error {
-	return c.endWith(ErrAssociationClosed, true)
+	_, err := c.endWith(ErrAssociationClosed, true)
+	return err
 }
 
 // Done returns a channel closed when the association ends, for whatever reason.
@@ -1531,15 +1532,18 @@ func (c *Association) Err() error {
 
 // closeWith closes the association, recording cause as the reason.
 func (c *Association) closeWith(cause error) error {
-	return c.endWith(cause, false)
+	_, err := c.endWith(cause, false)
+	return err
 }
 
 // endWith is the one teardown every end of the association runs, recording
 // cause as the reason. abortive releases SCTP with ABORT rather than SHUTDOWN
-// and changes nothing else; see Abort.
-func (c *Association) endWith(cause error, abortive bool) error {
-	var err error
+// and changes nothing else; see Abort. ended reports whether this call
+// performed the teardown, rather than finding it already done or waiting out
+// another's, and err is the transport release's error if it did.
+func (c *Association) endWith(cause error, abortive bool) (ended bool, err error) {
 	c.closeOnce.Do(func() {
+		ended = true
 		if cause != nil {
 			c.closeErr.Store(cause)
 		}
@@ -1598,7 +1602,7 @@ func (c *Association) endWith(cause error, abortive bool) error {
 			c.asReservation.rollback()
 		}
 	})
-	return err
+	return ended, err
 }
 
 func (c *Association) closeTransport() error {
@@ -2930,6 +2934,8 @@ func (c *Association) Shutdown() error {
 
 // ShutdownContext is Shutdown with caller-controlled cancellation.
 // Cancellation stops the outstanding T(ack) request and still releases SCTP.
+// If the association ends some other way while it runs -- Close, Abort, or a
+// failure -- ShutdownContext stops and returns what Err reports.
 //
 // It performs only the procedures AssociationConfig.ASPProcedures configures as
 // ASPProcedureAutomatic, because an explicitly managed application owns the
@@ -2996,8 +3002,17 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	return c.Close()
 }
 
+// finishTermination releases the association after a withdrawal step failed.
+// When another release ended it first, that release is why the step failed
+// -- the write it could not make, or the T(ack) wait it cancelled -- so it is
+// what ShutdownContext reports, through Err.
 func (c *Association) finishTermination(cause error) error {
-	closeErr := c.closeWith(cause)
+	ended, closeErr := c.endWith(cause, false)
+	if !ended {
+		if err := c.Err(); err != nil {
+			return err
+		}
+	}
 	if closeErr != nil {
 		return errors.Join(cause, closeErr)
 	}
