@@ -49,6 +49,9 @@ type routingTimedSender struct {
 	queues   [routingRouteCount]uint8
 	workload workload
 	now      func() time.Time
+	// failover classifies every call of an SGP failure cohort instead of
+	// requiring the frozen path; nil for every other cohort.
+	failover *failoverTracker
 }
 
 type routingTimedRoutedOutcome struct {
@@ -147,6 +150,25 @@ func (sender *routingTimedSender) routedSubmission(job routingTimedJob, payload 
 	return outcome
 }
 
+// partialTransferError is an MTP-TRANSFER that succeeded on some path and
+// failed on another. It hides the failures' causes, so a transfer that was
+// partly delivered stays a fault even when the drain deadline cut its other
+// paths off. Its text is the transfer error's own.
+type partialTransferError struct{ transfer *m3ua.MTPTransferError }
+
+func (err partialTransferError) Error() string { return err.transfer.Error() }
+
+// transferOutcome returns an MTP-TRANSFER error as a send outcome. A transfer
+// that failed on every path unwraps to its causes, so one the drain deadline
+// cut off is counted like a direct write it cut off.
+func transferOutcome(err error) error {
+	var transfer *m3ua.MTPTransferError
+	if errors.As(err, &transfer) && len(transfer.SuccessfulPaths) != 0 {
+		return partialTransferError{transfer}
+	}
+	return err
+}
+
 func (sender *routingTimedSender) send(ctx context.Context, queue uint8, job routingTimedJob, counters *senderCounters) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -174,9 +196,13 @@ func (sender *routingTimedSender) send(ctx context.Context, queue uint8, job rou
 	var sendStarted, sendEnded time.Time
 	switch sender.variant {
 	case routingTimedRouted:
+		if sender.failover != nil {
+			sender.sendFailover(job, payload, dispatchLag, counters)
+			return
+		}
 		outcome := sender.routedSubmission(job, payload)
 		result := outcome.result
-		sendStarted, sendEnded, sendErr = outcome.started, outcome.ended, outcome.err
+		sendStarted, sendEnded, sendErr = outcome.started, outcome.ended, transferOutcome(outcome.err)
 		if sendErr == nil && result.UserDataOctets != job.size {
 			sendErr = fmt.Errorf("MTPTransfer wrote %d bytes, want %d", result.UserDataOctets, job.size)
 		}
@@ -206,4 +232,33 @@ func (sender *routingTimedSender) send(ctx context.Context, queue uint8, job rou
 		sendErr = errors.Join(sendErr, job.clock.withinDrain(job.offset+dispatchLag))
 	}
 	counters.complete(sendErr, dispatchLag, sendEnded.Sub(sendStarted))
+}
+
+// withFailover returns a copy of the timed sender whose routed calls are
+// classified by tracker, leaving the shared sender untouched for other
+// cohorts.
+func (sender *routingTimedSender) withFailover(tracker *failoverTracker) *routingTimedSender {
+	copied := *sender
+	copied.failover = tracker
+	return &copied
+}
+
+// sendFailover submits one routed message of an SGP failure cohort. The call
+// is timed on the shared clock around the same Protocol Data construction and
+// MTPTransfer call as routed, and its outcome is classified instead of being
+// required to use the frozen path. A failed-path outcome is accounted, never
+// retried.
+func (sender *routingTimedSender) sendFailover(job routingTimedJob, payload []byte, dispatchLag time.Duration, counters *senderCounters) {
+	tracker := sender.failover
+	started, startErr := tracker.clock.source.Now()
+	outcome := sender.routedSubmission(job, payload)
+	returned, returnErr := tracker.clock.source.Now()
+	failed, err := tracker.classify(job.identity.Route, job.identity.Sequence, job.size, outcome.result, outcome.err, started, returned)
+	if startErr != nil || returnErr != nil {
+		err = errors.Join(err, errors.New("shared clock read around MTPTransfer failed"))
+	}
+	if job.clock != nil {
+		err = errors.Join(err, job.clock.withinDrain(job.offset+dispatchLag))
+	}
+	counters.completeOutcome(failed, err, dispatchLag, outcome.ended.Sub(outcome.started))
 }

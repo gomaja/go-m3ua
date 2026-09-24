@@ -194,7 +194,21 @@ failed warm-up cohort is accepted as that probe's evidence, and it can only fail
 or be not demonstrated. It qualifies only when the warm-up offered its whole
 schedule, no record carries a fatal read or control failure, the only error is
 the fixture's own validity failure, and the sender shows outstanding-cap
-refusals, missing deliveries or a stall. Loss counts alone are not enough: an
+refusals, missing deliveries, submitted work still undelivered when the drain
+deadline passed (the sender record's `drain_timeout`), scheduled work the
+sender itself could not submit by then (`sender_drain_timeout`), or a stall.
+Work left undelivered at the drain deadline is how a probe above capacity
+usually ends when the receiving library discards what it cannot queue: the
+sender waits for those messages until the deadline. The fixture records both
+outcomes as delivery failures, not fixture faults, and the CLI requires each to
+reconcile with its record (its cause and drain; submitted and accounted counts
+no higher than the receiver's final counters; outstanding work within the run's
+limit and cut-off sends that account for the send errors) before counting it.
+A bidirectional warm-up is evidence when either direction shows this and no
+record in either direction carries a fault. In either phase a cohort one of
+whose records carries a fatal error, or whose error names anything but its
+directions' validity failures, is refused as invalid input rather than
+decided: a fixture fault says nothing about the rate. Loss counts alone are not enough: an
 abort for another reason, such as a failed control request or a receiver read
 failure, also strands messages but says nothing about the rate, and is rejected
 as invalid input. The same failed warm-up in a validation repetition is a failed

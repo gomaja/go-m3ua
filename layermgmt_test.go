@@ -367,16 +367,12 @@ func TestManagementIndicationsCloseWithTheAssociation(t *testing.T) {
 }
 
 // The restart watcher is only reachable if the kernel is actually sending the
-// events, and that depends on a setsockopt made on every association. The unit
-// tests drive the watcher with a synthetic event and prove nothing about the
-// subscription, so this asserts the subscription itself against a live socket.
-//
-// It also pins the choice of option. SubscribeEvents -- the plural form -- sets
-// the whole sctp_event_subscribe struct and would clear every subscription it
-// was not told about; SubscribeEvent names one and leaves the rest alone. If
-// the plural form is ever substituted, the data-io subscription it silently
-// clears is not something this test would catch, but the association-change one
-// it sets is, and the difference in mechanism is worth recording here.
+// events, and that depends on the subscription Dial and Listen make before the
+// association exists. The unit tests drive the watcher with a synthetic event
+// and prove nothing about the subscription, so this asserts the subscription
+// itself against a live association at each end. Nothing subscribes an
+// established association any more, so the SGP end also shows that an accepted
+// association carries the listening socket's subscription.
 func TestAssociationEventsAreSubscribedOnALiveAssociation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

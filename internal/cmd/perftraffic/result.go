@@ -3,9 +3,12 @@ package main
 import "time"
 
 const (
-	verdictPass          = "pass"
-	verdictInvalid       = "invalid"
-	verdictInconclusive  = "inconclusive"
+	verdictPass         = "pass"
+	verdictInvalid      = "invalid"
+	verdictInconclusive = "inconclusive"
+	// verdictFail is an acceptance failure of a fault trial whose fixture is
+	// valid; nominal cohorts never report it.
+	verdictFail          = "fail"
 	baselineFixtureScope = "baseline fixture validity only; not independent-peer or candidate acceptance"
 )
 
@@ -31,9 +34,23 @@ type runSpec struct {
 	// SSNM is the opt-in SSNM load declaration, nil and omitted when off. A
 	// pointer rather than omitzero, which Go 1.23 does not implement.
 	SSNM *ssnmWorkload `json:"ssnm,omitempty"`
+	// SGPFailure is the one-SGP failure declaration of a failure trial's
+	// measurement cohort, nil and omitted for every other cohort.
+	SGPFailure *sgpFailureSpec `json:"failure_trial,omitempty"`
+	// RouteReferences is the application route-reference workload of a
+	// routed-direct cohort, nil and omitted without -route-references.
+	RouteReferences *routeReferenceSpec `json:"route_references,omitempty"`
 	// Overload identifies a cohort of a DATA overload trial. It is absent from
 	// every nominal cohort.
 	Overload *overloadSpec `json:"overload,omitempty"`
+}
+
+// nominalDrainOutcomes reports whether the cohort records a drain deadline
+// outcome (drain_timeout, sender_drain_timeout, late_after_deadline) as a
+// delivery failure of its offered rate. The overload and SGP failure trials
+// keep their own contracts, in which any drain failure is a fixture failure.
+func (specification runSpec) nominalDrainOutcomes() bool {
+	return specification.Overload == nil && specification.SGPFailure == nil
 }
 
 // overloadMeasurement reports whether the specification is the phased
@@ -64,6 +81,54 @@ type deliveryResult struct {
 	Invalid           uint64 `json:"invalid"`
 	Reordered         uint64 `json:"reordered"`
 	LateAfterStop     uint64 `json:"late_after_stop"`
+	// LateAfterDeadline counts deliveries a shared-clock receiver committed
+	// after the drain deadline. They earn no unique-delivery credit and are
+	// included in Invalid; the count names why.
+	LateAfterDeadline uint64 `json:"late_after_deadline"`
+}
+
+// drainTimeoutCause is the fixed cause every drain_timeout record carries.
+// internal/cmd/perfcapacity requires this exact text.
+const drainTimeoutCause = "the drain deadline passed while submitted messages were still unaccounted at the receiver: the offered load was not delivered in time"
+
+// drainTimeoutRecord is the outcome of a nominal cohort whose receiver had not
+// accounted for every submitted message when the absolute drain deadline
+// (the end of the measurement window plus Drain) passed. It is a delivery
+// failure of the offered rate, the expected result of a probe above capacity,
+// and never a fixture fault: a fault keeps its fatal_error. Accounted is the
+// receiver's unique, duplicate and invalid count in the last result the
+// sender read before it stopped waiting, ObservedBeforeDeadline how long
+// before the deadline that read completed (negative if it completed after
+// it), and Undelivered is Submitted minus Accounted. The delivery counters
+// beside it are the receiver's final counts, read after the stop.
+type drainTimeoutRecord struct {
+	Cause                  string        `json:"cause"`
+	Drain                  time.Duration `json:"drain_ns"`
+	Submitted              uint64        `json:"submitted"`
+	Accounted              uint64        `json:"accounted"`
+	Undelivered            uint64        `json:"undelivered"`
+	ObservedBeforeDeadline time.Duration `json:"observed_before_deadline_ns"`
+}
+
+// senderDrainTimeoutCause is the fixed cause every sender_drain_timeout record
+// carries. internal/cmd/perfcapacity requires this exact text.
+const senderDrainTimeoutCause = "the drain deadline passed while the sender still held scheduled messages it had not submitted: the offered load could not be submitted in time"
+
+// senderDrainTimeoutRecord is the sender side of a nominal cohort's drain
+// deadline outcome: the sender could not submit the work it had scheduled
+// before the absolute drain deadline passed. OutstandingAtDeadline is the
+// scheduled messages still queued in the fixture or in a send call when the
+// deadline passed, zero if the workers had finished; Unsubmitted is the sends
+// the deadline cut off, which failed on the expired write deadline or
+// completed after the shared drain deadline, all counted in send_errors. Like
+// drain_timeout it is a delivery failure of the offered rate, never a fixture
+// fault: a lost association, a short write or a clock failure keeps its
+// fatal_error.
+type senderDrainTimeoutRecord struct {
+	Cause                 string        `json:"cause"`
+	Drain                 time.Duration `json:"drain_ns"`
+	OutstandingAtDeadline uint64        `json:"outstanding_at_deadline"`
+	Unsubmitted           uint64        `json:"unsubmitted"`
 }
 
 type seriesPoint struct {
@@ -128,10 +193,28 @@ type runRecord struct {
 	ClockEvidence             *sharedClockEvidence  `json:"shared_clock_evidence,omitempty"`
 	ClockBoundary             *sharedClockSnapshot  `json:"shared_clock_boundary,omitempty"`
 	SSNM                      *ssnmRecord           `json:"ssnm,omitempty"`
+	// Failover is present only on the records of an SGP failure trial's
+	// measurement cohort: the receiver's fault and delivery observations on
+	// the receiver record, the outcome accounting and per-criterion
+	// evaluation on the sender record.
+	Failover *failoverRecord `json:"failover,omitempty"`
+	// RouteReferences is the application route-reference evidence and
+	// verdict of a -route-references sender record. The DATA verdicts do not
+	// include it.
+	RouteReferences *routeReferenceRecord `json:"route_references,omitempty"`
 	// Overload is present only on the records of a DATA overload measurement
 	// cohort: the receiver's observations on the receiver record, the full
 	// outcome accounting and acceptance evaluation on the sender record.
 	Overload *overloadRecord `json:"overload,omitempty"`
+	// DrainTimeout is present only on a nominal sender record whose drain
+	// deadline passed with submitted work still unaccounted.
+	DrainTimeout *drainTimeoutRecord `json:"drain_timeout,omitempty"`
+	// SenderDrainTimeout is present only on a nominal sender record whose
+	// drain deadline passed while the sender still held scheduled work.
+	SenderDrainTimeout *senderDrainTimeoutRecord `json:"sender_drain_timeout,omitempty"`
+	// Memory is the cohort's whole-process memory series, sampled once a
+	// second without forcing a collection. It is recorded, never judged.
+	Memory *memoryObservation `json:"memory,omitempty"`
 }
 
 type fixtureManifest struct {
@@ -185,6 +268,10 @@ func (record *runRecord) evaluate() {
 			"independent_peer_validation": "unavailable: both endpoints use this binary",
 		}
 	}
+	if record.Failover != nil {
+		record.evaluateFailover()
+		return
+	}
 	if record.Spec.overloadMeasurement() {
 		record.evaluateOverloadRecord()
 		return
@@ -203,6 +290,12 @@ func (record *runRecord) evaluate() {
 	}
 	if record.Delivery.Unique != record.Expected || record.Delivery.Missing != 0 {
 		invalid("receiver did not validate every delivery before the drain deadline")
+	}
+	if record.DrainTimeout != nil {
+		invalid("submitted traffic was still unaccounted at the receiver when the drain deadline passed")
+	}
+	if record.SenderDrainTimeout != nil {
+		invalid("scheduled traffic was still unsubmitted at the sender when the drain deadline passed")
 	}
 	if record.Delivery.Duplicate != 0 || record.Delivery.Invalid != 0 || record.Delivery.Reordered != 0 || record.Delivery.LateAfterStop != 0 {
 		invalid("receiver observed duplicate, invalid, reordered, or late traffic")

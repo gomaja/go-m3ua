@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -35,7 +36,15 @@ type cohortResult struct {
 	ReverseReceiver *runRecord `json:"reverse_receiver,omitempty"`
 	Verdict         string     `json:"verdict"`
 	Error           string     `json:"error,omitempty"`
+	// validityOnly records that every error the cohort reported, in either
+	// direction, is errCohortInvalid: the cohort ran and failed only its own
+	// validity rules. It is not serialized.
+	validityOnly bool
 }
+
+// errCohortInvalid is the whole error of a cohort that failed only its own
+// validity rules. internal/cmd/perfcapacity recognises a failed warm-up by it.
+var errCohortInvalid = errors.New("cohort is invalid; inspect machine-readable reasons")
 
 type sendJob struct {
 	identity  messageIdentity
@@ -67,6 +76,11 @@ type senderCounters struct {
 	// overload is the outcome accounting of an overload measurement cohort,
 	// nil for every other cohort.
 	overload *overloadCounters
+	// drainOutcomes makes a send the drain deadline cut off a counted
+	// outcome, unsubmitted, instead of a fatal error. Only nominal cohorts set
+	// it; the overload trial keeps its own contract.
+	drainOutcomes bool
+	unsubmitted   uint64
 }
 
 func newSenderCounters(limit int) *senderCounters {
@@ -104,15 +118,14 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 			go readEchoReplies(ctx, index, association, registry)
 		}
 	}
-	var localFatal chan error
+	var local *localReceiver
 	if config.Mode == modeBidirectional {
-		var shutdown func()
 		var err error
-		shutdown, localFatal, err = startLocalReceiver(ctx, config, associations)
+		local, err = startLocalReceiver(ctx, config, associations)
 		if err != nil {
 			return combinedResult{}, err
 		}
-		defer shutdown()
+		defer local.shutdown()
 	}
 	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
 		if phase == "warmup" {
@@ -130,23 +143,35 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		sender, receiver, err := runSenderCohort(ctx, cohortConfig, associations, registry, cohort, duration)
 		result := newCohortResult(phase, sender, receiver, err)
 		if config.Mode == modeBidirectional {
-			collectReverse(ctx, cohortConfig, &result)
+			finishBidirectionalCohort(ctx, cohortConfig, &result, local)
 		}
 		return result, err
 	}
 	return runWarmupAndMeasurement(config, runCohort, func(measurement *cohortResult) {
 		config.ssnmRun.finish(ctx, measurement)
-		if config.Mode == modeBidirectional {
-			select {
-			case readErr := <-localFatal:
-				if measurement.Error == "" {
-					measurement.Error = readErr.Error()
-				}
-				measurement.Verdict = verdictInvalid
-			default:
-			}
-		}
 	})
+}
+
+// finishBidirectionalCohort completes a bidirectional cohort, warm-up or
+// measurement: it collects the reverse direction's records from the SGP and
+// fails the cohort if the ASP-local receiver of that direction reported a
+// read fault.
+func finishBidirectionalCohort(ctx context.Context, config commandConfig, result *cohortResult, local *localReceiver) {
+	collectReverse(ctx, config, result)
+	foldLocalFault(result, local.fault())
+}
+
+// foldLocalFault fails a bidirectional cohort, warm-up or measurement, whose
+// ASP-local receiver, the receiver of the reverse direction, reported a read
+// fault. The fault joins the cohort's other errors and is never taken for the
+// validity failure of an overloaded direction.
+func foldLocalFault(result *cohortResult, fault string) {
+	if fault == "" {
+		return
+	}
+	result.Verdict = verdictInvalid
+	result.validityOnly = false
+	result.Error = joinErrorText(result.Error, "reverse cohort local receiver: "+fault)
 }
 
 // cohortRunner runs one cohort of the configured workload against the
@@ -168,7 +193,7 @@ func runWarmupAndMeasurement(config commandConfig, runCohort cohortRunner, inspe
 			if warmupErr == nil {
 				warmupErr = errors.New("warmup cohort is invalid")
 			}
-			return failedCohortResult("warmup", warmupResult.Sender, warmupResult.Receiver, fmt.Errorf("warmup did not drain cleanly: %w", warmupErr)), warmupErr
+			return failedWarmupResult(warmupResult, warmupErr), warmupErr
 		}
 	}
 	measurement, err := runCohort(config, "measurement", config.Cohort, config.Duration)
@@ -187,36 +212,62 @@ func runWarmupAndMeasurement(config commandConfig, runCohort cohortRunner, inspe
 	return result, err
 }
 
+// localReceiver is the ASP's own receiver for the reverse direction of a
+// bidirectional run: its control endpoint and the read loops that feed it.
+type localReceiver struct {
+	control *receiverControl
+	// faults carries the read loops' faults to forwardFaults.
+	faults   chan error
+	shutdown func()
+}
+
 // startLocalReceiver runs the ASP's own control endpoint and read loop for
 // the reverse direction of a bidirectional run. The SGP reverse driver owns
 // the cohort lifecycle against it exactly as the ASP owns the forward cohort
 // against the SGP.
-func startLocalReceiver(ctx context.Context, config commandConfig, associations []*m3ua.Association) (func(), chan error, error) {
+func startLocalReceiver(ctx context.Context, config commandConfig, associations []*m3ua.Association) (*localReceiver, error) {
 	control := newReceiverControl(config.Associations, maxOutstanding)
 	control.enableSharedClock(config.SameHostClock)
 	if control.fatal != "" {
-		return nil, nil, errors.New(control.fatal)
+		return nil, errors.New(control.fatal)
 	}
 	control.cpuStatPath = config.CPUStatPath
 	httpListener, err := net.Listen("tcp", config.ControlAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen for local receiver control: %w", err)
+		return nil, fmt.Errorf("listen for local receiver control: %w", err)
 	}
 	httpServer := &http.Server{Handler: control.handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		_ = httpServer.Serve(httpListener)
 	}()
-	fatal := make(chan error, 1)
+	local := &localReceiver{control: control, faults: make(chan error, 1)}
+	go local.forwardFaults(ctx)
 	for index, association := range associations {
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
-		go readAssociation(ctx, index, association, control, fatal)
+		go readAssociation(ctx, index, association, control, local.faults)
 	}
-	shutdown := func() {
+	local.shutdown = func() {
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownContext)
 	}
-	return shutdown, fatal, nil
+	return local, nil
+}
+
+// forwardFaults records the first read-loop fault on the local control, as
+// runReceiver does on the SGP. The reverse receiver record then carries it as
+// its fatal error, so a lost association can never pass for undelivered work.
+func (local *localReceiver) forwardFaults(ctx context.Context) {
+	select {
+	case err := <-local.faults:
+		local.control.setFatal(err.Error())
+	case <-ctx.Done():
+	}
+}
+
+// fault is the local receiver's fatal error, empty while it has none.
+func (local *localReceiver) fault() string {
+	return local.control.fatalError()
 }
 
 // collectReverse waits for the SGP reverse driver to finish the matching
@@ -236,6 +287,7 @@ func collectReverse(ctx context.Context, config commandConfig, result *cohortRes
 				result.ReverseSender = receiver.Reverse
 				result.ReverseReceiver = receiver.ReverseReceiver
 				result.Verdict = verdictInvalid
+				result.validityOnly = result.validityOnly && receiver.ReverseError == errCohortInvalid.Error()
 				result.Error = joinErrorText(result.Error, "reverse cohort: "+receiver.ReverseError)
 				return
 			case receiver.Reverse != nil:
@@ -248,12 +300,14 @@ func collectReverse(ctx context.Context, config commandConfig, result *cohortRes
 				return
 			case receiver.FatalError != "":
 				result.Verdict = verdictInvalid
+				result.validityOnly = false
 				result.Error = joinErrorText(result.Error, "reverse cohort receiver: "+receiver.FatalError)
 				return
 			}
 		}
 		if !time.Now().Before(deadline) {
 			result.Verdict = verdictInvalid
+			result.validityOnly = false
 			result.Error = joinErrorText(result.Error, "reverse cohort did not complete before the collection deadline")
 			return
 		}
@@ -262,6 +316,7 @@ func collectReverse(ctx context.Context, config commandConfig, result *cohortRes
 		case <-ctx.Done():
 			timer.Stop()
 			result.Verdict = verdictInvalid
+			result.validityOnly = false
 			result.Error = joinErrorText(result.Error, ctx.Err().Error())
 			return
 		case <-timer.C:
@@ -287,9 +342,12 @@ func joinErrorText(existing, addition string) string {
 }
 
 func newCohortResult(phase string, sender, receiver runRecord, err error) cohortResult {
-	result := cohortResult{Phase: phase, Sender: sender, Receiver: receiver, Verdict: verdictPass}
+	result := cohortResult{Phase: phase, Sender: sender, Receiver: receiver, Verdict: verdictPass,
+		validityOnly: err == nil || err.Error() == errCohortInvalid.Error()}
 	if sender.Verdict == verdictInvalid || receiver.Verdict == verdictInvalid || err != nil {
 		result.Verdict = verdictInvalid
+	} else if sender.Verdict == verdictFail || receiver.Verdict == verdictFail {
+		result.Verdict = verdictFail
 	} else if sender.Verdict == verdictInconclusive || receiver.Verdict == verdictInconclusive {
 		result.Verdict = verdictInconclusive
 	}
@@ -299,21 +357,30 @@ func newCohortResult(phase string, sender, receiver runRecord, err error) cohort
 	return result
 }
 
-func failedCohortResult(phase string, sender, receiver runRecord, err error) combinedResult {
-	cohort := newCohortResult(phase, sender, receiver, err)
-	result := combinedResult{
-		Phase:    phase,
-		Sender:   sender,
-		Receiver: receiver,
-		Verdict:  cohort.Verdict,
-		Error:    cohort.Error,
+// failedWarmupResult ends a run whose warm-up failed with every record the
+// warm-up produced, both directions' in a bidirectional run. A warm-up whose
+// every direction failed only its own validity rules ends with the bare
+// validity error, which internal/cmd/perfcapacity accepts as evidence against
+// the rate whichever direction failed; any other failure keeps the text of
+// every error the cohort reported, so it can never pass for overload.
+func failedWarmupResult(warmup cohortResult, err error) combinedResult {
+	cause := err.Error()
+	switch {
+	case warmup.validityOnly:
+		cause = errCohortInvalid.Error()
+	case warmup.Error != "":
+		cause = warmup.Error
 	}
-	if phase == "warmup" {
-		result.Warmup = &cohort
-	} else {
-		result.Measurement = &cohort
+	warmup.Verdict = verdictInvalid
+	warmup.Error = "warmup did not drain cleanly: " + cause
+	return combinedResult{
+		Phase:    warmup.Phase,
+		Warmup:   &warmup,
+		Sender:   warmup.Sender,
+		Receiver: warmup.Receiver,
+		Verdict:  warmup.Verdict,
+		Error:    warmup.Error,
 	}
-	return result
 }
 
 func runSenderCohort(ctx context.Context, config commandConfig, associations []*m3ua.Association, registry *echoRegistry, cohort string, duration time.Duration) (runRecord, runRecord, error) {
@@ -366,12 +433,28 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if specification.Direction == "" {
 		specification.Direction = directionASPToSGP
 	}
+	if config.sgpFailureCohort {
+		specification.SGPFailure = newSGPFailureSpec(config.SGPFailure)
+	}
+	if config.RouteReferences.enabled() {
+		specification.RouteReferences = config.RouteReferences.spec()
+	}
 	if config.overload != nil && config.overloadRole != "" {
 		specification.Overload = config.overload.spec(config.overloadRole)
 	}
 	clock, err := prepareSharedRunClock(ctx, config, &specification)
 	if err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("prepare shared clock: %w", err)
+	}
+	var failover *failoverTracker
+	if specification.SGPFailure != nil {
+		if routed == nil || clock == nil {
+			return runRecord{}, runRecord{}, errors.New("an SGP failure cohort needs the routed sender and the shared clock")
+		}
+		if failover, err = newFailoverTracker(*specification.SGPFailure, clock, routed.plane, routed.paths); err != nil {
+			return runRecord{}, runRecord{}, err
+		}
+		routed = routed.withFailover(failover)
 	}
 	if err := config.ssnmRun.attach(&specification, config.ssnmPhase); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("declare SSNM load: %w", err)
@@ -381,6 +464,8 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	}
 	cpuBefore, cpuBeforeErr := readCPUStat(config.CPUStatPath)
 	allocBefore := readRuntimeCounters()
+	memory := startMemorySampler()
+	defer memory.stop()
 	if err := postJSON(ctx, config.PeerControl+"/start", nil); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("start receiver: %w", err)
 	}
@@ -412,6 +497,10 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 			return stopFailedProgress(config.PeerControl, specification, initialObservation, deadlineErr)
 		}
 	}
+	// The drain deadline is past once the cohort ends. Left on the
+	// associations it would fail the next write the library makes on its own
+	// behalf, which closes the association, so every exit clears it.
+	defer clearWriteDeadlines(associations)
 	for _, association := range associations {
 		if deadlineErr := association.SetWriteDeadline(drainDeadline); deadlineErr != nil {
 			_ = postJSON(ctx, config.PeerControl+"/stop", nil)
@@ -426,6 +515,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		go sweepEchoRequests(tracker, sweepDone)
 	}
 	counters := newSenderCounters(config.Outstanding)
+	counters.drainOutcomes = specification.nominalDrainOutcomes()
 	var queues []chan sendJob
 	var routedQueues []chan routingTimedJob
 	var workersDone <-chan struct{}
@@ -445,6 +535,10 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		queues, workersDone = startOverloadSendWorkers(associations, config, counters, drainDeadline)
 	default:
 		queues, workersDone = startSendWorkers(associations, config, counters, tracker)
+	}
+	if failover != nil {
+		failover.watch(associations)
+		defer failover.finish()
 	}
 	sampleDone := make(chan struct{})
 	go sampleSharedSender(started, counters, sampleDone, clock)
@@ -472,6 +566,16 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	observations = append(observations, observeSharedProgress(boundaryContext, started, config.PeerControl, clock))
 	cancelBoundary()
 	drained := waitWorkersContext(ctx, workersDone, remainingUntil(drainDeadline))
+	var outstandingAtDeadline uint64
+	if !drained && ctx.Err() == nil && counters.drainOutcomes {
+		// The drain deadline passed with scheduled work still queued or in a
+		// send call. The association write deadline is the drain deadline, so
+		// every remaining send now fails at once and the workers finish within
+		// a short grace; one that does not is stuck in the transport, a fault
+		// handled below.
+		outstandingAtDeadline = counters.outstandingCount()
+		drained = waitWorkersContext(ctx, workersDone, senderDrainGrace)
+	}
 	if tracker != nil {
 		waitEchoDrain(ctx, tracker, drainDeadline)
 		close(sweepDone)
@@ -496,10 +600,23 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		}
 		counters.finishOverloadSeries(finalOffset)
 	}
-	drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
-	receiver, pollErr := waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
-	observations = append(observations, observeSharedProgress(drainContext, started, config.PeerControl, clock))
-	cancelDrain()
+	// Once the drain deadline cut the sender off, the deadline has passed and
+	// there is no drain left to wait for; the receiver's final counts are read
+	// after the stop.
+	senderTimeout := counters.drainTimeout(specification.Drain, outstandingAtDeadline)
+	var receiver runRecord
+	var pollErr error
+	if senderTimeout == nil {
+		drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
+		if failover != nil {
+			receiver, pollErr = waitFailoverDrain(drainContext, config.PeerControl, failover, drainDeadline)
+		} else {
+			receiver, pollErr = waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
+		}
+		observations = append(observations, observeSharedProgress(drainContext, started, config.PeerControl, clock))
+		cancelDrain()
+	}
+	drainTimeout, pollErr := drainTimeoutOutcome(pollErr, specification, drainDeadline)
 	if pollErr != nil {
 		counters.setFatal(pollErr.Error())
 	}
@@ -526,9 +643,11 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if stopErr != nil {
 		counters.setFatal(fmt.Sprintf("stop receiver: %v", stopErr))
 	}
+	memoryObservation := memory.finish()
 	cpuAfter, cpuAfterErr := readCPUStat(config.CPUStatPath)
 	allocAfter := readRuntimeCounters()
 	sender := counters.result(specification, duration, drainDuration, outstandingAtEnd)
+	sender.Memory = &memoryObservation
 	if tracker != nil {
 		echo := tracker.result(counters.submittedCount())
 		sender.Echo = &echo
@@ -565,9 +684,14 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		sender.WindowAlignment = "verified same-host CLOCK_MONOTONIC window; rate and backlog retain clock-resolution bounds"
 	}
 	sender.OutstandingScope = "legacy counters measure sender worker queues only; sender_window bounds include all scheduled but not yet validated deliveries"
+	if failover != nil {
+		sender.Failover = failover.evaluate(failoverInputs{specification: specification, scheduled: sender.Scheduled, capped: sender.Capped, receiver: receiver, accounting: accounting})
+	}
 	if overloadProfile != nil {
 		sender.Overload = collectOverloadEvidence(diagnosticsContext, config, specification, overloadProfile, counters, associations, overloadEpochs, fixtureQueueMax, receiver, initialProgress.Generation, stopErr, observations, &sender)
 	}
+	sender.DrainTimeout = drainTimeout
+	sender.SenderDrainTimeout = senderTimeout
 	sender.evaluate()
 	var cohortErrors []error
 	if pollErr != nil {
@@ -577,7 +701,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		cohortErrors = append(cohortErrors, stopErr)
 	}
 	if sender.Verdict == verdictInvalid || receiver.Verdict == verdictInvalid {
-		cohortErrors = append(cohortErrors, errors.New("cohort is invalid; inspect machine-readable reasons"))
+		cohortErrors = append(cohortErrors, errCohortInvalid)
 	}
 	return sender, receiver, errors.Join(cohortErrors...)
 }
@@ -694,7 +818,9 @@ func (counters *senderCounters) complete(err error, dispatchLag, sendDuration ti
 	}
 	if err != nil {
 		counters.sendErrors++
-		if counters.fatal == "" {
+		if counters.drainOutcomes && cutOffByDrainDeadline(err) {
+			counters.unsubmitted++
+		} else if counters.fatal == "" {
 			counters.fatal = err.Error()
 		}
 	} else {
@@ -720,6 +846,51 @@ func (counters *senderCounters) setFatal(reason string) {
 	defer counters.mutex.Unlock()
 	if counters.fatal == "" {
 		counters.fatal = reason
+	}
+}
+
+// senderDrainGrace bounds how long after the drain deadline the send workers
+// may take to fail the work they still hold. Every send then fails at once on
+// the expired write deadline, so the workers need milliseconds; one still
+// running after the grace is stuck in the transport.
+const senderDrainGrace = time.Second
+
+// cutOffByDrainDeadline reports a send that failed only because the drain
+// deadline passed: the association write deadline, which a nominal cohort
+// sets to the drain deadline, expired, or the call completed after the shared
+// drain deadline. Every cause the error wraps must be one of those; anything
+// else — a lost association, a short write, a clock failure — is a fault.
+func cutOffByDrainDeadline(err error) bool {
+	switch wrapped := err.(type) {
+	case nil:
+		return false
+	case interface{ Unwrap() []error }:
+		parts := wrapped.Unwrap()
+		for _, part := range parts {
+			if !cutOffByDrainDeadline(part) {
+				return false
+			}
+		}
+		return len(parts) != 0
+	case interface{ Unwrap() error }:
+		if cause := wrapped.Unwrap(); cause != nil {
+			return cutOffByDrainDeadline(cause)
+		}
+	}
+	return errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, errCompletedAfterDrain)
+}
+
+// drainTimeout records the sender side of a drain deadline outcome: work
+// still queued or in a send call when the deadline passed, or sends the
+// deadline cut off. It is nil when the sender submitted everything in time.
+func (counters *senderCounters) drainTimeout(drain time.Duration, outstandingAtDeadline uint64) *senderDrainTimeoutRecord {
+	counters.mutex.Lock()
+	defer counters.mutex.Unlock()
+	if !counters.drainOutcomes || outstandingAtDeadline == 0 && counters.unsubmitted == 0 {
+		return nil
+	}
+	return &senderDrainTimeoutRecord{
+		Cause: senderDrainTimeoutCause, Drain: drain, OutstandingAtDeadline: outstandingAtDeadline, Unsubmitted: counters.unsubmitted,
 	}
 }
 
@@ -804,15 +975,94 @@ func waitWorkersContext(ctx context.Context, done <-chan struct{}, timeout time.
 	}
 }
 
+// drainDeadlineError is waitReceiverDrain's report that the drain deadline
+// passed while the last receiver result the sender read still showed
+// submitted messages unaccounted. That is the delivery outcome of a probe
+// above capacity, not a fixture fault. Every other way the wait can end — a
+// failed request, a canceled run, or a deadline with no receiver result read
+// before it — is reported as the error that caused it.
+type drainDeadlineError struct {
+	submitted uint64
+	accounted uint64
+	observed  time.Time
+}
+
+func (err *drainDeadlineError) Error() string {
+	return fmt.Sprintf("receiver drain deadline exceeded with %d of %d submitted messages unaccounted", err.submitted-err.accounted, err.submitted)
+}
+
+// timeout records the drain outcome against the cohort's drain allowance and
+// absolute deadline.
+func (err *drainDeadlineError) timeout(drain time.Duration, deadline time.Time) *drainTimeoutRecord {
+	return &drainTimeoutRecord{
+		Cause: drainTimeoutCause, Drain: drain, Submitted: err.submitted, Accounted: err.accounted,
+		Undelivered: err.submitted - err.accounted, ObservedBeforeDeadline: max(deadline.Sub(err.observed), 0),
+	}
+}
+
+// drainTimeoutOutcome separates a nominal cohort's drain deadline outcome
+// from a fixture fault. The overload and SGP failure trials keep their own
+// contracts, in which any drain failure is a fixture failure, so their error
+// is returned unchanged.
+func drainTimeoutOutcome(pollErr error, specification runSpec, deadline time.Time) (*drainTimeoutRecord, error) {
+	var outcome *drainDeadlineError
+	if !specification.nominalDrainOutcomes() || !errors.As(pollErr, &outcome) {
+		return nil, pollErr
+	}
+	return outcome.timeout(specification.Drain, deadline), nil
+}
+
+// drainPollInterval is how often the drain wait reads the receiver's result.
+const drainPollInterval = 10 * time.Millisecond
+
+// drainObservationBound is how recent the last receiver result must be when
+// the drain deadline passes for the wait to report undelivered work rather
+// than a control fault. A responsive control is read every drainPollInterval,
+// so at the deadline its last result is at most one interval and one local
+// request old; ten intervals leave nine for request latency and scheduling
+// before a control that stopped answering is named. The observed runs read it
+// within 12 ms of the deadline. internal/cmd/perfcapacity applies the same
+// bound.
+const drainObservationBound = 10 * drainPollInterval
+
 func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCounters, deadline time.Time) (runRecord, error) {
+	return pollReceiverDrain(ctx, baseURL, counters, deadline, drainPollInterval, drainObservationBound)
+}
+
+// pollReceiverDrain reads the receiver's result every interval until it has
+// accounted for every submitted message or the deadline passes. A deadline
+// that passes after unaccounted work was seen is the drainDeadlineError
+// outcome only if the last result was read no more than bound before it;
+// otherwise the receiver control stopped answering, a fault.
+func pollReceiverDrain(ctx context.Context, baseURL string, counters *senderCounters, deadline time.Time, interval, bound time.Duration) (runRecord, error) {
+	var last runRecord
+	var outstanding *drainDeadlineError
+	// expired reports whether the drain deadline itself, rather than a
+	// failure or a canceled run, ended the wait after unaccounted work was
+	// seen.
+	expired := func(err error) bool {
+		return outstanding != nil && errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(deadline)
+	}
+	settle := func() (runRecord, error) {
+		if stale := deadline.Sub(outstanding.observed); stale > bound {
+			return runRecord{}, fmt.Errorf("receiver control did not answer during the drain: its last result was read %s before the deadline", stale)
+		}
+		return last, outstanding
+	}
 	for {
 		if !time.Now().Before(deadline) {
+			if outstanding != nil {
+				return settle()
+			}
 			return runRecord{}, errors.New("receiver drain deadline exceeded")
 		}
 		requestContext, cancelRequest := context.WithDeadline(ctx, deadline)
 		receiver, err := getReceiverResult(requestContext, baseURL)
 		cancelRequest()
 		if err != nil {
+			if expired(err) {
+				return settle()
+			}
 			return runRecord{}, err
 		}
 		submitted := counters.submittedCount()
@@ -825,16 +1075,29 @@ func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCoun
 		if accounted >= submitted {
 			return receiver, nil
 		}
+		last, outstanding = receiver, &drainDeadlineError{submitted: submitted, accounted: accounted, observed: time.Now()}
 		if !time.Now().Before(deadline) {
-			return receiver, errors.New("receiver drain deadline exceeded")
+			return settle()
 		}
-		timer := time.NewTimer(10 * time.Millisecond)
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if expired(ctx.Err()) {
+				return settle()
+			}
 			return receiver, ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+// clearWriteDeadlines removes the cohort's write deadline from every
+// association. An association that is already closed refuses it, which is
+// harmless.
+func clearWriteDeadlines(associations []*m3ua.Association) {
+	for _, association := range associations {
+		_ = association.SetWriteDeadline(time.Time{})
 	}
 }
 

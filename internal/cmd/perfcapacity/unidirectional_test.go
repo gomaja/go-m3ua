@@ -213,10 +213,10 @@ func TestSharedClockUnidirectionalCohortOutcomePrecedence(testContext *testing.T
 		wantReason   string
 	}{
 		{
-			name: "cohort error is a failed probe",
+			name: "cohort validity error is a failed probe",
 			mutate: func(cohort map[string]any) {
 				cohort["verdict"] = "invalid"
-				cohort["error"] = "cohort failed after measurement"
+				cohort["error"] = cohortValidityError
 			},
 			wantDecision: "fail", wantReason: "unidirectional-cohort-error",
 		},
@@ -225,20 +225,9 @@ func TestSharedClockUnidirectionalCohortOutcomePrecedence(testContext *testing.T
 			mutate: func(cohort map[string]any) {
 				cohort["sender"].(map[string]any)["send_duration"].(map[string]any)["max_ns"] = float64(1_200_000_000)
 				cohort["verdict"] = "invalid"
-				cohort["error"] = "cohort failed after measurement"
+				cohort["error"] = cohortValidityError
 			},
 			wantDecision: "inconclusive",
-		},
-		{
-			name: "receiver failure fails direction",
-			mutate: func(cohort map[string]any) {
-				receiver := cohort["receiver"].(map[string]any)
-				receiver["fatal_error"] = "receiver failed after delivery"
-				receiver["fixture_verdict"] = "invalid"
-				receiver["verdict"] = "invalid"
-				cohort["verdict"] = "invalid"
-			},
-			wantDecision: "fail",
 		},
 	} {
 		testContext.Run(test.name, func(testContext *testing.T) {
