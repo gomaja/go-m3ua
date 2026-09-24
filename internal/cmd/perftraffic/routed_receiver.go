@@ -598,14 +598,8 @@ func runRoutedReceiver(ctx context.Context, config commandConfig) (runRecord, er
 		}
 	}()
 	go sampleReceiver(lifetime, control)
-	select {
-	case <-ctx.Done():
-	case err = <-fatal:
-		control.setFatal(err.Error())
-	case err = <-httpFailure:
-		control.setFatal("HTTP control server: " + err.Error())
-	case <-peers.Done():
-		err = errors.New("routed SGP endpoints closed")
+	err = routedReceiverEnd(ctx, fatal, httpFailure, peers.Done())
+	if err != nil {
 		control.setFatal(err.Error())
 	}
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
@@ -617,4 +611,25 @@ func runRoutedReceiver(ctx context.Context, config commandConfig) (runRecord, er
 	record.Manifest = currentManifest(config.Outstanding, config.Initiation)
 	record.Manifest.FlowCount = routingRouteCount
 	return record, err
+}
+
+// routedReceiverEnd waits for the routed receiver's run to end and reports
+// why, or nil for a requested stop. The SGP endpoints live under a context
+// derived from ctx, so a requested stop closes them too, and both cases are
+// ready at once; a select would then pick either. Endpoints closing is a
+// fault only when no stop was requested.
+func routedReceiverEnd(ctx context.Context, fatal, httpFailure <-chan error, peersDone <-chan struct{}) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-fatal:
+		return err
+	case err := <-httpFailure:
+		return fmt.Errorf("HTTP control server: %w", err)
+	case <-peersDone:
+		if ctx.Err() != nil {
+			return nil
+		}
+		return errors.New("routed SGP endpoints closed")
+	}
 }
