@@ -8,6 +8,9 @@ package m3ua
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -20,7 +23,17 @@ func TestKernelAssociationEventsProbe(t *testing.T) {
 		t.Skipf("no SCTP in this kernel: %v", err)
 	}
 	if errors.Is(err, syscall.ENOPROTOOPT) {
-		t.Skipf("kernel older than Linux 5.0, without SCTP_EVENT: %v", err)
+		// Only a kernel older than 5.0 may refuse the option; a newer one
+		// refusing it means the probe asked for the wrong thing.
+		release, readErr := os.ReadFile("/proc/sys/kernel/osrelease")
+		if readErr != nil {
+			t.Fatalf("probe refused SCTP_EVENT (%v) and the kernel release is unreadable: %v", err, readErr)
+		}
+		var major int
+		if _, scanErr := fmt.Sscanf(string(release), "%d.", &major); scanErr != nil || major >= 5 {
+			t.Fatalf("Linux %s refused SCTP_EVENT: %v", strings.TrimSpace(string(release)), err)
+		}
+		t.Skipf("Linux %s predates SCTP_EVENT: %v", strings.TrimSpace(string(release)), err)
 	}
 	if err != nil {
 		t.Fatalf("probe: %v", err)

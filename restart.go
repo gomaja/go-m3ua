@@ -247,9 +247,6 @@ func withAssociationEvents[T any](open func(subscribe bool) (T, error)) (T, erro
 var (
 	associationEventsOnce      sync.Once
 	associationEventsSubscribe bool
-	// probeAssociationEvents asks the kernel whether it accepts the
-	// SCTP_EVENT subscription associationEvents makes.
-	probeAssociationEvents = kernelAssociationEvents
 )
 
 // associationEventsSupported reports, once per process, whether sockets can
@@ -258,7 +255,7 @@ var (
 // unavailable.
 func associationEventsSupported() bool {
 	associationEventsOnce.Do(func() {
-		err := probeAssociationEvents()
+		err := kernelAssociationEvents()
 		associationEventsSubscribe = associationEventsAccepted(err)
 		if !associationEventsSubscribe {
 			logf("m3ua: this kernel cannot subscribe to SCTP association events (%v); "+
