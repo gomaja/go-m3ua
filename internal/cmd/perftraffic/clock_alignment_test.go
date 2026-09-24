@@ -30,6 +30,20 @@ func TestSharedClockRequiresExplicitOptIn(testContext *testing.T) {
 	}
 }
 
+// wallMeasurementClock is a shared clock that advances with real time from a
+// large positive origin.
+type wallMeasurementClock struct {
+	origin time.Time
+}
+
+func (clock wallMeasurementClock) Now() (int64, error) {
+	return int64(time.Second) + int64(time.Since(clock.origin)), nil
+}
+
+func (wallMeasurementClock) Domain() (sharedClockDomain, error) {
+	return sharedClockDomain{Clock: "CLOCK_MONOTONIC", BootID: "test", TimeNamespace: "time:[1]", Resolution: 1}, nil
+}
+
 type fakeMeasurementClock struct {
 	now    atomic.Int64
 	domain sharedClockDomain

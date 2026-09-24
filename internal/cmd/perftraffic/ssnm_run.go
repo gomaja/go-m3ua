@@ -24,7 +24,10 @@ const (
 )
 
 const (
-	ssnmPreloadWait    = 60 * time.Second
+	ssnmPreloadWait = 60 * time.Second
+	// ssnmPreloadPoll is how often the ASP checks that every subscriber has
+	// consumed one preload step.
+	ssnmPreloadPoll    = time.Millisecond
 	ssnmCompletionWait = 10 * time.Second
 	ssnmVerdictPass    = "pass"
 	ssnmVerdictFail    = "fail"
@@ -46,10 +49,11 @@ func senderEndpointConfig(config commandConfig) m3ua.EndpointConfig {
 
 // ssnmStoreLimits sizes the ASP store for the workload. A standalone ASP
 // Association is one partition and its own retention peer, and the generator
-// reports every destination in every association's scope, so each partition
-// must hold all records and the store all partitions. Subscriptions keep the
-// approved 256-event queue, and the byte limit in force: the library's
-// approved 1 MiB default unless -ssnm-subscription-queue-bytes sets another.
+// reports each association's own records destinations on that association
+// only, so each partition must hold records and the store every partition.
+// Subscriptions keep the approved 256-event queue, and the byte limit in
+// force: the library's approved 1 MiB default unless
+// -ssnm-subscription-queue-bytes sets another.
 func ssnmStoreLimits(config ssnmConfig, associations int) m3ua.SSNMStateConfig {
 	needed := associations * (ssnmAccountedPartitionBytes + config.Records*ssnmAccountedRecordBytes)
 	return m3ua.SSNMStateConfig{
@@ -100,9 +104,11 @@ type ssnmSenderPreload struct {
 	InitialDestinations int    `json:"initial_destinations"`
 }
 
-// startSSNMLoad opens the subscriptions, has the SGP preload the store and
-// waits until every subscriber has consumed the preload, so DATA starts
-// against a full store. It returns nil when the workload is off.
+// startSSNMLoad opens the subscriptions and has the SGP preload the store one
+// message at a time, waiting until every subscriber has consumed each preload
+// message before requesting the next, so DATA starts against a full store and
+// no subscription ever holds more than one preload event. It returns nil when
+// the workload is off.
 func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.Endpoint, associations []*m3ua.Association) (*ssnmSenderRun, error) {
 	if !config.SSNM.enabled() {
 		return nil, nil
@@ -114,7 +120,7 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 	runContext, cancel := context.WithCancel(ctx)
 	run := &ssnmSenderRun{
 		config:       config.SSNM,
-		plan:         ssnmPlan{records: config.SSNM.Records, apcs: config.SSNM.APCs},
+		plan:         newSSNMPlan(config.SSNM, config.Associations),
 		associations: config.Associations,
 		drain:        config.Drain,
 		knowledge:    endpoint.SSNMKnowledge,
@@ -124,7 +130,7 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 		cancel:       cancel,
 	}
 	for index := 0; index < config.SSNM.Subscribers; index++ {
-		subscriber := newSSNMSubscriber(index, index == 0 && config.SSNM.Pause.enabled(), run.plan, config.SSNM.Rate, config.Associations, run.limits.SubscriptionQueueSize, run.limits.SubscriptionQueueBytes)
+		subscriber := newSSNMSubscriber(index, index == 0 && config.SSNM.Pause.enabled(), run.plan, config.SSNM.TotalRate, run.limits.SubscriptionQueueSize, run.limits.SubscriptionQueueBytes)
 		snapshot, subscription, err := endpoint.SubscribeSSNM()
 		if err != nil {
 			run.close()
@@ -157,21 +163,16 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 		run.close()
 		return nil, err
 	}
-	if err := postSSNMPreload(ctx, config.PeerControl); err != nil {
+	if err := run.preloadStore(ctx); err != nil {
 		run.close()
-		return nil, fmt.Errorf("SSNM preload: %w", err)
-	}
-	positions := run.plan.preloadMessages()
-	if err := run.waitPositions(ctx, positions, ssnmPreloadWait); err != nil {
-		run.close()
-		return nil, fmt.Errorf("SSNM preload was not consumed: %w", err)
+		return nil, err
 	}
 	finished, err := clock.Now()
 	if err != nil {
 		run.close()
 		return nil, err
 	}
-	run.preload.Positions = positions
+	run.preload.Positions = run.plan.preloadMessages()
 	run.preload.DurationNS = finished - started
 	run.preload.StoreRecords = ssnmStoreRecords(endpoint.SSNMKnowledge())
 	if want := config.Associations * config.SSNM.Records; run.preload.StoreRecords != want {
@@ -211,8 +212,51 @@ func writeSSNMDiagnostic(event string, association int, cause string) {
 	})
 }
 
-func postSSNMPreload(ctx context.Context, baseURL string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/ssnm/preload", nil)
+// preloadStore requests every preload step in order and waits until every
+// subscriber has consumed each one on its association's partition, within
+// ssnmPreloadWait for the whole preload.
+func (run *ssnmSenderRun) preloadStore(ctx context.Context) error {
+	deadline := time.Now().Add(ssnmPreloadWait)
+	for step := uint64(0); step < run.plan.preloadSteps(); step++ {
+		if err := postSSNMPreloadStep(ctx, run.peerControl, step); err != nil {
+			return fmt.Errorf("SSNM preload step %d: %w", step, err)
+		}
+		association, position := run.plan.preloadStep(step)
+		if err := run.waitAssociation(ctx, association, position+1, deadline); err != nil {
+			return fmt.Errorf("SSNM preload was not consumed: %w", err)
+		}
+	}
+	return nil
+}
+
+// waitAssociation waits until every subscriber has consumed position on
+// association's partition.
+func (run *ssnmSenderRun) waitAssociation(ctx context.Context, association int, position uint64, deadline time.Time) error {
+	for {
+		pending := 0
+		for _, subscriber := range run.subscribers {
+			if !subscriber.reached(association, position) {
+				pending++
+			}
+		}
+		if pending == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("%d subscriber(s) did not reach position %d of association %d's partition within %s", pending, position, association, ssnmPreloadWait)
+		}
+		timer := time.NewTimer(ssnmPreloadPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func postSSNMPreloadStep(ctx context.Context, baseURL string, step uint64) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/ssnm/preload?step=%d", baseURL, step), nil)
 	if err != nil {
 		return err
 	}
@@ -236,15 +280,15 @@ func ssnmStoreRecords(snapshot m3ua.SSNMSnapshot) int {
 	return records
 }
 
-// waitPositions waits until every subscriber has consumed positions on every
-// association's partition. It runs before the preload and after the
-// measurement, never during the F3 pause.
-func (run *ssnmSenderRun) waitPositions(ctx context.Context, positions uint64, window time.Duration) error {
+// waitPositions waits until every subscriber has reached every association's
+// expected position. It runs after the measurement, never during the F3
+// pause.
+func (run *ssnmSenderRun) waitPositions(ctx context.Context, expected []uint64, window time.Duration) error {
 	deadline := time.Now().Add(window)
 	for {
 		pending := 0
 		for _, subscriber := range run.subscribers {
-			if !subscriber.reachedAll(positions, run.associations) {
+			if !subscriber.reachedAll(expected) {
 				pending++
 			}
 		}
@@ -252,7 +296,7 @@ func (run *ssnmSenderRun) waitPositions(ctx context.Context, positions uint64, w
 			return nil
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("%d subscriber(s) did not reach position %d within %s", pending, positions, window)
+			return fmt.Errorf("%d subscriber(s) did not reach the expected positions %v within %s", pending, expected, window)
 		}
 		timer := time.NewTimer(20 * time.Millisecond)
 		select {
@@ -288,7 +332,7 @@ func (run *ssnmSenderRun) attach(specification *runSpec, phase string) error {
 		return nil
 	}
 	run.windowStart, run.windowEnd = specification.Clock.Start, specification.Clock.End
-	run.first, run.last = ssnmWindowMessages(run.config.Rate, run.anchor, run.windowStart, run.windowEnd)
+	run.first, run.last = ssnmWindowMessages(run.config.TotalRate, run.anchor, run.windowStart, run.windowEnd)
 	for _, subscriber := range run.subscribers {
 		subscriber.armReceipts(run.anchor, run.first, run.last, !subscriber.paused)
 	}
@@ -393,7 +437,7 @@ type ssnmDelayRecord struct {
 
 const (
 	ssnmSenderScope = "ASP SubscribeSSNM consumers checked against the deterministic update plan; verdict covers indication delivery and SSNM intensity, not DATA capacity"
-	ssnmDelayScope  = "SGP ReportDestinationAvailability start to healthy-subscriber Next return on the shared clock, microsecond receipt resolution; an upper bound on apply-and-publish time"
+	ssnmDelayScope  = "SGP report write start to healthy-subscriber Next return on the shared clock, one receipt per message per healthy subscriber, microsecond receipt resolution; an upper bound on apply-and-publish time"
 )
 
 // finish completes the SSNM evidence after the measurement cohort: it reads
@@ -425,15 +469,19 @@ func (run *ssnmSenderRun) finish(ctx context.Context, measurement *cohortResult)
 		unknown("generator was still running after the completion wait")
 	}
 	generator := &ssnmGeneratorRecord{
-		Scope: ssnmGeneratorScope, Workload: workload, PointCodeBase: ssnmPointCodeBase,
+		Scope: ssnmGeneratorScope, Workload: workload, Associations: run.associations, PointCodeBase: ssnmPointCodeBase,
 		RoutingContext: ssnmRoutingContext, NetworkAppearance: testNetworkAppearance,
 		State: log.State, AnchorNS: anchor, WindowStartNS: windowStart, WindowEndNS: windowEnd,
 		SentTotal: log.SentTotal, FailedTotal: log.FailedTotal,
 	}
 	if measurement.Receiver.SSNM != nil && measurement.Receiver.SSNM.Generator != nil {
-		generator.Preload = measurement.Receiver.SSNM.Generator.Preload
-		generator.FanoutFailures = measurement.Receiver.SSNM.Generator.FanoutFailures
-		generator.FirstError = measurement.Receiver.SSNM.Generator.FirstError
+		sgp := measurement.Receiver.SSNM.Generator
+		generator.Preload = sgp.Preload
+		generator.SendBufferWaits = sgp.SendBufferWaits
+		generator.FirstError = sgp.FirstError
+		if sgp.Associations != run.associations {
+			fail(fmt.Sprintf("the SGP generator spread its messages over %d associations, this run has %d", sgp.Associations, run.associations))
+		}
 	} else {
 		unknown("SGP record carries no SSNM generator evidence")
 	}
@@ -445,17 +493,19 @@ func (run *ssnmSenderRun) finish(ctx context.Context, measurement *cohortResult)
 		}
 	}
 	if log.From == 0 {
-		summarizeSSNMWindow(generator, run.config.Rate, log.Reports, log.Completions, statuses)
+		summarizeSSNMWindow(generator, run.config.TotalRate, log.Reports, log.Completions, statuses)
 	}
 	record.Generator = generator
 	if !generator.IntensityHeld {
 		unknown("the generator did not report every message scheduled in the measurement window inside it")
 	}
-	if log.FailedTotal != 0 || generator.FanoutFailures != 0 {
-		fail(fmt.Sprintf("the generator saw %d failed reports and %d association fan-out failures", log.FailedTotal, generator.FanoutFailures))
+	if log.FailedTotal != 0 {
+		fail(fmt.Sprintf("the generator saw %d failed reports", log.FailedTotal))
 	}
 
-	expected := run.plan.preloadMessages() + log.SentTotal
+	// Message m went to association m mod associations only, so each
+	// partition ends at the preload plus its own share of the sent messages.
+	expected := run.plan.expectedPositions(log.SentTotal)
 	if err := run.waitPositions(ctx, expected, ssnmCompletionWait); err != nil {
 		fail("subscribers did not consume every reported message: " + err.Error())
 	}
@@ -592,13 +642,32 @@ func ssnmBudgetChecks(config ssnmConfig, delay *ssnmDelayRecord, pause *ssnmPaus
 }
 
 // ssnmStoreMismatches counts the retained destinations that disagree with
-// the plan's state after positions, over every partition of a store
-// snapshot, exactly as a Resync snapshot is validated.
-func ssnmStoreMismatches(plan ssnmPlan, knowledge m3ua.SSNMSnapshot, positions uint64) uint64 {
+// the plan's state after each association's expected positions, over every
+// partition of a store snapshot, exactly as a Resync snapshot is validated.
+// A partition belongs to the association its first destination names; every
+// destination of a partition naming no association, or one another partition
+// already carries, disagrees, and so does every destination of an
+// association no partition carries.
+func ssnmStoreMismatches(plan ssnmPlan, knowledge m3ua.SSNMSnapshot, expected []uint64) uint64 {
 	var mismatches uint64
+	carried := make([]bool, plan.associations)
 	for _, partition := range knowledge.Partitions {
-		states, invalid := ssnmKnowledgeStates(partition, plan.records)
-		mismatches += invalid + plan.stateMismatches(states, positions)
+		if len(partition.Destinations) == 0 {
+			continue
+		}
+		association, _, found := plan.locate(partition.Destinations[0].Destination.PointCode)
+		if !found || carried[association] {
+			mismatches += uint64(len(partition.Destinations))
+			continue
+		}
+		carried[association] = true
+		states, invalid := ssnmKnowledgeStates(partition, plan, association)
+		mismatches += invalid + plan.stateMismatches(states, expected[association])
+	}
+	for association, held := range carried {
+		if !held {
+			mismatches += plan.stateMismatches(make([]uint8, plan.records), expected[association])
+		}
 	}
 	return mismatches
 }
@@ -611,6 +680,7 @@ func healthySubscriberFailures(record ssnmSubscriberRecord, associations int) []
 	if record.Gaps != 0 || record.Duplicates != 0 || record.Unexpected != 0 {
 		reasons = append(reasons, prefix+fmt.Sprintf("saw %d missing, %d duplicate and %d unexpected reports", record.Gaps, record.Duplicates, record.Unexpected))
 	}
+	reasons = append(reasons, misScopedFailures(prefix, record)...)
 	if record.ContinuityLost != 0 || record.ResourceLoss != 0 || record.Invalidated != 0 {
 		reasons = append(reasons, prefix+fmt.Sprintf("saw %d continuity-loss, %d resource-loss and %d invalidation events", record.ContinuityLost, record.ResourceLoss, record.Invalidated))
 	}
@@ -635,13 +705,28 @@ func otherEventFailures(prefix string, record ssnmSubscriberRecord) []string {
 	return []string{prefix + fmt.Sprintf("saw %d other events (binding or partition lifecycle, or an unknown kind)", record.OtherEvents)}
 }
 
+// misScopedFailures rejects reports delivered on another association's
+// partition: the generator sends each message on one association, so its
+// destinations must arrive in that association's partition only.
+func misScopedFailures(prefix string, record ssnmSubscriberRecord) []string {
+	if record.MisScoped == 0 {
+		return nil
+	}
+	return []string{prefix + fmt.Sprintf("saw %d reports in another association's partition", record.MisScoped)}
+}
+
+// positionFailures checks that the subscriber saw one partition per
+// association and that each ended at its association's expected position.
 func positionFailures(prefix string, record ssnmSubscriberRecord, associations int) []string {
 	if record.Partitions != associations {
 		return []string{prefix + fmt.Sprintf("saw %d partitions, want %d", record.Partitions, associations)}
 	}
-	for slot, position := range record.FinalPositions {
-		if position != record.ExpectedFinalPosition {
-			return []string{prefix + fmt.Sprintf("ended partition %d at position %d, want %d", slot, position, record.ExpectedFinalPosition)}
+	if len(record.FinalPositions) != associations || len(record.ExpectedFinalPositions) != associations {
+		return []string{prefix + fmt.Sprintf("recorded %d final and %d expected positions, want %d", len(record.FinalPositions), len(record.ExpectedFinalPositions), associations)}
+	}
+	for association, position := range record.FinalPositions {
+		if position != record.ExpectedFinalPositions[association] {
+			return []string{prefix + fmt.Sprintf("ended association %d's partition at position %d, want %d", association, position, record.ExpectedFinalPositions[association])}
 		}
 	}
 	return nil
@@ -670,6 +755,7 @@ func pausedSubscriberFailures(record ssnmSubscriberRecord, pause *ssnmPauseRecor
 	if record.Gaps != 0 || record.Duplicates != 0 || record.Unexpected != 0 || record.ContinuityLost > 1 || record.ResourceLoss != 0 || record.Invalidated != 0 {
 		reasons = append(reasons, prefix+"was not lossless outside its one observed overflow")
 	}
+	reasons = append(reasons, misScopedFailures(prefix, record)...)
 	reasons = append(reasons, otherEventFailures(prefix, record)...)
 	reasons = append(reasons, positionFailures(prefix, record, associations)...)
 	if record.Error != "" {

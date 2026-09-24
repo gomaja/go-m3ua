@@ -96,7 +96,6 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 		return runRecord{}, fmt.Errorf("startup endpoint: %w", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	control.ssnm.setReporter(endpoint)
 
 	fatal := make(chan error, 1)
 	if config.Transport == "dial" {

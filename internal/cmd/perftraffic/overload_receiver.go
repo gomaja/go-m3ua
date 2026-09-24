@@ -356,6 +356,11 @@ func (control *receiverControl) trackAssociation(index int, association *m3ua.As
 		control.tracked = make([]*m3ua.Association, control.expectedAssociations)
 	}
 	control.tracked[index] = association
+	// The SSNM generator sends message m on transport index m mod
+	// associations only.
+	if association != nil {
+		control.ssnm.track(index, association)
+	}
 }
 
 // overloadProgressLocked returns the overload fields of one /progress snapshot

@@ -18,7 +18,8 @@ import (
 // consumed every reported position, the SGP record's generator view and the
 // ASP store's final knowledge.
 type finishFixture struct {
-	config ssnmConfig
+	config       ssnmConfig
+	associations int
 	// delay is how long after its report every healthy subscriber receives a
 	// message.
 	delay     time.Duration
@@ -37,33 +38,52 @@ const (
 )
 
 func steadyFinishFixture() *finishFixture {
-	return newFinishFixture(ssnmConfig{Rate: 1000, APCs: 1, Records: 8, Subscribers: 2}, 2*time.Millisecond)
+	return newFinishFixture(ssnmConfig{TotalRate: 1000, APCs: 1, Records: 8, Subscribers: 2}, 1, 2*time.Millisecond)
 }
 
 func largeFinishFixture(delay time.Duration) *finishFixture {
-	return newFinishFixture(ssnmConfig{Rate: 1000, APCs: ssnmMaxAPCs, Records: ssnmMaxAPCs, Subscribers: 2}, delay)
+	return newFinishFixture(ssnmConfig{TotalRate: 1000, APCs: ssnmMaxAPCs, Records: ssnmMaxAPCs, Subscribers: 2}, 1, delay)
 }
 
 func pausedFinishFixture(resync, recovery time.Duration) *finishFixture {
-	fixture := newFinishFixture(ssnmConfig{Rate: 1000, APCs: 1, Records: 8, Subscribers: 2, Pause: ssnmPause{Offset: time.Millisecond, Duration: time.Millisecond}}, 2*time.Millisecond)
+	fixture := newFinishFixture(ssnmConfig{TotalRate: 1000, APCs: 1, Records: 8, Subscribers: 2, Pause: ssnmPause{Offset: time.Millisecond, Duration: time.Millisecond}}, 1, 2*time.Millisecond)
 	fixture.pause = cleanPause()
 	fixture.pause.ResyncNS, fixture.pause.RecoveryNS = int64(resync), int64(recovery)
 	return fixture
 }
 
-func newFinishFixture(config ssnmConfig, delay time.Duration) *finishFixture {
+// The section 4 shapes over eight associations: the steady row's one-APC
+// messages and the large row's 1,024-APC messages, each partition holding
+// its 2,048 records.
+func steadyEightFinishFixture() *finishFixture {
+	return newFinishFixture(ssnmConfig{TotalRate: 1000, APCs: 1, Records: 2048, Subscribers: 3}, 8, 2*time.Millisecond)
+}
+
+func largeEightFinishFixture(delay time.Duration) *finishFixture {
+	return newFinishFixture(ssnmConfig{TotalRate: 10, APCs: ssnmMaxAPCs, Records: 2048, Subscribers: 3}, 8, delay)
+}
+
+func pausedEightFinishFixture() *finishFixture {
+	fixture := newFinishFixture(ssnmConfig{TotalRate: 1000, APCs: 1, Records: 256, Subscribers: 3, Pause: ssnmPause{Offset: time.Millisecond, Duration: time.Millisecond}}, 8, 2*time.Millisecond)
+	fixture.pause = cleanPause()
+	fixture.pause.SnapshotValidated = 8
+	fixture.pause.ResyncNS, fixture.pause.RecoveryNS = int64(5*time.Millisecond), int64(50*time.Millisecond)
+	return fixture
+}
+
+func newFinishFixture(config ssnmConfig, associations int, delay time.Duration) *finishFixture {
 	config.Budgets = ssnmBudgets{ApplyP99: ssnmDefaultApplyP99Budget, Resync: ssnmDefaultResyncBudget, Recovery: ssnmDefaultRecoveryBudget}
-	plan := ssnmPlan{records: config.Records, apcs: config.APCs}
+	plan := newSSNMPlan(config, associations)
 	log := ssnmReportsResponse{State: ssnmGeneratorComplete, SentTotal: finishSent}
 	for message := uint64(0); message < finishSent; message++ {
-		reported := finishAnchor + ssnmScheduled(config.Rate, message)
+		reported := finishAnchor + ssnmScheduled(config.TotalRate, message)
 		log.Reports = append(log.Reports, reported)
 		log.Completions = append(log.Completions, reported+int64(10*time.Microsecond))
 	}
 	return &finishFixture{
-		config: config, delay: delay, log: log,
-		receiver:  &ssnmRecord{Generator: &ssnmGeneratorRecord{State: ssnmGeneratorComplete}},
-		knowledge: snapshotAfter(plan, testPartition, plan.preloadMessages()+finishSent),
+		config: config, associations: associations, delay: delay, log: log,
+		receiver:  &ssnmRecord{Generator: &ssnmGeneratorRecord{State: ssnmGeneratorComplete, Associations: associations}},
+		knowledge: storeAfter(plan, plan.expectedPositions(finishSent)),
 	}
 }
 
@@ -82,22 +102,21 @@ func (fixture *finishFixture) run(testContext *testing.T) *ssnmRecord {
 	}))
 	testContext.Cleanup(server.Close)
 
-	plan := ssnmPlan{records: fixture.config.Records, apcs: fixture.config.APCs}
-	windowEnd := finishAnchor + ssnmScheduled(fixture.config.Rate, finishMessages)
+	plan := newSSNMPlan(fixture.config, fixture.associations)
+	windowEnd := finishAnchor + ssnmScheduled(fixture.config.TotalRate, finishMessages)
 	run := &ssnmSenderRun{
-		config: fixture.config, plan: plan, associations: 1, peerControl: server.URL,
-		limits: ssnmStoreLimits(fixture.config, 1), cancel: func() {},
+		config: fixture.config, plan: plan, associations: fixture.associations, peerControl: server.URL,
+		limits: ssnmStoreLimits(fixture.config, fixture.associations), cancel: func() {},
 		knowledge: func() m3ua.SSNMSnapshot { return fixture.knowledge },
 	}
 	for index := 0; index < fixture.config.Subscribers; index++ {
 		paused := index == 0 && fixture.config.Pause.enabled()
-		run.subscribers = append(run.subscribers, newSSNMSubscriber(index, paused, plan, fixture.config.Rate, 1, 256, 1<<20))
+		run.subscribers = append(run.subscribers, newSSNMSubscriber(index, paused, plan, fixture.config.TotalRate, 256, 1<<20))
 	}
 	specification := runSpec{Clock: &sharedClockWindow{Start: finishAnchor, End: windowEnd}}
 	if err := run.attach(&specification, ssnmPhaseMeasurement); err != nil {
 		testContext.Fatal(err)
 	}
-	preload := plan.preloadMessages()
 	for _, subscriber := range run.subscribers {
 		if subscriber.paused {
 			subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMContinuityLostEvent, ContinuityLost: true}, 0)
@@ -106,12 +125,8 @@ func (fixture *finishFixture) run(testContext *testing.T) *ssnmRecord {
 				subscriber.pause = &pause
 			}
 		}
-		for position := uint64(0); position < preload+finishSent; position++ {
-			received := finishAnchor
-			if position >= preload {
-				received = finishAnchor + ssnmScheduled(fixture.config.Rate, position-preload) + int64(fixture.delay)
-			}
-			subscriber.observe(planEvent(plan, testPartition, position), received)
+		for _, delivery := range roundRobinDeliveries(plan, fixture.config.TotalRate, finishAnchor, finishSent, fixture.delay) {
+			subscriber.observe(delivery.event, delivery.received)
 		}
 		for _, event := range fixture.events {
 			subscriber.observe(event, 0)
@@ -161,12 +176,12 @@ func TestSSNMFinishVerdicts(testContext *testing.T) {
 			fixture := steadyFinishFixture()
 			fixture.log.FailedTotal, fixture.log.Failed = 1, []uint64{3}
 			return fixture
-		}, ssnmVerdictFail, "1 failed reports"},
-		{"fan-out failure", func() *finishFixture {
+		}, ssnmVerdictFail, "saw 1 failed reports"},
+		{"generator over another association count", func() *finishFixture {
 			fixture := steadyFinishFixture()
-			fixture.receiver.Generator.FanoutFailures = 1
+			fixture.receiver.Generator.Associations = 8
 			return fixture
-		}, ssnmVerdictFail, "1 association fan-out failures"},
+		}, ssnmVerdictFail, "over 8 associations, this run has 1"},
 		{"log not from message zero", func() *finishFixture {
 			fixture := steadyFinishFixture()
 			fixture.log.From = 1
@@ -301,4 +316,90 @@ func budgetCheck(record *ssnmRecord, name string) *ssnmBudgetCheck {
 		}
 	}
 	return nil
+}
+
+// The steady and large rows over eight associations: every message reached
+// one partition, each partition ended at its own share, the store holds
+// 8 x 2,048 records and the delay join covers every measurement message
+// once. Each mutation of the evidence fails the run.
+func TestSSNMFinishEightAssociationRows(testContext *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		fixture func() *finishFixture
+		verdict string
+		reason  string
+	}{
+		{"steady row", steadyEightFinishFixture, ssnmVerdictPass, ""},
+		{"large row within the apply budget", func() *finishFixture { return largeEightFinishFixture(40 * time.Millisecond) }, ssnmVerdictPass, ""},
+		{"large row over the apply budget", func() *finishFixture { return largeEightFinishFixture(150 * time.Millisecond) }, ssnmVerdictFail, "apply-time budget"},
+		{"F3 pause over eight partitions", pausedEightFinishFixture, ssnmVerdictPass, ""},
+		{"F3 pause validating seven partitions", func() *finishFixture {
+			fixture := pausedEightFinishFixture()
+			fixture.pause.SnapshotValidated = 7
+			return fixture
+		}, ssnmVerdictFail, "validated 7 of 8 resynchronized partitions"},
+		{"one partition's records missing", func() *finishFixture {
+			fixture := steadyEightFinishFixture()
+			fixture.knowledge.Partitions = fixture.knowledge.Partitions[:7]
+			return fixture
+		}, ssnmVerdictFail, "held 14336 records at the end, want 16384"},
+		{"one partition holding another association's state", func() *finishFixture {
+			fixture := steadyEightFinishFixture()
+			plan := newSSNMPlan(fixture.config, 8)
+			// Partition 6 holds association 5's destinations instead of its
+			// own: the store still counts 16,384 records.
+			other := storeAfter(plan, plan.expectedPositions(finishSent)).Partitions[5]
+			other.Partition = testPartitionOf(6)
+			fixture.knowledge.Partitions[6] = other
+			return fixture
+		}, ssnmVerdictFail, "disagreed with the plan at 4096 destinations"},
+		{"store expected at the broadcast positions", func() *finishFixture {
+			fixture := steadyEightFinishFixture()
+			plan := newSSNMPlan(fixture.config, 8)
+			broadcast := make([]uint64, 8)
+			for association := range broadcast {
+				broadcast[association] = plan.preloadMessages() + finishSent
+			}
+			fixture.knowledge = storeAfter(plan, broadcast)
+			return fixture
+		}, ssnmVerdictFail, "disagreed with the plan"},
+	} {
+		testContext.Run(testCase.name, func(testContext *testing.T) {
+			fixture := testCase.fixture()
+			record := fixture.run(testContext)
+			if record.Verdict != testCase.verdict || testCase.reason != "" && !reasonsContain(record.Reasons, testCase.reason) {
+				testContext.Fatalf("verdict %s reasons %q, want %s with %q", record.Verdict, record.Reasons, testCase.verdict, testCase.reason)
+			}
+			if testCase.verdict != ssnmVerdictPass {
+				return
+			}
+			plan := newSSNMPlan(fixture.config, 8)
+			if record.Store.RecordsAtEnd != 8*fixture.config.Records || !record.Store.StateValidated || record.Store.StateMismatches != 0 {
+				testContext.Fatalf("store = %+v", record.Store)
+			}
+			generator := record.Generator
+			if generator.Offered != finishMessages || generator.Associations != 8 || len(generator.OfferedPerAssociation) != 8 {
+				testContext.Fatalf("generator = %+v", generator)
+			}
+			for association, share := range generator.OfferedPerAssociation {
+				if want := plan.messagesFor(association, finishMessages); share != want {
+					testContext.Fatalf("association %d offered %d, want %d", association, share, want)
+				}
+			}
+			healthy := 0
+			for _, subscriber := range record.Subscribers {
+				for association, position := range subscriber.FinalPositions {
+					if want := plan.preloadMessages() + plan.messagesFor(association, finishSent); position != want || subscriber.ExpectedFinalPositions[association] != want {
+						testContext.Fatalf("subscriber %d association %d ended at %d expecting %d, want %d", subscriber.Index, association, position, subscriber.ExpectedFinalPositions[association], want)
+					}
+				}
+				if subscriber.Role == "healthy" {
+					healthy++
+				}
+			}
+			if record.Delay.Delay.Count != uint64(healthy)*finishMessages || record.Delay.Messages != finishMessages {
+				testContext.Fatalf("delay join %+v, want one receipt per message per healthy subscriber", record.Delay)
+			}
+		})
+	}
 }

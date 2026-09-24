@@ -160,7 +160,10 @@ func TestSSNMByteCapMatchesLibraryAccounting(testContext *testing.T) {
 	// Publish in step: each report reaches every reference subscription
 	// before the next one is sent, so every store has published it and the
 	// held queues see the reports in order.
-	destinations := ssnmDestinations(64)
+	destinations := make([]m3ua.PointCodeRange, 64)
+	for index := range destinations {
+		destinations[index] = m3ua.PointCodeRange{PointCode: ssnmPointCodeBase + uint32(index)}
+	}
 	first := 0
 	for index, count := range byteCapCounts {
 		request := m3ua.DestinationAvailabilityRequest{Scope: ssnmScope(), Destinations: destinations[first : first+count], Availability: m3ua.DestinationUnavailable}
@@ -183,7 +186,7 @@ func TestSSNMByteCapMatchesLibraryAccounting(testContext *testing.T) {
 		}
 	}
 
-	plan := ssnmPlan{records: 64, apcs: 1}
+	plan := singlePlan(64, 1)
 	for _, peer := range peers {
 		testContext.Run(peer.name, func(testContext *testing.T) {
 			queueLimit := peer.limits.SubscriptionQueueSize
@@ -194,7 +197,7 @@ func TestSSNMByteCapMatchesLibraryAccounting(testContext *testing.T) {
 			if queueBytes == 0 {
 				queueBytes = m3ua.DefaultSSNMSubscriptionQueueBytes
 			}
-			subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, queueLimit, queueBytes)
+			subscriber := newSSNMSubscriber(0, true, plan, 1000, queueLimit, queueBytes)
 			subscriber.subscription = peer.held
 			pause := ssnmPause{Duration: time.Millisecond}
 			subscriber.pauseAndRecover(ctx, &steppingMeasurementClock{step: int64(pause.Duration)}, 0, pause)

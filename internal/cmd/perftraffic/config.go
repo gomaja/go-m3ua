@@ -100,7 +100,7 @@ type commandConfig struct {
 	CPUStatPath    string
 	SameHostClock  bool
 	clockWindow    *sharedClockWindow
-	// SSNM is the opt-in SSNM load workload; zero when -ssnm-rate is unset.
+	// SSNM is the opt-in SSNM load workload; zero when -ssnm-total-rate is unset.
 	SSNM ssnmConfig
 	// ssnmPhase names the cohort phase an SSNM cohort declares; empty is the
 	// measurement cohort.

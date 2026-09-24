@@ -55,7 +55,7 @@ const (
 // against loss-free DATA at a fixed nominal load. A combined run belongs to
 // neither contract: each workload's verdict would rest on conditions the
 // other deliberately breaks.
-const overloadSSNMRefusal = "overload-profile cannot be combined with SSNM load (-ssnm-rate): the DATA overload row runs DATA alone, and the SSNM rows judge SSNM delivery against loss-free DATA"
+const overloadSSNMRefusal = "overload-profile cannot be combined with SSNM load (-ssnm-total-rate): the DATA overload row runs DATA alone, and the SSNM rows judge SSNM delivery against loss-free DATA"
 
 // overloadPhase is one phase of an overload profile: the multiplier exactly
 // as written, the offered rate it yields, and how long it lasts.

@@ -26,31 +26,31 @@ func TestSSNMFlagsDefaultOffLeaveConfigurationUnchanged(testContext *testing.T) 
 		testContext.Fatalf("parseConfig: %v", err)
 	}
 	if config.SSNM != (ssnmConfig{}) || config.SSNM.enabled() {
-		testContext.Fatalf("SSNM config = %+v, want zero when -ssnm-rate is unset", config.SSNM)
+		testContext.Fatalf("SSNM config = %+v, want zero when -ssnm-total-rate is unset", config.SSNM)
 	}
 }
 
 func TestSSNMFlagsApplyDefaults(testContext *testing.T) {
-	config, err := parseConfig(ssnmSenderArguments("-ssnm-rate=1000"))
+	config, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000"))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
-	want := ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8, QueueBytes: 1 << 20,
+	want := ssnmConfig{TotalRate: 1000, APCs: 1, Records: 16384, Subscribers: 8, QueueBytes: 1 << 20,
 		Budgets: ssnmBudgets{ApplyP99: 100 * time.Millisecond, Resync: 100 * time.Millisecond, Recovery: time.Second}}
 	if config.SSNM != want {
 		testContext.Fatalf("SSNM config = %+v, want %+v", config.SSNM, want)
 	}
-	receiver, err := parseConfig(ssnmReceiverArguments("-ssnm-rate=10", "-ssnm-apcs=1024"))
+	receiver, err := parseConfig(ssnmReceiverArguments("-ssnm-total-rate=10", "-ssnm-apcs=1024"))
 	if err != nil {
 		testContext.Fatalf("parse receiver: %v", err)
 	}
-	if receiver.SSNM != (ssnmConfig{Rate: 10, APCs: 1024, Records: 16384}) {
+	if receiver.SSNM != (ssnmConfig{TotalRate: 10, APCs: 1024, Records: 16384}) {
 		testContext.Fatalf("receiver SSNM config = %+v", receiver.SSNM)
 	}
 }
 
 func TestSSNMBudgetFlagsParseAndReachTheManifest(testContext *testing.T) {
-	config, err := parseConfig(ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apcs=1024", "-ssnm-records=1024",
+	config, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-apcs=1024", "-ssnm-records=1024",
 		"-ssnm-apply-p99-budget=250ms", "-ssnm-resync-budget=50ms", "-ssnm-recovery-budget=2s"))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
@@ -78,7 +78,7 @@ func TestSSNMBudgetFlagsParseAndReachTheManifest(testContext *testing.T) {
 }
 
 func TestSSNMPauseFlagParses(testContext *testing.T) {
-	config, err := parseConfig(ssnmSenderArguments("-ssnm-rate=1000", "-pause-subscriber=5s/10s"))
+	config, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000", "-pause-subscriber=5s/10s"))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -92,36 +92,39 @@ func TestSSNMFlagsRejectInvalidCombinations(testContext *testing.T) {
 		arguments []string
 		want      string
 	}{
-		"apcs without rate":         {ssnmSenderArguments("-ssnm-apcs=1024"), "requires -ssnm-rate"},
-		"subscribers without rate":  {ssnmSenderArguments("-subscribers=4"), "requires -ssnm-rate"},
-		"pause without rate":        {ssnmSenderArguments("-pause-subscriber=1s/1s"), "requires -ssnm-rate"},
-		"rate above bound":          {ssnmSenderArguments("-ssnm-rate=10001"), "must not exceed"},
-		"zero apcs":                 {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apcs=0"), "ssnm-apcs"},
-		"apcs above bound":          {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apcs=1025"), "ssnm-apcs"},
-		"records above bound":       {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-records=16385"), "ssnm-records"},
-		"records not multiple":      {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apcs=1024", "-ssnm-records=1000"), "multiple"},
-		"echo mode":                 {append(ssnmSenderArguments("-ssnm-rate=10"), "-mode=echo", "-same-host-clock=false"), "throughput"},
-		"no shared clock":           {append(ssnmSenderArguments("-ssnm-rate=10"), "-same-host-clock=false"), "same-host-clock"},
-		"receiver subscribers":      {ssnmReceiverArguments("-ssnm-rate=10", "-subscribers=8"), "not SGP flags"},
-		"receiver pause":            {ssnmReceiverArguments("-ssnm-rate=10", "-pause-subscriber=1s/1s"), "not SGP flags"},
-		"too many subscribers":      {ssnmSenderArguments("-ssnm-rate=10", "-subscribers=17"), "subscribers"},
-		"pause with one subscriber": {ssnmSenderArguments("-ssnm-rate=10", "-subscribers=1", "-pause-subscriber=1s/1s"), "at least two"},
-		"pause past window":         {ssnmSenderArguments("-ssnm-rate=10", "-pause-subscriber=25s/10s"), "inside the measurement window"},
-		"pause malformed":           {ssnmSenderArguments("-ssnm-rate=10", "-pause-subscriber=10s"), "offset>/<duration"},
-		"pause negative":            {ssnmSenderArguments("-ssnm-rate=10", "-pause-subscriber=-1s/1s"), "negative"},
-		"receipt storage bound":     {append(ssnmSenderArguments("-ssnm-rate=10000", "-subscribers=16"), "-associations=32", "-duration=9m", "-warmup=0s"), "receipt storage"},
-		"budget without rate":       {ssnmSenderArguments("-ssnm-resync-budget=1s"), "requires -ssnm-rate"},
-		"receiver budget":           {ssnmReceiverArguments("-ssnm-rate=10", "-ssnm-apply-p99-budget=1s"), "not an SGP flag"},
-		"zero budget":               {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-recovery-budget=0s"), "budgets must be positive"},
-		"negative budget":           {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-apply-p99-budget=-1ms"), "budgets must be positive"},
-		"queue bytes without rate":  {ssnmSenderArguments("-ssnm-subscription-queue-bytes=98304"), "requires -ssnm-rate"},
-		"receiver queue bytes":      {ssnmReceiverArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=98304"), "not SGP flags"},
-		"negative queue bytes":      {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=-1"), "must not be negative"},
-		"queue bytes below library": {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=511"), "at least 512"},
+		"apcs without rate":         {ssnmSenderArguments("-ssnm-apcs=1024"), "requires -ssnm-total-rate"},
+		"subscribers without rate":  {ssnmSenderArguments("-subscribers=4"), "requires -ssnm-total-rate"},
+		"pause without rate":        {ssnmSenderArguments("-pause-subscriber=1s/1s"), "requires -ssnm-total-rate"},
+		"rate above bound":          {ssnmSenderArguments("-ssnm-total-rate=10001"), "must not exceed"},
+		"zero apcs":                 {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-apcs=0"), "ssnm-apcs"},
+		"apcs above bound":          {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-apcs=1025"), "ssnm-apcs"},
+		"records above bound":       {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-records=16385"), "ssnm-records"},
+		"records not multiple":      {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-apcs=1024", "-ssnm-records=1000"), "multiple"},
+		"echo mode":                 {append(ssnmSenderArguments("-ssnm-total-rate=10"), "-mode=echo", "-same-host-clock=false"), "throughput"},
+		"no shared clock":           {append(ssnmSenderArguments("-ssnm-total-rate=10"), "-same-host-clock=false"), "same-host-clock"},
+		"receiver subscribers":      {ssnmReceiverArguments("-ssnm-total-rate=10", "-subscribers=8"), "not SGP flags"},
+		"receiver pause":            {ssnmReceiverArguments("-ssnm-total-rate=10", "-pause-subscriber=1s/1s"), "not SGP flags"},
+		"too many subscribers":      {ssnmSenderArguments("-ssnm-total-rate=10", "-subscribers=17"), "subscribers"},
+		"pause with one subscriber": {ssnmSenderArguments("-ssnm-total-rate=10", "-subscribers=1", "-pause-subscriber=1s/1s"), "at least two"},
+		"pause past window":         {ssnmSenderArguments("-ssnm-total-rate=10", "-pause-subscriber=25s/10s"), "inside the measurement window"},
+		"pause malformed":           {ssnmSenderArguments("-ssnm-total-rate=10", "-pause-subscriber=10s"), "offset>/<duration"},
+		"pause negative":            {ssnmSenderArguments("-ssnm-total-rate=10", "-pause-subscriber=-1s/1s"), "negative"},
+		"receipt storage bound":     {append(ssnmSenderArguments("-ssnm-total-rate=10000", "-subscribers=16"), "-associations=32", "-duration=9m", "-warmup=0s"), "receipt storage"},
+		// The retired per-association broadcast flag is refused outright, so
+		// an old command line cannot run a different intensity.
+		"retired rate flag":         {ssnmSenderArguments("-ssnm-rate=1000"), "flag provided but not defined: -ssnm-rate"},
+		"budget without rate":       {ssnmSenderArguments("-ssnm-resync-budget=1s"), "requires -ssnm-total-rate"},
+		"receiver budget":           {ssnmReceiverArguments("-ssnm-total-rate=10", "-ssnm-apply-p99-budget=1s"), "not an SGP flag"},
+		"zero budget":               {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-recovery-budget=0s"), "budgets must be positive"},
+		"negative budget":           {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-apply-p99-budget=-1ms"), "budgets must be positive"},
+		"queue bytes without rate":  {ssnmSenderArguments("-ssnm-subscription-queue-bytes=98304"), "requires -ssnm-total-rate"},
+		"receiver queue bytes":      {ssnmReceiverArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=98304"), "not SGP flags"},
+		"negative queue bytes":      {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=-1"), "must not be negative"},
+		"queue bytes below library": {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=511"), "at least 512"},
 		// The full store's preload message names 1,024 destinations:
 		// 516 + 1,024 x 268 accounted bytes.
-		"queue bytes below preload": {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-subscription-queue-bytes=274947"), "cannot hold the 1024-destination preload message, 274948 accounted bytes"},
-		"small store preload":       {ssnmSenderArguments("-ssnm-rate=10", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69123"), "cannot hold the 256-destination preload message, 69124"},
+		"queue bytes below preload": {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=274947"), "cannot hold the 1024-destination preload message, 274948 accounted bytes"},
+		"small store preload":       {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69123"), "cannot hold the 256-destination preload message, 69124"},
 	}
 	for name, testCase := range cases {
 		testContext.Run(name, func(testContext *testing.T) {
@@ -152,7 +155,7 @@ func TestSSNMRunSpecOmittedWhenOff(testContext *testing.T) {
 
 func TestSSNMRunSpecRoundTripsAndCompares(testContext *testing.T) {
 	window := &sharedClockWindow{Start: 10, End: 20}
-	specification := runSpec{Cohort: "c", Clock: window, SSNM: workloadRef(ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8}.workload(ssnmPhaseMeasurement, 10))}
+	specification := runSpec{Cohort: "c", Clock: window, SSNM: workloadRef(ssnmConfig{TotalRate: 1000, APCs: 1, Records: 16384, Subscribers: 8}.workload(ssnmPhaseMeasurement, 10))}
 	encoded, err := json.Marshal(specification)
 	if err != nil {
 		testContext.Fatal(err)
@@ -178,9 +181,9 @@ func TestSSNMSubscriptionQueueBytesReachStoreAndSpec(testContext *testing.T) {
 		arguments []string
 		want      int
 	}{
-		{"library default", ssnmSenderArguments("-ssnm-rate=1000"), 1 << 20},
-		{"byte-binding F3", ssnmSenderArguments("-ssnm-rate=1000", "-ssnm-records=256", "-pause-subscriber=5s/10s", "-ssnm-subscription-queue-bytes=98304"), 98_304},
-		{"exactly one preload message", ssnmSenderArguments("-ssnm-rate=1000", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69124"), 69_124},
+		{"library default", ssnmSenderArguments("-ssnm-total-rate=1000"), 1 << 20},
+		{"byte-binding F3", ssnmSenderArguments("-ssnm-total-rate=1000", "-ssnm-records=256", "-pause-subscriber=5s/10s", "-ssnm-subscription-queue-bytes=98304"), 98_304},
+		{"exactly one preload message", ssnmSenderArguments("-ssnm-total-rate=1000", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69124"), 69_124},
 	} {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
 			config, err := parseConfig(testCase.arguments)
@@ -199,11 +202,11 @@ func TestSSNMSubscriptionQueueBytesReachStoreAndSpec(testContext *testing.T) {
 			}
 		})
 	}
-	receiver, err := parseConfig(ssnmReceiverArguments("-ssnm-rate=1000"))
+	receiver, err := parseConfig(ssnmReceiverArguments("-ssnm-total-rate=1000"))
 	if err != nil || receiver.SSNM.QueueBytes != 0 {
 		testContext.Fatalf("receiver queue bytes %d, %v", receiver.SSNM.QueueBytes, err)
 	}
-	specification := runSpec{SSNM: workloadRef(ssnmConfig{Rate: 1000, APCs: 1, Records: 256, Subscribers: 8, QueueBytes: 98_304}.workload(ssnmPhaseMeasurement, 1))}
+	specification := runSpec{SSNM: workloadRef(ssnmConfig{TotalRate: 1000, APCs: 1, Records: 256, Subscribers: 8, QueueBytes: 98_304}.workload(ssnmPhaseMeasurement, 1))}
 	other := specification
 	other.SSNM = workloadRef(*specification.SSNM)
 	other.SSNM.SubscriptionQueueBytes = 1 << 20
@@ -213,7 +216,7 @@ func TestSSNMSubscriptionQueueBytesReachStoreAndSpec(testContext *testing.T) {
 }
 
 func TestSSNMStoreLimitsFitTheWorkload(testContext *testing.T) {
-	limits := ssnmStoreLimits(ssnmConfig{Rate: 1000, APCs: 1, Records: 16384, Subscribers: 8}, 2)
+	limits := ssnmStoreLimits(ssnmConfig{TotalRate: 1000, APCs: 1, Records: 16384, Subscribers: 8}, 2)
 	if limits.MaxRecords != 32768 || limits.MaxRecordsPerPartition != 16384 || limits.MaxRecordsPerPeer != 16384 ||
 		limits.MaxSubscribers != 8 || limits.SubscriptionQueueSize != 256 || limits.MaxAffectedPointCodes != 1024 {
 		testContext.Fatalf("limits = %+v", limits)
@@ -228,3 +231,26 @@ func TestSSNMStoreLimitsFitTheWorkload(testContext *testing.T) {
 
 // workloadRef returns a declaration as runSpec carries it.
 func workloadRef(workload ssnmWorkload) *ssnmWorkload { return &workload }
+
+// A healthy subscriber keeps one receipt per measurement message: every
+// message reaches one partition, so the association count no longer
+// multiplies the storage. 8 subscribers x 1,800,001 messages x 4 bytes is
+// 57.6 MB, within the 64 MiB bound, over 32 associations as over one.
+func TestSSNMReceiptStorageDoesNotScaleWithAssociations(testContext *testing.T) {
+	for _, associations := range []string{"-associations=1", "-associations=32"} {
+		arguments := append(ssnmSenderArguments("-ssnm-total-rate=10000"), associations, "-duration=180s", "-warmup=0s")
+		if _, err := parseConfig(arguments); err != nil {
+			testContext.Fatalf("%s: %v", associations, err)
+		}
+	}
+}
+
+// The specification carries the total rate as total_rate and never the
+// retired per-association rate field.
+func TestSSNMWorkloadEncodesTheTotalRate(testContext *testing.T) {
+	workload := ssnmConfig{TotalRate: 1000, APCs: 1, Records: 2048, Subscribers: 8}.workload(ssnmPhaseMeasurement, 1)
+	encoded, err := json.Marshal(workload)
+	if err != nil || !strings.Contains(string(encoded), `"total_rate":1000`) || strings.Contains(string(encoded), `"rate"`) {
+		testContext.Fatalf("workload encoding %s, %v", encoded, err)
+	}
+}

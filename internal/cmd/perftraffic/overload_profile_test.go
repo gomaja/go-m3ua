@@ -142,11 +142,11 @@ func TestOverloadProfileFlagConfiguresOnlyTheThroughputSender(testContext *testi
 // combined: the sender refuses both flags together and a receiver refuses a
 // specification that carries both.
 func TestOverloadProfileIsNeverCombinedWithSSNMLoad(testContext *testing.T) {
-	_, err := parseConfig(ssnmSenderArguments("-ssnm-rate=1000", "-overload-profile=2x:15s,0.5x:15s"))
+	_, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000", "-overload-profile=2x:15s,0.5x:15s"))
 	if err == nil || !strings.Contains(err.Error(), "cannot be combined with SSNM load") {
 		testContext.Fatalf("sender flags: %v", err)
 	}
-	if _, err := parseConfig(ssnmSenderArguments("-ssnm-rate=1000")); err != nil {
+	if _, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000")); err != nil {
 		testContext.Fatalf("SSNM load alone: %v", err)
 	}
 	if config, err := parseConfig(ssnmSenderArguments("-overload-profile=2x:15s,0.5x:15s")); err != nil || config.overload == nil || config.SSNM.enabled() {
@@ -161,7 +161,7 @@ func TestOverloadProfileIsNeverCombinedWithSSNMLoad(testContext *testing.T) {
 			Cohort: "combined", Seed: 1, Associations: 1, Expected: profile.expected(), Duration: profile.duration(),
 			Drain: 3 * time.Second, Rate: 40_000, Outstanding: maxOutstanding, Payload: workloadMix,
 			Mode: modeThroughput, Direction: directionASPToSGP, Overload: profile.spec(role),
-			SSNM: &ssnmWorkload{Rate: 1_000, APCs: 1, Records: 16_384, Subscribers: 8, Phase: "measurement"},
+			SSNM: &ssnmWorkload{TotalRate: 1_000, APCs: 1, Records: 16_384, Subscribers: 8, Phase: "measurement"},
 		}
 		if role == overloadRoleWarmup {
 			specification.Rate, specification.Duration, specification.Expected = 20_000, 5*time.Second, 100_000

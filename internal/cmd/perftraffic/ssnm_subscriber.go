@@ -18,15 +18,15 @@ type ssnmEventStream interface {
 }
 
 // ssnmSubscriber is one SubscribeSSNM consumer on the ASP Endpoint. It checks
-// every delivered report against the deterministic plan: per partition, a
-// healthy subscriber must see every position exactly once and in order.
+// every delivered report against the deterministic plan: every partition
+// carries exactly one association's destinations, and per partition a healthy
+// subscriber must see every position exactly once and in order.
 type ssnmSubscriber struct {
 	index        int
 	paused       bool
 	subscription ssnmEventStream
 	plan         ssnmPlan
 	rate         uint64
-	partitionCap int
 	// queueLimit and queueBytes are the subscription's event and accounted
 	// byte limits in force.
 	queueLimit int
@@ -34,27 +34,36 @@ type ssnmSubscriber struct {
 
 	mutex      sync.Mutex
 	partitions map[m3ua.SSNMPartition]*ssnmPartitionProgress
-	slots      int
-	counts     ssnmSubscriberCounts
-	// receipts[slot][m-receiptFirst] is 1 + the microseconds between the
-	// anchor and this subscriber's receipt of generator message m, zero when
-	// not received. It is pointer-free and allocated once per measurement.
-	receipts     [][]uint32
+	// byAssociation is the partition carrying each association's
+	// destinations, bound by the first report naming them.
+	byAssociation []*ssnmPartitionProgress
+	counts        ssnmSubscriberCounts
+	// receipts[m-receiptFirst] is 1 + the microseconds between the anchor and
+	// this subscriber's receipt of generator message m, zero when not
+	// received. Every message reaches one partition, so one slot per message
+	// suffices. It is pointer-free and allocated once per measurement.
+	receipts     []uint32
 	receiptFirst uint64
 	receiptLast  uint64
 	anchor       int64
-	snapshot     map[int][]uint8
-	pause        *ssnmPauseRecord
-	pauseDone    bool
-	failure      string
+	// snapshot holds a Resync snapshot's states by association until each
+	// partition's first report after the Resync validates them.
+	snapshot  map[int][]uint8
+	pause     *ssnmPauseRecord
+	pauseDone bool
+	failure   string
 }
 
 type ssnmPartitionProgress struct {
-	slot   int
-	next   uint64
-	relock bool
+	association int
+	next        uint64
+	relock      bool
 }
 
+// ssnmSubscriberCounts are one subscriber's event counts. MisScoped counts
+// reports whose destinations belong to another association's partition than
+// the one that delivered them, including a second partition naming an
+// association another partition already carries.
 type ssnmSubscriberCounts struct {
 	Events             uint64 `json:"events"`
 	Reports            uint64 `json:"reports"`
@@ -62,6 +71,7 @@ type ssnmSubscriberCounts struct {
 	Gaps               uint64 `json:"gaps"`
 	Duplicates         uint64 `json:"duplicates"`
 	Unexpected         uint64 `json:"unexpected"`
+	MisScoped          uint64 `json:"mis_scoped"`
 	ContinuityLost     uint64 `json:"continuity_lost"`
 	ResourceLoss       uint64 `json:"resource_loss"`
 	Invalidated        uint64 `json:"invalidated"`
@@ -76,16 +86,18 @@ const (
 	ssnmStateAvailable   = uint8(2)
 )
 
-func newSSNMSubscriber(index int, paused bool, plan ssnmPlan, rate uint64, partitionCap, queueLimit, queueBytes int) *ssnmSubscriber {
+// newSSNMSubscriber checks a subscription against plan, whose total rate is
+// rate, under the subscription's event and byte limits.
+func newSSNMSubscriber(index int, paused bool, plan ssnmPlan, rate uint64, queueLimit, queueBytes int) *ssnmSubscriber {
 	return &ssnmSubscriber{
-		index:        index,
-		paused:       paused,
-		plan:         plan,
-		rate:         rate,
-		partitionCap: partitionCap,
-		queueLimit:   queueLimit,
-		queueBytes:   queueBytes,
-		partitions:   make(map[m3ua.SSNMPartition]*ssnmPartitionProgress),
+		index:         index,
+		paused:        paused,
+		plan:          plan,
+		rate:          rate,
+		queueLimit:    queueLimit,
+		queueBytes:    queueBytes,
+		partitions:    make(map[m3ua.SSNMPartition]*ssnmPartitionProgress),
+		byAssociation: make([]*ssnmPartitionProgress, plan.associations),
 	}
 }
 
@@ -99,10 +111,7 @@ func (subscriber *ssnmSubscriber) armReceipts(anchor int64, first, last uint64, 
 		return
 	}
 	subscriber.receiptFirst, subscriber.receiptLast = first, last
-	subscriber.receipts = make([][]uint32, subscriber.partitionCap)
-	for slot := range subscriber.receipts {
-		subscriber.receipts[slot] = make([]uint32, last-first)
-	}
+	subscriber.receipts = make([]uint32, last-first)
 }
 
 // observe accounts one delivered event received at the shared-clock instant.
@@ -130,10 +139,10 @@ func (subscriber *ssnmSubscriber) observeLocked(event m3ua.SSNMEvent, received i
 }
 
 // decodeSSNMReport maps a delivered report back to plan content: a contiguous
-// run of generated destinations with one availability.
-func decodeSSNMReport(event m3ua.SSNMEvent, records int) (ssnmChunk, bool) {
+// run of one association's generated destinations with one availability.
+func decodeSSNMReport(event m3ua.SSNMEvent, plan ssnmPlan) (int, ssnmChunk, bool) {
 	if !event.ReportSet || len(event.Report.Destinations) == 0 {
-		return ssnmChunk{}, false
+		return 0, ssnmChunk{}, false
 	}
 	var availability m3ua.DestinationAvailability
 	switch event.Report.Kind {
@@ -142,39 +151,43 @@ func decodeSSNMReport(event m3ua.SSNMEvent, records int) (ssnmChunk, bool) {
 	case m3ua.SSNMDestinationAvailableReport:
 		availability = m3ua.DestinationAvailable
 	default:
-		return ssnmChunk{}, false
+		return 0, ssnmChunk{}, false
 	}
 	destinations := event.Report.Destinations
-	first := int64(destinations[0].PointCode) - int64(ssnmPointCodeBase)
-	if first < 0 || first >= int64(records) {
-		return ssnmChunk{}, false
+	association, first, found := plan.locate(destinations[0].PointCode)
+	if !found {
+		return 0, ssnmChunk{}, false
 	}
 	for index, destination := range destinations {
-		if destination.Mask != 0 || int64(destination.PointCode)-int64(ssnmPointCodeBase) != first+int64(index) {
-			return ssnmChunk{}, false
+		if destination.Mask != 0 || destination.PointCode != destinations[0].PointCode+uint32(index) {
+			return 0, ssnmChunk{}, false
 		}
 	}
-	if first+int64(len(destinations)) > int64(records) {
-		return ssnmChunk{}, false
+	if first+len(destinations) > plan.records {
+		return 0, ssnmChunk{}, false
 	}
-	return ssnmChunk{first: int(first), count: len(destinations), availability: availability}, true
+	return association, ssnmChunk{first: first, count: len(destinations), availability: availability}, true
 }
 
 func (subscriber *ssnmSubscriber) observeReportLocked(event m3ua.SSNMEvent, received int64) {
-	chunk, ok := decodeSSNMReport(event, subscriber.plan.records)
+	association, chunk, ok := decodeSSNMReport(event, subscriber.plan)
 	if !ok {
 		subscriber.counts.Unexpected++
 		return
 	}
 	progress := subscriber.partitions[event.Partition]
 	if progress == nil {
-		if subscriber.slots >= subscriber.partitionCap {
-			subscriber.counts.Unexpected++
+		if subscriber.byAssociation[association] != nil {
+			subscriber.counts.MisScoped++
 			return
 		}
-		progress = &ssnmPartitionProgress{slot: subscriber.slots}
-		subscriber.slots++
+		progress = &ssnmPartitionProgress{association: association}
+		subscriber.byAssociation[association] = progress
 		subscriber.partitions[event.Partition] = progress
+	}
+	if progress.association != association {
+		subscriber.counts.MisScoped++
+		return
 	}
 	if progress.relock {
 		position, found := subscriber.lockOnLocked(progress, chunk, received)
@@ -182,7 +195,7 @@ func (subscriber *ssnmSubscriber) observeReportLocked(event m3ua.SSNMEvent, rece
 			subscriber.counts.Unexpected++
 			return
 		}
-		subscriber.validateSnapshotLocked(progress.slot, position)
+		subscriber.validateSnapshotLocked(association, position)
 		progress.relock = false
 		if subscriber.pause != nil {
 			subscriber.pause.LockedOnPositions = append(subscriber.pause.LockedOnPositions, position)
@@ -212,31 +225,29 @@ func (subscriber *ssnmSubscriber) observeReportLocked(event m3ua.SSNMEvent, rece
 func (subscriber *ssnmSubscriber) acceptLocked(progress *ssnmPartitionProgress, position uint64, received int64) {
 	progress.next = position + 1
 	subscriber.counts.Accepted++
-	preload := subscriber.plan.preloadMessages()
-	if position < preload || subscriber.receipts == nil {
-		return
-	}
-	message := position - preload
-	if message < subscriber.receiptFirst || message >= subscriber.receiptLast || progress.slot >= len(subscriber.receipts) {
+	message, generated := subscriber.plan.message(progress.association, position)
+	if !generated || subscriber.receipts == nil || message < subscriber.receiptFirst || message >= subscriber.receiptLast {
 		return
 	}
 	elapsed := (received - subscriber.anchor) / int64(time.Microsecond)
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	subscriber.receipts[progress.slot][message-subscriber.receiptFirst] = uint32(min(elapsed, math.MaxUint32-1) + 1)
+	subscriber.receipts[message-subscriber.receiptFirst] = uint32(min(elapsed, math.MaxUint32-1) + 1)
 }
 
 // lockOnLocked finds the position of the first report after a Resync. The
 // generator never reports before its schedule, so the position is the latest
 // one at or before the scheduled estimate that carries this content and lies
-// after everything consumed before the loss. The pattern repeats every
-// period positions, so the search spans one period.
+// after everything consumed before the loss. The estimate is the partition
+// position of the latest message due for this association: of the due
+// messages 0 .. due-1, association a carries a, a+N, a+2N, ... The pattern
+// repeats every period positions, so the search spans one period.
 func (subscriber *ssnmSubscriber) lockOnLocked(progress *ssnmPartitionProgress, chunk ssnmChunk, received int64) (uint64, bool) {
 	preload := subscriber.plan.preloadMessages()
 	estimate := preload
-	if due := ssnmDue(subscriber.rate, received-subscriber.anchor); due > 0 {
-		estimate = preload + due - 1
+	if due := ssnmDue(subscriber.rate, received-subscriber.anchor); due > uint64(progress.association) {
+		estimate = preload + (due-1-uint64(progress.association))/uint64(subscriber.plan.associations)
 	}
 	period := subscriber.plan.period()
 	for step := uint64(0); step < period; step++ {
@@ -270,9 +281,9 @@ func (subscriber *ssnmSubscriber) captureSnapshot(snapshot m3ua.SSNMSnapshot) (p
 		}
 		partitions++
 		destinations += len(knowledge.Destinations)
-		states, invalid := ssnmKnowledgeStates(knowledge, subscriber.plan.records)
+		states, invalid := ssnmKnowledgeStates(knowledge, subscriber.plan, progress.association)
 		subscriber.counts.SnapshotMismatches += invalid
-		subscriber.snapshot[progress.slot] = states
+		subscriber.snapshot[progress.association] = states
 	}
 	for _, progress := range subscriber.partitions {
 		progress.relock = true
@@ -281,14 +292,15 @@ func (subscriber *ssnmSubscriber) captureSnapshot(snapshot m3ua.SSNMSnapshot) (p
 }
 
 // ssnmKnowledgeStates maps one partition's retained knowledge onto the
-// plan's destinations and counts entries no plan position can produce: a
-// masked range, a destination outside the plan, or no availability.
-func ssnmKnowledgeStates(knowledge m3ua.SSNMPartitionKnowledge, records int) ([]uint8, uint64) {
-	states := make([]uint8, records)
+// association's plan destinations and counts entries no plan position of that
+// partition can produce: a masked range, a destination outside the
+// association's range, or no availability.
+func ssnmKnowledgeStates(knowledge m3ua.SSNMPartitionKnowledge, plan ssnmPlan, association int) ([]uint8, uint64) {
+	states := make([]uint8, plan.records)
 	var invalid uint64
 	for _, destination := range knowledge.Destinations {
-		offset := int64(destination.Destination.PointCode) - int64(ssnmPointCodeBase)
-		if destination.Destination.Mask != 0 || offset < 0 || offset >= int64(len(states)) || !destination.AvailabilitySet {
+		owner, offset, found := plan.locate(destination.Destination.PointCode)
+		if destination.Destination.Mask != 0 || !found || owner != association || !destination.AvailabilitySet {
 			invalid++
 			continue
 		}
@@ -326,41 +338,54 @@ func (plan ssnmPlan) stateMismatches(states []uint8, positions uint64) uint64 {
 
 // validateSnapshotLocked checks that the retained snapshot equals the plan's
 // state after exactly the positions before the first post-Resync report.
-func (subscriber *ssnmSubscriber) validateSnapshotLocked(slot int, position uint64) {
-	states, held := subscriber.snapshot[slot]
+func (subscriber *ssnmSubscriber) validateSnapshotLocked(association int, position uint64) {
+	states, held := subscriber.snapshot[association]
 	if !held {
 		subscriber.counts.SnapshotMismatches++
 		return
 	}
-	delete(subscriber.snapshot, slot)
+	delete(subscriber.snapshot, association)
 	subscriber.counts.SnapshotMismatches += subscriber.plan.stateMismatches(states, position)
 	if subscriber.pause != nil {
 		subscriber.pause.SnapshotValidated++
 	}
 }
 
-// positions reports the next expected position of every partition seen.
+// positions reports the next expected position of every association's
+// partition, zero for an association no partition has carried yet.
 func (subscriber *ssnmSubscriber) positions() []uint64 {
 	subscriber.mutex.Lock()
 	defer subscriber.mutex.Unlock()
-	positions := make([]uint64, subscriber.slots)
-	for _, progress := range subscriber.partitions {
-		positions[progress.slot] = progress.next
+	positions := make([]uint64, len(subscriber.byAssociation))
+	for association, progress := range subscriber.byAssociation {
+		if progress != nil {
+			positions[association] = progress.next
+		}
 	}
 	return positions
 }
 
-func (subscriber *ssnmSubscriber) reachedAll(positions uint64, partitions int) bool {
+// reachedAll reports whether every association's partition has reached its
+// expected next position.
+func (subscriber *ssnmSubscriber) reachedAll(expected []uint64) bool {
 	reached := subscriber.positions()
-	if len(reached) < partitions {
+	if len(reached) != len(expected) {
 		return false
 	}
-	for _, next := range reached {
-		if next < positions {
+	for association, next := range reached {
+		if next < expected[association] {
 			return false
 		}
 	}
 	return true
+}
+
+// reached reports whether one association's partition has reached position.
+func (subscriber *ssnmSubscriber) reached(association int, position uint64) bool {
+	subscriber.mutex.Lock()
+	defer subscriber.mutex.Unlock()
+	progress := subscriber.byAssociation[association]
+	return progress != nil && progress.next >= position
 }
 
 func (subscriber *ssnmSubscriber) setFailure(err error) {
@@ -560,15 +585,18 @@ func waitSharedUntil(ctx context.Context, clock measurementClock, target int64) 
 }
 
 // ssnmSubscriberRecord is one subscriber's accounting in the sender record.
+// FinalPositions and ExpectedFinalPositions are indexed by association: each
+// partition ends at the preload plus the generator messages its association
+// was sent.
 type ssnmSubscriberRecord struct {
 	Index int    `json:"index"`
 	Role  string `json:"role"`
 	ssnmSubscriberCounts
-	Partitions            int      `json:"partitions"`
-	FinalPositions        []uint64 `json:"final_positions"`
-	ExpectedFinalPosition uint64   `json:"expected_final_position"`
-	MissingReceipts       uint64   `json:"missing_receipts"`
-	Error                 string   `json:"error,omitempty"`
+	Partitions             int      `json:"partitions"`
+	FinalPositions         []uint64 `json:"final_positions"`
+	ExpectedFinalPositions []uint64 `json:"expected_final_positions"`
+	MissingReceipts        uint64   `json:"missing_receipts"`
+	Error                  string   `json:"error,omitempty"`
 }
 
 // joinDelays records report-to-receipt delays for the measurement messages
@@ -577,25 +605,26 @@ type ssnmSubscriberRecord struct {
 func (subscriber *ssnmSubscriber) joinDelays(histogram *durationHistogram, log ssnmReportsResponse, failed map[uint64]bool) (missing uint64) {
 	subscriber.mutex.Lock()
 	defer subscriber.mutex.Unlock()
-	for slot := 0; slot < subscriber.slots && slot < len(subscriber.receipts); slot++ {
-		for message := subscriber.receiptFirst; message < subscriber.receiptLast; message++ {
-			index := message - log.From
-			if message < log.From || index >= uint64(len(log.Reports)) || failed[message] {
-				continue
-			}
-			receipt := subscriber.receipts[slot][message-subscriber.receiptFirst]
-			if receipt == 0 {
-				missing++
-				continue
-			}
-			received := subscriber.anchor + int64(receipt-1)*int64(time.Microsecond)
-			histogram.record(time.Duration(received - log.Reports[index]))
+	if subscriber.receipts == nil {
+		return 0
+	}
+	for message := subscriber.receiptFirst; message < subscriber.receiptLast; message++ {
+		index := message - log.From
+		if message < log.From || index >= uint64(len(log.Reports)) || failed[message] {
+			continue
 		}
+		receipt := subscriber.receipts[message-subscriber.receiptFirst]
+		if receipt == 0 {
+			missing++
+			continue
+		}
+		received := subscriber.anchor + int64(receipt-1)*int64(time.Microsecond)
+		histogram.record(time.Duration(received - log.Reports[index]))
 	}
 	return missing
 }
 
-func (subscriber *ssnmSubscriber) record(expected uint64) ssnmSubscriberRecord {
+func (subscriber *ssnmSubscriber) record(expected []uint64) ssnmSubscriberRecord {
 	positions := subscriber.positions()
 	subscriber.mutex.Lock()
 	defer subscriber.mutex.Unlock()
@@ -604,12 +633,12 @@ func (subscriber *ssnmSubscriber) record(expected uint64) ssnmSubscriberRecord {
 		role = "paused"
 	}
 	return ssnmSubscriberRecord{
-		Index:                 subscriber.index,
-		Role:                  role,
-		ssnmSubscriberCounts:  subscriber.counts,
-		Partitions:            subscriber.slots,
-		FinalPositions:        positions,
-		ExpectedFinalPosition: expected,
-		Error:                 subscriber.failure,
+		Index:                  subscriber.index,
+		Role:                   role,
+		ssnmSubscriberCounts:   subscriber.counts,
+		Partitions:             len(subscriber.partitions),
+		FinalPositions:         positions,
+		ExpectedFinalPositions: append([]uint64(nil), expected...),
+		Error:                  subscriber.failure,
 	}
 }
