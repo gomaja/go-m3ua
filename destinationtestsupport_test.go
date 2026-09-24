@@ -133,15 +133,15 @@ func retainedAvailabilityForNetworkAndRoutingContext(
 
 // seedDestinationRange records a destination range directly in an Association's
 // retained state, which is what the removed local setters did.
-func seedDestinationRange(c *Association, rangeValue DestinationRange) {
-	c.destinations.setRanges([]DestinationRange{rangeValue})
+func seedDestinationRange(c *Association, rangeValue destinationRange) {
+	c.destinations.setRanges([]destinationRange{rangeValue})
 }
 
 // seedDestinationAvailability seeds one point code's availability in the scope
 // the removed per-Association setters resolved.
 func seedDestinationAvailability(c *Association, pointCode uint32, availability DestinationAvailability) {
 	scope := associationDestinationScope(c, nil)
-	seedDestinationRange(c, DestinationRange{
+	seedDestinationRange(c, destinationRange{
 		NetworkAppearance:    scope.networkAppearance,
 		NetworkAppearanceSet: scope.networkAppearanceSet,
 		RoutingContext:       scope.routingContext,

@@ -2,6 +2,7 @@ package m3ua
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -53,6 +54,7 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 		t.Fatalf("Dial ASP: %v", err)
 	}
 	t.Cleanup(func() { _ = aspAssociation.Close() })
+	observeSSNM(t, aspAssociation)
 	var sgpAssociation *Association
 	select {
 	case result := <-accepted:
@@ -81,9 +83,9 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 	status := receiveDestinationStatus(t, ctx, aspAssociation)
 	// The SCON carries congestion alone; the availability RFC 4666
 	// Section 4.5.2.2 keeps separate from it is still the Available default.
-	if status.State.Availability != DestinationAvailable ||
-		!status.State.Congestion.Congested || status.State.Congestion.Level != 2 ||
-		status.PointCode != destination.PointCode || status.Mask != destination.Mask {
+	if retainedAvailability(aspAssociation, destination.PointCode) != DestinationAvailable ||
+		!reportedSSNMCongestion(t, status).Congested || reportedSSNMCongestion(t, status).Level != 2 ||
+		status.Destinations[0].PointCode != destination.PointCode || status.Destinations[0].Mask != destination.Mask {
 		t.Fatalf("ASP SCON status = %+v", status)
 	}
 
@@ -92,13 +94,30 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ASP DAUD: %v", err)
 	}
-	congested := receiveDestinationStatus(t, ctx, aspAssociation)
-	available := receiveDestinationStatus(t, ctx, aspAssociation)
-	if !congested.State.Congestion.Congested || congested.State.Congestion.Level != 2 {
-		t.Fatalf("DAUD SCON status = %+v", congested)
-	}
-	if available.State.Availability != DestinationAvailable {
-		t.Fatalf("DAUD DAVA status = %+v", available)
+	seen := make(map[SSNMReportKind]bool)
+	for range 3 {
+		report := receiveDestinationStatus(t, ctx, aspAssociation)
+		if seen[report.Kind] || !reflect.DeepEqual(report.Scope, scope) ||
+			len(report.Destinations) != 1 || report.Destinations[0] != destination {
+			t.Fatalf("duplicate or incorrectly scoped audit exchange report: %+v", report)
+		}
+		switch report.Kind {
+		case SSNMDestinationStateAuditReport:
+			if report.Source != SSNMLocalReport {
+				t.Fatalf("audit was not locally originated: %+v", report)
+			}
+		case SSNMSignallingCongestionReport:
+			if report.Source != SSNMPeerReport || !reportedSSNMCongestion(t, report).Congested || reportedSSNMCongestion(t, report).Level != 2 {
+				t.Fatalf("DAUD SCON status = %+v", report)
+			}
+		case SSNMDestinationAvailableReport:
+			if report.Source != SSNMPeerReport || !seen[SSNMSignallingCongestionReport] || reportedSSNMAvailability(t, report) != DestinationAvailable {
+				t.Fatalf("DAUD DAVA status or reply order = %+v", report)
+			}
+		default:
+			t.Fatalf("unexpected audit exchange report: %+v", report)
+		}
+		seen[report.Kind] = true
 	}
 
 	if err := sgpEndpoint.DestinationUserPartUnavailable(DestinationUserPartUnavailableRequest{
@@ -110,7 +129,7 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 		t.Fatalf("SGP DUPU: %v", err)
 	}
 	dupu := receiveDestinationStatus(t, ctx, aspAssociation)
-	if !dupu.UserPartUnavailable || dupu.PointCode != 0x654321 ||
+	if dupu.Kind != SSNMDestinationUserPartUnavailableReport || dupu.Destinations[0].PointCode != 0x654321 ||
 		dupu.UserCause != params.NewUserCause(params.SCCP, params.Inaccessible).UserCause() {
 		t.Fatalf("ASP DUPU status = %+v", dupu)
 	}
@@ -120,16 +139,7 @@ func receiveDestinationStatus(
 	t *testing.T,
 	ctx context.Context,
 	association *Association,
-) *DestinationStatus {
+) SSNMReport {
 	t.Helper()
-	select {
-	case status := <-association.SignallingStatus():
-		if status == nil {
-			t.Fatal("SignallingStatus closed")
-		}
-		return status
-	case <-ctx.Done():
-		t.Fatalf("SignallingStatus: %v", ctx.Err())
-		return nil
-	}
+	return receiveSSNMReport(t, ctx, association)
 }

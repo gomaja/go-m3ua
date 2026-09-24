@@ -60,10 +60,7 @@ func newTestConn(t *testing.T, state State, role Role) (*Association, *[]message
 		// panic on the first destination update.
 		destinations: newDestinations(),
 		tack:         newTAckRetransmitter(),
-		statusChan:   make(chan *DestinationStatus, 64),
-		// Like statusChan: a handler may report a transition on it, and
-		// closeStateChanges closes it on teardown, so a nil here would drop
-		// every event silently and then panic closing a nil channel.
+
 		stateEventChan: make(chan State, 16),
 		mgmtChan:       make(chan *ManagementIndication, 64),
 		// Mirroring newAssociation: a dynamically registered Routing Key is

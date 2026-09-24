@@ -42,20 +42,15 @@ func TestSCONFromAnASPDoesNotRewriteTheSGsRoutingState(t *testing.T) {
 
 	// It is still reported as what it is: the peer's own congestion level,
 	// marked as describing the peer rather than the destination.
-	select {
-	case status := <-sgp.SignallingStatus():
-		if !status.PeerReported {
-			t.Error("an ASP's SCON was reported as SS7 destination state rather " +
-				"than as a report about the peer")
-		}
-		if !status.State.Congestion.Congested || status.State.Congestion.Level != 2 ||
-			!status.State.Congestion.LevelSet {
-			t.Errorf("reported peer congestion = %+v, want level 2 — the ASP's "+
-				"report should be kept, just not as SS7 state", status.State.Congestion)
-		}
-	default:
-		t.Error("an ASP's SCON was discarded instead of being reported as the " +
-			"peer's own congestion level")
+	status := nextSSNMReport(t, sgp)
+	if !status.PeerReported {
+		t.Error("an ASP's SCON was reported as SS7 destination state rather " +
+			"than as a report about the peer")
+	}
+	if !reportedSSNMCongestion(t, status).Congested || reportedSSNMCongestion(t, status).Level != 2 ||
+		!reportedSSNMCongestion(t, status).LevelSet {
+		t.Errorf("reported peer congestion = %+v, want level 2 — the ASP's "+
+			"report should be kept, just not as SS7 state", reportedSSNMCongestion(t, status))
 	}
 }
 
@@ -89,7 +84,7 @@ func TestSCONFromAnSGPDoesUpdateTheDestination(t *testing.T) {
 // keeps separate from availability.
 func seedRetainedCongestion(c *Association, pointCode uint32, level uint8) {
 	scope := associationDestinationScope(c, nil)
-	_ = c.destinations.setCongestionRangesWithinBudget([]DestinationRange{{
+	_ = c.destinations.setCongestionRangesWithinBudget([]destinationRange{{
 		NetworkAppearance:    scope.networkAppearance,
 		NetworkAppearanceSet: scope.networkAppearanceSet,
 		RoutingContext:       scope.routingContext,

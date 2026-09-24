@@ -286,8 +286,27 @@ Gateway that reported it rather than to one association.
 | `SetDestinationState`, `SetDestinationStateForNetwork`, `SetDestinationStateForNetworkAndRoutingContext`, `SetDestinationRange` and its two scoped forms | `Endpoint.ReportDestinationAvailability(DestinationAvailabilityRequest)` |
 | `ReportDestinationState`, `ReportDestinationRange` and their scoped forms | `Endpoint.ReportDestinationAvailability`, `Endpoint.SignallingCongestion`, `Endpoint.DestinationUserPartUnavailable` |
 | `DestinationState`, `DestinationStates`, `DestinationRanges` and their scoped forms | `Endpoint.DestinationStatus`, `Endpoint.DestinationStatuses` at an SGP; `Endpoint.SSNMKnowledge` and `Endpoint.SubscribeSSNM` at an ASP |
-| `Conn.PeerCongestionLevel` | `Association.SignallingStatus`, and `SSNMReport.PeerReported` in the SSNM stream |
+| `Conn.PeerCongestionLevel` | `Endpoint.SubscribeSSNM`; peer SCON reports carry `SSNMReport.PeerReported` |
+| `Association.SignallingStatus`, `Conn.SignallingStatus` | `Endpoint.SubscribeSSNM`; identify the association through `SSNMReport.Association` |
 | `Association.BeginMTP3Restart`, `Listener.BeginMTP3Restart` | `Endpoint.BeginMTP3Restart` |
+
+The association-level status channel and the public `DestinationStatus` and
+`DestinationRange` types are removed, without compatibility wrappers. Subscribe
+before receiving reports; `SubscribeSSNM` atomically returns retained knowledge
+and a subscription for subsequent changes. Each report identifies its association
+and wire scope. Use `Endpoint.SSNMKnowledge` for retained peer knowledge and
+`Endpoint.DestinationStatus` or `DestinationStatuses` for local SGP authority,
+not an association-level cache as an application routing contract.
+
+A report describes the message received, not a combined availability/congestion
+snapshot. Read the report kind before interpreting its fields. DUPU and peer
+SCON are event-only: a snapshot does not reconstruct lost user-part or peer
+congestion indications. Handle `SSNMContinuityLostEvent` with
+`SSNMSubscription.Resync` and account for event-only information that remains
+unknown. Closing one
+association does not close an Endpoint subscription; observe binding/partition
+lifecycle events. Close the subscription when its consumer stops, or close the
+owning Endpoint to terminate all its subscriptions.
 
 The `DestinationState` type is removed and split in two, because RFC 4666
 Section 4.5.2.2 keeps availability and congestion as two separate statuses of
@@ -665,8 +684,9 @@ Every incompatible declaration and public field across the module.
 | `Conn.SelectRoutingContext` | Removed. `DataRequest.AS` names the scope per message. |
 | `Conn.ActivateRoutingContexts`, `DeactivateRoutingContexts` | Same operations on `Association`; the scoped `ASPActive` and `ASPInactive` procedures are also available. |
 | `Conn.AssociationStatus`, `Close`, `Done`, `Err`, `LocalAddr`, `RemoteAddr`, `Shutdown`, `ShutdownContext`, `State`, `StateChanges` | Same operations on `Association`. Endpoint-wide status is additionally available from `Endpoint`. |
-| `Conn.ManagementIndications`, `SignallingStatus`, `MaxMessageStreamID`, `PeerASPIdentifier`, `StreamID` | Same operations on `Association`. |
-| `Conn.PeerCongestionLevel` | Removed. `Association.SignallingStatus` carries the peer's report with `PeerReported` set. |
+| `Conn.ManagementIndications`, `MaxMessageStreamID`, `PeerASPIdentifier`, `StreamID` | Same operations on `Association`. |
+| `Conn.SignallingStatus`, `Association.SignallingStatus` | Removed. Use `Endpoint.SubscribeSSNM` and report association identity. |
+| `Conn.PeerCongestionLevel` | Removed. `Endpoint.SubscribeSSNM` delivers the peer's report with `SSNMReport.PeerReported` set. |
 | `Conn.SetDeadline`, `SetReadDeadline`, `SetWriteDeadline` | Same operations on `Association`, now applying to `ReadData` and `WriteData`. |
 | `Conn.DestinationRanges*`, `DestinationState*`, `DestinationStates*` | Removed. Use `Endpoint.DestinationStatuses` at an SGP, or `Endpoint.SSNMKnowledge` and `SubscribeSSNM` at an ASP. |
 | `Conn.SetDestinationRange*`, `SetDestinationState*` | Replaced by `Endpoint.ReportDestinationAvailability`. |
@@ -694,7 +714,8 @@ Every incompatible declaration and public field across the module.
 | `DataMessage.NetworkAppearance`, `NetworkAppearanceSet`, `RoutingContext`, `RoutingContextSet` | Replaced by `DataMessage.Scope` and `DataMessage.AS`. |
 | `ManagementIndication.AspIdentifier`, `AspIdentifierSet` | Replaced by `ASPIdentifier` and `ASPIdentifierSet`. |
 | `ManagementIndication.RoutingContext`, `RoutingContextSet`, `AffectedPointCodes` | Replaced by `ASKeys` and `AffectedDestinations`, which keep the whole scope. |
-| `DestinationRange.CongestionLevel`, `DestinationStatus.CongestionLevel`, `DestinationStatusSnapshot.CongestionLevel`, `CongestionLevelSet` | Replaced by `DestinationNetworkState`, which carries both dimensions. |
+| `DestinationRange`, `DestinationStatus` | Removed. Use `AffectedDestination` and the Endpoint publication APIs for local authority; `SSNMReport`, `SSNMDestinationKnowledge` and subscriptions for peer information. |
+| `DestinationStatusSnapshot.CongestionLevel`, `CongestionLevelSet` | Replaced by `DestinationNetworkState`, which carries both dimensions. |
 | `ErrAspIDRequired`, `ErrConnClosed`, `ErrInvalidAspIdentifier`, `ErrUnsupportedMode` | Replaced by `ErrASPIdentifierRequired`, `ErrAssociationClosed`, `ErrInvalidASPIdentifier` and `ErrUnsupportedRole`. |
 | `ErrAmbiguousRoutingContext` | Removed. The keyed API refuses ambiguity at the call that would have caused it. |
 | `StateAspDown`, `StateAspInactive`, `StateAspActive` | Replaced by `StateASPDown`, `StateASPInactive` and `StateASPActive`. |

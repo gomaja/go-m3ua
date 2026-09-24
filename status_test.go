@@ -1,228 +1,115 @@
-// Copyright 2018-2024 go-m3ua authors. All rights reserved.
-// Use of this source code is governed by a MIT-style license that can be
-// found in the LICENSE file.
-
 package m3ua
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gomaja/go-m3ua/messages"
+	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// SignallingStatus hands the caller a channel and its documentation invites an
-// MTP3-User to read it, so the idiomatic use is:
-//
-//	go func() {
-//		for st := range conn.SignallingStatus() { ... }
-//	}()
-//
-// That loop never terminated. The channel was created per Association and never
-// closed, so every association left one goroutine parked on a channel with no
-// remaining sender — for the life of the process. On an SGP whose ASPs come and
-// go, that is an unbounded leak of goroutines and of the Associations they keep
-// reachable.
-func TestSignallingStatusChannelClosesWithTheAssociation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	peer := newRawPeer(t, 3100, handshakeOnly)
-	conn := dialRawPeer(t, ctx, peer, 3100, &HeartbeatInfo{Enabled: false})
-
-	ranged := make(chan struct{})
-	go func() {
-		//nolint:revive // draining is the point
-		for range conn.SignallingStatus() {
+func TestAssociationCloseRetiresTypedSSNMAndPausesCachedDestinations(testContext *testing.T) {
+	endpoint := newSSNMStateEndpoint(testContext, ssnmPeerInventoryConfig(), nil)
+	association := attachSSNMAssociation(testContext, endpoint, SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}, 7, 1)
+	subscription := observeSSNM(testContext, association)
+	for _, pointCode := range []uint32{0x111111, 0x222222} {
+		if err := association.handleDestinationAvailable(messages.NewDestinationAvailable(params.NewNetworkAppearance(7), params.NewRoutingContext(1), apc(pointCode), nil)); err != nil {
+			testContext.Fatal(err)
 		}
-		close(ranged)
-	}()
-
-	// Let the reader park on the channel before the Association goes away.
-	time.Sleep(100 * time.Millisecond)
-	if err := conn.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+		report := nextSSNMReport(testContext, association)
+		if report.Kind != SSNMDestinationAvailableReport || report.Destinations[0].PointCode != pointCode {
+			testContext.Fatalf("report = %+v", report)
+		}
 	}
-
-	select {
-	case <-ranged:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a range over SignallingStatus() never terminated after Close: one goroutine leaks per association")
+	if err := association.Close(); err != nil {
+		testContext.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	event, err := subscription.Next(ctx)
+	if err != nil || event.Kind != SSNMPartitionRetiredEvent {
+		testContext.Fatalf("close event = %+v, %v", event, err)
+	}
+	if snapshot := endpoint.SSNMKnowledge(); len(snapshot.Partitions) != 0 {
+		testContext.Fatalf("last-binding knowledge survived close: %+v", snapshot)
+	}
+	for _, pointCode := range []uint32{0x111111, 0x222222} {
+		if state := retainedAvailabilityForNetworkAndRoutingContext(association, 7, 1, pointCode); state != DestinationUnavailable {
+			testContext.Fatalf("cached availability = %v", state)
+		}
+	}
+	if err := association.Close(); err != nil {
+		testContext.Fatal(err)
 	}
 }
 
-// Closing the channel introduces a race the previous code did not have: a send
-// on a closed channel panics, and SSNM arriving as the association is torn down
-// is exactly when that happens. Run under -race.
-func TestNotifyStatusRacingCloseDoesNotPanic(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+func TestTypedSSNMReaderTerminatesWithEndpoint(testContext *testing.T) {
+	endpoint := newSSNMStateEndpoint(testContext, nil, nil)
+	_, subscription, err := endpoint.SubscribeSSNM()
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	finished := make(chan error, 1)
+	go func() { _, nextErr := subscription.Next(ctx); finished <- nextErr }()
+	if err := endpoint.Close(); err != nil {
+		testContext.Fatal(err)
+	}
+	if err := <-finished; !errors.Is(err, ErrEndpointClosed) {
+		testContext.Fatalf("Next after Endpoint close = %v", err)
+	}
+}
 
-	peer := newRawPeer(t, 3102, handshakeOnly)
-	conn := dialRawPeer(t, ctx, peer, 3102, &HeartbeatInfo{Enabled: false})
-
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
+func TestSSNMReportsRacingAssociationClose(testContext *testing.T) {
+	association, _ := newSSNMTestConn(testContext, StateASPActive, RoleASP)
+	var writers sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		writers.Add(1)
 		go func() {
-			defer wg.Done()
-			for j := 0; j < 500; j++ {
-				conn.notifyStatus(&DestinationStatus{PointCode: uint32(j)})
+			defer writers.Done()
+			for iteration := 0; iteration < 100; iteration++ {
+				_ = association.handleDestinationUnavailable(messages.NewDestinationUnavailable(nil, nil, apc(uint32(iteration)), nil))
 			}
 		}()
 	}
-
-	time.Sleep(20 * time.Millisecond)
-	if err := conn.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if err := association.Close(); err != nil {
+		testContext.Fatal(err)
 	}
-	wg.Wait()
-
-	// And a second Close must still be safe.
-	if err := conn.Close(); err != nil {
-		t.Errorf("second Close: %v", err)
-	}
+	writers.Wait()
 }
 
-// A caller that never reads the channel must be unaffected: the send stays
-// non-blocking and lossy, and Close must not hang waiting for a reader.
-func TestUnreadSignallingStatusDoesNotBlockClose(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	peer := newRawPeer(t, 3104, handshakeOnly)
-	conn := dialRawPeer(t, ctx, peer, 3104, &HeartbeatInfo{Enabled: false})
-
-	// Overfill the buffer with nobody reading.
-	for i := 0; i < 1000; i++ {
-		conn.notifyStatus(&DestinationStatus{PointCode: uint32(i)})
+func TestUnreadTypedSSNMDoesNotBlockClose(testContext *testing.T) {
+	association, _ := newSSNMTestConn(testContext, StateASPActive, RoleASP)
+	for pointCode := uint32(0); pointCode < 300; pointCode++ {
+		if err := association.handleDestinationUnavailable(messages.NewDestinationUnavailable(nil, nil, apc(pointCode), nil)); err != nil {
+			testContext.Fatal(err)
+		}
 	}
-
-	done := make(chan error, 1)
-	go func() { done <- conn.Close() }()
+	finished := make(chan error, 1)
+	go func() { finished <- association.Close() }()
 	select {
-	case err := <-done:
+	case err := <-finished:
 		if err != nil {
-			t.Fatalf("Close: %v", err)
+			testContext.Fatal(err)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Close blocked on an unread status channel")
+	case <-time.After(time.Second):
+		testContext.Fatal("association close blocked on unread typed subscription")
 	}
 }
 
-// Statuses already queued must still be readable after Close — closing a
-// channel does not discard what is buffered — so a caller draining after
-// teardown sees what the peer reported before it went away.
-func TestQueuedStatusesSurviveClose(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	peer := newRawPeer(t, 3106, handshakeOnly)
-	conn := dialRawPeer(t, ctx, peer, 3106, &HeartbeatInfo{Enabled: false})
-
-	const queued = 5
-	for i := 0; i < queued; i++ {
-		conn.notifyStatus(&DestinationStatus{PointCode: uint32(i)})
+func TestClosingAnAssociationDoesNotInventDestinations(testContext *testing.T) {
+	association, _ := newSSNMTestConn(testContext, StateASPActive, RoleASP)
+	if err := association.Close(); err != nil {
+		testContext.Fatal(err)
 	}
-	if err := conn.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if ranges := retainedRanges(association); len(ranges) != 0 {
+		testContext.Fatalf("invented cached destinations: %+v", ranges)
 	}
-
-	counted := make(chan int, 1)
-	go func() {
-		n := 0
-		for range conn.SignallingStatus() {
-			n++
-		}
-		counted <- n
-	}()
-
-	select {
-	case got := <-counted:
-		if got != queued {
-			t.Errorf("drained %d queued statuses after Close, want %d", got, queued)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("draining SignallingStatus() after Close never terminated")
-	}
-}
-
-// RFC 4666 Section 4.3.3, on the association going away underneath an ASP:
-//
-//	"If the M3UA layer subsequently receives an SCTP-COMMUNICATION_DOWN or
-//	SCTP-RESTART indication primitive from the underlying SCTP layer [...] The
-//	state of the ASP will be moved to ASP-DOWN. At an ASP, the MTP3-User will
-//	be informed of the unavailability of any affected SS7 destinations through
-//	the use of MTP-PAUSE indication primitives."
-//
-// Nothing was reported: the status channel was closed in silence and the
-// retained destination state went on answering with whatever the peer had said,
-// so an MTP3-User that had been told a destination was available kept being
-// told so long after the only route to it had gone.
-func TestClosingAnAssociationReportsItsDestinationsUnavailable(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	peer := newRawPeer(t, 3140, handshakeOnly)
-	conn := dialRawPeer(t, ctx, peer, 3140, &HeartbeatInfo{Enabled: false})
-
-	// The peer has told us about three destinations.
-	seedDestinationAvailability(conn, 0x111111, DestinationAvailable)
-	seedDestinationAvailability(conn, 0x222222, DestinationRestricted)
-	seedDestinationAvailability(conn, 0x333333, DestinationUnavailable)
-
-	paused := make(chan map[uint32]DestinationAvailability, 1)
-	go func() {
-		got := map[uint32]DestinationAvailability{}
-		for st := range conn.SignallingStatus() {
-			got[st.PointCode] = st.State.Availability
-		}
-		paused <- got
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	if err := conn.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	select {
-	case got := <-paused:
-		for _, pc := range []uint32{0x111111, 0x222222} {
-			if got[pc] != DestinationUnavailable {
-				t.Errorf("point code %#x reported as %v on teardown, want %v",
-					pc, got[pc], DestinationUnavailable)
-			}
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the status channel never closed")
-	}
-
-	// And the authoritative view must agree: a destination reachable only over
-	// this association is not reachable once it is gone.
-	for _, pc := range []uint32{0x111111, 0x222222, 0x333333} {
-		if got := retainedAvailability(conn, pc); got != DestinationUnavailable {
-			t.Errorf("retained availability for %#x = %v after Close, want %v", pc, got, DestinationUnavailable)
-		}
-	}
-}
-
-// A destination the peer never mentioned is not invented on teardown.
-func TestClosingAnAssociationDoesNotInventDestinations(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	peer := newRawPeer(t, 3142, handshakeOnly)
-	conn := dialRawPeer(t, ctx, peer, 3142, &HeartbeatInfo{Enabled: false})
-
-	if err := conn.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	count := 0
-	for range conn.SignallingStatus() {
-		count++
-	}
-	if count != 0 {
-		t.Errorf("reported %d destinations on teardown having heard about none", count)
+	if snapshot := association.endpoint.SSNMKnowledge(); len(snapshot.Partitions) != 0 {
+		testContext.Fatalf("invented typed destination knowledge: %+v", snapshot)
 	}
 }
