@@ -266,6 +266,11 @@ func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
 	return perfstats.ProbeNotDemonstrated
 }
 
+// lateAfterDeadlineReason names a failed direction whose receiver committed
+// deliveries after the drain deadline: work that arrived late rather than
+// work the receiver discarded or never got.
+const lateAfterDeadlineReason = "deliveries-committed-after-drain-deadline"
+
 func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	forward := perfstats.DecideRun(fixture.forward)
 	result := probeDecision{
@@ -290,6 +295,10 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 				if fixture.cohortError {
 					result.Decision = string(perfstats.Fail)
 					result.Reason = "unidirectional-cohort-error"
+				}
+				if fixture.forwardLate && result.Decision == string(perfstats.Fail) {
+					result.Reason = lateAfterDeadlineReason
+					result.Directions[0].Reason = lateAfterDeadlineReason
 				}
 			}
 			applySSNMDecision(&result, fixture.ssnmVerdict, forward.Stall != nil && forward.Stall.Stalled())
@@ -316,6 +325,14 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	if fixture.reverseAchieved != nil {
 		reverseDirection.AchievedRateLower = &fixture.reverseAchieved.lower
 		reverseDirection.AchievedRateUpper = &fixture.reverseAchieved.upper
+	}
+	for _, direction := range []struct {
+		decision *directionDecision
+		late     bool
+	}{{&forwardDirection, fixture.forwardLate}, {&reverseDirection, fixture.reverseLate}} {
+		if direction.late && direction.decision.Decision == string(perfstats.Fail) {
+			direction.decision.Reason = lateAfterDeadlineReason
+		}
 	}
 	result.Directions = []directionDecision{forwardDirection, reverseDirection}
 	switch {
@@ -475,7 +492,17 @@ type drainTimeoutEvidence struct {
 	Submitted   *uint64        `json:"submitted"`
 	Accounted   *uint64        `json:"accounted"`
 	Undelivered *uint64        `json:"undelivered"`
+	// ObservedBeforeDeadline is how long before the deadline the last
+	// receiver result was read, zero if the read completed at or after it.
+	ObservedBeforeDeadline *time.Duration `json:"observed_before_deadline_ns"`
 }
+
+// drainObservationBound is how recent perftraffic's last receiver result must
+// be when the drain deadline passes for the wait to report undelivered work:
+// ten of its 10 ms poll intervals. An older result means the receiver control
+// stopped answering, which perftraffic reports as a fatal error; a
+// drain_timeout claiming one is contradictory.
+const drainObservationBound = 100 * time.Millisecond
 
 // undeliveredAtDrainDeadline reports whether the record carries a drain
 // deadline outcome with work outstanding. The outcome's consistency is checked
@@ -494,8 +521,12 @@ func validateDrainTimeout(record *fixtureEvidence) error {
 	if timeout == nil {
 		return nil
 	}
-	if timeout.Cause == nil || timeout.Drain == nil || timeout.Submitted == nil || timeout.Accounted == nil || timeout.Undelivered == nil {
-		return errors.New("drain_timeout cause, drain_ns, submitted, accounted and undelivered are required")
+	if timeout.Cause == nil || timeout.Drain == nil || timeout.Submitted == nil || timeout.Accounted == nil || timeout.Undelivered == nil ||
+		timeout.ObservedBeforeDeadline == nil {
+		return errors.New("drain_timeout cause, drain_ns, submitted, accounted, undelivered and observed_before_deadline_ns are required")
+	}
+	if *timeout.ObservedBeforeDeadline < 0 || *timeout.ObservedBeforeDeadline > drainObservationBound {
+		return fmt.Errorf("drain_timeout observed_before_deadline_ns must be between 0 and %s: an older last result is a receiver control that stopped answering", drainObservationBound)
 	}
 	if *timeout.Cause != drainTimeoutCause {
 		return errors.New("drain_timeout cause must match the producer contract")
@@ -528,6 +559,19 @@ type deliveryEvidence struct {
 	Invalid           *uint64 `json:"invalid"`
 	Reordered         *uint64 `json:"reordered"`
 	LateAfterStop     *uint64 `json:"late_after_stop"`
+	// LateAfterDeadline counts deliveries a shared-clock receiver committed
+	// after the drain deadline, a subset of Invalid. Records from before the
+	// counter existed omit it.
+	LateAfterDeadline *uint64 `json:"late_after_deadline"`
+}
+
+// lateAfterDeadline is the count of deliveries committed after the drain
+// deadline, zero when the record does not carry the counter.
+func (delivery *deliveryEvidence) lateAfterDeadline() uint64 {
+	if delivery == nil || delivery.LateAfterDeadline == nil {
+		return 0
+	}
+	return *delivery.LateAfterDeadline
 }
 
 type senderWindowEvidence struct {
@@ -697,6 +741,10 @@ type fixtureRun struct {
 	reverseAchieved      *achievedRateBounds
 	aggregateAchieved    *achievedRateBounds
 	cohortError          bool
+	// forwardLate and reverseLate mark a direction whose receiver committed
+	// deliveries after the drain deadline.
+	forwardLate bool
+	reverseLate bool
 	// warmup marks a probe whose warm-up failed with demonstrated loss or a
 	// stall, so it never reached measurement. It can never pass.
 	warmup      bool
@@ -830,11 +878,57 @@ func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, erro
 			return fixtureRun{}, errors.New("cohort sender mode must be throughput, bidirectional, routed or routed-direct")
 		}
 	}
+	var fault struct {
+		FatalError string `json:"fatal_error"`
+	}
+	if err := json.Unmarshal(raw, &fault); err != nil {
+		return fixtureRun{}, fmt.Errorf("decode run evidence: %w", err)
+	}
+	if fault.FatalError != "" {
+		return fixtureRun{}, fmt.Errorf("%w: sender record: %s", errFixtureFault, fault.FatalError)
+	}
 	evidence, identity, err := evidenceFromFixture(raw, declaredRate)
 	if err != nil {
 		return fixtureRun{}, err
 	}
 	return fixtureRun{forward: evidence, identity: identity}, nil
+}
+
+// errFixtureFault refuses a run whose fixture reported a fault: a record's
+// fatal_error, or a cohort error other than its directions' validity
+// failures. A fault says nothing about the offered rate in either phase, so it
+// is never a failed probe; it ends the search as invalid input.
+var errFixtureFault = errors.New("a run with a fixture fault is not capacity evidence")
+
+// cohortValidityError is the error perftraffic reports for a cohort that
+// failed only its own validity rules; a bidirectional cohort names its
+// reverse direction's the same way.
+const cohortValidityError = "cohort is invalid; inspect machine-readable reasons"
+
+// refuseCohortFaults refuses a cohort, warm-up or measurement, any of whose
+// records carries a fatal_error. A measurement cohort's error must also be
+// empty or only its directions' validity failures; a warm-up's error was
+// already checked by cohortPhase.
+func refuseCohortFaults(cohort *fixtureCohort) error {
+	for _, record := range []struct {
+		name     string
+		evidence *fixtureEvidence
+	}{
+		{"sender", cohort.Sender}, {"receiver", cohort.Receiver},
+		{"reverse_sender", cohort.ReverseSender}, {"reverse_receiver", cohort.ReverseReceiver},
+	} {
+		if record.evidence != nil && record.evidence.FatalError != "" {
+			return fmt.Errorf("%w: %s record: %s", errFixtureFault, record.name, record.evidence.FatalError)
+		}
+	}
+	if cohort.Phase != nil && *cohort.Phase == "measurement" {
+		switch cohort.Error {
+		case "", cohortValidityError, "reverse cohort: " + cohortValidityError, cohortValidityError + "; reverse cohort: " + cohortValidityError:
+		default:
+			return fmt.Errorf("%w: cohort error: %s", errFixtureFault, cohort.Error)
+		}
+	}
+	return nil
 }
 
 // evidenceFromFixture maps one per-run fixture sender record to the
@@ -1031,6 +1125,9 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
 	}
+	if err := refuseCohortFaults(&cohort); err != nil {
+		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
+	}
 	if cohort.Sender == nil || cohort.Receiver == nil || cohort.ReverseSender == nil || cohort.ReverseReceiver == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort requires sender, receiver, reverse_sender and reverse_receiver records")
 	}
@@ -1149,6 +1246,7 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 		aggregateOfferedRate: aggregateOffered, forwardAchieved: forwardAchieved,
 		reverseAchieved: reverseAchieved, aggregateAchieved: aggregateAchieved,
 		cohortError: cohort.Error != "", warmup: warmup,
+		forwardLate: cohort.Sender.Delivery.lateAfterDeadline() > 0, reverseLate: cohort.ReverseSender.Delivery.lateAfterDeadline() > 0,
 	}, nil
 }
 
@@ -1159,6 +1257,9 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	}
 	warmup, err := cohortPhase(&cohort)
 	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional cohort: %w", err)
+	}
+	if err := refuseCohortFaults(&cohort); err != nil {
 		return fixtureRun{}, fmt.Errorf("unidirectional cohort: %w", err)
 	}
 	if cohort.Sender == nil || cohort.Receiver == nil {
@@ -1220,6 +1321,7 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
 		forwardAchieved: achieved, cohortError: cohort.Error != "", warmup: warmup,
+		forwardLate: cohort.Sender.Delivery.lateAfterDeadline() > 0,
 		ssnmVerdict: ssnmVerdict, referenceVerdict: referenceVerdict,
 	}, nil
 }
@@ -1402,6 +1504,9 @@ func validateDelivery(delivery *deliveryEvidence) error {
 		delivery.Missing == nil || delivery.Duplicate == nil || delivery.Invalid == nil || delivery.Reordered == nil || delivery.LateAfterStop == nil {
 		return errors.New("delivery counters are required")
 	}
+	if delivery.LateAfterDeadline != nil && *delivery.LateAfterDeadline > *delivery.Invalid {
+		return errors.New("delivery late_after_deadline must be counted in invalid")
+	}
 	return nil
 }
 
@@ -1555,7 +1660,9 @@ func equalDelivery(first, second *deliveryEvidence) bool {
 	return *first.Unique == *second.Unique && *first.UniqueMeasurement == *second.UniqueMeasurement &&
 		*first.UniqueDrain == *second.UniqueDrain && *first.Missing == *second.Missing &&
 		*first.Duplicate == *second.Duplicate && *first.Invalid == *second.Invalid &&
-		*first.Reordered == *second.Reordered && *first.LateAfterStop == *second.LateAfterStop
+		*first.Reordered == *second.Reordered && *first.LateAfterStop == *second.LateAfterStop &&
+		(first.LateAfterDeadline == nil) == (second.LateAfterDeadline == nil) &&
+		first.lateAfterDeadline() == second.lateAfterDeadline()
 }
 
 func clockFromSpec(spec *fixtureSpec) (clockIdentity, error) {
