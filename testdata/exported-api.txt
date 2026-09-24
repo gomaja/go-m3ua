@@ -390,6 +390,8 @@ field SCTPConfig.<embedded *SCTPNoDelayInfo>
 field SCTPConfig.<embedded *SCTPSACKInfo>
 field SCTPConfig.InitTimeout
 field SCTPConfig.ReadBufferSize
+field SCTPConfig.SocketReceiveBuffer
+field SCTPConfig.SocketSendBuffer
 field SCTPNoDelayInfo.Enabled
 field SCTPNoDelayInfo.NoDelay
 field SCTPSACKInfo.Enabled
@@ -565,6 +567,8 @@ method Association.SetWriteDeadline
 method Association.Shutdown
 method Association.ShutdownContext
 method Association.SignallingCongestion
+method Association.SocketReceiveBuffer
+method Association.SocketSendBuffer
 method Association.State
 method Association.StateChanges
 method Association.StreamID
@@ -817,6 +821,7 @@ var ErrInvalidNetworkAppearance
 var ErrInvalidParameterValue
 var ErrInvalidRoleConfiguration
 var ErrInvalidRoutingContext
+var ErrInvalidSCTPConfig
 var ErrInvalidSSNMStateConfig
 var ErrInvalidState
 var ErrMTP3RestartInProgress

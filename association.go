@@ -3239,6 +3239,43 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 	}, nil
 }
 
+// SocketReceiveBuffer reports the association's socket receive buffer size, in
+// bytes, as the kernel reads SO_RCVBUF back: the size that took effect, not the
+// SCTPConfig.SocketReceiveBuffer that was requested.
+//
+// On Linux the two differ. socket(7): the kernel doubles a requested size "to
+// allow space for bookkeeping overhead", and "this doubled value is returned by
+// getsockopt(2)", after capping the request at net.core.rmem_max. A 1 MiB
+// request therefore reads back as 2 MiB, and one above the cap as twice the
+// cap, which is how an operator sees that the cap applied. A socket left at the
+// default reports net.core.rmem_default undoubled, which can be more than a
+// capped request gives, so compare the two before concluding that a request
+// enlarged anything. The receive window the association announced at setup
+// was half the size reported here, but never below the 1500 octets RFC 9260
+// Sections 3.3.2 and 3.3.3 require.
+//
+// It returns an error once the association is gone.
+func (c *Association) SocketReceiveBuffer() (int, error) {
+	if c.sctpConn == nil {
+		return 0, ErrAssociationClosed
+	}
+	return c.sctpConn.GetReadBuffer()
+}
+
+// SocketSendBuffer reports the association's socket send buffer size, in bytes,
+// as the kernel reads SO_SNDBUF back. As with SocketReceiveBuffer, Linux
+// reports twice the requested SCTPConfig.SocketSendBuffer, capped at twice
+// net.core.wmem_max, and net.core.wmem_default for a socket left at the
+// default.
+//
+// It returns an error once the association is gone.
+func (c *Association) SocketSendBuffer() (int, error) {
+	if c.sctpConn == nil {
+		return 0, ErrAssociationClosed
+	}
+	return c.sctpConn.GetWriteBuffer()
+}
+
 // ManagementIndicationKind identifies which of RFC 4666's Layer Management
 // indications a ManagementIndication carries.
 type ManagementIndicationKind uint8

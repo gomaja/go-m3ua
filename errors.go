@@ -171,6 +171,10 @@ var (
 	// no RFC 4666 meaning for the selected endpoint role.
 	ErrInvalidRoleConfiguration = errors.New("invalid M3UA role configuration")
 
+	// ErrInvalidSCTPConfig reports an SCTPConfig socket setting that cannot be
+	// applied as configured.
+	ErrInvalidSCTPConfig = errors.New("invalid SCTP configuration")
+
 	// ErrInvalidASPConfig reports an invalid ASP-wide MTP Route, Signalling
 	// Gateway, Signalling Gateway Process, or route inventory.
 	ErrInvalidASPConfig = errors.New("invalid ASP routing configuration")

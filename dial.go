@@ -66,6 +66,9 @@ type sctpDialPolicy struct {
 	abandon sctp.DialAbandonPolicy
 	// events are subscribed before the socket connects; see associationEvents.
 	events []sctp.NotificationSubscription
+	// buffers are sized before the socket connects, so the INIT announces the
+	// receive window they give; see socketBuffers.control.
+	buffers socketBuffers
 }
 
 func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
@@ -94,6 +97,7 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 
 func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.PreconfiguredSocket {
 	base := &sctp.SocketConfig{
+		Control: p.buffers.control(),
 		// A Dial watcher serves one association, so its route ignores the
 		// association ID; it is set once Dial has an Association to route to.
 		NotificationHandler: restarts.handle,
@@ -134,11 +138,13 @@ func (p sctpDialPolicy) dialContext(
 // PreAssociation.RTOInfo applies that through SCTP_FUTURE_ASSOC without
 // wrapping or taking ownership of the raw descriptor that go-sctp still owns,
 // and PreAssociation.Notifications subscribes associationEvents the same way.
-func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, timeout time.Duration, restarts *restartWatcher) (*sctp.SCTPConn, error) {
+// The socket buffers are sized in the Control hook, which runs earlier still.
+func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, timeout time.Duration, buffers socketBuffers, restarts *restartWatcher) (*sctp.SCTPConn, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	policy := oneShotSCTPDialPolicy(timeout)
+	policy.buffers = buffers
 	sctpAssociation, err := withAssociationEvents(func(subscribe bool) (*sctp.SCTPConn, error) {
 		if !subscribe {
 			policy.events = nil
@@ -242,7 +248,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	restarts := &restartWatcher{}
 	restarts.setRoute(func(sctp.SCTPAssocID) *Association { return association })
 
-	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, restarts)
+	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, socketBuffersFor(cfg.SCTPConfig), restarts)
 	if err != nil {
 		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
 			return nil, ErrEndpointClosed
