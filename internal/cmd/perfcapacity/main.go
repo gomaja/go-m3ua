@@ -1,12 +1,14 @@
 // perfcapacity evaluates a bounded capacity search campaign. It reads one
 // strict JSON request from standard input: the search parameters, the per-run
-// fixture evidence for each probe in execution order, and optionally the five
-// validation repetitions at the selected rate. Shared-clock throughput and the
+// fixture evidence for each probe in execution order, and the validation
+// repetitions in execution order. The search asks for each probe and each
+// repetition in turn, and a repetition that does not validate its rate moves
+// the search below it. Shared-clock throughput and the
 // routed and routed-direct optional-router workloads use a complete
 // sender/receiver cohort; bidirectional mode uses all four directional
-// records. Each probe must have run at
-// exactly the rate the predeclared search selected; any deviation is invalid
-// input, so a campaign cannot reorder or drop inconvenient probes.
+// records. Each probe and repetition must have run at exactly the rate the
+// predeclared search selected; any deviation is invalid input, so a campaign
+// cannot reorder or drop inconvenient runs.
 //
 // Exit statuses mirror perfratio: 0 pass, 1 fail, 2 inconclusive, 3 invalid
 // input. A pass covers only the predeclared search and repetition rules; it
@@ -116,14 +118,18 @@ type response struct {
 	// NextProbeRate is the rate the unfinished search selected for its next
 	// probe, so a campaign driver can run the search one probe at a time
 	// without reimplementing it. It is absent once the search has terminated.
-	NextProbeRate        int                     `json:"next_probe_rate,omitempty"`
-	AggregateOfferedRate uint64                  `json:"aggregate_offered_rate,omitempty"`
-	Probes               []perfstats.ProbeRecord `json:"probes,omitempty"`
-	ProbeDecisions       []probeDecision         `json:"probe_decisions,omitempty"`
-	RepetitionDecisions  []probeDecision         `json:"repetition_decisions,omitempty"`
-	Reason               string                  `json:"reason,omitempty"`
-	Scope                string                  `json:"scope"`
-	Error                string                  `json:"error,omitempty"`
+	NextProbeRate int `json:"next_probe_rate,omitempty"`
+	// NextRepetitionRate is the rate the next validation repetition must run
+	// at, present while a bracketed search awaits one.
+	NextRepetitionRate   int                         `json:"next_repetition_rate,omitempty"`
+	AggregateOfferedRate uint64                      `json:"aggregate_offered_rate,omitempty"`
+	Probes               []perfstats.ProbeRecord     `json:"probes,omitempty"`
+	ValidationRounds     []perfstats.ValidationRound `json:"validation_rounds,omitempty"`
+	ProbeDecisions       []probeDecision             `json:"probe_decisions,omitempty"`
+	RepetitionDecisions  []probeDecision             `json:"repetition_decisions,omitempty"`
+	Reason               string                      `json:"reason,omitempty"`
+	Scope                string                      `json:"scope"`
+	Error                string                      `json:"error,omitempty"`
 }
 
 const decisionScope = "capacity search and validation-repetition decision only; not absolute achieved-rate, environmental, latency, CPU or independent-peer acceptance"
@@ -175,45 +181,74 @@ func evaluate(decoded request) (response, error) {
 
 	result := response{ProbeDecisions: []probeDecision{}, RepetitionDecisions: []probeDecision{}}
 	var campaign campaignIdentity
-	for index, probe := range decoded.Probes {
-		fixture, err := fixtureRunFromJSON(probe.Run, *probe.Rate)
-		if err != nil {
-			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
+	// Replay the campaign in the search's own order: a probe while the search
+	// selects one, a repetition while a bracketed search awaits one. A round
+	// whose repetition failed moves the search below the rate, so probes and
+	// repetitions interleave; each list is consumed in execution order.
+	probes, repetitions := decoded.Probes, decoded.Repetitions
+	probeIndex, repetitionIndex := 0, 0
+	for {
+		if next, running := search.NextRate(); running {
+			if probeIndex == len(probes) {
+				result.NextProbeRate = next
+				break
+			}
+			probe := probes[probeIndex]
+			probeIndex++
+			decision, err := decideCampaignRun(&campaign, probe, "probe", probeIndex)
+			if err != nil {
+				return response{}, err
+			}
+			result.ProbeDecisions = append(result.ProbeDecisions, decision)
+			if err := search.Record(*probe.Rate, decision.SearchOutcome); err != nil {
+				return response{}, fmt.Errorf("probe %d: %w", probeIndex, err)
+			}
+			continue
 		}
-		if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
-			return response{}, fmt.Errorf("probe %d run: %w", index+1, err)
+		if next, pending := search.NextRepetitionRate(); pending {
+			if repetitionIndex == len(repetitions) {
+				result.NextRepetitionRate = next
+				break
+			}
+			repetition := repetitions[repetitionIndex]
+			repetitionIndex++
+			decision, err := decideCampaignRun(&campaign, repetition, "repetition", repetitionIndex)
+			if err != nil {
+				return response{}, err
+			}
+			result.RepetitionDecisions = append(result.RepetitionDecisions, decision)
+			if err := search.RecordRepetition(*repetition.Rate, decision.SearchOutcome); err != nil {
+				return response{}, fmt.Errorf("repetition %d: %w", repetitionIndex, err)
+			}
+			continue
 		}
-		decision := decideFixtureRun(fixture, *probe.Rate)
-		decision.SearchOutcome = searchOutcome(decision)
-		result.ProbeDecisions = append(result.ProbeDecisions, decision)
-		if err := search.Record(*probe.Rate, decision.SearchOutcome); err != nil {
-			return response{}, fmt.Errorf("probe %d: %w", index+1, err)
+		break
+	}
+	// Runs the search did not ask for are invalid input. Each is still
+	// decoded and checked against the campaign first, so evidence that is
+	// invalid in itself is reported as such.
+	for index := probeIndex; index < len(probes); index++ {
+		if _, err := decideCampaignRun(&campaign, probes[index], "probe", index+1); err != nil {
+			return response{}, err
 		}
+	}
+	for index := repetitionIndex; index < len(repetitions); index++ {
+		if _, err := decideCampaignRun(&campaign, repetitions[index], "repetition", index+1); err != nil {
+			return response{}, err
+		}
+	}
+	if probeIndex < len(probes) {
+		return response{}, fmt.Errorf("probe %d: the search did not select a probe (status %q)", probeIndex+1, search.Status())
+	}
+	if repetitionIndex < len(repetitions) {
+		return response{}, fmt.Errorf("repetition %d: no validation repetition is pending (status %q)", repetitionIndex+1, search.Status())
 	}
 	result.SearchStatus = search.Status()
 	result.Probes = search.Probes()
-	if next, running := search.NextRate(); running {
-		result.NextProbeRate = next
-	}
-
-	var repetitionRates []int
-	var repetitionDecisions []perfstats.Decision
-	for index, repetition := range decoded.Repetitions {
-		fixture, err := fixtureRunFromJSON(repetition.Run, *repetition.Rate)
-		if err != nil {
-			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
-		}
-		if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
-			return response{}, fmt.Errorf("repetition %d run: %w", index+1, err)
-		}
-		decision := decideFixtureRun(fixture, *repetition.Rate)
-		result.RepetitionDecisions = append(result.RepetitionDecisions, decision)
-		repetitionRates = append(repetitionRates, *repetition.Rate)
-		repetitionDecisions = append(repetitionDecisions, perfstats.Decision(decision.Decision))
-	}
+	result.ValidationRounds = search.ValidationRounds()
 
 	result.Environments = campaign.environments()
-	capacity := perfstats.DecideCapacity(search, repetitionRates, repetitionDecisions)
+	capacity := perfstats.DecideCapacity(search)
 	result.Decision = string(capacity.Decision)
 	result.SelectedRate = capacity.SelectedRate
 	if campaign.set && campaign.workload.Mode == "bidirectional" && capacity.SelectedRate > 0 {
@@ -227,7 +262,23 @@ func evaluate(decoded request) (response, error) {
 	return result, nil
 }
 
-// searchOutcome is what one probe decision contributes to the capacity search.
+// decideCampaignRun decides one probe or repetition run and checks it against
+// the campaign's identity. kind and index name the run in errors.
+func decideCampaignRun(campaign *campaignIdentity, entry rateRun, kind string, index int) (probeDecision, error) {
+	fixture, err := fixtureRunFromJSON(entry.Run, *entry.Rate)
+	if err != nil {
+		return probeDecision{}, fmt.Errorf("%s %d run: %w", kind, index, err)
+	}
+	if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
+		return probeDecision{}, fmt.Errorf("%s %d run: %w", kind, index, err)
+	}
+	decision := decideFixtureRun(fixture, *entry.Rate)
+	decision.SearchOutcome = searchOutcome(decision)
+	return decision, nil
+}
+
+// searchOutcome is what one probe or repetition decision contributes to the
+// capacity search.
 // An inconclusive probe whose every inconclusive reason is a transport stall
 // or a backlog trend straddling the floor did not demonstrate its rate: near
 // and above capacity those are the expected outcomes, so the rate bounds the

@@ -370,13 +370,19 @@ func TestEvidenceInconclusiveProbeStopsTheSearch(testContext *testing.T) {
 }
 
 func TestLowerBoundOnlyIsNotACapacityPass(testContext *testing.T) {
-	input := requestJSON(50, []struct {
+	schedule := []struct {
 		rate    int
 		passing bool
-	}{{50, true}, {100, true}}, repetitionsJSON(100, 5, passingRunJSON()))
-	status, decoded := runRequest(testContext, input)
-	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" || decoded.SearchStatus != "lower-bound-only" {
-		testContext.Fatalf("status %d decision %+v, want inconclusive lower-bound-only", status, decoded)
+	}{{50, true}, {100, true}}
+	status, decoded := runRequest(testContext, requestJSON(50, schedule, ""))
+	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" || decoded.SearchStatus != "lower-bound-only" ||
+		decoded.NextRepetitionRate != 0 {
+		testContext.Fatalf("status %d decision %+v, want inconclusive lower-bound-only without repetitions", status, decoded)
+	}
+	// Repetitions cannot turn it into a pass: the search never asked for them.
+	status, decoded = runRequest(testContext, requestJSON(50, schedule, repetitionsJSON(100, 5, passingRunJSON())))
+	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "no validation repetition is pending") {
+		testContext.Fatalf("status %d decision %+v, want the unrequested repetitions refused", status, decoded)
 	}
 }
 
@@ -391,28 +397,79 @@ func TestBracketedSearchWithoutRepetitionsIsSearchOnly(testContext *testing.T) {
 	}
 }
 
-func TestRepetitionAtTheWrongRateDoesNotValidate(testContext *testing.T) {
+// A repetition must run at exactly the rate the search selected, like a probe.
+func TestRepetitionAtTheWrongRateIsInvalidInput(testContext *testing.T) {
 	input := requestJSON(10, capacity37Schedule, repetitionsJSON(38, 5, passingRunJSON()))
 	status, decoded := runRequest(testContext, input)
-	if status != inconclusiveExitStatus || !strings.HasPrefix(decoded.Reason, "validation-repetition-rate-mismatch") {
-		testContext.Fatalf("status %d decision %+v, want rate-mismatch inconclusive", status, decoded)
+	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "repetition rate 38 does not match the selected rate 37") {
+		testContext.Fatalf("status %d decision %+v, want the misplaced repetition refused", status, decoded)
 	}
 }
 
-func TestFailingRepetitionFailsTheCapacity(testContext *testing.T) {
-	runs := repetitionsJSON(37, 4, passingRunJSON()) + `,{"rate":37,"run":` + runAtRateJSON(failingRunJSON(), 37) + `}`
-	input := requestJSON(10, capacity37Schedule, runs)
-	status, decoded := runRequest(testContext, input)
-	if status != failingExitStatus || decoded.Decision != "fail" {
-		testContext.Fatalf("status %d decision %+v, want fail", status, decoded)
+// The budget's result is the lower passing rate, never a transient peak. A
+// failed repetition at 37 shows 37 was such a peak: 37 bounds the bracket from
+// above, the search resumes between the highest passing probe below it (35)
+// and 37, and validates what it selects there.
+func TestFailingRepetitionMovesTheSearchBelowTheRate(testContext *testing.T) {
+	failed := repetitionsJSON(37, 4, passingRunJSON()) + `,{"rate":37,"run":` + runAtRateJSON(failingRunJSON(), 37) + `}`
+	status, decoded := runRequest(testContext, requestJSON(10, capacity37Schedule, failed))
+	if status != inconclusiveExitStatus || decoded.Decision != "inconclusive" || decoded.Reason != perfstats.SearchIncompleteReason ||
+		decoded.SearchStatus != perfstats.SearchRunning || decoded.NextProbeRate != 36 || decoded.NextRepetitionRate != 0 {
+		testContext.Fatalf("status %d decision %+v, want the search running with next probe 36", status, decoded)
+	}
+	if len(decoded.ValidationRounds) != 1 || decoded.ValidationRounds[0].Rate != 37 || len(decoded.ValidationRounds[0].Outcomes) != 5 ||
+		decoded.ValidationRounds[0].Outcomes[4] != perfstats.ProbeFailing || len(decoded.RepetitionDecisions) != 5 {
+		testContext.Fatalf("validation rounds %+v decisions %d, want one round at 37 ending in a failure", decoded.ValidationRounds, len(decoded.RepetitionDecisions))
+	}
+
+	resumed := append(append([]struct {
+		rate    int
+		passing bool
+	}(nil), capacity37Schedule...), struct {
+		rate    int
+		passing bool
+	}{36, true})
+	status, decoded = runRequest(testContext, requestJSON(10, resumed, failed))
+	if status != inconclusiveExitStatus || decoded.Reason != perfstats.RepetitionsMissingReason || decoded.SearchStatus != perfstats.SearchBracketed ||
+		decoded.SelectedRate != 36 || decoded.NextRepetitionRate != 36 || decoded.NextProbeRate != 0 {
+		testContext.Fatalf("status %d decision %+v, want bracketed at 36 awaiting repetitions", status, decoded)
+	}
+
+	status, decoded = runRequest(testContext, requestJSON(10, resumed, failed+","+repetitionsJSON(36, 5, passingRunJSON())))
+	if status != passingExitStatus || decoded.Decision != "pass" || decoded.SelectedRate != 36 || decoded.NextRepetitionRate != 0 {
+		testContext.Fatalf("status %d decision %+v, want pass at 36", status, decoded)
+	}
+	if len(decoded.ValidationRounds) != 2 || decoded.ValidationRounds[1].Rate != 36 || len(decoded.ValidationRounds[1].Outcomes) != 5 ||
+		len(decoded.RepetitionDecisions) != 10 || len(decoded.ProbeDecisions) != len(resumed) {
+		testContext.Fatalf("response %+v, want both rounds and every run's decision", decoded)
 	}
 }
 
 func TestFourRepetitionsDoNotValidate(testContext *testing.T) {
 	input := requestJSON(10, capacity37Schedule, repetitionsJSON(37, 4, passingRunJSON()))
 	status, decoded := runRequest(testContext, input)
-	if status != inconclusiveExitStatus || decoded.Reason != "validation-repetition-count-mismatch" {
-		testContext.Fatalf("status %d decision %+v, want count-mismatch inconclusive", status, decoded)
+	if status != inconclusiveExitStatus || decoded.Reason != perfstats.RepetitionsMissingReason || decoded.NextRepetitionRate != 37 {
+		testContext.Fatalf("status %d decision %+v, want repetitions missing with the next one at 37", status, decoded)
+	}
+}
+
+// Runs the search did not ask for are invalid input, never ignored: a sixth
+// repetition, or a probe while a validation repetition is pending.
+func TestUnrequestedRunsAreInvalidInput(testContext *testing.T) {
+	status, decoded := runRequest(testContext, requestJSON(10, capacity37Schedule, repetitionsJSON(37, 6, passingRunJSON())))
+	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "repetition 6: no validation repetition is pending") {
+		testContext.Fatalf("status %d decision %+v, want the sixth repetition refused", status, decoded)
+	}
+	extra := append(append([]struct {
+		rate    int
+		passing bool
+	}(nil), capacity37Schedule...), struct {
+		rate    int
+		passing bool
+	}{36, true})
+	status, decoded = runRequest(testContext, requestJSON(10, extra, repetitionsJSON(37, 5, passingRunJSON())))
+	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "probe 8: the search did not select a probe") {
+		testContext.Fatalf("status %d decision %+v, want the unselected probe refused", status, decoded)
 	}
 }
 
@@ -884,5 +941,24 @@ func TestPartialSearchNamesItsNextProbeRate(testContext *testing.T) {
 		if decoded.NextProbeRate != 0 || decoded.SearchStatus != perfstats.SearchBracketed || decoded.SelectedRate != 37 {
 			testContext.Fatalf("terminated search: next_probe_rate %d status %q selected %d", decoded.NextProbeRate, decoded.SearchStatus, decoded.SelectedRate)
 		}
+	}
+}
+
+// A repetition that did not demonstrate the selected rate only because of a
+// transport stall is decided like such a probe: the rate is rejected and the
+// search moves below it, rather than validation ending inconclusive.
+func TestStalledRepetitionMovesTheSearchBelowTheRate(testContext *testing.T) {
+	// stalledRunJSON at 37 msg/s: the same 200 capped and missing messages,
+	// every other counter scaled to the rate's 4,440 scheduled.
+	stalledRun := runAtRateJSON(stalledRunJSON(), 37)
+	for _, field := range []string{"sent", "submitted", "unique", "unique_measurement"} {
+		stalledRun = strings.Replace(stalledRun, fmt.Sprintf(`"%s":1000`, field), fmt.Sprintf(`"%s":%d`, field, 37*120-200), 1)
+	}
+	stalled := repetitionsJSON(37, 2, passingRunJSON()) + `,{"rate":37,"run":` + stalledRun + `}`
+	status, decoded := runRequest(testContext, requestJSON(10, capacity37Schedule, stalled))
+	if status != inconclusiveExitStatus || decoded.NextProbeRate != 36 || len(decoded.RepetitionDecisions) != 3 ||
+		decoded.RepetitionDecisions[2].SearchOutcome != perfstats.ProbeNotDemonstrated ||
+		len(decoded.ValidationRounds) != 1 || decoded.ValidationRounds[0].Outcomes[2] != perfstats.ProbeNotDemonstrated {
+		testContext.Fatalf("status %d decision %+v, want the stalled repetition to reject 37 and the next probe at 36", status, decoded)
 	}
 }

@@ -136,48 +136,283 @@ func TestCapacitySearchRejectsProbesAfterTermination(testContext *testing.T) {
 	}
 }
 
+// recordRepetitions records outcomes at the search's pending repetition rate.
+func recordRepetitions(testContext *testing.T, search *CapacitySearch, outcomes ...ProbeOutcome) {
+	testContext.Helper()
+	for index, outcome := range outcomes {
+		rate, pending := search.NextRepetitionRate()
+		if !pending {
+			testContext.Fatalf("repetition %d: none pending (status %q)", index+1, search.Status())
+		}
+		if err := search.RecordRepetition(rate, outcome); err != nil {
+			testContext.Fatalf("RecordRepetition(%d, %q): %v", rate, outcome, err)
+		}
+	}
+}
+
+func fivePassing() []ProbeOutcome {
+	return []ProbeOutcome{ProbePassing, ProbePassing, ProbePassing, ProbePassing, ProbePassing}
+}
+
 func TestDecideCapacityRequiresBracketThenFivePassingRepetitionsAtLowerRate(testContext *testing.T) {
 	search := driveSearch(testContext, 25000, 1000000, 24, 37000)
 	selected := search.Lower()
-
-	passing := []Decision{Pass, Pass, Pass, Pass, Pass}
-	rates := []int{selected, selected, selected, selected, selected}
-	decision := DecideCapacity(search, rates, passing)
+	if rate, pending := search.NextRepetitionRate(); !pending || rate != selected {
+		testContext.Fatalf("NextRepetitionRate() = %d, %t, want %d pending", rate, pending, selected)
+	}
+	recordRepetitions(testContext, search, fivePassing()...)
+	decision := DecideCapacity(search)
 	if decision.Decision != Pass || decision.SelectedRate != selected {
 		testContext.Fatalf("DecideCapacity() = %+v, want pass at %d", decision, selected)
+	}
+	if _, pending := search.NextRepetitionRate(); pending {
+		testContext.Fatal("a validated search still asks for a repetition")
+	}
+	rounds := search.ValidationRounds()
+	if len(rounds) != 1 || rounds[0].Rate != selected || len(rounds[0].Outcomes) != RequiredFullRepetitions {
+		testContext.Fatalf("ValidationRounds() = %+v, want one round of five at %d", rounds, selected)
 	}
 }
 
 func TestDecideCapacityRepetitionRules(testContext *testing.T) {
-	newSearch := func(testContext *testing.T) (*CapacitySearch, int) {
-		search := driveSearch(testContext, 25000, 1000000, 24, 37000)
-		return search, search.Lower()
-	}
 	tests := []struct {
-		name      string
-		rates     func(selected int) []int
-		decisions []Decision
-		want      Decision
-		reason    string
+		name     string
+		outcomes []ProbeOutcome
+		want     Decision
+		reason   string
+		pending  bool
 	}{
-		{name: "missing", rates: func(int) []int { return nil }, decisions: nil, want: Inconclusive, reason: RepetitionsMissingReason},
-		{name: "four only", rates: func(selected int) []int { return []int{selected, selected, selected, selected} },
-			decisions: []Decision{Pass, Pass, Pass, Pass}, want: Inconclusive, reason: RepetitionCountReason},
-		{name: "six", rates: func(selected int) []int { return []int{selected, selected, selected, selected, selected, selected} },
-			decisions: []Decision{Pass, Pass, Pass, Pass, Pass, Pass}, want: Inconclusive, reason: RepetitionCountReason},
-		{name: "wrong rate", rates: func(selected int) []int { return []int{selected, selected, selected, selected, selected + 1} },
-			decisions: []Decision{Pass, Pass, Pass, Pass, Pass}, want: Inconclusive, reason: RepetitionRateReason},
-		{name: "one fails", rates: func(selected int) []int { return []int{selected, selected, selected, selected, selected} },
-			decisions: []Decision{Pass, Pass, Fail, Pass, Pass}, want: Fail, reason: RepetitionFailureReason},
-		{name: "one inconclusive", rates: func(selected int) []int { return []int{selected, selected, selected, selected, selected} },
-			decisions: []Decision{Pass, Pass, Inconclusive, Pass, Pass}, want: Inconclusive, reason: RepetitionInconclusiveReason},
+		{name: "missing", outcomes: nil, want: Inconclusive, reason: RepetitionsMissingReason, pending: true},
+		{name: "four only", outcomes: fivePassing()[:4], want: Inconclusive, reason: RepetitionsMissingReason, pending: true},
+		{name: "five", outcomes: fivePassing(), want: Pass},
+		{name: "one inconclusive", outcomes: []ProbeOutcome{ProbePassing, ProbePassing, ProbeInconclusive}, want: Inconclusive,
+			reason: RepetitionInconclusiveReason},
 	}
 	for _, test := range tests {
 		testContext.Run(test.name, func(testContext *testing.T) {
-			search, selected := newSearch(testContext)
-			decision := DecideCapacity(search, test.rates(selected), test.decisions)
-			if decision.Decision != test.want || !strings.HasPrefix(decision.Reason, test.reason) {
-				testContext.Fatalf("DecideCapacity() = %+v, want %q with reason %q", decision, test.want, test.reason)
+			search := driveSearch(testContext, 25000, 1000000, 24, 37000)
+			selected := search.Lower()
+			recordRepetitions(testContext, search, test.outcomes...)
+			decision := DecideCapacity(search)
+			if decision.Decision != test.want || decision.Reason != test.reason || decision.SelectedRate != selected {
+				testContext.Fatalf("DecideCapacity() = %+v, want %q with reason %q at %d", decision, test.want, test.reason, selected)
+			}
+			if _, pending := search.NextRepetitionRate(); pending != test.pending {
+				testContext.Fatalf("repetition pending = %t, want %t", pending, test.pending)
+			}
+		})
+	}
+}
+
+// A repetition is recorded only while one is pending, at exactly the selected
+// rate, with a known outcome: the replay cannot add, move or invent runs.
+func TestRecordRepetitionRejectsRunsTheSearchDidNotAskFor(testContext *testing.T) {
+	running, err := NewCapacitySearch(1000, 1000000, 24)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	if err := running.RecordRepetition(1000, ProbePassing); err == nil {
+		testContext.Fatal("a running search accepted a repetition")
+	}
+	search := driveSearch(testContext, 25000, 1000000, 24, 37000)
+	selected := search.Lower()
+	if err := search.RecordRepetition(selected+1, ProbePassing); err == nil {
+		testContext.Fatal("a repetition at the wrong rate was accepted")
+	}
+	if err := search.RecordRepetition(selected, ProbeOutcome("maybe")); err == nil {
+		testContext.Fatal("an unknown repetition outcome was accepted")
+	}
+	recordRepetitions(testContext, search, fivePassing()...)
+	if err := search.RecordRepetition(selected, ProbePassing); err == nil {
+		testContext.Fatal("a sixth repetition was accepted")
+	}
+	inconclusive := driveSearch(testContext, 25000, 1000000, 24, 37000)
+	recordRepetitions(testContext, inconclusive, ProbeInconclusive)
+	if err := inconclusive.RecordRepetition(selected, ProbePassing); err == nil {
+		testContext.Fatal("a repetition after an inconclusive one was accepted")
+	}
+}
+
+// The budget's result is the lower passing rate, never a transient peak. A
+// repetition that fails or does not demonstrate the selected rate bounds the
+// bracket from above like a failed probe; the search resumes below it and
+// validates the rate it then selects.
+func TestFailedValidationMovesTheSearchBelowTheRate(testContext *testing.T) {
+	for _, outcome := range []ProbeOutcome{ProbeFailing, ProbeNotDemonstrated} {
+		testContext.Run(string(outcome), func(testContext *testing.T) {
+			search := driveSearch(testContext, 25000, 1000000, 24, 37000)
+			peak := search.Lower()
+			var belowPeak int
+			for _, probe := range search.Probes() {
+				if probe.Outcome == ProbePassing && probe.Rate < peak && probe.Rate > belowPeak {
+					belowPeak = probe.Rate
+				}
+			}
+			recordRepetitions(testContext, search, ProbePassing, ProbePassing, outcome)
+			if search.Upper() != peak || search.Lower() != belowPeak {
+				testContext.Fatalf("bracket [%d, %d], want [%d, %d]", search.Lower(), search.Upper(), belowPeak, peak)
+			}
+			if _, pending := search.NextRepetitionRate(); pending && search.Lower() == peak {
+				testContext.Fatal("the failed rate is still being validated")
+			}
+			// The sustained capacity is below the peak: continue the search
+			// with every rate at or above the peak failing.
+			for {
+				rate, running := search.NextRate()
+				if !running {
+					break
+				}
+				if rate >= peak {
+					testContext.Fatalf("the search probed %d, at or above the rejected rate %d", rate, peak)
+				}
+				if err := search.Record(rate, ProbePassing); err != nil {
+					testContext.Fatal(err)
+				}
+			}
+			if search.Status() != SearchBracketed || search.Lower() >= peak || 100*search.Upper() > 105*search.Lower() {
+				testContext.Fatalf("status %q bracket [%d, %d], want a refined bracket below %d", search.Status(), search.Lower(), search.Upper(), peak)
+			}
+			if decision := DecideCapacity(search); decision.Decision != Inconclusive || decision.Reason != RepetitionsMissingReason ||
+				decision.SelectedRate != search.Lower() {
+				testContext.Fatalf("DecideCapacity() before the new round = %+v, want repetitions missing at %d", decision, search.Lower())
+			}
+			recordRepetitions(testContext, search, fivePassing()...)
+			decision := DecideCapacity(search)
+			if decision.Decision != Pass || decision.SelectedRate != search.Lower() || decision.SelectedRate >= peak {
+				testContext.Fatalf("DecideCapacity() = %+v, want a pass below %d", decision, peak)
+			}
+			rounds := search.ValidationRounds()
+			if len(rounds) != 2 || rounds[0].Rate != peak || len(rounds[0].Outcomes) != 3 || rounds[0].Outcomes[2] != outcome ||
+				rounds[1].Rate != decision.SelectedRate || len(rounds[1].Outcomes) != RequiredFullRepetitions {
+				testContext.Fatalf("ValidationRounds() = %+v, want the failed round at %d then five at %d", rounds, peak, decision.SelectedRate)
+			}
+		})
+	}
+}
+
+// The recorded smoke search of 2026-09-24 (SSNM 10 x 1,024 APCs over 8
+// associations, perftraffic at ae84f02): the bracket closed at 300,000 msg/s,
+// and the first validation repetition there lost DATA. The old rule failed the
+// whole search; the search now continues between the highest passing probe
+// below it and 300,000.
+func TestRecordedSmokeSearchContinuesBelowAFailedValidation(testContext *testing.T) {
+	search, err := NewCapacitySearch(40000, 640000, 24)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	for _, probe := range []ProbeRecord{{40000, ProbePassing}, {80000, ProbePassing}, {160000, ProbePassing}, {320000, ProbeFailing},
+		{240000, ProbePassing}, {280000, ProbePassing}, {300000, ProbePassing}, {310000, ProbeNotDemonstrated}} {
+		if err := search.Record(probe.Rate, probe.Outcome); err != nil {
+			testContext.Fatalf("Record(%d): %v", probe.Rate, err)
+		}
+	}
+	if rate, pending := search.NextRepetitionRate(); search.Status() != SearchBracketed || !pending || rate != 300000 {
+		testContext.Fatalf("status %q repetition %d/%t, want validation at 300000", search.Status(), rate, pending)
+	}
+	recordRepetitions(testContext, search, ProbeFailing)
+	if next, running := search.NextRate(); !running || next != 290000 {
+		testContext.Fatalf("NextRate() = %d, %t, want 290000 between 280000 and 300000", next, running)
+	}
+	if decision := DecideCapacity(search); decision.Decision != Inconclusive || decision.Reason != SearchIncompleteReason {
+		testContext.Fatalf("DecideCapacity() = %+v, want an incomplete search", decision)
+	}
+}
+
+// The probe budget still binds after a step-down: the recorded smoke search
+// used its eighth probe to bracket 300,000, so with a budget of eight the
+// probe its failed repetition calls for (290,000) is not run, and the search
+// ends out of budget, reported as rejected rather than never refined.
+func TestProbeBudgetBindsAfterAStepDown(testContext *testing.T) {
+	search, err := NewCapacitySearch(40000, 640000, 8)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	for _, probe := range []ProbeRecord{{40000, ProbePassing}, {80000, ProbePassing}, {160000, ProbePassing}, {320000, ProbeFailing},
+		{240000, ProbePassing}, {280000, ProbePassing}, {300000, ProbePassing}, {310000, ProbeNotDemonstrated}} {
+		if err := search.Record(probe.Rate, probe.Outcome); err != nil {
+			testContext.Fatalf("Record(%d): %v", probe.Rate, err)
+		}
+	}
+	if err := search.Record(300000, ProbePassing); err == nil || !strings.Contains(err.Error(), "awaits a validation repetition at 300000") {
+		testContext.Fatalf("Record while a repetition is pending: %v, want the pending repetition named", err)
+	}
+	recordRepetitions(testContext, search, ProbeFailing)
+	if _, running := search.NextRate(); running || search.Status() != SearchProbeBudgetExhausted {
+		testContext.Fatalf("status %q running %t, want the probe budget exhausted", search.Status(), running)
+	}
+	if decision := DecideCapacity(search); decision.Decision != Inconclusive || decision.Reason != RejectedSearchNotRefinedReason {
+		testContext.Fatalf("DecideCapacity() = %+v, want inconclusive with %q", decision, RejectedSearchNotRefinedReason)
+	}
+}
+
+// Validation descends at most MaxValidationRounds times; then the search is
+// inconclusive, not a pass at whatever rate it reached.
+func TestValidationRoundsAreBounded(testContext *testing.T) {
+	search := driveSearch(testContext, 25000, 1000000, 64, 37000)
+	for round := 1; ; round++ {
+		if round > MaxValidationRounds {
+			testContext.Fatalf("validation continued past %d rounds", MaxValidationRounds)
+		}
+		recordRepetitions(testContext, search, ProbeFailing)
+		if search.Status() == SearchValidationRoundsExhausted {
+			if round != MaxValidationRounds {
+				testContext.Fatalf("exhausted after %d rounds, want %d", round, MaxValidationRounds)
+			}
+			break
+		}
+		for {
+			rate, running := search.NextRate()
+			if !running {
+				break
+			}
+			if err := search.Record(rate, ProbePassing); err != nil {
+				testContext.Fatal(err)
+			}
+		}
+		if search.Status() != SearchBracketed {
+			testContext.Fatalf("round %d: status %q, want a new bracket", round, search.Status())
+		}
+	}
+	if _, running := search.NextRate(); running {
+		testContext.Fatal("an exhausted search still selects probes")
+	}
+	if _, pending := search.NextRepetitionRate(); pending {
+		testContext.Fatal("an exhausted search still asks for repetitions")
+	}
+	if decision := DecideCapacity(search); decision.Decision != Inconclusive || decision.Reason != ValidationRoundsExhaustedReason ||
+		decision.SelectedRate != 0 {
+		testContext.Fatalf("DecideCapacity() = %+v, want inconclusive with %q", decision, ValidationRoundsExhaustedReason)
+	}
+}
+
+// A failed validation at the only passing rate sends the search downward from
+// it; if nothing below passes either, the search has no passing rate. That is
+// a failure when every run failed, and inconclusive when a repetition was only
+// not demonstrated.
+func TestFailedValidationAtTheOnlyPassingRateCanEndWithNoPassingRate(testContext *testing.T) {
+	for _, test := range []struct {
+		outcome ProbeOutcome
+		want    Decision
+		reason  string
+	}{{ProbeFailing, Fail, NoPassingRateReason}, {ProbeNotDemonstrated, Inconclusive, NoDemonstratedRateReason}} {
+		testContext.Run(string(test.outcome), func(testContext *testing.T) {
+			search := driveSearch(testContext, 100, 1000000, 24, 100)
+			if search.Status() != SearchBracketed || search.Lower() != 100 {
+				testContext.Fatalf("status %q lower %d, want bracketed at 100", search.Status(), search.Lower())
+			}
+			recordRepetitions(testContext, search, test.outcome)
+			for {
+				rate, running := search.NextRate()
+				if !running {
+					break
+				}
+				if err := search.Record(rate, ProbeFailing); err != nil {
+					testContext.Fatal(err)
+				}
+			}
+			decision := DecideCapacity(search)
+			if search.Status() != SearchNoPassingRate || decision.Decision != test.want || decision.Reason != test.reason {
+				testContext.Fatalf("status %q decision %+v, want %q with %q", search.Status(), decision, test.want, test.reason)
 			}
 		})
 	}
@@ -213,7 +448,7 @@ func TestDecideCapacityMapsTerminalSearchStatuses(testContext *testing.T) {
 			} else {
 				search = driveSearch(testContext, test.initial, 1000000, test.maxProbes, test.passAbove)
 			}
-			decision := DecideCapacity(search, nil, nil)
+			decision := DecideCapacity(search)
 			if decision.Decision != test.want || !strings.HasPrefix(decision.Reason, test.reason) {
 				testContext.Fatalf("DecideCapacity() = %+v, want %q with reason %q", decision, test.want, test.reason)
 			}
@@ -229,7 +464,7 @@ func TestDecideCapacityInconclusiveProbeStaysInconclusive(testContext *testing.T
 	if err := search.Record(1000, ProbeInconclusive); err != nil {
 		testContext.Fatalf("Record: %v", err)
 	}
-	decision := DecideCapacity(search, nil, nil)
+	decision := DecideCapacity(search)
 	if decision.Decision != Inconclusive || decision.Reason != SearchNotRefinedReason {
 		testContext.Fatalf("DecideCapacity() = %+v, want inconclusive", decision)
 	}
@@ -362,7 +597,8 @@ func TestNotDemonstratedProbeBoundsTheBracketAndContinues(testContext *testing.T
 	if probes[4].Outcome != ProbeNotDemonstrated || probes[6].Outcome != ProbeNotDemonstrated {
 		testContext.Fatalf("recorded outcomes %+v lost the not-demonstrated probes", probes)
 	}
-	decision := DecideCapacity(search, []int{105000, 105000, 105000, 105000, 105000}, []Decision{Pass, Pass, Pass, Pass, Pass})
+	recordRepetitions(testContext, search, fivePassing()...)
+	decision := DecideCapacity(search)
 	if decision.Decision != Pass || decision.SelectedRate != 105000 {
 		testContext.Fatalf("DecideCapacity() = %+v, want pass at 105000", decision)
 	}
@@ -403,7 +639,7 @@ func TestNoPassingRateNeedsDemonstratedFailures(testContext *testing.T) {
 			if search.Status() != SearchNoPassingRate {
 				testContext.Fatalf("status %q, want no passing rate", search.Status())
 			}
-			if decision := DecideCapacity(search, nil, nil); decision.Decision != scenario.want || decision.Reason != scenario.reason {
+			if decision := DecideCapacity(search); decision.Decision != scenario.want || decision.Reason != scenario.reason {
 				testContext.Fatalf("DecideCapacity() = %+v, want %q with %q", decision, scenario.want, scenario.reason)
 			}
 		})

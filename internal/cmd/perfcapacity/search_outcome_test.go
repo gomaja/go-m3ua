@@ -179,7 +179,7 @@ func TestWarmupOverloadIsDetectedInEitherDirection(testContext *testing.T) {
 // A validation repetition whose warm-up failed from overload never reached a
 // full run at the selected rate. The repetition path decides it like any run,
 // so it is a failed repetition (or not demonstrated with a stall), never a
-// pass: DecideCapacity requires every repetition to pass.
+// pass: it moves the search below the rate instead of validating it.
 func TestFailedWarmupRepetitionIsNeverAPass(testContext *testing.T) {
 	for name, maximumSend := range map[string]float64{"loss": 4_000_000, "loss and stall": 1_030_000_000} {
 		warmup := searchRecord(testContext, "search-160000-warmup.json")
@@ -189,13 +189,22 @@ func TestFailedWarmupRepetitionIsNeverAPass(testContext *testing.T) {
 			testContext.Fatalf("%s: %v", name, err)
 		}
 		decision := decideFixtureRun(fixture, 160000)
-		if decision.Phase != "warmup" || decision.Decision == string(perfstats.Pass) {
-			testContext.Fatalf("%s: failed warm-up repetition decided %+v, want a non-passing warm-up", name, decision)
+		outcome := searchOutcome(decision)
+		if decision.Phase != "warmup" || decision.Decision == string(perfstats.Pass) ||
+			outcome != perfstats.ProbeFailing && outcome != perfstats.ProbeNotDemonstrated {
+			testContext.Fatalf("%s: failed warm-up repetition decided %+v (%q), want a non-passing warm-up that bounds the rate", name, decision, outcome)
 		}
-		capacity := perfstats.DecideCapacity(bracketedAt(testContext, 160000), []int{160000, 160000, 160000, 160000, 160000},
-			[]perfstats.Decision{perfstats.Pass, perfstats.Pass, perfstats.Pass, perfstats.Pass, perfstats.Decision(decision.Decision)})
-		if capacity.Decision == perfstats.Pass {
-			testContext.Fatalf("%s: campaign %+v passed with a failed warm-up repetition", name, capacity)
+		search := bracketedAt(testContext, 160000)
+		for index := 0; index < 4; index++ {
+			if err := search.RecordRepetition(160000, perfstats.ProbePassing); err != nil {
+				testContext.Fatal(err)
+			}
+		}
+		if err := search.RecordRepetition(160000, outcome); err != nil {
+			testContext.Fatal(err)
+		}
+		if capacity := perfstats.DecideCapacity(search); capacity.Decision == perfstats.Pass || search.Upper() != 160000 {
+			testContext.Fatalf("%s: campaign %+v with bracket upper %d, want no pass and 160000 rejected", name, capacity, search.Upper())
 		}
 	}
 }
