@@ -14,6 +14,7 @@ import (
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/internal/perfstats"
+	"github.com/gomaja/go-m3ua/internal/sctpevents"
 	"github.com/gomaja/go-sctp"
 )
 
@@ -225,29 +226,26 @@ const (
 	associationEventsUnsupported = "unsupported"
 )
 
-// failoverAssociationEventsProbe reports whether this kernel lets a socket
+// failoverAssociationEventsProbe asks whether this kernel lets a socket
 // subscribe to SCTP_ASSOC_CHANGE through SCTP_EVENT (RFC 6458 Section 6.2.2),
-// which the library needs to report an ABORT as SCTP_COMM_LOST. Linux added
-// SCTP_EVENT in 5.0; before it the library runs without the subscription and
-// an ABORT surfaces as whichever error reaches the reader first. A variable so
-// a test can stand in for the kernel.
-var failoverAssociationEventsProbe = probeSCTPAssociationEvents
+// which the library needs to report an ABORT as SCTP_COMM_LOST. It asks the
+// way the library does, through the same internal probe: an SCTP socket that
+// is never bound or connected, so nothing reaches the network. The answer is
+// the kernel's, the same for an IPv4 or an IPv6 configuration. A variable so a
+// test can stand in for the kernel.
+var failoverAssociationEventsProbe = func() string { return associationEventsAnswer(sctpevents.Probe()) }
 
-// probeSCTPAssociationEvents asks the question the library asks, the same
-// way: a socket subscribing before it listens. It is closed at once.
-func probeSCTPAssociationEvents() string {
-	subscription := sctp.PreAssociationConfig{Notifications: []sctp.NotificationSubscription{
-		{Type: sctp.SCTP_ASSOC_CHANGE, State: sctp.SocketOptionEnable},
-	}}
-	listener, err := (&sctp.SocketConfig{}).WithPreAssociation(subscription).Listen("sctp4", nil)
+// associationEventsAnswer reads the probe as the library does: only
+// ENOPROTOOPT means a kernel without SCTP_EVENT (Linux before 5.0). Any other
+// failure leaves the question open.
+func associationEventsAnswer(probeErr error) string {
 	switch {
-	case err == nil:
-		_ = listener.Close()
+	case probeErr == nil:
 		return associationEventsSupported
-	case errors.Is(err, syscall.ENOPROTOOPT):
+	case errors.Is(probeErr, syscall.ENOPROTOOPT):
 		return associationEventsUnsupported
 	default:
-		return "unknown: " + err.Error()
+		return "unknown: " + probeErr.Error()
 	}
 }
 
@@ -295,6 +293,9 @@ func newFailoverTracker(spec sgpFailureSpec, clock *sharedRunClock, plane *routi
 		spec: spec, clock: clock, due: clock.window.Start + int64(spec.Offset), bindings: append([]routingBinding(nil), plane.bindings...),
 		sgps: make(map[m3ua.AssociationID]m3ua.SGPIdentity), failedSenders: make(map[m3ua.AssociationID]bool), alternativeSenders: make(map[m3ua.AssociationID]bool),
 		submitted: make(map[m3ua.AssociationID]uint64), indeterminate: make(map[m3ua.AssociationID]uint64), stop: make(chan struct{}),
+		// Asked here, before the cohort's measured window opens, so the probe's
+		// socket is no part of what the window measures.
+		associationEvents: failoverAssociationEventsProbe(),
 	}
 	for _, binding := range plane.bindings {
 		tracker.sgps[binding.SenderAssociation] = binding.Peer.SGP
@@ -330,7 +331,6 @@ func newFailoverTracker(spec sgpFailureSpec, clock *sharedRunClock, plane *routi
 // force at its start.
 func (tracker *failoverTracker) watch(associations []*m3ua.Association) {
 	tracker.timers = readFailoverTimers(associations)
-	tracker.associationEvents = failoverAssociationEventsProbe()
 	for _, association := range associations {
 		tracker.watches.Add(1)
 		go func(association *m3ua.Association) {

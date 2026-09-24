@@ -550,7 +550,9 @@ kinds.
   User-Initiated Abort cause of a requested ABORT. It also records whether
   this kernel reports SCTP association events
   (`sender.kernel_association_events`), without which an ABORT is not seen
-  as `SCTP_COMM_LOST`. The notification instant is the later of the failed
+  as `SCTP_COMM_LOST`. It asks before the measured window opens, the way the
+  library asks, on an SCTP socket that is never bound or connected; the answer
+  is the kernel's and holds for IPv4 and IPv6 alike. The notification instant is the later of the failed
   SGP's two, so the SGP is known down; any surviving association ending fails
   the trial. The time from
   the fault to each notification is recorded, not budgeted (section 4 excludes

@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -551,6 +552,46 @@ func TestFailoverCloseMustReturnBeforeTheAbortFallback(testContext *testing.T) {
 				testContext.Fatalf("close trial measured %v against budget %v, want %d against %d", got.Measured, got.Budget, test.took, sgpFailureShutdownFallback)
 			}
 		})
+	}
+}
+
+// The probe's answer is read as the library reads it: only ENOPROTOOPT means a
+// kernel without SCTP_EVENT, and any other failure leaves the question open,
+// which an abort trial reports as not measured.
+func TestFailoverAssociationEventsAnswer(testContext *testing.T) {
+	for _, test := range []struct {
+		probe error
+		want  string
+	}{
+		{probe: nil, want: associationEventsSupported},
+		{probe: syscall.ENOPROTOOPT, want: associationEventsUnsupported},
+		{probe: fmt.Errorf("setsockopt: %w", syscall.ENOPROTOOPT), want: associationEventsUnsupported},
+		{probe: syscall.EPROTONOSUPPORT, want: "unknown: " + syscall.EPROTONOSUPPORT.Error()},
+	} {
+		if got := associationEventsAnswer(test.probe); got != test.want {
+			testContext.Errorf("probe %v: %q, want %q", test.probe, got, test.want)
+		}
+	}
+}
+
+// The kernel is asked once, when the tracker is built before the cohort's
+// measured window opens, and not again when the watch starts inside it.
+func TestFailoverAssociationEventsAreAskedBeforeTheWindow(testContext *testing.T) {
+	asked := 0
+	previous := failoverAssociationEventsProbe
+	failoverAssociationEventsProbe = func() string {
+		asked++
+		return "probed"
+	}
+	defer func() { failoverAssociationEventsProbe = previous }()
+	tracker, _, _ := failoverTrackerFixture(testContext)
+	if asked != 1 || tracker.associationEvents != "probed" {
+		testContext.Fatalf("building the tracker asked %d times and recorded %q, want once and the answer", asked, tracker.associationEvents)
+	}
+	tracker.watch(nil)
+	tracker.finish()
+	if asked != 1 {
+		testContext.Fatalf("the watch asked the kernel again inside the measured window (%d probes)", asked)
 	}
 }
 
