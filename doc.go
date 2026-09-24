@@ -77,6 +77,15 @@ performs the procedures AssociationConfig.ASPProcedures marks automatic and then
 closes. Nothing calls it for the application: an ASP that wants its peers told
 before it goes calls it on each association before closing their owner.
 
+Both options end in the SCTP SHUTDOWN procedure, which the peer acknowledges
+and its SCTP layer reports as SHUTDOWN_COMPLETE. Association.Abort ends one
+association with an SCTP ABORT instead (RFC 9260 Sections 9.1 and 11.1.4): it
+discards whatever is still queued, does not wait for the peer, and the peer's
+SCTP layer reports COMMUNICATION LOST. Locally it is Close, with the same
+teardown and the same deregistration. It is for an association that has to go
+at once, such as a misbehaving peer or one that is not completing the
+shutdown, and like ShutdownContext only the application calls it.
+
 The ctx passed to Dial and Accept is the association's lifetime, not its
 handshake. Cancelling it closes the associations it produced, and that makes it
 the wrong context to derive from an interrupt signal if the application also
