@@ -1739,6 +1739,85 @@ func (c *Association) configuredASKeys() []ASKey {
 	return uniqueASKeys(keys)
 }
 
+// configuredASKeysContain reports whether key is one of configuredASKeys()
+// without building that slice. Route selection and status projection ask it
+// for every candidate Association of every lookup, so it must not allocate.
+//
+// It mirrors configuredASKeys: every dynamically registered scope is carried;
+// a statically configured Routing Context is carried under its dynamic scope
+// when one was registered for it and under its configured scope otherwise;
+// and the contextless Application Server is carried when no Routing Context is
+// configured at all, or when only dynamic ones are and the static
+// configuration is contextless.
+func (c *Association) configuredASKeysContain(key ASKey) bool {
+	if c == nil || c.isIPSPDoubleExchange() && !c.hasPeerIPSPTrafficDirection() {
+		return false
+	}
+	c.muDynamicASKeys.RLock()
+	dynamicCount := len(c.dynamicPeerASKeys)
+	dynamicMatch := false
+	for _, dynamic := range c.dynamicPeerASKeys {
+		if dynamic == key {
+			dynamicMatch = true
+			break
+		}
+	}
+	staticOverridden := false
+	if key.RoutingContextSet {
+		_, staticOverridden = c.dynamicPeerASKeys[key.RoutingContext]
+	}
+	c.muDynamicASKeys.RUnlock()
+	if dynamicMatch {
+		return true
+	}
+
+	explicitlyEmpty, staticCount, staticCarries := c.staticRoutingContextMembership(key)
+	if explicitlyEmpty && dynamicCount == 0 {
+		return false
+	}
+	if staticCarries && !staticOverridden && c.staticASKeyForRoutingContext(key.RoutingContext, false) == key {
+		return true
+	}
+	if staticCount != 0 || explicitlyEmpty {
+		return false
+	}
+	return key == c.contextlessASKey(false)
+}
+
+// staticRoutingContextMembership reports, without allocating, what
+// staticallyConfiguredRoutingContexts and hasExplicitlyEmptyASPAuthorization
+// would: whether the resolved authorization is explicitly empty, how many
+// static Routing Contexts there are, and whether key's Routing Context is one
+// of them.
+func (c *Association) staticRoutingContextMembership(key ASKey) (explicitlyEmpty bool, count int, carries bool) {
+	c.muAuthorizedRCs.RLock()
+	explicitlyEmpty = c.authorizationResolved && c.authorizationExplicit && len(c.authorizedRCs) == 0
+	if c.role == RoleSGP && c.authorizationResolved {
+		count = len(c.authorizedRCs)
+		if key.RoutingContextSet {
+			for _, routingContext := range c.authorizedRCs {
+				if routingContext == key.RoutingContext {
+					carries = true
+					break
+				}
+			}
+		}
+		c.muAuthorizedRCs.RUnlock()
+		return explicitlyEmpty, count, carries
+	}
+	c.muAuthorizedRCs.RUnlock()
+	servers := c.applicationServerInventory(false)
+	for index := range servers {
+		if servers[index].ASKey.RoutingContextSet {
+			count++
+			if key.RoutingContextSet && servers[index].ASKey.RoutingContext == key.RoutingContext {
+				carries = true
+			}
+		}
+	}
+	return explicitlyEmpty, count, carries
+}
+
 func (c *Association) staticallyConfiguredASKeys() []ASKey {
 	if c == nil {
 		return nil

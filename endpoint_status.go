@@ -339,10 +339,9 @@ func snapshotApplicationServer(applicationServer *applicationServer) Application
 
 // MTPRouteStatus returns one configured ASP MTP Route by its local key.
 //
-// It reads aspRoutes.derived in one pass, collecting only this route's own
-// keys, rather than building every route's destinations
-// to answer one of them: the cost is proportional to the total number of
-// derived destination records, not to their product with the route count.
+// It reads only this route's own aspRoutes.derived set rather than building
+// every route's destinations to answer one of them: the cost is proportional
+// to this route's derived destination records.
 func (e *Endpoint) MTPRouteStatus(id MTPRouteID) (MTPRouteStatus, bool) {
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return MTPRouteStatus{}, false
@@ -361,16 +360,9 @@ func (e *Endpoint) MTPRouteStatus(id MTPRouteID) (MTPRouteStatus, bool) {
 	}
 	sort.Slice(associations, func(i, j int) bool { return associations[i] < associations[j] })
 
-	keys := make([]aspDerivedRangeKey, 0)
-	for key := range routes.derived {
-		if key.mtpRoute == id {
-			keys = append(keys, key)
-		}
-	}
-
 	return MTPRouteStatus{
 		MTPRoute:     id,
-		Destinations: sortedDestinationStatuses(routes.derived, keys),
+		Destinations: sortedDestinationStatuses(routes.derived[id]),
 		Associations: associations,
 	}, true
 }
@@ -378,12 +370,12 @@ func (e *Endpoint) MTPRouteStatus(id MTPRouteID) (MTPRouteStatus, bool) {
 // MTPRouteStatuses returns every configured ASP MTP Route in configuration
 // order. Every nested slice is caller-owned.
 //
-// It builds every route's destinations and eligible Associations in one pass
-// each under one read lock — one pass over
-// aspRoutes.derived grouping keys by route, and one pass over
-// associationEligibleRoutes grouping Associations by route — rather than
-// querying one route at a time: the cost is proportional to the configured
-// routes, Associations and destination records, not to their product.
+// It builds every route's destinations and eligible Associations under one
+// read lock — each route's destinations from its own aspRoutes.derived set,
+// and one pass over associationEligibleRoutes grouping Associations by route —
+// rather than querying one route at a time: the cost is proportional to the
+// configured routes, Associations and destination records, not to their
+// product.
 func (e *Endpoint) MTPRouteStatuses() []MTPRouteStatus {
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return nil
@@ -391,11 +383,6 @@ func (e *Endpoint) MTPRouteStatuses() []MTPRouteStatus {
 	routes := e.aspRoutes
 	routes.mu.RLock()
 	defer routes.mu.RUnlock()
-
-	destinationsByRoute := make(map[MTPRouteID][]aspDerivedRangeKey, len(routes.config.mtpRoutes))
-	for key := range routes.derived {
-		destinationsByRoute[key.mtpRoute] = append(destinationsByRoute[key.mtpRoute], key)
-	}
 
 	associationsByRoute := make(map[MTPRouteID][]AssociationID, len(routes.config.mtpRoutes))
 	for association, eligible := range routes.associationEligibleRoutes {
@@ -420,7 +407,7 @@ func (e *Endpoint) MTPRouteStatuses() []MTPRouteStatus {
 		}
 		statuses = append(statuses, MTPRouteStatus{
 			MTPRoute:     route.id,
-			Destinations: sortedDestinationStatuses(routes.derived, destinationsByRoute[route.id]),
+			Destinations: sortedDestinationStatuses(routes.derived[route.id]),
 			Associations: associations,
 		})
 	}
