@@ -546,6 +546,63 @@ association, err := endpoint.Dial(associationCtx, "m3ua", nil, remote, config)
 _ = association.ShutdownContext(shutdownCtx) // Written while associationCtx is live.
 ```
 
+### SCTP tuning
+
+`AssociationConfig.SetSCTPSACK` and `SetSCTPNoDelay` set the delayed-SACK timer
+and `SCTP_NODELAY` once an association exists. Its socket buffers are sized in
+`SCTPConfig`, in bytes, before it exists; zero keeps the kernel default:
+
+```go
+config := m3ua.NewAssociationConfig()
+config.SocketReceiveBuffer = 8 << 20 // SO_RCVBUF
+config.SocketSendBuffer = 1 << 20    // SO_SNDBUF
+```
+
+`SocketReceiveBuffer` is not `ReadBufferSize`. That bounds one M3UA message
+read from the socket; this is the kernel queue those reads drain.
+
+The sizes are applied before the socket connects or listens, which is what makes
+the receive buffer matter: the INIT or INIT ACK announces the receive window
+(RFC 9260 Sections 3.3.2 and 3.3.3), and Linux announces half the socket's
+receive buffer. A size applied to an established socket would change the buffer
+and not the window.
+
+Raise the receive buffer when small messages arrive at a high rate. Linux
+charges each queued message its payload plus about 232 bytes of `sk_buff`
+bookkeeping against the buffer, while the window counts payload alone, so for
+payloads under about 232 bytes the window admits more than the buffer can hold.
+A receiver that pauses, for a garbage collection or a scheduling delay, then
+overflows it. The kernel drops DATA, and when fast retransmit cannot recover it
+the sender waits for a T3-rtx timeout, never shorter than RTO.Min, one second by
+default (RFC 9260 Sections 6.3.1 and 16). Size the buffer for what arrives
+during the longest pause the receiver has to ride out, roughly rate × pause ×
+(payload + 232 bytes). One association carrying 25,000 messages/s with 128-byte
+payloads stalled that way in 5 of 6 two-minute runs at the default buffer, and
+in none of 6 with a 16 MiB receive buffer.
+
+Linux caps a request at `net.core.rmem_max` (`wmem_max` for the send buffer) and
+doubles it, as `socket(7)` describes. The library never exceeds the cap with
+`SO_RCVBUFFORCE`, so check what took effect: a reported size below twice the
+request means the cap applied, and raising it is the operator's decision.
+
+```go
+if size, err := association.SocketReceiveBuffer(); err == nil {
+    log.Printf("SO_RCVBUF is %d bytes; the window announced at setup was %d", size, size/2)
+}
+```
+
+This replaces raising `net.core.rmem_default`, which resizes every socket on the
+host. `SocketReceiveBuffer` sizes only the associations that need it, and
+`rmem_max` only has to permit the request.
+
+A Listener sizes its listening socket from `DefaultAssociationConfig`, and every
+association it accepts inherits those sizes. `SelectAssociationConfig` runs
+after the INIT ACK has announced the window, so a selected
+`SocketReceiveBuffer` must be zero or the default's; anything else refuses that
+peer with `ErrInvalidSCTPConfig`, and a peer that needs a different receive size
+needs a Listener of its own. A selected `SocketSendBuffer` is applied to the
+accepted socket.
+
 ## Routing Key Management
 
 An SGP or IPSP Endpoint enables the optional RFC 4666 Sections 3.6 and 4.4

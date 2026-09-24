@@ -111,6 +111,44 @@ type SCTPConfig struct {
 	// is 32-bit, so there is no protocol-level maximum to size against. Raise
 	// this if a peer is known to send larger blocks than the default allows.
 	ReadBufferSize int
+
+	// SocketReceiveBuffer is the SO_RCVBUF size, in bytes, requested for the
+	// association's SCTP socket. Zero leaves the size the socket starts with:
+	// the kernel default for Dial and Listen, and the listening socket's for an
+	// association Accept returns, which inherits it.
+	//
+	// It is not ReadBufferSize. That bounds one M3UA message read out of the
+	// socket; this is the kernel queue those reads drain, where DATA waits
+	// until the application reads it.
+	//
+	// It is applied before the socket connects or listens, which is what makes
+	// it matter: RFC 6458 Section 8.1.6 has SO_RCVBUF control the receiver
+	// window on a one-to-one socket, and the INIT or INIT ACK announces that
+	// window as the Advertised Receiver Window Credit, "the dedicated buffer
+	// space [...] reserved in association with this window" (RFC 9260
+	// Sections 3.3.2 and 3.3.3). Linux fixes it when the association is
+	// created and announces half the socket's buffer. A size applied afterwards
+	// changes the buffer and not the window the peer was given.
+	//
+	// socket(7) describes what Linux does with the request: it caps it at
+	// net.core.rmem_max and doubles it for bookkeeping overhead. The library
+	// never uses SO_RCVBUFFORCE to exceed the cap; raising the cap is the
+	// operator's decision. Association.SocketReceiveBuffer reports the size
+	// that took effect.
+	//
+	// A Listener applies its DefaultAssociationConfig's value to the listening
+	// socket; see ListenerConfig for what a selected configuration may change.
+	SocketReceiveBuffer int
+
+	// SocketSendBuffer is the SO_SNDBUF size, in bytes, requested for the
+	// association's SCTP socket: how much it may hold waiting to be sent and
+	// acknowledged (RFC 6458 Section 8.1.7). Zero leaves the size the socket
+	// starts with, as for SocketReceiveBuffer.
+	//
+	// Linux caps the request at net.core.wmem_max and doubles it, as socket(7)
+	// describes; Association.SocketSendBuffer reports the size that took
+	// effect.
+	SocketSendBuffer int
 }
 
 // DefaultInitTimeout bounds one SCTP association attempt: how long Dial waits
@@ -560,6 +598,26 @@ type AssociationConfigSelector func(AcceptInfo) (*AssociationConfig, error)
 // DefaultAssociationConfig is the fallback per-association configuration. If
 // SelectAssociationConfig is set, it runs after SCTP accept and before socket
 // options, monitor goroutines, ASP Up parsing, or compatibility handling.
+//
+// DefaultAssociationConfig also sizes the listening socket, whether or not
+// SelectAssociationConfig is set: its SCTPConfig.SocketReceiveBuffer and
+// SocketSendBuffer are applied before listen, and every accepted association
+// inherits them.
+//
+// The INIT ACK has announced the receive window by the time
+// SelectAssociationConfig runs, so a selected SocketReceiveBuffer must be zero
+// or the default's own; any other value refuses that association with
+// ErrInvalidSCTPConfig, and the Listener carries on serving. Applying it to the
+// accepted socket instead could not honour it, because Linux keeps the window
+// it announced. A larger buffer would give the peer no more window, and a
+// smaller one would leave the peer entitled to more than the buffer holds,
+// which is the overflow the setting exists to prevent and what RFC 9260
+// Sections 3.3.2 and 3.3.3 advise against: "During the life of the
+// association, this buffer space SHOULD NOT be reduced". A peer that needs a
+// different receive size needs a Listener of its own.
+//
+// A selected SocketSendBuffer is announced to no one, so a non-zero one is
+// applied to the accepted socket exactly.
 type ListenerConfig struct {
 	DefaultAssociationConfig *AssociationConfig
 	SelectAssociationConfig  AssociationConfigSelector
@@ -649,6 +707,9 @@ func snapshotApplicationServers(servers []ASConfig) []ASConfig {
 func validateAssociationConfigForRole(role Role, config *AssociationConfig) error {
 	if config == nil {
 		return ErrNilAssociationConfig
+	}
+	if err := validateSCTPConfig(config.SCTPConfig); err != nil {
+		return err
 	}
 	if err := validateApplicationServers("ApplicationServers", config.ApplicationServers); err != nil {
 		return err
