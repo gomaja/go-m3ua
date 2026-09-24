@@ -8,7 +8,8 @@ import (
 func TestWarmupFailurePreservesBothRawRecords(testContext *testing.T) {
 	sender := runRecord{Side: "sender", Capped: 7, Verdict: verdictInvalid}
 	receiver := runRecord{Side: "receiver", Delivery: deliveryResult{Missing: 7}, Verdict: verdictInvalid}
-	result := failedCohortResult("warmup", sender, receiver, errors.New("warmup cohort is invalid"))
+	err := errors.New("warmup cohort is invalid")
+	result := failedWarmupResult(newCohortResult("warmup", sender, receiver, err), err)
 	if result.Phase != "warmup" || result.Warmup == nil || result.Measurement != nil {
 		testContext.Fatalf("phase result = %+v", result)
 	}

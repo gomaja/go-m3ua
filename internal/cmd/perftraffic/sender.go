@@ -35,7 +35,15 @@ type cohortResult struct {
 	ReverseReceiver *runRecord `json:"reverse_receiver,omitempty"`
 	Verdict         string     `json:"verdict"`
 	Error           string     `json:"error,omitempty"`
+	// validityOnly records that every error the cohort reported, in either
+	// direction, is errCohortInvalid: the cohort ran and failed only its own
+	// validity rules. It is not serialized.
+	validityOnly bool
 }
+
+// errCohortInvalid is the whole error of a cohort that failed only its own
+// validity rules. internal/cmd/perfcapacity recognises a failed warm-up by it.
+var errCohortInvalid = errors.New("cohort is invalid; inspect machine-readable reasons")
 
 type sendJob struct {
 	identity  messageIdentity
@@ -168,7 +176,7 @@ func runWarmupAndMeasurement(config commandConfig, runCohort cohortRunner, inspe
 			if warmupErr == nil {
 				warmupErr = errors.New("warmup cohort is invalid")
 			}
-			return failedCohortResult("warmup", warmupResult.Sender, warmupResult.Receiver, fmt.Errorf("warmup did not drain cleanly: %w", warmupErr)), warmupErr
+			return failedWarmupResult(warmupResult, warmupErr), warmupErr
 		}
 	}
 	measurement, err := runCohort(config, "measurement", config.Cohort, config.Duration)
@@ -236,6 +244,7 @@ func collectReverse(ctx context.Context, config commandConfig, result *cohortRes
 				result.ReverseSender = receiver.Reverse
 				result.ReverseReceiver = receiver.ReverseReceiver
 				result.Verdict = verdictInvalid
+				result.validityOnly = result.validityOnly && receiver.ReverseError == errCohortInvalid.Error()
 				result.Error = joinErrorText(result.Error, "reverse cohort: "+receiver.ReverseError)
 				return
 			case receiver.Reverse != nil:
@@ -248,12 +257,14 @@ func collectReverse(ctx context.Context, config commandConfig, result *cohortRes
 				return
 			case receiver.FatalError != "":
 				result.Verdict = verdictInvalid
+				result.validityOnly = false
 				result.Error = joinErrorText(result.Error, "reverse cohort receiver: "+receiver.FatalError)
 				return
 			}
 		}
 		if !time.Now().Before(deadline) {
 			result.Verdict = verdictInvalid
+			result.validityOnly = false
 			result.Error = joinErrorText(result.Error, "reverse cohort did not complete before the collection deadline")
 			return
 		}
@@ -262,6 +273,7 @@ func collectReverse(ctx context.Context, config commandConfig, result *cohortRes
 		case <-ctx.Done():
 			timer.Stop()
 			result.Verdict = verdictInvalid
+			result.validityOnly = false
 			result.Error = joinErrorText(result.Error, ctx.Err().Error())
 			return
 		case <-timer.C:
@@ -287,7 +299,8 @@ func joinErrorText(existing, addition string) string {
 }
 
 func newCohortResult(phase string, sender, receiver runRecord, err error) cohortResult {
-	result := cohortResult{Phase: phase, Sender: sender, Receiver: receiver, Verdict: verdictPass}
+	result := cohortResult{Phase: phase, Sender: sender, Receiver: receiver, Verdict: verdictPass,
+		validityOnly: err == nil || err.Error() == errCohortInvalid.Error()}
 	if sender.Verdict == verdictInvalid || receiver.Verdict == verdictInvalid || err != nil {
 		result.Verdict = verdictInvalid
 	} else if sender.Verdict == verdictInconclusive || receiver.Verdict == verdictInconclusive {
@@ -299,21 +312,30 @@ func newCohortResult(phase string, sender, receiver runRecord, err error) cohort
 	return result
 }
 
-func failedCohortResult(phase string, sender, receiver runRecord, err error) combinedResult {
-	cohort := newCohortResult(phase, sender, receiver, err)
-	result := combinedResult{
-		Phase:    phase,
-		Sender:   sender,
-		Receiver: receiver,
-		Verdict:  cohort.Verdict,
-		Error:    cohort.Error,
+// failedWarmupResult ends a run whose warm-up failed with every record the
+// warm-up produced, both directions' in a bidirectional run. A warm-up whose
+// every direction failed only its own validity rules ends with the bare
+// validity error, which internal/cmd/perfcapacity accepts as evidence against
+// the rate whichever direction failed; any other failure keeps the text of
+// every error the cohort reported, so it can never pass for overload.
+func failedWarmupResult(warmup cohortResult, err error) combinedResult {
+	cause := err.Error()
+	switch {
+	case warmup.validityOnly:
+		cause = errCohortInvalid.Error()
+	case warmup.Error != "":
+		cause = warmup.Error
 	}
-	if phase == "warmup" {
-		result.Warmup = &cohort
-	} else {
-		result.Measurement = &cohort
+	warmup.Verdict = verdictInvalid
+	warmup.Error = "warmup did not drain cleanly: " + cause
+	return combinedResult{
+		Phase:    warmup.Phase,
+		Warmup:   &warmup,
+		Sender:   warmup.Sender,
+		Receiver: warmup.Receiver,
+		Verdict:  warmup.Verdict,
+		Error:    warmup.Error,
 	}
-	return result
 }
 
 func runSenderCohort(ctx context.Context, config commandConfig, associations []*m3ua.Association, registry *echoRegistry, cohort string, duration time.Duration) (runRecord, runRecord, error) {
@@ -583,7 +605,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		cohortErrors = append(cohortErrors, stopErr)
 	}
 	if sender.Verdict == verdictInvalid || receiver.Verdict == verdictInvalid {
-		cohortErrors = append(cohortErrors, errors.New("cohort is invalid; inspect machine-readable reasons"))
+		cohortErrors = append(cohortErrors, errCohortInvalid)
 	}
 	return sender, receiver, errors.Join(cohortErrors...)
 }

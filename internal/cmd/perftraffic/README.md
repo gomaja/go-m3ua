@@ -77,6 +77,10 @@ The cohort result carries per-direction records: `sender`/`receiver` cover
 ASP-to-SGP and `reverse_sender`/`reverse_receiver` cover SGP-to-ASP, each
 with its own counters, series, sender-window bounds and backlog interval. The
 cohort passes only when all four records are loss-free and fixture-valid.
+A failed warm-up keeps all four records. When every direction failed only its
+own validity rules the run ends with the plain warm-up validity error,
+whichever direction failed; a fixture fault in either direction keeps its own
+text in the error.
 In the default HTTP-interval mode, each direction's measurement window is anchored by its own driving side; the
 two windows start within one control round-trip of each other and are not
 claimed to be identical. With `-same-host-clock`, both directions instead use
@@ -755,8 +759,9 @@ A trend fitted over a finite window cannot prove indefinite stability.
 
 Sender stdout is one JSON object containing the active `phase`, top-level
 `sender`, `receiver`, `verdict`, an optional `error`, and retained `warmup` and
-`measurement` phase records. A warm-up failure returns both raw warm-up records
-instead of replacing them with an empty result. Each side retains raw
+`measurement` phase records. A warm-up failure returns every raw warm-up record
+(both directions' in bidirectional mode) instead of replacing them with an
+empty result. Each side retains raw
 configuration and observations:
 
 - `scheduled`, `sent`, `submitted`, `send_errors`, `capped`, and outstanding counts at
@@ -872,7 +877,7 @@ unreachable receiver control request, a canceled run, or a deadline that passed
 before any receiver result was read. On a shared-clock receiver a delivery
 committed after the drain deadline is likewise counted, in `invalid` and in
 `late_after_deadline`, rather than ending the receiver with a fatal error. A
-throughput or routed warm-up that fails this way ends with exactly the warm-up
-validity error, so `internal/cmd/perfcapacity` accepts it as a failed probe of
-that rate. The DATA overload trial keeps its own contract: there any drain
+throughput, routed or bidirectional warm-up that fails this way ends with
+exactly the warm-up validity error, so `internal/cmd/perfcapacity` accepts it
+as a failed probe of that rate. The DATA overload trial keeps its own contract: there any drain
 failure or late delivery is a fixture failure, as before.
