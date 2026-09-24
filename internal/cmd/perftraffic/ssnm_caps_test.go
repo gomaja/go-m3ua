@@ -59,7 +59,7 @@ func TestSSNMEventBytesFollowsTheDocumentedFormula(testContext *testing.T) {
 		// Byte lengths, not runes: "état" is five bytes.
 		{"reason counted in bytes", m3ua.SSNMEvent{Kind: m3ua.SSNMResourceLossEvent, Reason: "état"}, 517},
 		// 512 + 1024*(8 + 256 + 4) + 4.
-		{"1,024-APC workload report", deliveredEvent(ssnmPlan{records: 1024, apcs: 1024}, 1), 274_948},
+		{"1,024-APC workload report", deliveredEvent(singlePlan(1024, 1024), 1), 274_948},
 	} {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
 			if got := ssnmEventBytes(testCase.event); got != testCase.want {
@@ -76,7 +76,7 @@ func TestSSNMWorkloadEventBytes(testContext *testing.T) {
 		if got := ssnmWorkloadEventBytes(destinations); got != want {
 			testContext.Errorf("%d-destination message = %d accounted bytes, want %d", destinations, got, want)
 		}
-		plan := ssnmPlan{records: 1024, apcs: destinations}
+		plan := singlePlan(1024, destinations)
 		if got := ssnmEventBytes(deliveredEvent(plan, plan.preloadMessages())); got != want {
 			testContext.Errorf("delivered %d-destination report = %d accounted bytes, want %d", destinations, got, want)
 		}
@@ -98,7 +98,7 @@ func capEvidence(queueLimit, queueBytes, queued int) *ssnmPauseRecord {
 }
 
 func TestSSNMCapFailureJudgesTheBindingCap(testContext *testing.T) {
-	record := ssnmSubscriberRecord{Partitions: 1, FinalPositions: []uint64{10}, ExpectedFinalPosition: 10, ssnmSubscriberCounts: ssnmSubscriberCounts{ContinuityLost: 1}}
+	record := ssnmSubscriberRecord{Partitions: 1, FinalPositions: []uint64{10}, ExpectedFinalPositions: []uint64{10}, ssnmSubscriberCounts: ssnmSubscriberCounts{ContinuityLost: 1}}
 	for _, testCase := range []struct {
 		name    string
 		pause   func() *ssnmPauseRecord
@@ -193,11 +193,18 @@ func (stream *scriptedStream) Resync() (m3ua.SSNMSnapshot, error) {
 
 func (*scriptedStream) Close() error { return nil }
 
-// deliveredEvent is the report the library delivers for one plan position:
-// planEvent's report in the generator's scope, with every destination it
-// names updated in the availability dimension under that scope.
+// deliveredEvent is the report the library delivers for one plan position of
+// association 0's partition.
 func deliveredEvent(plan ssnmPlan, position uint64) m3ua.SSNMEvent {
-	event := planEvent(plan, testPartition, position)
+	return deliveredAssociationEvent(plan, 0, position)
+}
+
+// deliveredAssociationEvent is the report the library delivers for one
+// position of association's partition: associationEvent's report in the
+// generator's scope, with every destination it names updated in the
+// availability dimension under that scope.
+func deliveredAssociationEvent(plan ssnmPlan, association int, position uint64) m3ua.SSNMEvent {
+	event := associationEvent(plan, testPartitionOf(association), association, position)
 	event.Report.Scope = ssnmScope()
 	for _, destination := range event.Report.Destinations {
 		event.Updated = append(event.Updated, m3ua.SSNMDestinationKnowledge{
@@ -207,12 +214,14 @@ func deliveredEvent(plan ssnmPlan, position uint64) m3ua.SSNMEvent {
 	return event
 }
 
-// retainedQueue is a paused queue of steady one-APC reports, optionally
+// retainedQueue is a paused queue of steady one-APC reports in schedule
+// order, generator message m in association m mod N's partition, optionally
 // followed by the continuity-loss marker.
 func retainedQueue(plan ssnmPlan, events int, loss bool) []m3ua.SSNMEvent {
 	var queue []m3ua.SSNMEvent
-	for index := 0; index < events; index++ {
-		queue = append(queue, deliveredEvent(plan, plan.preloadMessages()+uint64(index)))
+	for message := uint64(0); message < uint64(events); message++ {
+		association, position := plan.target(message)
+		queue = append(queue, deliveredAssociationEvent(plan, association, position))
 	}
 	if loss {
 		queue = append(queue, m3ua.SSNMEvent{Kind: m3ua.SSNMContinuityLostEvent, ContinuityLost: true})
@@ -224,7 +233,12 @@ func retainedQueue(plan ssnmPlan, events int, loss bool) []m3ua.SSNMEvent {
 // bytes and classifies the loss. The clock steps a whole pause per read, so
 // no real time is asserted.
 func TestSSNMPauseDrainAccountsRetainedBytes(testContext *testing.T) {
-	plan := ssnmPlan{records: 256, apcs: 1}
+	plan := singlePlan(256, 1)
+	// Under the total rate the retained queue interleaves eight partitions'
+	// reports; the caps count every event of the subscription alike, so the
+	// judgment is the same: 256 events for the count cap, and 125 events of
+	// 784 bytes under a 96 KiB byte limit.
+	eight := ssnmPlan{records: 256, apcs: 1, associations: 8}
 	for _, testCase := range []struct {
 		name       string
 		queueLimit int
@@ -232,25 +246,45 @@ func TestSSNMPauseDrainAccountsRetainedBytes(testContext *testing.T) {
 		queue      []m3ua.SSNMEvent
 		want       ssnmPauseRecord
 		reason     string
+		// eight marks a queue of the eight-association plan.
+		eight bool
 	}{
+		{"byte cap over eight partitions", 256, 98_304, retainedQueue(eight, 125, true), ssnmPauseRecord{
+			ContinuityLossObserved: true, QueuedAtLoss: 125, QueuedBytesAtLoss: 98_000, SmallestQueuedEventBytes: 784,
+			ByteCapEnforced: true, BindingCap: ssnmBindingBytes, QueuedStateEntries: 125,
+		}, "", true},
+		{"count cap over eight partitions", 256, 1 << 20, retainedQueue(eight, 256, true), ssnmPauseRecord{
+			ContinuityLossObserved: true, QueuedAtLoss: 256, QueuedBytesAtLoss: 256 * 784, SmallestQueuedEventBytes: 784,
+			CountCapEnforced: true, BindingCap: ssnmBindingCount, QueuedStateEntries: 256,
+		}, "", true},
+		{"eight partitions over the count cap", 256, 1 << 20, retainedQueue(eight, 300, false), ssnmPauseRecord{
+			QueuedAtLoss: 257, QueuedBytesAtLoss: 257 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 257,
+		}, "retained 257 events, over the 256-event cap", true},
+		{"eight partitions losing continuity early", 256, 1 << 20, retainedQueue(eight, 40, true), ssnmPauseRecord{
+			ContinuityLossObserved: true, QueuedAtLoss: 40, QueuedBytesAtLoss: 40 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 40,
+		}, "below both caps", true},
 		{"byte cap", 256, 98_304, retainedQueue(plan, 125, true), ssnmPauseRecord{
 			ContinuityLossObserved: true, QueuedAtLoss: 125, QueuedBytesAtLoss: 98_000, SmallestQueuedEventBytes: 784,
 			ByteCapEnforced: true, BindingCap: ssnmBindingBytes, QueuedStateEntries: 125,
-		}, ""},
+		}, "", false},
 		{"count cap", 4, 1 << 20, retainedQueue(plan, 4, true), ssnmPauseRecord{
 			ContinuityLossObserved: true, QueuedAtLoss: 4, QueuedBytesAtLoss: 4 * 784, SmallestQueuedEventBytes: 784,
 			CountCapEnforced: true, BindingCap: ssnmBindingCount, QueuedStateEntries: 4,
-		}, ""},
+		}, "", false},
 		{"queue over the count cap", 4, 1 << 20, retainedQueue(plan, 6, false), ssnmPauseRecord{
 			QueuedAtLoss: 5, QueuedBytesAtLoss: 5 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 5,
-		}, "retained 5 events, over the 4-event cap"},
+		}, "retained 5 events, over the 4-event cap", false},
 		{"early loss", 256, 1 << 20, retainedQueue(plan, 3, true), ssnmPauseRecord{
 			ContinuityLossObserved: true, QueuedAtLoss: 3, QueuedBytesAtLoss: 3 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 3,
-		}, "below both caps"},
+		}, "below both caps", false},
 	} {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
 			stream := &scriptedStream{events: testCase.queue}
-			subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, testCase.queueLimit, testCase.queueBytes)
+			subscriberPlan := plan
+			if testCase.eight {
+				subscriberPlan = eight
+			}
+			subscriber := newSSNMSubscriber(0, true, subscriberPlan, 1000, testCase.queueLimit, testCase.queueBytes)
 			subscriber.subscription = stream
 			pause := ssnmPause{Duration: 10 * time.Millisecond}
 			subscriber.pauseAndRecover(context.Background(), &steppingMeasurementClock{step: int64(pause.Duration)}, 0, pause)
@@ -272,6 +306,11 @@ func TestSSNMPauseDrainAccountsRetainedBytes(testContext *testing.T) {
 			failure := ssnmCapFailure(got)
 			if testCase.reason == "" && failure != "" || testCase.reason != "" && !strings.Contains(failure, testCase.reason) {
 				testContext.Fatalf("cap failure %q, want %q", failure, testCase.reason)
+			}
+			// The queue starts after the preload, which counts as a gap; its
+			// reports must still belong to their partitions.
+			if counts := subscriber.counts; counts.Unexpected != 0 || counts.MisScoped != 0 {
+				testContext.Fatalf("the retained queue did not follow the plan: %+v", counts)
 			}
 		})
 	}

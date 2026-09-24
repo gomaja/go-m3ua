@@ -9,8 +9,15 @@ import (
 
 // ssnmSpecEvidence is the SSNM load declaration of a perftraffic cohort
 // specification. It is absent from every run without SSNM load.
+//
+// TotalRate is the SSNM messages per second the ASP received over every
+// association, each message sent on one association round-robin. LegacyRate
+// is the retired rate field, a per-association intensity every association
+// received in full; it is decoded only so that such evidence is refused by
+// name rather than read under the other meaning.
 type ssnmSpecEvidence struct {
-	Rate                   *uint64        `json:"rate"`
+	TotalRate              *uint64        `json:"total_rate"`
+	LegacyRate             *uint64        `json:"rate"`
 	APCs                   *int           `json:"apcs"`
 	Records                *int           `json:"records"`
 	Subscribers            *int           `json:"subscribers"`
@@ -26,8 +33,10 @@ type ssnmSpecEvidence struct {
 // no-update control can never be mixed into one capacity decision. The
 // per-run anchor is excluded, like the cohort name and seed, and so is the
 // phase: a failed warm-up ran the same disturbance as the measurement.
+// TotalRate is spread over the workload's associations, which the workload
+// identity carries beside it.
 type ssnmIdentity struct {
-	Rate        uint64
+	TotalRate   uint64
 	APCs        int
 	Records     int
 	Subscribers int
@@ -73,7 +82,7 @@ const (
 )
 
 const (
-	maximumSSNMRate        = 10_000
+	maximumSSNMTotalRate   = 10_000
 	maximumSSNMAPCs        = 1024
 	maximumSSNMRecords     = 16_384
 	maximumSSNMSubscribers = 16
@@ -87,17 +96,20 @@ func ssnmIdentityFromSpec(spec *fixtureSpec) (ssnmIdentity, error) {
 	if declared == nil {
 		return ssnmIdentity{}, nil
 	}
-	if declared.Rate == nil || declared.APCs == nil || declared.Records == nil || declared.Subscribers == nil || declared.SubscriptionQueueBytes == nil ||
+	if declared.LegacyRate != nil {
+		return ssnmIdentity{}, errors.New("spec.ssnm rate is the retired per-association broadcast intensity, which every association received in full; evidence under it cannot be read as a total_rate workload or mixed with one, so re-run it with -ssnm-total-rate")
+	}
+	if declared.TotalRate == nil || declared.APCs == nil || declared.Records == nil || declared.Subscribers == nil || declared.SubscriptionQueueBytes == nil ||
 		declared.PauseOffset == nil || declared.PauseDuration == nil || declared.Phase == nil || declared.Anchor == nil {
-		return ssnmIdentity{}, errors.New("spec.ssnm rate, apcs, records, subscribers, subscription_queue_bytes, pause_offset_ns, pause_duration_ns, phase and anchor_ns are required")
+		return ssnmIdentity{}, errors.New("spec.ssnm total_rate, apcs, records, subscribers, subscription_queue_bytes, pause_offset_ns, pause_duration_ns, phase and anchor_ns are required")
 	}
 	identity := ssnmIdentity{
-		Rate: *declared.Rate, APCs: *declared.APCs, Records: *declared.Records, Subscribers: *declared.Subscribers,
+		TotalRate: *declared.TotalRate, APCs: *declared.APCs, Records: *declared.Records, Subscribers: *declared.Subscribers,
 		SubscriptionQueueBytes: *declared.SubscriptionQueueBytes, PauseOffset: *declared.PauseOffset, PauseDuration: *declared.PauseDuration,
 	}
 	switch {
-	case identity.Rate == 0 || identity.Rate > maximumSSNMRate:
-		return ssnmIdentity{}, errors.New("spec.ssnm rate must be between 1 and 10000")
+	case identity.TotalRate == 0 || identity.TotalRate > maximumSSNMTotalRate:
+		return ssnmIdentity{}, errors.New("spec.ssnm total_rate must be between 1 and 10000")
 	case identity.APCs < 1 || identity.APCs > maximumSSNMAPCs:
 		return ssnmIdentity{}, errors.New("spec.ssnm apcs must be between 1 and 1024")
 	case identity.Records < identity.APCs || identity.Records > maximumSSNMRecords || identity.Records%identity.APCs != 0:

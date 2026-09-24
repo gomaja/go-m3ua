@@ -16,7 +16,7 @@ func ssnmRunJSON(testContext *testing.T, rate int, verdict string, mutate func(m
 		sender := cohort["sender"].(map[string]any)
 		start := sender["spec"].(map[string]any)["shared_clock"].(map[string]any)["start_ns"]
 		workload := map[string]any{
-			"rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20,
+			"total_rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20,
 			"pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": start,
 		}
 		for _, side := range []string{"sender", "receiver"} {
@@ -80,12 +80,12 @@ func TestSSNMLoadedCohortRequiresEvidence(testContext *testing.T) {
 		}},
 		{"workload disagrees with spec", func(cohort map[string]any) {
 			cohort["sender"].(map[string]any)["ssnm"].(map[string]any)["workload"] = map[string]any{
-				"rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
+				"total_rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
 			}
 		}},
 		{"receiver spec disagrees", func(cohort map[string]any) {
 			cohort["receiver"].(map[string]any)["spec"].(map[string]any)["ssnm"] = map[string]any{
-				"rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
+				"total_rate": 999, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20, "pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
 			}
 		}},
 		{"warm-up phase", func(cohort map[string]any) {
@@ -288,7 +288,7 @@ func TestSSNMBudgetsAreRequiredAndPartOfTheIdentity(testContext *testing.T) {
 // whose spec declares none.
 func TestStraySSNMEvidenceIsRefusedOutsideLoadedCohorts(testContext *testing.T) {
 	workload := map[string]any{
-		"rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20,
+		"total_rate": 1000, "apcs": 1, "records": 16384, "subscribers": 8, "subscription_queue_bytes": 1 << 20,
 		"pause_offset_ns": 0, "pause_duration_ns": 0, "phase": "measurement", "anchor_ns": 1,
 	}
 	for _, side := range []string{"sender", "receiver", "reverse_sender", "reverse_receiver"} {
@@ -376,5 +376,88 @@ func TestSSNMSubscriptionQueueBytesArePartOfTheIdentity(testContext *testing.T) 
 				testContext.Fatalf("status=%d result=%+v, want the spec refused for subscription_queue_bytes", status, decoded)
 			}
 		})
+	}
+}
+
+// legacySSNMWorkload rewrites one spec.ssnm-shaped map to the retired
+// per-association meaning: rate in place of total_rate.
+func legacySSNMWorkload(workload map[string]any) map[string]any {
+	legacy := map[string]any{}
+	for key, value := range workload {
+		legacy[key] = value
+	}
+	legacy["rate"] = legacy["total_rate"]
+	delete(legacy, "total_rate")
+	return legacy
+}
+
+// Evidence produced under the retired per-association broadcast, where every
+// association received rate messages/s, is refused by name wherever it
+// appears, so it never folds into a total-rate campaign or reads as one.
+func TestSSNMRetiredPerAssociationRateIsRefused(testContext *testing.T) {
+	spec := func(cohort map[string]any, side string) map[string]any {
+		return cohort[side].(map[string]any)["spec"].(map[string]any)
+	}
+	legacyEverywhere := func(cohort map[string]any) {
+		legacy := legacySSNMWorkload(spec(cohort, "sender")["ssnm"].(map[string]any))
+		for _, side := range []string{"sender", "receiver"} {
+			spec(cohort, side)["ssnm"] = legacy
+		}
+		cohort["sender"].(map[string]any)["ssnm"].(map[string]any)["workload"] = legacy
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"legacy evidence throughout": legacyEverywhere,
+		"legacy sender workload": func(cohort map[string]any) {
+			sender := cohort["sender"].(map[string]any)["ssnm"].(map[string]any)
+			sender["workload"] = legacySSNMWorkload(sender["workload"].(map[string]any))
+		},
+		"both fields": func(cohort map[string]any) {
+			for _, side := range []string{"sender", "receiver"} {
+				workload := map[string]any{}
+				for key, value := range spec(cohort, side)["ssnm"].(map[string]any) {
+					workload[key] = value
+				}
+				workload["rate"] = 125
+				spec(cohort, side)["ssnm"] = workload
+			}
+		},
+		"no rate at all": func(cohort map[string]any) {
+			for _, side := range []string{"sender", "receiver"} {
+				workload := map[string]any{}
+				for key, value := range spec(cohort, side)["ssnm"].(map[string]any) {
+					workload[key] = value
+				}
+				delete(workload, "total_rate")
+				spec(cohort, side)["ssnm"] = workload
+			}
+		},
+	} {
+		testContext.Run(name, func(testContext *testing.T) {
+			input := fmt.Sprintf(`{"initial":10,"maximum":10,"probes":[{"rate":10,"run":%s}]}`, ssnmRunJSON(testContext, 10, "pass", mutate))
+			status, decoded := runRequest(testContext, input)
+			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "ssnm") {
+				testContext.Fatalf("status %d error %q, want the SSNM evidence refused", status, decoded.Error)
+			}
+			if name == "legacy evidence throughout" && !strings.Contains(decoded.Error, "retired per-association") {
+				testContext.Fatalf("error %q does not name the retired per-association rate", decoded.Error)
+			}
+		})
+	}
+	// A campaign whose first probe ran the total rate cannot take a probe
+	// that ran the old per-association rate, whatever its numbers.
+	input := fmt.Sprintf(`{"initial":10,"maximum":40,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
+		ssnmRunJSON(testContext, 10, "pass", nil), ssnmRunJSON(testContext, 20, "pass", legacyEverywhere))
+	if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "probe 2") || !strings.Contains(decoded.Error, "retired per-association") {
+		testContext.Fatalf("mixed old and new SSNM evidence: status %d error %q", status, decoded.Error)
+	}
+	// Nor can one campaign mix total rates: 1,000/s in total is not 125/s.
+	otherTotal := ssnmRunJSON(testContext, 20, "pass", func(cohort map[string]any) {
+		for _, side := range []string{"sender", "receiver"} {
+			spec(cohort, side)["ssnm"].(map[string]any)["total_rate"] = 125
+		}
+	})
+	input = fmt.Sprintf(`{"initial":10,"maximum":40,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`, ssnmRunJSON(testContext, 10, "pass", nil), otherTotal)
+	if status, decoded := runRequest(testContext, input); status != invalidInputExitStatus || !strings.Contains(decoded.Error, "workload") {
+		testContext.Fatalf("campaign mixing SSNM total rates: status %d error %q", status, decoded.Error)
 	}
 }

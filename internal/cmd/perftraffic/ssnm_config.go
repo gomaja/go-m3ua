@@ -10,16 +10,19 @@ import (
 	"github.com/gomaja/go-m3ua"
 )
 
-// SSNM load workload bounds. The workload is off unless -ssnm-rate is set, so
-// every existing mode keeps its exact flags, specification and records.
+// SSNM load workload bounds. The workload is off unless -ssnm-total-rate is
+// set, so every existing mode keeps its exact flags, specification and
+// records.
 const (
-	ssnmMaxRate = 10_000
+	// ssnmMaxTotalRate bounds the total generated message rate over every
+	// association.
+	ssnmMaxTotalRate = 10_000
 	// ssnmMaxAPCs is the Affected Point Code count one generated message may
 	// carry, matching the library's default per-message acceptance bound.
 	ssnmMaxAPCs = m3ua.DefaultMaxAffectedPointCodesPerSSNM
-	// ssnmMaxRecords is the per-association destination bound on both sides:
-	// each ASP and SGP Association retains at most this many destination
-	// records by default, and one generated scope creates one per destination.
+	// ssnmMaxRecords is the per-association destination bound: each ASP
+	// Association's partition retains at most this many destination records
+	// by default, and one generated scope creates one per destination.
 	ssnmMaxRecords         = m3ua.DefaultMaxSSNMDestinationRecords
 	ssnmDefaultRecords     = 16_384
 	ssnmDefaultSubscribers = 8
@@ -27,9 +30,11 @@ const (
 	// ssnmPreloadChunk is the Affected Point Code count of each preload
 	// message that fills the store before traffic starts.
 	ssnmPreloadChunk = m3ua.DefaultMaxAffectedPointCodesPerSSNM
-	// ssnmPointCodeBase starts the reported destination range. DATA uses DPCs
-	// 0x220000-0x221f1f and OPCs 0x110000-0x111f1f, so the SSNM range never
-	// names a DATA destination and cannot make the measured DATA ineligible.
+	// ssnmPointCodeBase starts the reported destination range: association a
+	// reports 0x400000 + a*records + d, at most 32 x 16,384 destinations, so
+	// the range ends by 0x47ffff. DATA uses DPCs 0x220000-0x221f1f and OPCs
+	// 0x110000-0x111f1f, so the SSNM range never names a DATA destination and
+	// cannot make the measured DATA ineligible.
 	ssnmPointCodeBase = uint32(0x400000)
 	// ssnmRoutingContext is the Application Server scope the generator
 	// reports in: flow 0's AS, which every fixture association serves.
@@ -79,11 +84,17 @@ type ssnmPause struct {
 
 func (pause ssnmPause) enabled() bool { return pause.Duration > 0 }
 
-// ssnmConfig is one process's SSNM load flags. Rate zero disables the whole
-// workload; the struct is then zero so a disabled configuration is identical
-// to one parsed before the workload existed.
+// ssnmConfig is one process's SSNM load flags. TotalRate zero disables the
+// whole workload; the struct is then zero so a disabled configuration is
+// identical to one parsed before the workload existed.
+//
+// TotalRate is the number of SSNM messages per second the ASP receives over
+// every association together: the generator schedules one open-loop sequence
+// at that rate and sends each message on one association, round-robin.
+// Records is the number of destinations of each association's partition, so
+// the ASP store holds associations x Records records.
 type ssnmConfig struct {
-	Rate        uint64
+	TotalRate   uint64
 	APCs        int
 	Records     int
 	Subscribers int
@@ -96,7 +107,7 @@ type ssnmConfig struct {
 	Budgets ssnmBudgets
 }
 
-func (config ssnmConfig) enabled() bool { return config.Rate > 0 }
+func (config ssnmConfig) enabled() bool { return config.TotalRate > 0 }
 
 // subscriptionQueueBytes is the subscription byte limit in force: the flag,
 // or the library default when it is unset.
@@ -116,15 +127,18 @@ func (config ssnmConfig) healthySubscribers() int {
 }
 
 // ssnmWorkload is the SSNM part of a cohort specification. The ASP declares
-// it and the SGP accepts a cohort only when rate, APCs and records equal its
-// own flags, so both processes provably ran the same disturbance. Anchor is
-// the shared-clock instant generator message zero is scheduled at: the first
-// SSNM cohort's start, carried unchanged by every later cohort.
+// it and the SGP accepts a cohort only when the total rate, APCs and records
+// equal its own flags and the cohort's association count its own, so both
+// processes provably ran the same disturbance. TotalRate is carried as
+// total_rate: the earlier rate field meant a per-association broadcast
+// intensity, and evidence under that meaning must never read as this one.
+// Anchor is the shared-clock instant generator message zero is scheduled at:
+// the first SSNM cohort's start, carried unchanged by every later cohort.
 // SubscriptionQueueBytes is the ASP subscriptions' byte limit in force, the
 // library default included, so the SGP record and perfcapacity see the limit
 // the F3 overflow was judged against.
 type ssnmWorkload struct {
-	Rate                   uint64        `json:"rate"`
+	TotalRate              uint64        `json:"total_rate"`
 	APCs                   int           `json:"apcs"`
 	Records                int           `json:"records"`
 	Subscribers            int           `json:"subscribers"`
@@ -135,7 +149,7 @@ type ssnmWorkload struct {
 	Anchor                 int64         `json:"anchor_ns"`
 }
 
-func (workload *ssnmWorkload) enabled() bool { return workload != nil && workload.Rate > 0 }
+func (workload *ssnmWorkload) enabled() bool { return workload != nil && workload.TotalRate > 0 }
 
 // pauseFlag parses -pause-subscriber=<offset>/<duration>.
 type pauseFlag struct {
@@ -170,9 +184,9 @@ func (value pauseFlag) Set(text string) error {
 }
 
 func registerSSNMFlags(flagSet *flag.FlagSet, config *ssnmConfig) {
-	flagSet.Uint64Var(&config.Rate, "ssnm-rate", 0, "SSNM load: generated DUNA/DAVA messages per second (0 disables the SSNM workload)")
+	flagSet.Uint64Var(&config.TotalRate, "ssnm-total-rate", 0, "SSNM load: generated DUNA/DAVA messages per second in total, each sent on one association round-robin (0 disables the SSNM workload)")
 	flagSet.IntVar(&config.APCs, "ssnm-apcs", 1, "SSNM load: Affected Point Codes per generated message (1 to 1024)")
-	flagSet.IntVar(&config.Records, "ssnm-records", ssnmDefaultRecords, "SSNM load: distinct destinations cycled and retained per association")
+	flagSet.IntVar(&config.Records, "ssnm-records", ssnmDefaultRecords, "SSNM load: distinct destinations cycled and retained in each association's partition")
 	flagSet.IntVar(&config.Subscribers, "subscribers", 0, "SSNM load (ASP): SSNM subscriptions, default 8 when SSNM load is on")
 	flagSet.Var(pauseFlag{pause: &config.Pause}, "pause-subscriber", "SSNM load (ASP): pause subscriber 0 at <offset>/<duration> into the measurement window, then Resync")
 	flagSet.IntVar(&config.QueueBytes, "ssnm-subscription-queue-bytes", 0, "SSNM load (ASP): accounted byte limit of each subscription queue, SSNMStateConfig.SubscriptionQueueBytes (0 selects the library default, 1 MiB)")
@@ -193,15 +207,15 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 	if !ssnm.enabled() {
 		for _, name := range append([]string{"ssnm-apcs", "ssnm-records", "subscribers", "pause-subscriber", "ssnm-subscription-queue-bytes"}, ssnmBudgetFlags...) {
 			if explicit[name] {
-				return fmt.Errorf("-%s requires -ssnm-rate", name)
+				return fmt.Errorf("-%s requires -ssnm-total-rate", name)
 			}
 		}
 		*ssnm = ssnmConfig{}
 		return nil
 	}
 	switch {
-	case ssnm.Rate > ssnmMaxRate:
-		return fmt.Errorf("ssnm-rate must not exceed %d", ssnmMaxRate)
+	case ssnm.TotalRate > ssnmMaxTotalRate:
+		return fmt.Errorf("ssnm-total-rate must not exceed %d", ssnmMaxTotalRate)
 	case ssnm.APCs < 1 || ssnm.APCs > ssnmMaxAPCs:
 		return fmt.Errorf("ssnm-apcs must be between 1 and %d", ssnmMaxAPCs)
 	case ssnm.Records < 1 || ssnm.Records > ssnmMaxRecords:
@@ -245,13 +259,16 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 			return errors.New("pause-subscriber offset plus duration must end inside the measurement window")
 		}
 	}
-	messages, err := scheduledMessages(ssnm.Rate, config.Duration)
+	messages, err := scheduledMessages(ssnm.TotalRate, config.Duration)
 	if err != nil {
-		return fmt.Errorf("ssnm-rate: %w", err)
+		return fmt.Errorf("ssnm-total-rate: %w", err)
 	}
-	receiptBytes := uint64(ssnm.healthySubscribers()) * uint64(config.Associations) * (messages + 1) * 4
+	// Every generator message reaches one partition, so a healthy subscriber
+	// keeps one receipt per measurement message whatever the association
+	// count.
+	receiptBytes := uint64(ssnm.healthySubscribers()) * (messages + 1) * 4
 	if receiptBytes > ssnmMaxReceiptBytes {
-		return fmt.Errorf("SSNM receipt storage of %d bytes exceeds %d; reduce associations, subscribers, rate or duration", receiptBytes, ssnmMaxReceiptBytes)
+		return fmt.Errorf("SSNM receipt storage of %d bytes exceeds %d; reduce subscribers, total rate or duration", receiptBytes, ssnmMaxReceiptBytes)
 	}
 	return nil
 }
@@ -262,14 +279,11 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 // A queue that cannot hold it loses continuity on every subscriber, the
 // healthy ones included, before any traffic starts.
 //
-// The rule is necessary, not sufficient. Every SGP message becomes one event
-// per association in each subscription, and a large store preloads several
-// messages, so a subscriber that falls behind during the preload can still
-// lose continuity with a limit this accepts. That aborts the run at setup
-// ("SSNM preload was not consumed"); it never yields a verdict. Requiring room
-// for the whole preload would refuse the approved 1 MiB default at the full
-// store from four associations up, although subscribers drain it
-// concurrently.
+// The rule is also sufficient for the preload: every generator message
+// reaches one association, so it becomes one event in each subscription, and
+// the ASP requests the preload one message at a time, waiting until every
+// subscriber has consumed each before asking for the next. A queue therefore
+// never holds more than one preload event.
 func validateSSNMQueueBytes(ssnm *ssnmConfig) error {
 	switch {
 	case ssnm.QueueBytes < 0:
@@ -290,7 +304,7 @@ func validateSSNMQueueBytes(ssnm *ssnmConfig) error {
 // phase. The anchor is filled in by the sender run.
 func (config ssnmConfig) workload(phase string, anchor int64) ssnmWorkload {
 	return ssnmWorkload{
-		Rate:                   config.Rate,
+		TotalRate:              config.TotalRate,
 		APCs:                   config.APCs,
 		Records:                config.Records,
 		Subscribers:            config.Subscribers,
