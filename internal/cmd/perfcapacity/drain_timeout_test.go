@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -192,5 +193,67 @@ func TestPassingRecordCannotCarryADrainTimeout(testContext *testing.T) {
 	status, decoded := runRequest(testContext, singleProbeRequest(testContext, 80000, run))
 	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "fixture_verdict contradicts") {
 		testContext.Fatalf("status %d error %q, want a passing record with a drain timeout rejected", status, decoded.Error)
+	}
+}
+
+// The drain-timeout testdata records are the fixture's own output for one
+// overloaded probe on the reference environment: 400,000 messages/s over 8
+// associations with the mixed payload and a shared clock, the rate at which
+// the campaign's 8-association searches first aborted. One is the warm-up
+// cohort of a run whose warm-up failed; the other the measurement cohort of a
+// run without warm-up. Each ended with cap refusals, library discards and
+// submitted work undelivered at the drain deadline, and each blocked one send
+// for about 1.05 s.
+func realDrainTimeoutRecord(testContext *testing.T, phase string) map[string]any {
+	testContext.Helper()
+	run := searchRecord(testContext, "drain-timeout-400000-"+phase+".json")
+	sender := run["sender"].(map[string]any)
+	if _, fatal := sender["fatal_error"]; fatal || sender["drain_timeout"] == nil || run["phase"] != phase {
+		testContext.Fatalf("testdata is not a %s drain-timeout record: fatal %v drain_timeout %v", phase, sender["fatal_error"], sender["drain_timeout"])
+	}
+	return run
+}
+
+// Each real overloaded probe continues the search below its rate: with its
+// stall it did not demonstrate the rate, without the stall it failed it.
+func TestRealOverloadedProbesContinueTheSearch(testContext *testing.T) {
+	for _, phase := range []string{"warmup", "measurement"} {
+		for _, stalled := range []bool{true, false} {
+			testContext.Run(fmt.Sprintf("%s/stalled=%t", phase, stalled), func(testContext *testing.T) {
+				run := realDrainTimeoutRecord(testContext, phase)
+				decision, outcome := string(perfstats.Inconclusive), perfstats.ProbeNotDemonstrated
+				if !stalled {
+					run["sender"].(map[string]any)["send_duration"].(map[string]any)["max_ns"] = float64(4_000_000)
+					decision, outcome = string(perfstats.Fail), perfstats.ProbeFailing
+				}
+				status, decoded := runRequest(testContext, singleProbeRequest(testContext, 400000, run))
+				if status == invalidInputExitStatus || decoded.Error != "" || len(decoded.ProbeDecisions) != 1 {
+					testContext.Fatalf("real overloaded %s rejected: status %d %+v", phase, status, decoded)
+				}
+				wantPhase := map[string]string{"warmup": "warmup", "measurement": ""}[phase]
+				if probe := decoded.ProbeDecisions[0]; probe.Phase != wantPhase || probe.Decision != decision || probe.SearchOutcome != outcome {
+					testContext.Fatalf("probe %+v, want phase %q decision %s outcome %s", probe, wantPhase, decision, outcome)
+				}
+				if decoded.SearchStatus != perfstats.SearchRunning || decoded.NextProbeRate != 200000 {
+					testContext.Fatalf("search %q next %d, want running with next probe 200000", decoded.SearchStatus, decoded.NextProbeRate)
+				}
+			})
+		}
+	}
+}
+
+// The same real warm-up in the shape the fixture produced before
+// drain_timeout existed (the deadline reported as a fatal error) aborts the
+// search: that shape cannot be told apart from a control request that timed
+// out. A campaign needs fixture binaries built with drain_timeout.
+func TestRealOverloadedWarmupInThePreFixShapeIsRefused(testContext *testing.T) {
+	run := realDrainTimeoutRecord(testContext, "warmup")
+	sender := run["sender"].(map[string]any)
+	delete(sender, "drain_timeout")
+	sender["fatal_error"] = "context deadline exceeded"
+	run["error"] = "warmup did not drain cleanly: context deadline exceeded\ncohort is invalid; inspect machine-readable reasons"
+	status, decoded := runRequest(testContext, singleProbeRequest(testContext, 400000, run))
+	if status != invalidInputExitStatus || !strings.Contains(decoded.Error, "not probe evidence") {
+		testContext.Fatalf("status %d error %q, want the pre-fix warm-up refused", status, decoded.Error)
 	}
 }
