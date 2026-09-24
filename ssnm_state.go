@@ -5,8 +5,10 @@
 package m3ua
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -656,7 +658,7 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 		Partition: partition,
 		Epoch:     state.epoch,
 		Binding:   SSNMBinding{Association: association, Pending: pending},
-		States:    s.partitionDestinationsLocked(state),
+		States:    s.partitionDestinationViewLocked(state),
 	})
 	return nil
 }
@@ -695,7 +697,7 @@ func (s *ssnmState) retireLocked(partition SSNMPartition, association Associatio
 			Partition: partition,
 			Epoch:     epoch,
 			Binding:   SSNMBinding{Association: association},
-			States:    s.partitionDestinationsLocked(state),
+			States:    s.partitionDestinationViewLocked(state),
 		})
 		return
 	}
@@ -889,9 +891,9 @@ func (s *ssnmState) apply(report SSNMReport) error {
 		Revision:  revision,
 		Partition: report.Partition,
 		Epoch:     report.Epoch,
-		Report:    report.clone(),
+		Report:    report,
 		ReportSet: true,
-		States:    s.partitionDestinationsLocked(state),
+		States:    s.partitionDestinationViewLocked(state),
 	})
 	return nil
 }
@@ -987,7 +989,7 @@ func (s *ssnmState) publishEventOnlyLocked(report SSNMReport) error {
 		Revision:  revision,
 		Partition: report.Partition,
 		Epoch:     report.Epoch,
-		Report:    report.clone(),
+		Report:    report,
 		ReportSet: true,
 	})
 	return nil
@@ -1012,6 +1014,15 @@ func describeSSNMPartition(partition SSNMPartition) string {
 }
 
 func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSNMDestinationKnowledge {
+	knowledge := s.partitionDestinationViewLocked(state)
+	for index := range knowledge {
+		knowledge[index].Availability.Scope = knowledge[index].Availability.Scope.clone()
+		knowledge[index].Congestion.Scope = knowledge[index].Congestion.Scope.clone()
+	}
+	return knowledge
+}
+
+func (s *ssnmState) partitionDestinationViewLocked(state *ssnmPartitionState) []SSNMDestinationKnowledge {
 	if state == nil || state.records() == 0 {
 		return nil
 	}
@@ -1027,22 +1038,20 @@ func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSN
 		}
 		keys = append(keys, key)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].pointCode != keys[j].pointCode {
-			return keys[i].pointCode < keys[j].pointCode
+	slices.SortFunc(keys, func(first, second ssnmDestinationKey) int {
+		if comparison := cmp.Compare(first.pointCode, second.pointCode); comparison != 0 {
+			return comparison
 		}
-		return keys[i].mask < keys[j].mask
+		return cmp.Compare(first.mask, second.mask)
 	})
 	knowledge := make([]SSNMDestinationKnowledge, 0, len(keys))
 	for _, key := range keys {
 		entry := SSNMDestinationKnowledge{Destination: key.pointCodeRange()}
 		if availability, held := state.availability[key]; held {
-			availability.Scope = availability.Scope.clone()
 			entry.Availability = availability
 			entry.AvailabilitySet = true
 		}
 		if congestion, held := state.congestion[key]; held {
-			congestion.Scope = congestion.Scope.clone()
 			entry.Congestion = congestion
 			entry.CongestionSet = true
 		}
