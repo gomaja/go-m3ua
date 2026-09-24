@@ -521,6 +521,38 @@ if err := association.ShutdownContext(shutdownCtx); err != nil {
 _ = endpoint.Close()
 ```
 
+Both options end in the SCTP SHUTDOWN procedure. `Association.Abort` is the
+abortive release, the SCTP ABORT primitive of RFC 9260 Section 11.1.4, for an
+association that has to go at once: a misbehaving peer, or one that is not
+completing the shutdown. Locally it tears the association down exactly as
+`Close` does; what differs is what the peer is sent:
+
+| Call | M3UA sent first | SCTP release | Peer's SCTP layer reports | Waits for the peer |
+| --- | --- | --- | --- | --- |
+| `Association.Close` | nothing | SHUTDOWN (RFC 9260 Section 9.2) | SHUTDOWN_COMPLETE | for the SHUTDOWN exchange, aborting after three seconds |
+| `Association.ShutdownContext` | the automatic ASP Inactive and ASP Down | SHUTDOWN | SHUTDOWN_COMPLETE | for each T(ack), then as `Close` |
+| `Association.Abort` | nothing | ABORT with the User-Initiated Abort cause (Section 9.1) | COMMUNICATION LOST (`SCTP_COMM_LOST`) | no |
+
+An ABORT discards whatever either end still had queued instead of delivering
+it. A go-m3ua peer reports the loss through `Err` as `ErrSCTPNotAlive` on
+Linux 5.0 and later, where it receives SCTP association events. Either way the
+peer's M3UA moves the ASP to ASP-DOWN, as it does after a SHUTDOWN: RFC 4666
+Section 4.3.3 does so on SCTP-COMMUNICATION_DOWN and, at an ASP, pauses the
+affected SS7 destinations with MTP-PAUSE, and Section 4.3.1 counts
+COMMUNICATION LOST as SCTP CDI at an SGP just as it counts SHUTDOWN_COMPLETE.
+
+Locally, `Err` reports `ErrAssociationAborted` after `Abort`. It matches
+`ErrAssociationClosed`, so code that only asks whether the owner closed the
+association is unaffected, and the `ManagementSCTPRelease` indication carries
+it, so Layer Management can tell the abortive release from the graceful one.
+`Abort` and `Close` share one teardown with every other way an association
+ends, so only the first performs it and later calls return nil. An `Abort`
+while `ShutdownContext` waits for an acknowledgement ends that wait, and
+`ShutdownContext` returns what `Err` reports; one that finds `Close` already
+releasing SCTP waits for that release instead. Like `ShutdownContext`, nothing
+calls `Abort` for the application: `Listener.Close` and `Endpoint.Close`
+release gracefully.
+
 The `ctx` passed to `Dial` and `Accept` is the association's lifetime, not just
 its handshake. Cancelling it closes the associations it produced, so an accept
 loop that wants to stop accepting without dropping live traffic closes the
@@ -529,9 +561,10 @@ Listener instead.
 That also makes it the wrong context to derive from an interrupt signal when the
 application wants a graceful withdrawal. The association's monitor closes it as
 soon as the context is done, so `ShutdownContext` finds an association already
-in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns nil — option
-(a) silently becomes option (b). Give the association a context of its own and
-cancel it only after the withdrawal has returned:
+in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns the
+cancellation that closed it — option (a) becomes option (b). Give the
+association a context of its own and cancel it only after the withdrawal has
+returned:
 
 ```go
 notifyCtx, stopNotify := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

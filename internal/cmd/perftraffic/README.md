@@ -497,24 +497,39 @@ are the opt-in workloads described next.
 ### One SGP failure
 
 `-sgp-failure=<offset>` turns a shared-clock `-mode=routed` run into the
-section 4 "One SGP failure" trial. Both processes pass the same offset and
-`-same-host-clock`; the ASP declares the failure in its measurement cohort's
-`spec.failure_trial` and the SGP refuses a declaration that differs from its own
-flag, or any failure cohort once its fault has been injected. The warm-up
-cohort is the nominal routed workload. The offset must leave at least 2 s of
-the window before the fault and 10 s after it.
+section 4 "One SGP failure" trial. Both processes pass the same offset,
+`-same-host-clock` and, optionally, the same `-sgp-failure-kind`; the ASP
+declares the failure in its measurement cohort's `spec.failure_trial` and the
+SGP refuses a declaration that differs from its own flags, or any failure
+cohort once its fault has been injected. The warm-up cohort is the nominal
+routed workload. The offset must leave at least 2 s of the window before the
+fault and 10 s after it.
+
+`-sgp-failure-kind` chooses how the SGP fails, and is refused without
+`-sgp-failure`:
+
+| `-sgp-failure-kind` | Library call | On the wire | The ASP's SCTP layer reports | `failure_trial.kind` |
+| --- | --- | --- | --- | --- |
+| `close` (default) | `Association.Close` | SHUTDOWN (RFC 9260 Section 9.2); the SCTP dependency aborts only if the peer does not complete it within three seconds | SHUTDOWN_COMPLETE; the ASP's associations end with `EOF` | `shutdown` |
+| `abort` | `Association.Abort` | one ABORT with the User-Initiated Abort cause (RFC 9260 Section 9.1) | COMMUNICATION LOST; the ASP's associations end with `SCTP_COMM_LOST` | `abort` |
+
+The kind is part of the declaration, so a close trial and an abort trial are
+different cohorts and neither SGP accepts the other's. Leaving the flag unset
+is the close trial with the specification it always had. The declaration is
+what the SGP was asked to do; `failure_kind_observed` judges what the ASP saw
+and how long the SGP's calls took, and the other criteria are the same for both
+kinds.
 
 - **Fault.** At `start + offset` on the shared clock the receiver ends both
-  associations of SGP `sg-a/p0` with the library's `Association.Close`,
-  concurrently, and records the due instant, the shared-clock bracket around
-  the closes and each call's start, return and error (`receiver.fault`).
-  `Association.Close` is the only public way to end an association; the SCTP
-  dependency performs it as a graceful SHUTDOWN (RFC 9260 Section 9.2) and
-  aborts only if the peer does not complete it within three seconds. The fault
-  kind is therefore recorded as `shutdown`: an ABORT-initiated failure and a
-  blackhole that exercises SCTP failure detection are not produced by this
-  fixture. After the fault the failed SGP's read errors are recorded
-  (`receiver.reader_ends`) instead of ending the receiver.
+  associations of SGP `sg-a/p0` with `Association.Close` or `Association.Abort`,
+  as its kind says, concurrently, and records the kind, the due instant, the
+  shared-clock bracket around the calls and each call's start, return and
+  error (`receiver.fault`). A blackhole that exercises SCTP failure detection
+  is not produced by this fixture, and each record lists the failure kind it
+  did not measure in `unsupported_modes` (`abortive_failure` for a close
+  trial, `graceful_failure` for an abort trial). After the fault the failed
+  SGP's read errors are recorded (`receiver.reader_ends`) instead of ending the
+  receiver.
 - **Alternative.** Every SGP serves the `primary` Application Server, so the
   routes frozen on `sg-a/p0` (about a quarter) keep a same-SG/AS alternative,
   `sg-a/p1`. The sender calls `MTPTransfer` once per scheduled message and
@@ -527,9 +542,19 @@ the window before the fault and 10 s after it.
   an `MTPSelectionError`. Anything else — a healthy route off its frozen path,
   a failure on a surviving path — is unexpected and fails the fixture.
 - **Notification.** The sender watches `Association.Done` on all eight
-  associations, the earliest public observation of the transport failure. The
-  notification instant is the later of the failed SGP's two, so the SGP is
-  known down; any surviving association ending fails the trial. The time from
+  associations, the earliest public observation of the transport failure, and
+  records each one's `Err` with how it ended (`sender.notifications`):
+  `end_of_stream` for the `io.EOF` a completed SHUTDOWN leaves,
+  `communication_lost` for the `SCTP_COMM_LOST` the library reports as
+  `ErrSCTPNotAlive`, and `user_abort` when that loss carries the
+  User-Initiated Abort cause of a requested ABORT. It also records whether
+  this kernel reports SCTP association events
+  (`sender.kernel_association_events`), without which an ABORT is not seen
+  as `SCTP_COMM_LOST`. It asks before the measured window opens, the way the
+  library asks, on an SCTP socket that is never bound or connected; the answer
+  is the kernel's and holds for IPv4 and IPv6 alike. The notification instant is the later of the failed
+  SGP's two, so the SGP is known down; any surviving association ending fails
+  the trial. The time from
   the fault to each notification is recorded, not budgeted (section 4 excludes
   failure detection), together with the kernel SCTP timer defaults of the
   sender's network namespace and every association's retransmission timeout
@@ -553,8 +578,9 @@ one entry per criterion with its numbers (`criteria`), and `verdict`:
 
 | Criterion | Rule |
 | --- | --- |
-| `fault_injected` | the declared fault ran at its instant, inside the window, on both associations |
+| `fault_injected` | the declared fault ran at its instant, inside the window, on both associations, and no `Close` or `Abort` call returned an error |
 | `transport_failure_notified` | both failed-SGP associations, and no other, ended after the fault |
+| `failure_kind_observed` | what the ASP saw and the SGP's own calls took matches the declared kind. Abort trial: both failed-SGP associations ended on `communication_lost` with `user_abort`, which only an ABORT the SGP requested raises, so an `Abort` that fell back to a SHUTDOWN fails; on a kernel that does not report association events it is `not-measured`. Close trial: both ended at `end_of_stream`, which shows a SHUTDOWN reached the ASP, and each `Close` returned within 2.5 s, which shows the SCTP dependency's ABORT fallback, three seconds into an unfinished SHUTDOWN, did not run (Linux ends the ASP's reads when the SHUTDOWN arrives, so the ASP cannot see that fallback). Neither shows the SHUTDOWN handshake completed |
 | `pre_failure_nominal` | every message scheduled in the whole bins that end at least one bin before the fault is delivered: the period before the failure was nominal, so no loss is left for the failed path's accounting to absorb and the pre-failure rate is the offered one |
 | `alternative_selection` | the first alternative MTPTransfer returns within 100 ms of the notification (one returning before it, since the notification is the later of the two association ends, is judged as 0); no call started later than that touched or was refused on the failed SGP or failed; every affected route moved |
 | `healthy_path_recovery` | pre-failure rate: mean all-SGP deliveries per bin over whole bins from 1 s after the start to the fault; the first whole bin starting at or after the notification whose surviving-SGP deliveries reach 90% of it must end within 1 s of the notification |
@@ -573,6 +599,10 @@ evidence.
 ```sh
 perftraffic -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s
 perftraffic -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -rate=20000 -duration=30s
+
+# The abortive failure: both processes name the kind.
+perftraffic -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s -sgp-failure-kind=abort
+perftraffic -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -sgp-failure-kind=abort -rate=20000 -duration=30s
 ```
 
 ### Application route-reference churn
@@ -840,6 +870,14 @@ so none is applied silently here.
   validation follow RFC 4666 Section 3.3.1.
 - The ASP Up and ASP Active procedures needed before DATA transfer follow RFC
   4666 Sections 4.3.1 and 4.3.4.3.
+- The two SGP failure kinds are the SCTP SHUTDOWN and ABORT procedures of RFC
+  9260 Sections 9.2 and 9.1, which the ASP's SCTP layer reports as
+  SHUTDOWN_COMPLETE or COMMUNICATION LOST (Section 11.2.5). Either is the
+  SCTP-COMMUNICATION_DOWN on which RFC 4666 Section 4.3.3 moves the ASP to
+  ASP-DOWN and pauses the affected SS7 destinations with MTP-PAUSE. RFC 9260
+  obsoletes RFC 4960. Checked against both the RFC Editor and the Datatracker
+  on 2026-09-24, it has no updating or obsoleting RFC, and none of its
+  verified errata touches those sections.
 
 ## Build and run
 

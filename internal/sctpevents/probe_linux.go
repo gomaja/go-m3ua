@@ -4,7 +4,10 @@
 
 //go:build linux
 
-package m3ua
+// Package sctpevents asks the kernel whether SCTP sockets can subscribe to
+// association events. The library and its test fixtures ask the same question
+// the same way, without either exporting it.
+package sctpevents
 
 import (
 	"syscall"
@@ -13,11 +16,14 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// kernelAssociationEvents sets the SCTP_EVENT subscription associationEvents
-// makes (RFC 6458 Section 6.2.2) on an SCTP socket that is never bound or
-// connected, so asking puts nothing on the wire. The option carries the
-// dependency's sctp.Event, the layout it applies itself.
-func kernelAssociationEvents() error {
+// Probe sets the SCTP_EVENT subscription to SCTP_ASSOC_CHANGE (RFC 6458
+// Section 6.2.2) on an SCTP socket that is never bound or connected, so asking
+// puts nothing on the wire. The option carries the dependency's sctp.Event,
+// the layout it applies itself. Linux added SCTP_EVENT in 5.0 and refuses it
+// with ENOPROTOOPT before that; the answer is the kernel's, not the address
+// family's, so the socket is IPv4 unless the kernel cannot open one, and IPv6
+// then.
+func Probe() error {
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_SCTP)
 	if err != nil {
 		fd, err = syscall.Socket(syscall.AF_INET6, syscall.SOCK_STREAM, syscall.IPPROTO_SCTP)

@@ -36,6 +36,13 @@ const M3UAPPID uint32 = 3
 // I/O surface is WriteData and ReadData, which carry those per message. The
 // address, close and deadline operations remain, because they describe the
 // transport rather than the message.
+//
+// An association ends once, whatever ends it -- Close, Abort, ShutdownContext,
+// a cancelled context or a failure -- and in two steps. Done closes as the
+// teardown begins. State reaches ASP-DOWN, and StateChanges and
+// ManagementIndications report the end and close, once the SCTP association
+// has been released, which for a SHUTDOWN can take up to three seconds. A
+// caller that needs the final state waits for StateChanges to close.
 type Association struct {
 	// sctpConn is the SCTP association this Association owns.
 	//
@@ -387,7 +394,11 @@ type Association struct {
 	// had to wait; controlWritesWaiting is how many are waiting now.
 	controlWriteWaits    atomic.Uint64
 	controlWritesWaiting atomic.Int32
-	transportCloser      func() error
+	// transportCloser and transportAborter are the test seams for the two
+	// SCTP releases, SHUTDOWN and ABORT. Production leaves them nil and
+	// releases sctpConn.
+	transportCloser  func() error
+	transportAborter func() error
 	// notificationQueue keeps peer-controlled socket backpressure out of the AS
 	// state machine and proactive SSNM paths. A full queue closes the association
 	// rather than silently dropping mandatory ordered control traffic.
@@ -1445,7 +1456,8 @@ func isSSNM(raw []byte) bool {
 // Section 4.3.2 behaviour, not teardown reaching sideways.
 //
 // Close releases SCTP without sending ASP Inactive or ASP Down, which is RFC
-// 4666 Section 4.9 option (b). ShutdownContext is option (a).
+// 4666 Section 4.9 option (b). ShutdownContext is option (a). Abort releases
+// SCTP with an ABORT rather than a SHUTDOWN.
 //
 // Err then reports ErrAssociationClosed, unless the association had already
 // ended for some other reason, in which case that reason is kept. Close is
@@ -1455,12 +1467,70 @@ func (c *Association) Close() error {
 	return c.closeWith(ErrAssociationClosed)
 }
 
+// Abort ends this one association abortively, then releases it exactly as
+// Close does.
+//
+// Close and ShutdownContext end in the SCTP SHUTDOWN procedure (RFC 9260
+// Section 9.2), the one release both options of RFC 4666 Section 4.9 name:
+// the peer acknowledges what is outstanding and its SCTP layer reports
+// SHUTDOWN_COMPLETE. Abort invokes the SCTP ABORT primitive instead (RFC 9260
+// Section 11.1.4), for an association that has to go at once -- a misbehaving
+// peer, or one that is not completing the shutdown. A single ABORT chunk is
+// sent, carrying the User-Initiated Abort error cause (RFC 9260 Section 9.1),
+// and whatever either end still had queued is discarded rather than delivered
+// (RFC 9260 Section 9). Abort does not wait for the peer. The peer's SCTP
+// layer reports COMMUNICATION LOST (RFC 9260 Section 11.2.5; SCTP_COMM_LOST in
+// RFC 6458 Section 6.1.1), never SHUTDOWN_COMPLETE, and a go-m3ua peer then
+// ends with an Err matching ErrSCTPNotAlive wherever its kernel reports
+// association events (Linux 5.0 and later).
+//
+// Like Close, Abort sends no ASP Inactive or ASP Down. It is neither of the
+// Section 4.9 options but the transport loss every M3UA peer already handles,
+// and the peer's M3UA treats it as it treats the end of a SHUTDOWN. RFC 4666
+// Section 4.3.3 moves the ASP to ASP-DOWN on SCTP-COMMUNICATION_DOWN and, at
+// an ASP, pauses the affected SS7 destinations with MTP-PAUSE; Section 4.3.1
+// counts COMMUNICATION_LOST as SCTP CDI at an SGP exactly as it counts
+// SHUTDOWN_COMPLETE; and Section 4.2 reports both releases to the peer's Layer
+// Management as M-SCTP_RELEASE.
+//
+// Locally Abort is Close. The association's goroutines and pending operations
+// end, its state goes to ASP-DOWN, StateChanges and ManagementIndications
+// report the release and then close, and it is deregistered from its Listener
+// and its Endpoint. Only the recorded cause differs: Err then reports
+// ErrAssociationAborted, which matches ErrAssociationClosed, and the
+// ManagementSCTPRelease indication carries it as Cause and in its Description,
+// so Layer Management can tell an abortive release from a graceful one. An
+// association that had already ended for some other reason keeps that reason.
+//
+// Abort and Close share one teardown with every other way the association can
+// end, so only the first performs it and reports its error, and later calls
+// return nil. An Abort during ShutdownContext's ASP Inactive or ASP Down
+// exchange takes that teardown, and ShutdownContext stops waiting. An Abort
+// that finds Close already releasing SCTP cannot overtake it: it waits for
+// that release, which the SCTP dependency bounds by aborting a SHUTDOWN the
+// peer has not completed within three seconds, and returns nil.
+//
+// Neither Listener.Close nor Endpoint.Close calls it. An application that wants
+// every association aborted calls Abort on each before closing their owner.
+func (c *Association) Abort() error {
+	_, err := c.endWith(ErrAssociationAborted, true)
+	return err
+}
+
 // Done returns a channel closed when the association ends, for whatever reason.
 //
 // It follows context.Context's shape: select on Done, then ask Err what
 // happened. Without it the only way to notice an association had gone was to
 // poll State until it read ASP-DOWN, or to wait for a Read or Write to start
 // failing — neither of which says why.
+//
+// Done marks the start of the teardown, not its end. It closes first, so every
+// operation waiting on the association stops at once and reports Err, and no
+// message still being handled can move the state. The SCTP release follows,
+// and only after it does State reach ASP-DOWN and StateChanges and
+// ManagementIndications report the end and close. Until then State can still
+// read the state the association was in. A caller that needs the final state
+// ranges over StateChanges until it closes.
 func (c *Association) Done() <-chan struct{} {
 	return c.done
 }
@@ -1468,10 +1538,11 @@ func (c *Association) Done() <-chan struct{} {
 // Err reports why the association ended, or nil while it is still up.
 //
 // It distinguishes the cases an application has to tell apart:
-// ErrAssociationClosed for its own shutdown, ErrHeartbeatExpired for an
-// expired M3UA T(beat), a context error for a cancelled owner, and the
-// underlying read or protocol error otherwise. Read and Write report
-// ErrNotEstablished for all of them.
+// ErrAssociationClosed for its own shutdown (ErrAssociationAborted, which
+// matches it, when that was Abort), ErrHeartbeatExpired for an expired M3UA
+// T(beat), a context error for a cancelled owner, and the underlying read or
+// protocol error otherwise. Read and Write report ErrNotEstablished for all of
+// them.
 func (c *Association) Err() error {
 	if v := c.closeErr.Load(); v != nil {
 		if err, ok := v.(error); ok {
@@ -1483,16 +1554,33 @@ func (c *Association) Err() error {
 
 // closeWith closes the association, recording cause as the reason.
 func (c *Association) closeWith(cause error) error {
-	var err error
+	_, err := c.endWith(cause, false)
+	return err
+}
+
+// endWith is the one teardown every end of the association runs, recording
+// cause as the reason. abortive releases SCTP with ABORT rather than SHUTDOWN
+// and changes nothing else; see Abort. ended reports whether this call
+// performed the teardown, rather than finding it already done or waiting out
+// another's, and err is the transport release's error if it did.
+func (c *Association) endWith(cause error, abortive bool) (ended bool, err error) {
 	c.closeOnce.Do(func() {
+		ended = true
 		if cause != nil {
 			c.closeErr.Store(cause)
 		}
 		close(c.done)
-		// Retransmitters select on done, but cancel them explicitly so a
-		// pending request cannot be resent onto a socket that is closing.
+		// Retransmitters check done before each resend, and are cancelled here
+		// as well so none starts another. stopAllTAck does not take the retry
+		// lock, so a resend already past those checks can still reach the
+		// socket before the release below; one the release interrupts fails,
+		// and its request is dropped.
 		c.stopAllTAck()
-		err = c.closeTransport()
+		if abortive {
+			err = c.abortTransport()
+		} else {
+			err = c.closeTransport()
+		}
 		unlockTransfer := c.lockASPTransferMutation()
 		c.muState.Lock()
 		previousState := c.state
@@ -1539,7 +1627,7 @@ func (c *Association) closeWith(cause error) error {
 			c.asReservation.rollback()
 		}
 	})
-	return err
+	return ended, err
 }
 
 func (c *Association) closeTransport() error {
@@ -1548,6 +1636,22 @@ func (c *Association) closeTransport() error {
 	}
 	if c.sctpConn != nil {
 		return c.sctpConn.Close()
+	}
+	return nil
+}
+
+// abortTransport is closeTransport through the SCTP ABORT primitive. The
+// dependency sets SO_LINGER to zero before close(2), which RFC 6458 Section
+// 8.1.4 defines as that primitive. It also wakes a reader parked in recvmsg
+// first, which matters here because this package's reader always is: a parked
+// reader holds the file open, and the close, and with it the ABORT, would wait
+// for that reader.
+func (c *Association) abortTransport() error {
+	if c.transportAborter != nil {
+		return c.transportAborter()
+	}
+	if c.sctpConn != nil {
+		return c.sctpConn.Abort()
 	}
 	return nil
 }
@@ -2855,6 +2959,11 @@ func (c *Association) Shutdown() error {
 
 // ShutdownContext is Shutdown with caller-controlled cancellation.
 // Cancellation stops the outstanding T(ack) request and still releases SCTP.
+// If the association ends some other way before or while it runs -- Close,
+// Abort, a failure, or its cancelled lifetime context -- ShutdownContext
+// stops and returns what Err reports. A call made while another
+// ShutdownContext is under way waits for the association to end, or for its
+// own ctx, and returns nil in the first case.
 //
 // It performs only the procedures AssociationConfig.ASPProcedures configures as
 // ASPProcedureAutomatic, because an explicitly managed application owns the
@@ -2885,7 +2994,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	// Sections 4.3.4.1.2 and 4.3.4.4.1, by either IPSP. An SGP has no mirror
 	// request to send; Section 4.9's orderly option for it is SCTP Shutdown.
 	if c.role != RoleASP && c.role != RoleIPSP {
-		return c.Close()
+		return c.releaseAfterWithdrawal()
 	}
 
 	state := c.State()
@@ -2918,11 +3027,34 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		}
 	}
 
-	return c.Close()
+	return c.releaseAfterWithdrawal()
 }
 
+// releaseAfterWithdrawal is ShutdownContext's release once nothing is left to
+// withdraw. When another release ended the association first, that release is
+// what ShutdownContext reports, as Err does, rather than the nil a Close of an
+// association already closed returns.
+func (c *Association) releaseAfterWithdrawal() error {
+	ended, err := c.endWith(ErrAssociationClosed, false)
+	if !ended {
+		if cause := c.Err(); cause != nil {
+			return cause
+		}
+	}
+	return err
+}
+
+// finishTermination releases the association after a withdrawal step failed.
+// When another release ended it first, that release is why the step failed
+// -- the write it could not make, or the T(ack) wait it cancelled -- so it is
+// what ShutdownContext reports, through Err.
 func (c *Association) finishTermination(cause error) error {
-	closeErr := c.closeWith(cause)
+	ended, closeErr := c.endWith(cause, false)
+	if !ended {
+		if err := c.Err(); err != nil {
+			return err
+		}
+	}
 	if closeErr != nil {
 		return errors.Join(cause, closeErr)
 	}

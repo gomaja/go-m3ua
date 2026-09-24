@@ -531,6 +531,7 @@ method Association.ASPActive
 method Association.ASPDown
 method Association.ASPInactive
 method Association.ASPUp
+method Association.Abort
 method Association.ActivateRoutingContexts
 method Association.ApplicationServerState
 method Association.ApplicationServerStateForAS
@@ -796,6 +797,7 @@ type WireScope struct
 var ErrASPIdentifierRequired
 var ErrASPRouteStateLimit
 var ErrAmbiguousMTPRoute
+var ErrAssociationAborted
 var ErrAssociationClosed
 var ErrBroadcastFlowIdentifierTooLong
 var ErrContextlessApplicationServer

@@ -696,3 +696,63 @@ func requireAssociationReady(t *testing.T, association *Association) {
 		t.Fatal("Association did not signal policy-selected readiness")
 	}
 }
+
+// An explicit procedure waiting for its acknowledgement when the association
+// ends reports why it ended -- an expired T(beat), a lost association, an
+// Abort -- and so does the Layer Management indication of the failure. The
+// teardown also cancels the procedure's T(ack) request, whose own answer is
+// only ErrAssociationClosed; the waiter must be woken by done, which closes
+// first, and read the cause. A release that takes a while, as a SHUTDOWN
+// waiting for its acknowledgement does, is what exposed a teardown that
+// cancelled the request before closing done.
+func TestExplicitASPProcedureReportsWhyTheAssociationEnded(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		end   func(*Association)
+		cause error
+	}{
+		{"T(beat) expired", func(c *Association) { _ = c.closeWith(ErrHeartbeatExpired) }, ErrHeartbeatExpired},
+		{"association lost", func(c *Association) { _ = c.closeWith(ErrSCTPNotAlive) }, ErrSCTPNotAlive},
+		{"Abort", func(c *Association) { _ = c.Abort() }, ErrAssociationAborted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			association, _ := newTestConn(t, StateASPActive, RoleASP)
+			association.cfg.TAck = time.Hour
+			writes := make(chan messages.M3UA, 1)
+			association.signalWriter = func(message messages.M3UA) (int, error) {
+				writes <- message
+				return message.MarshalLen(), nil
+			}
+			slowRelease := func() error {
+				time.Sleep(100 * time.Millisecond)
+				return nil
+			}
+			association.transportCloser, association.transportAborter = slowRelease, slowRelease
+
+			result := make(chan error, 1)
+			go func() { result <- association.ASPInactive(context.Background()) }()
+			if _, ok := receiveSignal(t, writes).(*messages.AspInactive); !ok {
+				t.Fatal("ASPInactive did not write ASP Inactive")
+			}
+			// The caller must be parked in its T(ack) wait when the association
+			// ends, as it is in production.
+			if !waitFor(func() bool { return len(goroutinesBlockedIn("go-m3ua.(*Association).waitTAck")) > 0 }, time.Second) {
+				t.Fatal("ASPInactive never waited for its acknowledgement")
+			}
+
+			test.end(association)
+			if err := <-result; err != test.cause {
+				t.Errorf("ASPInactive = %v, want the cause the association ended with, %v", err, test.cause)
+			}
+			var reported error
+			for indication := range association.ManagementIndications() {
+				if indication.Kind == ManagementError {
+					reported = indication.Cause
+				}
+			}
+			if reported != test.cause {
+				t.Errorf("the ASP Inactive failure indication carried %v, want %v", reported, test.cause)
+			}
+		})
+	}
+}

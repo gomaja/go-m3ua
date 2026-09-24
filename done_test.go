@@ -7,8 +7,11 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gomaja/go-m3ua/messages"
 )
 
 // An owner of an Association had two ways to learn it was gone: poll
@@ -164,5 +167,177 @@ func TestDoneIsSafeForConcurrentWaiters(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("only %d of %d waiters woke", i, waiters)
 		}
+	}
+}
+
+// blockingRelease holds the SCTP release until the test opens it, the way a
+// SHUTDOWN waiting for its acknowledgement does, and reports when the teardown
+// reached it.
+type blockingRelease struct {
+	reached     chan struct{}
+	gate        chan struct{}
+	reachedOnce sync.Once
+	openOnce    sync.Once
+}
+
+// installBlockingRelease holds conn's release. A test that fails while the
+// release is held still has it opened on cleanup, before newTestConn's own
+// cleanup joins the teardown, so the failure is reported instead of hanging.
+func installBlockingRelease(t *testing.T, conn *Association) *blockingRelease {
+	t.Helper()
+	release := &blockingRelease{reached: make(chan struct{}), gate: make(chan struct{})}
+	hold := func() error {
+		release.reachedOnce.Do(func() { close(release.reached) })
+		<-release.gate
+		return nil
+	}
+	conn.transportCloser, conn.transportAborter = hold, hold
+	t.Cleanup(release.open)
+	return release
+}
+
+func (release *blockingRelease) open() {
+	release.openOnce.Do(func() { close(release.gate) })
+}
+
+// Done marks the start of the teardown, not its end. It closes as soon as the
+// association has begun to end -- before the SCTP release, which for a
+// SHUTDOWN waits on the peer -- so every waiter and every guard that checks it
+// stops at once, and Err already says why. State reaches ASP-DOWN, and
+// StateChanges and ManagementIndications report the end and close, only once
+// the release has finished: a caller that needs the final state ranges over
+// StateChanges until it closes.
+func TestDoneMarksTheStartOfTheTeardown(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		call  func(*Association) error
+		cause error
+	}{
+		{"Close", (*Association).Close, ErrAssociationClosed},
+		{"Abort", (*Association).Abort, ErrAssociationAborted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			conn, _ := newTestConn(t, StateASPActive, RoleASP)
+			const pointCode = 0x123456
+			seedDestinationAvailability(conn, pointCode, DestinationAvailable)
+			release := installBlockingRelease(t, conn)
+
+			released := make(chan error, 1)
+			go func() { released <- test.call(conn) }()
+			<-release.reached
+			select {
+			case <-conn.Done():
+			case <-time.After(time.Second):
+				t.Fatal("Done is still open while the SCTP release is under way; it must close when the teardown begins")
+			}
+			if conn.Err() != test.cause {
+				t.Errorf("Err when Done closed = %v, want %v", conn.Err(), test.cause)
+			}
+			select {
+			case st, ok := <-conn.StateChanges():
+				t.Fatalf("StateChanges delivered %v (open %v) before the release finished; the end is reported after it", st, ok)
+			default:
+			}
+
+			release.open()
+			var last State
+			for st := range conn.StateChanges() {
+				last = st
+			}
+			if last != StateASPDown {
+				t.Errorf("the last state StateChanges reported = %v, want %v", last, StateASPDown)
+			}
+			if got := conn.State(); got != StateASPDown {
+				t.Errorf("State once StateChanges closed = %v, want %v", got, StateASPDown)
+			}
+			if got := retainedDestinationState(conn, pointCode).Availability; got != DestinationUnavailable {
+				t.Errorf("destination availability once StateChanges closed = %v, want %v: the end is reported after the destinations are paused",
+					got, DestinationUnavailable)
+			}
+			reportedRelease := false
+			for indication := range conn.ManagementIndications() {
+				if indication.Kind == ManagementSCTPRelease && indication.Cause == test.cause {
+					reportedRelease = true
+				}
+			}
+			if !reportedRelease {
+				t.Errorf("ManagementIndications closed without reporting the release caused by %v", test.cause)
+			}
+			if err := <-released; err != nil {
+				t.Errorf("%s: %v", test.name, err)
+			}
+		})
+	}
+}
+
+// The end is reported only after the ASP's destinations are paused (RFC 4666
+// Section 4.3.3's MTP-PAUSE), so a caller that waited for StateChanges to
+// close reads them paused. Holding the destinations' lock stops the teardown
+// at the pause; StateChanges must stay open until it is released.
+func TestStateChangesClosesOnlyOnceTheDestinationsArePaused(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPActive, RoleASP)
+	conn.transportCloser = func() error { return nil }
+	conn.destinations.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			conn.destinations.mu.Unlock()
+		}
+	}()
+
+	closed := make(chan error, 1)
+	go func() { closed <- conn.Close() }()
+	<-conn.Done()
+	drained := make(chan struct{})
+	go func() {
+		for range conn.StateChanges() {
+		}
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		t.Fatal("StateChanges closed while the destinations were still to be paused")
+	case <-time.After(100 * time.Millisecond):
+	}
+	conn.destinations.mu.Unlock()
+	locked = false
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("StateChanges never closed once the destinations could be paused")
+	}
+	if err := <-closed; err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// Once the teardown has begun no handler moves the state: a message still
+// being handled -- here an ASP Down an SGP reads while its own Close is
+// releasing SCTP -- finds done closed and changes nothing. The teardown alone
+// takes the association to ASP-DOWN, and so reports it on StateChanges. A
+// handler that committed ASP-DOWN itself instead left the teardown nothing to
+// report, and ASP-DOWN never reached StateChanges.
+func TestNoHandlerMovesTheStateOnceTheTeardownHasBegun(t *testing.T) {
+	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
+	release := installBlockingRelease(t, conn)
+
+	closed := make(chan error, 1)
+	go func() { closed <- conn.Close() }()
+	<-release.reached
+	conn.handleSignals(context.Background(), messages.NewAspDown(nil))
+	release.open()
+	if err := <-closed; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var reported []State
+	for st := range conn.StateChanges() {
+		reported = append(reported, st)
+	}
+	if len(reported) != 1 || reported[0] != StateASPDown {
+		t.Errorf("StateChanges reported %v, want exactly the teardown's %v", reported, StateASPDown)
+	}
+	if names := typeNames(*sent); len(names) != 0 {
+		t.Errorf("the association answered %v after its teardown began", names)
 	}
 }

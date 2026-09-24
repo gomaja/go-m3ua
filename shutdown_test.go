@@ -7,6 +7,8 @@ package m3ua
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -413,5 +415,75 @@ func assertNoSignal(t *testing.T, signals <-chan messages.M3UA, duration time.Du
 	case signal := <-signals:
 		t.Fatalf("received %T: %s", signal, description)
 	case <-time.After(duration):
+	}
+}
+
+// A release that overtakes ShutdownContext -- here between its reading
+// ASP-ACTIVE and its ASP Inactive reaching the transport -- is why the
+// withdrawal failed, and is what ShutdownContext reports. It used to return
+// the write error the release caused, "use of closed network connection",
+// which no caller can match to the Close or Abort that ended the association.
+func TestShutdownReportsAReleaseThatOvertookItsWithdrawal(t *testing.T) {
+	for _, release := range []struct {
+		name string
+		call func(*Association) error
+	}{
+		{"Close", (*Association).Close},
+		{"Abort", (*Association).Abort},
+	} {
+		t.Run(release.name, func(t *testing.T) {
+			conn, _ := newTestConn(t, StateASPActive, RoleASP)
+			conn.cfg.TAck = time.Hour
+			conn.transportCloser = func() error { return nil }
+			conn.transportAborter = func() error { return nil }
+			conn.signalWriter = func(message messages.M3UA) (int, error) {
+				if _, ok := message.(*messages.AspInactive); ok {
+					if err := release.call(conn); err != nil {
+						t.Errorf("%s: %v", release.name, err)
+					}
+					return 0, fmt.Errorf("failed to write M3UA: %w", net.ErrClosed)
+				}
+				return message.MarshalLen(), nil
+			}
+
+			err := conn.ShutdownContext(context.Background())
+			if !errors.Is(err, ErrAssociationClosed) || errors.Is(err, net.ErrClosed) {
+				t.Fatalf("ShutdownContext = %v, want the %s that ended the association (%v), not the write error it caused",
+					err, release.name, conn.Err())
+			}
+			if err != conn.Err() {
+				t.Errorf("ShutdownContext = %v, want Err's %v", err, conn.Err())
+			}
+		})
+	}
+}
+
+// ShutdownContext on an association another release already ended reports
+// that release, as Err does, instead of the nil its own final release returns
+// when there is nothing left to release. Both of its final releases are
+// covered: an SGP's, which has nothing to withdraw, and an ASP's, which finds
+// itself already ASP-DOWN.
+func TestShutdownReportsAReleaseThatEndedTheAssociationFirst(t *testing.T) {
+	for _, role := range []Role{RoleASP, RoleSGP} {
+		for _, release := range []struct {
+			name string
+			call func(*Association) error
+		}{
+			{"Close", (*Association).Close},
+			{"Abort", (*Association).Abort},
+		} {
+			t.Run(fmt.Sprintf("%v after %s", role, release.name), func(t *testing.T) {
+				conn, _ := newTestConn(t, StateASPActive, role)
+				conn.transportCloser = func() error { return nil }
+				conn.transportAborter = func() error { return nil }
+				if err := release.call(conn); err != nil {
+					t.Fatalf("%s: %v", release.name, err)
+				}
+				err := conn.ShutdownContext(context.Background())
+				if err == nil || err != conn.Err() {
+					t.Errorf("ShutdownContext = %v, want Err's %v", err, conn.Err())
+				}
+			})
+		}
 	}
 }
