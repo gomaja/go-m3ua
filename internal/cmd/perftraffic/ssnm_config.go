@@ -40,6 +40,10 @@ const (
 	// ssnmGeneratorHorizon bounds how long a generator runs after its anchor
 	// when no measurement cohort ever names its end.
 	ssnmGeneratorHorizon = maxRunWindow + time.Minute
+	// ssnmMinSubscriptionQueueBytes is the smallest positive subscription
+	// byte limit SSNMStateConfig.SubscriptionQueueBytes accepts: "a positive
+	// limit must be at least 512 bytes", one event's fixed charge.
+	ssnmMinSubscriptionQueueBytes = ssnmEventBaseBytes
 )
 
 const (
@@ -84,11 +88,24 @@ type ssnmConfig struct {
 	Records     int
 	Subscribers int
 	Pause       ssnmPause
+	// QueueBytes is the ASP subscriptions' accounted byte limit,
+	// SSNMStateConfig.SubscriptionQueueBytes. Validation resolves zero to the
+	// library default; it is zero on the SGP.
+	QueueBytes int
 	// Budgets are judged by the ASP only; they are zero on the SGP.
 	Budgets ssnmBudgets
 }
 
 func (config ssnmConfig) enabled() bool { return config.Rate > 0 }
+
+// subscriptionQueueBytes is the subscription byte limit in force: the flag,
+// or the library default when it is unset.
+func (config ssnmConfig) subscriptionQueueBytes() int {
+	if config.QueueBytes > 0 {
+		return config.QueueBytes
+	}
+	return m3ua.DefaultSSNMSubscriptionQueueBytes
+}
 
 // healthySubscribers counts the subscribers that must stay lossless.
 func (config ssnmConfig) healthySubscribers() int {
@@ -103,15 +120,19 @@ func (config ssnmConfig) healthySubscribers() int {
 // own flags, so both processes provably ran the same disturbance. Anchor is
 // the shared-clock instant generator message zero is scheduled at: the first
 // SSNM cohort's start, carried unchanged by every later cohort.
+// SubscriptionQueueBytes is the ASP subscriptions' byte limit in force, the
+// library default included, so the SGP record and perfcapacity see the limit
+// the F3 overflow was judged against.
 type ssnmWorkload struct {
-	Rate          uint64        `json:"rate"`
-	APCs          int           `json:"apcs"`
-	Records       int           `json:"records"`
-	Subscribers   int           `json:"subscribers"`
-	PauseOffset   time.Duration `json:"pause_offset_ns"`
-	PauseDuration time.Duration `json:"pause_duration_ns"`
-	Phase         string        `json:"phase"`
-	Anchor        int64         `json:"anchor_ns"`
+	Rate                   uint64        `json:"rate"`
+	APCs                   int           `json:"apcs"`
+	Records                int           `json:"records"`
+	Subscribers            int           `json:"subscribers"`
+	SubscriptionQueueBytes int           `json:"subscription_queue_bytes"`
+	PauseOffset            time.Duration `json:"pause_offset_ns"`
+	PauseDuration          time.Duration `json:"pause_duration_ns"`
+	Phase                  string        `json:"phase"`
+	Anchor                 int64         `json:"anchor_ns"`
 }
 
 func (workload *ssnmWorkload) enabled() bool { return workload != nil && workload.Rate > 0 }
@@ -154,6 +175,7 @@ func registerSSNMFlags(flagSet *flag.FlagSet, config *ssnmConfig) {
 	flagSet.IntVar(&config.Records, "ssnm-records", ssnmDefaultRecords, "SSNM load: distinct destinations cycled and retained per association")
 	flagSet.IntVar(&config.Subscribers, "subscribers", 0, "SSNM load (ASP): SSNM subscriptions, default 8 when SSNM load is on")
 	flagSet.Var(pauseFlag{pause: &config.Pause}, "pause-subscriber", "SSNM load (ASP): pause subscriber 0 at <offset>/<duration> into the measurement window, then Resync")
+	flagSet.IntVar(&config.QueueBytes, "ssnm-subscription-queue-bytes", 0, "SSNM load (ASP): accounted byte limit of each subscription queue, SSNMStateConfig.SubscriptionQueueBytes (0 selects the library default, 1 MiB)")
 	flagSet.DurationVar(&config.Budgets.ApplyP99, "ssnm-apply-p99-budget", ssnmDefaultApplyP99Budget, "SSNM load (ASP): p99 apply-time budget of 1,024-APC messages, judged on the report-to-receipt p99, which bounds apply time from above; other APC counts record the delay without a budget")
 	flagSet.DurationVar(&config.Budgets.Resync, "ssnm-resync-budget", ssnmDefaultResyncBudget, "SSNM load (ASP): budget for the paused subscriber's Resync snapshot and subscription acquisition")
 	flagSet.DurationVar(&config.Budgets.Recovery, "ssnm-recovery-budget", ssnmDefaultRecoveryBudget, "SSNM load (ASP): budget for the paused subscriber to consume its retained queued indications and the Resync snapshot after the pause")
@@ -169,7 +191,7 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 	flagSet.Visit(func(set *flag.Flag) { explicit[set.Name] = true })
 	ssnm := &config.SSNM
 	if !ssnm.enabled() {
-		for _, name := range append([]string{"ssnm-apcs", "ssnm-records", "subscribers", "pause-subscriber"}, ssnmBudgetFlags...) {
+		for _, name := range append([]string{"ssnm-apcs", "ssnm-records", "subscribers", "pause-subscriber", "ssnm-subscription-queue-bytes"}, ssnmBudgetFlags...) {
 			if explicit[name] {
 				return fmt.Errorf("-%s requires -ssnm-rate", name)
 			}
@@ -192,8 +214,8 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 		return errors.New("SSNM load requires -same-host-clock: its schedule and delays use the shared Linux monotonic clock")
 	}
 	if config.Role == "sgp" {
-		if explicit["subscribers"] || explicit["pause-subscriber"] {
-			return errors.New("-subscribers and -pause-subscriber configure the ASP subscribers and are not SGP flags")
+		if explicit["subscribers"] || explicit["pause-subscriber"] || explicit["ssnm-subscription-queue-bytes"] {
+			return errors.New("-subscribers, -pause-subscriber and -ssnm-subscription-queue-bytes configure the ASP subscribers and are not SGP flags")
 		}
 		for _, name := range ssnmBudgetFlags {
 			if explicit[name] {
@@ -211,6 +233,9 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 	}
 	if ssnm.Subscribers < 1 || ssnm.Subscribers > ssnmMaxSubscribers {
 		return fmt.Errorf("subscribers must be between 1 and %d", ssnmMaxSubscribers)
+	}
+	if err := validateSSNMQueueBytes(ssnm); err != nil {
+		return err
 	}
 	if ssnm.Pause.enabled() {
 		if ssnm.Subscribers < 2 {
@@ -231,18 +256,49 @@ func validateSSNMConfig(flagSet *flag.FlagSet, config *commandConfig) error {
 	return nil
 }
 
+// validateSSNMQueueBytes resolves the subscription byte limit and refuses one
+// the library would refuse or that cannot hold the workload's largest
+// message. That message is the preload's: min(records, 1,024) destinations.
+// A queue that cannot hold it loses continuity on every subscriber, the
+// healthy ones included, before any traffic starts.
+//
+// The rule is necessary, not sufficient. Every SGP message becomes one event
+// per association in each subscription, and a large store preloads several
+// messages, so a subscriber that falls behind during the preload can still
+// lose continuity with a limit this accepts. That aborts the run at setup
+// ("SSNM preload was not consumed"); it never yields a verdict. Requiring room
+// for the whole preload would refuse the approved 1 MiB default at the full
+// store from four associations up, although subscribers drain it
+// concurrently.
+func validateSSNMQueueBytes(ssnm *ssnmConfig) error {
+	switch {
+	case ssnm.QueueBytes < 0:
+		return errors.New("ssnm-subscription-queue-bytes must not be negative")
+	case ssnm.QueueBytes == 0:
+		ssnm.QueueBytes = m3ua.DefaultSSNMSubscriptionQueueBytes
+	case ssnm.QueueBytes < ssnmMinSubscriptionQueueBytes:
+		return fmt.Errorf("ssnm-subscription-queue-bytes must be 0 or at least %d", ssnmMinSubscriptionQueueBytes)
+	}
+	destinations := min(ssnm.Records, ssnmPreloadChunk)
+	if largest := ssnmWorkloadEventBytes(destinations); ssnm.QueueBytes < largest {
+		return fmt.Errorf("ssnm-subscription-queue-bytes %d cannot hold the %d-destination preload message, %d accounted bytes; every subscriber would lose continuity before traffic starts", ssnm.QueueBytes, destinations, largest)
+	}
+	return nil
+}
+
 // workload is the cohort specification this configuration declares for one
 // phase. The anchor is filled in by the sender run.
 func (config ssnmConfig) workload(phase string, anchor int64) ssnmWorkload {
 	return ssnmWorkload{
-		Rate:          config.Rate,
-		APCs:          config.APCs,
-		Records:       config.Records,
-		Subscribers:   config.Subscribers,
-		PauseOffset:   config.Pause.Offset,
-		PauseDuration: config.Pause.Duration,
-		Phase:         phase,
-		Anchor:        anchor,
+		Rate:                   config.Rate,
+		APCs:                   config.APCs,
+		Records:                config.Records,
+		Subscribers:            config.Subscribers,
+		SubscriptionQueueBytes: config.subscriptionQueueBytes(),
+		PauseOffset:            config.Pause.Offset,
+		PauseDuration:          config.Pause.Duration,
+		Phase:                  phase,
+		Anchor:                 anchor,
 	}
 }
 

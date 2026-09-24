@@ -119,7 +119,7 @@ func currentManifest(role string, config commandConfig) manifest {
 		SSNMState:                    *ssnmStateConfig(),
 		SubscriptionEventCap:         subscriptionQueueSize,
 		SubscriptionByteCap:          subscriptionByteCap,
-		SubscriptionByteCapNote:      "SSNMStateConfig at this revision has no per-subscription byte cap; only the 256-event cap is configured and enforced",
+		SubscriptionByteCapNote:      "configured as SSNMStateConfig.SubscriptionQueueBytes alongside the 256-event cap; either limit losing continuity requires Resync",
 		DataQueueMessages:            dataQueueSize,
 		PendingRecoveryTotalBytes:    pendingRecoveryTotalBytes,
 		PendingRecoveryNote:          "pinned on each peer SGP Endpoint; an ASP Endpoint has no pending-recovery queue",

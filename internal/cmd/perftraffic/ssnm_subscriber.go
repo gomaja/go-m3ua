@@ -10,17 +10,27 @@ import (
 	"github.com/gomaja/go-m3ua"
 )
 
+// ssnmEventStream is the part of an m3ua.SSNMSubscription a subscriber uses.
+type ssnmEventStream interface {
+	Next(ctx context.Context) (m3ua.SSNMEvent, error)
+	Resync() (m3ua.SSNMSnapshot, error)
+	Close() error
+}
+
 // ssnmSubscriber is one SubscribeSSNM consumer on the ASP Endpoint. It checks
 // every delivered report against the deterministic plan: per partition, a
 // healthy subscriber must see every position exactly once and in order.
 type ssnmSubscriber struct {
 	index        int
 	paused       bool
-	subscription *m3ua.SSNMSubscription
+	subscription ssnmEventStream
 	plan         ssnmPlan
 	rate         uint64
 	partitionCap int
-	queueLimit   int
+	// queueLimit and queueBytes are the subscription's event and accounted
+	// byte limits in force.
+	queueLimit int
+	queueBytes int
 
 	mutex      sync.Mutex
 	partitions map[m3ua.SSNMPartition]*ssnmPartitionProgress
@@ -66,7 +76,7 @@ const (
 	ssnmStateAvailable   = uint8(2)
 )
 
-func newSSNMSubscriber(index int, paused bool, plan ssnmPlan, rate uint64, partitionCap, queueLimit int) *ssnmSubscriber {
+func newSSNMSubscriber(index int, paused bool, plan ssnmPlan, rate uint64, partitionCap, queueLimit, queueBytes int) *ssnmSubscriber {
 	return &ssnmSubscriber{
 		index:        index,
 		paused:       paused,
@@ -74,6 +84,7 @@ func newSSNMSubscriber(index int, paused bool, plan ssnmPlan, rate uint64, parti
 		rate:         rate,
 		partitionCap: partitionCap,
 		queueLimit:   queueLimit,
+		queueBytes:   queueBytes,
 		partitions:   make(map[m3ua.SSNMPartition]*ssnmPartitionProgress),
 	}
 }
@@ -401,34 +412,49 @@ func (subscriber *ssnmSubscriber) run(ctx context.Context, clock measurementCloc
 }
 
 // ssnmPauseRecord is the F3 overflow and recovery evidence of the paused
-// subscriber.
+// subscriber. QueueLimit and QueueByteLimit are the subscription's caps in
+// force; QueuedAtLoss and QueuedBytesAtLoss are the events it retained before
+// the continuity-loss marker and their accounted bytes, recomputed from the
+// delivered events by the documented SubscriptionQueueBytes formula.
+// SmallestEventBytes is the smallest event the generator can queue after the
+// preload, which decides whether another event could have fitted, and
+// SmallestQueuedEventBytes the smallest retained one, which must not be
+// below it. CountCapEnforced and ByteCapEnforced report each cap reached at
+// the loss, and BindingCap names the one that bound (ssnmCapsReached).
 type ssnmPauseRecord struct {
-	Subscriber             int      `json:"subscriber"`
-	ScheduledPauseNS       int64    `json:"scheduled_pause_ns"`
-	PausedAtNS             int64    `json:"paused_at_ns"`
-	ResumedAtNS            int64    `json:"resumed_at_ns"`
-	ContinuityLossObserved bool     `json:"continuity_loss_observed"`
-	QueueLimit             int      `json:"queue_limit"`
-	QueuedAtLoss           int      `json:"queued_at_loss"`
-	CountCapEnforced       bool     `json:"count_cap_enforced"`
-	QueuedStateEntries     int      `json:"queued_state_entries"`
-	ByteCap                string   `json:"byte_cap"`
-	DrainQueuedNS          int64    `json:"drain_queued_ns"`
-	ResyncNS               int64    `json:"resync_ns"`
-	SnapshotConsumeNS      int64    `json:"snapshot_consume_ns"`
-	RecoveryNS             int64    `json:"recovery_ns"`
-	SnapshotPartitions     int      `json:"snapshot_partitions"`
-	SnapshotDestinations   int      `json:"snapshot_destinations"`
-	SnapshotValidated      int      `json:"snapshot_partitions_validated"`
-	LockedOnPositions      []uint64 `json:"locked_on_positions,omitempty"`
-	Error                  string   `json:"error,omitempty"`
+	Subscriber               int      `json:"subscriber"`
+	ScheduledPauseNS         int64    `json:"scheduled_pause_ns"`
+	PausedAtNS               int64    `json:"paused_at_ns"`
+	ResumedAtNS              int64    `json:"resumed_at_ns"`
+	ContinuityLossObserved   bool     `json:"continuity_loss_observed"`
+	QueueLimit               int      `json:"queue_limit"`
+	QueuedAtLoss             int      `json:"queued_at_loss"`
+	CountCapEnforced         bool     `json:"count_cap_enforced"`
+	QueueByteLimit           int      `json:"queue_byte_limit"`
+	QueuedBytesAtLoss        int      `json:"queued_bytes_at_loss"`
+	SmallestEventBytes       int      `json:"smallest_event_bytes"`
+	SmallestQueuedEventBytes int      `json:"smallest_queued_event_bytes"`
+	ByteCapEnforced          bool     `json:"byte_cap_enforced"`
+	BindingCap               string   `json:"binding_cap"`
+	QueuedStateEntries       int      `json:"queued_state_entries"`
+	DrainQueuedNS            int64    `json:"drain_queued_ns"`
+	ResyncNS                 int64    `json:"resync_ns"`
+	SnapshotConsumeNS        int64    `json:"snapshot_consume_ns"`
+	RecoveryNS               int64    `json:"recovery_ns"`
+	SnapshotPartitions       int      `json:"snapshot_partitions"`
+	SnapshotDestinations     int      `json:"snapshot_destinations"`
+	SnapshotValidated        int      `json:"snapshot_partitions_validated"`
+	LockedOnPositions        []uint64 `json:"locked_on_positions,omitempty"`
+	Error                    string   `json:"error,omitempty"`
 }
-
-const ssnmByteCapNote = "not observable: this library's SSNMStateConfig bounds a subscription by event count only and exposes no retained-byte accounting; queued_state_entries sums the destination updates the retained events carry"
 
 func (subscriber *ssnmSubscriber) pauseAndRecover(ctx context.Context, clock measurementClock, pauseAt int64, pause ssnmPause) {
 	subscriber.pauseDone = true
-	record := &ssnmPauseRecord{Subscriber: subscriber.index, ScheduledPauseNS: pauseAt, QueueLimit: subscriber.queueLimit, ByteCap: ssnmByteCapNote}
+	record := &ssnmPauseRecord{
+		Subscriber: subscriber.index, ScheduledPauseNS: pauseAt,
+		QueueLimit: subscriber.queueLimit, QueueByteLimit: subscriber.queueBytes,
+		SmallestEventBytes: ssnmWorkloadEventBytes(subscriber.plan.apcs),
+	}
 	subscriber.mutex.Lock()
 	subscriber.pause = record
 	subscriber.mutex.Unlock()
@@ -452,7 +478,9 @@ func (subscriber *ssnmSubscriber) pauseAndRecover(ctx context.Context, clock mea
 		fail(err)
 		return
 	}
-	queued, entries, lossSeen := 0, 0, false
+	// The drain stops one event past the count cap, which is enough to show
+	// the cap exceeded, and never runs unbounded.
+	queued, queuedBytes, smallest, entries, lossSeen := 0, 0, 0, 0, false
 	for queued <= subscriber.queueLimit {
 		callContext, cancel := context.WithTimeout(ctx, time.Second)
 		event, nextErr := subscriber.subscription.Next(callContext)
@@ -471,7 +499,12 @@ func (subscriber *ssnmSubscriber) pauseAndRecover(ctx context.Context, clock mea
 			lossSeen = true
 			break
 		}
+		size := ssnmEventBytes(event)
+		if queued == 0 || size < smallest {
+			smallest = size
+		}
 		queued++
+		queuedBytes += size
 		entries += len(event.Updated)
 		subscriber.observe(event, received)
 	}
@@ -479,8 +512,10 @@ func (subscriber *ssnmSubscriber) pauseAndRecover(ctx context.Context, clock mea
 	subscriber.mutex.Lock()
 	record.PausedAtNS, record.ResumedAtNS = paused, resumed
 	record.QueuedAtLoss, record.QueuedStateEntries = queued, entries
+	record.QueuedBytesAtLoss, record.SmallestQueuedEventBytes = queuedBytes, smallest
 	record.ContinuityLossObserved = lossSeen
-	record.CountCapEnforced = lossSeen && queued == subscriber.queueLimit
+	record.CountCapEnforced, record.ByteCapEnforced = ssnmCapsReached(record)
+	record.BindingCap = ssnmBindingCap(record.CountCapEnforced, record.ByteCapEnforced)
 	record.DrainQueuedNS = drained - resumed
 	subscriber.mutex.Unlock()
 	if !lossSeen {

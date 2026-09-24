@@ -28,7 +28,7 @@ func planEvent(plan ssnmPlan, partition m3ua.SSNMPartition, position uint64) m3u
 
 func TestSSNMSubscriberAcceptsInOrderStream(testContext *testing.T) {
 	plan := ssnmPlan{records: 8, apcs: 2}
-	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256)
+	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256, 1<<20)
 	for position := uint64(0); position < 40; position++ {
 		subscriber.observe(planEvent(plan, testPartition, position), int64(position))
 	}
@@ -43,7 +43,7 @@ func TestSSNMSubscriberAcceptsInOrderStream(testContext *testing.T) {
 
 func TestSSNMSubscriberDetectsDuplicateGapAndUnexpected(testContext *testing.T) {
 	plan := ssnmPlan{records: 8, apcs: 2}
-	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256)
+	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256, 1<<20)
 	for _, position := range []uint64{0, 1, 2, 2, 5, 6} {
 		subscriber.observe(planEvent(plan, testPartition, position), 0)
 	}
@@ -67,7 +67,7 @@ func TestSSNMSubscriberDetectsDuplicateGapAndUnexpected(testContext *testing.T) 
 
 func TestSSNMSubscriberCountsLifecycleEventsAndPartitionCap(testContext *testing.T) {
 	plan := ssnmPlan{records: 8, apcs: 2}
-	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256)
+	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256, 1<<20)
 	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMContinuityLostEvent, ContinuityLost: true}, 0)
 	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMResourceLossEvent}, 0)
 	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMPartitionInvalidatedEvent}, 0)
@@ -88,7 +88,7 @@ func TestSSNMSubscriberJoinsReceiptsWithReports(testContext *testing.T) {
 	plan := ssnmPlan{records: 8, apcs: 2}
 	preload := plan.preloadMessages()
 	anchor := int64(1_000_000_000)
-	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256)
+	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256, 1<<20)
 	subscriber.armReceipts(anchor, 2, 6, true)
 	for position := uint64(0); position < preload+5; position++ {
 		message := position - preload
@@ -131,7 +131,7 @@ func TestSSNMSubscriberLocksOnAfterResync(testContext *testing.T) {
 	plan := ssnmPlan{records: 16, apcs: 1}
 	preload := plan.preloadMessages()
 	anchor := int64(1_000_000_000)
-	subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4)
+	subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4, 1<<20)
 	subscriber.pause = &ssnmPauseRecord{}
 	subscriber.armReceipts(anchor, 0, 0, false)
 	for position := uint64(0); position < preload+10; position++ {
@@ -161,10 +161,15 @@ func TestSSNMSubscriberLocksOnAfterResync(testContext *testing.T) {
 	}
 }
 
-// cleanPause is the F3 evidence of a pause that overflowed at the cap and
-// validated its one resynchronized partition.
+// cleanPause is the F3 evidence of a one-APC pause that overflowed at the
+// count cap under the default byte limit and validated its one
+// resynchronized partition: 256 events of 784 accounted bytes each.
 func cleanPause() *ssnmPauseRecord {
-	return &ssnmPauseRecord{ContinuityLossObserved: true, QueueLimit: 256, QueuedAtLoss: 256, CountCapEnforced: true, SnapshotValidated: 1}
+	return &ssnmPauseRecord{
+		ContinuityLossObserved: true, QueueLimit: 256, QueuedAtLoss: 256, CountCapEnforced: true,
+		QueueByteLimit: 1 << 20, QueuedBytesAtLoss: 256 * 784, SmallestEventBytes: 784, SmallestQueuedEventBytes: 784,
+		BindingCap: ssnmBindingCount, SnapshotValidated: 1,
+	}
 }
 
 // After a successful Resync and lock-on the paused subscriber must be
@@ -180,7 +185,7 @@ func TestSSNMSubscriberAfterResyncMustStayLossless(testContext *testing.T) {
 		"gap":       {resumed, resumed + 1, resumed + 3},
 	} {
 		testContext.Run(name, func(testContext *testing.T) {
-			subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4)
+			subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4, 1<<20)
 			subscriber.pause = &ssnmPauseRecord{}
 			subscriber.armReceipts(anchor, 0, 0, false)
 			for position := uint64(0); position < preload+10; position++ {
@@ -217,7 +222,7 @@ func TestSSNMSubscriberRejectsStaleSnapshot(testContext *testing.T) {
 	plan := ssnmPlan{records: 16, apcs: 1}
 	preload := plan.preloadMessages()
 	anchor := int64(1_000_000_000)
-	subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4)
+	subscriber := newSSNMSubscriber(0, true, plan, 1000, 1, 4, 1<<20)
 	subscriber.armReceipts(anchor, 0, 0, false)
 	for position := uint64(0); position < preload+10; position++ {
 		subscriber.observe(planEvent(plan, testPartition, position), 0)
@@ -234,7 +239,7 @@ func TestSSNMSubscriberRejectsStaleSnapshot(testContext *testing.T) {
 
 func TestSSNMPausedSubscriberContract(testContext *testing.T) {
 	record := ssnmSubscriberRecord{Partitions: 1, FinalPositions: []uint64{10}, ExpectedFinalPosition: 10, ssnmSubscriberCounts: ssnmSubscriberCounts{ContinuityLost: 1}}
-	good := &ssnmPauseRecord{ContinuityLossObserved: true, QueueLimit: 256, QueuedAtLoss: 256, CountCapEnforced: true, SnapshotValidated: 1}
+	good := cleanPause()
 	if failures := pausedSubscriberFailures(record, good, 1); len(failures) != 0 {
 		testContext.Fatalf("clean F3 pause failed: %v", failures)
 	}
@@ -272,7 +277,7 @@ func TestSSNMVerdict(testContext *testing.T) {
 // accounting against concurrent coordinator reads under the race detector.
 func TestSSNMSubscriberConcurrentAccounting(testContext *testing.T) {
 	plan := ssnmPlan{records: 64, apcs: 1}
-	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256)
+	subscriber := newSSNMSubscriber(0, false, plan, 1000, 1, 256, 1<<20)
 	subscriber.armReceipts(0, 0, 1000, true)
 	var group sync.WaitGroup
 	group.Add(2)
@@ -300,7 +305,7 @@ func TestSSNMSubscriberConcurrentAccounting(testContext *testing.T) {
 func TestSSNMAttachArmsEverySubscriberAnchor(testContext *testing.T) {
 	plan := ssnmPlan{records: 16, apcs: 1}
 	run := &ssnmSenderRun{config: ssnmConfig{Rate: 1000, APCs: 1, Records: 16, Subscribers: 2, Pause: ssnmPause{Offset: time.Second, Duration: time.Second}}, plan: plan, associations: 1}
-	run.subscribers = []*ssnmSubscriber{newSSNMSubscriber(0, true, plan, 1000, 1, 4), newSSNMSubscriber(1, false, plan, 1000, 1, 4)}
+	run.subscribers = []*ssnmSubscriber{newSSNMSubscriber(0, true, plan, 1000, 1, 4, 1<<20), newSSNMSubscriber(1, false, plan, 1000, 1, 4, 1<<20)}
 	warmup := runSpec{Clock: &sharedClockWindow{Start: 5_000_000_000, End: 6_000_000_000}}
 	if err := run.attach(&warmup, ssnmPhaseWarmup); err != nil || warmup.SSNM.Anchor != 5_000_000_000 || warmup.SSNM.Phase != ssnmPhaseWarmup {
 		testContext.Fatalf("warm-up attach = %+v, %v", warmup.SSNM, err)

@@ -46,10 +46,8 @@ func largeFinishFixture(delay time.Duration) *finishFixture {
 
 func pausedFinishFixture(resync, recovery time.Duration) *finishFixture {
 	fixture := newFinishFixture(ssnmConfig{Rate: 1000, APCs: 1, Records: 8, Subscribers: 2, Pause: ssnmPause{Offset: time.Millisecond, Duration: time.Millisecond}}, 2*time.Millisecond)
-	fixture.pause = &ssnmPauseRecord{
-		ContinuityLossObserved: true, QueueLimit: 256, QueuedAtLoss: 256, CountCapEnforced: true, SnapshotValidated: 1,
-		ResyncNS: int64(resync), RecoveryNS: int64(recovery),
-	}
+	fixture.pause = cleanPause()
+	fixture.pause.ResyncNS, fixture.pause.RecoveryNS = int64(resync), int64(recovery)
 	return fixture
 }
 
@@ -93,7 +91,7 @@ func (fixture *finishFixture) run(testContext *testing.T) *ssnmRecord {
 	}
 	for index := 0; index < fixture.config.Subscribers; index++ {
 		paused := index == 0 && fixture.config.Pause.enabled()
-		run.subscribers = append(run.subscribers, newSSNMSubscriber(index, paused, plan, fixture.config.Rate, 1, 256))
+		run.subscribers = append(run.subscribers, newSSNMSubscriber(index, paused, plan, fixture.config.Rate, 1, 256, 1<<20))
 	}
 	specification := runSpec{Clock: &sharedClockWindow{Start: finishAnchor, End: windowEnd}}
 	if err := run.attach(&specification, ssnmPhaseMeasurement); err != nil {
