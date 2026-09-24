@@ -57,6 +57,7 @@ type receiverControl struct {
 	uniqueMeasurement    uint64
 	uniqueDrain          uint64
 	lateAfterStop        uint64
+	lateAfterDeadline    uint64
 	echoReplies          uint64
 	echoReplyErrors      uint64
 	echoRepliesDropped   uint64
@@ -67,6 +68,8 @@ type receiverControl struct {
 	cpuError             string
 	allocBefore          runtimeCounters
 	allocAfter           runtimeCounters
+	memory               *memorySampler
+	memoryResult         *memoryObservation
 	series               []seriesPoint
 	generation           uint64
 	driver               *reverseDriver
@@ -155,6 +158,13 @@ func (control *receiverControl) setAssociationReady(index, maxMessageStreamID in
 	if control.minimumMaxStreamID < 0 || maxMessageStreamID < control.minimumMaxStreamID {
 		control.minimumMaxStreamID = maxMessageStreamID
 	}
+}
+
+// fatalError is the control's fatal error, empty while it has none.
+func (control *receiverControl) fatalError() string {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return control.fatal
 }
 
 func (control *receiverControl) setFatal(reason string) {
@@ -265,6 +275,12 @@ func (control *receiverControl) reset(specification runSpec) error {
 		}
 		routedLedger = ledger
 	}
+	if err := control.acceptFailoverSpecLocked(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
+	if err := validateRouteReferenceSpec(specification); err != nil {
+		return fmt.Errorf("%w: %v", errInvalidRunSpec, err)
+	}
 	// acceptSpec commits the generator to the cohort, so it runs after every
 	// check that can still refuse the specification.
 	if err := control.ssnm.acceptSpec(specification); err != nil {
@@ -294,6 +310,12 @@ func (control *receiverControl) reset(specification runSpec) error {
 	control.uniqueMeasurement = 0
 	control.uniqueDrain = 0
 	control.lateAfterStop = 0
+	control.lateAfterDeadline = 0
+	if control.memory != nil {
+		control.memory.stop()
+		control.memory = nil
+	}
+	control.memoryResult = nil
 	control.echoReplies = 0
 	control.echoReplyErrors = 0
 	control.echoRepliesDropped = 0
@@ -305,6 +327,7 @@ func (control *receiverControl) reset(specification runSpec) error {
 	control.cpuError = ""
 	control.series = nil
 	control.generation++
+	control.resetFailoverLocked(specification)
 	control.phase = receiverArmed
 	return nil
 }
@@ -326,12 +349,14 @@ func (control *receiverControl) start() error {
 		control.clockEvidence = &sharedClockEvidence{Before: domain}
 	}
 	control.allocBefore = readRuntimeCounters()
+	control.memory = startMemorySampler()
 	var err error
 	control.cpuBefore, err = readCPUStat(control.cpuStatPath)
 	if err != nil {
 		control.cpuError = err.Error()
 	}
 	control.phase = receiverMeasuring
+	control.startFailoverLocked()
 	control.startOverloadLocked()
 	specification := control.spec
 	driver := control.driver
@@ -408,11 +433,17 @@ func (control *receiverControl) stop() error {
 		return errors.New("receiver is not measuring")
 	}
 	control.stopped = control.now()
+	if control.memory != nil {
+		observation := control.memory.finish()
+		control.memoryResult = &observation
+		control.memory = nil
+	}
 	if control.spec.Clock != nil {
 		var clockErr error
 		control.stoppedClock, clockErr = control.sharedNowLocked()
 		if clockErr != nil {
 			control.phase = receiverStopped
+			control.stopFailoverLocked()
 			control.stopOverloadLocked()
 			return clockErr
 		}
@@ -424,6 +455,7 @@ func (control *receiverControl) stop() error {
 	}
 	control.allocAfter = readRuntimeCounters()
 	control.phase = receiverStopped
+	control.stopFailoverLocked()
 	control.stopOverloadLocked()
 	if control.overload != nil && control.overload.begun {
 		control.overload.finish()
@@ -534,7 +566,7 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 			control.ledger.snapshotData.Unique--
 			control.ledger.snapshotData.Invalid++
 			if clockErr == nil {
-				control.fatal = "delivery exceeds shared drain deadline"
+				control.lateDeliveryLocked()
 			}
 			return arrival{identity: identity, generation: generation}, recordInvalid
 		}
@@ -553,6 +585,21 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 		control.overload.recordUnique(globalIndex(identity))
 	}
 	return arrival{identity: identity, generation: generation}, recordUnique
+}
+
+// lateDeliveryLocked accounts for a delivery committed after the shared drain
+// deadline. In a nominal cohort it is work that was still outstanding at the
+// deadline: the delivery is already counted invalid, earns no unique credit
+// and fails the cohort, and late_after_deadline names why. It is not a fixture
+// fault, so it does not end the receiver. The overload and SGP failure trials
+// keep their contracts, in which any delivery past the deadline is a fixture
+// failure.
+func (control *receiverControl) lateDeliveryLocked() {
+	if !control.spec.nominalDrainOutcomes() {
+		control.fatal = "delivery exceeds shared drain deadline"
+		return
+	}
+	control.lateAfterDeadline++
 }
 
 func (control *receiverControl) bindAssociation(transportIndex, logicalIndex int) bool {
@@ -671,7 +718,12 @@ func (control *receiverControl) result() runRecord {
 			Invalid:           snapshot.Invalid,
 			Reordered:         snapshot.Reordered,
 			LateAfterStop:     control.lateAfterStop,
+			LateAfterDeadline: control.lateAfterDeadline,
 		}
+	}
+	if control.memoryResult != nil {
+		observation := *control.memoryResult
+		record.Memory = &observation
 	}
 	if control.spec.Mode == modeEcho {
 		record.ReceiverEcho = &receiverEchoResult{
@@ -702,6 +754,7 @@ func (control *receiverControl) result() runRecord {
 		record.SSNM = &ssnmRecord{Generator: generator}
 		record.UnsupportedModes = ssnmUnsupportedModes()
 	}
+	record.Failover = control.failoverRecordLocked()
 	record.CPU = newCPUObservation(record.CPU.Before, record.CPU.After, errorFromString(record.CPU.Error), nil, record.Delivery.Unique)
 	record.Allocations.Delta = runtimeDelta(record.Allocations.Before, record.Allocations.After)
 	if record.MeasurementDuration > 0 {

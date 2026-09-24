@@ -266,6 +266,11 @@ func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
 	return perfstats.ProbeNotDemonstrated
 }
 
+// lateAfterDeadlineReason names a failed direction whose receiver committed
+// deliveries after the drain deadline: work that arrived late rather than
+// work the receiver discarded or never got.
+const lateAfterDeadlineReason = "deliveries-committed-after-drain-deadline"
+
 func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	forward := perfstats.DecideRun(fixture.forward)
 	result := probeDecision{
@@ -291,8 +296,13 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 					result.Decision = string(perfstats.Fail)
 					result.Reason = "unidirectional-cohort-error"
 				}
+				if fixture.forwardLate && result.Decision == string(perfstats.Fail) {
+					result.Reason = lateAfterDeadlineReason
+					result.Directions[0].Reason = lateAfterDeadlineReason
+				}
 			}
 			applySSNMDecision(&result, fixture.ssnmVerdict, forward.Stall != nil && forward.Stall.Stalled())
+			applyRouteReferenceDecision(&result, fixture.referenceVerdict, forward.Stall != nil && forward.Stall.Stalled())
 		}
 		return result
 	}
@@ -315,6 +325,14 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	if fixture.reverseAchieved != nil {
 		reverseDirection.AchievedRateLower = &fixture.reverseAchieved.lower
 		reverseDirection.AchievedRateUpper = &fixture.reverseAchieved.upper
+	}
+	for _, direction := range []struct {
+		decision *directionDecision
+		late     bool
+	}{{&forwardDirection, fixture.forwardLate}, {&reverseDirection, fixture.reverseLate}} {
+		if direction.late && direction.decision.Decision == string(perfstats.Fail) {
+			direction.decision.Reason = lateAfterDeadlineReason
+		}
 	}
 	result.Directions = []directionDecision{forwardDirection, reverseDirection}
 	switch {
@@ -387,6 +405,149 @@ type fixtureEvidence struct {
 	ClockBoundary      *sharedClockBoundary `json:"shared_clock_boundary"`
 	ValidatedPerSecond *float64             `json:"validated_per_second"`
 	SSNM               *ssnmEvidence        `json:"ssnm"`
+	// DrainTimeout is present only on a sender record whose drain deadline
+	// passed with submitted work still unaccounted at the receiver.
+	DrainTimeout *drainTimeoutEvidence `json:"drain_timeout"`
+	// SenderDrainTimeout is present only on a sender record whose drain
+	// deadline passed while the sender still held scheduled work.
+	SenderDrainTimeout *senderDrainTimeoutEvidence `json:"sender_drain_timeout"`
+	// Failover is the evidence of a perftraffic SGP failure trial. Such a
+	// record is never capacity evidence.
+	Failover json.RawMessage `json:"failover"`
+	// RouteReferences is the route-reference result of a routed-direct
+	// sender record that declared the workload.
+	RouteReferences *routeReferenceEvidence `json:"route_references"`
+}
+
+// senderDrainTimeoutCause is the fixed cause perftraffic records on every
+// sender_drain_timeout outcome.
+const senderDrainTimeoutCause = "the drain deadline passed while the sender still held scheduled messages it had not submitted: the offered load could not be submitted in time"
+
+// senderDrainTimeoutEvidence is the sender side of a nominal cohort's drain
+// deadline outcome: OutstandingAtDeadline scheduled messages were still queued
+// or in a send call when the deadline passed, and Unsubmitted sends were cut
+// off by it (the expired write deadline or a completion after the shared
+// drain deadline), all counted in send_errors. Like drain_timeout it is a
+// delivery failure of the offered rate and never a fixture fault.
+type senderDrainTimeoutEvidence struct {
+	Cause                 *string        `json:"cause"`
+	Drain                 *time.Duration `json:"drain_ns"`
+	OutstandingAtDeadline *uint64        `json:"outstanding_at_deadline"`
+	Unsubmitted           *uint64        `json:"unsubmitted"`
+}
+
+// unsubmittedAtDrainDeadline reports whether the record carries a sender
+// drain deadline outcome with work the sender could not submit in time.
+func (record *fixtureEvidence) unsubmittedAtDrainDeadline() bool {
+	timeout := record.SenderDrainTimeout
+	return timeout != nil && (timeout.OutstandingAtDeadline != nil && *timeout.OutstandingAtDeadline > 0 ||
+		timeout.Unsubmitted != nil && *timeout.Unsubmitted > 0)
+}
+
+// validateSenderDrainTimeout checks a sender drain deadline outcome against
+// its record: the producer's cause, the run's drain, work actually cut off, no
+// more outstanding than the run's limit allows, and every send it cut off
+// counted in send_errors. Without a fatal error every send error must be one
+// the deadline cut off: any other send failure is a fault the producer
+// reports as fatal.
+func validateSenderDrainTimeout(record *fixtureEvidence) error {
+	timeout := record.SenderDrainTimeout
+	if timeout == nil {
+		return nil
+	}
+	if timeout.Cause == nil || timeout.Drain == nil || timeout.OutstandingAtDeadline == nil || timeout.Unsubmitted == nil {
+		return errors.New("sender_drain_timeout cause, drain_ns, outstanding_at_deadline and unsubmitted are required")
+	}
+	if *timeout.Cause != senderDrainTimeoutCause {
+		return errors.New("sender_drain_timeout cause must match the producer contract")
+	}
+	if *timeout.Drain != record.Spec.Drain {
+		return errors.New("sender_drain_timeout drain_ns must equal the workload drain")
+	}
+	if *timeout.OutstandingAtDeadline == 0 && *timeout.Unsubmitted == 0 {
+		return errors.New("sender_drain_timeout must report outstanding or unsubmitted work")
+	}
+	if *timeout.OutstandingAtDeadline > uint64(*record.Spec.Outstanding) {
+		return errors.New("sender_drain_timeout outstanding_at_deadline exceeds the workload outstanding limit")
+	}
+	if *timeout.Unsubmitted > *record.SendErrors || record.FatalError == "" && *timeout.Unsubmitted != *record.SendErrors {
+		return errors.New("sender_drain_timeout unsubmitted must be counted in send_errors, and be all of them without a fatal error")
+	}
+	return nil
+}
+
+// drainTimeoutCause is the fixed cause perftraffic records on every
+// drain_timeout outcome.
+const drainTimeoutCause = "the drain deadline passed while submitted messages were still unaccounted at the receiver: the offered load was not delivered in time"
+
+// drainTimeoutEvidence is a nominal cohort's drain deadline outcome: the
+// sender stopped waiting at the drain deadline with Undelivered of its
+// Submitted messages not yet accounted for (validated, duplicate or invalid)
+// in the last receiver result it read. It is a delivery failure of the
+// offered rate, the expected result above capacity, and never a fixture
+// fault; a fault keeps its fatal_error.
+type drainTimeoutEvidence struct {
+	Cause       *string        `json:"cause"`
+	Drain       *time.Duration `json:"drain_ns"`
+	Submitted   *uint64        `json:"submitted"`
+	Accounted   *uint64        `json:"accounted"`
+	Undelivered *uint64        `json:"undelivered"`
+	// ObservedBeforeDeadline is how long before the deadline the last
+	// receiver result was read, zero if the read completed at or after it.
+	ObservedBeforeDeadline *time.Duration `json:"observed_before_deadline_ns"`
+}
+
+// drainObservationBound is how recent perftraffic's last receiver result must
+// be when the drain deadline passes for the wait to report undelivered work:
+// ten of its 10 ms poll intervals. An older result means the receiver control
+// stopped answering, which perftraffic reports as a fatal error; a
+// drain_timeout claiming one is contradictory.
+const drainObservationBound = 100 * time.Millisecond
+
+// undeliveredAtDrainDeadline reports whether the record carries a drain
+// deadline outcome with work outstanding. The outcome's consistency is checked
+// with the rest of the record's validity.
+func (record *fixtureEvidence) undeliveredAtDrainDeadline() bool {
+	timeout := record.DrainTimeout
+	return timeout != nil && timeout.Undelivered != nil && *timeout.Undelivered > 0
+}
+
+// validateDrainTimeout checks a drain deadline outcome against the record
+// that carries it: the producer's cause, the run's drain allowance, the
+// sender's submissions, a reconciled positive undelivered count, and an
+// accounted count the receiver's final counters never fall below.
+func validateDrainTimeout(record *fixtureEvidence) error {
+	timeout := record.DrainTimeout
+	if timeout == nil {
+		return nil
+	}
+	if timeout.Cause == nil || timeout.Drain == nil || timeout.Submitted == nil || timeout.Accounted == nil || timeout.Undelivered == nil ||
+		timeout.ObservedBeforeDeadline == nil {
+		return errors.New("drain_timeout cause, drain_ns, submitted, accounted, undelivered and observed_before_deadline_ns are required")
+	}
+	if *timeout.ObservedBeforeDeadline < 0 || *timeout.ObservedBeforeDeadline > drainObservationBound {
+		return fmt.Errorf("drain_timeout observed_before_deadline_ns must be between 0 and %s: an older last result is a receiver control that stopped answering", drainObservationBound)
+	}
+	if *timeout.Cause != drainTimeoutCause {
+		return errors.New("drain_timeout cause must match the producer contract")
+	}
+	if *timeout.Drain != record.Spec.Drain {
+		return errors.New("drain_timeout drain_ns must equal the workload drain")
+	}
+	if *timeout.Submitted != *record.Submitted {
+		return errors.New("drain_timeout submitted must equal the sender submissions")
+	}
+	if *timeout.Undelivered == 0 || !sumEquals(*timeout.Submitted, *timeout.Accounted, *timeout.Undelivered) {
+		return errors.New("drain_timeout must report undelivered work that reconciles with its submitted and accounted counts")
+	}
+	final, ok := checkedAdd(*record.Delivery.Unique, *record.Delivery.Duplicate)
+	if ok {
+		final, ok = checkedAdd(final, *record.Delivery.Invalid)
+	}
+	if !ok || *timeout.Accounted > final {
+		return errors.New("drain_timeout accounted more deliveries than the receiver's final counters")
+	}
+	return nil
 }
 
 type deliveryEvidence struct {
@@ -398,6 +559,19 @@ type deliveryEvidence struct {
 	Invalid           *uint64 `json:"invalid"`
 	Reordered         *uint64 `json:"reordered"`
 	LateAfterStop     *uint64 `json:"late_after_stop"`
+	// LateAfterDeadline counts deliveries a shared-clock receiver committed
+	// after the drain deadline, a subset of Invalid. Records from before the
+	// counter existed omit it.
+	LateAfterDeadline *uint64 `json:"late_after_deadline"`
+}
+
+// lateAfterDeadline is the count of deliveries committed after the drain
+// deadline, zero when the record does not carry the counter.
+func (delivery *deliveryEvidence) lateAfterDeadline() uint64 {
+	if delivery == nil || delivery.LateAfterDeadline == nil {
+		return 0
+	}
+	return *delivery.LateAfterDeadline
 }
 
 type senderWindowEvidence struct {
@@ -507,6 +681,12 @@ type fixtureSpec struct {
 	PeerControl  string             `json:"peer_control"`
 	SharedClock  *sharedClockWindow `json:"shared_clock"`
 	SSNM         *ssnmSpecEvidence  `json:"ssnm"`
+	// SGPFailure declares a perftraffic SGP failure trial cohort, which is
+	// correctness and recovery evidence, never a capacity probe.
+	SGPFailure json.RawMessage `json:"failure_trial"`
+	// RouteReferences declares the application route-reference workload of
+	// a routed-direct cohort.
+	RouteReferences *routeReferenceSpecEvidence `json:"route_references"`
 	// Overload is the identity of a DATA overload trial's cohorts. Its mere
 	// presence refuses the record: an overload trial is never a capacity probe.
 	Overload json.RawMessage `json:"overload"`
@@ -548,6 +728,7 @@ type workloadIdentity struct {
 	PeerControl     string
 	Instrumentation string
 	SSNM            ssnmIdentity
+	RouteReferences routeReferenceIdentity
 }
 
 type fixtureRun struct {
@@ -560,10 +741,17 @@ type fixtureRun struct {
 	reverseAchieved      *achievedRateBounds
 	aggregateAchieved    *achievedRateBounds
 	cohortError          bool
+	// forwardLate and reverseLate mark a direction whose receiver committed
+	// deliveries after the drain deadline.
+	forwardLate bool
+	reverseLate bool
 	// warmup marks a probe whose warm-up failed with demonstrated loss or a
 	// stall, so it never reached measurement. It can never pass.
 	warmup      bool
 	ssnmVerdict string
+	// referenceVerdict is the route-reference verdict of a route-reference
+	// cohort, empty otherwise.
+	referenceVerdict string
 }
 
 type achievedRateBounds struct {
@@ -690,11 +878,57 @@ func fixtureRunFromJSON(raw json.RawMessage, declaredRate int) (fixtureRun, erro
 			return fixtureRun{}, errors.New("cohort sender mode must be throughput, bidirectional, routed or routed-direct")
 		}
 	}
+	var fault struct {
+		FatalError string `json:"fatal_error"`
+	}
+	if err := json.Unmarshal(raw, &fault); err != nil {
+		return fixtureRun{}, fmt.Errorf("decode run evidence: %w", err)
+	}
+	if fault.FatalError != "" {
+		return fixtureRun{}, fmt.Errorf("%w: sender record: %s", errFixtureFault, fault.FatalError)
+	}
 	evidence, identity, err := evidenceFromFixture(raw, declaredRate)
 	if err != nil {
 		return fixtureRun{}, err
 	}
 	return fixtureRun{forward: evidence, identity: identity}, nil
+}
+
+// errFixtureFault refuses a run whose fixture reported a fault: a record's
+// fatal_error, or a cohort error other than its directions' validity
+// failures. A fault says nothing about the offered rate in either phase, so it
+// is never a failed probe; it ends the search as invalid input.
+var errFixtureFault = errors.New("a run with a fixture fault is not capacity evidence")
+
+// cohortValidityError is the error perftraffic reports for a cohort that
+// failed only its own validity rules; a bidirectional cohort names its
+// reverse direction's the same way.
+const cohortValidityError = "cohort is invalid; inspect machine-readable reasons"
+
+// refuseCohortFaults refuses a cohort, warm-up or measurement, any of whose
+// records carries a fatal_error. A measurement cohort's error must also be
+// empty or only its directions' validity failures; a warm-up's error was
+// already checked by cohortPhase.
+func refuseCohortFaults(cohort *fixtureCohort) error {
+	for _, record := range []struct {
+		name     string
+		evidence *fixtureEvidence
+	}{
+		{"sender", cohort.Sender}, {"receiver", cohort.Receiver},
+		{"reverse_sender", cohort.ReverseSender}, {"reverse_receiver", cohort.ReverseReceiver},
+	} {
+		if record.evidence != nil && record.evidence.FatalError != "" {
+			return fmt.Errorf("%w: %s record: %s", errFixtureFault, record.name, record.evidence.FatalError)
+		}
+	}
+	if cohort.Phase != nil && *cohort.Phase == "measurement" {
+		switch cohort.Error {
+		case "", cohortValidityError, "reverse cohort: " + cohortValidityError, cohortValidityError + "; reverse cohort: " + cohortValidityError:
+		default:
+			return fmt.Errorf("%w: cohort error: %s", errFixtureFault, cohort.Error)
+		}
+	}
+	return nil
 }
 
 // evidenceFromFixture maps one per-run fixture sender record to the
@@ -719,10 +953,21 @@ func evidenceFromFixture(raw json.RawMessage, declaredRate int) (perfstats.RunEv
 	if err := rejectStraySSNM(&record); err != nil {
 		return perfstats.RunEvidence{}, runIdentity{}, err
 	}
+	if err := rejectStrayRouteReferences(&record); err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
+	}
 	return evidenceFromSenderRecord(&record, declaredRate, false)
 }
 
+// errSGPFailureTrial refuses the records of a perftraffic SGP failure trial:
+// the trial deliberately loses the failed path's traffic, so its throughput
+// is not a sustainable-capacity measurement.
+var errSGPFailureTrial = errors.New("an SGP failure trial record is not capacity evidence")
+
 func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, completeCohort bool) (perfstats.RunEvidence, runIdentity, error) {
+	if len(record.Failover) != 0 {
+		return perfstats.RunEvidence{}, runIdentity{}, errSGPFailureTrial
+	}
 	if record.Spec == nil {
 		return perfstats.RunEvidence{}, runIdentity{}, errors.New("spec is required to identify the measured run")
 	}
@@ -880,11 +1125,17 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 	if err != nil {
 		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
 	}
+	if err := refuseCohortFaults(&cohort); err != nil {
+		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
+	}
 	if cohort.Sender == nil || cohort.Receiver == nil || cohort.ReverseSender == nil || cohort.ReverseReceiver == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort requires sender, receiver, reverse_sender and reverse_receiver records")
 	}
 	if cohort.Verdict == nil {
 		return fixtureRun{}, errors.New("bidirectional cohort verdict is required")
+	}
+	if err := rejectStrayRouteReferences(cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
+		return fixtureRun{}, err
 	}
 	if err := rejectStraySSNM(cohort.Sender, cohort.Receiver, cohort.ReverseSender, cohort.ReverseReceiver); err != nil {
 		return fixtureRun{}, fmt.Errorf("bidirectional cohort: %w", err)
@@ -995,6 +1246,7 @@ func bidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun,
 		aggregateOfferedRate: aggregateOffered, forwardAchieved: forwardAchieved,
 		reverseAchieved: reverseAchieved, aggregateAchieved: aggregateAchieved,
 		cohortError: cohort.Error != "", warmup: warmup,
+		forwardLate: cohort.Sender.Delivery.lateAfterDeadline() > 0, reverseLate: cohort.ReverseSender.Delivery.lateAfterDeadline() > 0,
 	}, nil
 }
 
@@ -1005,6 +1257,9 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	}
 	warmup, err := cohortPhase(&cohort)
 	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional cohort: %w", err)
+	}
+	if err := refuseCohortFaults(&cohort); err != nil {
 		return fixtureRun{}, fmt.Errorf("unidirectional cohort: %w", err)
 	}
 	if cohort.Sender == nil || cohort.Receiver == nil {
@@ -1059,26 +1314,37 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 	// The budgets join the workload identity, so one campaign never mixes
 	// SSNM verdicts judged against different budgets.
 	identity.workload.SSNM.Budgets = ssnmBudgets
+	referenceVerdict, err := routeReferenceCohortVerdict(senderSpec.Workload.RouteReferences, cohort.Sender, cohort.Receiver)
+	if err != nil {
+		return fixtureRun{}, fmt.Errorf("unidirectional route_references: %w", err)
+	}
 	return fixtureRun{
 		forward: forwardEvidence, identity: identity, direction: senderSpec.Workload.Direction,
 		forwardAchieved: achieved, cohortError: cohort.Error != "", warmup: warmup,
-		ssnmVerdict: ssnmVerdict,
+		forwardLate: cohort.Sender.Delivery.lateAfterDeadline() > 0,
+		ssnmVerdict: ssnmVerdict, referenceVerdict: referenceVerdict,
 	}, nil
 }
 
 // warmupOverloadError is the whole error perftraffic reports when a warm-up
 // cohort ran its complete offered schedule and then failed only its own
-// loss-free validity rules. Any other failure — a receiver read failure, a
-// failed control request, a clock or reset error — joins further text or
-// fails before the schedule completes.
+// loss-free validity rules. Work still unaccounted or unsubmitted when the
+// drain deadline passed is one of those rules (the record's drain_timeout or
+// sender_drain_timeout), not an error. In a bidirectional run the text is the
+// same whichever direction failed, and only when every direction failed only
+// its own rules.
+// Any other failure — a receiver read failure, a failed control request, a
+// clock or reset error — joins further text or fails before the schedule
+// completes.
 const warmupOverloadError = "warmup did not drain cleanly: cohort is invalid; inspect machine-readable reasons"
 
 // cohortPhase accepts a measurement cohort, or a warm-up cohort whose warm-up
 // failed because the offered rate was not sustained: the cohort ran its whole
 // schedule with no fatal read or control failure, failed only its own validity
-// rules, and shows outstanding-cap refusals, missing deliveries or a stall.
-// That is evidence against the rate. A warm-up that did not fail, or failed
-// for any other reason, says nothing about the rate and is not probe evidence.
+// rules, and shows outstanding-cap refusals, missing deliveries, work still
+// undelivered or unsubmitted at the drain deadline, or a stall. That is evidence
+// against the rate. A warm-up that did not fail, or failed for any other
+// reason, says nothing about the rate and is not probe evidence.
 func cohortPhase(cohort *fixtureCohort) (bool, error) {
 	if cohort.Phase == nil {
 		return false, errors.New("phase is required")
@@ -1112,7 +1378,8 @@ func cohortPhase(cohort *fixtureCohort) (bool, error) {
 		stalled := record.SendDuration != nil && record.SendDuration.Max != nil &&
 			(perfstats.StallObservation{LongestSend: *record.SendDuration.Max}).Stalled()
 		lost := record.Capped != nil && *record.Capped > 0 ||
-			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0
+			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0 ||
+			record.undeliveredAtDrainDeadline() || record.unsubmittedAtDrainDeadline()
 		overloaded = overloaded || stalled || lost
 	}
 	if !overloaded {
@@ -1143,6 +1410,9 @@ func completeSpecIdentity(spec *fixtureSpec, declaredRate int) (specIdentity, er
 }
 
 func validateCohortReceiver(record *fixtureEvidence, declaredRate int) (specIdentity, error) {
+	if len(record.Failover) != 0 {
+		return specIdentity{}, errSGPFailureTrial
+	}
 	if record.Spec == nil {
 		return specIdentity{}, errors.New("spec is required")
 	}
@@ -1154,7 +1424,7 @@ func validateCohortReceiver(record *fixtureEvidence, declaredRate int) (specIden
 		return specIdentity{}, errors.New("record must be a receiver record")
 	}
 	if nonzero(record.Scheduled) || nonzero(record.Sent) || nonzero(record.Submitted) || record.SenderWindow != nil ||
-		record.Echo != nil || record.ReceiverEcho != nil {
+		record.Echo != nil || record.ReceiverEcho != nil || record.DrainTimeout != nil || record.SenderDrainTimeout != nil {
 		return specIdentity{}, errors.New("cohort receiver record carries sender-only or echo evidence")
 	}
 	if record.Expected == nil || *record.Expected != spec.Expected {
@@ -1233,6 +1503,9 @@ func validateDelivery(delivery *deliveryEvidence) error {
 	if delivery == nil || delivery.Unique == nil || delivery.UniqueMeasurement == nil || delivery.UniqueDrain == nil ||
 		delivery.Missing == nil || delivery.Duplicate == nil || delivery.Invalid == nil || delivery.Reordered == nil || delivery.LateAfterStop == nil {
 		return errors.New("delivery counters are required")
+	}
+	if delivery.LateAfterDeadline != nil && *delivery.LateAfterDeadline > *delivery.Invalid {
+		return errors.New("delivery late_after_deadline must be counted in invalid")
 	}
 	return nil
 }
@@ -1387,7 +1660,9 @@ func equalDelivery(first, second *deliveryEvidence) bool {
 	return *first.Unique == *second.Unique && *first.UniqueMeasurement == *second.UniqueMeasurement &&
 		*first.UniqueDrain == *second.UniqueDrain && *first.Missing == *second.Missing &&
 		*first.Duplicate == *second.Duplicate && *first.Invalid == *second.Invalid &&
-		*first.Reordered == *second.Reordered && *first.LateAfterStop == *second.LateAfterStop
+		*first.Reordered == *second.Reordered && *first.LateAfterStop == *second.LateAfterStop &&
+		(first.LateAfterDeadline == nil) == (second.LateAfterDeadline == nil) &&
+		first.lateAfterDeadline() == second.lateAfterDeadline()
 }
 
 func clockFromSpec(spec *fixtureSpec) (clockIdentity, error) {
@@ -1514,8 +1789,15 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 	if (*record.FixtureVerdict == "pass" || record.FatalError == "") && !sumEquals(*record.Expected, *record.Delivery.Unique, *record.Delivery.Missing) {
 		return errors.New("delivery unique and missing do not reconcile with the expected workload")
 	}
+	if err := validateDrainTimeout(record); err != nil {
+		return err
+	}
+	if err := validateSenderDrainTimeout(record); err != nil {
+		return err
+	}
 
-	fixtureInvalid := record.FatalError != "" || *record.Capped != 0 || *record.SendErrors != 0 ||
+	fixtureInvalid := record.FatalError != "" || record.DrainTimeout != nil || record.SenderDrainTimeout != nil ||
+		*record.Capped != 0 || *record.SendErrors != 0 ||
 		*record.Delivery.Unique != *record.Expected || *record.Delivery.Missing != 0 || *record.Delivery.Duplicate != 0 ||
 		*record.Delivery.Invalid != 0 || *record.Delivery.Reordered != 0 || *record.Delivery.LateAfterStop != 0 ||
 		*record.OutstandingAtWindowStart != 0 || *record.OutstandingAfterDrain != 0
@@ -1564,6 +1846,9 @@ func sumEquals(total uint64, parts ...uint64) bool {
 }
 
 func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, error) {
+	if len(spec.SGPFailure) != 0 {
+		return workloadIdentity{}, errSGPFailureTrial
+	}
 	if spec.Rate == nil {
 		return workloadIdentity{}, errors.New("spec.rate is required and cannot be null")
 	}
@@ -1644,6 +1929,10 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 	if err != nil {
 		return workloadIdentity{}, err
 	}
+	references, err := routeReferenceIdentityFromSpec(spec)
+	if err != nil {
+		return workloadIdentity{}, err
+	}
 	return workloadIdentity{
 		Associations:    *spec.Associations,
 		Duration:        *spec.Duration,
@@ -1656,6 +1945,7 @@ func workloadFromSpec(spec *fixtureSpec, declaredRate int) (workloadIdentity, er
 		PeerControl:     spec.PeerControl,
 		Instrumentation: instrumentation,
 		SSNM:            ssnm,
+		RouteReferences: references,
 	}, nil
 }
 

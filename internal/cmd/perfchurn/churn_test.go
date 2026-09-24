@@ -107,22 +107,58 @@ func TestChurnBlockDoesNotWaitForSlowCycles(t *testing.T) {
 	}
 }
 
+// steppedChurnClock releases one planned cycle start per tick the test sends,
+// so a block's starts follow the test rather than the host's scheduler.
+type steppedChurnClock struct {
+	ticks chan struct{}
+}
+
+func (steppedChurnClock) Now() time.Time { return time.Unix(0, 0) }
+
+func (clock steppedChurnClock) SleepUntil(ctx context.Context, _ time.Time) error {
+	select {
+	case <-clock.ticks:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Cancelling a block stops it starting cycles. Three starts are released; the
+// third cycle to run cancels, and the fourth start, never released, must not
+// happen. On the wall clock the block goes on starting cycles on schedule until
+// one of them runs, so a runner that runs them late saw more than three.
 func TestChurnBlockStopsStartingCyclesWhenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	plan := churnPlan{Cycles: 100, Rate: 100, Group: 1}
+	clock := steppedChurnClock{ticks: make(chan struct{})}
 	var mutex sync.Mutex
 	count := 0
-	stats := runChurnBlock(ctx, plan, systemClock{}, func(context.Context, int) cycleOutcome {
-		mutex.Lock()
-		count++
-		if count == 3 {
-			cancel()
-		}
-		mutex.Unlock()
-		return cycleOutcome{Mode: "peer"}
-	})
-	if count < 3 || stats.Attempted != count || stats.Attempted > 4 || stats.Completed != stats.Attempted {
+	result := make(chan churnStats, 1)
+	go func() {
+		result <- runChurnBlock(ctx, plan, clock, func(context.Context, int) cycleOutcome {
+			mutex.Lock()
+			count++
+			if count == 3 {
+				cancel()
+			}
+			mutex.Unlock()
+			return cycleOutcome{Mode: "peer"}
+		})
+	}()
+	for release := 0; release < 3; release++ {
+		clock.ticks <- struct{}{}
+	}
+	var stats churnStats
+	select {
+	case stats = <-result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cancelled block did not return")
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	if count != 3 || stats.Attempted != 3 || stats.Completed != 3 {
 		t.Fatalf("attempted %d, cycles run %d: %+v", stats.Attempted, count, stats)
 	}
 }

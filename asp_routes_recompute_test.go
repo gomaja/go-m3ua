@@ -161,7 +161,12 @@ func fastestASPRouteAssociationEnd(
 // recomputed route scanned the derived state of every route three times, so
 // the lock was held about 48x longer at 4,096 routes than at 64. After it, the
 // only term that grows with the inventory is one pass over the configured
-// routes, and the ratio measured under 2x. Taking the fastest of repeated
+// routes, which keeps indications in configuration order. That pass is
+// additive, not multiplied by the affected routes, and the ratio measured
+// under 2x, but the race detector inflates it relative to the recompute
+// itself: a CI race run measured 4.5x. The limit is therefore the 10x of
+// TestMTPRouteStatusesScalesWithRouteCount, well clear of that and of the
+// ~48x the multiplicative defect shows. Taking the fastest of repeated
 // recomputes keeps scheduling and garbage collection out of the ratio.
 func TestASPRouteAssociationEndCostIsIndependentOfUnaffectedRoutes(t *testing.T) {
 	if testing.Short() {
@@ -178,7 +183,7 @@ func TestASPRouteAssociationEndCostIsIndependentOfUnaffectedRoutes(t *testing.T)
 	t.Logf("ending an Association carrying %d routes held the routing lock %s among %d routes and %s among %d (%.1fx)",
 		affectedRoutes, small, smallInventory, large, largeInventory, growth)
 
-	const maxGrowth = 4.0
+	const maxGrowth = 10.0
 	if growth > maxGrowth {
 		t.Fatalf("ending an Association carrying %d MTP Routes held the routing lock %.1fx longer among %d routes "+
 			"than among %d (%s -> %s); want under %.1fx, since routes it did not carry must not add to its recompute",
