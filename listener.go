@@ -48,6 +48,11 @@ type Listener struct {
 	// accepted association the listener's handler; it routes by association ID.
 	restarts *restartWatcher
 
+	// buffers is the socket buffer request the listening socket is created
+	// with, and so the sizes every accepted association inherits; see
+	// ListenerConfig.
+	buffers socketBuffers
+
 	// nif records isolation from the nodal interworking function, which
 	// RFC 4666 Section 4.7 makes the SGP answer differently.
 	nif *nifAvailability
@@ -225,6 +230,7 @@ func newListener(endpoint *Endpoint, config *ListenerConfig) *Listener {
 		listenerConfig:    listenerConfig,
 		endpoint:          endpoint,
 		closeDone:         make(chan struct{}),
+		buffers:           socketBuffersFor(listenerConfig.DefaultAssociationConfig.SCTPConfig),
 	}
 	if endpoint != nil {
 		switch endpoint.Role() {
@@ -268,10 +274,17 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 		return nil, err
 	}
 	l := newListener(e, cfg)
-	// A selector-only Listener has no meaningful default association policy.
-	// Its selected snapshot is validated in Accept, before any socket setup or
-	// M3UA parsing. Validate the default here only when it can actually be used.
-	if l.listenerConfig.SelectAssociationConfig == nil {
+	// The default sizes the listening socket even when a selector chooses every
+	// accepted association's configuration, so its socket sizes are validated
+	// either way; see ListenerConfig.
+	if err := validateSCTPConfig(l.AssociationConfig.SCTPConfig); err != nil {
+		return nil, err
+	}
+	// With a selector, the default's association policy is never used for an
+	// accepted association: the selected snapshot is validated in Accept,
+	// before any socket setup or M3UA parsing. Validate the default's policy
+	// here only when it can actually be used.
+	if !l.selectsAssociationConfig() {
 		if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
 			return nil, err
 		}
@@ -283,7 +296,7 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 	}
 	l.restarts = &restartWatcher{}
 	l.restarts.setRoute(l.associationForSCTPID)
-	l.sctpListener, err = listenSCTP(n, laddr, l.restarts)
+	l.sctpListener, err = listenSCTP(n, laddr, l.buffers, l.restarts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen SCTP: %w", err)
 	}
@@ -304,9 +317,11 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 // associationEvents are subscribed on the listening socket, before listen: an
 // accepted association is created on it and keeps the subscription it had
 // then, so subscribing on the accepted socket afterwards came too late for an
-// ABORT that arrived in between.
-func listenSCTP(network string, laddr *sctp.SCTPAddr, restarts *restartWatcher) (*sctp.SCTPListener, error) {
+// ABORT that arrived in between. The socket buffers are sized there for the
+// same reason; see socketBuffers.control.
+func listenSCTP(network string, laddr *sctp.SCTPAddr, buffers socketBuffers, restarts *restartWatcher) (*sctp.SCTPListener, error) {
 	scfg := &sctp.SocketConfig{
+		Control:             buffers.control(),
 		NotificationHandler: restarts.handle,
 		// The same stream request Dial makes; see sctpStreams. Left zero,
 		// the kernel default applied (10 outbound on Linux), so every
@@ -364,10 +379,56 @@ func (l *Listener) resolveAcceptedAssociationConfig(
 	if err := validateAssociationConfigForRole(role, associationConfig); err != nil {
 		return nil, err
 	}
+	if err := l.validateSelectedReceiveBuffer(associationConfig); err != nil {
+		return nil, err
+	}
 	if err := l.endpoint.validateAssociationConfig(associationConfig); err != nil {
 		return nil, err
 	}
 	return associationConfig, nil
+}
+
+// selectsAssociationConfig reports whether SelectAssociationConfig, rather than
+// the default the listening socket was sized from, chooses each accepted
+// association's configuration.
+func (l *Listener) selectsAssociationConfig() bool {
+	return l.listenerConfig != nil && l.listenerConfig.SelectAssociationConfig != nil
+}
+
+// validateSelectedReceiveBuffer refuses a SocketReceiveBuffer returned by
+// SelectAssociationConfig that the accepted association cannot have: the INIT
+// ACK announced the listening socket's receive window before the selector ran;
+// see ListenerConfig. Without a selector there is nothing to compare, since the
+// sizes fixed at Listen simply apply.
+func (l *Listener) validateSelectedReceiveBuffer(selected *AssociationConfig) error {
+	if !l.selectsAssociationConfig() {
+		return nil
+	}
+	requested := socketBuffersFor(selected.SCTPConfig).receive
+	if requested == 0 || requested == l.buffers.receive {
+		return nil
+	}
+	return fmt.Errorf("%w: selected SocketReceiveBuffer %d differs from the Listener's %d, "+
+		"which sized the receive window already announced to this peer", ErrInvalidSCTPConfig, requested, l.buffers.receive)
+}
+
+// applySelectedSendBuffer gives an accepted association the SocketSendBuffer
+// SelectAssociationConfig asks for, where that differs from the size it
+// inherited from the listening socket. Unlike the receive buffer, the send
+// buffer is announced to no one, so applying it now is exact. Without a
+// selector the size fixed at Listen applies, as the receive size does.
+func (l *Listener) applySelectedSendBuffer(sctpAssociation *sctp.SCTPConn, selected *AssociationConfig) error {
+	if !l.selectsAssociationConfig() {
+		return nil
+	}
+	send := socketBuffersFor(selected.SCTPConfig).send
+	if send == 0 || send == l.buffers.send {
+		return nil
+	}
+	if err := sctpAssociation.SetWriteBuffer(send); err != nil {
+		return fmt.Errorf("failed to set SO_SNDBUF: %w", err)
+	}
+	return nil
 }
 
 // Accept waits for and returns the next M3UA association. After establishment,
@@ -472,6 +533,10 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 		}
 	}
 
+	if err := l.applySelectedSendBuffer(sctpAssociation, associationConfig); err != nil {
+		_ = association.closeWith(err)
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
+	}
 	if err := association.setUpSocket(); err != nil {
 		_ = association.closeWith(err)
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
