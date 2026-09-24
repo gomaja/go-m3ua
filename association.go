@@ -2959,8 +2959,11 @@ func (c *Association) Shutdown() error {
 
 // ShutdownContext is Shutdown with caller-controlled cancellation.
 // Cancellation stops the outstanding T(ack) request and still releases SCTP.
-// If the association ends some other way while it runs -- Close, Abort, or a
-// failure -- ShutdownContext stops and returns what Err reports.
+// If the association ends some other way before or while it runs -- Close,
+// Abort, a failure, or its cancelled lifetime context -- ShutdownContext
+// stops and returns what Err reports. A call made while another
+// ShutdownContext is under way waits for the association to end, or for its
+// own ctx, and returns nil in the first case.
 //
 // It performs only the procedures AssociationConfig.ASPProcedures configures as
 // ASPProcedureAutomatic, because an explicitly managed application owns the
@@ -2991,7 +2994,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	// Sections 4.3.4.1.2 and 4.3.4.4.1, by either IPSP. An SGP has no mirror
 	// request to send; Section 4.9's orderly option for it is SCTP Shutdown.
 	if c.role != RoleASP && c.role != RoleIPSP {
-		return c.Close()
+		return c.releaseAfterWithdrawal()
 	}
 
 	state := c.State()
@@ -3024,7 +3027,21 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		}
 	}
 
-	return c.Close()
+	return c.releaseAfterWithdrawal()
+}
+
+// releaseAfterWithdrawal is ShutdownContext's release once nothing is left to
+// withdraw. When another release ended the association first, that release is
+// what ShutdownContext reports, as Err does, rather than the nil a Close of an
+// association already closed returns.
+func (c *Association) releaseAfterWithdrawal() error {
+	ended, err := c.endWith(ErrAssociationClosed, false)
+	if !ended {
+		if cause := c.Err(); cause != nil {
+			return cause
+		}
+	}
+	return err
 }
 
 // finishTermination releases the association after a withdrawal step failed.

@@ -561,9 +561,10 @@ Listener instead.
 That also makes it the wrong context to derive from an interrupt signal when the
 application wants a graceful withdrawal. The association's monitor closes it as
 soon as the context is done, so `ShutdownContext` finds an association already
-in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns nil — option
-(a) silently becomes option (b). Give the association a context of its own and
-cancel it only after the withdrawal has returned:
+in ASP-DOWN, sends neither ASP Inactive nor ASP Down, and returns the
+cancellation that closed it — option (a) becomes option (b). Give the
+association a context of its own and cancel it only after the withdrawal has
+returned:
 
 ```go
 notifyCtx, stopNotify := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

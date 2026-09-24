@@ -133,7 +133,7 @@ func main() {
 	// association as soon as it is done. Hand it the signal context and an
 	// interrupt tears the association down immediately, leaving ShutdownContext
 	// with an association already in ASP-DOWN — so it sends neither ASP Inactive
-	// nor ASP Down, returns nil, and the graceful withdrawal silently becomes
+	// nor ASP Down, returns the cancellation, and the graceful withdrawal becomes
 	// the abrupt close it was meant to replace.
 	//
 	// So the signal context stops the traffic loop, and the association's own

@@ -519,8 +519,9 @@ func TestMTPIndicationsNilnessMatchesItsDocumentation(t *testing.T) {
 // association as soon as it is done. An application that hands Dial its signal
 // context and then calls ShutdownContext on the way out gets no withdrawal at
 // all: the association is already ASP-DOWN, so neither ASP Inactive nor ASP
-// Down is sent, and ShutdownContext returns nil rather than reporting that it
-// did nothing. RFC 4666 Section 4.9 option (a) silently becomes option (b).
+// Down is sent. RFC 4666 Section 4.9 option (a) becomes option (b).
+// ShutdownContext used to return nil for it, as if the withdrawal had
+// succeeded; it now returns the cancellation that ended the association.
 func TestGracefulWithdrawalNeedsALiveAssociationContext(t *testing.T) {
 	t.Run("after the lifetime context ended", func(t *testing.T) {
 		association, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
@@ -534,10 +535,11 @@ func TestGracefulWithdrawalNeedsALiveAssociationContext(t *testing.T) {
 
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
 		defer cancelShutdown()
-		// It returns nil, so an application that only checks the error is told
-		// the withdrawal succeeded. Nothing was sent.
-		if err := association.ShutdownContext(shutdownCtx); err != nil {
-			t.Fatalf("ShutdownContext() error = %v", err)
+		// Nothing is sent, and the error says why: the association had already
+		// ended, and an application that only checks the error is not told the
+		// withdrawal succeeded.
+		if err := association.ShutdownContext(shutdownCtx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("ShutdownContext() error = %v, want the cancellation that ended the association", err)
 		}
 		if got := (*sent)[before:]; len(got) != 0 {
 			t.Errorf("a withdrawal on a closed association sent %v, want nothing", got)
@@ -691,10 +693,10 @@ func TestExampleShutdownClosesOnlyItsOwnScope(t *testing.T) {
 	}
 
 	// Close is RFC 4666 Section 4.9 option (b), so a Shutdown afterwards has no
-	// procedures left to run and simply returns.
+	// procedures left to run, and reports the Close that ended the association.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if err := association.ShutdownContext(shutdownCtx); err != nil {
-		t.Errorf("ShutdownContext() after Close = %v, want nil", err)
+	if err := association.ShutdownContext(shutdownCtx); !errors.Is(err, ErrAssociationClosed) {
+		t.Errorf("ShutdownContext() after Close = %v, want ErrAssociationClosed", err)
 	}
 }

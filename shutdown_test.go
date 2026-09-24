@@ -457,3 +457,33 @@ func TestShutdownReportsAReleaseThatOvertookItsWithdrawal(t *testing.T) {
 		})
 	}
 }
+
+// ShutdownContext on an association another release already ended reports
+// that release, as Err does, instead of the nil its own final release returns
+// when there is nothing left to release. Both of its final releases are
+// covered: an SGP's, which has nothing to withdraw, and an ASP's, which finds
+// itself already ASP-DOWN.
+func TestShutdownReportsAReleaseThatEndedTheAssociationFirst(t *testing.T) {
+	for _, role := range []Role{RoleASP, RoleSGP} {
+		for _, release := range []struct {
+			name string
+			call func(*Association) error
+		}{
+			{"Close", (*Association).Close},
+			{"Abort", (*Association).Abort},
+		} {
+			t.Run(fmt.Sprintf("%v after %s", role, release.name), func(t *testing.T) {
+				conn, _ := newTestConn(t, StateASPActive, role)
+				conn.transportCloser = func() error { return nil }
+				conn.transportAborter = func() error { return nil }
+				if err := release.call(conn); err != nil {
+					t.Fatalf("%s: %v", release.name, err)
+				}
+				err := conn.ShutdownContext(context.Background())
+				if err == nil || err != conn.Err() {
+					t.Errorf("ShutdownContext = %v, want Err's %v", err, conn.Err())
+				}
+			})
+		}
+	}
+}
