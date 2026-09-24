@@ -216,7 +216,11 @@ func TestSharedClockDrainRejectsLateCompletion(testContext *testing.T) {
 			testContext.Fatalf("drain boundary %d: %v, %v", index, err, outcome)
 		}
 	}
-	if result := control.result(); result.Delivery.Unique != 1 || result.Delivery.Invalid != 1 || result.FatalError == "" {
+	// A late completion earns no credit and fails the cohort; it is work that
+	// was still outstanding at the deadline, not a fixture fault, so it is
+	// named by late_after_deadline rather than by a fatal error.
+	if result := control.result(); result.Delivery.Unique != 1 || result.Delivery.Invalid != 1 || result.Delivery.LateAfterDeadline != 1 ||
+		result.FatalError != "" || result.FixtureVerdict != verdictInvalid {
 		testContext.Fatalf("late completion credited: %+v", result)
 	}
 	source.now.Store(clock.window.Start)

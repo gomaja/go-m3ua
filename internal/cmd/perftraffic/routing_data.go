@@ -64,6 +64,18 @@ type routingDirectWriter struct {
 	associations map[m3ua.AssociationID]routingDataAssociation
 	epochs       map[m3ua.AssociationID]uint64
 	admission    chan struct{}
+	// table is the application route table a -route-references run resolves
+	// every message through; nil resolves from the frozen paths directly.
+	table *applicationRouteTable
+}
+
+// resolve returns the path a direct write uses for route: the application
+// table's stable reference when the run has one, the frozen path otherwise.
+func (writer *routingDirectWriter) resolve(route uint16) (routingResolvedPath, error) {
+	if writer.table != nil {
+		return writer.table.resolve(route)
+	}
+	return writer.paths.path(route)
 }
 
 func newRoutingDataSenderPlane(endpoint routingDataTransferEndpoint, associations []routingDataAssociation, pairs []routingAssociationPair, closePlane func() error) (*routingDataSenderPlane, error) {
@@ -263,7 +275,7 @@ func (writer *routingDirectWriter) begin(ctx context.Context, route uint16, requ
 		write.outcome.validationErr = err
 		return write
 	}
-	path, err := writer.paths.path(route)
+	path, err := writer.resolve(route)
 	if err != nil {
 		write.outcome.validationErr = err
 		return write

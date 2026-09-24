@@ -77,6 +77,13 @@ The cohort result carries per-direction records: `sender`/`receiver` cover
 ASP-to-SGP and `reverse_sender`/`reverse_receiver` cover SGP-to-ASP, each
 with its own counters, series, sender-window bounds and backlog interval. The
 cohort passes only when all four records are loss-free and fixture-valid.
+A failed warm-up keeps all four records. When every direction failed only its
+own validity rules the run ends with the plain warm-up validity error,
+whichever direction failed; a fixture fault in either direction keeps its own
+text in the error. A read fault of the ASP's own receiver, the reverse
+direction's receiver, is recorded on that control as it is on the SGP, so the
+reverse receiver record carries it as its `fatal_error`, and it joins the
+cohort's error in warm-up and measurement alike.
 In the default HTTP-interval mode, each direction's measurement window is anchored by its own driving side; the
 two windows start within one control round-trip of each other and are not
 claimed to be identical. With `-same-host-clock`, both directions instead use
@@ -482,9 +489,168 @@ If the ASP fails at any point before its first cohort, it sends
 a sender that has gone. A canceled preparation request never closes the SGP
 endpoints on its own.
 
-The routed modes do not cover alternate AS preference, partial path failures,
-SSNM storms or reference churn; those remain separate workloads and are
-reported as unavailable in `unsupported_modes`.
+The routed modes do not cover alternate AS preference or SSNM storms; those
+remain separate workloads and are reported as unavailable in
+`unsupported_modes`. One SGP failure and application route-reference churn
+are the opt-in workloads described next.
+
+### One SGP failure
+
+`-sgp-failure=<offset>` turns a shared-clock `-mode=routed` run into the
+section 4 "One SGP failure" trial. Both processes pass the same offset and
+`-same-host-clock`; the ASP declares the failure in its measurement cohort's
+`spec.failure_trial` and the SGP refuses a declaration that differs from its own
+flag, or any failure cohort once its fault has been injected. The warm-up
+cohort is the nominal routed workload. The offset must leave at least 2 s of
+the window before the fault and 10 s after it.
+
+- **Fault.** At `start + offset` on the shared clock the receiver ends both
+  associations of SGP `sg-a/p0` with the library's `Association.Close`,
+  concurrently, and records the due instant, the shared-clock bracket around
+  the closes and each call's start, return and error (`receiver.fault`).
+  `Association.Close` is the only public way to end an association; the SCTP
+  dependency performs it as a graceful SHUTDOWN (RFC 9260 Section 9.2) and
+  aborts only if the peer does not complete it within three seconds. The fault
+  kind is therefore recorded as `shutdown`: an ABORT-initiated failure and a
+  blackhole that exercises SCTP failure detection are not produced by this
+  fixture. After the fault the failed SGP's read errors are recorded
+  (`receiver.reader_ends`) instead of ending the receiver.
+- **Alternative.** Every SGP serves the `primary` Application Server, so the
+  routes frozen on `sg-a/p0` (about a quarter) keep a same-SG/AS alternative,
+  `sg-a/p1`. The sender calls `MTPTransfer` once per scheduled message and
+  never retries; MTPTransfer selects the alternative. Each call is timed on the
+  shared clock and classified: the frozen path, the failed SGP's other
+  association, the alternative (same SG path, SGP `sg-a/p1`, its `primary` AS
+  scope, one of its two associations, never before the fault and never a
+  second alternative association for the same route), or a failed-path
+  outcome: `DataNotSent`, `DataSendIndeterminate`, another write failure, or
+  an `MTPSelectionError`. Anything else — a healthy route off its frozen path,
+  a failure on a surviving path — is unexpected and fails the fixture.
+- **Notification.** The sender watches `Association.Done` on all eight
+  associations, the earliest public observation of the transport failure. The
+  notification instant is the later of the failed SGP's two, so the SGP is
+  known down; any surviving association ending fails the trial. The time from
+  the fault to each notification is recorded, not budgeted (section 4 excludes
+  failure detection), together with the kernel SCTP timer defaults of the
+  sender's network namespace and every association's retransmission timeout
+  at cohort start (`sender.transport_timers`).
+- **Receiver.** An affected route may arrive on the alternative only after the
+  fault, in the alternative's scope, stream and epoch, and on one alternative
+  association; every other arrival keeps the frozen-path validation. Only the
+  failed SGP handing over, after the fault, an older message of an affected
+  route is counted as `failover_reordered`: every later message of a moved
+  route travels the alternative, so nothing else can arrive late because of
+  the failure. A reorder before the fault, or one the alternative delivers,
+  stays a nominal reorder. Unique deliveries are
+  binned every 100 ms by shared-clock arrival (all, and on the surviving SGPs
+  only) and by each message's scheduled offset, and counted per transport.
+- **Drain.** The sender waits until every submission on a surviving
+  association is delivered on its transport; the failed SGP's in-flight work
+  is accounted, not awaited.
+
+The sender record's `failover` carries the accounting, the measurements and
+one entry per criterion with its numbers (`criteria`), and `verdict`:
+
+| Criterion | Rule |
+| --- | --- |
+| `fault_injected` | the declared fault ran at its instant, inside the window, on both associations |
+| `transport_failure_notified` | both failed-SGP associations, and no other, ended after the fault |
+| `pre_failure_nominal` | every message scheduled in the whole bins that end at least one bin before the fault is delivered: the period before the failure was nominal, so no loss is left for the failed path's accounting to absorb and the pre-failure rate is the offered one |
+| `alternative_selection` | the first alternative MTPTransfer returns within 100 ms of the notification (one returning before it, since the notification is the later of the two association ends, is judged as 0); no call started later than that touched or was refused on the failed SGP or failed; every affected route moved |
+| `healthy_path_recovery` | pre-failure rate: mean all-SGP deliveries per bin over whole bins from 1 s after the start to the fault; the first whole bin starting at or after the notification whose surviving-SGP deliveries reach 90% of it must end within 1 s of the notification |
+| `full_rate_after_recovery` | from the milestone (notification plus 1 s, rounded up to a bin) every scheduled message is delivered, and the sender-window backlog trend over the rest of the window is `not-growing` |
+| `healthy_routes_nominal` | no unexpected outcome; every surviving association delivered exactly what was submitted on it; no invalid, duplicate, nominal reordered or late delivery |
+| `failed_path_accounted` | every scheduled message had exactly one MTPTransfer call and one outcome, none capped; the failed SGP delivered no more than it was given; every receiver-missing message is a failed-path outcome (`failed_path.unexplained` is zero) |
+
+A criterion that cannot be measured (too few bins or backlog samples, an
+unresolved trend) is `not-measured` and makes the trial `inconclusive`; a
+violated one makes it `fail`. The sender record's `verdict` is the trial
+verdict (`pass`, `fail`, `inconclusive`, or `invalid` for a fixture failure),
+and CPU throttling turns a pass inconclusive. The failed path's traffic is
+deliberately lost, so `perfcapacity` refuses these records as capacity
+evidence.
+
+```sh
+perftraffic -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s
+perftraffic -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -rate=20000 -duration=30s
+```
+
+### Application route-reference churn
+
+`-route-references=churn|static` on the ASP of a shared-clock
+`-mode=routed-direct` run is the section 4 "Application route-reference
+churn" row and its matched control. Route references belong to the
+application: the library has no route-reference call and its route inventory
+is immutable, so the workload is an application route table and proves that
+changing it causes no library or protocol activity and costs little DATA
+capacity.
+
+- **Table.** After preflight the ASP builds an application route table: one
+  stable reference per route (the frozen path), and a churned set of
+  references to live associations, behind one read-write lock. Every timed
+  message resolves its route through the table under the read lock before
+  `Association.WriteData`, in both variants, so the churn contends with the
+  DATA path exactly as an application table would. Nothing the table does
+  calls the library: adding a reference only reads the association's `Done`
+  and `Epoch` to refuse a dead or replaced association, and removing one —
+  including an association's last reference — only deletes it.
+- **Churn.** `-route-references=churn` performs `-route-reference-rate`
+  add/remove operations per second (default 1,000) open-loop on the shared
+  clock from the first cohort through the last: operation `k` is due at
+  `anchor + floor(k * 1s / rate)`, a late churner catches up in order and
+  never skips. Each cycle adds 1,000 references (the first makes the set
+  0 -> 1), round-robin over the eight associations, then removes them last
+  added first back to 0, so every association gains a first reference and
+  loses its last one every cycle. `-route-references=static` is the
+  unchanged-reference control: the same table on the same DATA path, the same
+  observation, no operation.
+- **Observation.** For the whole run the ASP drains every association's
+  `StateChanges` and `ManagementIndications` and watches `Done`, timestamping
+  each on the shared clock. Before and after every cohort it captures, on
+  both ends, each association's identity, epoch and state, every ASP status
+  and every Application Server status; the SGP side serves its own through a
+  read-only `GET /routing/peer-state` on the routed receiver.
+
+The ASP record's `route_references` carries the workload, the churn evidence
+over the cohort window (operations due in it and how many completed, the latest
+completion relative to its due instant, completed cycles, first-reference
+additions and last-reference removals, operation durations), both snapshots,
+the library events inside the window (declared start through the drain), one
+entry per criterion and `verdict`:
+
+| Criterion | Rule |
+| --- | --- |
+| `churn_intensity` (churn) | every operation due in the window completed, none later than one interval and at least 100 ms after its due instant, the set reached 1,000 and at least one cycle and one last-reference removal completed in the window; otherwise `not-measured` |
+| `references_to_live_associations` (churn) | every added reference named a live association with its original epoch |
+| `no_association_reconnection` | the same eight association identities and epochs at both ends before and after, and no association ended in the window |
+| `no_as_deactivation` | no ASP state change in the window; every ASP status ASP-ACTIVE and every SGP-side AS AS-ACTIVE before, and all of it identical after |
+| `no_library_indications` | no management indication (Notify, Error, SCTP restart or release) on any ASP association in the window |
+
+A violated criterion makes the verdict `fail`, an unmeasured one
+`inconclusive`. The DATA verdicts do not include it: zero unexpected DATA
+loss and a non-growing backlog are the ordinary routed-direct record
+evidence. Registration traffic has no in-process observation point: the
+library sends REG REQ and DEREG REQ only from
+`Association.RegisterRoutingKeys` and `DeregisterApplicationServers`, which
+the fixture never calls; a capture of the association traffic is the direct
+evidence.
+
+The cohort specification declares the workload as `spec.route_references`
+(`mode`, `rate`, `peak`, `stable`, `cycle`) on both records; the SGP refuses
+any other shape and refuses it outside routed-direct. `perfcapacity` adds it
+to the workload identity, so a churned campaign, its static control and a
+plain routed-direct campaign can never be mixed, requires the sender record's
+`route_references` verdict, and folds it in like SSNM load: `fail` fails the
+probe and `inconclusive` turns a passing probe inconclusive. Compare the
+churned campaign's selected capacity with the control's: the row needs at
+least 90%.
+
+```sh
+perftraffic -role=sgp -mode=routed-direct ... -same-host-clock
+perftraffic -role=asp -mode=routed-direct ... -same-host-clock -route-references=churn -rate=<probe>
+# matched unchanged-reference control
+perftraffic -role=asp -mode=routed-direct ... -same-host-clock -route-references=static -rate=<probe>
+```
 
 ## DATA overload mode
 
@@ -885,14 +1051,16 @@ A trend fitted over a finite window cannot prove indefinite stability.
 
 Sender stdout is one JSON object containing the active `phase`, top-level
 `sender`, `receiver`, `verdict`, an optional `error`, and retained `warmup` and
-`measurement` phase records. A warm-up failure returns both raw warm-up records
-instead of replacing them with an empty result. Each side retains raw
+`measurement` phase records. A warm-up failure returns every raw warm-up record
+(both directions' in bidirectional mode) instead of replacing them with an
+empty result. Each side retains raw
 configuration and observations:
 
 - `scheduled`, `sent`, `submitted`, `send_errors`, `capped`, and outstanding counts at
   the start, measurement end, and end of drain;
 - receiver `unique`, `unique_measurement`, `unique_drain`, `missing`,
-  `duplicate`, `invalid`, `reordered`, and `late_after_stop` counts;
+  `duplicate`, `invalid`, `reordered`, `late_after_stop` and
+  `late_after_deadline` counts;
 - bounded one-second series and bounded histogram-derived send-duration and
   scheduled-to-worker dispatch-lag percentiles (p50/p95/p99/max), where each
   percentile is a conservative bucket upper bound, capped by the observed
@@ -903,6 +1071,30 @@ configuration and observations:
   unique validated delivery;
 - runtime allocation counters spanning the cohort through drain, including
   asynchronous work;
+- `memory`, the cohort's whole-process memory series (performance budgets
+  section 4: "During timed runs collect low-overhead RSS/runtime counters
+  without forcing collection; record peak heap as well as post-GC live
+  heap"), on the sender and receiver records of every timed cohort. The
+  sender samples from just before it starts the receiver's cohort until after
+  the drain and stop, the receiver from its start to its stop. Each reading,
+  one a second plus one at each end, takes four `runtime/metrics` counters, which unlike
+  `runtime.ReadMemStats` do not stop the world, and the process's `VmRSS` and
+  `VmHWM` from `/proc/self/status`, re-read from an open descriptor so a
+  reading allocates nothing; no collection is ever forced. `heap_peak_bytes`
+  is the largest sampled heap (live and unswept objects),
+  `heap_live_peak_bytes` and `heap_live_end_bytes` the post-GC live heap (what
+  the previous collection marked live), `heap_goal_peak_bytes` the largest GC
+  heap goal, `gc_cycles` the collections completed during the cohort and
+  `rss_peak_bytes` the largest sampled resident set. Sampled peaks are lower
+  bounds of the true peaks. `rss_high_water_start_bytes` and
+  `rss_high_water_end_bytes` are the kernel's process-lifetime `VmHWM`, which
+  it maintains lazily from approximate per-CPU counters: it can capture a peak
+  between samples but is not a strict bound on a sampled `VmRSS`. Where the
+  kernel provides neither, the RSS fields are absent and `rss_error` names why;
+  a missing measurement is never a zero. `sampling_ns` is the total time the
+  readings took, the sampler's own cost, and at most 601 readings are
+  retained. The observation is recorded, never judged: no verdict reads it.
+  Forced-GC retained-heap checks belong to the separate memory trials;
 - toolchain, revision when available, dependency version, fixed socket options,
   flow count, queue cap, and negotiated outbound stream counts;
 - `assessed_baseline_revision`, the baseline commit the campaign is assessed
@@ -957,3 +1149,65 @@ Missing or regressed cgroup counters, CPU throttling, too few series samples, or
 unavailable capacity observability produce an overall `inconclusive` result;
 protocol/data failures produce `invalid`. No field is named or treated as
 application-routing acceptance.
+
+Above capacity a cohort can end with submitted work still undelivered when the
+drain deadline passes, typically because the receiving library discarded what
+its inbound DATA queue could not hold and the sender waited for those messages
+to the end. That is the cohort's delivery outcome, not a fixture fault: when
+the last receiver result the sender read before the deadline still showed
+submitted messages unaccounted (neither validated, duplicate nor invalid), the
+sender record carries `drain_timeout` instead of a `fatal_error`, with
+`cause`, `drain_ns` (the deadline is the end of the measurement window plus
+this drain), `submitted`, `accounted` in that last result, `undelivered`
+(submitted minus accounted), and `observed_before_deadline_ns`, how long
+before the deadline that read completed (zero if it completed at or after
+it). The drain wait reads the result every 10 ms, so a responsive control's
+last result is at most about one interval old at the deadline; if it is more
+than ten intervals (100 ms) old, the control stopped answering and the wait
+reports "receiver control did not answer during the drain" as a fatal error
+instead. The record is invalid with the reason
+"submitted traffic was still unaccounted at the receiver when the drain
+deadline passed", even if the receiver's final counters, read after the stop,
+show that the last messages arrived in time: the sender did not observe them in
+time. Every other end of the drain wait remains a `fatal_error`: a failed or
+unreachable receiver control request, a canceled run, or a deadline that passed
+before any receiver result was read. That last case includes send workers that
+finish only a moment before the deadline, leaving no time for one receiver
+read: the fixture cannot tell that from a control that never answered, so it
+stays conservatively fatal. On a shared-clock receiver a delivery
+committed after the drain deadline is likewise counted, in `invalid` and in
+`late_after_deadline`, rather than ending the receiver with a fatal error.
+
+The sender's own queue can hold scheduled work at the drain deadline too:
+above capacity its send workers may still be submitting when the deadline
+passes. The association write deadline is the drain deadline, so from then on
+every send fails at once; the sender gives its workers a one-second grace to
+fail what they hold. Each send the deadline cut off, one that failed on the
+expired write deadline or, on the shared clock, completed after the drain
+deadline, is counted in `send_errors` rather than becoming a fatal error, and
+the sender record carries `sender_drain_timeout` with `cause`, `drain_ns`,
+`outstanding_at_deadline` (the messages still queued or in a send call when
+the drain wait reached the deadline, or when dispatching ended if that was
+later) and `unsubmitted` (the sends the deadline cut off, which can exceed
+it). The record is invalid with the reason "scheduled traffic was still
+unsubmitted at the sender when the drain deadline passed". The receiver wait
+is skipped, since the deadline has passed; the receiver's final counts are read
+after the stop. The associations stay up, and every cohort clears their write
+deadline when it ends, so the expired deadline cannot fail a later write the
+library makes on its own behalf and close the association. A send that failed
+any other way (a
+lost association, a short write, a clock failure) keeps its fatal error, and a
+worker still running after the grace is stuck in the transport: that remains
+a fatal error and the fixture closes the associations to reclaim it, as
+before. Each capacity trial runs in fresh processes, and a failed warm-up or
+measurement cohort ends its run, so no later probe inherits either outcome.
+
+A throughput, routed or bidirectional warm-up that fails in any of these ways
+ends with exactly the warm-up validity error, so `internal/cmd/perfcapacity`
+accepts it as a failed probe of that rate. A fault never passes for overload
+in either phase: `internal/cmd/perfcapacity` refuses as invalid input any
+cohort, warm-up or measurement, one of whose records carries a `fatal_error`
+or whose error names anything but its directions' validity failures, and a
+single sender record with a `fatal_error`. The DATA overload and SGP failure
+trials keep their own contracts: there any drain failure or late delivery is a
+fixture failure, as before.

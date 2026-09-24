@@ -156,10 +156,17 @@ func (clock *sharedRunClock) waitUntil(ctx context.Context, target int64) error 
 	}
 }
 
+// errCompletedAfterDrain is withinDrain's report of a call that completed after
+// the shared drain deadline, as distinct from a clock failure.
+var errCompletedAfterDrain = errors.New("shared clock completion is after the drain deadline")
+
 func (clock *sharedRunClock) withinDrain(dispatched time.Duration) error {
 	now, err := clock.source.Now()
-	if err != nil || !clock.window.validDrain(clock.drain) || now < clock.window.Start || time.Duration(now-clock.window.Start) < dispatched || now > clock.window.End+int64(clock.drain)-clock.window.Domain.Resolution {
+	if err != nil || !clock.window.validDrain(clock.drain) || now < clock.window.Start || time.Duration(now-clock.window.Start) < dispatched {
 		return errors.New("shared clock completion is outside the drain deadline")
+	}
+	if now > clock.window.End+int64(clock.drain)-clock.window.Domain.Resolution {
+		return errCompletedAfterDrain
 	}
 	return nil
 }
@@ -178,14 +185,19 @@ func (job sendJob) dispatchDelay() (time.Duration, error) {
 func sameRunSpec(first, second runSpec) bool {
 	firstClock, secondClock := first.Clock, second.Clock
 	firstSSNM, secondSSNM := first.SSNM, second.SSNM
+	firstFailure, secondFailure := first.SGPFailure, second.SGPFailure
+	firstReferences, secondReferences := first.RouteReferences, second.RouteReferences
 	first.Clock, second.Clock = nil, nil
 	first.SSNM, second.SSNM = nil, nil
+	first.SGPFailure, second.SGPFailure = nil, nil
+	first.RouteReferences, second.RouteReferences = nil, nil
 	firstOverload, secondOverload := first.Overload, second.Overload
 	first.Overload, second.Overload = nil, nil
 	if first != second || !sameOverloadSpec(firstOverload, secondOverload) {
 		return false
 	}
-	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM)
+	return samePointee(firstClock, secondClock) && samePointee(firstSSNM, secondSSNM) && samePointee(firstFailure, secondFailure) &&
+		samePointee(firstReferences, secondReferences)
 }
 
 // samePointee compares two optional values: both absent, or both present and
@@ -205,6 +217,14 @@ func copyRunSpec(specification runSpec) runSpec {
 	if specification.SSNM != nil {
 		workload := *specification.SSNM
 		specification.SSNM = &workload
+	}
+	if specification.SGPFailure != nil {
+		failure := *specification.SGPFailure
+		specification.SGPFailure = &failure
+	}
+	if specification.RouteReferences != nil {
+		references := *specification.RouteReferences
+		specification.RouteReferences = &references
 	}
 	specification.Overload = copyOverloadSpec(specification.Overload)
 	return specification

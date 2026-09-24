@@ -217,7 +217,7 @@ func TestBidirectionalTransportStallTakesPrecedence(testContext *testing.T) {
 			wantDirections: [2]string{"inconclusive", "pass"},
 			mutateCohort: func(cohort map[string]any) {
 				cohort["verdict"] = "invalid"
-				cohort["error"] = "cohort failed after measurement"
+				cohort["error"] = cohortValidityError
 			},
 		},
 		{
@@ -583,7 +583,7 @@ func TestBidirectionalCohortVerdictAndErrorMustAgree(testContext *testing.T) {
 	valid := bidirectionalRunJSON(10, -1, 0, -2, -1)
 	for _, runJSON := range []string{
 		strings.Replace(valid, `"verdict":"inconclusive"}`, `"verdict":"pass"}`, 1),
-		strings.Replace(valid, `"verdict":"inconclusive"}`, `"verdict":"inconclusive","error":"reverse failed"}`, 1),
+		strings.Replace(valid, `"verdict":"inconclusive"}`, `"verdict":"inconclusive","error":"reverse cohort: `+cohortValidityError+`"}`, 1),
 	} {
 		input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, runJSON)
 		status, decoded := runRequest(testContext, input)
@@ -592,7 +592,14 @@ func TestBidirectionalCohortVerdictAndErrorMustAgree(testContext *testing.T) {
 		}
 	}
 
-	failed := strings.Replace(valid, `"verdict":"inconclusive"}`, `"verdict":"invalid","error":"reverse failed"}`, 1)
+	// A cohort error other than its directions' validity failures is a
+	// fixture fault, never a failed probe.
+	faulted := strings.Replace(valid, `"verdict":"inconclusive"}`, `"verdict":"invalid","error":"reverse failed"}`, 1)
+	if status, decoded := runRequest(testContext, fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, faulted)); status != invalidInputExitStatus ||
+		!strings.Contains(decoded.Error, errFixtureFault.Error()) {
+		testContext.Fatalf("faulted cohort accepted: status %d result %+v", status, decoded)
+	}
+	failed := strings.Replace(valid, `"verdict":"inconclusive"}`, `"verdict":"invalid","error":"reverse cohort: `+cohortValidityError+`"}`, 1)
 	input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, failed)
 	status, decoded := runRequest(testContext, input)
 	if status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].Decision != "fail" {
@@ -623,7 +630,9 @@ func TestBidirectionalCompletedLossIsAFailedProbe(testContext *testing.T) {
 	}
 }
 
-func TestBidirectionalReceiverFailureFailsItsDirection(testContext *testing.T) {
+// A receiver fault in either direction is a fixture fault, not capacity
+// evidence: the measurement cohort is refused rather than decided.
+func TestBidirectionalReceiverFailureIsRefused(testContext *testing.T) {
 	valid := bidirectionalRunJSON(10, -1, 0, -2, -1)
 	for _, test := range []struct {
 		name      string
@@ -643,11 +652,9 @@ func TestBidirectionalReceiverFailureFailsItsDirection(testContext *testing.T) {
 			})
 			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, mutated)
 			status, decoded := runRequest(testContext, input)
-			if status == invalidInputExitStatus || len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].Decision != "fail" {
-				testContext.Fatalf("receiver failure did not fail the probe: status %d result %+v", status, decoded)
-			}
-			if decoded.ProbeDecisions[0].Directions[test.direction].Decision != "fail" {
-				testContext.Fatalf("receiver failure did not fail direction %d: %+v", test.direction, decoded.ProbeDecisions[0])
+			if status != invalidInputExitStatus || !strings.Contains(decoded.Error, errFixtureFault.Error()) ||
+				!strings.Contains(decoded.Error, test.receiver+" record") {
+				testContext.Fatalf("receiver fault in direction %d accepted: status %d result %+v", test.direction, status, decoded)
 			}
 		})
 	}

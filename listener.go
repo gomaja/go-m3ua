@@ -281,22 +281,9 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 	if !ok {
 		return nil, fmt.Errorf("invalid network: %s", network)
 	}
-	// Through SocketConfig rather than ListenSCTP so a notification handler can
-	// be installed. The dependency fixes a listener's handler at construction
-	// and gives the same one to every association it accepts, so the handler
-	// routes by association ID; see restartWatcher.
 	l.restarts = &restartWatcher{}
 	l.restarts.setRoute(l.associationForSCTPID)
-	scfg := &sctp.SocketConfig{
-		NotificationHandler: l.restarts.handle,
-		// The same stream request Dial makes; see sctpStreams. Left zero,
-		// the kernel default applied (10 outbound on Linux), so every
-		// accepted association had nine DATA streams for its Signalling Link
-		// Selections while the dialling end had many more.
-		InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams},
-	}
-
-	l.sctpListener, err = scfg.Listen(n, laddr)
+	l.sctpListener, err = listenSCTP(n, laddr, l.restarts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen SCTP: %w", err)
 	}
@@ -305,6 +292,35 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 		return nil, ErrEndpointClosed
 	}
 	return l, nil
+}
+
+// listenSCTP opens the listening socket every Listener accepts on.
+//
+// Through SocketConfig rather than ListenSCTP so a notification handler can be
+// installed. The dependency fixes a listener's handler at construction and
+// gives the same one to every association it accepts, so the handler routes by
+// association ID; see restartWatcher.
+//
+// associationEvents are subscribed on the listening socket, before listen: an
+// accepted association is created on it and keeps the subscription it had
+// then, so subscribing on the accepted socket afterwards came too late for an
+// ABORT that arrived in between.
+func listenSCTP(network string, laddr *sctp.SCTPAddr, restarts *restartWatcher) (*sctp.SCTPListener, error) {
+	scfg := &sctp.SocketConfig{
+		NotificationHandler: restarts.handle,
+		// The same stream request Dial makes; see sctpStreams. Left zero,
+		// the kernel default applied (10 outbound on Linux), so every
+		// accepted association had nine DATA streams for its Signalling Link
+		// Selections while the dialling end had many more.
+		InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams},
+	}
+	return withAssociationEvents(func(subscribe bool) (*sctp.SCTPListener, error) {
+		var pre sctp.PreAssociationConfig
+		if subscribe {
+			pre.Notifications = associationEvents()
+		}
+		return scfg.WithPreAssociation(pre).Listen(network, laddr)
+	})
 }
 
 // associationForSCTPID finds the accepted Association with the given SCTP
