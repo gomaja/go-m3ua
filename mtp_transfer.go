@@ -361,11 +361,11 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 		e.aspRoutes.config.congestionPolicy,
 		request.ProtocolData.MessagePriority,
 	)
-	unlockSequence, err := e.aspRoutes.lockTransferSequence(request)
+	sequence, err := e.aspRoutes.lockTransferSequence(request)
 	if err != nil {
 		return MTPTransferResult{}, err
 	}
-	defer unlockSequence()
+	defer sequence.release()
 
 	targets, err := e.aspRoutes.selectTransfer(request, congestionDecision, e.ssnm)
 	if err != nil {
@@ -409,34 +409,57 @@ func (target aspTransferTarget) describe() MTPTransferPath {
 	}
 }
 
-func (r *aspRoutes) lockTransferSequence(request MTPTransferRequest) (func(), error) {
+// aspTransferSequence is one held MTP-TRANSFER flow lock; release returns it.
+// It is a value rather than an unlock closure so holding it does not allocate.
+type aspTransferSequence struct {
+	routes   *aspRoutes
+	flowKey  aspTransferFlowKey
+	flowLock *aspTransferFlowLock
+}
+
+func (r *aspRoutes) lockTransferSequence(request MTPTransferRequest) (aspTransferSequence, error) {
 	r.mu.RLock()
 	mtpRoute, err := r.resolveTransferMTPRouteLocked(request.MTPRoute, request.ProtocolData)
 	r.mu.RUnlock()
 	if err != nil {
-		return nil, err
+		return aspTransferSequence{}, err
 	}
 	flowKey := newASPTransferFlowKey(mtpRoute.id, request.ProtocolData)
 
 	r.transferSequenceMu.Lock()
 	flowLock := r.transferSequences[flowKey]
 	if flowLock == nil {
-		flowLock = &aspTransferFlowLock{}
+		if idle := len(r.idleTransferFlowLocks); idle > 0 {
+			flowLock = r.idleTransferFlowLocks[idle-1]
+			r.idleTransferFlowLocks[idle-1] = nil
+			r.idleTransferFlowLocks = r.idleTransferFlowLocks[:idle-1]
+		} else {
+			flowLock = &aspTransferFlowLock{}
+		}
 		r.transferSequences[flowKey] = flowLock
 	}
 	flowLock.references++
 	r.transferSequenceMu.Unlock()
 
 	flowLock.mu.Lock()
-	return func() {
-		flowLock.mu.Unlock()
-		r.transferSequenceMu.Lock()
-		flowLock.references--
-		if flowLock.references == 0 {
-			delete(r.transferSequences, flowKey)
+	return aspTransferSequence{routes: r, flowKey: flowKey, flowLock: flowLock}, nil
+}
+
+// release unlocks the flow and, once no transfer holds or waits for it,
+// retires its lock. A retired lock is unlocked and unreferenced, so reusing it
+// for any later flow is safe.
+func (sequence aspTransferSequence) release() {
+	routes := sequence.routes
+	sequence.flowLock.mu.Unlock()
+	routes.transferSequenceMu.Lock()
+	sequence.flowLock.references--
+	if sequence.flowLock.references == 0 {
+		delete(routes.transferSequences, sequence.flowKey)
+		if len(routes.idleTransferFlowLocks) < maxIdleTransferFlowLocks {
+			routes.idleTransferFlowLocks = append(routes.idleTransferFlowLocks, sequence.flowLock)
 		}
-		r.transferSequenceMu.Unlock()
-	}, nil
+	}
+	routes.transferSequenceMu.Unlock()
 }
 
 func (r *aspRoutes) selectTransfer(
@@ -798,16 +821,17 @@ func (r *aspRoutes) transferMembersLocked(
 	members := make([]aspTransferMember, 0, len(associations))
 	bound := false
 	for _, association := range associations {
-		for _, key := range r.config.asKeysFor(association, identity, applicationServer) {
+		r.config.visitASKeys(association, identity, applicationServer, func(key ASKey) bool {
 			if !aspAssociationBoundToAS(association, key) {
-				continue
+				return true
 			}
 			bound = true
 			if aspAssociationEligibleForAS(association, key) {
 				members = append(members, aspTransferMember{association: association, as: key})
-				break
+				return false
 			}
-		}
+			return true
+		})
 	}
 	if len(members) > 0 {
 		return members, 0

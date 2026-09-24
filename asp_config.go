@@ -366,14 +366,37 @@ func (c aspRoutingConfig) asKeysFor(
 	identity SGPIdentity,
 	id RemoteASID,
 ) []ASKey {
+	var keys []ASKey
+	c.visitASKeys(association, identity, id, func(key ASKey) bool {
+		keys = append(keys, key)
+		return true
+	})
+	return keys
+}
+
+// visitASKeys calls visit with each scope asKeysFor resolves, in the same
+// order, until visit returns false. A statically provisioned Application
+// Server, the case every transfer and status projection meets, costs no
+// allocation.
+func (c aspRoutingConfig) visitASKeys(
+	association *Association,
+	identity SGPIdentity,
+	id RemoteASID,
+	visit func(ASKey) bool,
+) {
 	applicationServer, exists := c.remoteASFor(identity, id)
 	if !exists {
-		return nil
+		return
 	}
 	if applicationServer.asKeyStatic {
-		return []ASKey{applicationServer.asKey}
+		visit(applicationServer.asKey)
+		return
 	}
-	return association.dynamicASKeysForRemoteAS(id)
+	for _, key := range association.dynamicASKeysForRemoteAS(id) {
+		if !visit(key) {
+			return
+		}
+	}
 }
 
 func (c aspRoutingConfig) remoteASFor(identity SGPIdentity, id RemoteASID) (aspRemoteAS, bool) {
