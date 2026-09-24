@@ -170,24 +170,34 @@ func TestDoneIsSafeForConcurrentWaiters(t *testing.T) {
 	}
 }
 
-// blockingRelease holds the SCTP release until the test opens the gate, the
-// way a SHUTDOWN waiting for its acknowledgement does, and reports when the
-// teardown reached it.
+// blockingRelease holds the SCTP release until the test opens it, the way a
+// SHUTDOWN waiting for its acknowledgement does, and reports when the teardown
+// reached it.
 type blockingRelease struct {
-	reached chan struct{}
-	gate    chan struct{}
-	once    sync.Once
+	reached     chan struct{}
+	gate        chan struct{}
+	reachedOnce sync.Once
+	openOnce    sync.Once
 }
 
-func installBlockingRelease(conn *Association) *blockingRelease {
+// installBlockingRelease holds conn's release. A test that fails while the
+// release is held still has it opened on cleanup, before newTestConn's own
+// cleanup joins the teardown, so the failure is reported instead of hanging.
+func installBlockingRelease(t *testing.T, conn *Association) *blockingRelease {
+	t.Helper()
 	release := &blockingRelease{reached: make(chan struct{}), gate: make(chan struct{})}
 	hold := func() error {
-		release.once.Do(func() { close(release.reached) })
+		release.reachedOnce.Do(func() { close(release.reached) })
 		<-release.gate
 		return nil
 	}
 	conn.transportCloser, conn.transportAborter = hold, hold
+	t.Cleanup(release.open)
 	return release
+}
+
+func (release *blockingRelease) open() {
+	release.openOnce.Do(func() { close(release.gate) })
 }
 
 // Done marks the start of the teardown, not its end. It closes as soon as the
@@ -210,7 +220,7 @@ func TestDoneMarksTheStartOfTheTeardown(t *testing.T) {
 			conn, _ := newTestConn(t, StateASPActive, RoleASP)
 			const pointCode = 0x123456
 			seedDestinationAvailability(conn, pointCode, DestinationAvailable)
-			release := installBlockingRelease(conn)
+			release := installBlockingRelease(t, conn)
 
 			released := make(chan error, 1)
 			go func() { released <- test.call(conn) }()
@@ -229,7 +239,7 @@ func TestDoneMarksTheStartOfTheTeardown(t *testing.T) {
 			default:
 			}
 
-			close(release.gate)
+			release.open()
 			var last State
 			for st := range conn.StateChanges() {
 				last = st
@@ -309,13 +319,13 @@ func TestStateChangesClosesOnlyOnceTheDestinationsArePaused(t *testing.T) {
 // report, and ASP-DOWN never reached StateChanges.
 func TestNoHandlerMovesTheStateOnceTheTeardownHasBegun(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
-	release := installBlockingRelease(conn)
+	release := installBlockingRelease(t, conn)
 
 	closed := make(chan error, 1)
 	go func() { closed <- conn.Close() }()
 	<-release.reached
 	conn.handleSignals(context.Background(), messages.NewAspDown(nil))
-	close(release.gate)
+	release.open()
 	if err := <-closed; err != nil {
 		t.Fatalf("Close: %v", err)
 	}
