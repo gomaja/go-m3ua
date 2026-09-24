@@ -251,11 +251,12 @@ func TestTAckGivesTheFinalResendAFullInterval(t *testing.T) {
 	}
 }
 
-// With the default timers a peer that accepts the association and never
-// answers is reported by Dial as ErrTimeout: the T(ack) budget, DefaultTAck for
-// every send including the last resend, must outlast DefaultEstablishTimeout.
-// When the two coincided, which error Dial returned depended on which timer the
-// scheduler ran first.
+// The default T(ack) budget, DefaultTAck for every send including the last
+// resend, must outlast DefaultEstablishTimeout. When the two coincided, Dial
+// against a peer that accepts the association and never answers returned
+// ErrTimeout or ErrTAckExpired depending on which timer ran first. This pins
+// the constants only; TestDialAgainstMuteePeerTimesOut exercises Dial with the
+// default timers against such a peer over real SCTP on Linux.
 func TestDefaultTAckBudgetOutlastsTheEstablishTimeout(t *testing.T) {
 	budget := DefaultTAck * time.Duration(DefaultTAckRetries+1)
 	if budget <= DefaultEstablishTimeout {
