@@ -223,24 +223,54 @@ func associationEvents() []sctp.NotificationSubscription {
 	}
 }
 
-// withAssociationEvents opens a socket with associationEvents, and again
-// without them if the kernel has no SCTP_EVENT: Linux added the option in 5.0
-// and refuses it with ENOPROTOOPT before that. The dependency applies the
-// subscription before bind, connect or listen, so the refused attempt put
-// nothing on the wire; Dial still sends at most one INIT.
+// withAssociationEvents opens a socket with associationEvents when the kernel
+// accepts them, and without them when it does not: Linux added SCTP_EVENT in
+// 5.0 and refuses it with ENOPROTOOPT before that.
 //
-// Such a kernel still serves traffic, as it did when the subscription was made
-// on the established association and allowed to fail. What it loses is logged
-// rather than refused: no restart is reported as M-SCTP_RESTART, and a lost
-// association is noticed only through the socket's pending error, which a
-// concurrent write can take before the reader does.
+// Which it is, is asked of a socket that never connects (see
+// associationEventsSupported), never inferred from an open that failed. Dial
+// fails with ENOPROTOOPT for another reason as well: Linux reports an ICMP
+// protocol-unreachable, the answer of a host without SCTP, as ENOPROTOOPT.
+// Opening again on any ENOPROTOOPT therefore sent a second INIT to such a host
+// and blamed the kernel for it. Each socket is opened exactly once, so Dial
+// sends at most one INIT.
+//
+// A kernel without SCTP_EVENT still serves traffic, as it did when the
+// subscription was made on the established association and allowed to fail.
+// What it loses is logged rather than refused: no restart is reported as
+// M-SCTP_RESTART, and a lost association is noticed only through the socket's
+// pending error, which a concurrent write can take before the reader does.
 func withAssociationEvents[T any](open func(subscribe bool) (T, error)) (T, error) {
-	opened, err := open(true)
-	if err == nil || !errors.Is(err, syscall.ENOPROTOOPT) {
-		return opened, err
-	}
-	logf("m3ua: this kernel cannot subscribe to SCTP association events (%v); "+
-		"M-SCTP_RESTART will not be reported and a lost association "+
-		"may go unnoticed while writes fail", err)
-	return open(false)
+	return open(associationEventsSupported())
+}
+
+var (
+	associationEventsOnce      sync.Once
+	associationEventsSubscribe bool
+	// probeAssociationEvents asks the kernel whether it accepts the
+	// SCTP_EVENT subscription associationEvents makes.
+	probeAssociationEvents = kernelAssociationEvents
+)
+
+// associationEventsSupported reports, once per process, whether sockets can
+// subscribe to associationEvents. Any probe failure other than ENOPROTOOPT
+// leaves the subscription on, so the socket itself reports why SCTP is
+// unavailable.
+func associationEventsSupported() bool {
+	associationEventsOnce.Do(func() {
+		err := probeAssociationEvents()
+		associationEventsSubscribe = associationEventsAccepted(err)
+		if !associationEventsSubscribe {
+			logf("m3ua: this kernel cannot subscribe to SCTP association events (%v); "+
+				"M-SCTP_RESTART will not be reported and a lost association "+
+				"may go unnoticed while writes fail", err)
+		}
+	})
+	return associationEventsSubscribe
+}
+
+// associationEventsAccepted reads the probe's answer: only ENOPROTOOPT means
+// the kernel has no SCTP_EVENT.
+func associationEventsAccepted(probeErr error) bool {
+	return !errors.Is(probeErr, syscall.ENOPROTOOPT)
 }

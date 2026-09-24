@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"reflect"
 	"sync"
 	"syscall"
 	"testing"
@@ -667,44 +666,52 @@ func TestCommunicationLostFailsTheReadWhateverTheRoute(t *testing.T) {
 	}
 }
 
-// A kernel without SCTP_EVENT (Linux before 5.0) refuses the pre-association
-// subscription with ENOPROTOOPT, wrapped by the dependency. The socket is then
-// opened again without it, as the association served traffic before the
-// subscription existed; any other failure is the caller's to see, unretried.
-func TestAssociationEventsFallBackOnlyWhenTheKernelLacksSCTPEvent(t *testing.T) {
-	refused := &net.OpError{Op: "dial", Net: "sctp",
-		Err: fmt.Errorf("sctp: apply PreAssociation.Notifications: %w", syscall.ENOPROTOOPT)}
-	for _, test := range []struct {
-		name  string
-		first error
-		want  []bool
-		err   error
-	}{
-		{name: "subscribed", want: []bool{true}},
-		{name: "no SCTP_EVENT", first: refused, want: []bool{true, false}},
-		{name: "other failure", first: syscall.ECONNREFUSED, want: []bool{true}, err: syscall.ECONNREFUSED},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var calls []bool
-			opened, err := withAssociationEvents(func(subscribe bool) (int, error) {
-				calls = append(calls, subscribe)
-				if subscribe && test.first != nil {
-					return 0, test.first
-				}
-				return 1, nil
-			})
-			if !reflect.DeepEqual(calls, test.want) {
-				t.Errorf("opened with subscribe = %v, want %v", calls, test.want)
+// Every socket is opened exactly once. A Dial that fails with ENOPROTOOPT is
+// not retried without the subscription: Linux reports an ICMP
+// protocol-unreachable from a host without SCTP as ENOPROTOOPT too, and the
+// retry sent that host a second INIT.
+func TestAssociationEventsOpenEachSocketOnce(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "sctp", Err: syscall.ENOPROTOOPT}
+	for _, failure := range []error{nil, refused, syscall.ECONNREFUSED} {
+		calls := 0
+		opened, err := withAssociationEvents(func(subscribe bool) (int, error) {
+			calls++
+			if subscribe != associationEventsSupported() {
+				t.Errorf("opened with subscribe = %t, but the kernel's answer is %t", subscribe, associationEventsSupported())
 			}
-			if test.err != nil {
-				if !errors.Is(err, test.err) {
-					t.Errorf("error = %v, want %v", err, test.err)
-				}
-				return
+			if failure != nil {
+				return 0, failure
 			}
-			if err != nil || opened != 1 {
-				t.Errorf("opened = %d, %v; want the socket", opened, err)
-			}
+			return 1, nil
 		})
+		if calls != 1 {
+			t.Errorf("failure %v: opened %d times, want once", failure, calls)
+		}
+		if failure == nil && (err != nil || opened != 1) {
+			t.Errorf("opened = %d, %v; want the socket", opened, err)
+		}
+		if failure != nil && !errors.Is(err, failure) {
+			t.Errorf("error = %v, want %v", err, failure)
+		}
+	}
+}
+
+// Only the probe's ENOPROTOOPT means a kernel without SCTP_EVENT (Linux
+// before 5.0). Any other probe failure, such as SCTP missing altogether,
+// leaves the subscription on, so opening the socket reports that failure.
+func TestAssociationEventsProbeReading(t *testing.T) {
+	for _, test := range []struct {
+		probe error
+		want  bool
+	}{
+		{probe: nil, want: true},
+		{probe: syscall.ENOPROTOOPT, want: false},
+		{probe: fmt.Errorf("setsockopt: %w", syscall.ENOPROTOOPT), want: false},
+		{probe: syscall.EPROTONOSUPPORT, want: true},
+		{probe: syscall.EACCES, want: true},
+	} {
+		if got := associationEventsAccepted(test.probe); got != test.want {
+			t.Errorf("probe %v: accepted = %t, want %t", test.probe, got, test.want)
+		}
 	}
 }
