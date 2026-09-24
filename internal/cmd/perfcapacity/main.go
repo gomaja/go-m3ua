@@ -387,6 +387,69 @@ type fixtureEvidence struct {
 	ClockBoundary      *sharedClockBoundary `json:"shared_clock_boundary"`
 	ValidatedPerSecond *float64             `json:"validated_per_second"`
 	SSNM               *ssnmEvidence        `json:"ssnm"`
+	// DrainTimeout is present only on a sender record whose drain deadline
+	// passed with submitted work still unaccounted at the receiver.
+	DrainTimeout *drainTimeoutEvidence `json:"drain_timeout"`
+}
+
+// drainTimeoutCause is the fixed cause perftraffic records on every
+// drain_timeout outcome.
+const drainTimeoutCause = "the drain deadline passed while submitted messages were still unaccounted at the receiver: the offered load was not delivered in time"
+
+// drainTimeoutEvidence is a nominal cohort's drain deadline outcome: the
+// sender stopped waiting at the drain deadline with Undelivered of its
+// Submitted messages not yet accounted for (validated, duplicate or invalid)
+// in the last receiver result it read. It is a delivery failure of the
+// offered rate, the expected result above capacity, and never a fixture
+// fault; a fault keeps its fatal_error.
+type drainTimeoutEvidence struct {
+	Cause       *string        `json:"cause"`
+	Drain       *time.Duration `json:"drain_ns"`
+	Submitted   *uint64        `json:"submitted"`
+	Accounted   *uint64        `json:"accounted"`
+	Undelivered *uint64        `json:"undelivered"`
+}
+
+// undeliveredAtDrainDeadline reports whether the record carries a drain
+// deadline outcome with work outstanding. The outcome's consistency is checked
+// with the rest of the record's validity.
+func (record *fixtureEvidence) undeliveredAtDrainDeadline() bool {
+	timeout := record.DrainTimeout
+	return timeout != nil && timeout.Undelivered != nil && *timeout.Undelivered > 0
+}
+
+// validateDrainTimeout checks a drain deadline outcome against the record
+// that carries it: the producer's cause, the run's drain allowance, the
+// sender's submissions, a reconciled positive undelivered count, and an
+// accounted count the receiver's final counters never fall below.
+func validateDrainTimeout(record *fixtureEvidence) error {
+	timeout := record.DrainTimeout
+	if timeout == nil {
+		return nil
+	}
+	if timeout.Cause == nil || timeout.Drain == nil || timeout.Submitted == nil || timeout.Accounted == nil || timeout.Undelivered == nil {
+		return errors.New("drain_timeout cause, drain_ns, submitted, accounted and undelivered are required")
+	}
+	if *timeout.Cause != drainTimeoutCause {
+		return errors.New("drain_timeout cause must match the producer contract")
+	}
+	if *timeout.Drain != record.Spec.Drain {
+		return errors.New("drain_timeout drain_ns must equal the workload drain")
+	}
+	if *timeout.Submitted != *record.Submitted {
+		return errors.New("drain_timeout submitted must equal the sender submissions")
+	}
+	if *timeout.Undelivered == 0 || !sumEquals(*timeout.Submitted, *timeout.Accounted, *timeout.Undelivered) {
+		return errors.New("drain_timeout must report undelivered work that reconciles with its submitted and accounted counts")
+	}
+	final, ok := checkedAdd(*record.Delivery.Unique, *record.Delivery.Duplicate)
+	if ok {
+		final, ok = checkedAdd(final, *record.Delivery.Invalid)
+	}
+	if !ok || *timeout.Accounted > final {
+		return errors.New("drain_timeout accounted more deliveries than the receiver's final counters")
+	}
+	return nil
 }
 
 type deliveryEvidence struct {
@@ -1068,17 +1131,20 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 
 // warmupOverloadError is the whole error perftraffic reports when a warm-up
 // cohort ran its complete offered schedule and then failed only its own
-// loss-free validity rules. Any other failure — a receiver read failure, a
-// failed control request, a clock or reset error — joins further text or
-// fails before the schedule completes.
+// loss-free validity rules. Work still unaccounted when the drain deadline
+// passed is one of those rules (the record's drain_timeout), not an error.
+// Any other failure — a receiver read failure, a failed control request, a
+// clock or reset error — joins further text or fails before the schedule
+// completes.
 const warmupOverloadError = "warmup did not drain cleanly: cohort is invalid; inspect machine-readable reasons"
 
 // cohortPhase accepts a measurement cohort, or a warm-up cohort whose warm-up
 // failed because the offered rate was not sustained: the cohort ran its whole
 // schedule with no fatal read or control failure, failed only its own validity
-// rules, and shows outstanding-cap refusals, missing deliveries or a stall.
-// That is evidence against the rate. A warm-up that did not fail, or failed
-// for any other reason, says nothing about the rate and is not probe evidence.
+// rules, and shows outstanding-cap refusals, missing deliveries, submitted
+// work still undelivered at the drain deadline, or a stall. That is evidence
+// against the rate. A warm-up that did not fail, or failed for any other
+// reason, says nothing about the rate and is not probe evidence.
 func cohortPhase(cohort *fixtureCohort) (bool, error) {
 	if cohort.Phase == nil {
 		return false, errors.New("phase is required")
@@ -1112,7 +1178,8 @@ func cohortPhase(cohort *fixtureCohort) (bool, error) {
 		stalled := record.SendDuration != nil && record.SendDuration.Max != nil &&
 			(perfstats.StallObservation{LongestSend: *record.SendDuration.Max}).Stalled()
 		lost := record.Capped != nil && *record.Capped > 0 ||
-			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0
+			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0 ||
+			record.undeliveredAtDrainDeadline()
 		overloaded = overloaded || stalled || lost
 	}
 	if !overloaded {
@@ -1154,7 +1221,7 @@ func validateCohortReceiver(record *fixtureEvidence, declaredRate int) (specIden
 		return specIdentity{}, errors.New("record must be a receiver record")
 	}
 	if nonzero(record.Scheduled) || nonzero(record.Sent) || nonzero(record.Submitted) || record.SenderWindow != nil ||
-		record.Echo != nil || record.ReceiverEcho != nil {
+		record.Echo != nil || record.ReceiverEcho != nil || record.DrainTimeout != nil {
 		return specIdentity{}, errors.New("cohort receiver record carries sender-only or echo evidence")
 	}
 	if record.Expected == nil || *record.Expected != spec.Expected {
@@ -1514,8 +1581,11 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 	if (*record.FixtureVerdict == "pass" || record.FatalError == "") && !sumEquals(*record.Expected, *record.Delivery.Unique, *record.Delivery.Missing) {
 		return errors.New("delivery unique and missing do not reconcile with the expected workload")
 	}
+	if err := validateDrainTimeout(record); err != nil {
+		return err
+	}
 
-	fixtureInvalid := record.FatalError != "" || *record.Capped != 0 || *record.SendErrors != 0 ||
+	fixtureInvalid := record.FatalError != "" || record.DrainTimeout != nil || *record.Capped != 0 || *record.SendErrors != 0 ||
 		*record.Delivery.Unique != *record.Expected || *record.Delivery.Missing != 0 || *record.Delivery.Duplicate != 0 ||
 		*record.Delivery.Invalid != 0 || *record.Delivery.Reordered != 0 || *record.Delivery.LateAfterStop != 0 ||
 		*record.OutstandingAtWindowStart != 0 || *record.OutstandingAfterDrain != 0

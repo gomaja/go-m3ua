@@ -762,7 +762,8 @@ configuration and observations:
 - `scheduled`, `sent`, `submitted`, `send_errors`, `capped`, and outstanding counts at
   the start, measurement end, and end of drain;
 - receiver `unique`, `unique_measurement`, `unique_drain`, `missing`,
-  `duplicate`, `invalid`, `reordered`, and `late_after_stop` counts;
+  `duplicate`, `invalid`, `reordered`, `late_after_stop` and
+  `late_after_deadline` counts;
 - bounded one-second series and bounded histogram-derived send-duration and
   scheduled-to-worker dispatch-lag percentiles (p50/p95/p99/max), where each
   percentile is a conservative bucket upper bound, capped by the observed
@@ -827,3 +828,27 @@ Missing or regressed cgroup counters, CPU throttling, too few series samples, or
 unavailable capacity observability produce an overall `inconclusive` result;
 protocol/data failures produce `invalid`. No field is named or treated as
 application-routing acceptance.
+
+Above capacity a cohort can end with submitted work still undelivered when the
+drain deadline passes, typically because the receiving library discarded what
+its inbound DATA queue could not hold and the sender waited for those messages
+to the end. That is the cohort's delivery outcome, not a fixture fault: when
+the last receiver result the sender read before the deadline still showed
+submitted messages unaccounted (neither validated, duplicate nor invalid), the
+sender record carries `drain_timeout` instead of a `fatal_error`, with
+`cause`, `drain_ns` (the deadline is the end of the measurement window plus
+this drain), `submitted`, `accounted` in that last result, `undelivered`
+(submitted minus accounted), and `observed_before_deadline_ns`, how long
+before the deadline that read completed. The record is invalid with the reason
+"submitted traffic was still unaccounted at the receiver when the drain
+deadline passed", even if the receiver's final counters, read after the stop,
+show that the last messages arrived in time: the sender did not observe them in
+time. Every other end of the drain wait remains a `fatal_error`: a failed or
+unreachable receiver control request, a canceled run, or a deadline that passed
+before any receiver result was read. On a shared-clock receiver a delivery
+committed after the drain deadline is likewise counted, in `invalid` and in
+`late_after_deadline`, rather than ending the receiver with a fatal error. A
+throughput or routed warm-up that fails this way ends with exactly the warm-up
+validity error, so `internal/cmd/perfcapacity` accepts it as a failed probe of
+that rate. The DATA overload trial keeps its own contract: there any drain
+failure or late delivery is a fixture failure, as before.

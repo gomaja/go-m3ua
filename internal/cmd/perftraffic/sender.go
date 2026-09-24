@@ -500,6 +500,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	receiver, pollErr := waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
 	observations = append(observations, observeSharedProgress(drainContext, started, config.PeerControl, clock))
 	cancelDrain()
+	drainTimeout, pollErr := drainTimeoutOutcome(pollErr, specification, drainDeadline)
 	if pollErr != nil {
 		counters.setFatal(pollErr.Error())
 	}
@@ -568,6 +569,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if overloadProfile != nil {
 		sender.Overload = collectOverloadEvidence(diagnosticsContext, config, specification, overloadProfile, counters, associations, overloadEpochs, fixtureQueueMax, receiver, initialProgress.Generation, stopErr, observations, &sender)
 	}
+	sender.DrainTimeout = drainTimeout
 	sender.evaluate()
 	var cohortErrors []error
 	if pollErr != nil {
@@ -804,15 +806,65 @@ func waitWorkersContext(ctx context.Context, done <-chan struct{}, timeout time.
 	}
 }
 
+// drainDeadlineError is waitReceiverDrain's report that the drain deadline
+// passed while the last receiver result the sender read still showed
+// submitted messages unaccounted. That is the delivery outcome of a probe
+// above capacity, not a fixture fault. Every other way the wait can end — a
+// failed request, a canceled run, or a deadline with no receiver result read
+// before it — is reported as the error that caused it.
+type drainDeadlineError struct {
+	submitted uint64
+	accounted uint64
+	observed  time.Time
+}
+
+func (err *drainDeadlineError) Error() string {
+	return fmt.Sprintf("receiver drain deadline exceeded with %d of %d submitted messages unaccounted", err.submitted-err.accounted, err.submitted)
+}
+
+// timeout records the drain outcome against the cohort's drain allowance and
+// absolute deadline.
+func (err *drainDeadlineError) timeout(drain time.Duration, deadline time.Time) *drainTimeoutRecord {
+	return &drainTimeoutRecord{
+		Cause: drainTimeoutCause, Drain: drain, Submitted: err.submitted, Accounted: err.accounted,
+		Undelivered: err.submitted - err.accounted, ObservedBeforeDeadline: deadline.Sub(err.observed),
+	}
+}
+
+// drainTimeoutOutcome separates a nominal cohort's drain deadline outcome
+// from a fixture fault. The overload trial keeps its own contract, in which
+// any drain failure is a fixture failure, so its error is returned unchanged.
+func drainTimeoutOutcome(pollErr error, specification runSpec, deadline time.Time) (*drainTimeoutRecord, error) {
+	var outcome *drainDeadlineError
+	if specification.Overload != nil || !errors.As(pollErr, &outcome) {
+		return nil, pollErr
+	}
+	return outcome.timeout(specification.Drain, deadline), nil
+}
+
 func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCounters, deadline time.Time) (runRecord, error) {
+	var last runRecord
+	var outstanding *drainDeadlineError
+	// expired reports whether the drain deadline itself, rather than a
+	// failure or a canceled run, ended the wait after unaccounted work was
+	// seen.
+	expired := func(err error) bool {
+		return outstanding != nil && errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(deadline)
+	}
 	for {
 		if !time.Now().Before(deadline) {
+			if outstanding != nil {
+				return last, outstanding
+			}
 			return runRecord{}, errors.New("receiver drain deadline exceeded")
 		}
 		requestContext, cancelRequest := context.WithDeadline(ctx, deadline)
 		receiver, err := getReceiverResult(requestContext, baseURL)
 		cancelRequest()
 		if err != nil {
+			if expired(err) {
+				return last, outstanding
+			}
 			return runRecord{}, err
 		}
 		submitted := counters.submittedCount()
@@ -825,13 +877,17 @@ func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCoun
 		if accounted >= submitted {
 			return receiver, nil
 		}
+		last, outstanding = receiver, &drainDeadlineError{submitted: submitted, accounted: accounted, observed: time.Now()}
 		if !time.Now().Before(deadline) {
-			return receiver, errors.New("receiver drain deadline exceeded")
+			return receiver, outstanding
 		}
 		timer := time.NewTimer(10 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if expired(ctx.Err()) {
+				return receiver, outstanding
+			}
 			return receiver, ctx.Err()
 		case <-timer.C:
 		}
