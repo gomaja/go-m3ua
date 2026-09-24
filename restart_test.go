@@ -196,6 +196,7 @@ func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) 
 	alreadyDown := destinationKey{networkAppearance: 8, networkAppearanceSet: true, pointCode: 0x222222}
 	conn.destinations.set(available, DestinationAvailable)
 	conn.destinations.set(alreadyDown, DestinationUnavailable)
+	subscription := observeSSNM(t, conn)
 
 	w := &restartWatcher{}
 	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
@@ -221,20 +222,17 @@ func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) 
 	if got := retainedAvailabilityForNetwork(conn, 8, available.pointCode); got != DestinationUnavailable {
 		t.Errorf("affected destination state = %v, want %v", got, DestinationUnavailable)
 	}
-	select {
-	case status := <-conn.SignallingStatus():
-		if status.PointCode != available.pointCode || status.NetworkAppearance != 8 ||
-			!status.NetworkAppearanceSet || status.State.Availability != DestinationUnavailable {
-			t.Errorf("MTP-PAUSE equivalent = %+v, want Network Appearance 8 point code %#x unavailable",
-				status, available.pointCode)
-		}
-	default:
-		t.Error("the affected destination produced no MTP-PAUSE equivalent")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	event, err := subscription.Next(ctx)
+	if err != nil || event.Kind != SSNMPartitionRetiredEvent {
+		t.Fatalf("restart retirement = %+v, %v", event, err)
 	}
-	select {
-	case extra := <-conn.SignallingStatus():
-		t.Errorf("already-unavailable destination produced a duplicate pause: %+v", extra)
-	default:
+	if snapshot := conn.endpoint.SSNMKnowledge(); len(snapshot.Partitions) != 0 {
+		t.Fatalf("restart retained stale knowledge: %+v", snapshot)
+	}
+	if got := retainedAvailabilityForNetwork(conn, 8, alreadyDown.pointCode); got != DestinationUnavailable {
+		t.Fatalf("already unavailable destination changed to %v", got)
 	}
 
 	conn.muAckedRCs.RLock()

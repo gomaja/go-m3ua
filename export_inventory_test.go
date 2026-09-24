@@ -48,6 +48,14 @@ const exportedAPIInventory = "testdata/exported-api.txt"
 // updateExportedAPIInventory is the environment variable that rewrites it.
 const updateExportedAPIInventory = "M3UA_UPDATE_EXPORT_INVENTORY"
 
+func TestLegacySSNMExportsAreRemoved(testContext *testing.T) {
+	for _, declaration := range readPackageSurface(testContext, ".").lines {
+		if declaration == "method Association.SignallingStatus" || strings.HasPrefix(declaration, "type DestinationStatus ") || strings.HasPrefix(declaration, "type DestinationRange ") {
+			testContext.Errorf("removed legacy SSNM API remains exported: %s", declaration)
+		}
+	}
+}
+
 // inventoryLines reads the checked-in inventory as lines, tolerating a CRLF
 // checkout. Git converts line endings on Windows unless told otherwise, and a
 // trailing carriage return makes every entry miss, which reports the whole

@@ -428,8 +428,8 @@ func drainChannels(association *m3ua.Association, onEnd func()) <-chan struct{} 
 		if onEnd != nil {
 			defer onEnd()
 		}
-		states, indications, statuses := association.StateChanges(), association.ManagementIndications(), association.SignallingStatus()
-		for states != nil || indications != nil || statuses != nil {
+		states, indications := association.StateChanges(), association.ManagementIndications()
+		for states != nil || indications != nil {
 			select {
 			case _, open := <-states:
 				if !open {
@@ -438,10 +438,6 @@ func drainChannels(association *m3ua.Association, onEnd func()) <-chan struct{} 
 			case _, open := <-indications:
 				if !open {
 					indications = nil
-				}
-			case _, open := <-statuses:
-				if !open {
-					statuses = nil
 				}
 			}
 		}

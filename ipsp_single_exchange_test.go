@@ -1134,6 +1134,7 @@ func TestIPSPSingleExchangeRejectsSS7NetworkManagementMessages(t *testing.T) {
 
 func TestIPSPSingleExchangeAllowsSCONInBothDirections(t *testing.T) {
 	association, sent := newSingleExchangeIPSPForTest(t, StateASPActive)
+	observeSSNM(t, association)
 	association.noteRoutingContextsActive([]uint32{1})
 	congestion := messages.NewSignallingCongestion(
 		nil,
@@ -1153,11 +1154,11 @@ func TestIPSPSingleExchangeAllowsSCONInBothDirections(t *testing.T) {
 	if err := association.handleSignallingCongestion(congestion); err != nil {
 		t.Fatalf("handleSignallingCongestion(): %v", err)
 	}
-	status := nextStatus(t, association)
+	status := nextSSNMReport(t, association)
 	// RFC 4666 Section 4.5.2.2 keeps the two statuses apart, so the SCON reports
 	// congestion at its level and leaves the destination reachable.
-	if !status.State.Congestion.Congested || status.State.Congestion.Level != 2 ||
-		status.State.Availability != DestinationAvailable {
+	if !reportedSSNMCongestion(t, status).Congested || reportedSSNMCongestion(t, status).Level != 2 ||
+		retainedAvailability(association, 0x123456) != DestinationAvailable {
 		t.Fatalf("SCON status = %+v, want congested at level 2 and still available", status)
 	}
 }

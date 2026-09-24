@@ -1104,7 +1104,7 @@ func TestASPAssociationRejectsSGPDestinationReports(t *testing.T) {
 		routingContext    = uint32(1)
 		pointCode         = uint32(0x123456)
 	)
-	seedDestinationRange(association, DestinationRange{
+	seedDestinationRange(association, destinationRange{
 		NetworkAppearance:    networkAppearance,
 		NetworkAppearanceSet: true,
 		RoutingContext:       routingContext,
@@ -1442,10 +1442,11 @@ func TestEndpointRoleIsIndependentOfSCTPOrientation(t *testing.T) {
 			}
 
 			if test.dialRole == RoleSGP {
+				observeSSNM(t, acceptedAssociation)
 				const pointCode = 0x1234
 				// Seeded rather than published, so the DAVA the ASP waits for
 				// can only be the answer to its own DAUD.
-				seedDestinationRange(dialed, DestinationRange{
+				seedDestinationRange(dialed, destinationRange{
 					NetworkAppearanceSet: true,
 					RoutingContext:       1,
 					RoutingContextSet:    true,
@@ -1514,17 +1515,14 @@ func waitForEndpointDestinationStatus(
 ) {
 	t.Helper()
 	for {
-		select {
-		case status, ok := <-association.SignallingStatus():
-			if !ok {
-				t.Fatalf("Association closed before %s arrived", description)
-			}
-			if status != nil && status.PointCode == pointCode && status.State.Availability == state {
+		report := receiveSSNMReport(t, ctx, association)
+		if report.Kind != SSNMDestinationUnavailableReport && report.Kind != SSNMDestinationAvailableReport && report.Kind != SSNMDestinationRestrictedReport {
+			t.Fatalf("unexpected %s report: %+v", description, report)
+		}
+		for _, destination := range report.Destinations {
+			if destination.PointCode == pointCode && reportedSSNMAvailability(t, report) == state {
 				return
 			}
-		case <-ctx.Done():
-			t.Fatalf("%s for point code %#x and state %v did not arrive: %v",
-				description, pointCode, state, ctx.Err())
 		}
 	}
 }

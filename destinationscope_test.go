@@ -77,19 +77,15 @@ func TestDestinationStateSurvivesAnASPReconnecting(t *testing.T) {
 
 	auditState := func(t *testing.T, asp *Association) DestinationAvailability {
 		t.Helper()
+		observeSSNM(t, asp)
 		audit := messages.NewDestinationStateAudit(nil,
 			params.NewRoutingContext(1),
 			params.NewAffectedPointCodeWithMask(0, pointCode), nil)
 		if _, err := asp.WriteSignal(audit); err != nil {
 			t.Fatalf("sending DAUD: %v", err)
 		}
-		select {
-		case s := <-asp.SignallingStatus():
-			return s.State.Availability
-		case <-time.After(10 * time.Second):
-			t.Fatal("the SG never answered the DAUD")
-			return DestinationUnavailable
-		}
+		s := nextSSNMReport(t, asp)
+		return reportedSSNMAvailability(t, s)
 	}
 
 	first, err := dialASP(ctx, "m3ua", laddr, srvAddr, cliCfg)

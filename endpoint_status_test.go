@@ -328,7 +328,7 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	first := DestinationRange{
+	first := destinationRange{
 		NetworkAppearance:    10,
 		NetworkAppearanceSet: true,
 		RoutingContext:       1,
@@ -337,7 +337,7 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 		Mask:                 8,
 		State:                congestedState(2),
 	}
-	second := DestinationRange{
+	second := destinationRange{
 		NetworkAppearance:    20,
 		NetworkAppearanceSet: true,
 		RoutingContext:       1,
@@ -348,8 +348,8 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 	// RFC 4666 Section 4.5.2.2 keeps the two statuses apart, so the congested
 	// range is recorded as a congestion statement and leaves the destination
 	// reachable.
-	endpoint.destinations.setRanges([]DestinationRange{second})
-	if err := endpoint.destinations.setCongestionRangesWithinBudget([]DestinationRange{first}); err != nil {
+	endpoint.destinations.setRanges([]destinationRange{second})
+	if err := endpoint.destinations.setCongestionRangesWithinBudget([]destinationRange{first}); err != nil {
 		t.Fatalf("recording the congested range: %v", err)
 	}
 
@@ -404,16 +404,16 @@ func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 
-	rangeValue := DestinationRange{
+	rangeValue := destinationRange{
 		NetworkAppearance:    10,
 		NetworkAppearanceSet: true,
 		PointCode:            0x123456,
 		Mask:                 4,
 		State:                availabilityState(DestinationUnavailable),
 	}
-	endpoint.destinations.setScopedRanges([]uint32{1, 2}, []DestinationRange{rangeValue})
+	endpoint.destinations.setScopedRanges([]uint32{1, 2}, []destinationRange{rangeValue})
 	rangeValue.State = availabilityState(DestinationAvailable)
-	endpoint.destinations.setScopedRanges([]uint32{1}, []DestinationRange{rangeValue})
+	endpoint.destinations.setScopedRanges([]uint32{1}, []destinationRange{rangeValue})
 
 	want := []DestinationStatusSnapshot{
 		{
