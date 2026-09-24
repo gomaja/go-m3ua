@@ -84,8 +84,8 @@ type SSNMStateConfig struct {
 	// SubscriptionQueueBytes bounds the portable accounted payload of queued
 	// events. Zero selects DefaultSSNMSubscriptionQueueBytes; a positive limit
 	// must be at least 512 bytes. Accounting charges 512 bytes per event,
-	// 8 per report destination, 256 per retained destination state, 4 per
-	// Routing Context in the report and both state dimensions, and the byte
+	// 8 per report destination, 256 per updated destination, 4 per Routing
+	// Context in the report and both dimensions of each update, and the byte
 	// lengths of Reason and the event/report partition identity strings.
 	// Snapshot results, the fixed continuity-loss marker, queue backing-array
 	// capacity, and allocator overhead are outside this accounting. It is not
@@ -255,14 +255,6 @@ type SSNMReport struct {
 	// says nothing about destination reachability, so it is delivered as an
 	// event and retained as no one's destination knowledge.
 	PeerReported bool
-}
-
-func (r SSNMReport) clone() SSNMReport {
-	r.Scope = r.Scope.clone()
-	if r.Destinations != nil {
-		r.Destinations = append([]PointCodeRange(nil), r.Destinations...)
-	}
-	return r
 }
 
 // retainsAvailability reports whether this report installs the availability
@@ -658,7 +650,6 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 		Partition: partition,
 		Epoch:     state.epoch,
 		Binding:   SSNMBinding{Association: association, Pending: pending},
-		States:    s.partitionDestinationViewLocked(state),
 	})
 	return nil
 }
@@ -697,7 +688,6 @@ func (s *ssnmState) retireLocked(partition SSNMPartition, association Associatio
 			Partition: partition,
 			Epoch:     epoch,
 			Binding:   SSNMBinding{Association: association},
-			States:    s.partitionDestinationViewLocked(state),
 		})
 		return
 	}
@@ -814,25 +804,39 @@ func (s *ssnmState) apply(report SSNMReport) error {
 	}
 
 	scopeBytes := ssnmScopeBytes(report.Scope)
-	writes := make([]ssnmDimensionWrite, 0, len(report.Destinations))
-	seen := make(map[ssnmDestinationKey]struct{}, len(report.Destinations))
+	availability := report.retainsAvailability()
+	// The written keys are deduplicated by sorting rather than through a set,
+	// so a one-APC report builds nothing proportional to anything but itself,
+	// and in point-code then mask order, which is the order they are
+	// published in.
+	var small [4]ssnmDimensionWrite
+	writes := small[:0]
+	if len(report.Destinations) > len(small) {
+		writes = make([]ssnmDimensionWrite, 0, len(report.Destinations))
+	}
+	for _, destination := range report.Destinations {
+		writes = append(writes, ssnmDimensionWrite{key: ssnmDestinationKeyFor(destination)})
+	}
+	slices.SortFunc(writes, func(first, second ssnmDimensionWrite) int {
+		return compareSSNMDestinationKeys(first.key, second.key)
+	})
+	writes = slices.CompactFunc(writes, func(first, second ssnmDimensionWrite) bool {
+		return first.key == second.key
+	})
 	newRecords := 0
 	newBytes := 0
-	for _, destination := range report.Destinations {
-		key := ssnmDestinationKeyFor(destination)
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		seen[key] = struct{}{}
-		write := ssnmDimensionWrite{key: key, availability: report.retainsAvailability(), bytes: scopeBytes}
-		if write.availability {
-			existing, held := state.availability[key]
+	for index := range writes {
+		write := &writes[index]
+		write.availability = availability
+		write.bytes = scopeBytes
+		if availability {
+			existing, held := state.availability[write.key]
 			write.newRecord = !held
 			if held {
 				write.previous = ssnmScopeBytes(existing.Scope)
 			}
 		} else {
-			existing, held := state.congestion[key]
+			existing, held := state.congestion[write.key]
 			write.newRecord = !held
 			if held {
 				write.previous = ssnmScopeBytes(existing.Scope)
@@ -842,7 +846,6 @@ func (s *ssnmState) apply(report SSNMReport) error {
 			newRecords++
 		}
 		newBytes += write.bytes - write.previous
-		writes = append(writes, write)
 	}
 	if len(writes) == 0 {
 		return s.publishEventOnlyLocked(report)
@@ -855,13 +858,16 @@ func (s *ssnmState) apply(report SSNMReport) error {
 
 	revision := s.nextRevisionLocked()
 	report.Revision = revision
+	// Records are replaced whole and never written in place, so every record
+	// this report installs can share one owned copy of its wire scope.
+	scope := report.Scope.clone()
 	for _, write := range writes {
 		if write.availability {
 			state.availability[write.key] = SSNMAvailability{
 				State:       report.availabilityState(),
 				Kind:        report.Kind,
 				Source:      report.Source,
-				Scope:       report.Scope.clone(),
+				Scope:       scope,
 				Association: report.Association,
 				Epoch:       report.Epoch,
 				Revision:    revision,
@@ -872,7 +878,7 @@ func (s *ssnmState) apply(report SSNMReport) error {
 				Level:       report.CongestionLevel,
 				LevelSet:    report.CongestionLevelSet,
 				Source:      report.Source,
-				Scope:       report.Scope.clone(),
+				Scope:       scope,
 				Association: report.Association,
 				Epoch:       report.Epoch,
 				Revision:    revision,
@@ -886,15 +892,24 @@ func (s *ssnmState) apply(report SSNMReport) error {
 			s.peerRecords[peer]++
 		}
 	}
-	s.publishLocked(SSNMEvent{
+	event := SSNMEvent{
 		Kind:      SSNMReportEvent,
 		Revision:  revision,
 		Partition: report.Partition,
 		Epoch:     report.Epoch,
 		Report:    report,
 		ReportSet: true,
-		States:    s.partitionDestinationViewLocked(state),
-	})
+	}
+	// The delta is read back from the store after the commit, so it is the
+	// retained knowledge of exactly the destinations written, in both
+	// dimensions. Every subscriber takes its own copy of it.
+	if len(s.subscribers) > 0 {
+		event.Updated = make([]SSNMDestinationKnowledge, len(writes))
+		for index, write := range writes {
+			event.Updated[index] = state.retainedKnowledge(write.key)
+		}
+	}
+	s.publishLocked(event)
 	return nil
 }
 
@@ -1013,49 +1028,50 @@ func describeSSNMPartition(partition SSNMPartition) string {
 		partition.ApplicationServer, partition.SignallingGateway)
 }
 
-func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSNMDestinationKnowledge {
-	knowledge := s.partitionDestinationViewLocked(state)
-	for index := range knowledge {
-		knowledge[index].Availability.Scope = knowledge[index].Availability.Scope.clone()
-		knowledge[index].Congestion.Scope = knowledge[index].Congestion.Scope.clone()
+// retainedKnowledge returns both retained dimensions of one destination.
+// The scopes are the store's own and must be copied before they leave it.
+func (p *ssnmPartitionState) retainedKnowledge(key ssnmDestinationKey) SSNMDestinationKnowledge {
+	entry := SSNMDestinationKnowledge{Destination: key.pointCodeRange()}
+	if availability, held := p.availability[key]; held {
+		entry.Availability = availability
+		entry.AvailabilitySet = true
 	}
-	return knowledge
+	if congestion, held := p.congestion[key]; held {
+		entry.Congestion = congestion
+		entry.CongestionSet = true
+	}
+	return entry
 }
 
-func (s *ssnmState) partitionDestinationViewLocked(state *ssnmPartitionState) []SSNMDestinationKnowledge {
+func compareSSNMDestinationKeys(first, second ssnmDestinationKey) int {
+	if comparison := cmp.Compare(first.pointCode, second.pointCode); comparison != 0 {
+		return comparison
+	}
+	return cmp.Compare(first.mask, second.mask)
+}
+
+// partitionDestinationsLocked returns an owned copy of every destination one
+// partition retains, in point-code then mask order.
+func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSNMDestinationKnowledge {
 	if state == nil || state.records() == 0 {
 		return nil
 	}
 	keys := make([]ssnmDestinationKey, 0, len(state.availability)+len(state.congestion))
-	seen := make(map[ssnmDestinationKey]struct{}, len(state.availability)+len(state.congestion))
 	for key := range state.availability {
-		seen[key] = struct{}{}
 		keys = append(keys, key)
 	}
 	for key := range state.congestion {
-		if _, duplicate := seen[key]; duplicate {
-			continue
+		if _, duplicate := state.availability[key]; !duplicate {
+			keys = append(keys, key)
 		}
-		keys = append(keys, key)
 	}
-	slices.SortFunc(keys, func(first, second ssnmDestinationKey) int {
-		if comparison := cmp.Compare(first.pointCode, second.pointCode); comparison != 0 {
-			return comparison
-		}
-		return cmp.Compare(first.mask, second.mask)
-	})
-	knowledge := make([]SSNMDestinationKnowledge, 0, len(keys))
-	for _, key := range keys {
-		entry := SSNMDestinationKnowledge{Destination: key.pointCodeRange()}
-		if availability, held := state.availability[key]; held {
-			entry.Availability = availability
-			entry.AvailabilitySet = true
-		}
-		if congestion, held := state.congestion[key]; held {
-			entry.Congestion = congestion
-			entry.CongestionSet = true
-		}
-		knowledge = append(knowledge, entry)
+	slices.SortFunc(keys, compareSSNMDestinationKeys)
+	knowledge := make([]SSNMDestinationKnowledge, len(keys))
+	for index, key := range keys {
+		entry := state.retainedKnowledge(key)
+		entry.Availability.Scope = entry.Availability.Scope.clone()
+		entry.Congestion.Scope = entry.Congestion.Scope.clone()
+		knowledge[index] = entry
 	}
 	return knowledge
 }

@@ -191,7 +191,7 @@ message.
 offset, sleeps for the duration, then drains what its queue retained, observes
 `SSNMContinuityLostEvent`, calls `Resync`, consumes the snapshot and continues.
 `sender.ssnm.pause` records the events retained at loss against the count cap
-(`count_cap_enforced`), the partition states those events carried, the drain
+(`count_cap_enforced`), the destination updates those events carried, the drain
 time, the `Resync` acquisition time (`resync_ns`), the snapshot consumption
 time and `recovery_ns` from resumption to a consumed snapshot after the
 retained queue. The snapshot is validated destination by

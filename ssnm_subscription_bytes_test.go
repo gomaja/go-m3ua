@@ -23,7 +23,7 @@ func TestSSNMSubscriptionDefaultBytesRejectsOversizedEvent(testContext *testing.
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	subscription.enqueue(SSNMEvent{Kind: SSNMReportEvent, States: make([]SSNMDestinationKnowledge, 4097)})
+	subscription.enqueue(SSNMEvent{Kind: SSNMReportEvent, Updated: make([]SSNMDestinationKnowledge, 4097)})
 	if len(subscription.queue) != 0 || !subscription.continuityLost {
 		testContext.Fatal("subscription retained an event larger than its default byte budget")
 	}
@@ -59,7 +59,7 @@ func TestSSNMSubscriptionCountLimitWithLargeEvent(testContext *testing.T) {
 		testContext.Fatal(err)
 	}
 	subscription.enqueue(SSNMEvent{Revision: 1})
-	subscription.enqueue(SSNMEvent{Revision: 2, States: make([]SSNMDestinationKnowledge, 1000)})
+	subscription.enqueue(SSNMEvent{Revision: 2, Updated: make([]SSNMDestinationKnowledge, 1000)})
 	if len(subscription.queue) != 1 || subscription.queuedBytes != 512 || !subscription.continuityLost {
 		testContext.Fatal("event-count overflow did not preserve the queued event and mark continuity loss")
 	}
@@ -77,10 +77,10 @@ func TestSSNMEventAccountedBytesIncludesVariableData(testContext *testing.T) {
 	}{
 		{"base", SSNMEvent{}, 0},
 		{"destinations", SSNMEvent{Report: SSNMReport{Destinations: make([]PointCodeRange, 2)}}, 16},
-		{"states", SSNMEvent{States: make([]SSNMDestinationKnowledge, 2)}, 512},
+		{"states", SSNMEvent{Updated: make([]SSNMDestinationKnowledge, 2)}, 512},
 		{"report scope", SSNMEvent{Report: SSNMReport{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}, 8},
-		{"availability scope", SSNMEvent{States: []SSNMDestinationKnowledge{{Availability: SSNMAvailability{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 264},
-		{"congestion scope", SSNMEvent{States: []SSNMDestinationKnowledge{{Congestion: SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 264},
+		{"availability scope", SSNMEvent{Updated: []SSNMDestinationKnowledge{{Availability: SSNMAvailability{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 264},
+		{"congestion scope", SSNMEvent{Updated: []SSNMDestinationKnowledge{{Congestion: SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 264},
 		{"reason", SSNMEvent{Reason: "reason"}, 6},
 		{"partition SG", SSNMEvent{Partition: SSNMPartition{SignallingGateway: "gateway"}}, 7},
 		{"partition AS", SSNMEvent{Partition: SSNMPartition{ApplicationServer: "server"}}, 6},
@@ -145,7 +145,7 @@ func TestSSNMSubscriptionRejectsBytesBeforeCloning(testContext *testing.T) {
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	event := SSNMEvent{Report: SSNMReport{Destinations: make([]PointCodeRange, 1024)}, States: make([]SSNMDestinationKnowledge, 1024)}
+	event := SSNMEvent{Report: SSNMReport{Destinations: make([]PointCodeRange, 1024)}, Updated: make([]SSNMDestinationKnowledge, 1024)}
 	allocations := testing.AllocsPerRun(100, func() {
 		subscription.continuityLost = false
 		subscription.pendingLoss = false
@@ -164,7 +164,7 @@ func TestSSNMSubscriptionResyncReleasesBytesAndSlots(testContext *testing.T) {
 	}
 	subscription.enqueue(SSNMEvent{Reason: "retained"})
 	backing := subscription.queue
-	subscription.enqueue(SSNMEvent{States: make([]SSNMDestinationKnowledge, 4)})
+	subscription.enqueue(SSNMEvent{Updated: make([]SSNMDestinationKnowledge, 4)})
 	if !subscription.continuityLost {
 		testContext.Fatal("expected byte overflow")
 	}
@@ -291,7 +291,7 @@ func TestSSNMSubscriptionOwnedPayloadAndByteRelease(testContext *testing.T) {
 	}
 	event := SSNMEvent{
 		Report: SSNMReport{Scope: WireScope{RoutingContexts: []uint32{1}}, Destinations: []PointCodeRange{{PointCode: 7}}},
-		States: []SSNMDestinationKnowledge{{
+		Updated: []SSNMDestinationKnowledge{{
 			Availability: SSNMAvailability{Scope: WireScope{RoutingContexts: []uint32{2}}},
 			Congestion:   SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{3}}},
 		}},
@@ -299,14 +299,14 @@ func TestSSNMSubscriptionOwnedPayloadAndByteRelease(testContext *testing.T) {
 	subscription.enqueue(event)
 	event.Report.Scope.RoutingContexts[0] = 99
 	event.Report.Destinations[0].PointCode = 99
-	event.States[0].Availability.Scope.RoutingContexts[0] = 99
-	event.States[0].Congestion.Scope.RoutingContexts[0] = 99
+	event.Updated[0].Availability.Scope.RoutingContexts[0] = 99
+	event.Updated[0].Congestion.Scope.RoutingContexts[0] = 99
 	if subscription.queuedBytes != 512+8+256+12 {
 		testContext.Fatalf("retained byte cost = %d", subscription.queuedBytes)
 	}
 	owned, ready, err := subscription.take()
 	if !ready || err != nil || owned.Report.Scope.RoutingContexts[0] != 1 || owned.Report.Destinations[0].PointCode != 7 ||
-		owned.States[0].Availability.Scope.RoutingContexts[0] != 2 || owned.States[0].Congestion.Scope.RoutingContexts[0] != 3 || subscription.queuedBytes != 0 {
+		owned.Updated[0].Availability.Scope.RoutingContexts[0] != 2 || owned.Updated[0].Congestion.Scope.RoutingContexts[0] != 3 || subscription.queuedBytes != 0 {
 		testContext.Fatalf("owned event or byte release: %+v, %v, %v, bytes=%d", owned, ready, err, subscription.queuedBytes)
 	}
 }
@@ -322,7 +322,7 @@ func TestSSNMSubscriptionConcurrentByteResyncAndClose(testContext *testing.T) {
 	go func() {
 		defer workers.Done()
 		for iteration := 0; iteration < 500; iteration++ {
-			subscription.enqueue(SSNMEvent{States: make([]SSNMDestinationKnowledge, iteration%8)})
+			subscription.enqueue(SSNMEvent{Updated: make([]SSNMDestinationKnowledge, iteration%8)})
 		}
 	}()
 	go func() {
@@ -356,14 +356,14 @@ func FuzzSSNMEventByteAccounting(fuzzContext *testing.F) {
 			return
 		}
 		event := SSNMEvent{
-			Reason: string(input),
-			Report: SSNMReport{Destinations: make([]PointCodeRange, int(input[0])%32), Scope: WireScope{RoutingContexts: make([]uint32, int(input[1])%16)}},
-			States: make([]SSNMDestinationKnowledge, int(input[2])%8),
+			Reason:  string(input),
+			Report:  SSNMReport{Destinations: make([]PointCodeRange, int(input[0])%32), Scope: WireScope{RoutingContexts: make([]uint32, int(input[1])%16)}},
+			Updated: make([]SSNMDestinationKnowledge, int(input[2])%8),
 		}
-		want := 512 + len(input) + 8*len(event.Report.Destinations) + 4*len(event.Report.Scope.RoutingContexts) + 256*len(event.States)
-		for index := range event.States {
-			event.States[index].Availability.Scope.RoutingContexts = make([]uint32, index%4)
-			event.States[index].Congestion.Scope.RoutingContexts = make([]uint32, index%3)
+		want := 512 + len(input) + 8*len(event.Report.Destinations) + 4*len(event.Report.Scope.RoutingContexts) + 256*len(event.Updated)
+		for index := range event.Updated {
+			event.Updated[index].Availability.Scope.RoutingContexts = make([]uint32, index%4)
+			event.Updated[index].Congestion.Scope.RoutingContexts = make([]uint32, index%3)
 			want += 4 * (index%4 + index%3)
 		}
 		limit := int(budget & uint64(^uint(0)>>1))
@@ -380,7 +380,7 @@ func TestSSNMSubscriptionTakeClearsConsumedSlot(testContext *testing.T) {
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	subscription.enqueue(SSNMEvent{Revision: 1, Reason: "first", States: make([]SSNMDestinationKnowledge, 1)})
+	subscription.enqueue(SSNMEvent{Revision: 1, Reason: "first", Updated: make([]SSNMDestinationKnowledge, 1)})
 	subscription.enqueue(SSNMEvent{Revision: 2, Reason: "second"})
 	backing := subscription.queue
 	event, ready, err := subscription.take()

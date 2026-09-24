@@ -116,7 +116,7 @@ func TestSSNMRoutePublicationOwnsDecodedInput(testContext *testing.T) {
 			clear(words)
 			for _, kind := range []SSNMReportKind{SSNMDestinationUnavailableReport, SSNMSignallingCongestionReport} {
 				event := nextSSNMOwnershipEvent(testContext, first)
-				if event.Kind != SSNMReportEvent || event.Report.Kind != kind || len(event.States) != count ||
+				if event.Kind != SSNMReportEvent || event.Report.Kind != kind || len(event.Updated) != count ||
 					len(event.Report.Destinations) != count || event.Report.Scope.NetworkAppearance != 7 ||
 					!event.Report.Scope.NetworkAppearanceSet || !event.Report.Scope.RoutingContextSet ||
 					len(event.Report.Scope.RoutingContexts) != 1 || event.Report.Scope.RoutingContexts[0] != 1 {
@@ -129,7 +129,7 @@ func TestSSNMRoutePublicationOwnsDecodedInput(testContext *testing.T) {
 				}
 				wantEvent := ssnmOwnershipValue(testContext, event)
 				mutateSSNMOwnershipReport(event.Report)
-				mutateSSNMOwnershipStates(event.States)
+				mutateSSNMOwnershipStates(event.Updated)
 				requireSSNMOwnershipValue(testContext, "route report subscriber isolation", nextSSNMOwnershipEvent(testContext, second), wantEvent)
 			}
 			requireSSNMRouteOwnershipRecords(testContext, endpoint, ranges)

@@ -397,7 +397,7 @@ func (oracle *routingSSNMOracle) observe(ordinal uint8, event m3ua.SSNMEvent) er
 		return oracle.reject(errors.New("routing SSNM report association is unexpected or duplicated"))
 	}
 	if !sameRoutingSSNMDestinations(report.Destinations, oracle.plan.destinations) ||
-		!sameRoutingSSNMEventStates(event.States, oracle.plan.destinations, report) {
+		!sameRoutingSSNMEventUpdates(event.Updated, oracle.plan.destinations, report) {
 		return oracle.reject(errors.New("routing SSNM report destinations or resulting states differ"))
 	}
 	if oracle.receiptCount >= len(oracle.receipts) {
@@ -510,7 +510,10 @@ func sameRoutingSSNMDestinations(actual []m3ua.PointCodeRange, expected [routing
 	return true
 }
 
-func sameRoutingSSNMEventStates(actual []m3ua.SSNMDestinationKnowledge, expected [routingRouteCount]m3ua.PointCodeRange, report m3ua.SSNMReport) bool {
+// sameRoutingSSNMEventUpdates checks a report event's delta. Every report
+// names every planned destination, so the event updates each of them, once and
+// in point-code then mask order, to the availability the report carried.
+func sameRoutingSSNMEventUpdates(actual []m3ua.SSNMDestinationKnowledge, expected [routingRouteCount]m3ua.PointCodeRange, report m3ua.SSNMReport) bool {
 	if len(actual) != len(expected) {
 		return false
 	}

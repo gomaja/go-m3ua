@@ -462,7 +462,7 @@ func TestSSNMSnapshotAndEventsAreOwnedByTheCaller(t *testing.T) {
 	}
 	event.Report.Destinations[0].PointCode = 0
 	event.Report.Scope.RoutingContexts[0] = 888
-	event.States[0].Availability.State = DestinationAvailable
+	event.Updated[0].Availability.State = DestinationAvailable
 
 	fresh := ssnmPartitionKnowledge(t, endpoint.SSNMKnowledge(), canonicalSSNMPartition("sg-a", "as-core"))
 	destination := ssnmDestination(t, fresh, 0x123456, 0)
@@ -498,8 +498,8 @@ func TestSSNMEventsAreNotSharedBetweenSubscribers(t *testing.T) {
 	}
 	firstEvent.Report.Destinations[0].PointCode = 0
 	firstEvent.Report.Scope.RoutingContexts[0] = 777
-	firstEvent.States[0].Availability.State = DestinationAvailable
-	firstEvent.States[0].Availability.Scope.RoutingContexts[0] = 777
+	firstEvent.Updated[0].Availability.State = DestinationAvailable
+	firstEvent.Updated[0].Availability.Scope.RoutingContexts[0] = 777
 
 	secondEvent, err := drainSSNMEvent(t, second)
 	if err != nil {
@@ -512,9 +512,9 @@ func TestSSNMEventsAreNotSharedBetweenSubscribers(t *testing.T) {
 	if secondEvent.Report.Scope.RoutingContexts[0] != 1 {
 		t.Fatalf("one subscriber rewrote another's wire scope: %+v", secondEvent.Report.Scope)
 	}
-	if secondEvent.States[0].Availability.State != DestinationUnavailable ||
-		secondEvent.States[0].Availability.Scope.RoutingContexts[0] != 1 {
-		t.Fatalf("one subscriber rewrote another's retained state: %+v", secondEvent.States)
+	if secondEvent.Updated[0].Availability.State != DestinationUnavailable ||
+		secondEvent.Updated[0].Availability.Scope.RoutingContexts[0] != 1 {
+		t.Fatalf("one subscriber rewrote another's retained state: %+v", secondEvent.Updated)
 	}
 }
 

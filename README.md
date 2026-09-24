@@ -694,6 +694,15 @@ for {
 }
 ```
 
+Events are deltas, and `applyDelta` patches the view rather than replacing it. A
+report event's `Updated` holds only the destinations that report wrote, each
+with both dimensions as retained afterwards, so it replaces those entries of
+`event.Partition` and leaves every other destination alone. Binding events set
+or remove `event.Binding`; `SSNMPartitionRetiredEvent` drops the partition and
+`SSNMPartitionInvalidatedEvent` drops its destinations. A one-destination report
+therefore costs the same however much the partition holds. The whole view comes
+only from the snapshot, which `Resync` replaces.
+
 Knowledge is owned by canonical identity, not by the label that carried it:
 `event.Partition` names one Signalling Gateway and one Application Server, while
 `event.Report.Scope` is the exact Network Appearance and Routing Context the

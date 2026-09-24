@@ -399,7 +399,7 @@ func (s *SSNMSubscription) Resync() (SSNMSnapshot, error)
 func (s *SSNMSubscription) Close() error
 ```
 
-Three decisions are worth recording.
+Four decisions are worth recording.
 
 **Ownership is canonical, not wire.** A partition is one Signalling Gateway and
 one Application Server. Section 1.4.2.1 makes a Routing Context an index into
@@ -431,11 +431,26 @@ not, which is worse than refusing: a peer chooses every Affected Point Code it
 reports, so unbounded retention is peer-controlled memory, and silent eviction
 is peer-controlled misinformation.
 
+**Events are deltas; only the snapshot is whole.** A report event carries, in
+`SSNMEvent.Updated`, the destinations that report wrote, each with both
+dimensions as retained after it, and nothing else of its partition. Binding
+lifecycle events carry no destinations, and a retired or invalidated partition
+is discarded whole by its event kind. No report removes a single destination:
+DAVA and a level-zero SCON are retained as statements, and bounds refuse
+rather than evict. Applying the events in order to the snapshot the
+subscription started from reproduces the partition knowledge `SSNMKnowledge`
+returns (its refusal tallies are counters no event carries); the whole partition comes
+only from `SubscribeSSNM` and `Resync`. Carrying the partition in every event
+had made a one-destination report cost the partition's size once per
+subscriber and once more to build — about 24 MB per report with 16,384
+retained records and 8 subscribers — so publication could not keep up with a
+steady stream of one-destination reports.
+
 `SSNMStateConfig.SubscriptionQueueBytes` defaults to 1 MiB independently of
 the 256-event default `SubscriptionQueueSize`. Positive byte limits must be at
 least 512. The portable accounting charges 512 bytes per queued event, 8 per
-report destination, 256 per retained destination state, 4 per Routing Context
-in the report and both state dimensions, and the byte lengths of the reason
+report destination, 256 per updated destination, 4 per Routing Context in the
+report and in both dimensions of each update, and the byte lengths of the reason
 and both event/report partition identity strings. Every variable field is
 charged even when its presence flag is false, because the queued copy retains
 it. These fixed charges are accounting units, not a heap-size measurement;

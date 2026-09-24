@@ -16,7 +16,7 @@ type SSNMEventKind uint8
 
 const (
 	// SSNMReportEvent carries one locally validated RFC 4666 Section 3.4
-	// report, together with the partition knowledge that resulted from it.
+	// report, together with the destination knowledge it wrote.
 	SSNMReportEvent SSNMEventKind = iota + 1
 	// SSNMBindingAdmittedEvent reports an Association admitted to a partition,
 	// active or pending activation.
@@ -69,6 +69,30 @@ func (k SSNMEventKind) String() string {
 // Revision is strictly greater than the revision of the snapshot the
 // subscription started from, and strictly increases across the events one
 // subscription delivers.
+//
+// An event carries what it changed, never the rest of its partition. Applied
+// in order to the snapshot the subscription started from (SubscribeSSNM, or
+// the latest successful Resync), the events reproduce the store's
+// SSNMPartitionKnowledge exactly:
+//
+//   - SSNMReportEvent: for each entry of Updated, replace the partition's
+//     entry for that Destination. No other destination changed.
+//   - SSNMBindingAdmittedEvent: set Binding in Partition, creating the
+//     partition with this Epoch and no destinations if it is not held.
+//   - SSNMBindingActivatedEvent: mark Binding no longer pending.
+//   - SSNMBindingRetiredEvent: remove Binding. Destinations are unchanged.
+//   - SSNMPartitionRetiredEvent: remove Partition with its bindings and
+//     destinations.
+//   - SSNMPartitionInvalidatedEvent: remove every destination of Partition.
+//     Its bindings are unchanged.
+//   - SSNMResourceLossEvent: no knowledge changed.
+//   - SSNMContinuityLostEvent: the view can no longer be patched; replace it
+//     with the snapshot Resync returns.
+//
+// A report never removes one destination's knowledge: DAVA and a level-zero
+// SCON are retained as statements about the destination, and a resource bound
+// refuses a report rather than evicting what is held. Knowledge leaves the
+// store only a whole partition at a time, which the event kind signals.
 type SSNMEvent struct {
 	Kind      SSNMEventKind
 	Revision  uint64
@@ -80,27 +104,69 @@ type SSNMEvent struct {
 	ReportSet bool
 	// Binding is set for the binding lifecycle events.
 	Binding SSNMBinding
-	// States is the partition's retained knowledge after this event, owned by
-	// the caller.
-	States []SSNMDestinationKnowledge
+	// Updated is set for SSNMReportEvent only, and only when the report was
+	// retained: the destinations the report wrote, each once, in point-code
+	// then mask order and keyed exactly as SSNMPartitionKnowledge.Destinations.
+	// Each entry carries both dimensions as retained after this event: the one
+	// the report wrote, with this Revision, and the other one unchanged, so an
+	// entry replaces the consumer's entry for its Destination whole. It is
+	// empty for a report retained by nobody -- an unbound partition, DUPU,
+	// DAUD, or a peer-reported SCON -- and for every other kind: binding
+	// lifecycle changes no destination knowledge, and a retired or
+	// invalidated partition is discarded whole. Owned by the caller.
+	Updated []SSNMDestinationKnowledge
 	// Reason is a bounded diagnostic for invalidation and resource loss.
 	Reason string
 	// ContinuityLost is true on SSNMContinuityLostEvent, and on nothing else.
 	ContinuityLost bool
 }
 
+// clone returns an event that shares no storage with the receiver.
+//
+// Every Routing Context list of the copy lives in one array, each capped at
+// its own length so that appending to one reallocates instead of writing into
+// the next. A one-destination report therefore costs three allocations per
+// subscriber however many lists it carries.
 func (e SSNMEvent) clone() SSNMEvent {
-	e.Report = e.Report.clone()
-	if e.States != nil {
-		states := make([]SSNMDestinationKnowledge, len(e.States))
-		for index, state := range e.States {
-			state.Availability.Scope = state.Availability.Scope.clone()
-			state.Congestion.Scope = state.Congestion.Scope.clone()
-			states[index] = state
+	contexts := len(e.Report.Scope.RoutingContexts)
+	for _, update := range e.Updated {
+		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
+	}
+	var arena ssnmRoutingContextArena
+	if contexts > 0 {
+		arena.free = make([]uint32, contexts)
+	}
+	e.Report.Scope.RoutingContexts = arena.own(e.Report.Scope.RoutingContexts)
+	if e.Report.Destinations != nil {
+		e.Report.Destinations = append([]PointCodeRange(nil), e.Report.Destinations...)
+	}
+	if e.Updated != nil {
+		updated := make([]SSNMDestinationKnowledge, len(e.Updated))
+		for index, update := range e.Updated {
+			update.Availability.Scope.RoutingContexts = arena.own(update.Availability.Scope.RoutingContexts)
+			update.Congestion.Scope.RoutingContexts = arena.own(update.Congestion.Scope.RoutingContexts)
+			updated[index] = update
 		}
-		e.States = states
+		e.Updated = updated
 	}
 	return e
+}
+
+// ssnmRoutingContextArena hands out owned Routing Context lists from one
+// preallocated array. An empty list is returned as nil, as WireScope.clone
+// returns it.
+type ssnmRoutingContextArena struct {
+	free []uint32
+}
+
+func (a *ssnmRoutingContextArena) own(values []uint32) []uint32 {
+	if len(values) == 0 {
+		return nil
+	}
+	owned := a.free[:len(values):len(values)]
+	copy(owned, values)
+	a.free = a.free[len(values):]
+	return owned
 }
 
 const (
@@ -113,7 +179,7 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 	remaining := limit
 	if !reserveSSNMEventBytes(&remaining, 1, ssnmEventBaseBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Destinations), ssnmEventDestinationBytes) ||
-		!reserveSSNMEventBytes(&remaining, len(event.States), ssnmEventStateBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.Updated), ssnmEventStateBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 		return 0, false
 	}
@@ -128,9 +194,9 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 			return 0, false
 		}
 	}
-	for _, state := range event.States {
-		if !reserveSSNMEventBytes(&remaining, len(state.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) ||
-			!reserveSSNMEventBytes(&remaining, len(state.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+	for _, update := range event.Updated {
+		if !reserveSSNMEventBytes(&remaining, len(update.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) ||
+			!reserveSSNMEventBytes(&remaining, len(update.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 			return 0, false
 		}
 	}
@@ -144,6 +210,10 @@ func reserveSSNMEventBytes(remaining *int, count, width int) bool {
 	*remaining -= count * width
 	return true
 }
+
+// ssnmSpareQueueSlots bounds the drained queue array a subscription keeps
+// for reuse.
+const ssnmSpareQueueSlots = 8
 
 type queuedSSNMEvent struct {
 	event SSNMEvent
@@ -178,8 +248,19 @@ type SSNMSubscription struct {
 	// first consumer needed.
 	busy chan struct{}
 
-	mu             sync.Mutex
-	queue          []queuedSSNMEvent
+	mu    sync.Mutex
+	queue []queuedSSNMEvent
+	// spare is the array of a queue that was drained, kept for the next event
+	// while it is small. A consumer that keeps up then costs no allocation to
+	// queue for; the larger array a burst grew is released once drained. Every
+	// slot in it has been cleared.
+	spare []queuedSSNMEvent
+	// queueArrayCap is the whole capacity of the array queue lives in, from
+	// its first slot. cap(queue) cannot stand in for it: take advances queue
+	// through the array, so a drained queue reports only the slots after its
+	// last event, and a burst that exactly filled a large array would look
+	// small enough to keep.
+	queueArrayCap  int
 	queuedBytes    int
 	closed         bool
 	terminal       error
@@ -235,7 +316,16 @@ func (s *SSNMSubscription) enqueue(event SSNMEvent) {
 		s.signal()
 		return
 	}
+	if len(s.queue) == 0 && s.spare != nil {
+		s.queue, s.spare = s.spare, nil
+	}
+	previousCap := cap(s.queue)
 	s.queue = append(s.queue, queuedSSNMEvent{event: event.clone(), bytes: accountedBytes})
+	if cap(s.queue) != previousCap {
+		// append moved the queue to a new array, and the queue starts at its
+		// first slot.
+		s.queueArrayCap = cap(s.queue)
+	}
 	s.queuedBytes += accountedBytes
 	s.mu.Unlock()
 	s.signal()
@@ -298,11 +388,15 @@ func (s *SSNMSubscription) take() (SSNMEvent, bool, error) {
 	if len(s.queue) > 0 {
 		queued := s.queue[0]
 		s.queue[0] = queuedSSNMEvent{}
-		s.queue = s.queue[1:]
 		s.queuedBytes -= queued.bytes
-		if len(s.queue) == 0 {
-			s.queue = nil
+		if len(s.queue) > 1 {
+			s.queue = s.queue[1:]
+			return queued.event, true, nil
 		}
+		if s.queueArrayCap <= ssnmSpareQueueSlots {
+			s.spare = s.queue[:0]
+		}
+		s.queue = nil
 		return queued.event, true, nil
 	}
 	// The terminal state is delivered only once the queue that preceded it has

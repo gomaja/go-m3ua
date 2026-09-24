@@ -424,7 +424,7 @@ type ssnmPauseRecord struct {
 	Error                  string   `json:"error,omitempty"`
 }
 
-const ssnmByteCapNote = "not observable: this library's SSNMStateConfig bounds a subscription by event count only and exposes no retained-byte accounting; queued_state_entries sums the partition states the retained events carry"
+const ssnmByteCapNote = "not observable: this library's SSNMStateConfig bounds a subscription by event count only and exposes no retained-byte accounting; queued_state_entries sums the destination updates the retained events carry"
 
 func (subscriber *ssnmSubscriber) pauseAndRecover(ctx context.Context, clock measurementClock, pauseAt int64, pause ssnmPause) {
 	subscriber.pauseDone = true
@@ -472,7 +472,7 @@ func (subscriber *ssnmSubscriber) pauseAndRecover(ctx context.Context, clock mea
 			break
 		}
 		queued++
-		entries += len(event.States)
+		entries += len(event.Updated)
 		subscriber.observe(event, received)
 	}
 	drained, _ := clock.Now()
