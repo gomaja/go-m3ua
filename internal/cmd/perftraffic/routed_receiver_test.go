@@ -33,3 +33,22 @@ func TestRoutedReceiverEndTellsAStopFromLostEndpoints(testContext *testing.T) {
 		testContext.Fatalf("an HTTP failure = %v", err)
 	}
 }
+
+// The routed receiver ends with the first fault its control recorded: a
+// sender's stop is recorded before it closes the SGP endpoints, so the run
+// reports the stop, not the endpoints closing that followed it.
+func TestRoutedReceiverReportsTheFirstRecordedFault(testContext *testing.T) {
+	closed := errors.New("routed SGP endpoints closed")
+	if err := routedReceiverCause(&receiverControl{}, nil); err != nil {
+		testContext.Fatalf("a requested stop = %v, want nil", err)
+	}
+	control := &receiverControl{}
+	if err := routedReceiverCause(control, closed); err == nil || err.Error() != closed.Error() || control.fatalError() != closed.Error() {
+		testContext.Fatalf("endpoints closing on their own = %v (recorded %q), want that fault", err, control.fatalError())
+	}
+	stopped := &receiverControl{}
+	stopped.setFatal("routed peer topology was stopped by the sender before measurement completed")
+	if err := routedReceiverCause(stopped, closed); err == nil || err.Error() != stopped.fatalError() {
+		testContext.Fatalf("endpoints closing after the sender's stop = %v, want the stop reason", err)
+	}
+}

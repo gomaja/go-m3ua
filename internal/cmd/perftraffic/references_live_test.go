@@ -63,8 +63,10 @@ func TestRouteReferencesLiveOverLoopback(testContext *testing.T) {
 			}
 			result, senderErr := runRoutedSender(ctx, senderConfig)
 			stopReceiver()
+			// A sender that fails stops the receiver's topology, so a receiver
+			// failure is reported with the sender's error, its usual cause.
 			if err := <-receiverDone; err != nil {
-				testContext.Fatalf("receiver: %v", err)
+				testContext.Fatalf("receiver: %v (sender: %v)", err, senderErr)
 			}
 			if senderErr != nil || result.Measurement == nil || result.Warmup == nil {
 				testContext.Fatalf("sender error %v verdict %s error %q", senderErr, result.Verdict, result.Error)
