@@ -793,6 +793,7 @@ type WireScope struct
 var ErrASPIdentifierRequired
 var ErrASPRouteStateLimit
 var ErrAmbiguousMTPRoute
+var ErrAssociationAborted
 var ErrAssociationClosed
 var ErrBroadcastFlowIdentifierTooLong
 var ErrContextlessApplicationServer

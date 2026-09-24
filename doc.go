@@ -82,9 +82,11 @@ and its SCTP layer reports as SHUTDOWN_COMPLETE. Association.Abort ends one
 association with an SCTP ABORT instead (RFC 9260 Sections 9.1 and 11.1.4): it
 discards whatever is still queued, does not wait for the peer, and the peer's
 SCTP layer reports COMMUNICATION LOST. Locally it is Close, with the same
-teardown and the same deregistration. It is for an association that has to go
-at once, such as a misbehaving peer or one that is not completing the
-shutdown, and like ShutdownContext only the application calls it.
+teardown and the same deregistration, except that Err reports
+ErrAssociationAborted, which matches ErrAssociationClosed. It is for an
+association that has to go at once, such as a misbehaving peer or one that is
+not completing the shutdown, and like ShutdownContext only the application
+calls it.
 
 The ctx passed to Dial and Accept is the association's lifetime, not its
 handshake. Cancelling it closes the associations it produced, and that makes it

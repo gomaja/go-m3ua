@@ -535,13 +535,23 @@ completing the shutdown. Locally it tears the association down exactly as
 
 An ABORT discards whatever either end still had queued instead of delivering
 it. A go-m3ua peer reports the loss through `Err` as `ErrSCTPNotAlive` on
-Linux 5.0 and later, where it receives SCTP association events; either way RFC
-4666 Section 4.3.1 counts it as SCTP CDI and takes the ASP to ASP-DOWN. `Abort` and `Close` share one teardown with every other way an
-association ends, so only the first performs it and later calls return nil. An
-`Abort` while `ShutdownContext` waits for an acknowledgement ends that wait;
-one that finds `Close` already releasing SCTP waits for that release instead.
-Like `ShutdownContext`, nothing calls `Abort` for the application:
-`Listener.Close` and `Endpoint.Close` release gracefully.
+Linux 5.0 and later, where it receives SCTP association events. Either way the
+peer's M3UA moves the ASP to ASP-DOWN, as it does after a SHUTDOWN: RFC 4666
+Section 4.3.3 does so on SCTP-COMMUNICATION_DOWN and, at an ASP, pauses the
+affected SS7 destinations with MTP-PAUSE, and Section 4.3.1 counts
+COMMUNICATION LOST as SCTP CDI at an SGP just as it counts SHUTDOWN_COMPLETE.
+
+Locally, `Err` reports `ErrAssociationAborted` after `Abort`. It matches
+`ErrAssociationClosed`, so code that only asks whether the owner closed the
+association is unaffected, and the `ManagementSCTPRelease` indication carries
+it, so Layer Management can tell the abortive release from the graceful one.
+`Abort` and `Close` share one teardown with every other way an association
+ends, so only the first performs it and later calls return nil. An `Abort`
+while `ShutdownContext` waits for an acknowledgement ends that wait, and
+`ShutdownContext` returns what `Err` reports; one that finds `Close` already
+releasing SCTP waits for that release instead. Like `ShutdownContext`, nothing
+calls `Abort` for the application: `Listener.Close` and `Endpoint.Close`
+release gracefully.
 
 The `ctx` passed to `Dial` and `Accept` is the association's lifetime, not just
 its handshake. Cancelling it closes the associations it produced, so an accept

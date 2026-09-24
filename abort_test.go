@@ -48,6 +48,36 @@ func installReleaseSeams(conn *Association, abortErr error) *releaseSeams {
 	return seams
 }
 
+// requireAbortedCause requires err to be Abort's recorded cause, which still
+// matches ErrAssociationClosed because the owner closed the association.
+func requireAbortedCause(t *testing.T, err error, what string) {
+	t.Helper()
+	if err != ErrAssociationAborted || !errors.Is(err, ErrAssociationClosed) {
+		t.Errorf("%s = %v, want %v, which matches %v", what, err, ErrAssociationAborted, ErrAssociationClosed)
+	}
+}
+
+// releaseCause is the cause a release named in a test records: Abort's for any
+// name mentioning an abort, Close's otherwise.
+func releaseCause(name string) error {
+	if strings.Contains(strings.ToLower(name), "abort") {
+		return ErrAssociationAborted
+	}
+	return ErrAssociationClosed
+}
+
+// Abort's cause is a Close's cause too, so a caller that asks only whether the
+// owner closed the association keeps working; the converse must not hold, or a
+// graceful Close would read as an abort.
+func TestErrAssociationAbortedIsAnOwnerClose(t *testing.T) {
+	if !errors.Is(ErrAssociationAborted, ErrAssociationClosed) {
+		t.Errorf("errors.Is(%v, %v) = false, want true", ErrAssociationAborted, ErrAssociationClosed)
+	}
+	if errors.Is(ErrAssociationClosed, ErrAssociationAborted) {
+		t.Errorf("errors.Is(%v, %v) = true, want false", ErrAssociationClosed, ErrAssociationAborted)
+	}
+}
+
 // requireDone waits for the association to end.
 func requireDone(t *testing.T, conn *Association, what string) {
 	t.Helper()
@@ -78,9 +108,7 @@ func TestAbortReleasesThroughTheAbortPrimitiveThenTearsDownLikeClose(t *testing.
 	}
 
 	requireDone(t, conn, "Abort")
-	if !errors.Is(conn.Err(), ErrAssociationClosed) {
-		t.Errorf("Err after Abort = %v, want %v, as after Close", conn.Err(), ErrAssociationClosed)
-	}
+	requireAbortedCause(t, conn.Err(), "Err after Abort")
 	if got := conn.State(); got != StateASPDown {
 		t.Errorf("State after Abort = %v, want %v", got, StateASPDown)
 	}
@@ -91,9 +119,13 @@ func TestAbortReleasesThroughTheAbortPrimitiveThenTearsDownLikeClose(t *testing.
 		t.Errorf("StateChanges delivered %v after the release instead of closing", st)
 	}
 	indication, ok := <-conn.ManagementIndications()
-	if !ok || indication.Kind != ManagementSCTPRelease || !errors.Is(indication.Cause, ErrAssociationClosed) {
-		t.Errorf("management indication after Abort = %+v (open %v), want %v caused by %v",
-			indication, ok, ManagementSCTPRelease, ErrAssociationClosed)
+	if !ok || indication.Kind != ManagementSCTPRelease {
+		t.Errorf("management indication after Abort = %+v (open %v), want %v", indication, ok, ManagementSCTPRelease)
+	} else {
+		requireAbortedCause(t, indication.Cause, "the release indication's Cause")
+		if !strings.Contains(indication.Description, "SCTP ABORT") {
+			t.Errorf("the release indication's Description %q does not say the release was an SCTP ABORT", indication.Description)
+		}
 	}
 	if extra, ok := <-conn.ManagementIndications(); ok {
 		t.Errorf("ManagementIndications delivered %+v after the release instead of closing", extra)
@@ -126,9 +158,7 @@ func TestAbortIsIdempotentAndReportsOnlyTheFirstError(t *testing.T) {
 	if aborts, closes := seams.aborts.Load(), seams.closes.Load(); aborts != 1 || closes != 0 {
 		t.Errorf("transport released %d times by ABORT and %d by close, want exactly one ABORT", aborts, closes)
 	}
-	if !errors.Is(conn.Err(), ErrAssociationClosed) {
-		t.Errorf("Err = %v, want %v: the cause is the release, not its transport error", conn.Err(), ErrAssociationClosed)
-	}
+	requireAbortedCause(t, conn.Err(), "Err: the cause is the release, not its transport error; Err")
 }
 
 // An association that has already ended keeps the reason it ended for, and a
@@ -155,7 +185,7 @@ func TestAbortAfterTheAssociationEndedIsANoOp(t *testing.T) {
 			if aborts, closes := seams.aborts.Load(), seams.closes.Load(); aborts != 0 || closes != 1 {
 				t.Errorf("transport released %d times by ABORT and %d by close, want the one earlier close", aborts, closes)
 			}
-			if !errors.Is(conn.Err(), first.cause) {
+			if conn.Err() != first.cause {
 				t.Errorf("Err = %v, want the original cause %v", conn.Err(), first.cause)
 			}
 		})
@@ -236,8 +266,8 @@ func TestAbortStopsAShutdownWaitingForItsAck(t *testing.T) {
 	}
 	select {
 	case err := <-shutdownDone:
-		if !errors.Is(err, ErrAssociationClosed) {
-			t.Fatalf("ShutdownContext = %v, want %v once Abort released the association", err, ErrAssociationClosed)
+		if err != ErrAssociationAborted {
+			t.Fatalf("ShutdownContext = %v, want %v once Abort released the association", err, ErrAssociationAborted)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("ShutdownContext is still waiting for its ASP Inactive Ack after Abort")
@@ -357,8 +387,8 @@ func TestAbortSendsABORTWhereCloseCompletesASHUTDOWN(t *testing.T) {
 			}
 
 			requireDone(t, conn, test.name)
-			if !errors.Is(conn.Err(), ErrAssociationClosed) {
-				t.Errorf("Err after %s = %v, want %v", test.name, conn.Err(), ErrAssociationClosed)
+			if want := releaseCause(test.name); conn.Err() != want {
+				t.Errorf("Err after %s = %v, want %v", test.name, conn.Err(), want)
 			}
 			if got := conn.State(); got != StateASPDown {
 				t.Errorf("State after %s = %v, want %v", test.name, got, StateASPDown)
@@ -400,8 +430,8 @@ func TestAbortDropsAnAssociationStuckInShutdown(t *testing.T) {
 	}
 	select {
 	case err := <-shutdownDone:
-		if !errors.Is(err, ErrAssociationClosed) {
-			t.Errorf("ShutdownContext = %v, want %v", err, ErrAssociationClosed)
+		if err != ErrAssociationAborted {
+			t.Errorf("ShutdownContext = %v, want %v", err, ErrAssociationAborted)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("ShutdownContext is still waiting five seconds after Abort")
@@ -490,8 +520,8 @@ func TestAbortedAssociationIsLostAtItsGoM3UAPeer(t *testing.T) {
 			}
 
 			requireDone(t, local, test.name)
-			if !errors.Is(local.Err(), ErrAssociationClosed) {
-				t.Errorf("Err after %s = %v, want %v", test.name, local.Err(), ErrAssociationClosed)
+			if want := releaseCause(test.name); local.Err() != want {
+				t.Errorf("Err after %s = %v, want %v", test.name, local.Err(), want)
 			}
 			if !waitFor(func() bool {
 				listener.muConns.Lock()
@@ -515,8 +545,14 @@ func TestAbortedAssociationIsLostAtItsGoM3UAPeer(t *testing.T) {
 // other releases, a blocked ReadData and a stream of WriteData. The race
 // detector judges the interleavings; the test requires every call to return,
 // every release to report nil, and the peer to see the association end.
+//
+// Which release wins a mixed race is the scheduler's choice, so the mixed
+// race runs several rounds per side and logs the winner, and an Abort-only
+// round per side makes sure an Abort with I/O in flight is always exercised:
+// there the peer must see the SCTP_COMM_LOST an ABORT raises.
 func TestAbortIsSafeAgainstConcurrentReleaseAndIO(t *testing.T) {
-	for _, test := range []struct {
+	const rounds = 3
+	for _, side := range []struct {
 		name     string
 		port     int
 		accepted bool
@@ -524,129 +560,163 @@ func TestAbortIsSafeAgainstConcurrentReleaseAndIO(t *testing.T) {
 		{"dialled association", 3938, false},
 		{"accepted association", 3939, true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			asp, sgp, err := setupConn(t, ctx, test.port)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				_ = asp.Close()
-				_ = sgp.Close()
+		for round := 0; round < rounds; round++ {
+			t.Run(fmt.Sprintf("%s/mixed releases/round %d", side.name, round), func(t *testing.T) {
+				raceReleasesAgainstIO(t, side.port+10*round, side.accepted, false)
 			})
-			local, remote := asp, sgp
-			if test.accepted {
-				local, remote = sgp, asp
-			}
-
-			readDone := make(chan error, 1)
-			go func() {
-				_, err := local.ReadData(context.Background())
-				readDone <- err
-			}()
-			// The writer keeps writing until the release ends it. Before that,
-			// a refusal is backpressure (EAGAIN without a write deadline) or
-			// the concurrent ShutdownContext withdrawing traffic, not the end
-			// of the association.
-			var written atomic.Int64
-			writeDone := make(chan error, 1)
-			go func() {
-				for {
-					_, err := writePayload(local, 1, []byte("in-flight"))
-					if err == nil {
-						written.Add(1)
-						continue
-					}
-					select {
-					case <-local.Done():
-						writeDone <- err
-						return
-					default:
-					}
-				}
-			}()
-			// The remote end drains what the writer sends, so its receive
-			// window never becomes what ends the writes.
-			go func() {
-				for {
-					if _, err := remote.ReadData(context.Background()); err != nil {
-						return
-					}
-				}
-			}()
-			if !waitFor(func() bool { return written.Load() > 0 }, 5*time.Second) {
-				t.Fatal("no WriteData succeeded before the release; nothing would be in flight")
-			}
-
-			start := make(chan struct{})
-			results := make(chan error, 8)
-			var wg sync.WaitGroup
-			for i := 0; i < 4; i++ {
-				wg.Add(2)
-				go func() { defer wg.Done(); <-start; results <- local.Abort() }()
-				go func() { defer wg.Done(); <-start; results <- local.Close() }()
-			}
-			shutdownDone := make(chan error, 1)
-			go func() { <-start; shutdownDone <- local.ShutdownContext(context.Background()) }()
-			ownerDone := make(chan error, 1)
-			go func() {
-				<-start
-				if test.accepted {
-					ownerDone <- local.listener.Close()
-					return
-				}
-				ownerDone <- nil
-			}()
-			close(start)
-
-			releasesDone := make(chan struct{})
-			go func() { wg.Wait(); close(releasesDone) }()
-			select {
-			case <-releasesDone:
-			case <-time.After(10 * time.Second):
-				t.Fatal("an Abort or Close is still running ten seconds later")
-			}
-			close(results)
-			for err := range results {
-				if err != nil {
-					t.Errorf("a concurrent Abort or Close returned %v, want nil", err)
-				}
-			}
-			// ShutdownContext may lose its withdrawal to the release at any
-			// step, and reports whichever failure stopped it; that it returns
-			// is what is required of it here.
-			select {
-			case err := <-shutdownDone:
-				t.Logf("ShutdownContext returned %v", err)
-			case <-time.After(10 * time.Second):
-				t.Fatal("ShutdownContext did not return")
-			}
-			select {
-			case err := <-ownerDone:
-				if err != nil {
-					t.Errorf("the owner's Close = %v, want nil", err)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("the owner's Close did not return")
-			}
-			for name, done := range map[string]chan error{"ReadData": readDone, "WriteData": writeDone} {
-				select {
-				case err := <-done:
-					if err == nil {
-						t.Errorf("%s in flight during the release returned nil", name)
-					}
-				case <-time.After(10 * time.Second):
-					t.Fatalf("%s in flight during the release never returned", name)
-				}
-			}
-
-			requireDone(t, local, "the concurrent releases")
-			requireDone(t, remote, "the peer")
-			if !errors.Is(local.Err(), ErrAssociationClosed) {
-				t.Errorf("Err = %v, want %v", local.Err(), ErrAssociationClosed)
-			}
+		}
+		t.Run(side.name+"/Abort only", func(t *testing.T) {
+			raceReleasesAgainstIO(t, side.port+40, side.accepted, true)
 		})
+	}
+}
+
+// raceReleasesAgainstIO releases one side of a live association concurrently
+// with a blocked ReadData and a stream of WriteData on it. abortOnly races four
+// Aborts; otherwise Aborts race Closes, ShutdownContext and, on the accepted
+// side, the Listener's Close.
+func raceReleasesAgainstIO(t *testing.T, port int, accepted, abortOnly bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	asp, sgp, err := setupConn(t, ctx, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = asp.Close()
+		_ = sgp.Close()
+	})
+	local, remote := asp, sgp
+	if accepted {
+		local, remote = sgp, asp
+	}
+	requireSubscribedAssociationEvents(t, remote.sctpConn, "peer association")
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := local.ReadData(context.Background())
+		readDone <- err
+	}()
+	// The writer keeps writing until the release ends it. Before that, a
+	// refusal is backpressure (EAGAIN without a write deadline) or the
+	// concurrent ShutdownContext withdrawing traffic, not the end of the
+	// association.
+	var written atomic.Int64
+	writeDone := make(chan error, 1)
+	go func() {
+		for {
+			_, err := writePayload(local, 1, []byte("in-flight"))
+			if err == nil {
+				written.Add(1)
+				continue
+			}
+			select {
+			case <-local.Done():
+				writeDone <- err
+				return
+			default:
+			}
+		}
+	}()
+	// The remote end drains what the writer sends, so its receive window
+	// never becomes what ends the writes.
+	go func() {
+		for {
+			if _, err := remote.ReadData(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	if !waitFor(func() bool { return written.Load() > 0 }, 5*time.Second) {
+		t.Fatal("no WriteData succeeded before the release; nothing would be in flight")
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 8)
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); <-start; results <- local.Abort() }()
+		if !abortOnly {
+			wg.Add(1)
+			go func() { defer wg.Done(); <-start; results <- local.Close() }()
+		}
+	}
+	shutdownDone := make(chan error, 1)
+	ownerDone := make(chan error, 1)
+	if abortOnly {
+		shutdownDone <- nil
+		ownerDone <- nil
+	} else {
+		go func() { <-start; shutdownDone <- local.ShutdownContext(context.Background()) }()
+		go func() {
+			<-start
+			if accepted {
+				ownerDone <- local.listener.Close()
+				return
+			}
+			ownerDone <- nil
+		}()
+	}
+	close(start)
+
+	releasesDone := make(chan struct{})
+	go func() { wg.Wait(); close(releasesDone) }()
+	select {
+	case <-releasesDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("an Abort or Close is still running ten seconds later")
+	}
+	close(results)
+	for err := range results {
+		if err != nil {
+			t.Errorf("a concurrent Abort or Close returned %v, want nil", err)
+		}
+	}
+	// ShutdownContext may lose its withdrawal to the release at any step and
+	// then reports the release that won, as Err does.
+	select {
+	case err := <-shutdownDone:
+		if err != nil && err != local.Err() {
+			t.Errorf("ShutdownContext = %v, want nil or Err's %v", err, local.Err())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ShutdownContext did not return")
+	}
+	select {
+	case err := <-ownerDone:
+		if err != nil {
+			t.Errorf("the owner's Close = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the owner's Close did not return")
+	}
+	for name, done := range map[string]chan error{"ReadData": readDone, "WriteData": writeDone} {
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Errorf("%s in flight during the release returned nil", name)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s in flight during the release never returned", name)
+		}
+	}
+
+	requireDone(t, local, "the concurrent releases")
+	requireDone(t, remote, "the peer")
+	t.Logf("%d writes before the release; %s won, and the peer ended with %v", written.Load(), local.Err(), remote.Err())
+	if !errors.Is(local.Err(), ErrAssociationClosed) {
+		t.Errorf("Err = %v, want %v", local.Err(), ErrAssociationClosed)
+	}
+	// Whichever release won is what reached the wire.
+	aborted := local.Err() == ErrAssociationAborted
+	if abortOnly && !aborted {
+		t.Errorf("Err = %v after only Aborts, want %v", local.Err(), ErrAssociationAborted)
+	}
+	if lost := errors.Is(remote.Err(), ErrSCTPNotAlive) &&
+		strings.Contains(remote.Err().Error(), sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT))); lost != aborted {
+		t.Errorf("the peer ended with %v; lost to a user ABORT = %v, want %v because %v won", remote.Err(), lost, aborted, local.Err())
 	}
 }

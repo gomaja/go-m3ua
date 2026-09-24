@@ -1478,16 +1478,22 @@ func (c *Association) Close() error {
 // association events (Linux 5.0 and later).
 //
 // Like Close, Abort sends no ASP Inactive or ASP Down. It is neither of the
-// Section 4.9 options but the transport loss every M3UA peer already handles:
-// RFC 4666 Section 4.3.1 counts COMMUNICATION_LOST as SCTP CDI exactly as it
-// counts SHUTDOWN_COMPLETE, so the peer takes this ASP to ASP-DOWN either way,
-// and Section 4.2 reports both to its Layer Management as M-SCTP_RELEASE.
+// Section 4.9 options but the transport loss every M3UA peer already handles,
+// and the peer's M3UA treats it as it treats the end of a SHUTDOWN. RFC 4666
+// Section 4.3.3 moves the ASP to ASP-DOWN on SCTP-COMMUNICATION_DOWN and, at
+// an ASP, pauses the affected SS7 destinations with MTP-PAUSE; Section 4.3.1
+// counts COMMUNICATION_LOST as SCTP CDI at an SGP exactly as it counts
+// SHUTDOWN_COMPLETE; and Section 4.2 reports both releases to the peer's Layer
+// Management as M-SCTP_RELEASE.
 //
 // Locally Abort is Close. The association's goroutines and pending operations
 // end, its state goes to ASP-DOWN, StateChanges and ManagementIndications
 // report the release and then close, and it is deregistered from its Listener
-// and its Endpoint. Err then reports ErrAssociationClosed, unless the
-// association had already ended for some other reason.
+// and its Endpoint. Only the recorded cause differs: Err then reports
+// ErrAssociationAborted, which matches ErrAssociationClosed, and the
+// ManagementSCTPRelease indication carries it as Cause and in its Description,
+// so Layer Management can tell an abortive release from a graceful one. An
+// association that had already ended for some other reason keeps that reason.
 //
 // Abort and Close share one teardown with every other way the association can
 // end, so only the first performs it and reports its error, and later calls
@@ -1500,7 +1506,7 @@ func (c *Association) Close() error {
 // Neither Listener.Close nor Endpoint.Close calls it. An application that wants
 // every association aborted calls Abort on each before closing their owner.
 func (c *Association) Abort() error {
-	_, err := c.endWith(ErrAssociationClosed, true)
+	_, err := c.endWith(ErrAssociationAborted, true)
 	return err
 }
 
@@ -1517,10 +1523,11 @@ func (c *Association) Done() <-chan struct{} {
 // Err reports why the association ended, or nil while it is still up.
 //
 // It distinguishes the cases an application has to tell apart:
-// ErrAssociationClosed for its own shutdown, ErrHeartbeatExpired for an
-// expired M3UA T(beat), a context error for a cancelled owner, and the
-// underlying read or protocol error otherwise. Read and Write report
-// ErrNotEstablished for all of them.
+// ErrAssociationClosed for its own shutdown (ErrAssociationAborted, which
+// matches it, when that was Abort), ErrHeartbeatExpired for an expired M3UA
+// T(beat), a context error for a cancelled owner, and the underlying read or
+// protocol error otherwise. Read and Write report ErrNotEstablished for all of
+// them.
 func (c *Association) Err() error {
 	if v := c.closeErr.Load(); v != nil {
 		if err, ok := v.(error); ok {

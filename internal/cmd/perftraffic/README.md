@@ -860,11 +860,13 @@ so none is applied silently here.
 - The ASP Up and ASP Active procedures needed before DATA transfer follow RFC
   4666 Sections 4.3.1 and 4.3.4.3.
 - The two SGP failure kinds are the SCTP SHUTDOWN and ABORT procedures of RFC
-  9260 Sections 9.2 and 9.1, which the peer's SCTP layer reports as
-  SHUTDOWN_COMPLETE or COMMUNICATION LOST (Section 11.2.5); RFC 4666 Section
-  4.3.1 counts either as SCTP CDI. RFC 9260 obsoletes RFC 4960. Checked against
-  both the RFC Editor and the Datatracker on 2026-09-24, it has no updating or
-  obsoleting RFC, and none of its verified errata touches those sections.
+  9260 Sections 9.2 and 9.1, which the ASP's SCTP layer reports as
+  SHUTDOWN_COMPLETE or COMMUNICATION LOST (Section 11.2.5). Either is the
+  SCTP-COMMUNICATION_DOWN on which RFC 4666 Section 4.3.3 moves the ASP to
+  ASP-DOWN and pauses the affected SS7 destinations with MTP-PAUSE. RFC 9260
+  obsoletes RFC 4960. Checked against both the RFC Editor and the Datatracker
+  on 2026-09-24, it has no updating or obsoleting RFC, and none of its
+  verified errata touches those sections.
 
 ## Build and run
 
