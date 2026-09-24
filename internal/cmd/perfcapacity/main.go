@@ -390,6 +390,66 @@ type fixtureEvidence struct {
 	// DrainTimeout is present only on a sender record whose drain deadline
 	// passed with submitted work still unaccounted at the receiver.
 	DrainTimeout *drainTimeoutEvidence `json:"drain_timeout"`
+	// SenderDrainTimeout is present only on a sender record whose drain
+	// deadline passed while the sender still held scheduled work.
+	SenderDrainTimeout *senderDrainTimeoutEvidence `json:"sender_drain_timeout"`
+}
+
+// senderDrainTimeoutCause is the fixed cause perftraffic records on every
+// sender_drain_timeout outcome.
+const senderDrainTimeoutCause = "the drain deadline passed while the sender still held scheduled messages it had not submitted: the offered load could not be submitted in time"
+
+// senderDrainTimeoutEvidence is the sender side of a nominal cohort's drain
+// deadline outcome: OutstandingAtDeadline scheduled messages were still queued
+// or in a send call when the deadline passed, and Unsubmitted sends were cut
+// off by it (the expired write deadline or a completion after the shared
+// drain deadline), all counted in send_errors. Like drain_timeout it is a
+// delivery failure of the offered rate and never a fixture fault.
+type senderDrainTimeoutEvidence struct {
+	Cause                 *string        `json:"cause"`
+	Drain                 *time.Duration `json:"drain_ns"`
+	OutstandingAtDeadline *uint64        `json:"outstanding_at_deadline"`
+	Unsubmitted           *uint64        `json:"unsubmitted"`
+}
+
+// unsubmittedAtDrainDeadline reports whether the record carries a sender
+// drain deadline outcome with work the sender could not submit in time.
+func (record *fixtureEvidence) unsubmittedAtDrainDeadline() bool {
+	timeout := record.SenderDrainTimeout
+	return timeout != nil && (timeout.OutstandingAtDeadline != nil && *timeout.OutstandingAtDeadline > 0 ||
+		timeout.Unsubmitted != nil && *timeout.Unsubmitted > 0)
+}
+
+// validateSenderDrainTimeout checks a sender drain deadline outcome against
+// its record: the producer's cause, the run's drain, work actually cut off, no
+// more outstanding than the run's limit allows, and every send it cut off
+// counted in send_errors. Without a fatal error every send error must be one
+// the deadline cut off: any other send failure is a fault the producer
+// reports as fatal.
+func validateSenderDrainTimeout(record *fixtureEvidence) error {
+	timeout := record.SenderDrainTimeout
+	if timeout == nil {
+		return nil
+	}
+	if timeout.Cause == nil || timeout.Drain == nil || timeout.OutstandingAtDeadline == nil || timeout.Unsubmitted == nil {
+		return errors.New("sender_drain_timeout cause, drain_ns, outstanding_at_deadline and unsubmitted are required")
+	}
+	if *timeout.Cause != senderDrainTimeoutCause {
+		return errors.New("sender_drain_timeout cause must match the producer contract")
+	}
+	if *timeout.Drain != record.Spec.Drain {
+		return errors.New("sender_drain_timeout drain_ns must equal the workload drain")
+	}
+	if *timeout.OutstandingAtDeadline == 0 && *timeout.Unsubmitted == 0 {
+		return errors.New("sender_drain_timeout must report outstanding or unsubmitted work")
+	}
+	if *timeout.OutstandingAtDeadline > uint64(*record.Spec.Outstanding) {
+		return errors.New("sender_drain_timeout outstanding_at_deadline exceeds the workload outstanding limit")
+	}
+	if *timeout.Unsubmitted > *record.SendErrors || record.FatalError == "" && *timeout.Unsubmitted != *record.SendErrors {
+		return errors.New("sender_drain_timeout unsubmitted must be counted in send_errors, and be all of them without a fatal error")
+	}
+	return nil
 }
 
 // drainTimeoutCause is the fixed cause perftraffic records on every
@@ -1131,8 +1191,11 @@ func unidirectionalFixtureRun(raw json.RawMessage, declaredRate int) (fixtureRun
 
 // warmupOverloadError is the whole error perftraffic reports when a warm-up
 // cohort ran its complete offered schedule and then failed only its own
-// loss-free validity rules. Work still unaccounted when the drain deadline
-// passed is one of those rules (the record's drain_timeout), not an error.
+// loss-free validity rules. Work still unaccounted or unsubmitted when the
+// drain deadline passed is one of those rules (the record's drain_timeout or
+// sender_drain_timeout), not an error. In a bidirectional run the text is the
+// same whichever direction failed, and only when every direction failed only
+// its own rules.
 // Any other failure — a receiver read failure, a failed control request, a
 // clock or reset error — joins further text or fails before the schedule
 // completes.
@@ -1141,8 +1204,8 @@ const warmupOverloadError = "warmup did not drain cleanly: cohort is invalid; in
 // cohortPhase accepts a measurement cohort, or a warm-up cohort whose warm-up
 // failed because the offered rate was not sustained: the cohort ran its whole
 // schedule with no fatal read or control failure, failed only its own validity
-// rules, and shows outstanding-cap refusals, missing deliveries, submitted
-// work still undelivered at the drain deadline, or a stall. That is evidence
+// rules, and shows outstanding-cap refusals, missing deliveries, work still
+// undelivered or unsubmitted at the drain deadline, or a stall. That is evidence
 // against the rate. A warm-up that did not fail, or failed for any other
 // reason, says nothing about the rate and is not probe evidence.
 func cohortPhase(cohort *fixtureCohort) (bool, error) {
@@ -1179,7 +1242,7 @@ func cohortPhase(cohort *fixtureCohort) (bool, error) {
 			(perfstats.StallObservation{LongestSend: *record.SendDuration.Max}).Stalled()
 		lost := record.Capped != nil && *record.Capped > 0 ||
 			record.Delivery != nil && record.Delivery.Missing != nil && *record.Delivery.Missing > 0 ||
-			record.undeliveredAtDrainDeadline()
+			record.undeliveredAtDrainDeadline() || record.unsubmittedAtDrainDeadline()
 		overloaded = overloaded || stalled || lost
 	}
 	if !overloaded {
@@ -1221,7 +1284,7 @@ func validateCohortReceiver(record *fixtureEvidence, declaredRate int) (specIden
 		return specIdentity{}, errors.New("record must be a receiver record")
 	}
 	if nonzero(record.Scheduled) || nonzero(record.Sent) || nonzero(record.Submitted) || record.SenderWindow != nil ||
-		record.Echo != nil || record.ReceiverEcho != nil || record.DrainTimeout != nil {
+		record.Echo != nil || record.ReceiverEcho != nil || record.DrainTimeout != nil || record.SenderDrainTimeout != nil {
 		return specIdentity{}, errors.New("cohort receiver record carries sender-only or echo evidence")
 	}
 	if record.Expected == nil || *record.Expected != spec.Expected {
@@ -1584,8 +1647,12 @@ func validateFixtureValidity(record *fixtureEvidence, mode string) error {
 	if err := validateDrainTimeout(record); err != nil {
 		return err
 	}
+	if err := validateSenderDrainTimeout(record); err != nil {
+		return err
+	}
 
-	fixtureInvalid := record.FatalError != "" || record.DrainTimeout != nil || *record.Capped != 0 || *record.SendErrors != 0 ||
+	fixtureInvalid := record.FatalError != "" || record.DrainTimeout != nil || record.SenderDrainTimeout != nil ||
+		*record.Capped != 0 || *record.SendErrors != 0 ||
 		*record.Delivery.Unique != *record.Expected || *record.Delivery.Missing != 0 || *record.Delivery.Duplicate != 0 ||
 		*record.Delivery.Invalid != 0 || *record.Delivery.Reordered != 0 || *record.Delivery.LateAfterStop != 0 ||
 		*record.OutstandingAtWindowStart != 0 || *record.OutstandingAfterDrain != 0

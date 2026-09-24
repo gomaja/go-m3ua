@@ -876,8 +876,31 @@ time. Every other end of the drain wait remains a `fatal_error`: a failed or
 unreachable receiver control request, a canceled run, or a deadline that passed
 before any receiver result was read. On a shared-clock receiver a delivery
 committed after the drain deadline is likewise counted, in `invalid` and in
-`late_after_deadline`, rather than ending the receiver with a fatal error. A
-throughput, routed or bidirectional warm-up that fails this way ends with
-exactly the warm-up validity error, so `internal/cmd/perfcapacity` accepts it
-as a failed probe of that rate. The DATA overload trial keeps its own contract: there any drain
-failure or late delivery is a fixture failure, as before.
+`late_after_deadline`, rather than ending the receiver with a fatal error.
+
+The sender's own queue can hold scheduled work at the drain deadline too:
+above capacity its send workers may still be submitting when the deadline
+passes. The association write deadline is the drain deadline, so from then on
+every send fails at once; the sender gives its workers a one-second grace to
+fail what they hold. Each send the deadline cut off, one that failed on the
+expired write deadline or, on the shared clock, completed after the drain
+deadline, is counted in `send_errors` rather than becoming a fatal error, and
+the sender record carries `sender_drain_timeout` with `cause`, `drain_ns`,
+`outstanding_at_deadline` (the messages still queued or in a send call when
+the drain wait reached the deadline, or when dispatching ended if that was
+later) and `unsubmitted` (the sends the deadline cut off, which can exceed
+it). The record is invalid with the reason "scheduled traffic was still
+unsubmitted at the sender when the drain deadline passed". The receiver wait
+is skipped, since the deadline has passed; the receiver's final counts are read
+after the stop. The associations stay up. A send that failed any other way (a
+lost association, a short write, a clock failure) keeps its fatal error, and a
+worker still running after the grace is stuck in the transport: that remains
+a fatal error and the fixture closes the associations to reclaim it, as
+before. Each capacity trial runs in fresh processes, and a failed warm-up or
+measurement cohort ends its run, so no later probe inherits either outcome.
+
+A throughput, routed or bidirectional warm-up that fails in any of these ways
+ends with exactly the warm-up validity error, so `internal/cmd/perfcapacity`
+accepts it as a failed probe of that rate. The DATA overload trial keeps its
+own contract: there any drain failure or late delivery is a fixture failure,
+as before.

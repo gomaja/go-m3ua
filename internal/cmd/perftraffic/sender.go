@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -75,6 +76,11 @@ type senderCounters struct {
 	// overload is the outcome accounting of an overload measurement cohort,
 	// nil for every other cohort.
 	overload *overloadCounters
+	// drainOutcomes makes a send the drain deadline cut off a counted
+	// outcome, unsubmitted, instead of a fatal error. Only nominal cohorts set
+	// it; the overload trial keeps its own contract.
+	drainOutcomes bool
+	unsubmitted   uint64
 }
 
 func newSenderCounters(limit int) *senderCounters {
@@ -450,6 +456,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		go sweepEchoRequests(tracker, sweepDone)
 	}
 	counters := newSenderCounters(config.Outstanding)
+	counters.drainOutcomes = specification.Overload == nil
 	var queues []chan sendJob
 	var routedQueues []chan routingTimedJob
 	var workersDone <-chan struct{}
@@ -496,6 +503,16 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	observations = append(observations, observeSharedProgress(boundaryContext, started, config.PeerControl, clock))
 	cancelBoundary()
 	drained := waitWorkersContext(ctx, workersDone, remainingUntil(drainDeadline))
+	var outstandingAtDeadline uint64
+	if !drained && ctx.Err() == nil && counters.drainOutcomes {
+		// The drain deadline passed with scheduled work still queued or in a
+		// send call. The association write deadline is the drain deadline, so
+		// every remaining send now fails at once and the workers finish within
+		// a short grace; one that does not is stuck in the transport, a fault
+		// handled below.
+		outstandingAtDeadline = counters.outstandingCount()
+		drained = waitWorkersContext(ctx, workersDone, senderDrainGrace)
+	}
 	if tracker != nil {
 		waitEchoDrain(ctx, tracker, drainDeadline)
 		close(sweepDone)
@@ -520,10 +537,18 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		}
 		counters.finishOverloadSeries(finalOffset)
 	}
-	drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
-	receiver, pollErr := waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
-	observations = append(observations, observeSharedProgress(drainContext, started, config.PeerControl, clock))
-	cancelDrain()
+	// Once the drain deadline cut the sender off, the deadline has passed and
+	// there is no drain left to wait for; the receiver's final counts are read
+	// after the stop.
+	senderTimeout := counters.drainTimeout(specification.Drain, outstandingAtDeadline)
+	var receiver runRecord
+	var pollErr error
+	if senderTimeout == nil {
+		drainContext, cancelDrain := context.WithDeadline(ctx, drainDeadline)
+		receiver, pollErr = waitReceiverDrain(drainContext, config.PeerControl, counters, drainDeadline)
+		observations = append(observations, observeSharedProgress(drainContext, started, config.PeerControl, clock))
+		cancelDrain()
+	}
 	drainTimeout, pollErr := drainTimeoutOutcome(pollErr, specification, drainDeadline)
 	if pollErr != nil {
 		counters.setFatal(pollErr.Error())
@@ -596,6 +621,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		sender.Overload = collectOverloadEvidence(diagnosticsContext, config, specification, overloadProfile, counters, associations, overloadEpochs, fixtureQueueMax, receiver, initialProgress.Generation, stopErr, observations, &sender)
 	}
 	sender.DrainTimeout = drainTimeout
+	sender.SenderDrainTimeout = senderTimeout
 	sender.evaluate()
 	var cohortErrors []error
 	if pollErr != nil {
@@ -722,7 +748,9 @@ func (counters *senderCounters) complete(err error, dispatchLag, sendDuration ti
 	}
 	if err != nil {
 		counters.sendErrors++
-		if counters.fatal == "" {
+		if counters.drainOutcomes && cutOffByDrainDeadline(err) {
+			counters.unsubmitted++
+		} else if counters.fatal == "" {
 			counters.fatal = err.Error()
 		}
 	} else {
@@ -748,6 +776,51 @@ func (counters *senderCounters) setFatal(reason string) {
 	defer counters.mutex.Unlock()
 	if counters.fatal == "" {
 		counters.fatal = reason
+	}
+}
+
+// senderDrainGrace bounds how long after the drain deadline the send workers
+// may take to fail the work they still hold. Every send then fails at once on
+// the expired write deadline, so the workers need milliseconds; one still
+// running after the grace is stuck in the transport.
+const senderDrainGrace = time.Second
+
+// cutOffByDrainDeadline reports a send that failed only because the drain
+// deadline passed: the association write deadline, which a nominal cohort
+// sets to the drain deadline, expired, or the call completed after the shared
+// drain deadline. Every cause the error wraps must be one of those; anything
+// else — a lost association, a short write, a clock failure — is a fault.
+func cutOffByDrainDeadline(err error) bool {
+	switch wrapped := err.(type) {
+	case nil:
+		return false
+	case interface{ Unwrap() []error }:
+		parts := wrapped.Unwrap()
+		for _, part := range parts {
+			if !cutOffByDrainDeadline(part) {
+				return false
+			}
+		}
+		return len(parts) != 0
+	case interface{ Unwrap() error }:
+		if cause := wrapped.Unwrap(); cause != nil {
+			return cutOffByDrainDeadline(cause)
+		}
+	}
+	return errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, errCompletedAfterDrain)
+}
+
+// drainTimeout records the sender side of a drain deadline outcome: work
+// still queued or in a send call when the deadline passed, or sends the
+// deadline cut off. It is nil when the sender submitted everything in time.
+func (counters *senderCounters) drainTimeout(drain time.Duration, outstandingAtDeadline uint64) *senderDrainTimeoutRecord {
+	counters.mutex.Lock()
+	defer counters.mutex.Unlock()
+	if !counters.drainOutcomes || outstandingAtDeadline == 0 && counters.unsubmitted == 0 {
+		return nil
+	}
+	return &senderDrainTimeoutRecord{
+		Cause: senderDrainTimeoutCause, Drain: drain, OutstandingAtDeadline: outstandingAtDeadline, Unsubmitted: counters.unsubmitted,
 	}
 }
 

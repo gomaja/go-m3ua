@@ -156,10 +156,17 @@ func (clock *sharedRunClock) waitUntil(ctx context.Context, target int64) error 
 	}
 }
 
+// errCompletedAfterDrain is withinDrain's report of a call that completed after
+// the shared drain deadline, as distinct from a clock failure.
+var errCompletedAfterDrain = errors.New("shared clock completion is after the drain deadline")
+
 func (clock *sharedRunClock) withinDrain(dispatched time.Duration) error {
 	now, err := clock.source.Now()
-	if err != nil || !clock.window.validDrain(clock.drain) || now < clock.window.Start || time.Duration(now-clock.window.Start) < dispatched || now > clock.window.End+int64(clock.drain)-clock.window.Domain.Resolution {
+	if err != nil || !clock.window.validDrain(clock.drain) || now < clock.window.Start || time.Duration(now-clock.window.Start) < dispatched {
 		return errors.New("shared clock completion is outside the drain deadline")
+	}
+	if now > clock.window.End+int64(clock.drain)-clock.window.Domain.Resolution {
+		return errCompletedAfterDrain
 	}
 	return nil
 }

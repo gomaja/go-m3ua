@@ -93,6 +93,27 @@ type drainTimeoutRecord struct {
 	ObservedBeforeDeadline time.Duration `json:"observed_before_deadline_ns"`
 }
 
+// senderDrainTimeoutCause is the fixed cause every sender_drain_timeout record
+// carries. internal/cmd/perfcapacity requires this exact text.
+const senderDrainTimeoutCause = "the drain deadline passed while the sender still held scheduled messages it had not submitted: the offered load could not be submitted in time"
+
+// senderDrainTimeoutRecord is the sender side of a nominal cohort's drain
+// deadline outcome: the sender could not submit the work it had scheduled
+// before the absolute drain deadline passed. OutstandingAtDeadline is the
+// scheduled messages still queued in the fixture or in a send call when the
+// deadline passed, zero if the workers had finished; Unsubmitted is the sends
+// the deadline cut off, which failed on the expired write deadline or
+// completed after the shared drain deadline, all counted in send_errors. Like
+// drain_timeout it is a delivery failure of the offered rate, never a fixture
+// fault: a lost association, a short write or a clock failure keeps its
+// fatal_error.
+type senderDrainTimeoutRecord struct {
+	Cause                 string        `json:"cause"`
+	Drain                 time.Duration `json:"drain_ns"`
+	OutstandingAtDeadline uint64        `json:"outstanding_at_deadline"`
+	Unsubmitted           uint64        `json:"unsubmitted"`
+}
+
 type seriesPoint struct {
 	OffsetMillis uint64 `json:"offset_ms"`
 	Scheduled    uint64 `json:"scheduled,omitempty"`
@@ -162,6 +183,9 @@ type runRecord struct {
 	// DrainTimeout is present only on a nominal sender record whose drain
 	// deadline passed with submitted work still unaccounted.
 	DrainTimeout *drainTimeoutRecord `json:"drain_timeout,omitempty"`
+	// SenderDrainTimeout is present only on a nominal sender record whose
+	// drain deadline passed while the sender still held scheduled work.
+	SenderDrainTimeout *senderDrainTimeoutRecord `json:"sender_drain_timeout,omitempty"`
 	// Memory is the cohort's whole-process memory series, sampled once a
 	// second without forcing a collection. It is recorded, never judged.
 	Memory *memoryObservation `json:"memory,omitempty"`
@@ -239,6 +263,9 @@ func (record *runRecord) evaluate() {
 	}
 	if record.DrainTimeout != nil {
 		invalid("submitted traffic was still unaccounted at the receiver when the drain deadline passed")
+	}
+	if record.SenderDrainTimeout != nil {
+		invalid("scheduled traffic was still unsubmitted at the sender when the drain deadline passed")
 	}
 	if record.Delivery.Duplicate != 0 || record.Delivery.Invalid != 0 || record.Delivery.Reordered != 0 || record.Delivery.LateAfterStop != 0 {
 		invalid("receiver observed duplicate, invalid, reordered, or late traffic")
