@@ -68,6 +68,8 @@ type receiverControl struct {
 	cpuError             string
 	allocBefore          runtimeCounters
 	allocAfter           runtimeCounters
+	memory               *memorySampler
+	memoryResult         *memoryObservation
 	series               []seriesPoint
 	generation           uint64
 	driver               *reverseDriver
@@ -296,6 +298,11 @@ func (control *receiverControl) reset(specification runSpec) error {
 	control.uniqueDrain = 0
 	control.lateAfterStop = 0
 	control.lateAfterDeadline = 0
+	if control.memory != nil {
+		control.memory.stop()
+		control.memory = nil
+	}
+	control.memoryResult = nil
 	control.echoReplies = 0
 	control.echoReplyErrors = 0
 	control.echoRepliesDropped = 0
@@ -328,6 +335,7 @@ func (control *receiverControl) start() error {
 		control.clockEvidence = &sharedClockEvidence{Before: domain}
 	}
 	control.allocBefore = readRuntimeCounters()
+	control.memory = startMemorySampler()
 	var err error
 	control.cpuBefore, err = readCPUStat(control.cpuStatPath)
 	if err != nil {
@@ -410,6 +418,11 @@ func (control *receiverControl) stop() error {
 		return errors.New("receiver is not measuring")
 	}
 	control.stopped = control.now()
+	if control.memory != nil {
+		observation := control.memory.finish()
+		control.memoryResult = &observation
+		control.memory = nil
+	}
 	if control.spec.Clock != nil {
 		var clockErr error
 		control.stoppedClock, clockErr = control.sharedNowLocked()
@@ -689,6 +702,10 @@ func (control *receiverControl) result() runRecord {
 			LateAfterStop:     control.lateAfterStop,
 			LateAfterDeadline: control.lateAfterDeadline,
 		}
+	}
+	if control.memoryResult != nil {
+		observation := *control.memoryResult
+		record.Memory = &observation
 	}
 	if control.spec.Mode == modeEcho {
 		record.ReceiverEcho = &receiverEchoResult{

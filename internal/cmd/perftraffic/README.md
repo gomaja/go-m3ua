@@ -774,6 +774,30 @@ configuration and observations:
   unique validated delivery;
 - runtime allocation counters spanning the cohort through drain, including
   asynchronous work;
+- `memory`, the cohort's whole-process memory series (performance budgets
+  section 4: "During timed runs collect low-overhead RSS/runtime counters
+  without forcing collection; record peak heap as well as post-GC live
+  heap"), on the sender and receiver records of every timed cohort. The
+  sender samples from just before it starts the receiver's cohort until after
+  the drain and stop, the receiver from its start to its stop. Each reading,
+  one a second plus one at each end, takes four `runtime/metrics` counters, which unlike
+  `runtime.ReadMemStats` do not stop the world, and the process's `VmRSS` and
+  `VmHWM` from `/proc/self/status`, re-read from an open descriptor so a
+  reading allocates nothing; no collection is ever forced. `heap_peak_bytes`
+  is the largest sampled heap (live and unswept objects),
+  `heap_live_peak_bytes` and `heap_live_end_bytes` the post-GC live heap (what
+  the previous collection marked live), `heap_goal_peak_bytes` the largest GC
+  heap goal, `gc_cycles` the collections completed during the cohort and
+  `rss_peak_bytes` the largest sampled resident set. Sampled peaks are lower
+  bounds of the true peaks. `rss_high_water_start_bytes` and
+  `rss_high_water_end_bytes` are the kernel's process-lifetime `VmHWM`, which
+  it maintains lazily from approximate per-CPU counters: it can capture a peak
+  between samples but is not a strict bound on a sampled `VmRSS`. Where the
+  kernel provides neither, the RSS fields are absent and `rss_error` names why;
+  a missing measurement is never a zero. `sampling_ns` is the total time the
+  readings took, the sampler's own cost, and at most 601 readings are
+  retained. The observation is recorded, never judged: no verdict reads it.
+  Forced-GC retained-heap checks belong to the separate memory trials;
 - toolchain, revision when available, dependency version, fixed socket options,
   flow count, queue cap, and negotiated outbound stream counts;
 - `assessed_baseline_revision`, the baseline commit the campaign is assessed

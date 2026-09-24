@@ -162,6 +162,9 @@ type runRecord struct {
 	// DrainTimeout is present only on a nominal sender record whose drain
 	// deadline passed with submitted work still unaccounted.
 	DrainTimeout *drainTimeoutRecord `json:"drain_timeout,omitempty"`
+	// Memory is the cohort's whole-process memory series, sampled once a
+	// second without forcing a collection. It is recorded, never judged.
+	Memory *memoryObservation `json:"memory,omitempty"`
 }
 
 type fixtureManifest struct {

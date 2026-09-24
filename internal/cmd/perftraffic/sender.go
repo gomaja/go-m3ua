@@ -381,6 +381,8 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	}
 	cpuBefore, cpuBeforeErr := readCPUStat(config.CPUStatPath)
 	allocBefore := readRuntimeCounters()
+	memory := startMemorySampler()
+	defer memory.stop()
 	if err := postJSON(ctx, config.PeerControl+"/start", nil); err != nil {
 		return runRecord{}, runRecord{}, fmt.Errorf("start receiver: %w", err)
 	}
@@ -527,9 +529,11 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 	if stopErr != nil {
 		counters.setFatal(fmt.Sprintf("stop receiver: %v", stopErr))
 	}
+	memoryObservation := memory.finish()
 	cpuAfter, cpuAfterErr := readCPUStat(config.CPUStatPath)
 	allocAfter := readRuntimeCounters()
 	sender := counters.result(specification, duration, drainDuration, outstandingAtEnd)
+	sender.Memory = &memoryObservation
 	if tracker != nil {
 		echo := tracker.result(counters.submittedCount())
 		sender.Echo = &echo

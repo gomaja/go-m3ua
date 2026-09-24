@@ -98,7 +98,7 @@ func withholdingSenderConfig(receiver *withholdingReceiver, sharedClock bool) co
 // undelivered at the drain deadline fails as a probe: the combined result
 // carries exactly the error perfcapacity accepts as overload evidence, the
 // sender record names the drain timeout with its undelivered count and has no
-// fatal error.
+// fatal error, and both records carry the cohort's memory series.
 func TestOverloadedWarmupDrainTimeoutIsAFailedProbeOverLoopbackSCTP(testContext *testing.T) {
 	for _, sharedClock := range []bool{false, true} {
 		name := "http-interval"
@@ -127,6 +127,13 @@ func TestOverloadedWarmupDrainTimeoutIsAFailedProbeOverLoopbackSCTP(testContext 
 				sender.FixtureVerdict != verdictInvalid || peer.Delivery != sender.Delivery ||
 				!slices.Contains(sender.Reasons, "submitted traffic was still unaccounted at the receiver when the drain deadline passed") {
 				testContext.Fatalf("sender record: submitted %d delivery %+v verdict %s reasons %q", sender.Submitted, sender.Delivery, sender.FixtureVerdict, sender.Reasons)
+			}
+			for side, memory := range map[string]*memoryObservation{"sender": sender.Memory, "receiver": peer.Memory} {
+				if memory == nil || memory.SampleCount < 2 || memory.HeapPeak == 0 || memory.HeapGoalPeak == 0 || memory.MetricsError != "" ||
+					memory.RSSError != "" || memory.RSSPeak == 0 || memory.RSSHighWaterStart == 0 || memory.RSSHighWaterEnd == 0 ||
+					memory.HeapPeak > memory.RSSPeak {
+					testContext.Fatalf("%s memory = %+v", side, memory)
+				}
 			}
 		})
 	}
