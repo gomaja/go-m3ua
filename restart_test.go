@@ -7,7 +7,12 @@ package m3ua
 import (
 	"context"
 	"encoding/binary"
+	"errors"
+	"fmt"
+	"net"
+	"reflect"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -539,10 +544,13 @@ func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
 	}
 }
 
-// Every other association state already reaches the user by another route --
-// COMM_LOST and SHUTDOWN_COMP fail the read, which surfaces through Err() --
-// so reporting them here would double-report them under a name that does not
-// fit.
+// Every other association state reaches the user by another route, so
+// reporting it here would double-report it under a name that does not fit.
+// SCTP_COMM_LOST's route is the handler's own error, which fails the read and
+// surfaces through Err(); see
+// TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError for why the read that
+// follows it cannot be relied on to fail instead. SHUTDOWN_COMP's read fails by
+// itself.
 func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
 	for _, st := range []sctp.SCTPState{
 		sctp.SCTP_COMM_UP, sctp.SCTP_COMM_LOST,
@@ -552,7 +560,12 @@ func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
 		w := &restartWatcher{}
 		w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
 
-		if err := w.handle(assocChangeEvent(st, 1)); err != nil {
+		err := w.handle(assocChangeEvent(st, 1))
+		if st == sctp.SCTP_COMM_LOST {
+			if !errors.Is(err, ErrSCTPNotAlive) {
+				t.Fatalf("handle(%v) returned %v, want the read failed with %v", st, err, ErrSCTPNotAlive)
+			}
+		} else if err != nil {
 			t.Fatalf("handle(%v) returned %v", st, err)
 		}
 
@@ -635,5 +648,63 @@ func TestUnparseableOrUnknownEventsDoNotFailTheRead(t *testing.T) {
 	empty := &restartWatcher{}
 	if err := empty.handle(assocChangeEvent(sctp.SCTP_RESTART, 1)); err != nil {
 		t.Errorf("handle with no route = %v, want nil", err)
+	}
+}
+
+// SCTP_COMM_LOST is the exception: a one-to-one socket carries one
+// association, so the loss read from it is the loss of the association being
+// read, whether or not the route knows the ID it names.
+func TestCommunicationLostFailsTheReadWhateverTheRoute(t *testing.T) {
+	unknown := &restartWatcher{}
+	unknown.setRoute(func(sctp.SCTPAssocID) *Association { return nil })
+	for name, w := range map[string]*restartWatcher{
+		"unknown association": unknown,
+		"no route":            {},
+	} {
+		if err := w.handle(assocChangeEvent(sctp.SCTP_COMM_LOST, 999)); !errors.Is(err, ErrSCTPNotAlive) {
+			t.Errorf("%s: handle(SCTP_COMM_LOST) = %v, want the read failed with %v", name, err, ErrSCTPNotAlive)
+		}
+	}
+}
+
+// A kernel without SCTP_EVENT (Linux before 5.0) refuses the pre-association
+// subscription with ENOPROTOOPT, wrapped by the dependency. The socket is then
+// opened again without it, as the association served traffic before the
+// subscription existed; any other failure is the caller's to see, unretried.
+func TestAssociationEventsFallBackOnlyWhenTheKernelLacksSCTPEvent(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "sctp",
+		Err: fmt.Errorf("sctp: apply PreAssociation.Notifications: %w", syscall.ENOPROTOOPT)}
+	for _, test := range []struct {
+		name  string
+		first error
+		want  []bool
+		err   error
+	}{
+		{name: "subscribed", want: []bool{true}},
+		{name: "no SCTP_EVENT", first: refused, want: []bool{true, false}},
+		{name: "other failure", first: syscall.ECONNREFUSED, want: []bool{true}, err: syscall.ECONNREFUSED},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []bool
+			opened, err := withAssociationEvents(func(subscribe bool) (int, error) {
+				calls = append(calls, subscribe)
+				if subscribe && test.first != nil {
+					return 0, test.first
+				}
+				return 1, nil
+			})
+			if !reflect.DeepEqual(calls, test.want) {
+				t.Errorf("opened with subscribe = %v, want %v", calls, test.want)
+			}
+			if test.err != nil {
+				if !errors.Is(err, test.err) {
+					t.Errorf("error = %v, want %v", err, test.err)
+				}
+				return
+			}
+			if err != nil || opened != 1 {
+				t.Errorf("opened = %d, %v; want the socket", opened, err)
+			}
+		})
 	}
 }
