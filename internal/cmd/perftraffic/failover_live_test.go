@@ -13,13 +13,14 @@ import (
 // TestSGPFailureLiveOverLoopback runs the production routed entry points with
 // -sgp-failure over real SCTP on loopback: the receiver closes sg-a/p0's two
 // associations at the declared shared-clock instant, the ASP observes both
-// end, MTPTransfer moves the 250 affected routes to sg-a/p1, and every
-// criterion of the trial is judged from the records.
+// end at the end of stream a completed SHUTDOWN leaves, MTPTransfer moves the
+// 250 affected routes to sg-a/p1, and every criterion of the trial is judged
+// from the records.
 func TestSGPFailureLiveOverLoopback(testContext *testing.T) {
 	result := runSGPFailureLive(testContext)
 	failover := result.Sender.Failover
 	for _, notification := range failover.Sender.Notifications {
-		testContext.Logf("association %d ended: %s", notification.Association, notification.Error)
+		testContext.Logf("association %d ended: %s (%+v)", notification.Association, notification.Error, notification)
 	}
 }
 
@@ -46,6 +47,9 @@ func TestSGPAbortFailureLiveOverLoopback(testContext *testing.T) {
 	if failover.Receiver.Fault.Kind != sgpFailureKindAbort {
 		testContext.Errorf("the receiver recorded a %q fault, want %q", failover.Receiver.Fault.Kind, sgpFailureKindAbort)
 	}
+	if failover.Sender.AssociationEvents != associationEventsSupported {
+		testContext.Errorf("this kernel's SCTP association events were recorded as %q; the abort could not be observed", failover.Sender.AssociationEvents)
+	}
 	failed := 0
 	for _, notification := range failover.Sender.Notifications {
 		testContext.Logf("association %d ended: %s", notification.Association, notification.Error)
@@ -57,6 +61,9 @@ func TestSGPAbortFailureLiveOverLoopback(testContext *testing.T) {
 			if !strings.Contains(notification.Error, want) {
 				testContext.Errorf("failed-SGP association %d ended with %q, which does not name %s", notification.Association, notification.Error, want)
 			}
+		}
+		if !notification.CommunicationLost || !notification.UserAbort || notification.EndOfStream {
+			testContext.Errorf("failed-SGP association %d was recorded as %+v", notification.Association, notification)
 		}
 	}
 	if failed != 2 {

@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-sctp"
 )
 
 func sgpFailureASPArguments(extra ...string) []string {
@@ -265,8 +268,8 @@ func newFailoverScenario(testContext *testing.T) *failoverScenario {
 		Associations: []failoverClose{{Association: 1}, {Association: 2}}}
 	notification := fault.Before + 1_200_000
 	tracker.notifications = []failoverNotification{
-		{Association: 101, SGP: sgpFailureFailed, At: fault.Before + 1_000_000},
-		{Association: 102, SGP: sgpFailureFailed, At: notification},
+		newFailoverNotification(101, sgpFailureFailed, fault.Before+1_000_000, io.EOF),
+		newFailoverNotification(102, sgpFailureFailed, notification, io.EOF),
 	}
 	tracker.outcomes = failoverOutcomes{Calls: 30000, Frozen: 25000, Alternative: 4997, NotSent: 2, Indeterminate: 1}
 	tracker.submitted = map[m3ua.AssociationID]uint64{101: 1250, 102: 1250, 103: 3750 + 2499, 104: 3750 + 2498, 105: 3750, 106: 3750, 107: 3750, 108: 3750}
@@ -328,7 +331,7 @@ func failoverCriterionByName(record *failoverRecord, name string) failoverCriter
 func TestFailoverEvaluationPassesAConsistentTrial(testContext *testing.T) {
 	scenario := newFailoverScenario(testContext)
 	record := scenario.tracker.evaluate(scenario.inputs)
-	if record.Verdict != failoverPass || len(record.Criteria) != 8 {
+	if record.Verdict != failoverPass || len(record.Criteria) != 9 {
 		testContext.Fatalf("verdict %s criteria %+v", record.Verdict, record.Criteria)
 	}
 	sender := record.Sender
@@ -457,6 +460,21 @@ func TestFailoverEvaluationFailsEveryViolatedCriterion(testContext *testing.T) {
 		{name: "fault early", criterion: "fault_injected", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
 			scenario.inputs.receiver.Failover.Receiver.Fault.Before = scenario.tracker.due - 1
 		}},
+		{name: "an injected call failed", criterion: "fault_injected", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
+			scenario.inputs.receiver.Failover.Receiver.Fault.Associations[1].Error = "setsockopt: invalid argument"
+		}},
+		{name: "a close that ended in an ABORT", criterion: "failure_kind_observed", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
+			scenario.tracker.notifications[0] = newFailoverNotification(101, sgpFailureFailed, scenario.tracker.notifications[0].At, errFailoverUserAbort)
+		}},
+		{name: "an abort that reached the ASP as a SHUTDOWN", criterion: "failure_kind_observed", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
+			failoverScenarioOfKind(scenario, sgpFailureKindAbort)
+			scenario.tracker.notifications[1] = newFailoverNotification(102, sgpFailureFailed, scenario.notification, io.EOF)
+		}},
+		{name: "an abort that reached the ASP as a path failure", criterion: "failure_kind_observed", outcome: failoverFail, mutate: func(scenario *failoverScenario) {
+			failoverScenarioOfKind(scenario, sgpFailureKindAbort)
+			scenario.tracker.notifications[0] = newFailoverNotification(101, sgpFailureFailed, scenario.tracker.notifications[0].At,
+				fmt.Errorf("%w: SCTP association lost (SCTP_COMM_LOST, %s)", m3ua.ErrSCTPNotAlive, sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_NO_ERROR))))
+		}},
 	} {
 		testContext.Run(test.name, func(testContext *testing.T) {
 			scenario := newFailoverScenario(testContext)
@@ -472,6 +490,81 @@ func TestFailoverEvaluationFailsEveryViolatedCriterion(testContext *testing.T) {
 			}
 			if cohort := newCohortResult("measurement", result, runRecord{Verdict: verdictPass}, nil); cohort.Verdict != verdictFail {
 				testContext.Fatalf("cohort verdict %s", cohort.Verdict)
+			}
+		})
+	}
+}
+
+// errFailoverUserAbort is how the library reports an association lost to an
+// ABORT carrying the User-Initiated Abort cause.
+var errFailoverUserAbort = fmt.Errorf("%w: SCTP association lost (SCTP_COMM_LOST, %s)",
+	m3ua.ErrSCTPNotAlive, sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT)))
+
+// failoverScenarioOfKind turns the scenario into a trial of the given kind,
+// with the failed SGP's associations ending as that kind makes them end on a
+// kernel that reports association events.
+func failoverScenarioOfKind(scenario *failoverScenario, kind string) {
+	recorded := sgpFailureRecordedKind(kind)
+	scenario.tracker.spec.Kind = recorded
+	scenario.inputs.receiver.Failover.Receiver.Fault.Kind = recorded
+	scenario.tracker.associationEvents = associationEventsSupported
+	end := error(io.EOF)
+	if kind == sgpFailureKindAbort {
+		end = errFailoverUserAbort
+	}
+	for index, notification := range scenario.tracker.notifications {
+		scenario.tracker.notifications[index] = newFailoverNotification(notification.Association, notification.SGP, notification.At, end)
+	}
+}
+
+// How an association ended is classified when the watch fires, from the error
+// the library reports.
+func TestFailoverNotificationClassifiesHowTheAssociationEnded(testContext *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		err                    error
+		eof, lost, userAborted bool
+	}{
+		{name: "completed SHUTDOWN", err: io.EOF, eof: true},
+		{name: "ABORT", err: errFailoverUserAbort, lost: true, userAborted: true},
+		{name: "path failure", err: fmt.Errorf("%w: SCTP association lost (SCTP_COMM_LOST, %s)", m3ua.ErrSCTPNotAlive,
+			sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_NO_ERROR))), lost: true},
+		{name: "user abort named outside a loss", err: errors.New(sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT)))},
+		{name: "local close", err: m3ua.ErrAssociationClosed},
+		{name: "no cause", err: nil},
+	} {
+		got := newFailoverNotification(101, sgpFailureFailed, 7, test.err)
+		if got.EndOfStream != test.eof || got.CommunicationLost != test.lost || got.UserAbort != test.userAborted || got.Error != fmt.Sprint(test.err) {
+			testContext.Errorf("%s: %+v, want end of stream %v, lost %v, user abort %v", test.name, got, test.eof, test.lost, test.userAborted)
+		}
+	}
+}
+
+// Each kind passes on the end it produces, and an abort trial is not measured,
+// rather than passed, where the kernel does not report association events.
+func TestFailoverFailureKindObservedPerKind(testContext *testing.T) {
+	for _, test := range []struct {
+		name, kind, events, outcome, verdict string
+	}{
+		{name: "close", kind: sgpFailureKindClose, events: associationEventsSupported, outcome: failoverPass, verdict: failoverPass},
+		{name: "close without association events", kind: sgpFailureKindClose, events: associationEventsUnsupported, outcome: failoverPass, verdict: failoverPass},
+		{name: "abort", kind: sgpFailureKindAbort, events: associationEventsSupported, outcome: failoverPass, verdict: failoverPass},
+		{name: "abort without association events", kind: sgpFailureKindAbort, events: associationEventsUnsupported, outcome: failoverNotMeasured, verdict: verdictInconclusive},
+		{name: "abort with an unanswered probe", kind: sgpFailureKindAbort, events: "unknown: SCTP is unsupported", outcome: failoverNotMeasured, verdict: verdictInconclusive},
+	} {
+		testContext.Run(test.name, func(testContext *testing.T) {
+			scenario := newFailoverScenario(testContext)
+			failoverScenarioOfKind(scenario, test.kind)
+			scenario.tracker.associationEvents = test.events
+			record := scenario.tracker.evaluate(scenario.inputs)
+			got := failoverCriterionByName(record, "failure_kind_observed")
+			if got.Outcome != test.outcome || record.Verdict != test.verdict || record.Sender.AssociationEvents != test.events {
+				testContext.Fatalf("failure_kind_observed %s (%s), verdict %s, recorded events %q", got.Outcome, got.Detail, record.Verdict, record.Sender.AssociationEvents)
+			}
+			for _, notification := range record.Sender.Notifications {
+				if notification.EndOfStream == (test.kind == sgpFailureKindAbort) || notification.UserAbort != (test.kind == sgpFailureKindAbort) {
+					testContext.Fatalf("recorded notification %+v for a %s trial", notification, test.kind)
+				}
 			}
 		})
 	}
@@ -919,20 +1012,23 @@ func TestFailoverReceiverInjectsItsKind(testContext *testing.T) {
 	}
 }
 
-// The fault criterion names the call the fault made. A close trial's text is
-// the one it had while close was the only kind.
+// The fault criterion names the call the fault made, and fails when either
+// call returned an error. A close trial's text is the one it had while close
+// was the only kind.
 func TestFailoverFaultCriterionNamesTheInjectedCall(testContext *testing.T) {
 	tracker, _, specification := failoverTrackerFixture(testContext)
 	for _, test := range []struct {
-		kind, want string
+		kind, callErr, outcome, want string
 	}{
-		{sgpFailureKindShutdown, "shutdown of sg-a/p0 at offset 10.00005s (50000 ns after due); both Association.Close calls returned within 500000 ns; association 2 Close: broken pipe"},
-		{sgpFailureKindAbort, "abort of sg-a/p0 at offset 10.00005s (50000 ns after due); both Association.Abort calls returned within 500000 ns; association 2 Abort: broken pipe"},
+		{sgpFailureKindShutdown, "", failoverPass, "shutdown of sg-a/p0 at offset 10.00005s (50000 ns after due); both Association.Close calls returned within 500000 ns"},
+		{sgpFailureKindAbort, "", failoverPass, "abort of sg-a/p0 at offset 10.00005s (50000 ns after due); both Association.Abort calls returned within 500000 ns"},
+		{sgpFailureKindShutdown, "broken pipe", failoverFail, "shutdown of sg-a/p0 at offset 10.00005s (50000 ns after due); both Association.Close calls returned within 500000 ns; association 2 Close: broken pipe"},
+		{sgpFailureKindAbort, "broken pipe", failoverFail, "abort of sg-a/p0 at offset 10.00005s (50000 ns after due); both Association.Abort calls returned within 500000 ns; association 2 Abort: broken pipe"},
 	} {
 		fault := &failoverFault{Kind: test.kind, SGP: sgpFailureFailed, Due: tracker.due, Before: tracker.due + 50_000, After: tracker.due + 550_000,
-			Associations: []failoverClose{{Association: 1}, {Association: 2, Error: "broken pipe"}}}
+			Associations: []failoverClose{{Association: 1}, {Association: 2, Error: test.callErr}}}
 		criterion := tracker.faultCriterion(&failoverReceiverRecord{Fault: fault}, specification.Clock)
-		if criterion.Outcome != failoverPass || criterion.Detail != test.want {
+		if criterion.Outcome != test.outcome || criterion.Detail != test.want {
 			testContext.Errorf("%s fault criterion %s:\n got %s\nwant %s", test.kind, criterion.Outcome, criterion.Detail, test.want)
 		}
 	}

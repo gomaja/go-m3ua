@@ -515,8 +515,9 @@ fault and 10 s after it.
 
 The kind is part of the declaration, so a close trial and an abort trial are
 different cohorts and neither SGP accepts the other's. Leaving the flag unset
-is the close trial with the specification and fault it always had. The
-failover criteria are the same for both kinds.
+is the close trial with the specification it always had. The declaration is
+what the SGP was asked to do; `failure_kind_observed` judges what reached the
+ASP, and the other criteria are the same for both kinds.
 
 - **Fault.** At `start + offset` on the shared clock the receiver ends both
   associations of SGP `sg-a/p0` with `Association.Close` or `Association.Abort`,
@@ -541,10 +542,16 @@ failover criteria are the same for both kinds.
   a failure on a surviving path — is unexpected and fails the fixture.
 - **Notification.** The sender watches `Association.Done` on all eight
   associations, the earliest public observation of the transport failure, and
-  records each one's `Err` (`sender.notifications`), which shows the SCTP
-  event the kind produced. The notification instant is the later of the
-  failed SGP's two, so the SGP is known down; any surviving association ending
-  fails the trial. The time from
+  records each one's `Err` with how it ended (`sender.notifications`):
+  `end_of_stream` for the `io.EOF` a completed SHUTDOWN leaves,
+  `communication_lost` for the `SCTP_COMM_LOST` the library reports as
+  `ErrSCTPNotAlive`, and `user_abort` when that loss carries the
+  User-Initiated Abort cause of a requested ABORT. It also records whether
+  this kernel reports SCTP association events
+  (`sender.kernel_association_events`), without which an ABORT is not seen
+  as `SCTP_COMM_LOST`. The notification instant is the later of the failed
+  SGP's two, so the SGP is known down; any surviving association ending fails
+  the trial. The time from
   the fault to each notification is recorded, not budgeted (section 4 excludes
   failure detection), together with the kernel SCTP timer defaults of the
   sender's network namespace and every association's retransmission timeout
@@ -568,8 +575,9 @@ one entry per criterion with its numbers (`criteria`), and `verdict`:
 
 | Criterion | Rule |
 | --- | --- |
-| `fault_injected` | the declared fault ran at its instant, inside the window, on both associations |
+| `fault_injected` | the declared fault ran at its instant, inside the window, on both associations, and no `Close` or `Abort` call returned an error |
 | `transport_failure_notified` | both failed-SGP associations, and no other, ended after the fault |
+| `failure_kind_observed` | the failure that reached the ASP is the declared one: both failed-SGP associations ended at `end_of_stream` for a close trial, or on `communication_lost` with `user_abort` for an abort trial. An SGP whose `Abort` fell back to a SHUTDOWN, or whose `Close` ended in the SCTP dependency's ABORT fallback, fails it. An abort trial on a kernel that does not report association events is `not-measured` |
 | `pre_failure_nominal` | every message scheduled in the whole bins that end at least one bin before the fault is delivered: the period before the failure was nominal, so no loss is left for the failed path's accounting to absorb and the pre-failure rate is the offered one |
 | `alternative_selection` | the first alternative MTPTransfer returns within 100 ms of the notification (one returning before it, since the notification is the later of the two association ends, is judged as 0); no call started later than that touched or was refused on the failed SGP or failed; every affected route moved |
 | `healthy_path_recovery` | pre-failure rate: mean all-SGP deliveries per bin over whole bins from 1 s after the start to the fault; the first whole bin starting at or after the notification whose surviving-SGP deliveries reach 90% of it must end within 1 s of the notification |
