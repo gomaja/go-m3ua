@@ -36,6 +36,13 @@ const M3UAPPID uint32 = 3
 // I/O surface is WriteData and ReadData, which carry those per message. The
 // address, close and deadline operations remain, because they describe the
 // transport rather than the message.
+//
+// An association ends once, whatever ends it -- Close, Abort, ShutdownContext,
+// a cancelled context or a failure -- and in two steps. Done closes as the
+// teardown begins. State reaches ASP-DOWN, and StateChanges and
+// ManagementIndications report the end and close, once the SCTP association
+// has been released, which for a SHUTDOWN can take up to three seconds. A
+// caller that needs the final state waits for StateChanges to close.
 type Association struct {
 	// sctpConn is the SCTP association this Association owns.
 	//
@@ -1516,6 +1523,14 @@ func (c *Association) Abort() error {
 // happened. Without it the only way to notice an association had gone was to
 // poll State until it read ASP-DOWN, or to wait for a Read or Write to start
 // failing — neither of which says why.
+//
+// Done marks the start of the teardown, not its end. It closes first, so every
+// operation waiting on the association stops at once and reports Err, and no
+// message still being handled can move the state. The SCTP release follows,
+// and only after it does State reach ASP-DOWN and StateChanges and
+// ManagementIndications report the end and close. Until then State can still
+// read the state the association was in. A caller that needs the final state
+// ranges over StateChanges until it closes.
 func (c *Association) Done() <-chan struct{} {
 	return c.done
 }
@@ -1555,8 +1570,11 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 			c.closeErr.Store(cause)
 		}
 		close(c.done)
-		// Retransmitters select on done, but cancel them explicitly so a
-		// pending request cannot be resent onto a socket that is closing.
+		// Retransmitters check done before each resend, and are cancelled here
+		// as well so none starts another. stopAllTAck does not take the retry
+		// lock, so a resend already past those checks can still reach the
+		// socket before the release below; one the release interrupts fails,
+		// and its request is dropped.
 		c.stopAllTAck()
 		if abortive {
 			err = c.abortTransport()
