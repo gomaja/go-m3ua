@@ -137,3 +137,27 @@ func TestSenderDrainTimeoutMustReconcileWithItsRecord(testContext *testing.T) {
 		}
 	})
 }
+
+// The sender-backlog-400000-warmup testdata record is the fixture's own
+// output for one overloaded warm-up on the reference environment: 400,000
+// messages/s over 8 associations with the mixed payload, a shared clock and a
+// 10 ms drain, so the sender still held queued work when the deadline passed.
+// It carries sender_drain_timeout, deliveries counted late after the
+// deadline, cap refusals and a 1.06 s send block, and no fatal error.
+func TestRealSenderBacklogContinuesTheSearch(testContext *testing.T) {
+	run := searchRecord(testContext, "sender-backlog-400000-warmup.json")
+	sender := run["sender"].(map[string]any)
+	if _, fatal := sender["fatal_error"]; fatal || sender["sender_drain_timeout"] == nil {
+		testContext.Fatalf("testdata is not a sender backlog record: fatal %v sender_drain_timeout %v", sender["fatal_error"], sender["sender_drain_timeout"])
+	}
+	status, decoded := runRequest(testContext, singleProbeRequest(testContext, 400000, run))
+	if status == invalidInputExitStatus || decoded.Error != "" || len(decoded.ProbeDecisions) != 1 {
+		testContext.Fatalf("real sender backlog rejected: status %d %+v", status, decoded)
+	}
+	if probe := decoded.ProbeDecisions[0]; probe.Phase != "warmup" || probe.SearchOutcome != perfstats.ProbeNotDemonstrated {
+		testContext.Fatalf("probe %+v, want a not-demonstrated warm-up", probe)
+	}
+	if decoded.SearchStatus != perfstats.SearchRunning || decoded.NextProbeRate != 200000 {
+		testContext.Fatalf("search %q next %d, want running with next probe 200000", decoded.SearchStatus, decoded.NextProbeRate)
+	}
+}

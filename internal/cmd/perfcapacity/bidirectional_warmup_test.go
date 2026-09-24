@@ -100,3 +100,39 @@ func TestFailedBidirectionalWarmupRefusesFaultsInEitherDirection(testContext *te
 		})
 	}
 }
+
+// The bidirectional-200000-warmup testdata record is the fixture's own output
+// for one overloaded bidirectional warm-up on the reference environment:
+// 200,000 messages/s in each direction over 8 associations with 128-byte
+// payloads and a shared clock. Both directions ended with cap refusals, the
+// reverse direction with work undelivered at the drain deadline, and each
+// blocked one send for about 1.05 s. It keeps all four records.
+func TestRealFailedBidirectionalWarmupContinuesTheSearch(testContext *testing.T) {
+	for _, stalled := range []bool{true, false} {
+		testContext.Run(fmt.Sprintf("stalled=%t", stalled), func(testContext *testing.T) {
+			run := searchRecord(testContext, "bidirectional-200000-warmup.json")
+			for _, key := range []string{"sender", "receiver", "reverse_sender", "reverse_receiver"} {
+				if _, present := run[key]; !present {
+					testContext.Fatalf("testdata has no %s record", key)
+				}
+			}
+			decision, outcome := string(perfstats.Inconclusive), perfstats.ProbeNotDemonstrated
+			if !stalled {
+				for _, key := range []string{"sender", "reverse_sender"} {
+					run[key].(map[string]any)["send_duration"].(map[string]any)["max_ns"] = float64(4_000_000)
+				}
+				decision, outcome = string(perfstats.Fail), perfstats.ProbeFailing
+			}
+			status, decoded := runRequest(testContext, singleProbeRequest(testContext, 200000, run))
+			if status == invalidInputExitStatus || decoded.Error != "" || len(decoded.ProbeDecisions) != 1 {
+				testContext.Fatalf("real bidirectional warm-up rejected: status %d %+v", status, decoded)
+			}
+			if probe := decoded.ProbeDecisions[0]; probe.Phase != "warmup" || probe.Decision != decision || probe.SearchOutcome != outcome || len(probe.Directions) != 2 {
+				testContext.Fatalf("probe %+v, want decision %s outcome %s", probe, decision, outcome)
+			}
+			if decoded.SearchStatus != perfstats.SearchRunning || decoded.NextProbeRate != 100000 {
+				testContext.Fatalf("search %q next %d, want running with next probe 100000", decoded.SearchStatus, decoded.NextProbeRate)
+			}
+		})
+	}
+}
