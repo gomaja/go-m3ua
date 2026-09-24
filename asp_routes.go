@@ -406,11 +406,16 @@ func (r *aspRoutes) apply(
 		return nil
 	}
 
-	// Which route ranges the report names depends only on the compiled
-	// inventory, which never changes once an Association can reach it, and on
-	// the report itself, so it is resolved before the routing write lock is
-	// taken. The lock that every MTPTransfer waits on covers only the budget
-	// checks, the writes and the recompute.
+	// Which route ranges the report names depends on the compiled inventory,
+	// which never changes once an Association can reach it, on the report,
+	// and on the Association's own configuration and registration bindings,
+	// which its own locks guard and the routing lock never did. So it is
+	// resolved before the routing write lock is taken, and the lock that
+	// every MTPTransfer waits on covers only the budget checks, the writes and
+	// the recompute. Reports from two SGPs of one SG are therefore written in
+	// the order they reach the lock, which a large report resolving slowly can
+	// change by its resolution time; RFC 4666 orders no messages across
+	// Associations, and delivery to this point never guaranteed one.
 	pendingKeys, affectedMTPRoutes := r.config.reportRanges(association, identity, sgp, statuses)
 	if r.applyResolved != nil {
 		r.applyResolved()
