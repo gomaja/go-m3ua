@@ -77,6 +77,13 @@ The cohort result carries per-direction records: `sender`/`receiver` cover
 ASP-to-SGP and `reverse_sender`/`reverse_receiver` cover SGP-to-ASP, each
 with its own counters, series, sender-window bounds and backlog interval. The
 cohort passes only when all four records are loss-free and fixture-valid.
+A failed warm-up keeps all four records. When every direction failed only its
+own validity rules the run ends with the plain warm-up validity error,
+whichever direction failed; a fixture fault in either direction keeps its own
+text in the error. A read fault of the ASP's own receiver, the reverse
+direction's receiver, is recorded on that control as it is on the SGP, so the
+reverse receiver record carries it as its `fatal_error`, and it joins the
+cohort's error in warm-up and measurement alike.
 In the default HTTP-interval mode, each direction's measurement window is anchored by its own driving side; the
 two windows start within one control round-trip of each other and are not
 claimed to be identical. With `-same-host-clock`, both directions instead use
@@ -914,14 +921,16 @@ A trend fitted over a finite window cannot prove indefinite stability.
 
 Sender stdout is one JSON object containing the active `phase`, top-level
 `sender`, `receiver`, `verdict`, an optional `error`, and retained `warmup` and
-`measurement` phase records. A warm-up failure returns both raw warm-up records
-instead of replacing them with an empty result. Each side retains raw
+`measurement` phase records. A warm-up failure returns every raw warm-up record
+(both directions' in bidirectional mode) instead of replacing them with an
+empty result. Each side retains raw
 configuration and observations:
 
 - `scheduled`, `sent`, `submitted`, `send_errors`, `capped`, and outstanding counts at
   the start, measurement end, and end of drain;
 - receiver `unique`, `unique_measurement`, `unique_drain`, `missing`,
-  `duplicate`, `invalid`, `reordered`, and `late_after_stop` counts;
+  `duplicate`, `invalid`, `reordered`, `late_after_stop` and
+  `late_after_deadline` counts;
 - bounded one-second series and bounded histogram-derived send-duration and
   scheduled-to-worker dispatch-lag percentiles (p50/p95/p99/max), where each
   percentile is a conservative bucket upper bound, capped by the observed
@@ -932,6 +941,30 @@ configuration and observations:
   unique validated delivery;
 - runtime allocation counters spanning the cohort through drain, including
   asynchronous work;
+- `memory`, the cohort's whole-process memory series (performance budgets
+  section 4: "During timed runs collect low-overhead RSS/runtime counters
+  without forcing collection; record peak heap as well as post-GC live
+  heap"), on the sender and receiver records of every timed cohort. The
+  sender samples from just before it starts the receiver's cohort until after
+  the drain and stop, the receiver from its start to its stop. Each reading,
+  one a second plus one at each end, takes four `runtime/metrics` counters, which unlike
+  `runtime.ReadMemStats` do not stop the world, and the process's `VmRSS` and
+  `VmHWM` from `/proc/self/status`, re-read from an open descriptor so a
+  reading allocates nothing; no collection is ever forced. `heap_peak_bytes`
+  is the largest sampled heap (live and unswept objects),
+  `heap_live_peak_bytes` and `heap_live_end_bytes` the post-GC live heap (what
+  the previous collection marked live), `heap_goal_peak_bytes` the largest GC
+  heap goal, `gc_cycles` the collections completed during the cohort and
+  `rss_peak_bytes` the largest sampled resident set. Sampled peaks are lower
+  bounds of the true peaks. `rss_high_water_start_bytes` and
+  `rss_high_water_end_bytes` are the kernel's process-lifetime `VmHWM`, which
+  it maintains lazily from approximate per-CPU counters: it can capture a peak
+  between samples but is not a strict bound on a sampled `VmRSS`. Where the
+  kernel provides neither, the RSS fields are absent and `rss_error` names why;
+  a missing measurement is never a zero. `sampling_ns` is the total time the
+  readings took, the sampler's own cost, and at most 601 readings are
+  retained. The observation is recorded, never judged: no verdict reads it.
+  Forced-GC retained-heap checks belong to the separate memory trials;
 - toolchain, revision when available, dependency version, fixed socket options,
   flow count, queue cap, and negotiated outbound stream counts;
 - `assessed_baseline_revision`, the baseline commit the campaign is assessed
@@ -986,3 +1019,65 @@ Missing or regressed cgroup counters, CPU throttling, too few series samples, or
 unavailable capacity observability produce an overall `inconclusive` result;
 protocol/data failures produce `invalid`. No field is named or treated as
 application-routing acceptance.
+
+Above capacity a cohort can end with submitted work still undelivered when the
+drain deadline passes, typically because the receiving library discarded what
+its inbound DATA queue could not hold and the sender waited for those messages
+to the end. That is the cohort's delivery outcome, not a fixture fault: when
+the last receiver result the sender read before the deadline still showed
+submitted messages unaccounted (neither validated, duplicate nor invalid), the
+sender record carries `drain_timeout` instead of a `fatal_error`, with
+`cause`, `drain_ns` (the deadline is the end of the measurement window plus
+this drain), `submitted`, `accounted` in that last result, `undelivered`
+(submitted minus accounted), and `observed_before_deadline_ns`, how long
+before the deadline that read completed (zero if it completed at or after
+it). The drain wait reads the result every 10 ms, so a responsive control's
+last result is at most about one interval old at the deadline; if it is more
+than ten intervals (100 ms) old, the control stopped answering and the wait
+reports "receiver control did not answer during the drain" as a fatal error
+instead. The record is invalid with the reason
+"submitted traffic was still unaccounted at the receiver when the drain
+deadline passed", even if the receiver's final counters, read after the stop,
+show that the last messages arrived in time: the sender did not observe them in
+time. Every other end of the drain wait remains a `fatal_error`: a failed or
+unreachable receiver control request, a canceled run, or a deadline that passed
+before any receiver result was read. That last case includes send workers that
+finish only a moment before the deadline, leaving no time for one receiver
+read: the fixture cannot tell that from a control that never answered, so it
+stays conservatively fatal. On a shared-clock receiver a delivery
+committed after the drain deadline is likewise counted, in `invalid` and in
+`late_after_deadline`, rather than ending the receiver with a fatal error.
+
+The sender's own queue can hold scheduled work at the drain deadline too:
+above capacity its send workers may still be submitting when the deadline
+passes. The association write deadline is the drain deadline, so from then on
+every send fails at once; the sender gives its workers a one-second grace to
+fail what they hold. Each send the deadline cut off, one that failed on the
+expired write deadline or, on the shared clock, completed after the drain
+deadline, is counted in `send_errors` rather than becoming a fatal error, and
+the sender record carries `sender_drain_timeout` with `cause`, `drain_ns`,
+`outstanding_at_deadline` (the messages still queued or in a send call when
+the drain wait reached the deadline, or when dispatching ended if that was
+later) and `unsubmitted` (the sends the deadline cut off, which can exceed
+it). The record is invalid with the reason "scheduled traffic was still
+unsubmitted at the sender when the drain deadline passed". The receiver wait
+is skipped, since the deadline has passed; the receiver's final counts are read
+after the stop. The associations stay up, and every cohort clears their write
+deadline when it ends, so the expired deadline cannot fail a later write the
+library makes on its own behalf and close the association. A send that failed
+any other way (a
+lost association, a short write, a clock failure) keeps its fatal error, and a
+worker still running after the grace is stuck in the transport: that remains
+a fatal error and the fixture closes the associations to reclaim it, as
+before. Each capacity trial runs in fresh processes, and a failed warm-up or
+measurement cohort ends its run, so no later probe inherits either outcome.
+
+A throughput, routed or bidirectional warm-up that fails in any of these ways
+ends with exactly the warm-up validity error, so `internal/cmd/perfcapacity`
+accepts it as a failed probe of that rate. A fault never passes for overload
+in either phase: `internal/cmd/perfcapacity` refuses as invalid input any
+cohort, warm-up or measurement, one of whose records carries a `fatal_error`
+or whose error names anything but its directions' validity failures, and a
+single sender record with a `fatal_error`. The DATA overload and SGP failure
+trials keep their own contracts: there any drain failure or late delivery is a
+fixture failure, as before.

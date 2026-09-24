@@ -151,7 +151,7 @@ func (control *receiverControl) recordRouted(transport routingTransport, message
 			ledger.snapshotData.Unique--
 			ledger.snapshotData.Invalid++
 			if clockErr == nil {
-				control.fatal = "delivery exceeds shared drain deadline"
+				control.lateDeliveryLocked()
 			}
 			return recordInvalid
 		}

@@ -150,6 +150,25 @@ func (sender *routingTimedSender) routedSubmission(job routingTimedJob, payload 
 	return outcome
 }
 
+// partialTransferError is an MTP-TRANSFER that succeeded on some path and
+// failed on another. It hides the failures' causes, so a transfer that was
+// partly delivered stays a fault even when the drain deadline cut its other
+// paths off. Its text is the transfer error's own.
+type partialTransferError struct{ transfer *m3ua.MTPTransferError }
+
+func (err partialTransferError) Error() string { return err.transfer.Error() }
+
+// transferOutcome returns an MTP-TRANSFER error as a send outcome. A transfer
+// that failed on every path unwraps to its causes, so one the drain deadline
+// cut off is counted like a direct write it cut off.
+func transferOutcome(err error) error {
+	var transfer *m3ua.MTPTransferError
+	if errors.As(err, &transfer) && len(transfer.SuccessfulPaths) != 0 {
+		return partialTransferError{transfer}
+	}
+	return err
+}
+
 func (sender *routingTimedSender) send(ctx context.Context, queue uint8, job routingTimedJob, counters *senderCounters) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -183,7 +202,7 @@ func (sender *routingTimedSender) send(ctx context.Context, queue uint8, job rou
 		}
 		outcome := sender.routedSubmission(job, payload)
 		result := outcome.result
-		sendStarted, sendEnded, sendErr = outcome.started, outcome.ended, outcome.err
+		sendStarted, sendEnded, sendErr = outcome.started, outcome.ended, transferOutcome(outcome.err)
 		if sendErr == nil && result.UserDataOctets != job.size {
 			sendErr = fmt.Errorf("MTPTransfer wrote %d bytes, want %d", result.UserDataOctets, job.size)
 		}
