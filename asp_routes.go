@@ -110,7 +110,7 @@ type aspRoutes struct {
 	stateRecordsPerRoute             map[aspRouteStateBudgetKey]int
 	stateRecordsPerSignallingGateway map[SignallingGatewayID]int
 	stateRecordCount                 int
-	derived                          map[aspDerivedRangeKey]aspDestinationStatus
+	derived                          map[MTPRouteID]map[aspDerivedRangeKey]aspDestinationStatus
 	sequence                         uint64
 	transferFlows                    map[aspTransferFlowKey]*list.Element
 	transferFlowLRU                  *list.List
@@ -147,7 +147,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		stateIndex:                       make(map[MTPRouteID]*aspRouteStateIndexNode, len(snapshot.mtpRoutes)),
 		stateRecordsPerRoute:             make(map[aspRouteStateBudgetKey]int),
 		stateRecordsPerSignallingGateway: make(map[SignallingGatewayID]int),
-		derived:                          make(map[aspDerivedRangeKey]aspDestinationStatus),
+		derived:                          make(map[MTPRouteID]map[aspDerivedRangeKey]aspDestinationStatus, len(snapshot.mtpRoutes)),
 		transferFlows:                    make(map[aspTransferFlowKey]*list.Element),
 		transferFlowLRU:                  list.New(),
 		transferSequences:                make(map[aspTransferFlowKey]*aspTransferFlowLock),
@@ -155,11 +155,11 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 	}
 	for _, mtpRoute := range snapshot.mtpRoutes {
 		routes.stateIndex[mtpRoute.id] = &aspRouteStateIndexNode{}
-		routes.derived[aspDerivedRangeKey{
+		routes.derived[mtpRoute.id] = map[aspDerivedRangeKey]aspDestinationStatus{{
 			mtpRoute:  mtpRoute.id,
 			pointCode: mtpRoute.destinationPointCode,
 			mask:      mtpRoute.mask,
-		}] = aspDestinationStatus{availability: DestinationUnavailable}
+		}: {availability: DestinationUnavailable}}
 	}
 	return routes, nil
 }
@@ -699,8 +699,8 @@ func (r *aspRoutes) destinationStatus(mtpRouteID MTPRouteID, pointCode uint32, m
 	defer r.mu.RUnlock()
 	var result aspDestinationStatus
 	found := false
-	for key, status := range r.derived {
-		if key.mtpRoute != mtpRouteID || !aspRangesOverlap(key.pointCode, key.mask, pointCode, mask) {
+	for key, status := range r.derived[mtpRouteID] {
+		if !aspRangesOverlap(key.pointCode, key.mask, pointCode, mask) {
 			continue
 		}
 		if found && status != result {
@@ -725,11 +725,9 @@ func (r *aspRoutes) mtpDestinationStatus(destination MTPDestination) (MTPDestina
 }
 
 // mtpDestinationStatuses returns every derived destination in configuration
-// order. It groups r.derived by MTP Route in one pass
-// instead of scanning it once per route, so this costs O(derived records x
-// log(derived records)) for the sort rather than O(routes x derived records).
-// It reads r.derived without changing how or where that map, or any other
-// route state, is mutated.
+// order. r.derived already holds each MTP Route's destinations under that
+// route, so this costs O(derived records x log(derived records)) for the sort
+// rather than O(routes x derived records).
 func (r *aspRoutes) mtpDestinationStatuses() []MTPDestinationStatus {
 	if r == nil {
 		return nil
@@ -737,28 +735,28 @@ func (r *aspRoutes) mtpDestinationStatuses() []MTPDestinationStatus {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	keysByRoute := make(map[MTPRouteID][]aspDerivedRangeKey, len(r.config.mtpRoutes))
-	for key := range r.derived {
-		keysByRoute[key.mtpRoute] = append(keysByRoute[key.mtpRoute], key)
+	count := 0
+	for _, destinations := range r.derived {
+		count += len(destinations)
 	}
-
-	statuses := make([]MTPDestinationStatus, 0, len(r.derived))
+	statuses := make([]MTPDestinationStatus, 0, count)
 	for _, mtpRoute := range r.config.mtpRoutes {
-		statuses = append(statuses, sortedDestinationStatuses(r.derived, keysByRoute[mtpRoute.id])...)
+		statuses = append(statuses, sortedDestinationStatuses(r.derived[mtpRoute.id])...)
 	}
 	return statuses
 }
 
 // sortedDestinationStatuses builds one MTP Route's destinations, in
-// point-code then mask order, from a set of aspRoutes.derived keys the caller
-// already knows belong to that one route. keys is sorted in place; the caller
-// must not still need its original order. The returned slice is freshly
-// built and owned by the caller. The caller must already hold aspRoutes.mu
-// for reading.
+// point-code then mask order, from that route's aspRoutes.derived set. The
+// returned slice is freshly built and owned by the caller. The caller must
+// already hold aspRoutes.mu for reading.
 func sortedDestinationStatuses(
 	derived map[aspDerivedRangeKey]aspDestinationStatus,
-	keys []aspDerivedRangeKey,
 ) []MTPDestinationStatus {
+	keys := make([]aspDerivedRangeKey, 0, len(derived))
+	for key := range derived {
+		keys = append(keys, key)
+	}
 	sort.Slice(keys, func(first, second int) bool {
 		if keys[first].pointCode != keys[second].pointCode {
 			return keys[first].pointCode < keys[second].pointCode
@@ -787,14 +785,11 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 		updated := r.recomputeMTPRouteLocked(mtpRoute)
 		routeIndications := r.derivedStatusIndicationsLocked(mtpRoute, updated)
 		indications = append(indications, routeIndications...)
-		for key := range r.derived {
-			if key.mtpRoute == mtpRoute.id {
-				delete(r.derived, key)
-			}
-		}
-		for key, status := range updated {
-			r.derived[key] = status
-		}
+		// updated is built fresh for this route and nothing else retains it,
+		// so it replaces the route's set whole. This runs under the routing
+		// lock every MTP-TRANSFER takes, so it must cost this route's
+		// destinations rather than every route's.
+		r.derived[mtpRoute.id] = updated
 	}
 	return indications
 }
@@ -950,7 +945,7 @@ func (r *aspRoutes) derivedStatusIndicationsLocked(
 	mtpRoute aspMTPRoute,
 	updated map[aspDerivedRangeKey]aspDestinationStatus,
 ) []*MTPIndication {
-	previousTree := derivedStatusTree(mtpRoute, r.derived)
+	previousTree := derivedStatusTree(mtpRoute, r.derived[mtpRoute.id])
 	currentTree := derivedStatusTree(mtpRoute, updated)
 	indications := make([]*MTPIndication, 0)
 	appendDerivedStatusIndications(
@@ -1282,28 +1277,14 @@ func aspRouteASMatchesStatus(association *Association, key ASKey, status *Destin
 	if association == nil || status == nil {
 		return false
 	}
-	networkAppearance := status.NetworkAppearance
-	networkAppearanceSet := status.NetworkAppearanceSet
-	if !networkAppearanceSet && association.cfg != nil {
-		networkAppearance, networkAppearanceSet = asConfigNetworkAppearance(association.cfg.ApplicationServers)
+	scope := WireScope{
+		NetworkAppearance:    status.NetworkAppearance,
+		NetworkAppearanceSet: status.NetworkAppearanceSet,
+		RoutingContexts:      status.RoutingContexts,
+		RoutingContextSet:    status.RoutingContextSet,
 	}
-	if key.NetworkAppearanceSet != networkAppearanceSet || key.NetworkAppearance != networkAppearance {
-		return false
-	}
-
-	routingContexts := status.RoutingContexts
-	routingContextSet := status.RoutingContextSet
-	if !routingContextSet {
-		routingContexts, routingContextSet = association.destinationRoutingContexts(nil)
-	}
-	if key.RoutingContextSet != routingContextSet {
-		return false
-	}
-	if !routingContextSet {
-		return true
-	}
-	for _, routingContext := range routingContexts {
-		if routingContext == key.RoutingContext {
+	for _, resolved := range association.ssnmASKeys(scope) {
+		if key == resolved {
 			return true
 		}
 	}
