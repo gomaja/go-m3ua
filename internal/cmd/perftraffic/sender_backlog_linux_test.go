@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -72,10 +74,20 @@ func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testConte
 				// The cohort's expired drain deadline no longer bounds a
 				// write: left in place it would fail this one at once, and
 				// the next write the library makes on its own behalf would
-				// close the association.
+				// close the association. The backlog may still fill the send
+				// buffer, so a refusal for that is waited out; a deadline
+				// error is the defect.
 				identity := planMessage("after-backlog-stray", 1, 0, 1)
-				if _, err := association.WriteData(tupleFor(identity.Flow, identity.Association).dataRequest(buildPayload(identity, 128))); err != nil {
-					testContext.Fatalf("association %d write after the failed probe: %v", index, err)
+				request := tupleFor(identity.Flow, identity.Association).dataRequest(buildPayload(identity, 128))
+				var writeErr error
+				for attempt := 0; attempt < 1000; attempt++ {
+					if _, writeErr = association.WriteData(request); writeErr == nil || !errors.Is(writeErr, syscall.EAGAIN) {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if writeErr != nil {
+					testContext.Fatalf("association %d write after the failed probe: %v", index, writeErr)
 				}
 			}
 			// Messages submitted just before the deadline may still be in
