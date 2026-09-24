@@ -12,10 +12,12 @@ import (
 	"github.com/gomaja/go-m3ua"
 )
 
-// failoverCloser is the one library call the fault injection makes on each
-// association of the failed SGP.
+// failoverCloser holds the library calls the fault injection can make on each
+// association of the failed SGP: Close for a close failure, Abort for an abort
+// failure.
 type failoverCloser interface {
 	Close() error
+	Abort() error
 }
 
 // failoverReceiver is a routed receiver's side of the SGP failure trial: the
@@ -25,6 +27,8 @@ type failoverCloser interface {
 type failoverReceiver struct {
 	ctx    context.Context
 	offset time.Duration
+	// kind is the receiver's -sgp-failure-kind, the only failure it injects.
+	kind string
 
 	// Frozen at preflight completion and never changed afterwards.
 	frozen          bool
@@ -35,7 +39,7 @@ type failoverReceiver struct {
 	affected        [routingRouteCount]bool
 
 	// injected is set, once per process, immediately before the failed SGP's
-	// associations are closed. From then on their read failures are the
+	// associations are ended. From then on their read failures are the
 	// injected fault rather than fatal errors, and the alternative SGP may
 	// carry the affected routes.
 	injected atomic.Bool
@@ -61,8 +65,8 @@ type failoverCohort struct {
 }
 
 // failoverFault is the injected fault on the shared clock: Before is read
-// immediately before the first Close is issued and After once every Close has
-// returned.
+// immediately before the first Close or Abort is issued and After once every
+// one has returned.
 type failoverFault struct {
 	Kind         string           `json:"kind"`
 	SGP          m3ua.SGPIdentity `json:"sgp"`
@@ -72,7 +76,8 @@ type failoverFault struct {
 	Associations []failoverClose  `json:"associations"`
 }
 
-// failoverClose is one Association.Close of the failed SGP.
+// failoverClose is one Association.Close or Association.Abort of the failed
+// SGP, as the fault's kind says.
 type failoverClose struct {
 	Association m3ua.AssociationID `json:"association"`
 	Started     int64              `json:"started_ns"`
@@ -118,11 +123,11 @@ type failoverReceiverRecord struct {
 	ScheduledBins       []uint64                 `json:"scheduled_bins"`
 }
 
-func (control *receiverControl) enableFailover(ctx context.Context, offset time.Duration) {
+func (control *receiverControl) enableFailover(ctx context.Context, offset time.Duration, kind string) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
 	if control.routed != nil && offset > 0 {
-		control.routed.failover = &failoverReceiver{ctx: ctx, offset: offset}
+		control.routed.failover = &failoverReceiver{ctx: ctx, offset: offset, kind: kind}
 	}
 }
 
@@ -158,7 +163,7 @@ func (failover *failoverReceiver) freeze(topology routingTopology, pairs []routi
 		case sgpFailureFailed:
 			closer, valid := associations[index].(failoverCloser)
 			if !valid || associations[index].ID() != pair.Binding.Peer.Association {
-				return errors.New("failed SGP association cannot be closed")
+				return errors.New("failed SGP association cannot be closed or aborted")
 			}
 			failover.failed[pair.Binding.Peer] = closer
 		case sgpFailureAlternative:
@@ -201,7 +206,7 @@ func (control *receiverControl) acceptFailoverSpecLocked(specification runSpec) 
 		}
 		return nil
 	}
-	if err := validateSGPFailureSpec(specification, failover.offset); err != nil {
+	if err := validateSGPFailureSpec(specification, failover.offset, failover.kind); err != nil {
 		return err
 	}
 	if specification.SGPFailure != nil && (!failover.frozen || failover.injected.Load()) {
@@ -256,8 +261,9 @@ func (control *receiverControl) stopFailoverLocked() {
 }
 
 // inject waits for the declared shared-clock instant and ends every
-// association of the failed SGP with Association.Close, concurrently, timing
-// each call on the shared clock.
+// association of the failed SGP with Association.Close or, for an abort
+// failure, Association.Abort, concurrently, timing each call on the shared
+// clock.
 func (failover *failoverReceiver) inject(ctx context.Context, control *receiverControl, generation uint64, due int64) {
 	clock := control.clock
 	if err := waitSharedInstant(ctx, clock, due); err != nil {
@@ -280,7 +286,7 @@ func (failover *failoverReceiver) inject(ctx context.Context, control *receiverC
 		go func(index int, transport routingTransport) {
 			defer closing.Done()
 			started, _ := clock.Now()
-			err := failover.failed[transport].Close()
+			err := failover.end(failover.failed[transport])
 			returned, _ := clock.Now()
 			closes[index] = failoverClose{Association: transport.Association, Started: started, Returned: returned}
 			if err != nil {
@@ -301,6 +307,16 @@ func (failover *failoverReceiver) inject(ctx context.Context, control *receiverC
 		return
 	}
 	failover.cohort.fault = &failoverFault{Kind: failover.cohort.spec.Kind, SGP: sgpFailureFailed, Due: due, Before: before, After: after, Associations: closes}
+}
+
+// end ends one association of the failed SGP the way this receiver's
+// -sgp-failure-kind says: SCTP SHUTDOWN through Close, or SCTP ABORT through
+// Abort.
+func (failover *failoverReceiver) end(association failoverCloser) error {
+	if failover.kind == sgpFailureKindAbort {
+		return association.Abort()
+	}
+	return association.Close()
 }
 
 // sgpFailureWaitSlice bounds one sleep of the injection wait, so the shared

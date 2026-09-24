@@ -569,7 +569,7 @@ func runRoutedReceiver(ctx context.Context, config commandConfig) (runRecord, er
 	}
 	lifetime, cancel := context.WithCancel(ctx)
 	defer cancel()
-	control.enableFailover(lifetime, config.SGPFailure)
+	control.enableFailover(lifetime, config.SGPFailure, config.SGPFailureKind)
 	peers, err := startRoutingPeerSet(lifetime, topology, addresses, nil)
 	if err != nil {
 		return runRecord{}, fmt.Errorf("startup listen: %w", err)
