@@ -294,12 +294,16 @@ func newAssociationEventPeer(t *testing.T, port int, reply func(messages.M3UA) m
 		t.Fatal(err)
 	}
 	events := make(chan *sctp.AssocChange, 16)
+	var ended atomic.Bool
 	handler := func(b []byte) error {
 		notification, err := sctp.ParseNotification(b)
 		if err != nil {
 			return nil
 		}
 		if change, ok := notification.(*sctp.AssocChange); ok {
+			if change.State != sctp.SCTP_COMM_UP {
+				ended.Store(true)
+			}
 			select {
 			case events <- change:
 			default:
@@ -320,8 +324,18 @@ func newAssociationEventPeer(t *testing.T, port int, reply func(messages.M3UA) m
 		t.Fatal(err)
 	}
 
-	p := &rawPeer{t: t, ln: ln, addr: addr, reply: reply}
-	t.Cleanup(func() { _ = ln.Close() })
+	p := &rawPeer{t: t, ln: ln, addr: addr, reply: reply, ended: ended.Load}
+	// The accepted association is closed with the listener: it can still be
+	// draining notifications, and it holds the port the next test listens on.
+	t.Cleanup(func() {
+		_ = ln.Close()
+		p.mu.Lock()
+		conn := p.conn
+		p.mu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+	})
 	go p.serve()
 
 	return p, events
