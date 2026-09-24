@@ -25,13 +25,16 @@ func unaccountedReceiver() runRecord {
 }
 
 // waitDrain runs the drain wait the way runSenderCohortWith does: under a
-// context that ends at the drain deadline.
+// context that ends at the drain deadline. Its observation bound is the whole
+// margin, so a loaded runner's scheduling delay before the deadline cannot
+// turn a responsive receiver into a stale one; the production bound is
+// exercised where the staleness is far beyond it.
 func waitDrain(ctx context.Context, url string, submitted uint64, deadline time.Time) (runRecord, error) {
 	counters := newSenderCounters(8)
 	counters.submitted = submitted
 	drainContext, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	return waitReceiverDrain(drainContext, url, counters, deadline)
+	return pollReceiverDrain(drainContext, url, counters, deadline, drainPollInterval, drainWaitMargin)
 }
 
 // A probe above capacity leaves submitted work unaccounted when the drain

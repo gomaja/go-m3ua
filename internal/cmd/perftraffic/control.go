@@ -160,6 +160,13 @@ func (control *receiverControl) setAssociationReady(index, maxMessageStreamID in
 	}
 }
 
+// fatalError is the control's fatal error, empty while it has none.
+func (control *receiverControl) fatalError() string {
+	control.mutex.Lock()
+	defer control.mutex.Unlock()
+	return control.fatal
+}
+
 func (control *receiverControl) setFatal(reason string) {
 	control.mutex.Lock()
 	defer control.mutex.Unlock()
@@ -584,10 +591,11 @@ func (control *receiverControl) record(transportIndex int, message receivedMessa
 // deadline. In a nominal cohort it is work that was still outstanding at the
 // deadline: the delivery is already counted invalid, earns no unique credit
 // and fails the cohort, and late_after_deadline names why. It is not a fixture
-// fault, so it does not end the receiver. The overload trial keeps its
-// contract, in which any delivery past the deadline is a fixture failure.
+// fault, so it does not end the receiver. The overload and SGP failure trials
+// keep their contracts, in which any delivery past the deadline is a fixture
+// failure.
 func (control *receiverControl) lateDeliveryLocked() {
-	if control.spec.Overload != nil {
+	if !control.spec.nominalDrainOutcomes() {
 		control.fatal = "delivery exceeds shared drain deadline"
 		return
 	}

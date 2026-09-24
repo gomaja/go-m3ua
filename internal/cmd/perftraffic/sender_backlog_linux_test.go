@@ -65,9 +65,17 @@ func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testConte
 			testContext.Logf("backlog: %d outstanding at the deadline, %d unsubmitted, %d capped, %d submitted, %d delivered",
 				timeout.OutstandingAtDeadline, timeout.Unsubmitted, sender.Capped, sender.Submitted, peer.Delivery.Unique)
 
-			for _, association := range associations {
+			for index, association := range associations {
 				if state := association.State(); state != m3ua.StateASPActive {
 					testContext.Fatalf("association state after the failed probe = %v, want ASP-ACTIVE", state)
+				}
+				// The cohort's expired drain deadline no longer bounds a
+				// write: left in place it would fail this one at once, and
+				// the next write the library makes on its own behalf would
+				// close the association.
+				identity := planMessage("after-backlog-stray", 1, 0, 1)
+				if _, err := association.WriteData(tupleFor(identity.Flow, identity.Association).dataRequest(buildPayload(identity, 128))); err != nil {
+					testContext.Fatalf("association %d write after the failed probe: %v", index, err)
 				}
 			}
 			// Messages submitted just before the deadline may still be in

@@ -45,6 +45,14 @@ type runSpec struct {
 	Overload *overloadSpec `json:"overload,omitempty"`
 }
 
+// nominalDrainOutcomes reports whether the cohort records a drain deadline
+// outcome (drain_timeout, sender_drain_timeout, late_after_deadline) as a
+// delivery failure of its offered rate. The overload and SGP failure trials
+// keep their own contracts, in which any drain failure is a fixture failure.
+func (specification runSpec) nominalDrainOutcomes() bool {
+	return specification.Overload == nil && specification.SGPFailure == nil
+}
+
 // overloadMeasurement reports whether the specification is the phased
 // measurement cohort of an overload trial.
 func (specification runSpec) overloadMeasurement() bool {

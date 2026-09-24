@@ -80,7 +80,10 @@ cohort passes only when all four records are loss-free and fixture-valid.
 A failed warm-up keeps all four records. When every direction failed only its
 own validity rules the run ends with the plain warm-up validity error,
 whichever direction failed; a fixture fault in either direction keeps its own
-text in the error.
+text in the error. A read fault of the ASP's own receiver, the reverse
+direction's receiver, is recorded on that control as it is on the SGP, so the
+reverse receiver record carries it as its `fatal_error`, and it joins the
+cohort's error in warm-up and measurement alike.
 In the default HTTP-interval mode, each direction's measurement window is anchored by its own driving side; the
 two windows start within one control round-trip of each other and are not
 claimed to be identical. With `-same-host-clock`, both directions instead use
@@ -1027,13 +1030,21 @@ sender record carries `drain_timeout` instead of a `fatal_error`, with
 `cause`, `drain_ns` (the deadline is the end of the measurement window plus
 this drain), `submitted`, `accounted` in that last result, `undelivered`
 (submitted minus accounted), and `observed_before_deadline_ns`, how long
-before the deadline that read completed. The record is invalid with the reason
+before the deadline that read completed (zero if it completed at or after
+it). The drain wait reads the result every 10 ms, so a responsive control's
+last result is at most about one interval old at the deadline; if it is more
+than ten intervals (100 ms) old, the control stopped answering and the wait
+reports "receiver control did not answer during the drain" as a fatal error
+instead. The record is invalid with the reason
 "submitted traffic was still unaccounted at the receiver when the drain
 deadline passed", even if the receiver's final counters, read after the stop,
 show that the last messages arrived in time: the sender did not observe them in
 time. Every other end of the drain wait remains a `fatal_error`: a failed or
 unreachable receiver control request, a canceled run, or a deadline that passed
-before any receiver result was read. On a shared-clock receiver a delivery
+before any receiver result was read. That last case includes send workers that
+finish only a moment before the deadline, leaving no time for one receiver
+read: the fixture cannot tell that from a control that never answered, so it
+stays conservatively fatal. On a shared-clock receiver a delivery
 committed after the drain deadline is likewise counted, in `invalid` and in
 `late_after_deadline`, rather than ending the receiver with a fatal error.
 
@@ -1051,7 +1062,10 @@ later) and `unsubmitted` (the sends the deadline cut off, which can exceed
 it). The record is invalid with the reason "scheduled traffic was still
 unsubmitted at the sender when the drain deadline passed". The receiver wait
 is skipped, since the deadline has passed; the receiver's final counts are read
-after the stop. The associations stay up. A send that failed any other way (a
+after the stop. The associations stay up, and every cohort clears their write
+deadline when it ends, so the expired deadline cannot fail a later write the
+library makes on its own behalf and close the association. A send that failed
+any other way (a
 lost association, a short write, a clock failure) keeps its fatal error, and a
 worker still running after the grace is stuck in the transport: that remains
 a fatal error and the fixture closes the associations to reclaim it, as
@@ -1060,6 +1074,10 @@ measurement cohort ends its run, so no later probe inherits either outcome.
 
 A throughput, routed or bidirectional warm-up that fails in any of these ways
 ends with exactly the warm-up validity error, so `internal/cmd/perfcapacity`
-accepts it as a failed probe of that rate. The DATA overload trial keeps its
-own contract: there any drain failure or late delivery is a fixture failure,
-as before.
+accepts it as a failed probe of that rate. A fault never passes for overload
+in either phase: `internal/cmd/perfcapacity` refuses as invalid input any
+cohort, warm-up or measurement, one of whose records carries a `fatal_error`
+or whose error names anything but its directions' validity failures, and a
+single sender record with a `fatal_error`. The DATA overload and SGP failure
+trials keep their own contracts: there any drain failure or late delivery is a
+fixture failure, as before.

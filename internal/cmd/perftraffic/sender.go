@@ -118,15 +118,14 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 			go readEchoReplies(ctx, index, association, registry)
 		}
 	}
-	var localFatal chan error
+	var local *localReceiver
 	if config.Mode == modeBidirectional {
-		var shutdown func()
 		var err error
-		shutdown, localFatal, err = startLocalReceiver(ctx, config, associations)
+		local, err = startLocalReceiver(ctx, config, associations)
 		if err != nil {
 			return combinedResult{}, err
 		}
-		defer shutdown()
+		defer local.shutdown()
 	}
 	runCohort := func(cohortConfig commandConfig, phase, cohort string, duration time.Duration) (cohortResult, error) {
 		if phase == "warmup" {
@@ -144,23 +143,35 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		sender, receiver, err := runSenderCohort(ctx, cohortConfig, associations, registry, cohort, duration)
 		result := newCohortResult(phase, sender, receiver, err)
 		if config.Mode == modeBidirectional {
-			collectReverse(ctx, cohortConfig, &result)
+			finishBidirectionalCohort(ctx, cohortConfig, &result, local)
 		}
 		return result, err
 	}
 	return runWarmupAndMeasurement(config, runCohort, func(measurement *cohortResult) {
 		config.ssnmRun.finish(ctx, measurement)
-		if config.Mode == modeBidirectional {
-			select {
-			case readErr := <-localFatal:
-				if measurement.Error == "" {
-					measurement.Error = readErr.Error()
-				}
-				measurement.Verdict = verdictInvalid
-			default:
-			}
-		}
 	})
+}
+
+// finishBidirectionalCohort completes a bidirectional cohort, warm-up or
+// measurement: it collects the reverse direction's records from the SGP and
+// fails the cohort if the ASP-local receiver of that direction reported a
+// read fault.
+func finishBidirectionalCohort(ctx context.Context, config commandConfig, result *cohortResult, local *localReceiver) {
+	collectReverse(ctx, config, result)
+	foldLocalFault(result, local.fault())
+}
+
+// foldLocalFault fails a bidirectional cohort, warm-up or measurement, whose
+// ASP-local receiver, the receiver of the reverse direction, reported a read
+// fault. The fault joins the cohort's other errors and is never taken for the
+// validity failure of an overloaded direction.
+func foldLocalFault(result *cohortResult, fault string) {
+	if fault == "" {
+		return
+	}
+	result.Verdict = verdictInvalid
+	result.validityOnly = false
+	result.Error = joinErrorText(result.Error, "reverse cohort local receiver: "+fault)
 }
 
 // cohortRunner runs one cohort of the configured workload against the
@@ -201,36 +212,62 @@ func runWarmupAndMeasurement(config commandConfig, runCohort cohortRunner, inspe
 	return result, err
 }
 
+// localReceiver is the ASP's own receiver for the reverse direction of a
+// bidirectional run: its control endpoint and the read loops that feed it.
+type localReceiver struct {
+	control *receiverControl
+	// faults carries the read loops' faults to forwardFaults.
+	faults   chan error
+	shutdown func()
+}
+
 // startLocalReceiver runs the ASP's own control endpoint and read loop for
 // the reverse direction of a bidirectional run. The SGP reverse driver owns
 // the cohort lifecycle against it exactly as the ASP owns the forward cohort
 // against the SGP.
-func startLocalReceiver(ctx context.Context, config commandConfig, associations []*m3ua.Association) (func(), chan error, error) {
+func startLocalReceiver(ctx context.Context, config commandConfig, associations []*m3ua.Association) (*localReceiver, error) {
 	control := newReceiverControl(config.Associations, maxOutstanding)
 	control.enableSharedClock(config.SameHostClock)
 	if control.fatal != "" {
-		return nil, nil, errors.New(control.fatal)
+		return nil, errors.New(control.fatal)
 	}
 	control.cpuStatPath = config.CPUStatPath
 	httpListener, err := net.Listen("tcp", config.ControlAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen for local receiver control: %w", err)
+		return nil, fmt.Errorf("listen for local receiver control: %w", err)
 	}
 	httpServer := &http.Server{Handler: control.handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		_ = httpServer.Serve(httpListener)
 	}()
-	fatal := make(chan error, 1)
+	local := &localReceiver{control: control, faults: make(chan error, 1)}
+	go local.forwardFaults(ctx)
 	for index, association := range associations {
 		control.setAssociationReady(index, int(association.MaxMessageStreamID()))
-		go readAssociation(ctx, index, association, control, fatal)
+		go readAssociation(ctx, index, association, control, local.faults)
 	}
-	shutdown := func() {
+	local.shutdown = func() {
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownContext)
 	}
-	return shutdown, fatal, nil
+	return local, nil
+}
+
+// forwardFaults records the first read-loop fault on the local control, as
+// runReceiver does on the SGP. The reverse receiver record then carries it as
+// its fatal error, so a lost association can never pass for undelivered work.
+func (local *localReceiver) forwardFaults(ctx context.Context) {
+	select {
+	case err := <-local.faults:
+		local.control.setFatal(err.Error())
+	case <-ctx.Done():
+	}
+}
+
+// fault is the local receiver's fatal error, empty while it has none.
+func (local *localReceiver) fault() string {
+	return local.control.fatalError()
 }
 
 // collectReverse waits for the SGP reverse driver to finish the matching
@@ -460,6 +497,10 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 			return stopFailedProgress(config.PeerControl, specification, initialObservation, deadlineErr)
 		}
 	}
+	// The drain deadline is past once the cohort ends. Left on the
+	// associations it would fail the next write the library makes on its own
+	// behalf, which closes the association, so every exit clears it.
+	defer clearWriteDeadlines(associations)
 	for _, association := range associations {
 		if deadlineErr := association.SetWriteDeadline(drainDeadline); deadlineErr != nil {
 			_ = postJSON(ctx, config.PeerControl+"/stop", nil)
@@ -474,7 +515,7 @@ func runSenderCohortWith(ctx context.Context, config commandConfig, associations
 		go sweepEchoRequests(tracker, sweepDone)
 	}
 	counters := newSenderCounters(config.Outstanding)
-	counters.drainOutcomes = specification.Overload == nil
+	counters.drainOutcomes = specification.nominalDrainOutcomes()
 	var queues []chan sendJob
 	var routedQueues []chan routingTimedJob
 	var workersDone <-chan struct{}
@@ -955,22 +996,45 @@ func (err *drainDeadlineError) Error() string {
 func (err *drainDeadlineError) timeout(drain time.Duration, deadline time.Time) *drainTimeoutRecord {
 	return &drainTimeoutRecord{
 		Cause: drainTimeoutCause, Drain: drain, Submitted: err.submitted, Accounted: err.accounted,
-		Undelivered: err.submitted - err.accounted, ObservedBeforeDeadline: deadline.Sub(err.observed),
+		Undelivered: err.submitted - err.accounted, ObservedBeforeDeadline: max(deadline.Sub(err.observed), 0),
 	}
 }
 
 // drainTimeoutOutcome separates a nominal cohort's drain deadline outcome
-// from a fixture fault. The overload trial keeps its own contract, in which
-// any drain failure is a fixture failure, so its error is returned unchanged.
+// from a fixture fault. The overload and SGP failure trials keep their own
+// contracts, in which any drain failure is a fixture failure, so their error
+// is returned unchanged.
 func drainTimeoutOutcome(pollErr error, specification runSpec, deadline time.Time) (*drainTimeoutRecord, error) {
 	var outcome *drainDeadlineError
-	if specification.Overload != nil || !errors.As(pollErr, &outcome) {
+	if !specification.nominalDrainOutcomes() || !errors.As(pollErr, &outcome) {
 		return nil, pollErr
 	}
 	return outcome.timeout(specification.Drain, deadline), nil
 }
 
+// drainPollInterval is how often the drain wait reads the receiver's result.
+const drainPollInterval = 10 * time.Millisecond
+
+// drainObservationBound is how recent the last receiver result must be when
+// the drain deadline passes for the wait to report undelivered work rather
+// than a control fault. A responsive control is read every drainPollInterval,
+// so at the deadline its last result is at most one interval and one local
+// request old; ten intervals leave nine for request latency and scheduling
+// before a control that stopped answering is named. The observed runs read it
+// within 12 ms of the deadline. internal/cmd/perfcapacity applies the same
+// bound.
+const drainObservationBound = 10 * drainPollInterval
+
 func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCounters, deadline time.Time) (runRecord, error) {
+	return pollReceiverDrain(ctx, baseURL, counters, deadline, drainPollInterval, drainObservationBound)
+}
+
+// pollReceiverDrain reads the receiver's result every interval until it has
+// accounted for every submitted message or the deadline passes. A deadline
+// that passes after unaccounted work was seen is the drainDeadlineError
+// outcome only if the last result was read no more than bound before it;
+// otherwise the receiver control stopped answering, a fault.
+func pollReceiverDrain(ctx context.Context, baseURL string, counters *senderCounters, deadline time.Time, interval, bound time.Duration) (runRecord, error) {
 	var last runRecord
 	var outstanding *drainDeadlineError
 	// expired reports whether the drain deadline itself, rather than a
@@ -979,10 +1043,16 @@ func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCoun
 	expired := func(err error) bool {
 		return outstanding != nil && errors.Is(err, context.DeadlineExceeded) && !time.Now().Before(deadline)
 	}
+	settle := func() (runRecord, error) {
+		if stale := deadline.Sub(outstanding.observed); stale > bound {
+			return runRecord{}, fmt.Errorf("receiver control did not answer during the drain: its last result was read %s before the deadline", stale)
+		}
+		return last, outstanding
+	}
 	for {
 		if !time.Now().Before(deadline) {
 			if outstanding != nil {
-				return last, outstanding
+				return settle()
 			}
 			return runRecord{}, errors.New("receiver drain deadline exceeded")
 		}
@@ -991,7 +1061,7 @@ func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCoun
 		cancelRequest()
 		if err != nil {
 			if expired(err) {
-				return last, outstanding
+				return settle()
 			}
 			return runRecord{}, err
 		}
@@ -1007,18 +1077,27 @@ func waitReceiverDrain(ctx context.Context, baseURL string, counters *senderCoun
 		}
 		last, outstanding = receiver, &drainDeadlineError{submitted: submitted, accounted: accounted, observed: time.Now()}
 		if !time.Now().Before(deadline) {
-			return receiver, outstanding
+			return settle()
 		}
-		timer := time.NewTimer(10 * time.Millisecond)
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			if expired(ctx.Err()) {
-				return receiver, outstanding
+				return settle()
 			}
 			return receiver, ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+// clearWriteDeadlines removes the cohort's write deadline from every
+// association. An association that is already closed refuses it, which is
+// harmless.
+func clearWriteDeadlines(associations []*m3ua.Association) {
+	for _, association := range associations {
+		_ = association.SetWriteDeadline(time.Time{})
 	}
 }
 
