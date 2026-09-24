@@ -138,6 +138,21 @@ func TestPeerAbortWithHeartbeatIsDetectedWhileIdle(t *testing.T) {
 // and abort before anything is done to the established association, so the
 // subscription can only be the one made before connect or listen. They use the
 // library's own socket configuration, notification handler and reader.
+// requireSubscribedAssociationEvents requires the association to carry the
+// SCTP_ASSOC_CHANGE subscription made before it existed. On a kernel without
+// SCTP_EVENT (Linux before 5.0) the library deliberately falls back to none,
+// so the abort tests have nothing to prove there and skip.
+func requireSubscribedAssociationEvents(t *testing.T, conn *sctp.SCTPConn, what string) {
+	t.Helper()
+	on, err := conn.EventSubscribed(sctp.SCTP_ASSOC_CHANGE)
+	if errors.Is(err, syscall.ENOPROTOOPT) {
+		t.Skipf("skipping: this kernel has no SCTP_EVENT, so the %s carries no association events", what)
+	}
+	if err != nil || !on {
+		t.Fatalf("%s SCTP_ASSOC_CHANGE subscribed = %v (%v), want it subscribed before the association existed", what, on, err)
+	}
+}
+
 func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -158,6 +173,7 @@ func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 	}
 	association.sctpConn = conn
 	t.Cleanup(func() { _ = association.Close() })
+	requireSubscribedAssociationEvents(t, conn, "dialled association")
 
 	// Before setUpSocket, which is where the subscription used to be made.
 	peer.abort(t)
@@ -213,9 +229,7 @@ func TestPeerAbortOnAnAcceptedAssociationEndsTheReadAfterAWriteTookTheSocketErro
 
 	// Nothing has subscribed the accepted socket itself: whatever it carries
 	// came from the listening socket.
-	if on, err := result.conn.EventSubscribed(sctp.SCTP_ASSOC_CHANGE); err != nil || !on {
-		t.Errorf("accepted association SCTP_ASSOC_CHANGE subscribed = %v (%v), want it inherited from the listener", on, err)
-	}
+	requireSubscribedAssociationEvents(t, result.conn, "accepted association")
 
 	if err := peer.Abort(); err != nil {
 		t.Fatalf("aborting the peer association: %v", err)

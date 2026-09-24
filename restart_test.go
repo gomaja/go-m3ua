@@ -675,7 +675,7 @@ func TestCommunicationLostFailsTheReadWhateverTheRoute(t *testing.T) {
 // subscription existed; any other failure is the caller's to see, unretried.
 func TestAssociationEventsFallBackOnlyWhenTheKernelLacksSCTPEvent(t *testing.T) {
 	refused := &net.OpError{Op: "dial", Net: "sctp",
-		Err: fmt.Errorf("sctp: apply PreAssociation.Notification: %w", syscall.ENOPROTOOPT)}
+		Err: fmt.Errorf("sctp: apply PreAssociation.Notifications: %w", syscall.ENOPROTOOPT)}
 	for _, test := range []struct {
 		name  string
 		first error
