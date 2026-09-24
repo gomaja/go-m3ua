@@ -59,7 +59,7 @@ func TestDrainDeadlineWithUnaccountedWorkIsAFailedProbe(testContext *testing.T) 
 		testContext.Fatalf("drain outcome = %+v, fatal %v; want a drain timeout and no fatal error", timeout, fatal)
 	}
 	if timeout.Cause != drainTimeoutCause || timeout.Drain != 2*time.Second || timeout.Submitted != 100 || timeout.Accounted != 93 ||
-		timeout.Undelivered != 7 || timeout.ObservedBeforeDeadline != deadline.Sub(outcome.observed) {
+		timeout.Undelivered != 7 || timeout.ObservedBeforeDeadline != max(deadline.Sub(outcome.observed), 0) {
 		testContext.Fatalf("drain timeout = %+v", timeout)
 	}
 
