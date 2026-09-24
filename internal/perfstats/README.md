@@ -179,7 +179,8 @@ was a transient peak. It bounds the bracket from above exactly as a failed
 probe does, the highest passing probe below it becomes the lower bound, and
 the search resumes: it refines the new bracket and validates the rate it
 selects there with a fresh round of five. A round ends at its first repetition
-that does not pass; repetitions are never retried and a rejected rate is never
+that does not pass, so a driver runs one repetition at a time and stops the
+round there; repetitions are never retried and a rejected rate is never
 probed again. After `MaxValidationRounds` (3) rounds that did not validate the
 search ends `validation-rounds-exhausted`. An inconclusive repetition (missing
 or invalid evidence) says nothing about the rate and ends validation
@@ -204,8 +205,13 @@ Each probe contributes one of four outcomes:
 - `inconclusive`: evidence was missing or invalid. It says nothing about the
   rate and ends the search.
 
-`no-passing-rate` is a failure when every probe failed, and inconclusive when
-any probe or validation repetition was only not demonstrated.
+`no-passing-rate` is a failure when every rate the search tried failed, a rate
+whose probe passed but whose validation then failed counting as failed, and
+inconclusive when any probe or validation repetition was only not
+demonstrated. A search that validation moved below a rejected rate and that
+then ended without refining a new bracket (out of budget, at the integer
+resolution limit or at an inconclusive probe) reports
+`search-did-not-refine-a-bracket-below-a-rejected-rate`.
 
 A probe whose warm-up could not sustain the rate never reaches measurement; its
 failed warm-up cohort is accepted as that probe's evidence, and it can only fail

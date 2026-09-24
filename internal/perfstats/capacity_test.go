@@ -318,6 +318,33 @@ func TestRecordedSmokeSearchContinuesBelowAFailedValidation(testContext *testing
 	}
 }
 
+// The probe budget still binds after a step-down: the recorded smoke search
+// used its eighth probe to bracket 300,000, so with a budget of eight the
+// probe its failed repetition calls for (290,000) is not run, and the search
+// ends out of budget, reported as rejected rather than never refined.
+func TestProbeBudgetBindsAfterAStepDown(testContext *testing.T) {
+	search, err := NewCapacitySearch(40000, 640000, 8)
+	if err != nil {
+		testContext.Fatal(err)
+	}
+	for _, probe := range []ProbeRecord{{40000, ProbePassing}, {80000, ProbePassing}, {160000, ProbePassing}, {320000, ProbeFailing},
+		{240000, ProbePassing}, {280000, ProbePassing}, {300000, ProbePassing}, {310000, ProbeNotDemonstrated}} {
+		if err := search.Record(probe.Rate, probe.Outcome); err != nil {
+			testContext.Fatalf("Record(%d): %v", probe.Rate, err)
+		}
+	}
+	if err := search.Record(300000, ProbePassing); err == nil || !strings.Contains(err.Error(), "awaits a validation repetition at 300000") {
+		testContext.Fatalf("Record while a repetition is pending: %v, want the pending repetition named", err)
+	}
+	recordRepetitions(testContext, search, ProbeFailing)
+	if _, running := search.NextRate(); running || search.Status() != SearchProbeBudgetExhausted {
+		testContext.Fatalf("status %q running %t, want the probe budget exhausted", search.Status(), running)
+	}
+	if decision := DecideCapacity(search); decision.Decision != Inconclusive || decision.Reason != RejectedSearchNotRefinedReason {
+		testContext.Fatalf("DecideCapacity() = %+v, want inconclusive with %q", decision, RejectedSearchNotRefinedReason)
+	}
+}
+
 // Validation descends at most MaxValidationRounds times; then the search is
 // inconclusive, not a pass at whatever rate it reached.
 func TestValidationRoundsAreBounded(testContext *testing.T) {

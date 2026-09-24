@@ -255,6 +255,9 @@ func (search *CapacitySearch) NextRate() (int, bool) {
 // terminates the search. No probe is ever retried.
 func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 	if search.status != SearchRunning {
+		if next, pending := search.NextRepetitionRate(); pending {
+			return fmt.Errorf("no probe is pending: the search awaits a validation repetition at %d", next)
+		}
 		return fmt.Errorf("search already terminated with status %q", search.status)
 	}
 	if rate != search.next {
@@ -323,6 +326,7 @@ const (
 	SearchNotRefinedReason          = "search-did-not-refine-a-pass-fail-bracket"
 	NoPassingRateReason             = "no-passing-rate"
 	NoDemonstratedRateReason        = "no-demonstrated-rate-with-undemonstrated-probes"
+	RejectedSearchNotRefinedReason  = "search-did-not-refine-a-bracket-below-a-rejected-rate"
 	RepetitionsMissingReason        = "validation-repetitions-missing"
 	RepetitionInconclusiveReason    = "validation-repetition-inconclusive"
 	ValidationRoundsExhaustedReason = "validation-rounds-exhausted"
@@ -360,6 +364,11 @@ func DecideCapacity(search *CapacitySearch) CapacityDecision {
 		return CapacityDecision{Decision: Inconclusive, Status: status, Reason: ValidationRoundsExhaustedReason}
 	case SearchBracketed:
 	default:
+		if len(search.rounds) != 0 {
+			// It refined a bracket once; validation rejected that rate, and
+			// the search below it then ended without a new one.
+			return CapacityDecision{Decision: Inconclusive, Status: status, Reason: RejectedSearchNotRefinedReason}
+		}
 		return CapacityDecision{Decision: Inconclusive, Status: status, Reason: SearchNotRefinedReason}
 	}
 
