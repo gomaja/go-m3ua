@@ -416,7 +416,8 @@ func (r *aspRoutes) apply(
 	// the order they reach the lock, which a large report resolving slowly can
 	// change by its resolution time; RFC 4666 orders no messages across
 	// Associations, and delivery to this point never guaranteed one.
-	pendingKeys, affectedMTPRoutes := r.config.reportRanges(association, identity, sgp, statuses)
+	affectedMTPRoutes := make(map[MTPRouteID]struct{})
+	pendingKeys := r.config.reportRanges(association, identity, sgp, statuses, affectedMTPRoutes)
 	if r.applyResolved != nil {
 		r.applyResolved()
 	}
@@ -1287,17 +1288,18 @@ func (r *aspRoutes) indexedRouteStateForRangeLocked(
 }
 
 // reportRanges returns the route ranges one report applied on one Association
-// names, each once, in report then route order, and the MTP Routes they
-// belong to.
+// names, each once, in report then route order, and adds the MTP Routes they
+// belong to to affected. The caller owns affected so that it can stay off the
+// heap, as it did when this ran inline in apply.
 func (c *aspRoutingConfig) reportRanges(
 	association *Association,
 	identity SGPIdentity,
 	sgp aspSGPConfig,
 	statuses []*destinationStatus,
-) ([]aspRouteRangeKey, map[MTPRouteID]struct{}) {
+	affected map[MTPRouteID]struct{},
+) []aspRouteRangeKey {
 	keys := make([]aspRouteRangeKey, 0, len(statuses))
 	seen := make(map[aspRouteRangeKey]struct{}, len(statuses))
-	affected := make(map[MTPRouteID]struct{})
 	scopes := aspRouteScopeMatches{association: association, identity: identity, sgp: sgp, config: c}
 	for _, status := range statuses {
 		if status == nil {
@@ -1322,7 +1324,7 @@ func (c *aspRoutingConfig) reportRanges(
 			affected[mtpRoute.id] = struct{}{}
 		}
 	}
-	return keys, affected
+	return keys
 }
 
 // aspRouteScopeMatches resolves, for one report applied on one Association,
@@ -1334,12 +1336,16 @@ func (c *aspRoutingConfig) reportRanges(
 // 1,000-destination DAVA on an ASP with 1,000 routes held the routing lock
 // that every MTPTransfer waits on for a quarter of a second. Resolved once per
 // distinct scope, it runs once per route.
+//
+// A report nearly always names one scope, so the first resolution is kept in
+// the struct itself and only a report of several scopes allocates for the rest.
 type aspRouteScopeMatches struct {
 	association *Association
 	identity    SGPIdentity
 	sgp         aspSGPConfig
 	config      *aspRoutingConfig
-	resolved    []aspRouteScopeMatch
+	first       aspRouteScopeMatch
+	more        []aspRouteScopeMatch
 }
 
 type aspRouteScopeMatch struct {
@@ -1350,7 +1356,10 @@ type aspRouteScopeMatch struct {
 // routesFor returns the MTP Routes, in the SGP's route order, whose
 // candidates carry status's wire scope.
 func (m *aspRouteScopeMatches) routesFor(status *destinationStatus) []aspMTPRoute {
-	for _, match := range m.resolved {
+	if m.first.scope != nil && sameDestinationStatusScope(m.first.scope, status) {
+		return m.first.routes
+	}
+	for _, match := range m.more {
 		if sameDestinationStatusScope(match.scope, status) {
 			return match.routes
 		}
@@ -1364,7 +1373,11 @@ func (m *aspRouteScopeMatches) routesFor(status *destinationStatus) []aspMTPRout
 			routes = append(routes, mtpRoute)
 		}
 	}
-	m.resolved = append(m.resolved, aspRouteScopeMatch{scope: status, routes: routes})
+	if m.first.scope == nil {
+		m.first = aspRouteScopeMatch{scope: status, routes: routes}
+	} else {
+		m.more = append(m.more, aspRouteScopeMatch{scope: status, routes: routes})
+	}
 	return routes
 }
 

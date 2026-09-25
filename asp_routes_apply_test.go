@@ -139,7 +139,8 @@ func TestReportRangesMatchesThePerStatusWalk(t *testing.T) {
 			status.Mask = masks[rng.Intn(len(masks))]
 			statuses[index] = &status
 		}
-		gotKeys, gotAffected := routes.config.reportRanges(association, identity, sgp, statuses)
+		gotAffected := make(map[MTPRouteID]struct{})
+		gotKeys := routes.config.reportRanges(association, identity, sgp, statuses, gotAffected)
 		wantKeys, wantAffected := referenceReportRanges(&routes.config, association, identity, sgp, statuses)
 		if len(gotKeys) != len(wantKeys) || (len(wantKeys) != 0 && !reflect.DeepEqual(gotKeys, wantKeys)) ||
 			!reflect.DeepEqual(gotAffected, wantAffected) {
@@ -275,7 +276,8 @@ func TestReportRangesMatchesThePerStatusWalkWithRegistrationsAndMaskedRoutes(t *
 			status.Mask = masks[rng.Intn(len(masks))]
 			statuses[index] = &status
 		}
-		gotKeys, gotAffected := routes.config.reportRanges(association, identity, sgp, statuses)
+		gotAffected := make(map[MTPRouteID]struct{})
+		gotKeys := routes.config.reportRanges(association, identity, sgp, statuses, gotAffected)
 		wantKeys, wantAffected := referenceReportRanges(&routes.config, association, identity, sgp, statuses)
 		if len(gotKeys) != len(wantKeys) || (len(wantKeys) != 0 && !reflect.DeepEqual(gotKeys, wantKeys)) ||
 			!reflect.DeepEqual(gotAffected, wantAffected) {
