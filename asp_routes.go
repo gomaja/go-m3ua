@@ -7,6 +7,7 @@ package m3ua
 import (
 	"container/list"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 )
@@ -99,6 +100,10 @@ type aspRoutes struct {
 	mu sync.RWMutex
 
 	config aspRoutingConfig
+	// applyResolved, when set, runs in apply between resolving a report's
+	// route ranges and taking the routing write lock. Tests use it to detach
+	// the Association in that window; it is nil otherwise.
+	applyResolved func()
 
 	associations              map[*Association]SGPIdentity
 	associationsBySGP         map[SGPIdentity]map[*Association]struct{}
@@ -390,85 +395,80 @@ func (r *aspRoutes) apply(
 	if r == nil || association == nil || len(statuses) == 0 {
 		return nil
 	}
-	r.mu.Lock()
+	r.mu.RLock()
 	identity, exists := r.associations[association]
+	r.mu.RUnlock()
 	if !exists {
-		r.mu.Unlock()
 		return nil
 	}
 	sgp, exists := r.config.sgpByIdentity[identity]
 	if !exists {
+		return nil
+	}
+
+	// Which route ranges the report names depends on the compiled inventory,
+	// which never changes once an Association can reach it, on the report,
+	// and on the Association's own configuration and registration bindings,
+	// which its own locks guard and the routing lock never did. So it is
+	// resolved before the routing write lock is taken, and the lock that
+	// every MTPTransfer waits on covers only the budget checks, the writes and
+	// the recompute. Reports from two SGPs of one SG are therefore written in
+	// the order they reach the lock, which a large report resolving slowly can
+	// change by its resolution time; RFC 4666 orders no messages across
+	// Associations, and delivery to this point never guaranteed one.
+	affectedMTPRoutes := make(map[MTPRouteID]struct{})
+	pendingKeys := r.config.reportRanges(association, identity, sgp, statuses, affectedMTPRoutes)
+	if r.applyResolved != nil {
+		r.applyResolved()
+	}
+
+	r.mu.Lock()
+	// The Association may have detached, or reattached under another identity,
+	// while the ranges were resolved; the report then belongs to no route of
+	// this registry, exactly as when it arrives after detach.
+	if current, attached := r.associations[association]; !attached || current != identity {
 		r.mu.Unlock()
 		return nil
 	}
-	pendingKeys := make([]aspRouteRangeKey, 0, len(statuses))
-	pendingSet := make(map[aspRouteRangeKey]struct{}, len(statuses))
+	// Refuse the whole report before writing any of it if it would take a
+	// route, an SG or the Endpoint over its record budget.
 	newRecordsPerRoute := make(map[aspRouteStateBudgetKey]int)
 	newRecordsPerSignallingGateway := make(map[SignallingGatewayID]int)
 	newRecordCount := 0
-	affectedMTPRoutes := make(map[MTPRouteID]struct{})
-
-	for _, status := range statuses {
-		if status == nil {
+	for _, key := range pendingKeys {
+		if r.hasRouteStateRecordLocked(key, update.kind) {
 			continue
 		}
-		for _, routeID := range sgp.routeOrder {
-			if !r.config.routeCandidateMatchesStatus(association, identity, routeID, status) {
-				continue
-			}
-			mtpRoute, ok := r.mtpRoute(routeID)
-			if !ok {
-				continue
-			}
-			pointCode, mask, overlaps := aspRouteIntersection(mtpRoute, status.PointCode, status.Mask)
-			if !overlaps {
-				continue
-			}
-			key := aspRouteRangeKey{
-				signallingGateway: identity.SignallingGateway,
-				mtpRoute:          routeID,
-				pointCode:         pointCode,
-				mask:              mask,
-			}
-			if _, duplicate := pendingSet[key]; duplicate {
-				continue
-			}
-			pendingSet[key] = struct{}{}
-			if !r.hasRouteStateRecordLocked(key, update.kind) {
-				budgetKey := aspRouteStateBudgetKey{
-					signallingGateway: key.signallingGateway,
-					mtpRoute:          key.mtpRoute,
-				}
-				if r.stateRecordsPerRoute[budgetKey]+newRecordsPerRoute[budgetKey]+1 >
-					r.config.maxSSNMStateRecordsPerRoute {
-					r.mu.Unlock()
-					return fmt.Errorf("%w: SG %q MTP Route %q would exceed the %d-record limit",
-						ErrASPRouteStateLimit,
-						budgetKey.signallingGateway,
-						budgetKey.mtpRoute,
-						r.config.maxSSNMStateRecordsPerRoute)
-				}
-				if r.stateRecordsPerSignallingGateway[budgetKey.signallingGateway]+
-					newRecordsPerSignallingGateway[budgetKey.signallingGateway]+1 >
-					r.config.maxSSNMStateRecordsPerSignallingGateway {
-					r.mu.Unlock()
-					return fmt.Errorf("%w: SG %q would exceed the %d-record limit",
-						ErrASPRouteStateLimit,
-						budgetKey.signallingGateway,
-						r.config.maxSSNMStateRecordsPerSignallingGateway)
-				}
-				if r.stateRecordCount+newRecordCount+1 > r.config.maxSSNMStateRecords {
-					r.mu.Unlock()
-					return fmt.Errorf("%w: Endpoint would exceed the %d-record limit",
-						ErrASPRouteStateLimit, r.config.maxSSNMStateRecords)
-				}
-				newRecordsPerRoute[budgetKey]++
-				newRecordsPerSignallingGateway[budgetKey.signallingGateway]++
-				newRecordCount++
-			}
-			pendingKeys = append(pendingKeys, key)
-			affectedMTPRoutes[routeID] = struct{}{}
+		budgetKey := aspRouteStateBudgetKey{
+			signallingGateway: key.signallingGateway,
+			mtpRoute:          key.mtpRoute,
 		}
+		if r.stateRecordsPerRoute[budgetKey]+newRecordsPerRoute[budgetKey]+1 >
+			r.config.maxSSNMStateRecordsPerRoute {
+			r.mu.Unlock()
+			return fmt.Errorf("%w: SG %q MTP Route %q would exceed the %d-record limit",
+				ErrASPRouteStateLimit,
+				budgetKey.signallingGateway,
+				budgetKey.mtpRoute,
+				r.config.maxSSNMStateRecordsPerRoute)
+		}
+		if r.stateRecordsPerSignallingGateway[budgetKey.signallingGateway]+
+			newRecordsPerSignallingGateway[budgetKey.signallingGateway]+1 >
+			r.config.maxSSNMStateRecordsPerSignallingGateway {
+			r.mu.Unlock()
+			return fmt.Errorf("%w: SG %q would exceed the %d-record limit",
+				ErrASPRouteStateLimit,
+				budgetKey.signallingGateway,
+				r.config.maxSSNMStateRecordsPerSignallingGateway)
+		}
+		if r.stateRecordCount+newRecordCount+1 > r.config.maxSSNMStateRecords {
+			r.mu.Unlock()
+			return fmt.Errorf("%w: Endpoint would exceed the %d-record limit",
+				ErrASPRouteStateLimit, r.config.maxSSNMStateRecords)
+		}
+		newRecordsPerRoute[budgetKey]++
+		newRecordsPerSignallingGateway[budgetKey.signallingGateway]++
+		newRecordCount++
 	}
 
 	for _, key := range pendingKeys {
@@ -1285,6 +1285,109 @@ func (r *aspRoutes) indexedRouteStateForRangeLocked(
 		node = node.children[branch]
 	}
 	return availability, availabilitySet, congestion, congestionSet
+}
+
+// reportRanges returns the route ranges one report applied on one Association
+// names, each once, in report then route order, and adds the MTP Routes they
+// belong to to affected. The caller owns affected so that it can stay off the
+// heap, as it did when this ran inline in apply.
+func (c *aspRoutingConfig) reportRanges(
+	association *Association,
+	identity SGPIdentity,
+	sgp aspSGPConfig,
+	statuses []*destinationStatus,
+	affected map[MTPRouteID]struct{},
+) []aspRouteRangeKey {
+	keys := make([]aspRouteRangeKey, 0, len(statuses))
+	seen := make(map[aspRouteRangeKey]struct{}, len(statuses))
+	scopes := aspRouteScopeMatches{association: association, identity: identity, sgp: sgp, config: c}
+	for _, status := range statuses {
+		if status == nil {
+			continue
+		}
+		for _, mtpRoute := range scopes.routesFor(status) {
+			pointCode, mask, overlaps := aspRouteIntersection(mtpRoute, status.PointCode, status.Mask)
+			if !overlaps {
+				continue
+			}
+			key := aspRouteRangeKey{
+				signallingGateway: identity.SignallingGateway,
+				mtpRoute:          mtpRoute.id,
+				pointCode:         pointCode,
+				mask:              mask,
+			}
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+			affected[mtpRoute.id] = struct{}{}
+		}
+	}
+	return keys
+}
+
+// aspRouteScopeMatches resolves, for one report applied on one Association,
+// which of the SGP's MTP Routes have a candidate carried in a status's wire
+// scope. routeCandidateMatchesStatus depends on a status only through that
+// scope -- its Network Appearance and Routing Contexts, never its point code
+// -- and the statuses of one report share it. Evaluated for every status, the
+// candidate walk and its scope resolution ran destinations x routes times: a
+// 1,000-destination DAVA on an ASP with 1,000 routes held the routing lock
+// that every MTPTransfer waits on for a quarter of a second. Resolved once per
+// distinct scope, it runs once per route.
+//
+// A report nearly always names one scope, so the first resolution is kept in
+// the struct itself and only a report of several scopes allocates for the rest.
+type aspRouteScopeMatches struct {
+	association *Association
+	identity    SGPIdentity
+	sgp         aspSGPConfig
+	config      *aspRoutingConfig
+	first       aspRouteScopeMatch
+	more        []aspRouteScopeMatch
+}
+
+type aspRouteScopeMatch struct {
+	scope  *destinationStatus
+	routes []aspMTPRoute
+}
+
+// routesFor returns the MTP Routes, in the SGP's route order, whose
+// candidates carry status's wire scope.
+func (m *aspRouteScopeMatches) routesFor(status *destinationStatus) []aspMTPRoute {
+	if m.first.scope != nil && sameDestinationStatusScope(m.first.scope, status) {
+		return m.first.routes
+	}
+	for _, match := range m.more {
+		if sameDestinationStatusScope(match.scope, status) {
+			return match.routes
+		}
+	}
+	var routes []aspMTPRoute
+	for _, routeID := range m.sgp.routeOrder {
+		if !m.config.routeCandidateMatchesStatus(m.association, m.identity, routeID, status) {
+			continue
+		}
+		if mtpRoute, ok := m.config.mtpRoute(routeID); ok {
+			routes = append(routes, mtpRoute)
+		}
+	}
+	if m.first.scope == nil {
+		m.first = aspRouteScopeMatch{scope: status, routes: routes}
+	} else {
+		m.more = append(m.more, aspRouteScopeMatch{scope: status, routes: routes})
+	}
+	return routes
+}
+
+// sameDestinationStatusScope reports whether two statuses name the same wire
+// scope, the only part of a status aspRouteASMatchesStatus reads.
+func sameDestinationStatusScope(first, second *destinationStatus) bool {
+	return first.NetworkAppearance == second.NetworkAppearance &&
+		first.NetworkAppearanceSet == second.NetworkAppearanceSet &&
+		first.RoutingContextSet == second.RoutingContextSet &&
+		slices.Equal(first.RoutingContexts, second.RoutingContexts)
 }
 
 func aspRouteASMatchesStatus(association *Association, key ASKey, status *destinationStatus) bool {
