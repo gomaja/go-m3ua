@@ -60,15 +60,13 @@ type Association struct {
 	//
 	// This is the SCTP_SNDRCV control message, which RFC 6458 Section 5.3.2
 	// deprecates in favour of SCTP_SNDINFO. The receive side has moved — see
-	// SetRecvRcvInfo in setUpSocket — but the send side deliberately has not.
+	// SetRecvRcvInfo in setUpSocket — but the send side has not yet.
 	//
-	// SCTPWrite byte-swaps PPID per message and SCTPWriteInfo passes it through
-	// untouched, matching SetDefaultSndInfo; the dependency documents the
-	// difference on both. Moving would put PPID 3 on the wire as 0x03000000
-	// unless this package byte-swapped it itself, which is knowledge of network
-	// byte order that the current call does not require of it, for no
-	// behavioural gain. The kernel accepts either form, and both can be mixed
-	// on one association.
+	// Byte order is not what holds it back. The dependency takes PPID in host
+	// order on every send path, SCTPWrite, SCTPWriteInfo and SetDefaultSndInfo
+	// alike, and converts it to network order at the kernel boundary, so
+	// moving to SCTP_SNDINFO needs no byte swapping here. The move changes the
+	// per-message send path, so it is a change of its own.
 	//
 	// setUpSocket also installs this template as the socket's
 	// SCTP_DEFAULT_SNDINFO, because the one send that carries no ancillary data
