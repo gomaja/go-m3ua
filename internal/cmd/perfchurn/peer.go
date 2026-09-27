@@ -94,8 +94,12 @@ func (peer *peerRun) event(format string, arguments ...any) {
 	}
 }
 
+// localAddress binds to the configured -local-ip in its own family. net.ParseIP
+// holds an IPv4 address in its 16-byte mapped form, so Unmap restores the
+// four-byte address; an IPv6 address such as ::1 passes through unchanged.
 func (peer *peerRun) localAddress(port int) *sctp.Addr {
-	return &sctp.Addr{IPs: []netip.Addr{netip.AddrFrom4([4]byte(peer.localIP.To4()))}, Port: uint16(port)}
+	ip, _ := netip.AddrFromSlice(peer.localIP)
+	return &sctp.Addr{IPs: []netip.Addr{ip.Unmap()}, Port: uint16(port)}
 }
 
 // establish dials the 32 stable associations. The SGP-role Dial returns once
