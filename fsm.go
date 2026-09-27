@@ -244,10 +244,12 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 func (c *Association) handleStateUpdateAsIPSPDoubleExchange(current State, entering bool) error {
 	switch current {
 	case StateASPDown:
+		peerDown := c.peerDownAwaitingEntry
+		c.peerDownAwaitingEntry = false
 		if entering {
 			c.forgetActiveRoutingContexts()
 		}
-		if !entering || c.terminating.Load() ||
+		if !entering || peerDown || c.terminating.Load() ||
 			c.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic ||
 			c.localIPSPState != StateASPDown {
 			return nil
@@ -583,6 +585,9 @@ func (c *Association) commitState(s State) bool {
 	}
 	stateChanged := c.state != s
 	c.state = s
+	if s != StateASPDown {
+		c.peerDownAwaitingEntry = false
+	}
 	c.muState.Unlock()
 	unlockTransfer()
 	if stateChanged {
@@ -683,6 +688,13 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// held would go on believing it was carrying traffic the SGP had
 		// already taken away.
 		if err := c.handleAspDownAck(msg); err != nil {
+			// An Ack still owed for a retransmission of an earlier ASP Down
+			// cannot undo a newer ASP Up (RFC 4666 Sections 4.3.4.1 and
+			// 4.3.4.2). It is neither a new transition nor a peer error.
+			if errors.Is(err, errDuplicateASPDownAck) {
+				c.sendState(stateUnchanged)
+				return
+			}
 			c.sendErrForMessage(msg, raw, err)
 
 			var unexpected *UnexpectedMessageError

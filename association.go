@@ -107,6 +107,10 @@ type Association struct {
 	// IPSP in the RFC 4666 Double Exchange model. state retains the remote
 	// IPSP's state for traffic directed to the peer.
 	localIPSPState State
+	// A peer ASP Down ends its ASPSM exchange under RFC 4666 Section 5.6.2.
+	// The resulting ASP-DOWN publication must not initiate another ASP Up.
+	// Guarded by muState and consumed by that publication's entry action.
+	peerDownAwaitingEntry bool
 	// appliedState is the state the entry-action pass last ran for.
 	//
 	// It exists because state is now committed by sendState, on the dispatch
@@ -826,7 +830,18 @@ func (c *Association) WriteSignal(m3 messages.M3UA) (n int, err error) {
 // writeControl writes a message the library sends on its own behalf. It waits
 // for send-buffer space rather than failing on it; see writeControlFrame.
 func (c *Association) writeControl(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, true, libraryWrite)
+	if _, isASPDown := m3.(*messages.AspDown); !isASPDown || c.tack == nil || !c.isIPSPDoubleExchange() {
+		return c.writeSignal(m3, true, libraryWrite)
+	}
+	c.tack.aspDownDeliveryMu.Lock()
+	defer c.tack.aspDownDeliveryMu.Unlock()
+	n, err = c.writeSignal(m3, true, libraryWrite)
+	if err == nil {
+		c.tack.mu.Lock()
+		c.tack.aspDownAcksOutstanding++
+		c.tack.mu.Unlock()
+	}
+	return n, err
 }
 
 // writeDistributedSignal writes a message whose Application Server has already

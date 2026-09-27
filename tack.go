@@ -73,6 +73,13 @@ type tackRetransmitter struct {
 	// retransmission is distinguishable from an unsolicited Ack only by this
 	// bounded current-epoch evidence.
 	aspUpAcknowledged bool
+	// RFC 4666 Section 4.3.4.2 requires one ASP Down Ack for every ASP Down,
+	// including retransmissions. This counts successfully sent messages still
+	// owed an Ack in the current SCTP association.
+	aspDownAcksOutstanding uint64
+	// Serializes an ASP Down write and its count update with Ack classification.
+	// An Ack may arrive before the sending goroutine resumes from SendMsg.
+	aspDownDeliveryMu sync.Mutex
 	// awaitingRestartAspUp rejects ASPTM Acks left over from the prior SCTP
 	// epoch until the mandatory fresh ASP-Up procedure completes. Stream 0 has
 	// no request identifier with which an old ASPTM Ack could otherwise be
@@ -507,6 +514,25 @@ func (c *Association) isRepeatedASPUpAcknowledgement() bool {
 	return c.tack.aspUpAcknowledged
 }
 
+// claimASPDownAcknowledgement consumes one owed response whether or not a
+// T(ack) request remains. Only an Ack without a pending request and with an
+// outstanding transmission is a duplicate of an earlier ASP Down.
+func (c *Association) claimASPDownAcknowledgement() (pendingTAckAcknowledgement, bool) {
+	if c.tack == nil {
+		return pendingTAckAcknowledgement{}, false
+	}
+	c.tack.aspDownDeliveryMu.Lock()
+	defer c.tack.aspDownDeliveryMu.Unlock()
+	acknowledgement := c.claimTAckAcknowledgement(requestAspDown, nil)
+	c.tack.mu.Lock()
+	duplicate := !acknowledgement.solicited && c.tack.aspDownAcksOutstanding > 0
+	if c.tack.aspDownAcksOutstanding > 0 {
+		c.tack.aspDownAcksOutstanding--
+	}
+	c.tack.mu.Unlock()
+	return acknowledgement, duplicate
+}
+
 // rejectStaleASPTMAck reports an ASPTM Ack that cannot belong to the current
 // control procedure. After SCTP restart, RFC 4666 Section 4.3.3 requires
 // recovery to begin with ASP Up, so no ASP Active/Inactive Ack is actionable
@@ -671,12 +697,15 @@ func (c *Association) resetTAckEpoch() {
 		return
 	}
 	c.tack.retryMu.Lock()
+	c.tack.aspDownDeliveryMu.Lock()
 	c.tack.mu.Lock()
 	c.tack.awaitingRestartAspUp = c.role == RoleASP || c.role == RoleIPSP
 	c.tack.aspUpAcknowledged = false
+	c.tack.aspDownAcksOutstanding = 0
 	c.cancelAllTAckLocked()
 	clear(c.tack.acknowledgedASPTM)
 	c.tack.mu.Unlock()
+	c.tack.aspDownDeliveryMu.Unlock()
 	c.tack.retryMu.Unlock()
 }
 
