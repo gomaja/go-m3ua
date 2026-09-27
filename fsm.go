@@ -244,10 +244,12 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 func (c *Association) handleStateUpdateAsIPSPDoubleExchange(current State, entering bool) error {
 	switch current {
 	case StateASPDown:
+		peerDown := c.peerDownAwaitingEntry
+		c.peerDownAwaitingEntry = false
 		if entering {
 			c.forgetActiveRoutingContexts()
 		}
-		if !entering || c.terminating.Load() ||
+		if !entering || peerDown || c.terminating.Load() ||
 			c.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic ||
 			c.localIPSPState != StateASPDown {
 			return nil
@@ -583,6 +585,9 @@ func (c *Association) commitState(s State) bool {
 	}
 	stateChanged := c.state != s
 	c.state = s
+	if s != StateASPDown {
+		c.peerDownAwaitingEntry = false
+	}
 	c.muState.Unlock()
 	unlockTransfer()
 	if stateChanged {

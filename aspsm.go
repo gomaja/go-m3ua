@@ -342,6 +342,9 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 }
 
 func (c *Association) handleAspDownDoubleExchange() error {
+	c.muState.Lock()
+	c.peerDownAwaitingEntry = true
+	c.muState.Unlock()
 	c.commitState(StateASPDown)
 	if c.usesSingleASPSMExchange() {
 		c.commitLocalIPSPState(StateASPDown)
@@ -381,7 +384,12 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 	}
 	if c.role == RoleIPSP {
 		if c.isIPSPDoubleExchange() {
-			acknowledgement := c.claimTAckAcknowledgement(requestAspDown, nil)
+			acknowledgement, duplicate := c.claimASPDownAcknowledgement()
+			// RFC 4666 Section 4.3.4.2 gives an unsolicited Ack its own
+			// ASP-DOWN transition once all sent ASP Downs have been answered.
+			if duplicate {
+				return nil
+			}
 			c.commitLocalIPSPState(StateASPDown)
 			c.noteNoRoutingContextsAcked()
 			c.quiesceLocalIPSPSSNMTraffic()

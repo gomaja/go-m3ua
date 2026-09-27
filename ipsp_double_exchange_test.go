@@ -902,6 +902,171 @@ func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testin
 	}
 }
 
+func TestIPSPSingleASPSMPeerDownDoesNotStartANewASPUp(t *testing.T) {
+	association, sent := newDoubleExchangeIPSPForTest(t)
+	association.cfg.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPActive,
+		TrafficToPeer:  StateASPActive,
+	})
+	association.muState.Lock()
+	association.appliedState = StateASPActive
+	association.stateEntered = true
+	association.muState.Unlock()
+
+	association.handleReceivedSignals(context.Background(), messages.NewAspDown(nil), nil)
+	select {
+	case state := <-association.stateChan:
+		if state != StateASPDown {
+			t.Fatalf("published state = %v, want ASP-DOWN", state)
+		}
+		if err := association.handlePublishedStateUpdate(state); err != nil {
+			t.Fatalf("apply peer ASP Down: %v", err)
+		}
+	default:
+		t.Fatal("peer ASP Down published no state")
+	}
+	if got := countType(*sent, "ASP Down Ack"); got != 1 {
+		t.Fatalf("peer ASP Down produced %d Acks, want 1", got)
+	}
+	if got := countType(*sent, "ASP Up"); got != 0 {
+		t.Fatalf("peer ASP Down started %d new ASP Up procedures, want 0", got)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPDown,
+		TrafficToPeer:  StateASPDown,
+	}) {
+		t.Fatalf("state after peer ASP Down = %+v, want both directions ASP-DOWN", got)
+	}
+}
+
+func TestIPSPSingleASPSMDelayedDownAckDoesNotResetNewASPUp(t *testing.T) {
+	association := singleASPSMWithCompletedDownForTest(t, 1)
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("delayed duplicate ASP Down Ack: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPInactive,
+		TrafficToPeer:  StateASPInactive,
+	}) {
+		t.Fatalf("delayed duplicate ASP Down Ack reset new exchange to %+v", got)
+	}
+}
+
+func TestIPSPSingleASPSMUnsolicitedDownAckAfterDuplicatesTakesDown(t *testing.T) {
+	association := singleASPSMWithCompletedDownForTest(t, 1)
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("delayed duplicate ASP Down Ack: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPInactive,
+		TrafficToPeer:  StateASPInactive,
+	}) {
+		t.Fatalf("duplicate Ack changed newer exchange to %+v", got)
+	}
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("unsolicited ASP Down Ack: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPDown,
+		TrafficToPeer:  StateASPDown,
+	}) {
+		t.Fatalf("unsolicited Ack left IPSP in %+v, want both directions ASP-DOWN", got)
+	}
+}
+
+func TestIPSPSingleASPSMTwoDelayedDownAcksThenUnsolicited(t *testing.T) {
+	association := singleASPSMWithCompletedDownForTest(t, 2)
+	for i := 0; i < 2; i++ {
+		if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+			t.Fatalf("delayed duplicate ASP Down Ack %d: %v", i+1, err)
+		}
+		if got := association.IPSPState(); got != (IPSPState{
+			TrafficToLocal: StateASPInactive,
+			TrafficToPeer:  StateASPInactive,
+		}) {
+			t.Fatalf("duplicate Ack %d changed newer exchange to %+v", i+1, got)
+		}
+	}
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("unsolicited ASP Down Ack: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPDown,
+		TrafficToPeer:  StateASPDown,
+	}) {
+		t.Fatalf("unsolicited Ack left IPSP in %+v, want both directions ASP-DOWN", got)
+	}
+}
+
+func TestIPSPSingleASPSMNewDownKeepsEarlierAckDebt(t *testing.T) {
+	association := singleASPSMWithCompletedDownForTest(t, 1)
+	if _, err := association.initiateASPDown(); err != nil {
+		t.Fatalf("send new ASP Down: %v", err)
+	}
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("first remaining ASP Down Ack: %v", err)
+	}
+	if err := association.handleAspUp(messages.NewAspUp(nil, nil)); err != nil {
+		t.Fatalf("peer ASP Up after newer ASP Down Ack: %v", err)
+	}
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("second remaining ASP Down Ack: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPInactive,
+		TrafficToPeer:  StateASPInactive,
+	}) {
+		t.Fatalf("remaining Ack reset newer exchange to %+v", got)
+	}
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("unsolicited ASP Down Ack: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPDown,
+		TrafficToPeer:  StateASPDown,
+	}) {
+		t.Fatalf("unsolicited Ack left IPSP in %+v, want both directions ASP-DOWN", got)
+	}
+}
+
+func singleASPSMWithCompletedDownForTest(t *testing.T, retransmissions int) *Association {
+	t.Helper()
+	association, sent := newDoubleExchangeIPSPForTest(t)
+	association.cfg.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
+	association.cfg.TAck = time.Hour
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPActive,
+		TrafficToPeer:  StateASPActive,
+	})
+	association.terminating.Store(true)
+	request, err := association.initiateASPDown()
+	if err != nil {
+		t.Fatalf("send initial ASP Down: %v", err)
+	}
+	for i := 0; i < retransmissions; i++ {
+		if _, err := association.writeControl(request.msg); err != nil {
+			t.Fatalf("send ASP Down retransmission %d: %v", i+1, err)
+		}
+	}
+	if got := countType(*sent, "ASP Down"); got != retransmissions+1 {
+		t.Fatalf("ASP Down transmissions = %d, want %d", got, retransmissions+1)
+	}
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
+		t.Fatalf("first ASP Down Ack: %v", err)
+	}
+	if err := association.handleAspUp(messages.NewAspUp(nil, nil)); err != nil {
+		t.Fatalf("peer ASP Up after ASP Down Ack: %v", err)
+	}
+	if got := association.IPSPState(); got != (IPSPState{
+		TrafficToLocal: StateASPInactive,
+		TrafficToPeer:  StateASPInactive,
+	}) {
+		t.Fatalf("state after peer ASP Up = %+v, want both directions ASP-INACTIVE", got)
+	}
+	return association
+}
+
 func TestIPSPSingleASPSMDownAckDefersASNotifyUntilTrafficDrains(t *testing.T) {
 	association, _ := newDoubleExchangeIPSPForTest(t)
 	association.cfg.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
