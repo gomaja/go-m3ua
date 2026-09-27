@@ -64,8 +64,8 @@ type AssociationSnapshot struct {
     Role        Role
     State       State
     IPSPState   IPSPState
-    LocalAddr   *sctp.SCTPAddr
-    RemoteAddr  *sctp.SCTPAddr
+    LocalAddr   *sctp.Addr
+    RemoteAddr  *sctp.Addr
 
     PeerASPIdentifier    uint32
     PeerASPIdentifierSet bool

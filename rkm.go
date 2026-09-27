@@ -85,7 +85,7 @@ type RoutingKeyPeer struct {
 	Role             Role
 	ASPIdentifier    uint32
 	ASPIdentifierSet bool
-	RemoteAddr       *sctp.SCTPAddr
+	RemoteAddr       *sctp.Addr
 }
 
 // RoutingKeyRegistrationRequest is the immutable request passed to a Routing

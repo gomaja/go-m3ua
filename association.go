@@ -24,7 +24,7 @@ import (
 // M3UAPPID is the SCTP Payload Protocol Identifier IANA assigned to M3UA.
 //
 // RFC 4666 Section 7.1 says value 3 SHOULD be included in each SCTP DATA chunk.
-// The value is in host order here, as expected by sctp.SCTPWrite; that method
+// The value is in host order here, as expected by sctp.SendMsg; that method
 // performs the conversion required for the SCTP ancillary data on the wire.
 const M3UAPPID uint32 = 3
 
@@ -53,26 +53,20 @@ type Association struct {
 	// first Association's socket. That Association then reported the wrong peer, read the
 	// other ASP's traffic, wrote to the other ASP, and closed the other ASP's
 	// socket on Close. See multi_asp_test.go.
-	sctpConn *sctp.SCTPConn
-	// sctpInfo is the SndRcvInfo template for sends on this association. It is
+	sctpConn *sctp.Conn
+	// sctpInfo is the SndInfo template for sends on this association. It is
 	// per-Association for the same reason as sctpConn, and is copied by value at each
 	// send so the stream ID can vary per message.
 	//
-	// This is the SCTP_SNDRCV control message, which RFC 6458 Section 5.3.2
-	// deprecates in favour of SCTP_SNDINFO. The receive side has moved — see
-	// SetRecvRcvInfo in setUpSocket — but the send side has not yet.
+	// SendMsg carries this as SCTP_SNDINFO (RFC 6458 Section 5.3.4):
+	// stream 0 for M3UA management (RFC 4666 Section 1.4.7) and PPID 3
+	// in host order (RFC 4666 Section 7.1). go-sctp converts PPID at the
+	// ancillary-data boundary. The receive path gets SCTP_RCVINFO by value
+	// from ReadMsg (RFC 6458 Section 5.3.5).
 	//
-	// Byte order is not what holds it back. The dependency takes PPID in host
-	// order on every send path, SCTPWrite, SCTPWriteInfo and SetDefaultSndInfo
-	// alike, and converts it to network order at the kernel boundary, so
-	// moving to SCTP_SNDINFO needs no byte swapping here. The move changes the
-	// per-message send path, so it is a change of its own.
-	//
-	// setUpSocket also installs this template as the socket's
-	// SCTP_DEFAULT_SNDINFO, because the one send that carries no ancillary data
-	// at all -- writeControlFrame's wait for buffer space -- takes its stream and
-	// PPID from there.
-	sctpInfo *sctp.SndRcvInfo
+	// The waiting control send carries the same SndInfo explicitly, so no
+	// SCTP_DEFAULT_SNDINFO socket setting is needed (RFC 6458 Section 8.1.31).
+	sctpInfo *sctp.SndInfo
 	// lastRecv is when the last successfully parsed M3UA message with PPID 0 or
 	// M3UAPPID was received from the peer, in Unix nanoseconds. RFC 4666 Section
 	// 4.3.4.6 counts "any other M3UA message" as evidence the peer is alive, so
@@ -133,6 +127,9 @@ type Association struct {
 	resumeTo State
 	// stateChan is to update the state and handle it
 	stateChan chan State
+	// restartStateChan lets the dispatcher wait until the monitor has applied
+	// ASP-DOWN before it handles messages from the restarted peer.
+	restartStateChan chan restartStateUpdate
 	// inboundChan serialises SCTP notifications with M3UA messages in the exact
 	// order the association reader observed them. It is deliberately
 	// unbuffered in a live Association: the reader cannot move past a restart and hand
@@ -384,7 +381,17 @@ type Association struct {
 	signalWriter func(m3 messages.M3UA) (int, error)
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
-	dataWriter func([]byte, *sctp.SndRcvInfo) (int, error)
+	dataWriter func([]byte, *sctp.SndInfo) (int, error)
+	// applicationWriteDeadline records whether DATA sends should wait for socket
+	// buffer space. The socket itself enforces the deadline when it is set.
+	applicationWriteDeadline atomic.Bool
+	// Abort can interrupt a graceful transport close after the M3UA teardown
+	// has started. These channels separate the start and end of that release.
+	gracefulReleaseStarted chan struct{}
+	releaseCompleted       chan struct{}
+	closingAbortive        atomic.Bool
+	abortOvertakeStarted   atomic.Bool
+	abortOvertakeOnce      sync.Once
 	// controlTransport is the test seam for writeControlFrame's two sends.
 	// Production leaves it nil and writes through sctpConn.
 	controlTransport controlSender
@@ -469,25 +476,28 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 	}
 
 	c := &Association{
-		muState:      new(sync.RWMutex),
-		role:         role,
-		stateChan:    make(chan State),
-		inboundChan:  make(chan inbound),
-		established:  make(chan struct{}, 1),
-		done:         make(chan struct{}),
-		errChan:      make(chan error),
-		dataChan:     make(chan *DataMessage, dataQueueSize),
-		beatAckChan:  make(chan struct{}, 1), // see notifyBeatAck: buffers an Ack that beats heartbeat() to its select
-		beatStart:    make(chan struct{}),
-		destinations: newDestinations(),
-		tack:         newTAckRetransmitter(),
+		muState:                new(sync.RWMutex),
+		role:                   role,
+		stateChan:              make(chan State),
+		restartStateChan:       make(chan restartStateUpdate),
+		inboundChan:            make(chan inbound),
+		established:            make(chan struct{}, 1),
+		done:                   make(chan struct{}),
+		gracefulReleaseStarted: make(chan struct{}),
+		releaseCompleted:       make(chan struct{}),
+		errChan:                make(chan error),
+		dataChan:               make(chan *DataMessage, dataQueueSize),
+		beatAckChan:            make(chan struct{}, 1), // see notifyBeatAck: buffers an Ack that beats heartbeat() to its select
+		beatStart:              make(chan struct{}),
+		destinations:           newDestinations(),
+		tack:                   newTAckRetransmitter(),
 		// Sized for the handful of transitions an association makes in its
 		// lifetime rather than for an unbounded stream.
 		stateEventChan:            make(chan State, 16),
 		mgmtChan:                  make(chan *ManagementIndication, 64),
 		notificationQueue:         make(chan mandatoryControl, defaultNotificationQueueSize),
 		cfg:                       cfg,
-		sctpInfo:                  &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
+		sctpInfo:                  &sctp.SndInfo{PPID: M3UAPPID, Stream: 0},
 		dynamicPeerASKeys:         make(map[uint32]ASKey),
 		dynamicLocalASKeys:        make(map[uint32]ASKey),
 		dynamicPeerASKeyVersions:  make(map[uint32]uint64),
@@ -694,9 +704,9 @@ func (c *Association) setUpSocket() error {
 			_ = c.sctpConn.Close()
 			return err
 		}
-		if err := c.sctpConn.SetSackTimer(&sctp.SackTimer{
-			SackDelay:     sack.SackDelay,
-			SackFrequency: sack.SackFrequency,
+		if err := c.sctpConn.SetDelayedSACK(&sctp.DelayedSACK{
+			Delay:     time.Duration(sack.SackDelay) * time.Millisecond,
+			Frequency: uint32(sack.SackFrequency),
 		}); err != nil {
 			_ = c.sctpConn.Close()
 			return fmt.Errorf("failed to set sack timer: %w", err)
@@ -704,50 +714,15 @@ func (c *Association) setUpSocket() error {
 	}
 
 	if nd := c.cfg.SCTPNoDelayInfo; nd != nil && nd.Enabled {
-		optval := 0
-		if nd.NoDelay {
-			optval = 1
-		}
-		if err := c.sctpConn.SetNoDelay(optval); err != nil {
+		if err := c.sctpConn.SetNoDelay(nd.NoDelay); err != nil {
 			_ = c.sctpConn.Close()
 			return fmt.Errorf("failed to set no delay: %w", err)
 		}
 	}
 
-	// The stream a message arrived on is part of what makes it valid (RFC 4666
-	// Section 1.4.7 rules 1 to 3, and Section 3.8.1's "Invalid Stream
-	// Identifier" error), and the kernel reports it only when asked: without
-	// this, every read comes back with no ancillary data and the receive-side
-	// stream checks have nothing to check.
-	//
-	// SCTP_RECVRCVINFO is the non-deprecated way to ask. RFC 6458 Section 5.3.2
-	// splits the old sctp_sndrcvinfo into SCTP_SNDINFO for sending and
-	// SCTP_RCVINFO for receiving, and the read path accepts either form, so this
-	// asks for exactly the per-message information it needs. The alternative,
-	// SubscribeEvents(SCTP_EVENT_DATA_IO), goes through the deprecated
-	// SCTP_EVENTS and would also have to be kept clear of the notification
-	// flags, which deliver association and peer-address events into the same
-	// read stream where the dispatcher would try to parse them as M3UA.
-	if err := c.sctpConn.SetRecvRcvInfo(true); err != nil {
-		_ = c.sctpConn.Close()
-		return fmt.Errorf("failed to enable SCTP_RECVRCVINFO: %w", err)
-	}
-
-	// writeControlFrame waits for send-buffer space through Write, the one send
-	// that carries no ancillary data, so the kernel applies these defaults to
-	// it (RFC 6458 Section 8.1.31). They are the control template every other
-	// control write names explicitly: stream 0, where RFC 4666 Section 1.4.7
-	// rule 2 puts the ASPSM, MGMT and RKM classes and rule 3 permits the rest,
-	// and the M3UA PPID. Without them that write would leave with PPID 0.
-	if err := c.sctpConn.SetDefaultSndInfo(&sctp.SndInfo{
-		SID:  c.sctpInfo.Stream,
-		PPID: c.sctpInfo.PPID,
-	}); err != nil {
-		_ = c.sctpConn.Close()
-		return fmt.Errorf("failed to set SCTP_DEFAULT_SNDINFO: %w", err)
-	}
-
-	r, err := c.sctpConn.GetStatus()
+	// ReadMsg always returns SCTP_RCVINFO with stream and PPID in host order
+	// (RFC 6458 Section 5.3.5); go-sctp enables it before association setup.
+	r, err := c.sctpConn.Status()
 	if err != nil {
 		_ = c.sctpConn.Close()
 		return fmt.Errorf("failed to get SCTP association status: %w", err)
@@ -758,26 +733,26 @@ func (c *Association) setUpSocket() error {
 	// getsockopt and an unsigned 0-1 would wrap to 65535 — every DATA would
 	// then go out on a stream the peer never opened and be discarded by it,
 	// silently and completely.
-	if r.Ostreams == 0 {
+	if r.OutStreams == 0 {
 		_ = c.sctpConn.Close()
-		return fmt.Errorf("peer negotiated %d outbound streams", r.Ostreams)
+		return fmt.Errorf("peer negotiated %d outbound streams", r.OutStreams)
 	}
-	c.maxMessageStreamID = r.Ostreams - 1
+	c.maxMessageStreamID = r.OutStreams - 1
 	// Recorded so a shared notification handler can tell which association an
 	// event belongs to: a Listener installs one handler for every association
 	// it accepts, and the kernel names the association only by this ID.
-	c.assocID.Store(int32(r.AssocID))
-	// SCTP_ASSOC_CHANGE is already subscribed: Dial and Listen subscribe it
+	c.assocID.Store(int32(c.sctpConn.AssocID()))
+	// EventAssocChange is already subscribed: Dial and Listen subscribe it
 	// before the association exists; see associationEvents.
 
 	return nil
 }
 
-func (c *Association) writeSCTPData(data []byte, info *sctp.SndRcvInfo) (int, error) {
+func (c *Association) writeSCTPData(data []byte, info *sctp.SndInfo) (int, error) {
 	if c.dataWriter != nil {
 		return c.dataWriter(data, info)
 	}
-	return c.sctpConn.SCTPWrite(data, info)
+	return c.sctpConn.SendMsg(data, sctp.SendOptions{Info: info, NoWait: !c.applicationWriteDeadline.Load()})
 }
 
 func (c *Association) inboundDataActive() bool {
@@ -878,12 +853,9 @@ const (
 	libraryWrite
 )
 
-// controlSender is the part of the SCTP association that writes signals: the
-// non-blocking SCTPWrite every signal tries first, and the waiting Write that
-// writeControlFrame falls back to.
+// controlSender sends control messages with explicit per-message SCTP options.
 type controlSender interface {
-	SCTPWrite(b []byte, info *sctp.SndRcvInfo) (int, error)
-	Write(b []byte) (int, error)
+	SendMsg(b []byte, opts sctp.SendOptions) (int, error)
 }
 
 func (c *Association) controlSender() controlSender {
@@ -901,9 +873,7 @@ func (c *Association) controlWriteTimeout() time.Duration {
 	return DefaultControlWriteTimeout
 }
 
-// sendBufferFull reports the SCTP dependency refusing a send for want of
-// send-buffer space. Without a write deadline SCTPWrite does not wait: it
-// passes MSG_DONTWAIT and returns EAGAIN.
+// sendBufferFull identifies a NoWait send refused for lack of buffer space.
 func sendBufferFull(err error) bool {
 	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
 }
@@ -918,21 +888,11 @@ const (
 // writeControlFrame hands the transport a message the library writes on its
 // own behalf, waiting for send-buffer space rather than failing on it.
 //
-// SCTPWrite does not wait unless the application installed a write deadline.
-// Without one a full send buffer comes back as EAGAIN, and treating that as a
-// failure closed the association: a peer whose receive window was closed for a
-// moment, or one DATA chunk waiting out its T3-rtx retransmission at RTO.Min
-// (RFC 9260 Sections 6.3.3 and 16), tore down an association with nothing
-// wrong with it. A full buffer is backpressure, not failure.
-//
-// The first attempt is the ordinary non-blocking one, so a write that fits
-// costs exactly what it did. Only a refused one waits, through Write, which
-// parks in the runtime poller until the socket is writable. Write sends no
-// ancillary data; setUpSocket installed this association's control template as
-// SCTP_DEFAULT_SNDINFO (RFC 6458 Section 8.1.31), so the message still leaves
-// on stream 0 with the M3UA PPID. The refused attempt queued nothing --
-// sctp_sendmsg queues a message whole or not at all -- so sending the whole
-// buffer again cannot duplicate it.
+// SendMsg first tries NoWait with the control SndInfo. A full buffer returns
+// EAGAIN with no message queued; only that refusal is retried through a
+// blocking SendMsg carrying the same stream 0 and M3UA PPID (RFC 6458
+// Sections 5.3.4 and 8.1.31; RFC 4666 Sections 1.4.7 and 7.1). Because
+// both sends carry SndInfo, SCTP_DEFAULT_SNDINFO is unnecessary.
 //
 // The wait is bounded by ControlWriteTimeout. A waiting write holds the
 // socket's write lock, and whatever ordering barrier its caller holds, so an
@@ -940,9 +900,9 @@ const (
 // When the bound expires the association is closed, and that also ends the
 // wait: closing the SCTP association releases any write parked in the poller
 // before the descriptor goes.
-func (c *Association) writeControlFrame(frame []byte, info *sctp.SndRcvInfo) error {
+func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo) error {
 	transport := c.controlSender()
-	_, err := transport.SCTPWrite(frame, info)
+	_, err := transport.SendMsg(frame, sctp.SendOptions{Info: info, NoWait: true})
 	if !sendBufferFull(err) {
 		return err
 	}
@@ -958,7 +918,7 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndRcvInfo) err
 			_ = c.closeWith(expired)
 		}
 	})
-	_, err = transport.Write(frame)
+	_, err = transport.SendMsg(frame, sctp.SendOptions{Info: info})
 	if !state.CompareAndSwap(controlWriteWaiting, controlWriteFinished) {
 		// The watchdog decided first. The association is closing on its
 		// account, whatever this attempt returned, so report the cause.
@@ -1085,13 +1045,13 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	if origin == libraryWrite {
 		err = c.writeControlFrame(buf, &sctpInfo)
 	} else {
-		_, err = c.controlSender().SCTPWrite(buf, &sctpInfo)
+		_, err = c.controlSender().SendMsg(buf, sctp.SendOptions{Info: &sctpInfo, NoWait: !c.applicationWriteDeadline.Load()})
 	}
 	if err != nil {
 		return 0, fmt.Errorf("failed to write M3UA: %w", err)
 	}
 
-	// The encoded length, counted once. It used to have the SCTPWrite return
+	// The encoded length, counted once. It used to have the transport write return
 	// added to it, which is the same number again.
 	return n, nil
 }
@@ -1479,8 +1439,8 @@ func (c *Association) Close() error {
 // (RFC 9260 Section 9). Abort does not wait for the peer. The peer's SCTP
 // layer reports COMMUNICATION LOST (RFC 9260 Section 11.2.5; SCTP_COMM_LOST in
 // RFC 6458 Section 6.1.1), never SHUTDOWN_COMPLETE, and a go-m3ua peer then
-// ends with an Err matching ErrSCTPNotAlive wherever its kernel reports
-// association events (Linux 5.0 and later).
+// ends with an Err matching ErrSCTPNotAlive on Linux 5.0 or later, where
+// association events are required when Dial or Listen creates the socket.
 //
 // Like Close, Abort sends no ASP Inactive or ASP Down. It is neither of the
 // Section 4.9 options but the transport loss every M3UA peer already handles,
@@ -1504,13 +1464,38 @@ func (c *Association) Close() error {
 // end, so only the first performs it and reports its error, and later calls
 // return nil. An Abort during ShutdownContext's ASP Inactive or ASP Down
 // exchange takes that teardown, and ShutdownContext stops waiting. An Abort
-// that finds Close already releasing SCTP cannot overtake it: it waits for
-// that release, which the SCTP dependency bounds by aborting a SHUTDOWN the
-// peer has not completed within three seconds, and returns nil.
+// that finds Close waiting for SHUTDOWN asks Conn.Abort to send ABORT at
+// once; the waiting Close then finishes. The first teardown's recorded cause
+// remains in Err and ManagementIndications (RFC 9260 Sections 9.1, 11.1.4).
 //
 // Neither Listener.Close nor Endpoint.Close calls it. An application that wants
 // every association aborted calls Abort on each before closing their owner.
 func (c *Association) Abort() error {
+	// A concurrent Close may already own closeOnce and be waiting for SCTP's
+	// SHUTDOWN. Its Conn.Abort must run concurrently to overtake that wait.
+	// RFC 9260 Sections 9.1 and 11.1.4; RFC 6458 Section 4.1.7.
+	if c.sctpConn != nil {
+		go func() {
+			<-c.done
+			if c.closingAbortive.Load() {
+				return
+			}
+			select {
+			case <-c.gracefulReleaseStarted:
+			case <-c.releaseCompleted:
+				return
+			}
+			select {
+			case <-c.releaseCompleted:
+				return
+			default:
+			}
+			c.abortOvertakeOnce.Do(func() {
+				c.abortOvertakeStarted.Store(true)
+				_ = c.abortTransport()
+			})
+		}()
+	}
 	_, err := c.endWith(ErrAssociationAborted, true)
 	return err
 }
@@ -1564,6 +1549,7 @@ func (c *Association) closeWith(cause error) error {
 func (c *Association) endWith(cause error, abortive bool) (ended bool, err error) {
 	c.closeOnce.Do(func() {
 		ended = true
+		c.closingAbortive.Store(abortive)
 		if cause != nil {
 			c.closeErr.Store(cause)
 		}
@@ -1577,8 +1563,10 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		if abortive {
 			err = c.abortTransport()
 		} else {
+			close(c.gracefulReleaseStarted)
 			err = c.closeTransport()
 		}
+		close(c.releaseCompleted)
 		unlockTransfer := c.lockASPTransferMutation()
 		c.muState.Lock()
 		previousState := c.state
@@ -1633,7 +1621,14 @@ func (c *Association) closeTransport() error {
 		return c.transportCloser()
 	}
 	if c.sctpConn != nil {
-		return c.sctpConn.Close()
+		err := c.sctpConn.Close()
+		// An Abort may win the narrow interval between this teardown's
+		// release signal and Conn.Close. Conn.Close then sees an already
+		// released descriptor, although that release was our own Abort.
+		if errors.Is(err, net.ErrClosed) && c.abortOvertakeStarted.Load() {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
@@ -1668,7 +1663,7 @@ func (c *Association) RemoteAddr() net.Addr {
 // the consequences documented on SetWriteDeadline.
 func (c *Association) SetDeadline(t time.Time) error {
 	c.setReadDeadline(t)
-	return c.sctpConn.SetWriteDeadline(t)
+	return c.SetWriteDeadline(t)
 }
 
 // SetReadDeadline sets the deadline for future ReadData calls.
@@ -1727,7 +1722,11 @@ func (c *Association) readTimeout() (<-chan time.Time, func(), bool) {
 // os.ErrDeadlineExceeded rather than ErrControlWriteTimeout: the message could
 // not be sent, and nothing can wait beyond a deadline the socket enforces.
 func (c *Association) SetWriteDeadline(t time.Time) error {
-	return c.sctpConn.SetWriteDeadline(t)
+	if err := c.sctpConn.SetWriteDeadline(t); err != nil {
+		return err
+	}
+	c.applicationWriteDeadline.Store(!t.IsZero())
+	return nil
 }
 
 // State returns the current RFC 4666 ASP/IPSP state of the Association. For
@@ -2404,9 +2403,9 @@ func (c *Association) SetSCTPSACK(sackDelay, sackFrequency uint32) error {
 	if err := validateSackDelay(sackDelay); err != nil {
 		return err
 	}
-	return c.sctpConn.SetSackTimer(&sctp.SackTimer{
-		SackDelay:     sackDelay,
-		SackFrequency: sackFrequency,
+	return c.sctpConn.SetDelayedSACK(&sctp.DelayedSACK{
+		Delay:     time.Duration(sackDelay) * time.Millisecond,
+		Frequency: sackFrequency,
 	})
 }
 
@@ -2416,11 +2415,7 @@ func (c *Association) SetSCTPSACK(sackDelay, sackFrequency uint32) error {
 // user messages are sent as soon as possible. When false, small messages
 // may be bundled to improve throughput.
 func (c *Association) SetSCTPNoDelay(noDelay bool) error {
-	optval := 0
-	if noDelay {
-		optval = 1
-	}
-	return c.sctpConn.SetNoDelay(optval)
+	return c.sctpConn.SetNoDelay(noDelay)
 }
 
 // streamFor maps a Signalling Link Selection value onto a data stream.
@@ -3159,8 +3154,11 @@ type AssociationStatus struct {
 	// PrimaryCongestionWindow is the primary path's congestion window, in
 	// octets.
 	PrimaryCongestionWindow uint32
-	// PrimarySmoothedRTT is the primary path's smoothed round-trip time.
-	PrimarySmoothedRTT time.Duration
+	// PrimarySmoothedRTTTicks is the primary path's raw spinfo_srtt value in
+	// kernel ticks. Linux net/sctp/socket.c copies transport->srtt without
+	// converting it, although RFC 6458 Section 8.2.2 specifies milliseconds.
+	// A tick's length depends on the kernel's CONFIG_HZ.
+	PrimarySmoothedRTTTicks uint32
 	// PrimaryRetransmissionTimeout is the primary path's current RTO. It is the
 	// delay before an unacknowledged chunk is resent, so it bounds how long a
 	// lost message can go unnoticed.
@@ -3176,25 +3174,25 @@ type AssociationStatus struct {
 // linux/sctp.h begins at SCTP_EMPTY, not SCTP_CLOSED, so a table numbered from
 // CLOSED = 0 is off by one throughout and reports an established association as
 // COOKIE_ECHOED. The dependency documents that trap on the constant block.
-func associationStateName(s sctp.StatusState) string {
+func associationStateName(s sctp.AssocState) string {
 	switch s {
-	case sctp.SCTP_EMPTY:
+	case sctp.StateEmpty:
 		return "EMPTY"
-	case sctp.SCTP_CLOSED:
+	case sctp.StateClosed:
 		return "CLOSED"
-	case sctp.SCTP_COOKIE_WAIT:
+	case sctp.StateCookieWait:
 		return "COOKIE-WAIT"
-	case sctp.SCTP_COOKIE_ECHOED:
+	case sctp.StateCookieEchoed:
 		return "COOKIE-ECHOED"
-	case sctp.SCTP_ESTABLISHED:
+	case sctp.StateEstablished:
 		return "ESTABLISHED"
-	case sctp.SCTP_SHUTDOWN_PENDING:
+	case sctp.StateShutdownPending:
 		return "SHUTDOWN-PENDING"
-	case sctp.SCTP_SHUTDOWN_SENT:
+	case sctp.StateShutdownSent:
 		return "SHUTDOWN-SENT"
-	case sctp.SCTP_SHUTDOWN_RECEIVED:
+	case sctp.StateShutdownReceived:
 		return "SHUTDOWN-RECEIVED"
-	case sctp.SCTP_SHUTDOWN_ACK_SENT:
+	case sctp.StateShutdownAckSent:
 		return "SHUTDOWN-ACK-SENT"
 	default:
 		return fmt.Sprintf("unknown(%d)", int32(s))
@@ -3217,23 +3215,23 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 		return nil, ErrAssociationClosed
 	}
 
-	r, err := c.sctpConn.GetStatus()
+	r, err := c.sctpConn.Status()
 	if err != nil {
 		return nil, err
 	}
 
 	return &AssociationStatus{
 		State:                        associationStateName(r.State),
-		ReceiverWindow:               r.RWND,
-		UnackedDataChunks:            r.Unackdata,
-		PendingDataChunks:            r.Penddata,
-		InboundStreams:               r.Instreams,
-		OutboundStreams:              r.Ostreams,
+		ReceiverWindow:               r.PeerRwnd,
+		UnackedDataChunks:            r.Unacked,
+		PendingDataChunks:            r.Pending,
+		InboundStreams:               r.InStreams,
+		OutboundStreams:              r.OutStreams,
 		FragmentationPoint:           r.FragmentationPoint,
-		PrimaryCongestionWindow:      r.PrimaryPeerAddr.CWND,
-		PrimarySmoothedRTT:           time.Duration(r.PrimaryPeerAddr.SRTT) * time.Millisecond,
-		PrimaryRetransmissionTimeout: time.Duration(r.PrimaryPeerAddr.RTO) * time.Millisecond,
-		PrimaryMTU:                   r.PrimaryPeerAddr.MTU,
+		PrimaryCongestionWindow:      r.Primary.Cwnd,
+		PrimarySmoothedRTTTicks:      r.Primary.SRTTTicks,
+		PrimaryRetransmissionTimeout: r.Primary.RTO,
+		PrimaryMTU:                   r.Primary.MTU,
 	}, nil
 }
 
@@ -3257,7 +3255,7 @@ func (c *Association) SocketReceiveBuffer() (int, error) {
 	if c.sctpConn == nil {
 		return 0, ErrAssociationClosed
 	}
-	return c.sctpConn.GetReadBuffer()
+	return c.sctpConn.ReadBuffer()
 }
 
 // SocketSendBuffer reports the association's socket send buffer size, in bytes,
@@ -3271,7 +3269,7 @@ func (c *Association) SocketSendBuffer() (int, error) {
 	if c.sctpConn == nil {
 		return 0, ErrAssociationClosed
 	}
-	return c.sctpConn.GetWriteBuffer()
+	return c.sctpConn.WriteBuffer()
 }
 
 // ManagementIndicationKind identifies which of RFC 4666's Layer Management

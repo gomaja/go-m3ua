@@ -74,7 +74,7 @@ func exerciseIPSPSingleExchangeIntegration(t *testing.T, sctpInitiator, aspsmIni
 		accepted <- associationResult{association: association, err: acceptErr}
 	}()
 	dialed, err := dialingEndpoint.Dial(
-		ctx, "m3ua", mcAddr(0, "127.0.0.1"), listener.Addr().(*sctp.SCTPAddr), dialingConfig,
+		ctx, "m3ua", mcAddr(0, "127.0.0.1"), listener.Addr().(*sctp.Addr), dialingConfig,
 	)
 	if err != nil {
 		t.Fatalf("Dial IPSP: %v", err)

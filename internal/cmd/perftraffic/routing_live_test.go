@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -96,10 +97,10 @@ func routingLiveConfigFromEnvironment(testContext *testing.T) routingLiveConfig 
 	return config
 }
 
-func routingLivePeerAddresses(ip net.IP) []*sctp.SCTPAddr {
-	addresses := make([]*sctp.SCTPAddr, 4)
+func routingLivePeerAddresses(ip net.IP) []*sctp.Addr {
+	addresses := make([]*sctp.Addr, 4)
 	for index := range addresses {
-		addresses[index] = &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: append(net.IP(nil), ip...)}}, Port: 2905 + index}
+		addresses[index] = &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr(ip.String())}, Port: uint16(2905 + index)}
 	}
 	return addresses
 }
@@ -218,7 +219,7 @@ func runRoutingLiveSender(testContext *testing.T, config routingLiveConfig) {
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	local := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: append(net.IP(nil), config.SenderIP...)}}, Port: 0}
+	local := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr(config.SenderIP.String())}, Port: 0}
 	set, err := startRoutingSenderSet(ctx, topology, local, routingLivePeerAddresses(config.PeerIP), nil)
 	if err != nil {
 		testContext.Fatal(err)

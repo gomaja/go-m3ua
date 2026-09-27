@@ -8,7 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"net"
+	"net/netip"
 	"os"
 	"syscall"
 	"testing"
@@ -31,7 +31,7 @@ func dialLoopbackSGP(t *testing.T, port int) (*Association, ASKey) {
 		c.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 		return c
 	}
-	address := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, Port: port}
+	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(port)}
 
 	asp, err := NewEndpoint(EndpointConfig{Role: RoleASP})
 	if err != nil {
@@ -128,7 +128,7 @@ func TestRefusedDataNeverReachesThePeer(t *testing.T) {
 			key := ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 			config := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
 			config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
-			address := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, Port: variant.port}
+			address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(variant.port)}
 			sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 			if err != nil {
 				t.Fatal(err)

@@ -8,7 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -88,11 +88,11 @@ func TestApplicationServerWaitsForConfiguredActiveASPThreshold(t *testing.T) {
 // These tests are socket-backed and therefore only run where SCTP exists
 // (Linux); they skip elsewhere, as the rest of the socket tests do.
 
-// mcAddr builds an SCTPAddr from one or more dotted-quad addresses.
-func mcAddr(port int, ips ...string) *sctp.SCTPAddr {
-	a := &sctp.SCTPAddr{Port: port}
+// mcAddr builds an Addr from one or more dotted-quad addresses.
+func mcAddr(port int, ips ...string) *sctp.Addr {
+	a := &sctp.Addr{Port: uint16(port)}
 	for _, s := range ips {
-		a.IPAddrs = append(a.IPAddrs, net.IPAddr{IP: net.ParseIP(s)})
+		a.IPs = append(a.IPs, netip.MustParseAddr(s))
 	}
 	return a
 }
@@ -145,7 +145,7 @@ func mcWrite(c *Association, opc, dpc uint32, payload string) (int, error) {
 }
 
 // mcListen starts an M3UA listener, skipping the test where SCTP is absent.
-func mcListen(t *testing.T, laddr *sctp.SCTPAddr) *Listener {
+func mcListen(t *testing.T, laddr *sctp.Addr) *Listener {
 	t.Helper()
 
 	ln, err := listenSGP("m3ua", laddr, NewListenerConfig(mcSGPConfig()))
@@ -169,7 +169,7 @@ type mcASP struct {
 // mcConnect brings up n ASPs against ln, one at a time so each Accept is
 // unambiguously paired with the Dial that caused it, and returns them in
 // connection order.
-func mcConnect(t *testing.T, ctx context.Context, ln *Listener, raddr *sctp.SCTPAddr, aspIPs []string, port int) []mcASP {
+func mcConnect(t *testing.T, ctx context.Context, ln *Listener, raddr *sctp.Addr, aspIPs []string, port int) []mcASP {
 	t.Helper()
 	return mcConnectWithASPIdentifierBase(t, ctx, ln, raddr, aspIPs, port, 0xAA000000)
 }
@@ -178,7 +178,7 @@ func mcConnectWithASPIdentifierBase(
 	t *testing.T,
 	ctx context.Context,
 	ln *Listener,
-	raddr *sctp.SCTPAddr,
+	raddr *sctp.Addr,
 	aspIPs []string,
 	port int,
 	identifierBase uint32,

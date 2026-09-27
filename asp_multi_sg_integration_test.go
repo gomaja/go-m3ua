@@ -50,7 +50,7 @@ func TestASPMultiSGTransferWhenASPInitiatesSCTPAssociations(t *testing.T) {
 		}()
 
 		aspAssociation, err := aspEndpoint.Dial(
-			ctx, "m3ua", mcAddr(0, "127.0.0.1"), listener.Addr().(*sctp.SCTPAddr),
+			ctx, "m3ua", mcAddr(0, "127.0.0.1"), listener.Addr().(*sctp.Addr),
 			integrationAssociationConfig(RoleASP, peer),
 		)
 		if err != nil {
@@ -114,7 +114,7 @@ func TestASPMultiSGTransferWhenSGPsInitiateSCTPAssociations(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = sgpEndpoint.Close() })
 		association, err := sgpEndpoint.Dial(
-			ctx, "m3ua", mcAddr(0, peer.ip), listener.Addr().(*sctp.SCTPAddr),
+			ctx, "m3ua", mcAddr(0, peer.ip), listener.Addr().(*sctp.Addr),
 			integrationAssociationConfig(RoleSGP, peer),
 		)
 		if err != nil {
@@ -140,8 +140,8 @@ func TestASPMultiSGTransferWhenSGPsInitiateSCTPAssociations(t *testing.T) {
 
 func TestASPMultiSGConcurrentTransferAndRouteChanges(t *testing.T) {
 	endpoint, first, second := newASPMultiSGFixture(t)
-	first.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) { return len(data), nil }
-	second.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) { return len(data), nil }
+	first.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) { return len(data), nil }
+	second.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) { return len(data), nil }
 
 	var workers sync.WaitGroup
 	workers.Add(5)

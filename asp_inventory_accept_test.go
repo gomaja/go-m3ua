@@ -255,7 +255,7 @@ func TestConcurrentAcceptResolutionMatchesProvisionedInventory(t *testing.T) {
 	}
 	listener := newListener(endpoint, &ListenerConfig{
 		SelectAssociationConfig: func(info AcceptInfo) (*AssociationConfig, error) {
-			p, provisioned := byPort[info.RemoteAddr.Port-1]
+			p, provisioned := byPort[int(info.RemoteAddr.Port)-1]
 			if !provisioned {
 				return nil, fmt.Errorf("no peer for port %d", info.RemoteAddr.Port)
 			}
@@ -456,7 +456,7 @@ func TestConcurrentAcceptAttachAndDetachShareRouteStateSafely(t *testing.T) {
 	}
 	listener := newListener(endpoint, &ListenerConfig{
 		SelectAssociationConfig: func(info AcceptInfo) (*AssociationConfig, error) {
-			chosen := sgps[info.RemoteAddr.Port%len(sgps)]
+			chosen := sgps[int(info.RemoteAddr.Port)%len(sgps)]
 			return acceptedASPConfig(
 				chosen.signallingGateway, chosen.sgp,
 				chosen.networkAppearance, chosen.routingContext), nil

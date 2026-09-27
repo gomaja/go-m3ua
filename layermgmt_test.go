@@ -188,10 +188,17 @@ func TestAssociationStatusReportsTheLiveAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AssociationStatus: %v", err)
 	}
+	raw, err := cliConn.sctpConn.Status()
+	if err != nil {
+		t.Fatalf("SCTP Status: %v", err)
+	}
+	if st.PrimarySmoothedRTTTicks != raw.Primary.SRTTTicks {
+		t.Errorf("PrimarySmoothedRTTTicks = %d, want raw kernel ticks %d", st.PrimarySmoothedRTTTicks, raw.Primary.SRTTTicks)
+	}
 
 	// The association is up and carrying an M3UA handshake, so this is the only
 	// state it can be in. Asserted by name because the underlying enum starts
-	// at SCTP_EMPTY rather than SCTP_CLOSED: a table numbered from CLOSED = 0
+	// at StateEmpty rather than StateClosed: a table numbered from CLOSED = 0
 	// renders an established association as COOKIE-ECHOED, and that off-by-one
 	// is exactly what this pins.
 	if st.State != "ESTABLISHED" {
@@ -387,13 +394,13 @@ func TestAssociationEventsAreSubscribedOnALiveAssociation(t *testing.T) {
 	}()
 
 	for name, c := range map[string]*Association{"ASP": cliConn, "SGP": srvConn} {
-		on, err := c.sctpConn.EventSubscribed(sctp.SCTP_ASSOC_CHANGE)
+		on, err := c.sctpConn.Subscribed(sctp.EventAssocChange)
 		if err != nil {
 			t.Errorf("%s: EventSubscribed: %v", name, err)
 			continue
 		}
 		if !on {
-			t.Errorf("%s: SCTP_ASSOC_CHANGE is not subscribed; the kernel will never "+
+			t.Errorf("%s: EventAssocChange is not subscribed; the kernel will never "+
 				"deliver an association restart and M-SCTP_RESTART can never fire", name)
 		}
 		// The association id is what a shared handler routes on, so a zero here

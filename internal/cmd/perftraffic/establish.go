@@ -56,19 +56,19 @@ type associationAcceptorCloser interface {
 // endpointConnector abstracts Endpoint Listen/Dial behind exactly the
 // signatures the fixture needs.
 type endpointConnector interface {
-	Listen(network string, laddr *sctp.SCTPAddr, cfg *m3ua.ListenerConfig) (associationAcceptorCloser, error)
-	Dial(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, cfg *m3ua.AssociationConfig) (*m3ua.Association, error)
+	Listen(network string, laddr *sctp.Addr, cfg *m3ua.ListenerConfig) (associationAcceptorCloser, error)
+	Dial(ctx context.Context, network string, laddr, raddr *sctp.Addr, cfg *m3ua.AssociationConfig) (*m3ua.Association, error)
 }
 
 type m3uaConnector struct {
 	endpoint *m3ua.Endpoint
 }
 
-func (connector m3uaConnector) Listen(network string, laddr *sctp.SCTPAddr, cfg *m3ua.ListenerConfig) (associationAcceptorCloser, error) {
+func (connector m3uaConnector) Listen(network string, laddr *sctp.Addr, cfg *m3ua.ListenerConfig) (associationAcceptorCloser, error) {
 	return connector.endpoint.Listen(network, laddr, cfg)
 }
 
-func (connector m3uaConnector) Dial(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, cfg *m3ua.AssociationConfig) (*m3ua.Association, error) {
+func (connector m3uaConnector) Dial(ctx context.Context, network string, laddr, raddr *sctp.Addr, cfg *m3ua.AssociationConfig) (*m3ua.Association, error) {
 	return connector.endpoint.Dial(ctx, network, laddr, raddr, cfg)
 }
 
@@ -82,7 +82,7 @@ func establishSenderAssociations(ctx context.Context, config commandConfig, conn
 		associations, err := dialSenderAssociations(ctx, config, connector)
 		return associations, func() {}, err
 	}
-	listenAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+	listenAddress, err := sctp.ResolveAddr("sctp", config.SCTPAddress)
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve ASP listen address: %w", err)
 	}
@@ -159,13 +159,13 @@ func acceptOne(ctx context.Context, listener associationAcceptorCloser, deadline
 // unchanged from the working direction: one bounded Dial per association, no
 // retry, the caller reports the first failure.
 func dialSenderAssociations(ctx context.Context, config commandConfig, connector endpointConnector) ([]*m3ua.Association, error) {
-	remoteAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+	remoteAddress, err := sctp.ResolveAddr("sctp", config.SCTPAddress)
 	if err != nil {
 		return nil, fmt.Errorf("resolve SGP address: %w", err)
 	}
-	var localAddress *sctp.SCTPAddr
+	var localAddress *sctp.Addr
 	if config.LocalAddress != "" {
-		localAddress, err = sctp.ResolveSCTPAddr("sctp", config.LocalAddress)
+		localAddress, err = sctp.ResolveAddr("sctp", config.LocalAddress)
 		if err != nil {
 			return nil, fmt.Errorf("resolve ASP local address: %w", err)
 		}

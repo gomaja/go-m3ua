@@ -38,7 +38,7 @@ func TestWithdrawnScopeAdmitsNoFurtherWriteData(t *testing.T) {
 	releaseWrite := make(chan struct{})
 	var submissions atomic.Int64
 	var started atomic.Bool
-	asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	asp.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		submissions.Add(1)
 		if started.CompareAndSwap(false, true) {
 			close(writeStarted)
@@ -101,7 +101,7 @@ func TestWriteAdmissionIsOrderedAgainstBindingWithdrawal(t *testing.T) {
 	scope := associationConfigASKey(asp.cfg, 1)
 	var withdrawn atomic.Bool
 	var admittedAfterWithdrawal, accepted, refused atomic.Int64
-	asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	asp.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		if withdrawn.Load() {
 			admittedAfterWithdrawal.Add(1)
 		}

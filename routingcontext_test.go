@@ -80,7 +80,7 @@ func TestASPWithASubsetOfTheSGPsRoutingContextsActivates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	srvAddr := ln.Addr().(*sctp.SCTPAddr)
+	srvAddr := ln.Addr().(*sctp.Addr)
 
 	type acceptResult struct {
 		conn *Association
@@ -129,7 +129,7 @@ func TestTwoASPsWithDistinctRoutingContextsBothActivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	srvAddr := ln.Addr().(*sctp.SCTPAddr)
+	srvAddr := ln.Addr().(*sctp.Addr)
 
 	type acceptResult struct {
 		conn *Association
@@ -192,7 +192,7 @@ func TestContextlessRoutingContextAssociationActivates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	srvAddr := ln.Addr().(*sctp.SCTPAddr)
+	srvAddr := ln.Addr().(*sctp.Addr)
 
 	type acceptResult struct {
 		conn *Association
@@ -260,7 +260,7 @@ func TestRoutingContextHandshakeMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer func() { _ = ln.Close() }()
-			srvAddr := ln.Addr().(*sctp.SCTPAddr)
+			srvAddr := ln.Addr().(*sctp.Addr)
 
 			type acceptResult struct {
 				conn *Association

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -85,8 +84,8 @@ func (transport routingTransportDTO) validate(role m3ua.Role) error {
 	}
 	snapshot := m3ua.AssociationSnapshot{
 		Association: transport.Association, Role: transport.Role, State: transport.State,
-		LocalAddr:  &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.IP(transport.Local.Address.AsSlice()), Zone: transport.Local.Address.Zone()}}, Port: int(transport.Local.Port)},
-		RemoteAddr: &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.IP(transport.Remote.Address.AsSlice()), Zone: transport.Remote.Address.Zone()}}, Port: int(transport.Remote.Port)},
+		LocalAddr:  &sctp.Addr{IPs: []netip.Addr{transport.Local.Address}, Port: transport.Local.Port},
+		RemoteAddr: &sctp.Addr{IPs: []netip.Addr{transport.Remote.Address}, Port: transport.Remote.Port},
 		SCTP:       &m3ua.AssociationStatus{State: transport.SCTPState, InboundStreams: transport.InboundStreams, OutboundStreams: transport.OutboundStreams},
 	}
 	addresses, err := validateRoutingInventorySnapshot(snapshot, role, transport.Epoch, transport.MaxMessageStreamID)

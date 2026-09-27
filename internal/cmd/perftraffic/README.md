@@ -547,12 +547,8 @@ kinds.
   `end_of_stream` for the `io.EOF` a completed SHUTDOWN leaves,
   `communication_lost` for the `SCTP_COMM_LOST` the library reports as
   `ErrSCTPNotAlive`, and `user_abort` when that loss carries the
-  User-Initiated Abort cause of a requested ABORT. It also records whether
-  this kernel reports SCTP association events
-  (`sender.kernel_association_events`), without which an ABORT is not seen
-  as `SCTP_COMM_LOST`. It asks before the measured window opens, the way the
-  library asks, on an SCTP socket that is never bound or connected; the answer
-  is the kernel's and holds for IPv4 and IPv6 alike. The notification instant is the later of the failed
+  User-Initiated Abort cause of a requested ABORT.
+  The notification instant is the later of the failed
   SGP's two, so the SGP is known down; any surviving association ending fails
   the trial. The time from
   the fault to each notification is recorded, not budgeted (section 4 excludes
@@ -580,7 +576,7 @@ one entry per criterion with its numbers (`criteria`), and `verdict`:
 | --- | --- |
 | `fault_injected` | the declared fault ran at its instant, inside the window, on both associations, and no `Close` or `Abort` call returned an error |
 | `transport_failure_notified` | both failed-SGP associations, and no other, ended after the fault |
-| `failure_kind_observed` | what the ASP saw and the SGP's own calls took matches the declared kind. Abort trial: both failed-SGP associations ended on `communication_lost` with `user_abort`, which only an ABORT the SGP requested raises, so an `Abort` that fell back to a SHUTDOWN fails; on a kernel that does not report association events it is `not-measured`. Close trial: both ended at `end_of_stream`, which shows a SHUTDOWN reached the ASP, and each `Close` returned within 2.5 s, which shows the SCTP dependency's ABORT fallback, three seconds into an unfinished SHUTDOWN, did not run (Linux ends the ASP's reads when the SHUTDOWN arrives, so the ASP cannot see that fallback). Neither shows the SHUTDOWN handshake completed |
+| `failure_kind_observed` | what the ASP saw and the SGP's own calls took matches the declared kind. Abort trial: both failed-SGP associations ended on `communication_lost` with `user_abort`, which only an ABORT the SGP requested raises, so an `Abort` that fell back to a SHUTDOWN fails. Close trial: both ended at `end_of_stream`, which shows a SHUTDOWN reached the ASP, and each `Close` returned within 2.5 s, which shows the SCTP dependency's ABORT fallback, three seconds into an unfinished SHUTDOWN, did not run (Linux ends the ASP's reads when the SHUTDOWN arrives, so the ASP cannot see that fallback). Neither shows the SHUTDOWN handshake completed |
 | `pre_failure_nominal` | every message scheduled in the whole bins that end at least one bin before the fault is delivered: the period before the failure was nominal, so no loss is left for the failed path's accounting to absorb and the pre-failure rate is the offered one |
 | `alternative_selection` | the first alternative MTPTransfer returns within 100 ms of the notification (one returning before it, since the notification is the later of the two association ends, is judged as 0); no call started later than that touched or was refused on the failed SGP or failed; every affected route moved |
 | `healthy_path_recovery` | pre-failure rate: mean all-SGP deliveries per bin over whole bins from 1 s after the start to the fault; the first whole bin starting at or after the notification whose surviving-SGP deliveries reach 90% of it must end within 1 s of the notification |

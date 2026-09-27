@@ -192,7 +192,7 @@ func TestDataOnlyFlowsForAnAcknowledgedRoutingContext(t *testing.T) {
 	// The Routing Context travels on the message, so each write names the
 	// Application Server it belongs to and is admitted on that scope alone.
 	var writes int
-	asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	asp.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		writes++
 		return len(data), nil
 	}

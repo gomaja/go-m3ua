@@ -36,7 +36,7 @@ func TestSSNMGeneratorLeavesSGPWritesToTheLibrary(testContext *testing.T) {
 		testContext.Fatal(err)
 	}
 	defer func() { _ = sgp.Close() }()
-	address, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:0")
+	address, err := sctp.ResolveAddr("sctp", "127.0.0.1:0")
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 				testContext.Fatal(err)
 			}
 			defer func() { _ = sgp.Close() }()
-			address, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:0")
+			address, err := sctp.ResolveAddr("sctp", "127.0.0.1:0")
 			if err != nil {
 				testContext.Fatal(err)
 			}

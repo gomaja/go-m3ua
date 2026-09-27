@@ -14,9 +14,8 @@ var errBackpressureTimeout = errors.New("transport kept refusing the message")
 const backpressureRetry = time.Millisecond
 
 // transportRefused reports a DATA send the SCTP stack refused for a full send
-// buffer. go-sctp sends with MSG_DONTWAIT and reports EAGAIN, and
-// sctp_sendmsg queues a message in full or not at all (go-sctp v1.0.6
-// sctp_linux.go, sendmsg), so nothing of a refused message is queued and
+// buffer. go-m3ua sends DATA with SendOptions.NoWait (MSG_DONTWAIT) and reports EAGAIN, and
+// go-sctp v1.1.0 SendMsg queues a message in full or not at all, so nothing of a refused message is queued and
 // offering it again cannot duplicate it. go-m3ua reports the refusal as
 // DataNotSent from #115 on and as DataSendIndeterminate before it; both wrap
 // the transport's EAGAIN, which is what is tested here, so the fixture reads

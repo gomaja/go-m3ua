@@ -72,11 +72,11 @@ type fakeConnector struct {
 	dialErr  error
 }
 
-func (fake *fakeConnector) Listen(string, *sctp.SCTPAddr, *m3ua.ListenerConfig) (associationAcceptorCloser, error) {
+func (fake *fakeConnector) Listen(string, *sctp.Addr, *m3ua.ListenerConfig) (associationAcceptorCloser, error) {
 	return fake.listener, nil
 }
 
-func (fake *fakeConnector) Dial(context.Context, string, *sctp.SCTPAddr, *sctp.SCTPAddr, *m3ua.AssociationConfig) (*m3ua.Association, error) {
+func (fake *fakeConnector) Dial(context.Context, string, *sctp.Addr, *sctp.Addr, *m3ua.AssociationConfig) (*m3ua.Association, error) {
 	fake.dials++
 	return nil, fake.dialErr
 }

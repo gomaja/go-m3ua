@@ -63,7 +63,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 	srvCfg.ASPIdentifier = nil
 
 	// setup SCTP peer on the specified IPs and Port.
-	raddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
+	raddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -97,7 +97,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 	cliCfg := newASPAssociationConfigForTest(cliHB, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	// set nil on unnecessary parameters.
 
-	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
+	laddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, nil, err
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -95,12 +96,12 @@ func TestRoutedPeerAddressesUseFourConsecutivePorts(testContext *testing.T) {
 		testContext.Fatalf("addresses = %d, want 4", len(addresses))
 	}
 	for index, address := range addresses {
-		if len(address.IPAddrs) != 1 || !address.IPAddrs[0].IP.Equal([]byte{127, 0, 0, 1}) || address.Port != 2905+index {
+		if len(address.IPs) != 1 || address.IPs[0] != netip.MustParseAddr("127.0.0.1") || address.Port != uint16(2905+index) {
 			testContext.Fatalf("address %d = %+v", index, address)
 		}
 	}
 	local, err := routedLocalAddress("127.0.0.1:0")
-	if err != nil || local.Port != 0 || len(local.IPAddrs) != 1 {
+	if err != nil || local.Port != 0 || len(local.IPs) != 1 {
 		testContext.Fatalf("local address = %+v, %v", local, err)
 	}
 	for _, invalid := range []string{"0.0.0.0:2905", "[::]:2905", "127.0.0.1:65533", "127.0.0.1"} {

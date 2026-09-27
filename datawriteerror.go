@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 )
 
 // DataSendOutcome is what a failed DATA send leaves behind, and therefore what
@@ -88,9 +89,9 @@ func newDataSendIndeterminate(key ASKey, stream uint16, cause error) *DataWriteE
 // newDataSubmissionError classifies a failure of the transport write itself.
 //
 // Such a failure is indeterminate unless the transport refused the message
-// whole. sctp_sendmsg queues a message whole or not at all, and the SCTP
+// whole. SendMsg queues a message whole or not at all, and the SCTP
 // dependency documents the same, so a send refused for want of send-buffer
-// space -- EAGAIN without a write deadline, or a write deadline that expired
+// space -- EAGAIN from NoWait without a write deadline, or a write deadline that expired
 // while the send waited for space -- leaves nothing of the message queued, let
 // alone on the wire. Reporting that as indeterminate told the application a
 // resend might duplicate exactly when backpressure made resending the right
@@ -105,5 +106,5 @@ func newDataSubmissionError(key ASKey, stream uint16, cause error) *DataWriteErr
 // transportRefusedWhole reports a transport error that means the SCTP stack
 // refused the whole message rather than failing partway.
 func transportRefusedWhole(err error) bool {
-	return sendBufferFull(err) || errors.Is(err, os.ErrDeadlineExceeded)
+	return sendBufferFull(err) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, syscall.EMSGSIZE)
 }

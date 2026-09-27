@@ -3,7 +3,7 @@ package m3ua
 import (
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -245,18 +245,17 @@ func TestRoutingKeyManagementConfigIsDeepSnapshotted(t *testing.T) {
 
 func TestRoutingKeyRegistrationRequestSnapshotOwnsPeerAddress(t *testing.T) {
 	request := RoutingKeyRegistrationRequest{
-		Peer: RoutingKeyPeer{RemoteAddr: &sctp.SCTPAddr{
-			IPAddrs: []net.IPAddr{{IP: net.IPv4(192, 0, 2, 1), Zone: "zone"}},
-			Port:    2905,
+		Peer: RoutingKeyPeer{RemoteAddr: &sctp.Addr{
+			IPs:  []netip.Addr{netip.MustParseAddr("fe80::1%zone")},
+			Port: 2905,
 		}},
 		RoutingKey: testRoutingKey(10, 100, params.ServiceIndSCCP),
 	}
 	snapshot := snapshotRoutingKeyRegistrationRequest(request)
-	request.Peer.RemoteAddr.IPAddrs[0].IP[len(request.Peer.RemoteAddr.IPAddrs[0].IP)-1] = 9
-	request.Peer.RemoteAddr.IPAddrs[0].Zone = "changed"
+	request.Peer.RemoteAddr.IPs[0] = netip.MustParseAddr("fe80::9%changed")
 	request.Peer.RemoteAddr.Port = 1
 
-	if snapshot.Peer.RemoteAddr.Port != 2905 || snapshot.Peer.RemoteAddr.IPAddrs[0].Zone != "zone" || !snapshot.Peer.RemoteAddr.IPAddrs[0].IP.Equal(net.IPv4(192, 0, 2, 1)) {
+	if snapshot.Peer.RemoteAddr.Port != 2905 || snapshot.Peer.RemoteAddr.IPs[0] != netip.MustParseAddr("fe80::1%zone") {
 		t.Fatalf("request snapshot address changed after caller mutation: %+v", snapshot.Peer.RemoteAddr)
 	}
 }

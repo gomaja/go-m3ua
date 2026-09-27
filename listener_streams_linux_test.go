@@ -7,7 +7,7 @@ package m3ua
 import (
 	"context"
 	"encoding/binary"
-	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -27,7 +27,7 @@ func TestAcceptedAssociationCapsAGreedyPeersStreams(t *testing.T) {
 	key := ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	config := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
-	address := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, Port: port}
+	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: port}
 
 	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {
@@ -47,7 +47,7 @@ func TestAcceptedAssociationCapsAGreedyPeersStreams(t *testing.T) {
 			accepted <- association
 		}
 	}()
-	peer := dialStalledASPWith(t, address, 1, sctp.InitMsg{NumOstreams: sctp.SCTP_MAX_STREAM, MaxInstreams: sctp.SCTP_MAX_STREAM})
+	peer := dialStalledASPWith(t, address, 1, sctp.InitMsg{OutStreams: uint16(65535), MaxInStreams: uint16(65535)})
 	var association *Association
 	select {
 	case association = <-accepted:
@@ -55,13 +55,13 @@ func TestAcceptedAssociationCapsAGreedyPeersStreams(t *testing.T) {
 		t.Fatal("the SGP never accepted the association")
 	}
 
-	status, err := association.sctpConn.GetStatus()
+	status, err := association.sctpConn.Status()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Ostreams != sctpStreams || status.Instreams != sctpStreams {
+	if status.OutStreams != sctpStreams || status.InStreams != sctpStreams {
 		t.Fatalf("negotiated %d outbound and %d inbound streams with a peer asking for %d; want %d each",
-			status.Ostreams, status.Instreams, sctp.SCTP_MAX_STREAM, sctpStreams)
+			status.OutStreams, status.InStreams, uint16(65535), sctpStreams)
 	}
 	if got := association.MaxMessageStreamID(); got != sctpStreams-1 {
 		t.Fatalf("DATA streams reach %d; want %d", got, sctpStreams-1)

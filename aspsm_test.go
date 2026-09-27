@@ -38,24 +38,26 @@ func newTestConn(t *testing.T, state State, role Role) (*Association, *[]message
 		// The transport is per-Association, so the send template lives here rather
 		// than on the shared Config; these tests write through signalWriter and
 		// never touch a socket, but StreamID() reads it.
-		sctpInfo: &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0},
+		sctpInfo: &sctp.SndInfo{PPID: M3UAPPID, Stream: 0},
 		// An established association has negotiated streams for DATA. RFC 4666
 		// Section 1.4.7 rule 1 forbids stream 0 for DATA, so leaving this at
 		// zero would model an association that cannot carry traffic at all —
 		// which is a case tests state explicitly when they mean it.
-		maxMessageStreamID: 4,
-		muState:            new(sync.RWMutex),
-		role:               role,
-		state:              state,
-		stateChan:          make(chan State, 8),
-		inboundChan:        make(chan inbound, 8),
-		errChan:            make(chan error, 8),
-		established:        make(chan struct{}, 1),
-		beatAckChan:        make(chan struct{}, 1),
-		beatStart:          make(chan struct{}),
-		dataChan:           make(chan *DataMessage, 8),
-		done:               make(chan struct{}),
-		cfg:                cfg,
+		maxMessageStreamID:     4,
+		muState:                new(sync.RWMutex),
+		role:                   role,
+		state:                  state,
+		stateChan:              make(chan State, 8),
+		inboundChan:            make(chan inbound, 8),
+		errChan:                make(chan error, 8),
+		established:            make(chan struct{}, 1),
+		beatAckChan:            make(chan struct{}, 1),
+		beatStart:              make(chan struct{}),
+		dataChan:               make(chan *DataMessage, 8),
+		done:                   make(chan struct{}),
+		gracefulReleaseStarted: make(chan struct{}),
+		releaseCompleted:       make(chan struct{}),
+		cfg:                    cfg,
 		// Matches Dial/Accept: SSNM handling needs both, and a nil map would
 		// panic on the first destination update.
 		destinations: newDestinations(),

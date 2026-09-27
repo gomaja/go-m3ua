@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"reflect"
 	"sort"
 	"sync"
@@ -25,8 +25,8 @@ type routingSetupListener interface {
 }
 
 type routingSetupEndpoint interface {
-	Listen(*sctp.SCTPAddr, *m3ua.ListenerConfig) (routingSetupListener, error)
-	Dial(context.Context, *sctp.SCTPAddr, *sctp.SCTPAddr, *m3ua.AssociationConfig) (routingSetupAssociation, error)
+	Listen(*sctp.Addr, *m3ua.ListenerConfig) (routingSetupListener, error)
+	Dial(context.Context, *sctp.Addr, *sctp.Addr, *m3ua.AssociationConfig) (routingSetupAssociation, error)
 	AssociationStatus(m3ua.AssociationID) (m3ua.AssociationSnapshot, bool)
 	Close() error
 }
@@ -41,7 +41,7 @@ type routingM3UAListener struct {
 	*m3ua.Listener
 }
 
-func (endpoint routingM3UAEndpoint) Listen(address *sctp.SCTPAddr, config *m3ua.ListenerConfig) (routingSetupListener, error) {
+func (endpoint routingM3UAEndpoint) Listen(address *sctp.Addr, config *m3ua.ListenerConfig) (routingSetupListener, error) {
 	listener, err := endpoint.Endpoint.Listen("m3ua", address, config)
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func (endpoint routingM3UAEndpoint) Listen(address *sctp.SCTPAddr, config *m3ua.
 	return routingM3UAListener{listener}, nil
 }
 
-func (endpoint routingM3UAEndpoint) Dial(ctx context.Context, local, remote *sctp.SCTPAddr, config *m3ua.AssociationConfig) (routingSetupAssociation, error) {
+func (endpoint routingM3UAEndpoint) Dial(ctx context.Context, local, remote *sctp.Addr, config *m3ua.AssociationConfig) (routingSetupAssociation, error) {
 	association, err := endpoint.Endpoint.Dial(ctx, "m3ua", local, remote, config)
 	if err != nil {
 		return nil, err
@@ -186,7 +186,7 @@ func (owner *routingSetupOwner) admit(entry routingSetupEntry) error {
 	return nil
 }
 
-func routingSetupInputs(topology routingTopology, addresses []*sctp.SCTPAddr) (routingTopology, []routingAddress, error) {
+func routingSetupInputs(topology routingTopology, addresses []*sctp.Addr) (routingTopology, []routingAddress, error) {
 	if topology.ASP == nil || topology.ASP.Routing == nil || len(topology.ASP.Routing.Paths) != 2 || len(topology.ASP.Routing.Paths[0].ApplicationServers) != 2 || len(addresses) != 4 {
 		return routingTopology{}, nil, errors.New("routing setup inventory is incomplete")
 	}
@@ -207,8 +207,8 @@ func routingSetupInputs(topology routingTopology, addresses []*sctp.SCTPAddr) (r
 	return owned, concrete, nil
 }
 
-func routingSCTPAddress(address routingAddress) *sctp.SCTPAddr {
-	return &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.IP(address.Address.AsSlice())}}, Port: int(address.Port)}
+func routingSCTPAddress(address routingAddress) *sctp.Addr {
+	return &sctp.Addr{IPs: []netip.Addr{address.Address}, Port: address.Port}
 }
 
 func routingSetupAssociationConfig(peer routingPeer, identifier uint32, sender bool) *m3ua.AssociationConfig {
@@ -223,7 +223,7 @@ func routingSetupAssociationConfig(peer routingPeer, identifier uint32, sender b
 	return config
 }
 
-func startRoutingPeerSet(ctx context.Context, topology routingTopology, addresses []*sctp.SCTPAddr, factory routingSetupFactory) (*routingPeerSet, error) {
+func startRoutingPeerSet(ctx context.Context, topology routingTopology, addresses []*sctp.Addr, factory routingSetupFactory) (*routingPeerSet, error) {
 	owned, concrete, err := routingSetupInputs(topology, addresses)
 	if err != nil {
 		return nil, err
@@ -275,7 +275,7 @@ func startRoutingPeerSet(ctx context.Context, topology routingTopology, addresse
 	return &routingPeerSet{owner}, nil
 }
 
-func startRoutingSenderSet(ctx context.Context, topology routingTopology, local *sctp.SCTPAddr, addresses []*sctp.SCTPAddr, factory routingSetupFactory) (*routingSenderSet, error) {
+func startRoutingSenderSet(ctx context.Context, topology routingTopology, local *sctp.Addr, addresses []*sctp.Addr, factory routingSetupFactory) (*routingSenderSet, error) {
 	owned, concrete, err := routingSetupInputs(topology, addresses)
 	if err != nil {
 		return nil, err
@@ -323,14 +323,11 @@ func startRoutingSenderSet(ctx context.Context, topology routingTopology, local 
 	return &routingSenderSet{owner}, nil
 }
 
-func cloneRoutingSetupAddress(source *sctp.SCTPAddr) *sctp.SCTPAddr {
+func cloneRoutingSetupAddress(source *sctp.Addr) *sctp.Addr {
 	if source == nil {
 		return nil
 	}
-	result := &sctp.SCTPAddr{Port: source.Port, IPAddrs: make([]net.IPAddr, len(source.IPAddrs))}
-	for index, address := range source.IPAddrs {
-		result.IPAddrs[index] = net.IPAddr{IP: append(net.IP(nil), address.IP...), Zone: address.Zone}
-	}
+	result := &sctp.Addr{Port: source.Port, IPs: append([]netip.Addr(nil), source.IPs...)}
 	return result
 }
 

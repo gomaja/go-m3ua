@@ -44,8 +44,7 @@ func NewHeartbeatInfo(interval, timer time.Duration) *HeartbeatInfo {
 // SackDelay sack_delay: This parameter contains the number of milliseconds the
 // user is requesting that the delayed SACK timer be set to.
 //
-// RFC 9260 Section 6.2 — the current SCTP specification, which obsoleted
-// RFC 4960 — bounds it from above only: "An implementation MUST NOT allow the
+// RFC 9260 Section 6.2 bounds it from above only: "An implementation MUST NOT allow the
 // maximum delay (protocol parameter 'SACK.Delay') to be configured to be more
 // than 500 ms. In other words, an implementation MAY lower the value of
 // 'SACK.Delay' below 500 ms but MUST NOT raise it above 500 ms." The 200 ms in
@@ -594,8 +593,8 @@ type AssociationConfig struct {
 // association so a selector can inspect or retain full multi-homing data
 // without mutating transport-owned address objects.
 type AcceptInfo struct {
-	LocalAddr  *sctp.SCTPAddr
-	RemoteAddr *sctp.SCTPAddr
+	LocalAddr  *sctp.Addr
+	RemoteAddr *sctp.Addr
 }
 
 // AssociationConfigSelector chooses the immutable AssociationConfig for an
@@ -891,28 +890,20 @@ func newAcceptInfo(local, remote net.Addr) AcceptInfo {
 	}
 }
 
-func cloneSCTPAddrFromNetAddr(addr net.Addr) *sctp.SCTPAddr {
-	sctpAddr, ok := addr.(*sctp.SCTPAddr)
+func cloneSCTPAddrFromNetAddr(addr net.Addr) *sctp.Addr {
+	sctpAddr, ok := addr.(*sctp.Addr)
 	if !ok {
 		return nil
 	}
 	return cloneSCTPAddr(sctpAddr)
 }
 
-func cloneSCTPAddr(addr *sctp.SCTPAddr) *sctp.SCTPAddr {
+func cloneSCTPAddr(addr *sctp.Addr) *sctp.Addr {
 	if addr == nil {
 		return nil
 	}
-	clone := &sctp.SCTPAddr{Port: addr.Port}
-	if len(addr.IPAddrs) > 0 {
-		clone.IPAddrs = make([]net.IPAddr, len(addr.IPAddrs))
-		for index, ipAddr := range addr.IPAddrs {
-			clone.IPAddrs[index] = net.IPAddr{
-				IP:   append(net.IP(nil), ipAddr.IP...),
-				Zone: ipAddr.Zone,
-			}
-		}
-	}
+	clone := &sctp.Addr{Port: addr.Port}
+	clone.IPs = append(clone.IPs, addr.IPs...)
 	return clone
 }
 

@@ -9,12 +9,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/internal/perfstats"
-	"github.com/gomaja/go-m3ua/internal/sctpevents"
 	"github.com/gomaja/go-sctp"
 )
 
@@ -109,7 +107,7 @@ func newFailoverNotification(association m3ua.AssociationID, sgp m3ua.SGPIdentit
 	return failoverNotification{
 		Association: association, SGP: sgp, At: at, Error: fmt.Sprint(err),
 		EndOfStream: errors.Is(err, io.EOF), CommunicationLost: lost,
-		UserAbort: lost && strings.Contains(err.Error(), sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT))),
+		UserAbort: lost && strings.Contains(err.Error(), sctp.CauseUserAbort.String()),
 	}
 }
 
@@ -141,10 +139,7 @@ type failoverSenderRecord struct {
 	Recovery          failoverRecovery        `json:"recovery"`
 	Samples           []failoverOutcomeSample `json:"failed_path_samples,omitempty"`
 	TransportTimers   failoverTimers          `json:"transport_timers"`
-	// AssociationEvents is whether this kernel reports SCTP association
-	// events, without which an ABORT is not seen as SCTP_COMM_LOST.
-	AssociationEvents string `json:"kernel_association_events"`
-	UnexpectedError   string `json:"unexpected_error,omitempty"`
+	UnexpectedError   string                  `json:"unexpected_error,omitempty"`
 	// LongestCallAfterFault is the MTPTransfer call that took longest among
 	// those started at or after the declared fault instant.
 	LongestCallAfterFault *failoverCall `json:"longest_call_after_fault,omitempty"`
@@ -220,35 +215,6 @@ var failoverKernelTimers = []string{
 	"rto_initial", "rto_min", "rto_max", "path_max_retrans", "association_max_retrans", "hb_interval", "pf_retrans",
 }
 
-// The answers of the association events probe other than an error.
-const (
-	associationEventsSupported   = "supported"
-	associationEventsUnsupported = "unsupported"
-)
-
-// failoverAssociationEventsProbe asks whether this kernel lets a socket
-// subscribe to SCTP_ASSOC_CHANGE through SCTP_EVENT (RFC 6458 Section 6.2.2),
-// which the library needs to report an ABORT as SCTP_COMM_LOST. It asks the
-// way the library does, through the same internal probe: an SCTP socket that
-// is never bound or connected, so nothing reaches the network. The answer is
-// the kernel's, the same for an IPv4 or an IPv6 configuration. A variable so a
-// test can stand in for the kernel.
-var failoverAssociationEventsProbe = func() string { return associationEventsAnswer(sctpevents.Probe()) }
-
-// associationEventsAnswer reads the probe as the library does: only
-// ENOPROTOOPT means a kernel without SCTP_EVENT (Linux before 5.0). Any other
-// failure leaves the question open.
-func associationEventsAnswer(probeErr error) string {
-	switch {
-	case probeErr == nil:
-		return associationEventsSupported
-	case errors.Is(probeErr, syscall.ENOPROTOOPT):
-		return associationEventsUnsupported
-	default:
-		return "unknown: " + probeErr.Error()
-	}
-}
-
 // failoverTracker classifies every MTPTransfer call of a failure cohort and
 // watches the sender associations for the transport-failure notification.
 type failoverTracker struct {
@@ -278,7 +244,6 @@ type failoverTracker struct {
 	unexpectedError   string
 	notifications     []failoverNotification
 	timers            failoverTimers
-	associationEvents string
 
 	stop    chan struct{}
 	watches sync.WaitGroup
@@ -293,9 +258,6 @@ func newFailoverTracker(spec sgpFailureSpec, clock *sharedRunClock, plane *routi
 		spec: spec, clock: clock, due: clock.window.Start + int64(spec.Offset), bindings: append([]routingBinding(nil), plane.bindings...),
 		sgps: make(map[m3ua.AssociationID]m3ua.SGPIdentity), failedSenders: make(map[m3ua.AssociationID]bool), alternativeSenders: make(map[m3ua.AssociationID]bool),
 		submitted: make(map[m3ua.AssociationID]uint64), indeterminate: make(map[m3ua.AssociationID]uint64), stop: make(chan struct{}),
-		// Asked here, before the cohort's measured window opens, so the probe's
-		// socket is no part of what the window measures.
-		associationEvents: failoverAssociationEventsProbe(),
 	}
 	for _, binding := range plane.bindings {
 		tracker.sgps[binding.SenderAssociation] = binding.Peer.SGP
@@ -585,7 +547,7 @@ func (tracker *failoverTracker) evaluate(inputs failoverInputs) *failoverRecord 
 	defer tracker.mutex.Unlock()
 	record := &failoverRecord{Spec: tracker.spec, Sender: &failoverSenderRecord{
 		Outcomes: tracker.outcomes, LastFailedSGPCall: tracker.lastFailedSGPCall, LastFailureCall: tracker.lastFailureCall,
-		Samples: append([]failoverOutcomeSample(nil), tracker.samples...), TransportTimers: tracker.timers, AssociationEvents: tracker.associationEvents,
+		Samples: append([]failoverOutcomeSample(nil), tracker.samples...), TransportTimers: tracker.timers,
 		UnexpectedError: tracker.unexpectedError,
 		Notifications:   append([]failoverNotification(nil), tracker.notifications...),
 	}}
@@ -706,9 +668,8 @@ const sgpFailureShutdownFallback = 2500 * time.Millisecond
 // An abort trial needs both failed-SGP associations to have ended on the
 // SCTP_COMM_LOST with the User-Initiated Abort cause that an ABORT the peer
 // requested raises (RFC 9260 Section 9.1): an Abort that fell back to a
-// SHUTDOWN leaves the end of stream instead. That loss is visible only where
-// the kernel reports association events, so an abort trial on a kernel
-// without them is not measured rather than passed.
+// SHUTDOWN leaves the end of stream instead. Dial and Listen require the
+// association event subscription before starting a trial.
 //
 // A close trial needs both to have ended at the end of stream, which shows a
 // SHUTDOWN reached the ASP, and both Close calls to have returned within
@@ -731,10 +692,6 @@ func (tracker *failoverTracker) failureKindCriterionLocked(record *failoverRecor
 		return criterion
 	}
 	abort := tracker.spec.Kind == sgpFailureKindAbort
-	if abort && record.Sender.AssociationEvents != associationEventsSupported {
-		criterion.Detail = fmt.Sprintf("SCTP association events are %s on this kernel, so an ABORT cannot be told from any other loss", record.Sender.AssociationEvents)
-		return criterion
-	}
 	criterion.Outcome = failoverFail
 	for _, notification := range ended {
 		switch {

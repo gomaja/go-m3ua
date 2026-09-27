@@ -175,7 +175,7 @@ func TestMTPTransferReusesSequenceLocksSafely(testContext *testing.T) {
 	var inFlight [flows]atomic.Int32
 	var violations atomic.Int32
 	for _, association := range associations {
-		association.dataWriter = func(raw []byte, _ *sctp.SndRcvInfo) (int, error) {
+		association.dataWriter = func(raw []byte, _ *sctp.SndInfo) (int, error) {
 			payload, err := capturedMTPTransferPayload(raw)
 			if err != nil {
 				return 0, err

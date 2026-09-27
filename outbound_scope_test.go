@@ -438,7 +438,7 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 				}
 				<-releaseWrite
 			}
-			asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+			asp.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 				holdTheWrite()
 				return len(data), nil
 			}
@@ -503,7 +503,7 @@ func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 	asp.recvStream.Store(0)
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})
-	asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	asp.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(writeStarted)
 		<-releaseWrite
 		return len(data), nil
@@ -619,7 +619,7 @@ func TestASPInactiveAckWaitsForUnscopedDirectData(t *testing.T) {
 	asp.maxMessageStreamID = 4
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})
-	asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	asp.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(writeStarted)
 		<-releaseWrite
 		return len(data), nil

@@ -62,12 +62,12 @@ const sctpStreams = 257
 
 type sctpDialPolicy struct {
 	init    sctp.InitMsg
-	rto     sctp.RtoInfo
-	abandon sctp.DialAbandonPolicy
+	rto     sctp.RTOInfo
+	abandon sctp.AbandonPolicy
 	// events are subscribed before the socket connects; see associationEvents.
-	events []sctp.NotificationSubscription
+	events []sctp.EventType
 	// buffers are sized before the socket connects, so the INIT announces the
-	// receive window they give; see socketBuffers.control.
+	// receive window they give; see socketBuffers.apply.
 	buffers socketBuffers
 }
 
@@ -75,57 +75,55 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 	rtoMillis := oneShotRTOMillisFor(timeout)
 	return sctpDialPolicy{
 		init: sctp.InitMsg{
-			NumOstreams:  sctpStreams,
-			MaxInstreams: sctpStreams,
+			OutStreams:   sctpStreams,
+			MaxInStreams: sctpStreams,
 			// Belt and braces: the deadline above ends the attempt first, and
 			// the raised RTO keeps the kernel from retransmitting inside it.
 			MaxAttempts:    1,
-			MaxInitTimeout: 1,
+			MaxInitTimeout: time.Millisecond,
 		},
-		rto: sctp.RtoInfo{
-			AssocID: sctp.SCTPAssocID(sctp.SCTP_FUTURE_ASSOC),
-			Initial: rtoMillis,
+		rto: sctp.RTOInfo{
+			Initial: time.Duration(rtoMillis) * time.Millisecond,
 			// Initial can exceed the kernel default maximum when a caller
 			// deliberately uses a long InitTimeout. Set Max with it so the
 			// one-shot invariant does not silently disappear above 60 seconds.
-			Max: rtoMillis,
+			Max: time.Duration(rtoMillis) * time.Millisecond,
 		},
-		abandon: sctp.DialAbandonQuiet,
+		abandon: sctp.AbandonQuiet,
 		events:  associationEvents(),
 	}
 }
 
-func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.PreconfiguredSocket {
-	base := &sctp.SocketConfig{
-		Control: p.buffers.control(),
+func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.Config {
+	base := &sctp.Config{
 		// A Dial watcher serves one association, so its route ignores the
 		// association ID; it is set once Dial has an Association to route to.
 		NotificationHandler: restarts.handle,
 		InitMsg:             p.init,
+		RTOInfo:             &p.rto,
+		Notifications:       p.events,
+		AbandonPolicy:       p.abandon,
 	}
-	return base.WithPreAssociation(sctp.PreAssociationConfig{
-		RTOInfo:       &p.rto,
-		Notifications: p.events,
-	})
+	p.buffers.apply(base)
+	return base
 }
 
 type sctpAbandonPolicyDialer interface {
-	DialContextWithAbandonPolicy(
+	Dial(
 		context.Context,
 		string,
-		*sctp.SCTPAddr,
-		*sctp.SCTPAddr,
-		sctp.DialAbandonPolicy,
-	) (*sctp.SCTPConn, error)
+		*sctp.Addr,
+		*sctp.Addr,
+	) (*sctp.Conn, error)
 }
 
 func (p sctpDialPolicy) dialContext(
 	ctx context.Context,
 	dialer sctpAbandonPolicyDialer,
 	network string,
-	laddr, raddr *sctp.SCTPAddr,
-) (*sctp.SCTPConn, error) {
-	return dialer.DialContextWithAbandonPolicy(ctx, network, laddr, raddr, p.abandon)
+	laddr, raddr *sctp.Addr,
+) (*sctp.Conn, error) {
+	return dialer.Dial(ctx, network, laddr, raddr)
 }
 
 // dialAssociation makes exactly one SCTP association attempt, bounded by
@@ -135,22 +133,19 @@ func (p sctpDialPolicy) dialContext(
 // non-established socket before returning without intentionally emitting a local
 // ABORT. What is left here is keeping the attempt to a single INIT, which needs
 // the initial RTO raised past the budget before the socket is connected.
-// PreAssociation.RTOInfo applies that through SCTP_FUTURE_ASSOC without
-// wrapping or taking ownership of the raw descriptor that go-sctp still owns,
-// and PreAssociation.Notifications subscribes associationEvents the same way.
-// The socket buffers are sized in the Control hook, which runs earlier still.
-func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, timeout time.Duration, buffers socketBuffers, restarts *restartWatcher) (*sctp.SCTPConn, error) {
+// Config applies RTOInfo, notification subscriptions and socket buffers
+// before connect. AbandonQuiet releases an unfinished attempt without a
+// locally initiated ABORT. RFC 6458 Sections 6.2.2, 8.1.1 and 8.1.3.
+func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Addr, timeout time.Duration, buffers socketBuffers, restarts *restartWatcher) (*sctp.Conn, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	policy := oneShotSCTPDialPolicy(timeout)
 	policy.buffers = buffers
-	sctpAssociation, err := withAssociationEvents(func(subscribe bool) (*sctp.SCTPConn, error) {
-		if !subscribe {
-			policy.events = nil
-		}
-		return policy.dialContext(attemptCtx, policy.socketConfig(restarts), network, laddr, raddr)
-	})
+	// There is one constructor call. Linux can report an ICMP Protocol
+	// Unreachable for the INIT as ENOPROTOOPT (RFC 9260 Section 10, ICMP8);
+	// return that dial error without trying a second socket or INIT.
+	sctpAssociation, err := policy.dialContext(attemptCtx, policy.socketConfig(restarts), network, laddr, raddr)
 	if err != nil {
 		// Our own budget expiring is reported as such; the caller's context
 		// ending is reported as the caller's error.
@@ -181,7 +176,7 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.SCT
 //
 // The M3UA handshake that follows has its own budget,
 // AssociationConfig.EstablishTimeout, and observes ctx as well.
-func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.SCTPAddr, cfg *AssociationConfig) (*Association, error) {
+func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.Addr, cfg *AssociationConfig) (*Association, error) {
 	role, err := e.associationRole()
 	if err != nil {
 		return nil, err
@@ -246,7 +241,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	// route it to this Association, and ignore events that arrive before an SCTP
 	// association identifier exists.
 	restarts := &restartWatcher{}
-	restarts.setRoute(func(sctp.SCTPAssocID) *Association { return association })
+	restarts.setRoute(func(sctp.AssocID) *Association { return association })
 
 	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, socketBuffersFor(cfg.SCTPConfig), restarts)
 	if err != nil {

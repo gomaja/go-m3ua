@@ -54,6 +54,8 @@ var approvedExports = []string{
 // compares its exported surface against the approved list.
 func TestApprovedPointCodeExportsAreUnchanged(t *testing.T) {
 	fileSet := token.NewFileSet()
+	//lint:ignore SA1019 The inventory includes every source declaration regardless of build tags.
+	//nolint:staticcheck // Include source declarations for every build target.
 	pkgs, err := parser.ParseDir(fileSet, ".", func(info fs.FileInfo) bool {
 		return !strings.HasSuffix(info.Name(), "_test.go")
 	}, 0)

@@ -47,7 +47,7 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 		ctx,
 		"m3ua",
 		mcAddr(0, "127.0.0.1"),
-		listener.Addr().(*sctp.SCTPAddr),
+		listener.Addr().(*sctp.Addr),
 		integrationAssociationConfig(RoleASP, peer),
 	)
 	if err != nil {

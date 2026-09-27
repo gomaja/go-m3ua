@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,7 +23,7 @@ type peerRun struct {
 	ctx       context.Context
 	finish    context.CancelFunc
 	endpoints [sgpCount]*m3ua.Endpoint
-	remote    *sctp.SCTPAddr
+	remote    *sctp.Addr
 	localIP   net.IP
 
 	// finishing is set once the ASP has asked for the record: the ASP then
@@ -41,7 +42,7 @@ func runPeer(ctx context.Context, config commandConfig) (peerRecord, error) {
 	defer finish()
 	peer := &peerRun{config: config, ctx: ctx, finish: finish, localIP: net.ParseIP(config.LocalIP),
 		record: peerRecord{Kind: "perfchurn-peer", Manifest: currentManifest(rolePeer, config)}}
-	remote, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+	remote, err := sctp.ResolveAddr("sctp", config.SCTPAddress)
 	if err != nil {
 		return peer.record, fmt.Errorf("resolve ASP address: %w", err)
 	}
@@ -93,8 +94,8 @@ func (peer *peerRun) event(format string, arguments ...any) {
 	}
 }
 
-func (peer *peerRun) localAddress(port int) *sctp.SCTPAddr {
-	return &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: peer.localIP}}, Port: port}
+func (peer *peerRun) localAddress(port int) *sctp.Addr {
+	return &sctp.Addr{IPs: []netip.Addr{netip.AddrFrom4([4]byte(peer.localIP.To4()))}, Port: uint16(port)}
 }
 
 // establish dials the 32 stable associations. The SGP-role Dial returns once

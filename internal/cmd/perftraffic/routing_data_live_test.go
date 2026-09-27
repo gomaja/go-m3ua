@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"testing"
 	"time"
@@ -30,11 +31,11 @@ func routedLoopbackPortBase(testContext *testing.T) int {
 	testContext.Helper()
 	for range 50 {
 		base := 20000 + rand.IntN(40000)
-		var listeners []*sctp.SCTPListener
+		var listeners []*sctp.Listener
 		var err error
 		for offset := range 4 {
-			var listener *sctp.SCTPListener
-			listener, err = sctp.ListenSCTP("sctp", &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.IPv4(127, 0, 0, 1)}}, Port: base + offset})
+			var listener *sctp.Listener
+			listener, err = sctp.Listen("sctp", &sctp.Addr{IPs: []netip.Addr{netip.AddrFrom4([4]byte{127, 0, 0, 1})}, Port: uint16(base + offset)})
 			if err != nil {
 				break
 			}

@@ -104,7 +104,7 @@ func ExampleNewEndpoint() {
 		})
 	config.PeerSGP = &peer
 
-	// remote, _ := sctp.ResolveSCTPAddr("sctp", "198.51.100.7:2905")
+	// remote, _ := sctp.ResolveAddr("sctp", "198.51.100.7:2905")
 	// association, err := endpoint.Dial(ctx, "m3ua", nil, remote, config)
 	//
 	// ctx is the association's lifetime, not just its handshake: cancelling it

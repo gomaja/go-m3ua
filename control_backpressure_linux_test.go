@@ -9,7 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
+	"net/netip"
 	"sync"
 	"syscall"
 	"testing"
@@ -40,7 +40,7 @@ func TestSSNMPublicationWaitsOutAFullSendBuffer(t *testing.T) {
 	key := ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	config := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
-	address := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, Port: port}
+	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(port)}
 
 	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {
@@ -147,16 +147,16 @@ type stalledASP struct {
 	dataStreams []uint16
 }
 
-func dialStalledASP(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32) *stalledASP {
+func dialStalledASP(t *testing.T, sgp *sctp.Addr, routingContext uint32) *stalledASP {
 	t.Helper()
-	return dialStalledASPWith(t, sgp, routingContext, sctp.InitMsg{NumOstreams: 16, MaxInstreams: 16})
+	return dialStalledASPWith(t, sgp, routingContext, sctp.InitMsg{OutStreams: 16, MaxInStreams: 16})
 }
 
 // dialStalledASPWith is dialStalledASP with the INIT stream request chosen by
 // the caller.
-func dialStalledASPWith(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32, init sctp.InitMsg) *stalledASP {
+func dialStalledASPWith(t *testing.T, sgp *sctp.Addr, routingContext uint32, init sctp.InitMsg) *stalledASP {
 	t.Helper()
-	socket := &sctp.SocketConfig{
+	socket := &sctp.Config{
 		InitMsg: init,
 		Control: func(_, _ string, c syscall.RawConn) error {
 			var setErr error
@@ -168,7 +168,7 @@ func dialStalledASPWith(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32,
 			return setErr
 		},
 	}
-	conn, err := socket.Dial("sctp", nil, sgp)
+	conn, err := socket.Dial(context.Background(), "sctp", nil, sgp)
 	if err != nil {
 		t.Fatalf("raw ASP dial: %v", err)
 	}
@@ -178,17 +178,14 @@ func dialStalledASPWith(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32,
 		close(stop)
 		_ = conn.Close()
 	})
-	if err := conn.SetRecvRcvInfo(true); err != nil {
-		t.Fatal(err)
-	}
-	control := &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0}
+	control := &sctp.SndInfo{PPID: M3UAPPID, Stream: 0}
 	send := func(message messages.M3UA) {
 		t.Helper()
 		b, err := message.MarshalBinary()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := conn.SCTPWrite(b, control); err != nil {
+		if _, err := sendWithInfo(conn, b, control); err != nil {
 			t.Fatalf("raw ASP send: %v", err)
 		}
 	}
@@ -199,7 +196,7 @@ func dialStalledASPWith(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32,
 			t.Fatal(err)
 		}
 		for {
-			n, _, err := conn.SCTPRead(buf)
+			n, _, err := recvWithInfo(conn, buf)
 			if err != nil {
 				t.Fatalf("raw ASP handshake read: %v", err)
 			}
@@ -223,7 +220,7 @@ func dialStalledASPWith(t *testing.T, sgp *sctp.SCTPAddr, routingContext uint32,
 			return
 		}
 		for {
-			n, info, err := conn.SCTPRead(buf)
+			n, info, err := recvWithInfo(conn, buf)
 			if err != nil {
 				return
 			}
@@ -282,9 +279,9 @@ func (p *stalledASP) unavailable() []stalledAck {
 // first this peer's receive window and then the library's send buffer.
 type stallingPeer struct {
 	t        *testing.T
-	ln       *sctp.SCTPListener
-	addr     *sctp.SCTPAddr
-	accepted chan *sctp.SCTPConn
+	ln       *sctp.Listener
+	addr     *sctp.Addr
+	accepted chan *sctp.Conn
 	paused   chan struct{}
 	resume   chan struct{}
 	stop     chan struct{}
@@ -301,7 +298,7 @@ type stalledAck struct {
 
 func newStallingPeer(t *testing.T, port int) *stallingPeer {
 	t.Helper()
-	addr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
+	addr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,8 +307,8 @@ func newStallingPeer(t *testing.T, port int) *stallingPeer {
 	// association is set up; changing it after accept would not shrink the
 	// window. Left to the kernel default, a host that raised
 	// net.core.rmem_default absorbs the whole flood and nothing ever waits.
-	socket := &sctp.SocketConfig{
-		InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams},
+	socket := &sctp.Config{
+		InitMsg: sctp.InitMsg{OutStreams: sctpStreams, MaxInStreams: sctpStreams},
 		Control: func(_, _ string, c syscall.RawConn) error {
 			var setErr error
 			if err := c.Control(func(fd uintptr) {
@@ -331,7 +328,7 @@ func newStallingPeer(t *testing.T, port int) *stallingPeer {
 	}
 	p := &stallingPeer{
 		t: t, ln: ln, addr: addr,
-		accepted: make(chan *sctp.SCTPConn, 1),
+		accepted: make(chan *sctp.Conn, 1),
 		paused:   make(chan struct{}),
 		resume:   make(chan struct{}),
 		stop:     make(chan struct{}),
@@ -351,17 +348,13 @@ func (p *stallingPeer) serve() {
 	}
 	defer func() { _ = conn.Close() }()
 	// The stream and PPID of each BEAT Ack are what the test checks.
-	if err := conn.SetRecvRcvInfo(true); err != nil {
-		p.t.Errorf("peer SCTP_RECVRCVINFO: %v", err)
-		return
-	}
 	p.accepted <- conn
 
-	control := &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0}
+	control := &sctp.SndInfo{PPID: M3UAPPID, Stream: 0}
 	buf := make([]byte, 65535)
 	paused := false
 	for {
-		n, info, err := conn.SCTPRead(buf)
+		n, info, err := recvWithInfo(conn, buf)
 		if err != nil {
 			return
 		}
@@ -402,7 +395,7 @@ func (p *stallingPeer) serve() {
 		if err != nil {
 			return
 		}
-		if _, err := conn.SCTPWrite(b, control); err != nil {
+		if _, err := sendWithInfo(conn, b, control); err != nil {
 			return
 		}
 	}
@@ -447,7 +440,7 @@ func stallLibraryReplies(t *testing.T, port int, controlWriteTimeout time.Durati
 	t.Cleanup(cancel)
 
 	peer := newStallingPeer(t, port)
-	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
+	laddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +452,7 @@ func stallLibraryReplies(t *testing.T, port int, controlWriteTimeout time.Durati
 	}
 	t.Cleanup(func() { _ = association.Close() })
 
-	var conn *sctp.SCTPConn
+	var conn *sctp.Conn
 	select {
 	case conn = <-peer.accepted:
 	case <-time.After(5 * time.Second):
@@ -468,20 +461,20 @@ func stallLibraryReplies(t *testing.T, port int, controlWriteTimeout time.Durati
 	if err := association.sctpConn.SetWriteBuffer(stallingSocketBuffer); err != nil {
 		t.Fatal(err)
 	}
-	receive, err := conn.GetReadBuffer()
+	receive, err := conn.ReadBuffer()
 	if err != nil {
 		t.Fatal(err)
 	}
-	send, err := association.sctpConn.GetWriteBuffer()
+	send, err := association.sctpConn.WriteBuffer()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Four times what the two buffers can hold between them, as the kernel
 	// actually sized them, so the library's Acks must wait.
 	count := 4 * (receive + send) / stallingBeatSize
-	control := &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0}
+	control := &sctp.SndInfo{PPID: M3UAPPID, Stream: 0}
 	// The first Ack stops the peer reading.
-	if _, err := conn.SCTPWrite(stallingBeat(t, 0, stallingBeatSize), control); err != nil {
+	if _, err := sendWithInfo(conn, stallingBeat(t, 0, stallingBeatSize), control); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -502,7 +495,7 @@ func stallLibraryReplies(t *testing.T, port int, controlWriteTimeout time.Durati
 	flood := make(chan error, 1)
 	go func() {
 		for _, beat := range beats {
-			if _, err := conn.SCTPWrite(beat, control); err != nil {
+			if _, err := sendWithInfo(conn, beat, control); err != nil {
 				flood <- err
 				return
 			}
@@ -516,8 +509,8 @@ func stallLibraryReplies(t *testing.T, port int, controlWriteTimeout time.Durati
 // shut long enough for the library's BEAT Acks to fill its send buffer, then
 // lets the peer read again. Every BEAT is answered once, in order, on stream 0
 // with the M3UA PPID -- including the Acks that could only be sent by waiting,
-// which leave through the socket's default send parameters rather than
-// ancillary data -- and the association is never closed.
+// which carry the same SndInfo as the first attempt -- and the association is
+// never closed.
 func TestLibraryRepliesWaitForAStalledPeerToResume(t *testing.T) {
 	peer, association, count, flood := stallLibraryReplies(t, 3262, time.Minute)
 

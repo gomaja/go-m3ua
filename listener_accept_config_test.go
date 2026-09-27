@@ -3,7 +3,7 @@ package m3ua
 import (
 	"context"
 	"errors"
-	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -55,7 +55,7 @@ func TestConcurrentAcceptsUseSelectedAssociationConfig(t *testing.T) {
 		aspConfig.EstablishTimeout = 5 * time.Second
 		aspConfig.TAck = 100 * time.Millisecond
 		aspConfig.TAckRetries = 5
-		aspAssociation, err := dialASP(ctx, "m3ua", mcAddr(0, ip), listenerAddr.(*sctp.SCTPAddr), aspConfig)
+		aspAssociation, err := dialASP(ctx, "m3ua", mcAddr(0, ip), listenerAddr.(*sctp.Addr), aspConfig)
 		if err != nil {
 			t.Fatalf("Dial from %s: %v", ip, err)
 		}
@@ -146,7 +146,7 @@ func TestAcceptSelectorErrorClosesOnlyRejectedAssociation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	listenerAddr := ln.Addr().(*sctp.SCTPAddr)
+	listenerAddr := ln.Addr().(*sctp.Addr)
 
 	type acceptResult struct {
 		association *Association
@@ -251,9 +251,9 @@ func acceptInfoHasRemoteIP(info AcceptInfo, ip string) bool {
 	if info.RemoteAddr == nil {
 		return false
 	}
-	parsed := net.ParseIP(ip)
-	for _, address := range info.RemoteAddr.IPAddrs {
-		if address.IP.Equal(parsed) {
+	parsed := netip.MustParseAddr(ip)
+	for _, address := range info.RemoteAddr.IPs {
+		if address == parsed {
 			return true
 		}
 	}

@@ -468,7 +468,7 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 	}
 	sctpInfo := *aspAssociation.sctpInfo
 	sctpInfo.Stream = aspAssociation.streamFor(2)
-	if _, err := aspAssociation.sctpConn.SCTPWrite(rawInvalid, &sctpInfo); err != nil {
+	if _, err := sendWithInfo(aspAssociation.sctpConn, rawInvalid, &sctpInfo); err != nil {
 		t.Fatalf("raw write invalid DATA: %v", err)
 	}
 	deadline := time.After(10 * time.Second)

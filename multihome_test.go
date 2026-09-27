@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ import (
 
 // Multi-homing is SCTP's defining feature over TCP and the reason M3UA runs on
 // it: an association binds several addresses at each end and survives losing a
-// path. go-m3ua takes *sctp.SCTPAddr straight from the caller, so support is a
+// path. go-m3ua takes *sctp.Addr straight from the caller, so support is a
 // matter of passing it through unchanged — which nothing verified.
 //
 // These tests need several usable loopback addresses and skip without them.
@@ -39,8 +40,8 @@ func usableLoopbacks(t *testing.T) []string {
 
 	var ok []string
 	for _, s := range []string{"127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4"} {
-		addr := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP(s)}}, Port: 0}
-		ln, err := sctp.ListenSCTP("sctp4", addr)
+		addr := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr(s)}, Port: 0}
+		ln, err := sctp.Listen("sctp4", addr)
 		if err != nil {
 			if isSCTPUnsupported(err) {
 				t.Skipf("skipping socket-backed test: %v", err)
@@ -65,7 +66,7 @@ func requireLoopbacks(t *testing.T, n int) []string {
 	return got
 }
 
-// addrsOf splits an SCTPAddr's String() form ("a/b/c:port") into its addresses.
+// addrsOf splits an Addr's String() form ("a/b/c:port") into its addresses.
 func addrsOf(a net.Addr) []string {
 	s := a.String()
 	if i := strings.LastIndex(s, ":"); i >= 0 {
@@ -92,7 +93,7 @@ func sameAddrs(got []string, want []string) bool {
 
 // The base case: an association whose two ends each bind several addresses,
 // with both ends learning the other's full set. The address exchange happens in
-// the INIT/INIT-ACK handshake, so an end that flattened its SCTPAddr shows up
+// the INIT/INIT-ACK handshake, so an end that flattened its Addr shows up
 // here as a peer that knows fewer addresses than were bound — while a
 // single-path data test still passes.
 func TestMultihomedAssociationKeepsEveryAddress(t *testing.T) {

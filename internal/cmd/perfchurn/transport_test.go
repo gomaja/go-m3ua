@@ -2,7 +2,7 @@ package main
 
 import (
 	"errors"
-	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -40,8 +40,8 @@ func TestInterfacesAreReadFromSysfs(t *testing.T) {
 	}
 }
 
-func sctpAddress(port int) *sctp.SCTPAddr {
-	return &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("172.31.250.10")}}, Port: port}
+func sctpAddress(port int) *sctp.Addr {
+	return &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("172.31.250.10")}, Port: uint16(port)}
 }
 
 func TestAssociationEvidenceJoinsSocketsKernelAndLibrary(t *testing.T) {

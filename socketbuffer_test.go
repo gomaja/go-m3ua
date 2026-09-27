@@ -10,6 +10,8 @@ import (
 	"math"
 	"strconv"
 	"testing"
+
+	"github.com/gomaja/go-sctp"
 )
 
 // socketBufferConfig is an SGP configuration with the given socket sizes.
@@ -140,20 +142,23 @@ func TestSelectedReceiveBufferMustBeTheListeners(t *testing.T) {
 	}
 }
 
-// An unset configuration installs no Control hook at all, so socket
-// construction is exactly what it was before the sizes existed.
-func TestSocketBufferControlOnlyWhenRequested(t *testing.T) {
-	if socketBuffersFor(&SCTPConfig{}).control() != nil {
-		t.Fatal("an unset configuration installed a Control hook")
-	}
-	if socketBuffersFor(nil).control() != nil {
-		t.Fatal("a nil configuration installed a Control hook")
-	}
-	if socketBuffersFor(&SCTPConfig{SocketReceiveBuffer: 1}).control() == nil {
-		t.Fatal("a receive size installed no Control hook")
-	}
-	if socketBuffersFor(&SCTPConfig{SocketSendBuffer: 1}).control() == nil {
-		t.Fatal("a send size installed no Control hook")
+// Unset sizes leave the typed SCTP Config at its default; requested sizes
+// are installed before Dial or Listen creates an association.
+func TestSocketBufferConfigOnlyWhenRequested(t *testing.T) {
+	for _, tc := range []struct {
+		buffers       socketBuffers
+		receive, send bool
+	}{
+		{socketBuffersFor(nil), false, false},
+		{socketBuffersFor(&SCTPConfig{}), false, false},
+		{socketBuffersFor(&SCTPConfig{SocketReceiveBuffer: 1}), true, false},
+		{socketBuffersFor(&SCTPConfig{SocketSendBuffer: 1}), false, true},
+	} {
+		var config sctp.Config
+		tc.buffers.apply(&config)
+		if (config.ReadBuffer != nil) != tc.receive || (config.WriteBuffer != nil) != tc.send {
+			t.Fatalf("buffers %+v produced read %v write %v", tc.buffers, config.ReadBuffer, config.WriteBuffer)
+		}
 	}
 }
 

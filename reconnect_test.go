@@ -139,17 +139,14 @@ func TestPeerAbortWithHeartbeatIsDetectedWhileIdle(t *testing.T) {
 // subscription can only be the one made before connect or listen. They use the
 // library's own socket configuration, notification handler and reader.
 // requireSubscribedAssociationEvents requires the association to carry the
-// SCTP_ASSOC_CHANGE subscription made before it existed. On a kernel without
-// SCTP_EVENT (Linux before 5.0) the library deliberately falls back to none,
-// so the abort tests have nothing to prove there and skip.
-func requireSubscribedAssociationEvents(t *testing.T, conn *sctp.SCTPConn, what string) {
+// EventAssocChange subscription made before it existed. A kernel that rejects
+// Linux 5.0 or later is required: Dial and Listen fail if SCTP_EVENT cannot
+// subscribe EventAssocChange before the association exists.
+func requireSubscribedAssociationEvents(t *testing.T, conn *sctp.Conn, what string) {
 	t.Helper()
-	on, err := conn.EventSubscribed(sctp.SCTP_ASSOC_CHANGE)
-	if errors.Is(err, syscall.ENOPROTOOPT) {
-		t.Skipf("skipping: this kernel has no SCTP_EVENT, so the %s carries no association events", what)
-	}
+	on, err := conn.Subscribed(sctp.EventAssocChange)
 	if err != nil || !on {
-		t.Fatalf("%s SCTP_ASSOC_CHANGE subscribed = %v (%v), want it subscribed before the association existed", what, on, err)
+		t.Fatalf("%s EventAssocChange subscribed = %v (%v), want it subscribed before the association existed", what, on, err)
 	}
 }
 
@@ -158,7 +155,7 @@ func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 	defer cancel()
 
 	peer := newRawPeer(t, 3056, handshakeOnly)
-	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:3056")
+	laddr, err := sctp.ResolveAddr("sctp", "127.0.0.1:3056")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +163,7 @@ func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 	association := newAssociation(RoleASP, newASPAssociationConfigForTest(
 		&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2}))
 	restarts := &restartWatcher{}
-	restarts.setRoute(func(sctp.SCTPAssocID) *Association { return association })
+	restarts.setRoute(func(sctp.AssocID) *Association { return association })
 	conn, err := dialAssociation(ctx, "sctp", laddr, peer.addr, 5*time.Second, socketBuffers{}, restarts)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -184,7 +181,7 @@ func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 // The accepting side of the same race, where the window was between accept and
 // setUpSocket.
 func TestPeerAbortOnAnAcceptedAssociationEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
-	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:3059")
+	laddr, err := sctp.ResolveAddr("sctp", "127.0.0.2:3059")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +193,7 @@ func TestPeerAbortOnAnAcceptedAssociationEndsTheReadAfterAWriteTookTheSocketErro
 	t.Cleanup(func() { _ = ln.Close() })
 
 	type acceptResult struct {
-		conn *sctp.SCTPConn
+		conn *sctp.Conn
 		err  error
 	}
 	accepted := make(chan acceptResult, 1)
@@ -206,7 +203,7 @@ func TestPeerAbortOnAnAcceptedAssociationEndsTheReadAfterAWriteTookTheSocketErro
 	}()
 
 	// A plain SCTP peer: nothing it does can subscribe this end to anything.
-	peer, err := sctp.DialSCTP("sctp", nil, laddr)
+	peer, err := sctp.Dial(context.Background(), "sctp", nil, laddr)
 	if err != nil {
 		t.Fatalf("peer dial: %v", err)
 	}

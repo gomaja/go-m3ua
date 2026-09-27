@@ -37,9 +37,9 @@ func TestExplicitASPProcedurePolicyControlsDialReadinessAndWireSequence(t *testi
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
-	local, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
+	local, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		t.Fatalf("ResolveSCTPAddr: %v", err)
+		t.Fatalf("ResolveAddr: %v", err)
 	}
 	config := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 10, []uint32{7})
 	config.EstablishTimeout = time.Second

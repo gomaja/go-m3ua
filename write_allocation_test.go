@@ -19,14 +19,14 @@ import (
 // collection pace of the whole process. The end-to-end delivery budget for one
 // DATA send is 16 allocations and 2*P+1024 allocated bytes per message (P = SS7
 // user payload octets), measured over a whole sender process — that figure
-// includes the fixed cost of the transport's SCTPWrite, which this package
+// includes the fixed cost of the transport's SendMsg, which this package
 // cannot influence.
 //
 // These tests measure everything the package itself contributes: the full
 // synchronous send path from WriteData down to the transport write, with the
 // transport replaced by the association's dataWriter seam so no SCTP socket is
 // needed (SCTP is unavailable on darwin, and a socket would add noise besides).
-// What the seam excludes is exactly SCTPWrite's own share — a handful of
+// What the seam excludes is exactly SendMsg's own share — a handful of
 // allocations and one payload-sized copy — so this package's share is held well
 // under the end-to-end budget: at most 11 allocations and P+1024 bytes per
 // message, leaving the transport the remainder.
@@ -40,7 +40,7 @@ func newSendAllocationAssociation(t *testing.T) *Association {
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
-	conn.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	conn.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		return len(data), nil
 	}
 	return conn

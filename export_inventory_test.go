@@ -85,6 +85,8 @@ func readPackageSurface(t *testing.T, dir string) packageSurface {
 	t.Helper()
 
 	fileSet := token.NewFileSet()
+	//lint:ignore SA1019 The inventory includes every source declaration regardless of build tags.
+	//nolint:staticcheck // Include source declarations for every build target.
 	packages, err := parser.ParseDir(fileSet, dir, func(info fs.FileInfo) bool {
 		return !strings.HasSuffix(info.Name(), "_test.go")
 	}, parser.ParseComments)

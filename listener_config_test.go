@@ -2,7 +2,7 @@ package m3ua
 
 import (
 	"errors"
-	"net"
+	"net/netip"
 	"reflect"
 	"testing"
 	"time"
@@ -137,9 +137,9 @@ func TestIPSPListenerSelectorOnlyDefersAssociationConfigValidation(t *testing.T)
 			return selected, nil
 		},
 	}
-	localAddr, err := sctp.ResolveSCTPAddr("sctp4", "127.0.0.1:0")
+	localAddr, err := sctp.ResolveAddr("sctp4", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("ResolveSCTPAddr(): %v", err)
+		t.Fatalf("ResolveAddr(): %v", err)
 	}
 
 	listener, listenErr := endpoint.Listen("m3ua4", localAddr, listenerConfig)
@@ -188,10 +188,10 @@ func TestAcceptInfoCarriesOwnedSCTPAddressCopies(t *testing.T) {
 	mutateSCTPAddr(info.LocalAddr)
 	mutateSCTPAddr(info.RemoteAddr)
 
-	if got := local.IPAddrs[0].IP.String(); got != "127.0.0.1" {
+	if got := local.IPs[0].String(); got != "127.0.0.1" {
 		t.Fatalf("local source address was mutated through AcceptInfo: %s", got)
 	}
-	if got := remote.IPAddrs[0].IP.String(); got != "127.0.0.2" {
+	if got := remote.IPs[0].String(); got != "127.0.0.2" {
 		t.Fatalf("remote source address was mutated through AcceptInfo: %s", got)
 	}
 }
@@ -226,19 +226,19 @@ func TestListenerASKeyAPIsSeparateSameRoutingContextByNetworkAppearance(t *testi
 	}
 }
 
-func mutateSCTPAddr(addr *sctp.SCTPAddr) {
-	if addr == nil || len(addr.IPAddrs) == 0 {
+func mutateSCTPAddr(addr *sctp.Addr) {
+	if addr == nil || len(addr.IPs) == 0 {
 		return
 	}
-	addr.IPAddrs[0].IP = net.IPv4(1, 2, 3, 4)
+	addr.IPs[0] = netip.AddrFrom4([4]byte{1, 2, 3, 4})
 }
 
-func sameSCTPAddrPortAndIPs(first, second *sctp.SCTPAddr) bool {
-	if first == nil || second == nil || first.Port != second.Port || len(first.IPAddrs) != len(second.IPAddrs) {
+func sameSCTPAddrPortAndIPs(first, second *sctp.Addr) bool {
+	if first == nil || second == nil || first.Port != second.Port || len(first.IPs) != len(second.IPs) {
 		return false
 	}
-	for i := range first.IPAddrs {
-		if !first.IPAddrs[i].IP.Equal(second.IPAddrs[i].IP) {
+	for i := range first.IPs {
+		if first.IPs[i] != second.IPs[i] {
 			return false
 		}
 	}

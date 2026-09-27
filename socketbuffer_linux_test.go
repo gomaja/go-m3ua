@@ -175,7 +175,7 @@ func socketBufferPeers(t *testing.T, listenerConfig *ListenerConfig, aspConfig *
 		association, err := ln.Accept(ctx)
 		accepted <- acceptResult{association, err}
 	}()
-	asp, err = dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), ln.Addr().(*sctp.SCTPAddr), aspConfig)
+	asp, err = dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), ln.Addr().(*sctp.Addr), aspConfig)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestSelectedSocketBuffersAfterAccept(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
-	listenerAddr := ln.Addr().(*sctp.SCTPAddr)
+	listenerAddr := ln.Addr().(*sctp.Addr)
 
 	// connection is what Dial and Accept made of one ASP.
 	type connection struct {
@@ -367,7 +367,7 @@ func TestListenerSocketBuffersAreFixedAtListen(t *testing.T) {
 		association, err := ln.Accept(ctx)
 		accepted <- acceptResult{association, err}
 	}()
-	asp, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), ln.Addr().(*sctp.SCTPAddr), mcASPConfig(0xEE000020))
+	asp, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.2"), ln.Addr().(*sctp.Addr), mcASPConfig(0xEE000020))
 	if asp != nil {
 		t.Cleanup(func() { _ = asp.Close() })
 	}
@@ -417,7 +417,7 @@ func TestRefusedReceiveBufferReleasesTheAcceptedSocket(t *testing.T) {
 			}
 			refused <- err
 		}()
-		peer, err := sctp.DialSCTP("sctp", nil, ln.Addr().(*sctp.SCTPAddr))
+		peer, err := sctp.Dial(context.Background(), "sctp", nil, ln.Addr().(*sctp.Addr))
 		if err != nil {
 			t.Fatalf("peer dial: %v", err)
 		}
@@ -434,7 +434,7 @@ func TestRefusedReceiveBufferReleasesTheAcceptedSocket(t *testing.T) {
 		if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := peer.SCTPRead(make([]byte, 64)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+		if _, _, err := recvWithInfo(peer, make([]byte, 64)); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
 			t.Fatalf("peer read after the refusal = %v; want the association ended", err)
 		}
 		ln.muConns.Lock()
