@@ -7,7 +7,8 @@ package m3ua
 import (
 	"fmt"
 	"math"
-	"syscall"
+
+	"github.com/gomaja/go-sctp"
 )
 
 // socketBuffers is the SO_RCVBUF and SO_SNDBUF request of one SCTPConfig, in
@@ -24,28 +25,15 @@ func socketBuffersFor(config *SCTPConfig) socketBuffers {
 	return socketBuffers{receive: config.SocketReceiveBuffer, send: config.SocketSendBuffer}
 }
 
-// control returns the SocketConfig.Control hook that applies b, or nil when b
-// requests nothing, so an unset configuration leaves socket construction
-// exactly as it was.
-//
-// The hook runs after the socket is created and before it binds, connects or
-// listens, and that order is the point. Linux sets an association's receive
-// window from the socket's buffer when the association is created, and the INIT
-// or INIT ACK announces it (RFC 9260 Sections 3.3.2 and 3.3.3), so a size
-// applied to the connected or accepted socket changes the buffer and not the
-// window the peer was given. An accepted socket inherits the listening socket's
-// sizes, so applying them before listen covers every association a Listener
-// accepts.
-func (b socketBuffers) control() func(network, address string, raw syscall.RawConn) error {
-	if b == (socketBuffers{}) {
-		return nil
+// apply sizes the socket before bind, connect or listen. Linux announces the
+// receive window derived from this buffer in INIT or INIT ACK (RFC 9260
+// Sections 3.3.2 and 3.3.3). Accepted sockets inherit their listener's sizes.
+func (b socketBuffers) apply(config *sctp.Config) {
+	if b.receive != 0 {
+		config.ReadBuffer = &b.receive
 	}
-	return func(_, _ string, raw syscall.RawConn) error {
-		var setErr error
-		if err := raw.Control(func(fd uintptr) { setErr = setSocketBuffers(fd, b) }); err != nil {
-			return err
-		}
-		return setErr
+	if b.send != 0 {
+		config.WriteBuffer = &b.send
 	}
 }
 

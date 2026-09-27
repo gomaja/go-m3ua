@@ -14,7 +14,7 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-func dialASP(ctx context.Context, network string, local, remote *sctp.SCTPAddr, config *AssociationConfig) (*Association, error) {
+func dialASP(ctx context.Context, network string, local, remote *sctp.Addr, config *AssociationConfig) (*Association, error) {
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
 	if err != nil {
 		return nil, err
@@ -22,7 +22,7 @@ func dialASP(ctx context.Context, network string, local, remote *sctp.SCTPAddr, 
 	return endpoint.Dial(ctx, network, local, remote, config)
 }
 
-func listenSGP(network string, local *sctp.SCTPAddr, config *ListenerConfig) (*Listener, error) {
+func listenSGP(network string, local *sctp.Addr, config *ListenerConfig) (*Listener, error) {
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {
 		return nil, err

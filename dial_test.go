@@ -39,28 +39,25 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 	tests := []struct {
 		name        string
 		timeout     time.Duration
-		wantInitial uint32
+		wantInitial time.Duration
 	}{
-		{name: "sub-millisecond", timeout: time.Nanosecond, wantInitial: 1001},
-		{name: "default budget", timeout: DefaultInitTimeout, wantInitial: 6000},
-		{name: "longer than default kernel max", timeout: 2 * time.Minute, wantInitial: 121000},
-		{name: "saturates", timeout: time.Duration(1<<63 - 1), wantInitial: ^uint32(0)},
+		{name: "sub-millisecond", timeout: time.Nanosecond, wantInitial: 1001 * time.Millisecond},
+		{name: "default budget", timeout: DefaultInitTimeout, wantInitial: 6000 * time.Millisecond},
+		{name: "longer than default kernel max", timeout: 2 * time.Minute, wantInitial: 121000 * time.Millisecond},
+		{name: "saturates", timeout: time.Duration(1<<63 - 1), wantInitial: time.Duration(^uint32(0)) * time.Millisecond},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			policy := oneShotSCTPDialPolicy(test.timeout)
-			if policy.init.NumOstreams != sctpStreams || policy.init.MaxInstreams != sctpStreams {
-				t.Errorf("streams = %d out, %d in, want %d each", policy.init.NumOstreams, policy.init.MaxInstreams, sctpStreams)
+			if policy.init.OutStreams != sctpStreams || policy.init.MaxInStreams != sctpStreams {
+				t.Errorf("streams = %d out, %d in, want %d each", policy.init.OutStreams, policy.init.MaxInStreams, sctpStreams)
 			}
 			if policy.init.MaxAttempts != 1 {
 				t.Errorf("MaxAttempts = %d, want 1", policy.init.MaxAttempts)
 			}
-			if policy.init.MaxInitTimeout != 1 {
+			if policy.init.MaxInitTimeout != time.Millisecond {
 				t.Errorf("MaxInitTimeout = %d, want 1", policy.init.MaxInitTimeout)
-			}
-			if policy.rto.AssocID != sctp.SCTPAssocID(sctp.SCTP_FUTURE_ASSOC) {
-				t.Errorf("RTO AssocID = %d, want SCTP_FUTURE_ASSOC", policy.rto.AssocID)
 			}
 			if policy.rto.Initial != test.wantInitial {
 				t.Errorf("RTO Initial = %d, want %d", policy.rto.Initial, test.wantInitial)
@@ -68,8 +65,8 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 			if policy.rto.Max != policy.rto.Initial {
 				t.Errorf("RTO Max = %d, want Initial %d", policy.rto.Max, policy.rto.Initial)
 			}
-			if policy.abandon != sctp.DialAbandonQuiet {
-				t.Errorf("abandon policy = %v, want DialAbandonQuiet", policy.abandon)
+			if policy.abandon != sctp.AbandonQuiet {
+				t.Errorf("abandon policy = %v, want AbandonQuiet", policy.abandon)
 			}
 			if !reflect.DeepEqual(policy.events, associationEvents()) {
 				t.Errorf("events = %v, want %v subscribed before connect", policy.events, associationEvents())
@@ -79,19 +76,16 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 }
 
 type captureAbandonPolicyDialer struct {
-	policy sctp.DialAbandonPolicy
-	err    error
-	calls  int
+	err   error
+	calls int
 }
 
-func (d *captureAbandonPolicyDialer) DialContextWithAbandonPolicy(
+func (d *captureAbandonPolicyDialer) Dial(
 	_ context.Context,
 	_ string,
-	_, _ *sctp.SCTPAddr,
-	policy sctp.DialAbandonPolicy,
-) (*sctp.SCTPConn, error) {
+	_, _ *sctp.Addr,
+) (*sctp.Conn, error) {
 	d.calls++
-	d.policy = policy
 	return nil, d.err
 }
 
@@ -106,8 +100,8 @@ func TestOneShotSCTPDialPolicyUsesQuietAbandon(t *testing.T) {
 	if dialer.calls != 1 {
 		t.Fatalf("DialContextWithAbandonPolicy calls = %d, want 1", dialer.calls)
 	}
-	if dialer.policy != sctp.DialAbandonQuiet {
-		t.Fatalf("abandon policy = %v, want DialAbandonQuiet", dialer.policy)
+	if policy.socketConfig(&restartWatcher{}).AbandonPolicy != sctp.AbandonQuiet {
+		t.Fatal("Dial Config must use AbandonQuiet")
 	}
 }
 
@@ -129,7 +123,7 @@ func TestOneShotSCTPDialPolicyRTOStaysPastBudget(t *testing.T) {
 			if timeout%time.Millisecond != 0 {
 				budgetMillis++
 			}
-			if uint64(rto.Initial) <= budgetMillis {
+			if uint64(rto.Initial/time.Millisecond) <= budgetMillis {
 				t.Fatalf("RTO Initial = %dms, not beyond InitTimeout %dms", rto.Initial, budgetMillis)
 			}
 			if rto.Max < rto.Initial {
@@ -146,10 +140,10 @@ func TestOneShotSCTPDialPolicyRTOStaysPastBudget(t *testing.T) {
 // unreachable turns the attempt into an immediate ECONNREFUSED, which tests
 // nothing about timeouts. local/run-tests.sh installs the DROP rule; without it
 // these tests skip rather than pass for the wrong reason.
-func blackholeAddr(t *testing.T) *sctp.SCTPAddr {
+func blackholeAddr(t *testing.T) *sctp.Addr {
 	t.Helper()
 
-	addr, err := sctp.ResolveSCTPAddr("sctp4", "192.0.2.1:2905")
+	addr, err := sctp.ResolveAddr("sctp4", "192.0.2.1:2905")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +417,7 @@ func TestEstablishTimeoutBoundsTheM3UAHandshake(t *testing.T) {
 	cfg := dialCfg(5 * time.Second)
 	cfg.EstablishTimeout = time.Second
 
-	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:3170")
+	laddr, err := sctp.ResolveAddr("sctp", "127.0.0.1:3170")
 	if err != nil {
 		t.Fatal(err)
 	}

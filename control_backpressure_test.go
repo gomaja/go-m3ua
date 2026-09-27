@@ -18,14 +18,14 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// fullSendBuffer models go-sctp's two sends against a socket whose send buffer
-// is full: SCTPWrite without a deadline refuses with EAGAIN, and Write parks
-// until space appears or the association is closed, which evicts it the way
-// closing the descriptor evicts a write parked in the runtime poller.
+// fullSendBuffer models SendMsg against a full send buffer: NoWait refuses
+// with EAGAIN, and a blocking send waits until space appears or the
+// association closes.
 type fullSendBuffer struct {
 	mu        sync.Mutex
 	firstErr  error
-	infos     []sctp.SndRcvInfo
+	infos     []sctp.SndInfo
+	waitInfos []sctp.SndInfo
 	attempted [][]byte
 	waited    [][]byte
 	waiting   chan struct{}
@@ -43,7 +43,14 @@ func newFullSendBuffer() *fullSendBuffer {
 	}
 }
 
-func (f *fullSendBuffer) SCTPWrite(b []byte, info *sctp.SndRcvInfo) (int, error) {
+func (f *fullSendBuffer) SendMsg(b []byte, opts sctp.SendOptions) (int, error) {
+	if opts.NoWait {
+		return f.noWaitSend(b, opts.Info)
+	}
+	return f.waitSend(b, opts.Info)
+}
+
+func (f *fullSendBuffer) noWaitSend(b []byte, info *sctp.SndInfo) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attempted = append(f.attempted, bytes.Clone(b))
@@ -56,12 +63,15 @@ func (f *fullSendBuffer) SCTPWrite(b []byte, info *sctp.SndRcvInfo) (int, error)
 	return len(b), nil
 }
 
-func (f *fullSendBuffer) Write(b []byte) (int, error) {
+func (f *fullSendBuffer) waitSend(b []byte, info *sctp.SndInfo) (int, error) {
 	f.waiting <- struct{}{}
 	select {
 	case <-f.space:
 		f.mu.Lock()
 		f.waited = append(f.waited, bytes.Clone(b))
+		if info != nil {
+			f.waitInfos = append(f.waitInfos, *info)
+		}
 		f.mu.Unlock()
 		return len(b), nil
 	case <-f.closed:
@@ -140,15 +150,16 @@ func TestLibraryWriteWaitsOutAFullSendBuffer(t *testing.T) {
 		t.Fatalf("after the write: %d waiting, %d waits in total; want 0 and 1", waiting, waits)
 	}
 
-	// The waiting send carries no ancillary data, so it must be the very
-	// message the refused attempt tried to send, and that attempt must have
-	// named the control template the socket defaults are set to.
+	// The waiting send must carry the refused frame and the same SndInfo.
 	waited := transport.waitedFrames()
 	if len(waited) != 1 || len(transport.attempted) != 1 || !bytes.Equal(waited[0], transport.attempted[0]) {
 		t.Fatalf("waited frames %x after attempts %x; want the refused frame once", waited, transport.attempted)
 	}
 	if got := transport.infos[0]; got.Stream != 0 || got.PPID != M3UAPPID {
 		t.Fatalf("the refused attempt used stream %d PPID %d; want the control template 0/%d", got.Stream, got.PPID, M3UAPPID)
+	}
+	if len(transport.waitInfos) != 1 || transport.waitInfos[0] != transport.infos[0] {
+		t.Fatalf("waiting send info = %v; want the refused send info %v", transport.waitInfos, transport.infos[0])
 	}
 }
 

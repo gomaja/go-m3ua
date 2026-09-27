@@ -26,7 +26,7 @@ var transportRefusals = []struct {
 	{"a full send buffer", syscall.EAGAIN, syscall.EAGAIN},
 	{"a full send buffer reported as EWOULDBLOCK", syscall.EWOULDBLOCK, syscall.EWOULDBLOCK},
 	// A write deadline the send waited out: the last attempt was refused
-	// before the wait began. SCTPWrite returns the poller's error unwrapped;
+	// before the wait began. SendMsg returns the poller's error unwrapped;
 	// both shapes are covered so a wrapped one is classified the same way.
 	{"an expired write deadline", os.ErrDeadlineExceeded, os.ErrDeadlineExceeded},
 	{"an expired write deadline, wrapped", &net.OpError{Op: "write", Net: "sctp", Err: os.ErrDeadlineExceeded}, os.ErrDeadlineExceeded},

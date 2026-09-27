@@ -6,12 +6,8 @@ package m3ua
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
-	"fmt"
-	"net"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -20,25 +16,9 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// assocChangeEvent builds a struct sctp_assoc_change exactly as the kernel
-// delivers one, so the watcher can be driven without persuading a real peer to
-// restart an association.
-//
-// The layout is RFC 6458 Section 6.1.1: type, flags and length, then state,
-// error, the two stream counts and the association id, twenty octets in all. It
-// is written in the host's byte order because that is how the kernel writes it
-// -- these are notifications from the local stack, not anything off the wire.
-func assocChangeEvent(state sctp.SCTPState, assocID uint32) []byte {
-	b := make([]byte, 20)
-	binary.NativeEndian.PutUint16(b[0:2], uint16(sctp.SCTP_ASSOC_CHANGE))
-	binary.NativeEndian.PutUint16(b[2:4], 0)
-	binary.NativeEndian.PutUint32(b[4:8], 20)
-	binary.NativeEndian.PutUint16(b[8:10], uint16(state))
-	binary.NativeEndian.PutUint16(b[10:12], 0)
-	binary.NativeEndian.PutUint16(b[12:14], 2)
-	binary.NativeEndian.PutUint16(b[14:16], 2)
-	binary.NativeEndian.PutUint32(b[16:20], assocID)
-	return b
+// assocChangeEvent builds the parsed notification the v1.1.0 handler receives.
+func assocChangeEvent(state sctp.AssocChangeState, assocID uint32) sctp.Notification {
+	return &sctp.AssocChange{State: state, AssocID: sctp.AssocID(assocID), OutStreams: 2, InStreams: 2}
 }
 
 // dispatchRestartMarker runs the ordered event a production dispatchLoop would
@@ -84,14 +64,14 @@ func TestSCTPRestartIsReportedToLayerManagement(t *testing.T) {
 	conn.assocID.Store(7)
 
 	w := &restartWatcher{}
-	w.setRoute(func(id sctp.SCTPAssocID) *Association {
+	w.setRoute(func(id sctp.AssocID) *Association {
 		if int32(id) == conn.assocID.Load() {
 			return conn
 		}
 		return nil
 	})
 
-	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
+	if err := w.handle(assocChangeEvent(sctp.AssocRestart, 7)); err != nil {
 		t.Fatalf("handle returned %v; an event must never fail the read", err)
 	}
 	dispatchRestartMarker(t, conn)
@@ -105,7 +85,7 @@ func TestSCTPRestartIsReportedToLayerManagement(t *testing.T) {
 			t.Error("Description is empty")
 		}
 	default:
-		t.Error("no M-SCTP_RESTART indication for an SCTP_RESTART event")
+		t.Error("no M-SCTP_RESTART indication for an AssocRestart event")
 	}
 }
 
@@ -140,8 +120,8 @@ func TestSCTPRestartMovesRemoteASPDownInEveryApplicationServer(t *testing.T) {
 	}
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
-	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
+	w.setRoute(func(sctp.AssocID) *Association { return conn })
+	if err := w.handle(assocChangeEvent(sctp.AssocRestart, 7)); err != nil {
 		t.Fatalf("handle returned %v; an event must never fail the read", err)
 	}
 
@@ -198,8 +178,8 @@ func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) 
 	subscription := observeSSNM(t, conn)
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
-	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
+	w.setRoute(func(sctp.AssocID) *Association { return conn })
+	if err := w.handle(assocChangeEvent(sctp.AssocRestart, 7)); err != nil {
 		t.Fatalf("handle returned %v; an event must never fail the read", err)
 	}
 	applyRestartTransition(t, conn)
@@ -259,8 +239,8 @@ func TestSCTPRestartCancelsEveryOldTAckBeforeFreshAspUp(t *testing.T) {
 	conn.startTAck(messages.NewAspDown(params.NewInfoString("old")), requestAspDown)
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
-	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
+	w.setRoute(func(sctp.AssocID) *Association { return conn })
+	if err := w.handle(assocChangeEvent(sctp.AssocRestart, 7)); err != nil {
 		t.Fatal(err)
 	}
 	applyRestartTransition(t, conn)
@@ -517,8 +497,8 @@ func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
 	}
 
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
-	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 7)); err != nil {
+	w.setRoute(func(sctp.AssocID) *Association { return conn })
+	if err := w.handle(assocChangeEvent(sctp.AssocRestart, 7)); err != nil {
 		t.Fatalf("handle restart: %v", err)
 	}
 	close(allowHandlerToFinish)
@@ -551,16 +531,16 @@ func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
 // follows it cannot be relied on to fail instead. SHUTDOWN_COMP's read fails by
 // itself.
 func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
-	for _, st := range []sctp.SCTPState{
-		sctp.SCTP_COMM_UP, sctp.SCTP_COMM_LOST,
-		sctp.SCTP_SHUTDOWN_COMP, sctp.SCTP_CANT_STR_ASSOC,
+	for _, st := range []sctp.AssocChangeState{
+		sctp.AssocCommUp, sctp.AssocCommLost,
+		sctp.AssocShutdownComplete, sctp.AssocCantStart,
 	} {
 		conn, _ := newTestConn(t, StateASPActive, RoleASP)
 		w := &restartWatcher{}
-		w.setRoute(func(sctp.SCTPAssocID) *Association { return conn })
+		w.setRoute(func(sctp.AssocID) *Association { return conn })
 
 		err := w.handle(assocChangeEvent(st, 1))
-		if st == sctp.SCTP_COMM_LOST {
+		if st == sctp.AssocCommLost {
 			if !errors.Is(err, ErrSCTPNotAlive) {
 				t.Fatalf("handle(%v) returned %v, want the read failed with %v", st, err, ErrSCTPNotAlive)
 			}
@@ -570,13 +550,13 @@ func TestNonRestartAssociationEventsAreNotReported(t *testing.T) {
 
 		select {
 		case ind := <-conn.ManagementIndications():
-			t.Errorf("state %v produced a %v indication; only SCTP_RESTART should",
+			t.Errorf("state %v produced a %v indication; only AssocRestart should",
 				st, ind.Kind)
 		default:
 		}
 		select {
 		case event := <-conn.inboundChan:
-			t.Errorf("state %v queued inbound event kind %d; only SCTP_RESTART should", st, event.kind)
+			t.Errorf("state %v queued inbound event kind %d; only AssocRestart should", st, event.kind)
 		default:
 		}
 	}
@@ -592,7 +572,7 @@ func TestRestartIsRoutedToTheNamedAssociationOnly(t *testing.T) {
 	b.assocID.Store(22)
 
 	w := &restartWatcher{}
-	w.setRoute(func(id sctp.SCTPAssocID) *Association {
+	w.setRoute(func(id sctp.AssocID) *Association {
 		switch int32(id) {
 		case a.assocID.Load():
 			return a
@@ -602,7 +582,7 @@ func TestRestartIsRoutedToTheNamedAssociationOnly(t *testing.T) {
 		return nil
 	})
 
-	if err := w.handle(assocChangeEvent(sctp.SCTP_RESTART, 22)); err != nil {
+	if err := w.handle(assocChangeEvent(sctp.AssocRestart, 22)); err != nil {
 		t.Fatal(err)
 	}
 	dispatchRestartMarker(t, b)
@@ -624,29 +604,15 @@ func TestRestartIsRoutedToTheNamedAssociationOnly(t *testing.T) {
 	}
 }
 
-// An event this layer cannot parse, or one for an association it does not know,
-// must not fail the read: the dependency propagates a handler error out of the
-// read, which would kill an association over an event that is not even ours.
-func TestUnparseableOrUnknownEventsDoNotFailTheRead(t *testing.T) {
+// Unknown association IDs cannot disturb another association's read.
+func TestUnknownEventsDoNotFailTheRead(t *testing.T) {
 	w := &restartWatcher{}
-	w.setRoute(func(sctp.SCTPAssocID) *Association { return nil })
-
-	for _, b := range [][]byte{
-		nil,
-		{0x01},
-		make([]byte, 8),
-		assocChangeEvent(sctp.SCTP_RESTART, 999),
-	} {
-		if err := w.handle(b); err != nil {
-			t.Errorf("handle(%d bytes) = %v, want nil", len(b), err)
-		}
+	w.setRoute(func(sctp.AssocID) *Association { return nil })
+	if err := w.handle(assocChangeEvent(sctp.AssocRestart, 999)); err != nil {
+		t.Fatalf("unknown association restart: %v", err)
 	}
-
-	// And with no route installed at all, which is the window between the
-	// socket being created and Dial having an Association to route to.
-	empty := &restartWatcher{}
-	if err := empty.handle(assocChangeEvent(sctp.SCTP_RESTART, 1)); err != nil {
-		t.Errorf("handle with no route = %v, want nil", err)
+	if err := (&restartWatcher{}).handle(assocChangeEvent(sctp.AssocRestart, 1)); err != nil {
+		t.Fatalf("restart before route installation: %v", err)
 	}
 }
 
@@ -655,63 +621,13 @@ func TestUnparseableOrUnknownEventsDoNotFailTheRead(t *testing.T) {
 // read, whether or not the route knows the ID it names.
 func TestCommunicationLostFailsTheReadWhateverTheRoute(t *testing.T) {
 	unknown := &restartWatcher{}
-	unknown.setRoute(func(sctp.SCTPAssocID) *Association { return nil })
+	unknown.setRoute(func(sctp.AssocID) *Association { return nil })
 	for name, w := range map[string]*restartWatcher{
 		"unknown association": unknown,
 		"no route":            {},
 	} {
-		if err := w.handle(assocChangeEvent(sctp.SCTP_COMM_LOST, 999)); !errors.Is(err, ErrSCTPNotAlive) {
+		if err := w.handle(assocChangeEvent(sctp.AssocCommLost, 999)); !errors.Is(err, ErrSCTPNotAlive) {
 			t.Errorf("%s: handle(SCTP_COMM_LOST) = %v, want the read failed with %v", name, err, ErrSCTPNotAlive)
-		}
-	}
-}
-
-// Every socket is opened exactly once. A Dial that fails with ENOPROTOOPT is
-// not retried without the subscription: Linux reports an ICMP
-// protocol-unreachable from a host without SCTP as ENOPROTOOPT too, and the
-// retry sent that host a second INIT.
-func TestAssociationEventsOpenEachSocketOnce(t *testing.T) {
-	refused := &net.OpError{Op: "dial", Net: "sctp", Err: syscall.ENOPROTOOPT}
-	for _, failure := range []error{nil, refused, syscall.ECONNREFUSED} {
-		calls := 0
-		opened, err := withAssociationEvents(func(subscribe bool) (int, error) {
-			calls++
-			if subscribe != associationEventsSupported() {
-				t.Errorf("opened with subscribe = %t, but the kernel's answer is %t", subscribe, associationEventsSupported())
-			}
-			if failure != nil {
-				return 0, failure
-			}
-			return 1, nil
-		})
-		if calls != 1 {
-			t.Errorf("failure %v: opened %d times, want once", failure, calls)
-		}
-		if failure == nil && (err != nil || opened != 1) {
-			t.Errorf("opened = %d, %v; want the socket", opened, err)
-		}
-		if failure != nil && !errors.Is(err, failure) {
-			t.Errorf("error = %v, want %v", err, failure)
-		}
-	}
-}
-
-// Only the probe's ENOPROTOOPT means a kernel without SCTP_EVENT (Linux
-// before 5.0). Any other probe failure, such as SCTP missing altogether,
-// leaves the subscription on, so opening the socket reports that failure.
-func TestAssociationEventsProbeReading(t *testing.T) {
-	for _, test := range []struct {
-		probe error
-		want  bool
-	}{
-		{probe: nil, want: true},
-		{probe: syscall.ENOPROTOOPT, want: false},
-		{probe: fmt.Errorf("setsockopt: %w", syscall.ENOPROTOOPT), want: false},
-		{probe: syscall.EPROTONOSUPPORT, want: true},
-		{probe: syscall.EACCES, want: true},
-	} {
-		if got := associationEventsAccepted(test.probe); got != test.want {
-			t.Errorf("probe %v: accepted = %t, want %t", test.probe, got, test.want)
 		}
 	}
 }

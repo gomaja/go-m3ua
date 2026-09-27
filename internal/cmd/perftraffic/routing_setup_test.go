@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"errors"
-	"net"
+	"net/netip"
 	"reflect"
 	"sync"
 	"testing"
@@ -77,8 +77,8 @@ type fakeRoutingEndpoint struct {
 	dialCtxs    []context.Context
 	activeDials int
 	dialConfig  []*m3ua.AssociationConfig
-	dialLocal   []*sctp.SCTPAddr
-	listenAddr  *sctp.SCTPAddr
+	dialLocal   []*sctp.Addr
+	listenAddr  *sctp.Addr
 	listenCfg   *m3ua.ListenerConfig
 	listenErr   error
 	dialErr     error
@@ -89,7 +89,7 @@ type fakeRoutingEndpoint struct {
 	closeOne    sync.Once
 }
 
-func (endpoint *fakeRoutingEndpoint) Listen(address *sctp.SCTPAddr, config *m3ua.ListenerConfig) (routingSetupListener, error) {
+func (endpoint *fakeRoutingEndpoint) Listen(address *sctp.Addr, config *m3ua.ListenerConfig) (routingSetupListener, error) {
 	endpoint.listenAddr = address
 	endpoint.listenCfg = config
 	if endpoint.listenErr != nil {
@@ -98,7 +98,7 @@ func (endpoint *fakeRoutingEndpoint) Listen(address *sctp.SCTPAddr, config *m3ua
 	return endpoint.listener, nil
 }
 
-func (endpoint *fakeRoutingEndpoint) Dial(ctx context.Context, local, _ *sctp.SCTPAddr, config *m3ua.AssociationConfig) (routingSetupAssociation, error) {
+func (endpoint *fakeRoutingEndpoint) Dial(ctx context.Context, local, _ *sctp.Addr, config *m3ua.AssociationConfig) (routingSetupAssociation, error) {
 	endpoint.mutex.Lock()
 	index := len(endpoint.dialCtxs)
 	endpoint.dialCtxs = append(endpoint.dialCtxs, ctx)
@@ -160,10 +160,10 @@ func (factory *fakeRoutingFactory) create(config m3ua.EndpointConfig) (routingSe
 	return factory.endpoints[index], nil
 }
 
-func routingSetupFixture(testContext *testing.T) (routingTopology, []*sctp.SCTPAddr, *fakeRoutingFactory, *fakeRoutingFactory) {
+func routingSetupFixture(testContext *testing.T) (routingTopology, []*sctp.Addr, *fakeRoutingFactory, *fakeRoutingFactory) {
 	testContext.Helper()
 	topology, senders, peers := routingInventoryFixture(testContext)
-	addresses := make([]*sctp.SCTPAddr, 4)
+	addresses := make([]*sctp.Addr, 4)
 	peerFactory := &fakeRoutingFactory{}
 	senderFactory := &fakeRoutingFactory{endpoints: []*fakeRoutingEndpoint{{snapshots: make(map[m3ua.AssociationID]m3ua.AssociationSnapshot), closed: make(chan struct{})}}}
 	for peerIndex := range topology.Peers {
@@ -249,7 +249,7 @@ func TestRoutingSetupKeepsLifetimeAndExportsPairableOwnedInventory(testContext *
 		}
 	}
 	for slot, local := range senderFactory.endpoints[0].dialLocal {
-		if local == nil || local.Port != 0 || len(local.IPAddrs) != 1 || !local.IPAddrs[0].IP.Equal(routingTestAddress("192.0.2.1", 0).IPAddrs[0].IP) {
+		if local == nil || local.Port != 0 || len(local.IPs) != 1 || local.IPs[0] != routingTestAddress("192.0.2.1", 0).IPs[0] {
 			testContext.Fatalf("dial %d lost its explicit ephemeral-port bind: %+v", slot, local)
 		}
 		config := senderFactory.endpoints[0].dialConfig[slot]
@@ -258,7 +258,7 @@ func TestRoutingSetupKeepsLifetimeAndExportsPairableOwnedInventory(testContext *
 		}
 	}
 	for index, endpoint := range peerFactory.endpoints {
-		if endpoint.listenAddr == nil || endpoint.listenAddr.Port != 2905+index || len(endpoint.listenAddr.IPAddrs) != 1 || !endpoint.listenAddr.IPAddrs[0].IP.Equal(addresses[index].IPAddrs[0].IP) {
+		if endpoint.listenAddr == nil || endpoint.listenAddr.Port != uint16(2905+index) || len(endpoint.listenAddr.IPs) != 1 || endpoint.listenAddr.IPs[0] != addresses[index].IPs[0] {
 			testContext.Fatalf("listener %d lost its concrete bind: %+v", index, endpoint.listenAddr)
 		}
 		if endpoint.listenCfg == nil || endpoint.listenCfg.DefaultAssociationConfig == nil || !reflect.DeepEqual(endpoint.listenCfg.DefaultAssociationConfig.ApplicationServers, topology.Peers[index].ApplicationServers) || endpoint.listenCfg.DefaultAssociationConfig.PeerSGP != nil {
@@ -277,9 +277,9 @@ func TestRoutingSetupKeepsLifetimeAndExportsPairableOwnedInventory(testContext *
 		testContext.Fatalf("live inventory seam is not pairable: count=%d error=%v", len(pairs), err)
 	}
 	peerInventory[0].Snapshot.SCTP.InboundStreams = 1
-	clear(peerInventory[0].Snapshot.LocalAddr.IPAddrs[0].IP)
+	peerInventory[0].Snapshot.LocalAddr.IPs[0] = netip.Addr{}
 	fresh, err := peers.Inventory()
-	if err != nil || fresh[0].Snapshot.SCTP.InboundStreams != 17 || fresh[0].Snapshot.LocalAddr.IPAddrs[0].IP.IsUnspecified() {
+	if err != nil || fresh[0].Snapshot.SCTP.InboundStreams != 17 || fresh[0].Snapshot.LocalAddr.IPs[0].IsUnspecified() {
 		testContext.Fatalf("exported inventory aliases runtime ownership: %+v %v", fresh, err)
 	}
 	if err := senders.Close(); err != nil {
@@ -444,14 +444,14 @@ func TestRoutingSetupConcurrentCloseJoinsAllAcceptors(testContext *testing.T) {
 }
 
 func TestRoutingSetupRejectsImplicitOrAmbiguousBindsBeforeOpeningResources(testContext *testing.T) {
-	for _, address := range []*sctp.SCTPAddr{nil, routingTestAddress("0.0.0.0", 0), routingTestAddress("::", 0), routingTestAddress("192.0.2.1", 40000), {IPAddrs: []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}, {IP: net.ParseIP("192.0.2.3")}}}} {
+	for _, address := range []*sctp.Addr{nil, routingTestAddress("0.0.0.0", 0), routingTestAddress("::", 0), routingTestAddress("192.0.2.1", 40000), {IPs: []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.3")}}} {
 		topology, addresses, _, factory := routingSetupFixture(testContext)
 		owner, err := startRoutingSenderSet(context.Background(), topology, address, addresses, factory.create)
 		if owner != nil || err == nil || len(factory.configs) != 0 {
 			testContext.Fatalf("unsupported sender bind opened resources: %+v %v", address, err)
 		}
 	}
-	for _, address := range []*sctp.SCTPAddr{nil, routingTestAddress("0.0.0.0", 2905), routingTestAddress("::", 2905), routingTestAddress("192.0.2.2", 0)} {
+	for _, address := range []*sctp.Addr{nil, routingTestAddress("0.0.0.0", 2905), routingTestAddress("::", 2905), routingTestAddress("192.0.2.2", 0)} {
 		topology, addresses, factory, _ := routingSetupFixture(testContext)
 		addresses[0] = address
 		owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create)
@@ -496,7 +496,7 @@ func TestRoutingSetupCloseWaitsForWorkerExit(testContext *testing.T) {
 func TestRoutingSetupRejectsUnexpectedActualLocalAddressAndPort(testContext *testing.T) {
 	for _, testCase := range []struct {
 		name    string
-		address *sctp.SCTPAddr
+		address *sctp.Addr
 	}{
 		{name: "zero-actual-port", address: routingTestAddress("192.0.2.1", 0)},
 		{name: "different-actual-IP", address: routingTestAddress("192.0.2.3", 40000)},

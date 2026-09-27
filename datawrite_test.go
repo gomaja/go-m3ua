@@ -29,7 +29,7 @@ type dataFrameCapture struct {
 	short int
 }
 
-func (c *dataFrameCapture) write(data []byte, info *sctp.SndRcvInfo) (int, error) {
+func (c *dataFrameCapture) write(data []byte, info *sctp.SndInfo) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
@@ -765,7 +765,7 @@ func TestWriteSignalOfDataUsesTheSameAdmissionAndOutcomeRules(t *testing.T) {
 			if err != nil {
 				return 0, err
 			}
-			if _, err := capture.write(frame, &sctp.SndRcvInfo{Stream: stream}); err != nil {
+			if _, err := capture.write(frame, &sctp.SndInfo{Stream: stream}); err != nil {
 				return 0, err
 			}
 			return len(frame), nil

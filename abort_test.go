@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -192,6 +191,56 @@ func TestAbortAfterTheAssociationEndedIsANoOp(t *testing.T) {
 	}
 }
 
+// A Close that already owns the M3UA teardown must still be interruptible by
+// Abort. The release seams hold Close where Conn.Close would wait for the
+// SHUTDOWN handshake, then release it when Abort runs (RFC 9260 Sections
+// 9.1, 11.1.4).
+func TestAbortOvertakesAssociationClose(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	local, remote, err := setupConn(t, ctx, 3940)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = remote.Close() }()
+	defer func() { _ = local.sctpConn.Close() }()
+
+	entered := make(chan struct{})
+	released := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(released) }) }
+	defer release()
+	local.transportCloser = func() error {
+		close(entered)
+		<-released
+		return nil
+	}
+	local.transportAborter = func() error { release(); return nil }
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- local.Close() }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("Close never reached the transport wait")
+	}
+	abortResult := make(chan error, 1)
+	go func() { abortResult <- local.Abort() }()
+	select {
+	case err := <-abortResult:
+		if err != nil {
+			t.Fatalf("Abort during Close: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Abort did not overtake the waiting Close")
+	}
+	if err := <-closeResult; err != nil {
+		t.Fatalf("Close after Abort: %v", err)
+	}
+	if local.Err() != ErrAssociationClosed {
+		t.Fatalf("first teardown cause = %v, want ErrAssociationClosed", local.Err())
+	}
+}
+
 // Abort, Close and ShutdownContext share one teardown. However they
 // interleave, the transport is released exactly once and every caller
 // returns.
@@ -281,27 +330,23 @@ func TestAbortStopsAShutdownWaitingForItsAck(t *testing.T) {
 	assertNoSignal(t, writes, 25*time.Millisecond, "ASP Down after Abort")
 }
 
-// newAssociationEventPeer is newRawPeer with SCTP_ASSOC_CHANGE subscribed on
+// newAssociationEventPeer is newRawPeer with EventAssocChange subscribed on
 // the listening socket before listen, so every association it accepts reports
 // how it ended (RFC 6458 Section 6.1.1). What the peer's own SCTP layer says it
 // received is the wire evidence: SCTP_COMM_LOST carrying the ABORT chunk's
-// error cause for an abort, SCTP_SHUTDOWN_COMP for a completed SHUTDOWN.
+// error cause for an abort, AssocShutdownComplete for a completed SHUTDOWN.
 func newAssociationEventPeer(t *testing.T, port int, reply func(messages.M3UA) messages.M3UA) (*rawPeer, <-chan *sctp.AssocChange) {
 	t.Helper()
 
-	addr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
+	addr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
 	events := make(chan *sctp.AssocChange, 16)
 	var ended atomic.Bool
-	handler := func(b []byte) error {
-		notification, err := sctp.ParseNotification(b)
-		if err != nil {
-			return nil
-		}
+	handler := func(notification sctp.Notification) error {
 		if change, ok := notification.(*sctp.AssocChange); ok {
-			if change.State != sctp.SCTP_COMM_UP {
+			if change.State != sctp.AssocCommUp {
 				ended.Store(true)
 			}
 			select {
@@ -311,15 +356,11 @@ func newAssociationEventPeer(t *testing.T, port int, reply func(messages.M3UA) m
 		}
 		return nil
 	}
-	ln, err := (&sctp.SocketConfig{NotificationHandler: handler}).
-		WithPreAssociation(sctp.PreAssociationConfig{Notifications: associationEvents()}).
+	ln, err := (&sctp.Config{NotificationHandler: handler, Notifications: associationEvents()}).
 		Listen("sctp", addr)
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
-		}
-		if errors.Is(err, syscall.ENOPROTOOPT) {
-			t.Skipf("skipping: this kernel has no SCTP_EVENT, so the peer cannot report how the association ended")
 		}
 		t.Fatal(err)
 	}
@@ -342,14 +383,14 @@ func newAssociationEventPeer(t *testing.T, port int, reply func(messages.M3UA) m
 }
 
 // associationEnd waits for the event that ended the peer's association: the
-// first SCTP_ASSOC_CHANGE other than SCTP_COMM_UP.
+// first EventAssocChange other than AssocCommUp.
 func associationEnd(t *testing.T, events <-chan *sctp.AssocChange) *sctp.AssocChange {
 	t.Helper()
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
 		case change := <-events:
-			if change.State != sctp.SCTP_COMM_UP {
+			if change.State != sctp.AssocCommUp {
 				return change
 			}
 		case <-deadline:
@@ -362,17 +403,17 @@ func associationEnd(t *testing.T, events <-chan *sctp.AssocChange) *sctp.AssocCh
 // The wire difference, observed by the peer's own SCTP layer. After Abort it
 // reports SCTP_COMM_LOST with the User-Initiated Abort cause RFC 9260 Section
 // 9.1 says an ABORT requested by the upper layer SHOULD carry; after Close it
-// reports SCTP_SHUTDOWN_COMP, the graceful end of Section 9.2. Each is also
+// reports AssocShutdownComplete, the graceful end of Section 9.2. Each is also
 // required not to be the other, so an Abort that fell back to Close fails here.
 func TestAbortSendsABORTWhereCloseCompletesASHUTDOWN(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		port    int
 		release func(*Association) error
-		state   sctp.SCTPState
+		state   sctp.AssocChangeState
 	}{
-		{"Close", 3931, (*Association).Close, sctp.SCTP_SHUTDOWN_COMP},
-		{"Abort", 3932, (*Association).Abort, sctp.SCTP_COMM_LOST},
+		{"Close", 3931, (*Association).Close, sctp.AssocShutdownComplete},
+		{"Abort", 3932, (*Association).Abort, sctp.AssocCommLost},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -393,11 +434,11 @@ func TestAbortSendsABORTWhereCloseCompletesASHUTDOWN(t *testing.T) {
 			end := associationEnd(t, events)
 			if end.State != test.state {
 				t.Fatalf("after %s the peer's SCTP layer reported %v (cause %s), want %v",
-					test.name, end.State, sctp.ErrorCauseString(uint32(end.Error)), test.state)
+					test.name, end.State, end.Error.String(), test.state)
 			}
-			if end.State == sctp.SCTP_COMM_LOST && end.Error != sctp.SCTP_ERROR_USER_ABORT {
+			if end.State == sctp.AssocCommLost && end.Error != sctp.CauseUserAbort {
 				t.Errorf("the ABORT carried cause %s, want %s (RFC 9260 Section 9.1)",
-					sctp.ErrorCauseString(uint32(end.Error)), sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT)))
+					end.Error.String(), sctp.CauseUserAbort.String())
 			}
 
 			requireDone(t, conn, test.name)
@@ -453,8 +494,8 @@ func TestAbortDropsAnAssociationStuckInShutdown(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Errorf("Abort and the shutdown it ended took %v; the ABORT must not wait for the peer", elapsed)
 	}
-	if end := associationEnd(t, events); end.State != sctp.SCTP_COMM_LOST {
-		t.Errorf("the peer's SCTP layer reported %v, want %v", end.State, sctp.SCTP_COMM_LOST)
+	if end := associationEnd(t, events); end.State != sctp.AssocCommLost {
+		t.Errorf("the peer's SCTP layer reported %v, want %v", end.State, sctp.AssocCommLost)
 	}
 	if n := peer.count("ASP Down"); n != 0 {
 		t.Errorf("the peer received %d ASP Down after Abort ended the shutdown", n)
@@ -519,7 +560,7 @@ func TestAbortedAssociationIsLostAtItsGoM3UAPeer(t *testing.T) {
 				t.Fatalf("the peer ended with %v; lost to SCTP_COMM_LOST = %v, want %v", peerErr, lost, test.lost)
 			}
 			if test.lost {
-				for _, want := range []string{"SCTP_COMM_LOST", sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT))} {
+				for _, want := range []string{"SCTP_COMM_LOST", sctp.CauseUserAbort.String()} {
 					if !strings.Contains(peerErr.Error(), want) {
 						t.Errorf("the peer's Err %q does not name %s", peerErr, want)
 					}
@@ -724,13 +765,19 @@ func raceReleasesAgainstIO(t *testing.T, port int, accepted, abortOnly bool) {
 	if !errors.Is(local.Err(), ErrAssociationClosed) {
 		t.Errorf("Err = %v, want %v", local.Err(), ErrAssociationClosed)
 	}
-	// Whichever release won is what reached the wire.
+	// Abort may overtake a Close that already won the M3UA teardown, so the
+	// recorded cause does not always determine which SCTP release reached the
+	// peer. An Abort that won first must still send ABORT.
 	aborted := local.Err() == ErrAssociationAborted
 	if abortOnly && !aborted {
 		t.Errorf("Err = %v after only Aborts, want %v", local.Err(), ErrAssociationAborted)
 	}
-	if lost := errors.Is(remote.Err(), ErrSCTPNotAlive) &&
-		strings.Contains(remote.Err().Error(), sctp.ErrorCauseString(uint32(sctp.SCTP_ERROR_USER_ABORT))); lost != aborted {
-		t.Errorf("the peer ended with %v; lost to a user ABORT = %v, want %v because %v won", remote.Err(), lost, aborted, local.Err())
+	lost := errors.Is(remote.Err(), ErrSCTPNotAlive) &&
+		strings.Contains(remote.Err().Error(), sctp.CauseUserAbort.String())
+	if aborted && !lost {
+		t.Errorf("the peer ended with %v; an Abort that won the teardown must send ABORT", remote.Err())
+	}
+	if !lost && !errors.Is(remote.Err(), io.EOF) {
+		t.Errorf("the peer ended with %v; want a completed SHUTDOWN or user ABORT", remote.Err())
 	}
 }

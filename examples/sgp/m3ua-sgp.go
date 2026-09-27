@@ -98,7 +98,7 @@ func main() {
 		SetApplicationServers(applicationServers...)
 
 	// setup SCTP listener on the specified IPs and Port.
-	laddr, err := sctp.ResolveSCTPAddr("sctp", *addr)
+	laddr, err := sctp.ResolveAddr("sctp", *addr)
 	if err != nil {
 		log.Fatalf("Failed to resolve SCTP address: %s", err)
 	}

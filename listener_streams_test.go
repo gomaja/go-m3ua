@@ -6,7 +6,7 @@ package m3ua
 
 import (
 	"context"
-	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -29,7 +29,7 @@ func TestAcceptedAssociationNegotiatesAsManyStreamsAsADialledOne(t *testing.T) {
 		c.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 		return c
 	}
-	address := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, Port: port}
+	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: port}
 
 	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {

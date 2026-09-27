@@ -19,7 +19,7 @@ import (
 // Listener.Accept returns transport-listener failures directly, so callers can
 // continue after this error without masking a failed listening socket.
 type AssociationEstablishmentError struct {
-	RemoteAddr *sctp.SCTPAddr
+	RemoteAddr *sctp.Addr
 	Err        error
 }
 

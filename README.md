@@ -14,12 +14,35 @@ Applications upgrading from v1.0 should read the
 
 ### Installation
 
-Run `go mod tidy` in your project's directory to collect the required packages automatically.
+Run `go get github.com/gomaja/go-m3ua@main` in your project's directory.
+
+**Requirements:** Linux 5.0 or later for SCTP associations; Rocky Linux / RHEL 9 is the primary target.
 
 _This project follows [the Release Policy of Go](https://go.dev/doc/devel/release#policy)._
 
 _Full SCTP socket validation runs on Linux. Non-Linux systems can build and run
-non-socket tests, but production M3UA associations require OS SCTP support._
+non-socket tests; production M3UA associations require Linux 5.0 or later._
+
+#### Enabling SCTP on Rocky Linux / RHEL 9
+
+The SCTP kernel module is not part of the base kernel package. It ships in
+`kernel-modules-extra`, and that package also installs
+`/etc/modprobe.d/sctp-blacklist.conf`, which keeps the module from loading.
+Until the blacklist entry is removed, opening an SCTP socket fails with
+`protocol not supported` (EPROTONOSUPPORT), and listing the module in
+`/etc/modules-load.d` does not help either: it is refused as deny-listed.
+
+```sh
+sudo dnf install kernel-modules-extra-$(uname -r)
+sudo sed -i 's/^blacklist sctp$/# blacklist sctp/' /etc/modprobe.d/sctp-blacklist.conf
+# optional: load it at boot rather than on the first SCTP socket
+echo sctp | sudo tee /etc/modules-load.d/sctp.conf
+```
+
+The package marks the blacklist file as configuration that updates do not
+replace, so the edit persists. With the entry commented out, the kernel loads
+the module when the first SCTP socket is opened. Install the
+`kernel-modules-extra` that matches each kernel you boot.
 
 ### Trying Examples
 
@@ -253,7 +276,7 @@ if err != nil {
 defer func() { _ = endpoint.Close() }()
 
 config.PeerSGP = &peer
-remote, err := sctp.ResolveSCTPAddr("sctp", PEER_ADDRESS)
+remote, err := sctp.ResolveAddr("sctp", PEER_ADDRESS)
 if err != nil {
     log.Fatal(err)
 }
@@ -535,8 +558,9 @@ completing the shutdown. Locally it tears the association down exactly as
 
 An ABORT discards whatever either end still had queued instead of delivering
 it. A go-m3ua peer reports the loss through `Err` as `ErrSCTPNotAlive` on
-Linux 5.0 and later, where it receives SCTP association events. Either way the
-peer's M3UA moves the ASP to ASP-DOWN, as it does after a SHUTDOWN: RFC 4666
+Linux 5.0 or later. Dial and Listen require the association-change subscription
+when opening the socket. The peer's M3UA moves the ASP to ASP-DOWN, as it does
+after a SHUTDOWN: RFC 4666
 Section 4.3.3 does so on SCTP-COMMUNICATION_DOWN and, at an ASP, pauses the
 affected SS7 destinations with MTP-PAUSE, and Section 4.3.1 counts
 COMMUNICATION LOST as SCTP CDI at an SGP just as it counts SHUTDOWN_COMPLETE.

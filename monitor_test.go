@@ -28,13 +28,13 @@ import (
 // after the handshake can expire T(beat).
 type rawPeer struct {
 	t        *testing.T
-	ln       *sctp.SCTPListener
-	addr     *sctp.SCTPAddr
+	ln       *sctp.Listener
+	addr     *sctp.Addr
 	mu       sync.Mutex
 	received []messages.M3UA
 	// conn is the accepted association, published so a test can send
 	// unsolicited traffic rather than only replying.
-	conn *sctp.SCTPConn
+	conn *sctp.Conn
 	// reply returns the message to send in response to msg, or nil to stay
 	// silent. It runs on the peer's goroutine.
 	reply func(msg messages.M3UA) messages.M3UA
@@ -49,11 +49,11 @@ type rawPeer struct {
 func newRawPeer(t *testing.T, port int, reply func(messages.M3UA) messages.M3UA) *rawPeer {
 	t.Helper()
 
-	addr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
+	addr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := sctp.ListenSCTP("sctp", addr)
+	ln, err := sctp.Listen("sctp", addr)
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -81,18 +81,18 @@ func (p *rawPeer) serve() {
 	}
 }
 
-func (p *rawPeer) serveConn(conn *sctp.SCTPConn) {
+func (p *rawPeer) serveConn(conn *sctp.Conn) {
 	defer func() { _ = conn.Close() }()
 
 	p.mu.Lock()
 	p.conn = conn
 	p.mu.Unlock()
 
-	info := &sctp.SndRcvInfo{PPID: 3, Stream: 0}
+	info := &sctp.SndInfo{PPID: 3, Stream: 0}
 	// Generous, so the peer itself never truncates what the library sends it.
 	buf := make([]byte, 65535)
 	for {
-		n, _, err := conn.SCTPRead(buf)
+		n, _, err := recvWithInfo(conn, buf)
 		if err != nil {
 			p.drainAfterEnd(conn, buf, err)
 			return
@@ -114,7 +114,7 @@ func (p *rawPeer) serveConn(conn *sctp.SCTPConn) {
 		if err != nil {
 			return
 		}
-		if _, err := conn.SCTPWrite(b, info); err != nil {
+		if _, err := sendWithInfo(conn, b, info); err != nil {
 			return
 		}
 	}
@@ -123,16 +123,16 @@ func (p *rawPeer) serveConn(conn *sctp.SCTPConn) {
 // drainAfterEnd keeps an association-event peer's socket open and read after
 // its end of stream until the SCTP layer has delivered how the association
 // ended. A SHUTDOWN shuts the socket for reading as soon as it arrives, so the
-// read loop sees the end of stream at once, while SCTP_SHUTDOWN_COMP is queued
+// read loop sees the end of stream at once, while AssocShutdownComplete is queued
 // only when the SHUTDOWN COMPLETE arrives (RFC 9260 Section 9.2). Closing the
 // socket on the end of stream discarded that notification whenever it came
 // later than the reader woke. Notifications are delivered only by reads.
-func (p *rawPeer) drainAfterEnd(conn *sctp.SCTPConn, buf []byte, err error) {
+func (p *rawPeer) drainAfterEnd(conn *sctp.Conn, buf []byte, err error) {
 	if p.ended == nil || !errors.Is(err, io.EOF) {
 		return
 	}
 	for deadline := time.Now().Add(10 * time.Second); !p.ended() && time.Now().Before(deadline); {
-		if _, _, err := conn.SCTPRead(buf); err != nil && !errors.Is(err, io.EOF) {
+		if _, _, err := recvWithInfo(conn, buf); err != nil && !errors.Is(err, io.EOF) {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -161,7 +161,7 @@ func (p *rawPeer) sendOn(t *testing.T, b []byte, stream uint16) {
 	conn := p.conn
 	p.mu.Unlock()
 
-	if _, err := conn.SCTPWrite(b, &sctp.SndRcvInfo{PPID: 3, Stream: stream}); err != nil {
+	if _, err := sendWithInfo(conn, b, &sctp.SndInfo{PPID: 3, Stream: stream}); err != nil {
 		t.Fatalf("peer send: %v", err)
 	}
 }
@@ -177,7 +177,7 @@ func (p *rawPeer) sendBest(b []byte) {
 	if conn == nil {
 		return
 	}
-	_, _ = conn.SCTPWrite(b, &sctp.SndRcvInfo{PPID: 3, Stream: 0})
+	_, _ = sendWithInfo(conn, b, &sctp.SndInfo{PPID: 3, Stream: 0})
 }
 
 // count reports how many messages of the given type name the peer received, so
@@ -214,7 +214,7 @@ func handshakeOnly(msg messages.M3UA) messages.M3UA {
 func dialRawPeer(t *testing.T, ctx context.Context, p *rawPeer, port int, hb *HeartbeatInfo) *Association {
 	t.Helper()
 
-	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
+	laddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestHeartbeatObservesASPActiveBeforeItStarts(t *testing.T) {
 // The headline regression: a peer that completes the handshake and then stops
 // answering BEATs must be detected.
 //
-// monitor() used to perform its SCTPRead inline inside a select arm, so while
+// monitor() used to perform its SCTP read inline inside a select arm, so while
 // an idle association was parked in that read the sibling errChan arm could not
 // be selected. errChan is unbuffered, so heartbeat()'s sendErr(ErrHeartbeatExpired)
 // blocked forever: the connection reported ASP-ACTIVE indefinitely and the
@@ -395,7 +395,7 @@ func TestHeartbeatSurvivesAgainstAnsweringPeer(t *testing.T) {
 
 // An asynchronous error raised from a dispatch goroutine must reach monitor()
 // even while the association is otherwise idle. Before the fix, monitor() was
-// parked in SCTPRead, so the sendErr in the DATA path blocked and the ERR the
+// parked in the SCTP read, so the sendErr in the DATA path blocked and the ERR the
 // RFC requires was never written — and the goroutine leaked. A peer that sent a
 // stream of malformed DATA could leak unboundedly.
 func TestErrorFromIdleAssociationIsReported(t *testing.T) {
@@ -448,7 +448,7 @@ func TestErrorFromIdleAssociationIsReported(t *testing.T) {
 	}
 }
 
-// Closing an Association must stop the reader goroutine. readLoop() blocks in SCTPRead,
+// Closing an Association must stop the reader goroutine. readLoop() blocks in ReadMsg,
 // so it is released by the socket close rather than by c.done; this pins that
 // it does not survive the association.
 func TestReaderGoroutineStopsOnClose(t *testing.T) {
@@ -558,10 +558,9 @@ func TestLargeDataRoundTrip(t *testing.T) {
 	}
 }
 
-// A message too large even for the configured buffer must be reported, not
-// silently dropped and not fatal to the association. SCTPRead does not surface
-// the MSG_EOR receive flag, so a read that exactly fills the buffer is the only
-// truncation signal available.
+// A message above the configured ceiling must end the association. ReadMsg
+// reports ErrMessageTooLong after draining that message to its boundary; the
+// existing M3UA policy still rejects it as a protocol error and tears down.
 func TestOversizedMessageIsReportedNotDropped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -580,7 +579,7 @@ func TestOversizedMessageIsReportedNotDropped(t *testing.T) {
 	})
 
 	// A deliberately small buffer, so a modest DATA overflows it.
-	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:2966")
+	laddr, err := sctp.ResolveAddr("sctp", "127.0.0.1:2966")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,10 +605,8 @@ func TestOversizedMessageIsReportedNotDropped(t *testing.T) {
 	}
 	peer.sendOn(t, raw, 1)
 
-	// The association must be torn down rather than left consuming the tail of
-	// a message it never saw the start of. ReadMsg leaves the remainder of an
-	// oversized message queued, so there is no way to resynchronise on a
-	// message boundary: continuing would feed the state machine fragments.
+	// ReadMsg drains the oversized message to its boundary. The M3UA policy
+	// still tears down after the reported limit violation.
 	if !waitFor(func() bool { return conn.State() != StateASPActive }, 5*time.Second) {
 		t.Errorf("state = %v after an oversized message; want the association torn down rather than resuming mid-message",
 			conn.State())
@@ -656,7 +653,7 @@ func TestMessageExactlyAtCeilingIsAccepted(t *testing.T) {
 
 	peer := newRawPeer(t, 2967, handshakeOnly)
 
-	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:2967")
+	laddr, err := sctp.ResolveAddr("sctp", "127.0.0.1:2967")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,7 @@ package m3ua
 import (
 	"context"
 	"errors"
-	"net"
+	"net/netip"
 	"syscall"
 	"testing"
 	"time"
@@ -39,7 +39,7 @@ func TestWriteReportsEAGAINWhenTheSendBufferIsFull(t *testing.T) {
 	key := ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	config := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
-	address := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, Port: 3092}
+	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: 3092}
 	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {
 		t.Fatal(err)

@@ -888,7 +888,7 @@ func TestSGPEndpointCanInitiateMultipleAssociations(t *testing.T) {
 	initiated := make([]*Association, 0, len(listeners))
 	for index, listener := range listeners {
 		association, err := sgpEndpoint.Dial(
-			ctx, "m3ua", nil, listener.Addr().(*sctp.SCTPAddr), sgpConfig,
+			ctx, "m3ua", nil, listener.Addr().(*sctp.Addr), sgpConfig,
 		)
 		if err != nil {
 			t.Fatalf("SGP Dial %d: %v", index, err)
@@ -951,7 +951,7 @@ func TestSGPListenerCloseRejectsAssociationSelectedAfterShutdown(t *testing.T) {
 		accepted <- acceptErr
 	}()
 
-	raw, err := sctp.DialSCTP("sctp", nil, listener.Addr().(*sctp.SCTPAddr))
+	raw, err := sctp.Dial(context.Background(), "sctp", nil, listener.Addr().(*sctp.Addr))
 	if err != nil {
 		_ = listener.Close()
 		t.Fatalf("raw SCTP association: %v", err)
@@ -1006,7 +1006,7 @@ func TestSGPListenerCloseStopsAssociationDuringM3UAEstablishment(t *testing.T) {
 		}
 		accepted <- acceptErr
 	}()
-	raw, err := sctp.DialSCTP("sctp", nil, listener.Addr().(*sctp.SCTPAddr))
+	raw, err := sctp.Dial(context.Background(), "sctp", nil, listener.Addr().(*sctp.Addr))
 	if err != nil {
 		_ = listener.Close()
 		t.Fatalf("raw SCTP association: %v", err)
@@ -1231,9 +1231,9 @@ func TestFailedDialDoesNotRetainApplicationServer(t *testing.T) {
 
 			config := test.config()
 			config.InitTimeout = 100 * time.Millisecond
-			remote, err := sctp.ResolveSCTPAddr("sctp4", "127.0.0.1:0")
+			remote, err := sctp.ResolveAddr("sctp4", "127.0.0.1:0")
 			if err != nil {
-				t.Fatalf("ResolveSCTPAddr(): %v", err)
+				t.Fatalf("ResolveAddr(): %v", err)
 			}
 			association, dialErr := endpoint.Dial(context.Background(), "m3ua4", nil, remote, config)
 			if association != nil {

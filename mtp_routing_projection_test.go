@@ -1182,7 +1182,7 @@ func TestFailedWriteIsNotRetriedThroughAWorkingApplicationServer(t *testing.T) {
 
 	// The transport refuses the preferred Application Server's scope and would
 	// accept the failback's.
-	association.dataWriter = func(data []byte, info *sctp.SndRcvInfo) (int, error) {
+	association.dataWriter = func(data []byte, info *sctp.SndInfo) (int, error) {
 		parsed, parseErr := messages.Parse(data)
 		if parseErr != nil {
 			t.Errorf("parse outbound DATA: %v", parseErr)
@@ -1296,7 +1296,7 @@ func TestScopeLostAfterAdmissionRefusesOnlyItsOwnTarget(t *testing.T) {
 	releaseWrite := make(chan struct{})
 	first := associations["sg-a/sgp-a1"]
 	firstCapture := captures["sg-a/sgp-a1"]
-	first.dataWriter = func(data []byte, info *sctp.SndRcvInfo) (int, error) {
+	first.dataWriter = func(data []byte, info *sctp.SndInfo) (int, error) {
 		close(writeReached)
 		<-releaseWrite
 		return firstCapture.write(data, info)
@@ -1601,7 +1601,7 @@ func TestDifferentOriginatingPointCodesAreDifferentFlows(t *testing.T) {
 	firstStarted := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	secondStarted := make(chan struct{})
-	associations["sg-a/sgp-a1"].dataWriter = func(raw []byte, _ *sctp.SndRcvInfo) (int, error) {
+	associations["sg-a/sgp-a1"].dataWriter = func(raw []byte, _ *sctp.SndInfo) (int, error) {
 		payload, err := capturedMTPTransferPayload(raw)
 		if err != nil {
 			return 0, err

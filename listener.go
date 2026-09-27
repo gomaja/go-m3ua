@@ -23,7 +23,7 @@ import (
 // SGP, or (through explicit Single Exchange model or Double Exchange model
 // APIs) IPSP procedures.
 type Listener struct {
-	sctpListener *sctp.SCTPListener
+	sctpListener *sctp.Listener
 	endpoint     *Endpoint
 	*AssociationConfig
 	listenerConfig *ListenerConfig
@@ -35,7 +35,7 @@ type Listener struct {
 	// pendingSCTP contains accepted SCTP associations that have not yet been
 	// promoted to M3UA Associations. Close owns these sockets too, including
 	// while SelectAssociationConfig is running.
-	pendingSCTP map[*sctp.SCTPConn]struct{}
+	pendingSCTP map[*sctp.Conn]struct{}
 	// activeAccept counts accepted SCTP associations still inside Accept,
 	// including peer selection and M3UA establishment.
 	activeAccept int
@@ -141,7 +141,7 @@ func (l *Listener) track(c *Association) bool {
 
 // beginAccept makes the Listener own an accepted SCTP association before any
 // peer configuration or M3UA establishment work starts.
-func (l *Listener) beginAccept(sctpAssociation *sctp.SCTPConn) bool {
+func (l *Listener) beginAccept(sctpAssociation *sctp.Conn) bool {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
 
@@ -149,7 +149,7 @@ func (l *Listener) beginAccept(sctpAssociation *sctp.SCTPConn) bool {
 		return false
 	}
 	if l.pendingSCTP == nil {
-		l.pendingSCTP = make(map[*sctp.SCTPConn]struct{})
+		l.pendingSCTP = make(map[*sctp.Conn]struct{})
 	}
 	l.pendingSCTP[sctpAssociation] = struct{}{}
 	l.activeAccept++
@@ -157,7 +157,7 @@ func (l *Listener) beginAccept(sctpAssociation *sctp.SCTPConn) bool {
 }
 
 // rejectPendingSCTP removes a socket that will not become an M3UA Association.
-func (l *Listener) rejectPendingSCTP(sctpAssociation *sctp.SCTPConn) {
+func (l *Listener) rejectPendingSCTP(sctpAssociation *sctp.Conn) {
 	l.muConns.Lock()
 	delete(l.pendingSCTP, sctpAssociation)
 	l.muConns.Unlock()
@@ -262,7 +262,7 @@ func (l *Listener) forget(c *Association) {
 
 // Listen returns an SCTP listener whose accepted associations run this
 // Endpoint's M3UA role.
-func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerConfig) (*Listener, error) {
+func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig) (*Listener, error) {
 	if !e.beginOperation() {
 		return nil, ErrEndpointClosed
 	}
@@ -309,7 +309,7 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 
 // listenSCTP opens the listening socket every Listener accepts on.
 //
-// Through SocketConfig rather than ListenSCTP so a notification handler can be
+// Through Config rather than ListenSCTP so a notification handler can be
 // installed. The dependency fixes a listener's handler at construction and
 // gives the same one to every association it accepts, so the handler routes by
 // association ID; see restartWatcher.
@@ -318,24 +318,19 @@ func (e *Endpoint) Listen(network string, laddr *sctp.SCTPAddr, cfg *ListenerCon
 // accepted association is created on it and keeps the subscription it had
 // then, so subscribing on the accepted socket afterwards came too late for an
 // ABORT that arrived in between. The socket buffers are sized there for the
-// same reason; see socketBuffers.control.
-func listenSCTP(network string, laddr *sctp.SCTPAddr, buffers socketBuffers, restarts *restartWatcher) (*sctp.SCTPListener, error) {
-	scfg := &sctp.SocketConfig{
-		Control:             buffers.control(),
+// same reason; see socketBuffers.apply.
+func listenSCTP(network string, laddr *sctp.Addr, buffers socketBuffers, restarts *restartWatcher) (*sctp.Listener, error) {
+	scfg := &sctp.Config{
 		NotificationHandler: restarts.handle,
 		// The same stream request Dial makes; see sctpStreams. Left zero,
 		// the kernel default applied (10 outbound on Linux), so every
 		// accepted association had nine DATA streams for its Signalling Link
 		// Selections while the dialling end had many more.
-		InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams},
+		InitMsg:       sctp.InitMsg{OutStreams: sctpStreams, MaxInStreams: sctpStreams},
+		Notifications: associationEvents(),
 	}
-	return withAssociationEvents(func(subscribe bool) (*sctp.SCTPListener, error) {
-		var pre sctp.PreAssociationConfig
-		if subscribe {
-			pre.Notifications = associationEvents()
-		}
-		return scfg.WithPreAssociation(pre).Listen(network, laddr)
-	})
+	buffers.apply(scfg)
+	return scfg.Listen(network, laddr)
 }
 
 // associationForSCTPID finds the accepted Association with the given SCTP
@@ -345,7 +340,7 @@ func listenSCTP(network string, laddr *sctp.SCTPAddr, buffers socketBuffers, res
 // the set is the ASPs a single SGP serves, it is walked only when the kernel
 // reports an association event, and a second index would be one more thing to
 // keep in step with track and forget.
-func (l *Listener) associationForSCTPID(id sctp.SCTPAssocID) *Association {
+func (l *Listener) associationForSCTPID(id sctp.AssocID) *Association {
 	l.muConns.Lock()
 	defer l.muConns.Unlock()
 
@@ -417,7 +412,7 @@ func (l *Listener) validateSelectedReceiveBuffer(selected *AssociationConfig) er
 // inherited from the listening socket. Unlike the receive buffer, the send
 // buffer is announced to no one, so applying it now is exact. Without a
 // selector the size fixed at Listen applies, as the receive size does.
-func (l *Listener) applySelectedSendBuffer(sctpAssociation *sctp.SCTPConn, selected *AssociationConfig) error {
+func (l *Listener) applySelectedSendBuffer(sctpAssociation *sctp.Conn, selected *AssociationConfig) error {
 	if !l.selectsAssociationConfig() {
 		return nil
 	}
@@ -619,7 +614,7 @@ func (l *Listener) Close() error {
 		conns = append(conns, c)
 	}
 	l.conns = nil
-	pendingSCTP := make([]*sctp.SCTPConn, 0, len(l.pendingSCTP))
+	pendingSCTP := make([]*sctp.Conn, 0, len(l.pendingSCTP))
 	for association := range l.pendingSCTP {
 		pendingSCTP = append(pendingSCTP, association)
 	}

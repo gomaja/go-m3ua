@@ -45,6 +45,8 @@ func TestNoUnprovenConcurrencyGuaranteeInTheCodec(t *testing.T) {
 
 	for _, dir := range []string{".", "params"} {
 		fileSet := token.NewFileSet()
+		//lint:ignore SA1019 This documentation check includes source for every build target.
+		//nolint:staticcheck // Check documentation for every build target.
 		pkgs, err := parser.ParseDir(fileSet, dir, func(info fs.FileInfo) bool {
 			return !strings.HasSuffix(info.Name(), "_test.go")
 		}, parser.ParseComments)

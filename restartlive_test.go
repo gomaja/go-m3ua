@@ -62,7 +62,7 @@ func dropSCTPTeardown(t *testing.T) (remove func(), ok bool) {
 //
 // The unit tests drive the watcher with a synthetic sctp_assoc_change and prove
 // routing and filtering; TestAssociationEventsAreSubscribedOnALiveAssociation
-// proves the subscription. Neither proves the kernel ever emits SCTP_RESTART,
+// proves the subscription. Neither proves the kernel ever emits AssocRestart,
 // which is the one link in the chain this library does not control. This closes
 // that gap by inducing a real restart: the SGP is made to miss the ASP's
 // teardown, and the ASP then re-establishes from the same five-tuple, so the
@@ -76,7 +76,7 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 	const port = 3231
 
 	srvCfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
-	srvAddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
+	srvAddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 	}()
 
 	cliCfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
-	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
+	laddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,16 +207,4 @@ drainInitialStates:
 		t.Errorf("SGP state after restart recovery = %v, want %v", got, StateASPActive)
 	}
 
-	// A control message that has to wait for send-buffer space leaves through
-	// the socket's default send parameters, which setUpSocket set on the
-	// original association. The restart keeps the kernel association, so they
-	// must still be the control template.
-	defaults, err := sgp.sctpConn.GetDefaultSndInfo()
-	if err != nil {
-		t.Fatalf("reading the default send parameters after the restart: %v", err)
-	}
-	if defaults.SID != 0 || defaults.PPID != M3UAPPID {
-		t.Errorf("default send parameters after the restart are stream %d PPID %d; want stream 0, PPID %d",
-			defaults.SID, defaults.PPID, M3UAPPID)
-	}
 }

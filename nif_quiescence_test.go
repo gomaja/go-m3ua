@@ -124,7 +124,7 @@ func TestTotalNIFIsolationWaitsForUnscopedDirectDataBeforeAspDownAck(t *testing.
 			close(releaseWrite)
 		}
 	}()
-	asp.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	asp.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(writeStarted)
 		<-releaseWrite
 		return len(data), nil

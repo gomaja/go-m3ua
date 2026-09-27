@@ -47,16 +47,17 @@ type routingAddressPair struct {
 	Remote routingAddress
 }
 
-func canonicalRoutingAddress(source *sctp.SCTPAddr) (routingAddress, error) {
-	if source == nil || len(source.IPAddrs) != 1 || source.Port < 1 || source.Port > 65535 || source.IPAddrs[0].Zone != "" {
+func canonicalRoutingAddress(source *sctp.Addr) (routingAddress, error) {
+	if source == nil || len(source.IPs) != 1 || source.Port < 1 || source.IPs[0].Zone() != "" {
 		return routingAddress{}, errors.New("routing transport requires one concrete unzoned address and port")
 	}
-	address, valid := netip.AddrFromSlice(source.IPAddrs[0].IP)
+	address := source.IPs[0]
+	valid := address.IsValid()
 	address = address.Unmap()
 	if !valid || address.IsUnspecified() || address.IsMulticast() || address == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
 		return routingAddress{}, errors.New("routing transport address is not unicast")
 	}
-	return routingAddress{Address: address, Port: uint16(source.Port)}, nil
+	return routingAddress{Address: address, Port: source.Port}, nil
 }
 
 func validateRoutingInventorySnapshot(snapshot m3ua.AssociationSnapshot, role m3ua.Role, epoch uint64, maximumStream uint16) (routingAddressPair, error) {

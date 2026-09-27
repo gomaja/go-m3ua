@@ -304,7 +304,7 @@ func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testi
 	orders := make(map[string][]string)
 	for identity, association := range associations {
 		identity := identity
-		association.dataWriter = func(raw []byte, _ *sctp.SndRcvInfo) (int, error) {
+		association.dataWriter = func(raw []byte, _ *sctp.SndInfo) (int, error) {
 			payload, err := capturedMTPTransferPayload(raw)
 			if err != nil {
 				return 0, err
@@ -386,7 +386,7 @@ func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
 	releaseFirstWrite := make(chan struct{})
 	secondWriteStarted := make(chan struct{})
 	firstAssociation := associations["sg-a/sgp-a1"]
-	firstAssociation.dataWriter = func(raw []byte, _ *sctp.SndRcvInfo) (int, error) {
+	firstAssociation.dataWriter = func(raw []byte, _ *sctp.SndInfo) (int, error) {
 		payload, err := capturedMTPTransferPayload(raw)
 		if err != nil {
 			return 0, err
@@ -931,7 +931,7 @@ func TestMTPTransferOrdersScopeLossAfterInFlightWrite(t *testing.T) {
 	primary := associations["sg-a/sgp-a1"]
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})
-	primary.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	primary.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(writeStarted)
 		<-releaseWrite
 		return len(data), nil
@@ -991,7 +991,7 @@ func TestAssociationCloseClosesTransportBeforeWaitingForMTPTransfer(t *testing.T
 	transportClosed := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
-	primary.dataWriter = func(_ []byte, _ *sctp.SndRcvInfo) (int, error) {
+	primary.dataWriter = func(_ []byte, _ *sctp.SndInfo) (int, error) {
 		close(writeStarted)
 		<-releaseWrite
 		return 0, ErrAssociationClosed
@@ -1040,7 +1040,7 @@ type mtpTransferCapture struct {
 	writeErr error
 }
 
-func (capture *mtpTransferCapture) write(data []byte, info *sctp.SndRcvInfo) (int, error) {
+func (capture *mtpTransferCapture) write(data []byte, info *sctp.SndInfo) (int, error) {
 	capture.mu.Lock()
 	defer capture.mu.Unlock()
 	if capture.writeErr != nil {

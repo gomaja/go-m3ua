@@ -25,7 +25,7 @@ type transportEvidence struct {
 // listenerStreamsNote explains the ASP's outbound stream count: section 1
 // asks for 16 negotiated outbound streams where the fixture supports it, and
 // this one cannot choose them.
-const listenerStreamsNote = "the ASP accepts every association on an m3ua.Listener, which exposes no SCTP_INITMSG setting, so its outbound stream count is the kernel default (10); the dialing peer requests 65,535. Each flow keeps one SLS and therefore one stream"
+const listenerStreamsNote = "the ASP accepts every association on an m3ua.Listener, which requests 257 streams in each direction; the dialing peer requests the same. Each flow keeps one SLS and therefore one stream"
 
 // associationEvidence joins one Association's library status, its row in
 // /proc/net/sctp/assocs and getsockopt on its own socket.
@@ -167,10 +167,10 @@ func associationEvidenceFor(source procSource, snapshots []m3ua.AssociationSnaps
 	for _, snapshot := range snapshots {
 		row := associationEvidence{Association: uint64(snapshot.Association), StableIndex: -1, Descriptor: -1, KernelError: kernelError}
 		if snapshot.LocalAddr != nil {
-			row.LocalPort = snapshot.LocalAddr.Port
+			row.LocalPort = int(snapshot.LocalAddr.Port)
 		}
 		if snapshot.RemoteAddr != nil {
-			row.RemotePort = snapshot.RemoteAddr.Port
+			row.RemotePort = int(snapshot.RemoteAddr.Port)
 		}
 		if role, err := classifyPort(peerPort(row.LocalPort, row.RemotePort)); err == nil && role.Stable {
 			row.StableIndex = role.StableIndex

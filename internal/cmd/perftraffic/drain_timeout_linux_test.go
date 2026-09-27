@@ -33,7 +33,7 @@ func startWithholdingReceiver(testContext *testing.T, ctx context.Context, share
 		testContext.Fatal(err)
 	}
 	testContext.Cleanup(func() { _ = endpoint.Close() })
-	address, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:0")
+	address, err := sctp.ResolveAddr("sctp", "127.0.0.1:0")
 	if err != nil {
 		testContext.Fatal(err)
 	}

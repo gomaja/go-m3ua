@@ -183,8 +183,8 @@ func newRoutedTestReceiver(testContext *testing.T, mode string) *routedTestRecei
 	return receiver
 }
 
-func routingSetupAddresses() []*sctp.SCTPAddr {
-	addresses := make([]*sctp.SCTPAddr, 4)
+func routingSetupAddresses() []*sctp.Addr {
+	addresses := make([]*sctp.Addr, 4)
 	for index := range addresses {
 		addresses[index] = routingTestAddress("192.0.2.2", 2905+index)
 	}

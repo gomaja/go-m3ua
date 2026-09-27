@@ -18,6 +18,10 @@ import (
 // State represents ASP State.
 type State uint8
 
+type restartStateUpdate struct {
+	applied chan struct{}
+}
+
 // IPSPState reports the independent ASP/IPSP states that govern the two data
 // traffic directions of RFC 4666 Sections 4.3 and 5.6.2.
 type IPSPState struct {
@@ -1045,15 +1049,12 @@ type inbound struct {
 }
 
 // newInboundMessage preserves the ancillary data ReadMsg returned for one
-// complete message. gomaja/sctp has already converted PPID to host order, so it
-// is copied without another byte swap; nil information is SCTP's unspecified
-// stream and PPID zero.
-func newInboundMessage(data []byte, info *sctp.SndRcvInfo) inbound {
+// complete message. go-sctp has already converted PPID to host order, so it
+// is copied without another byte swap.
+func newInboundMessage(data []byte, info sctp.RcvInfo) inbound {
 	event := inbound{kind: inboundMessage, data: data}
-	if info != nil {
-		event.stream = info.Stream
-		event.ppid = info.PPID
-	}
+	event.stream = info.Stream
+	event.ppid = info.PPID
 	return event
 }
 
@@ -1071,12 +1072,10 @@ func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
 		// keeps a peer claiming an enormous length from exhausting memory.
 		b, info, err := c.sctpConn.ReadMsg(max)
 		if err != nil {
-			// A message beyond our ceiling leaves its remainder queued, so the
-			// next read would resume mid-message and parse as garbage. There is
-			// no way to resynchronise on a message boundary from here: report it
-			// and let monitor() close the association rather than feed the state
-			// machine fragments.
-			if errors.Is(err, sctp.ErrMsgTooLong) {
+			// ReadMsg drains an oversized message to its boundary and reports
+			// ErrMessageTooLong. Preserve the M3UA policy of reporting the
+			// limit violation and closing the association.
+			if errors.Is(err, sctp.ErrMessageTooLong) {
 				c.sendErr(ErrMessageTooLarge)
 			}
 			select {
@@ -1172,6 +1171,13 @@ func (c *Association) monitor(ctx context.Context) {
 					_ = c.closeWith(err)
 					return
 				}
+			}
+		case restart := <-c.restartStateChan:
+			err := c.handlePublishedStateUpdate(StateASPDown)
+			close(restart.applied)
+			if errors.Is(err, ErrSCTPNotAlive) {
+				_ = c.closeWith(err)
+				return
 			}
 		}
 	}

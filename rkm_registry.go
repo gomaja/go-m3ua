@@ -1261,12 +1261,12 @@ func routingKeyPeersEqual(first, second RoutingKeyPeer) bool {
 	if first.RemoteAddr == nil || second.RemoteAddr == nil {
 		return first.RemoteAddr == nil && second.RemoteAddr == nil
 	}
-	if first.RemoteAddr.Port != second.RemoteAddr.Port || len(first.RemoteAddr.IPAddrs) != len(second.RemoteAddr.IPAddrs) {
+	if first.RemoteAddr.Port != second.RemoteAddr.Port || len(first.RemoteAddr.IPs) != len(second.RemoteAddr.IPs) {
 		return false
 	}
-	for index, firstIP := range first.RemoteAddr.IPAddrs {
-		secondIP := second.RemoteAddr.IPAddrs[index]
-		if firstIP.Zone != secondIP.Zone || !firstIP.IP.Equal(secondIP.IP) {
+	for index, firstIP := range first.RemoteAddr.IPs {
+		secondIP := second.RemoteAddr.IPs[index]
+		if firstIP != secondIP {
 			return false
 		}
 	}

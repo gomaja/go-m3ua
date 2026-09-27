@@ -120,7 +120,7 @@ func main() {
 	}
 	defer func() { _ = endpoint.Close() }()
 
-	remote, err := sctp.ResolveSCTPAddr("sctp", *addr)
+	remote, err := sctp.ResolveAddr("sctp", *addr)
 	if err != nil {
 		log.Fatalf("Failed to resolve SGP SCTP address: %s", err)
 	}

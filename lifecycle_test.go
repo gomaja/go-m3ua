@@ -35,10 +35,10 @@ func aspConfig(hb *HeartbeatInfo) *AssociationConfig {
 
 // dialTo dials a raw peer without the t.Fatal-on-error behaviour of
 // dialRawPeer, so a test can assert on the failure itself.
-func dialTo(ctx context.Context, t *testing.T, raddr *sctp.SCTPAddr, port int, cfg *AssociationConfig) (*Association, error) {
+func dialTo(ctx context.Context, t *testing.T, raddr *sctp.Addr, port int, cfg *AssociationConfig) (*Association, error) {
 	t.Helper()
 
-	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
+	laddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,11 +117,11 @@ func TestDialAgainstPeerThatDropsMidHandshake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	addr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:2992")
+	addr, err := sctp.ResolveAddr("sctp", "127.0.0.2:2992")
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := sctp.ListenSCTP("sctp", addr)
+	ln, err := sctp.Listen("sctp", addr)
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -137,7 +137,7 @@ func TestDialAgainstPeerThatDropsMidHandshake(t *testing.T) {
 		}
 		// Read the ASP Up, then drop the association without answering.
 		buf := make([]byte, 1500)
-		_, _, _ = conn.SCTPRead(buf)
+		_, _, _ = recvWithInfo(conn, buf)
 		_ = conn.Close()
 	}()
 
@@ -244,7 +244,7 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 	srvCfg := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	srvCfg.ASPIdentifier = nil
 
-	raddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:2995")
+	raddr, err := sctp.ResolveAddr("sctp", "127.0.0.2:2995")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,11 +267,11 @@ func TestAcceptAgainstMutePeerTimesOut(t *testing.T) {
 	}()
 
 	// A bare SCTP association initiator that connects and then stays silent: no ASP Up.
-	laddr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.1:2995")
+	laddr, err := sctp.ResolveAddr("sctp", "127.0.0.1:2995")
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := sctp.DialSCTP("sctp", laddr, raddr)
+	raw, err := sctp.Dial(context.Background(), "sctp", laddr, raddr)
 	if err != nil {
 		t.Fatalf("raw dial: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestAssociationConfigWithoutHeartbeatInfoAccepts(t *testing.T) {
 // Listen must reject an invalid network name rather than panicking, and must
 // not leave a listener behind.
 func TestListenRejectsInvalidNetwork(t *testing.T) {
-	addr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:2996")
+	addr, err := sctp.ResolveAddr("sctp", "127.0.0.2:2996")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestListenRejectsInvalidNetwork(t *testing.T) {
 func TestDialRejectsInvalidNetwork(t *testing.T) {
 	ctx := context.Background()
 
-	addr, err := sctp.ResolveSCTPAddr("sctp", "127.0.0.2:2997")
+	addr, err := sctp.ResolveAddr("sctp", "127.0.0.2:2997")
 	if err != nil {
 		t.Fatal(err)
 	}

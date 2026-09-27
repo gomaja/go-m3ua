@@ -617,7 +617,7 @@ func TestIPSPDoubleExchangeInactiveAckWaitsForAdmittedOutboundDATA(t *testing.T)
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
 	var startOnce sync.Once
-	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		startOnce.Do(func() { close(dataStarted) })
 		<-releaseData
 		return len(data), nil
@@ -681,7 +681,7 @@ func TestIPSPDoubleExchangeLocalInactiveAckDoesNotWaitForTrafficToPeerDATA(t *te
 
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
-	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(dataStarted)
 		<-releaseData
 		return len(data), nil
@@ -841,7 +841,7 @@ func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testin
 
 			dataStarted := make(chan struct{})
 			releaseData := make(chan struct{})
-			association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+			association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 				close(dataStarted)
 				<-releaseData
 				return len(data), nil
@@ -937,7 +937,7 @@ func TestIPSPSingleASPSMDownAckDefersASNotifyUntilTrafficDrains(t *testing.T) {
 
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
-	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(dataStarted)
 		<-releaseData
 		return len(data), nil
@@ -996,7 +996,7 @@ func TestIPSPDoubleExchangeSingleASPSMUpAckQuiescesTrafficToPeer(t *testing.T) {
 
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
-	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(dataStarted)
 		<-releaseData
 		return len(data), nil
@@ -1718,7 +1718,7 @@ func TestIPSPDoubleExchangeRestartDrainsOutboundDATABeforeFreshASPSM(t *testing.
 
 	dataStarted := make(chan struct{})
 	releaseData := make(chan struct{})
-	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		close(dataStarted)
 		<-releaseData
 		return len(data), nil
@@ -1853,7 +1853,7 @@ func newDoubleExchangeIPSPWithConfigForTest(
 	association.cfg = snapshotAssociationConfig(config)
 	association.trafficModes = trafficModeSnapshot{}
 	association.freezeTrafficModePolicies()
-	association.dataWriter = func(data []byte, _ *sctp.SndRcvInfo) (int, error) {
+	association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {
 		message, err := messages.Parse(data)
 		if err != nil {
 			return 0, err

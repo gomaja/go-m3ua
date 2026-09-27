@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"sync"
 	"testing"
@@ -745,7 +746,7 @@ func TestRoutingPreparationDTOsReconstructPairableOwnedInventory(testContext *te
 		testContext.Fatalf("pairs=%+v error=%v", pairs, err)
 	}
 	before := senderDTOs[0].Local.Address
-	reconstructedSenders[0].Snapshot.LocalAddr.IPAddrs[0].IP[0] ^= 0xff
+	reconstructedSenders[0].Snapshot.LocalAddr.IPs[0] = netip.Addr{}
 	if senderDTOs[0].Local.Address != before {
 		testContext.Fatal("reconstructed inventory aliases its transport DTO")
 	}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"strings"
 	"sync"
@@ -424,7 +425,7 @@ func TestRoutingControlDTOContainsOwnedExplicitTransportOnly(testContext *testin
 		if err != nil || strings.Contains(string(encoded), "SCTPError") || strings.Contains(string(encoded), "ReceiverWindow") {
 			testContext.Fatalf("non-DTO status escaped: %s %v", encoded, err)
 		}
-		clear(senders[index].Snapshot.LocalAddr.IPAddrs[0].IP)
+		senders[index].Snapshot.LocalAddr.IPs[0] = netip.Addr{}
 		peers[index].Snapshot.SCTP.InboundStreams = 1
 		again, err := json.Marshal([]routingTransportDTO{sender, peer})
 		if err != nil || !bytes.Equal(encoded, again) {

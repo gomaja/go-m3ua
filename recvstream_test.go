@@ -109,7 +109,7 @@ func TestArrivalStreamReachesTheHandlersOverASocket(t *testing.T) {
 	if raw == nil {
 		t.Fatal("peer never accepted an association")
 	}
-	if _, err := raw.SCTPWrite(b, &sctp.SndRcvInfo{PPID: 3, Stream: 4}); err != nil {
+	if _, err := sendWithInfo(raw, b, &sctp.SndInfo{PPID: 3, Stream: 4}); err != nil {
 		t.Fatalf("peer write on stream 4: %v", err)
 	}
 

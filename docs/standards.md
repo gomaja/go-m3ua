@@ -100,8 +100,8 @@ the SACK section. Errata
 [8774](https://www.rfc-editor.org/errata/eid8774) are Rejected and are not
 applied.
 
-go-m3ua v1.2.0 depends on
-[`github.com/gomaja/go-sctp` v1.0.4](https://github.com/gomaja/go-sctp/releases/tag/v1.0.4),
+go-m3ua now depends on
+[`github.com/gomaja/go-sctp` main revision a7c2cd8](https://github.com/gomaja/go-sctp/commit/a7c2cd80b141),
 which uses operating-system SCTP sockets rather than implementing the SCTP
 packet state machine. INIT, COOKIE, SACK, verification-tag, retransmission, and
 path procedures therefore belong to the deployed kernel's RFC 9260

@@ -73,7 +73,7 @@ func resolveRoutedIP(host string) (net.IP, error) {
 // routedPeerAddresses returns the four SGP listener addresses named by one
 // host:port: the same concrete address on the given port and the three that
 // follow it.
-func routedPeerAddresses(value string) ([]*sctp.SCTPAddr, error) {
+func routedPeerAddresses(value string) ([]*sctp.Addr, error) {
 	host, port, err := splitRoutedAddress(value)
 	if err != nil {
 		return nil, err
@@ -82,9 +82,9 @@ func routedPeerAddresses(value string) ([]*sctp.SCTPAddr, error) {
 	if err != nil {
 		return nil, fmt.Errorf("routed SGP address: %w", err)
 	}
-	addresses := make([]*sctp.SCTPAddr, routedPeerCount)
+	addresses := make([]*sctp.Addr, routedPeerCount)
 	for index := range addresses {
-		addresses[index] = &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: append(net.IP(nil), ip...)}}, Port: port + index}
+		addresses[index] = &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr(ip.String())}, Port: uint16(port + index)}
 	}
 	return addresses, nil
 }
@@ -92,7 +92,7 @@ func routedPeerAddresses(value string) ([]*sctp.SCTPAddr, error) {
 // routedLocalAddress returns the ASP's concrete local bind with an ephemeral
 // port, so each of the eight associations gets its own local port on the one
 // address the SGPs see.
-func routedLocalAddress(value string) (*sctp.SCTPAddr, error) {
+func routedLocalAddress(value string) (*sctp.Addr, error) {
 	host, portText, err := net.SplitHostPort(value)
 	if err != nil {
 		return nil, fmt.Errorf("%q must be host:0: %w", value, err)
@@ -107,5 +107,5 @@ func routedLocalAddress(value string) (*sctp.SCTPAddr, error) {
 	if err != nil {
 		return nil, fmt.Errorf("routed ASP local address: %w", err)
 	}
-	return &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: ip}}, Port: 0}, nil
+	return &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr(ip.String())}, Port: 0}, nil
 }

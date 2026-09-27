@@ -197,7 +197,7 @@ field AssociationStatus.PendingDataChunks
 field AssociationStatus.PrimaryCongestionWindow
 field AssociationStatus.PrimaryMTU
 field AssociationStatus.PrimaryRetransmissionTimeout
-field AssociationStatus.PrimarySmoothedRTT
+field AssociationStatus.PrimarySmoothedRTTTicks
 field AssociationStatus.ReceiverWindow
 field AssociationStatus.State
 field AssociationStatus.UnackedDataChunks

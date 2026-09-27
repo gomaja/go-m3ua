@@ -36,20 +36,20 @@ func TestM3UAPPIDIsExportedAndUsedForSends(t *testing.T) {
 	}
 }
 
-// gomaja/sctp already converts SndRcvInfo.PPID to host order. The M3UA read
+// gomaja/sctp already converts SndInfo.PPID to host order. The M3UA read
 // path must preserve that value exactly rather than byte-swapping it again or
 // dropping it while extracting the stream.
 func TestInboundMessageCarriesHostOrderPPID(t *testing.T) {
-	info := &sctp.SndRcvInfo{Stream: 7, PPID: 0x01020304}
+	info := sctp.RcvInfo{Stream: 7, PPID: 0x01020304}
 	event := newInboundMessage([]byte("message"), info)
 	if event.kind != inboundMessage || event.stream != 7 || event.ppid != 0x01020304 {
 		t.Errorf("inbound metadata = {kind:%d stream:%d ppid:%#x}, want {%d 7 %#x}",
 			event.kind, event.stream, event.ppid, inboundMessage, uint32(0x01020304))
 	}
 
-	unspecified := newInboundMessage([]byte("message"), nil)
+	unspecified := newInboundMessage([]byte("message"), sctp.RcvInfo{})
 	if unspecified.stream != 0 || unspecified.ppid != 0 {
-		t.Errorf("nil SndRcvInfo metadata = {stream:%d ppid:%d}, want zero values",
+		t.Errorf("zero RcvInfo metadata = {stream:%d ppid:%d}, want zero values",
 			unspecified.stream, unspecified.ppid)
 	}
 }
@@ -85,7 +85,7 @@ func TestReadLoopCarriesPPIDToTheDispatcherOverSocket(t *testing.T) {
 	} {
 		message := marshalPPIDTestMessage(t,
 			messages.NewHeartbeat(params.NewHeartbeatData(send.data)))
-		if _, err := rawConn.SCTPWrite(message, &sctp.SndRcvInfo{
+		if _, err := sendWithInfo(rawConn, message, &sctp.SndInfo{
 			PPID: send.ppid, Stream: 0,
 		}); err != nil {
 			t.Fatalf("peer write with PPID %d: %v", send.ppid, err)

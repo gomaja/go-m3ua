@@ -134,7 +134,7 @@ and before any M3UA message is parsed. Peer authentication belongs below this
 package; see the Security section.
 
 An SCTP association is multi-homed, so its addresses are lists. AcceptInfo and
-AssociationSnapshot carry *sctp.SCTPAddr values whose IPAddrs hold every address
+AssociationSnapshot carry *sctp.Addr values whose IPs hold every address
 the peer confirmed for that association, not one representative address. A
 selector matching a peer by address matches against the whole list, because
 which of those addresses a given SCTP packet arrives from is a transport

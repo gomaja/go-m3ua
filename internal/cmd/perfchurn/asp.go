@@ -276,7 +276,7 @@ func (asp *aspRun) start(record *aspRecord) error {
 			consumer.run(asp.ctx, &asp.subscriberGate, asp.recorder.currentPhase)
 		}()
 	}
-	address, err := sctp.ResolveSCTPAddr("sctp", asp.config.SCTPAddress)
+	address, err := sctp.ResolveAddr("sctp", asp.config.SCTPAddress)
 	if err != nil {
 		return fmt.Errorf("resolve listen address: %w", err)
 	}
@@ -285,12 +285,12 @@ func (asp *aspRun) start(record *aspRecord) error {
 			if info.RemoteAddr == nil {
 				return nil, errUnknownPeerPort
 			}
-			role, err := classifyPort(info.RemoteAddr.Port)
+			role, err := classifyPort(int(info.RemoteAddr.Port))
 			if err != nil {
 				return nil, err
 			}
 			if !role.Stable {
-				asp.beginEstablish(info.RemoteAddr.Port)
+				asp.beginEstablish(int(info.RemoteAddr.Port))
 			}
 			return aspAssociationConfig(role), nil
 		},
@@ -312,21 +312,21 @@ func (asp *aspRun) acceptLoop() {
 			var establishment *m3ua.AssociationEstablishmentError
 			if errors.As(err, &establishment) {
 				if establishment.RemoteAddr != nil {
-					asp.endEstablish(establishment.RemoteAddr.Port)
+					asp.endEstablish(int(establishment.RemoteAddr.Port))
 				}
 				asp.churn.reject()
 				continue
 			}
 			return
 		}
-		remote, ok := association.RemoteAddr().(*sctp.SCTPAddr)
+		remote, ok := association.RemoteAddr().(*sctp.Addr)
 		if !ok {
 			_ = association.Close()
 			asp.churn.reject()
 			continue
 		}
-		asp.endEstablish(remote.Port)
-		role, err := classifyPort(remote.Port)
+		asp.endEstablish(int(remote.Port))
+		role, err := classifyPort(int(remote.Port))
 		if err != nil {
 			_ = association.Close()
 			asp.churn.reject()

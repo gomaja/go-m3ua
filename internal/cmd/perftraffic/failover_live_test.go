@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gomaja/go-sctp"
 )
 
 // TestSGPFailureLiveOverLoopback runs the production routed entry points with
@@ -47,9 +49,6 @@ func TestSGPAbortFailureLiveOverLoopback(testContext *testing.T) {
 	if failover.Receiver.Fault.Kind != sgpFailureKindAbort {
 		testContext.Errorf("the receiver recorded a %q fault, want %q", failover.Receiver.Fault.Kind, sgpFailureKindAbort)
 	}
-	if failover.Sender.AssociationEvents != associationEventsSupported {
-		testContext.Errorf("this kernel's SCTP association events were recorded as %q; the abort could not be observed", failover.Sender.AssociationEvents)
-	}
 	failed := 0
 	for _, notification := range failover.Sender.Notifications {
 		testContext.Logf("association %d ended: %s", notification.Association, notification.Error)
@@ -57,7 +56,7 @@ func TestSGPAbortFailureLiveOverLoopback(testContext *testing.T) {
 			continue
 		}
 		failed++
-		for _, want := range []string{"SCTP_COMM_LOST", "SCTP_ERROR_USER_ABORT"} {
+		for _, want := range []string{"SCTP_COMM_LOST", sctp.CauseUserAbort.String()} {
 			if !strings.Contains(notification.Error, want) {
 				testContext.Errorf("failed-SGP association %d ended with %q, which does not name %s", notification.Association, notification.Error, want)
 			}

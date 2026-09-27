@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"net"
 	"net/netip"
@@ -11,8 +12,8 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-func routingTestAddress(address string, port int) *sctp.SCTPAddr {
-	return &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP(address)}}, Port: port}
+func routingTestAddress(address string, port int) *sctp.Addr {
+	return &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr(address)}, Port: uint16(port)}
 }
 
 func TestRoutingAddressCanonicalizesOwnedSingleAddress(testContext *testing.T) {
@@ -31,13 +32,13 @@ func TestRoutingAddressCanonicalizesOwnedSingleAddress(testContext *testing.T) {
 		if err != nil || actual.Address != netip.MustParseAddr(testCase.want) || actual.Port != 65535 {
 			testContext.Fatalf("address %q: result=%+v error=%v", testCase.input, actual, err)
 		}
-		clear(source.IPAddrs[0].IP)
+		source.IPs[0] = netip.Addr{}
 		source.Port = 1
 		if actual.Address != netip.MustParseAddr(testCase.want) || actual.Port != 65535 {
 			testContext.Fatal("canonical address aliases caller-owned memory")
 		}
 	}
-	compact := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.IP{192, 0, 2, 1}}}, Port: 2905}
+	compact := routingTestAddress("192.0.2.1", 2905)
 	wide := routingTestAddress("::ffff:192.0.2.1", 2905)
 	first, firstErr := canonicalRoutingAddress(compact)
 	second, secondErr := canonicalRoutingAddress(wide)
@@ -47,22 +48,18 @@ func TestRoutingAddressCanonicalizesOwnedSingleAddress(testContext *testing.T) {
 }
 
 func TestRoutingAddressRejectsUnsupportedOrAmbiguousInventory(testContext *testing.T) {
-	for _, source := range []*sctp.SCTPAddr{
-		nil,
-		{},
-		{IPAddrs: []net.IPAddr{{}}, Port: 2905},
-		{IPAddrs: []net.IPAddr{{IP: net.IP{1, 2, 3}}}, Port: 2905},
-		{IPAddrs: []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}, {IP: net.ParseIP("192.0.2.2")}}, Port: 2905},
-		{IPAddrs: []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}, {IP: net.ParseIP("192.0.2.1")}}, Port: 2905},
-		{IPAddrs: []net.IPAddr{{IP: net.ParseIP("fe80::1"), Zone: "en0"}}, Port: 2905},
+	for _, source := range []*sctp.Addr{
+		nil, {},
+		{IPs: []netip.Addr{{}}, Port: 2905},
+		{IPs: []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")}, Port: 2905},
+		{IPs: []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.1")}, Port: 2905},
+		{IPs: []netip.Addr{netip.MustParseAddr("fe80::1%en0")}, Port: 2905},
 		routingTestAddress("0.0.0.0", 2905),
 		routingTestAddress("::", 2905),
 		routingTestAddress("224.0.0.1", 2905),
 		routingTestAddress("ff02::1", 2905),
 		routingTestAddress("255.255.255.255", 2905),
-		routingTestAddress("192.0.2.1", -1),
 		routingTestAddress("192.0.2.1", 0),
-		routingTestAddress("192.0.2.1", 65536),
 	} {
 		if _, err := canonicalRoutingAddress(source); err == nil {
 			testContext.Fatalf("invalid address accepted: %+v", source)
@@ -71,23 +68,24 @@ func TestRoutingAddressRejectsUnsupportedOrAmbiguousInventory(testContext *testi
 }
 
 func FuzzRoutingAddress(fuzzContext *testing.F) {
-	fuzzContext.Add([]byte{192, 0, 2, 1}, 2905)
-	fuzzContext.Add([]byte(net.ParseIP("::ffff:192.0.2.1")), 65535)
-	fuzzContext.Add([]byte{}, 0)
-	fuzzContext.Fuzz(func(testContext *testing.T, addressBytes []byte, port int) {
+	fuzzContext.Add([]byte{192, 0, 2, 1}, uint16(2905))
+	fuzzContext.Add([]byte(net.ParseIP("::ffff:192.0.2.1")), uint16(65535))
+	fuzzContext.Add([]byte{}, uint16(0))
+	fuzzContext.Fuzz(func(testContext *testing.T, addressBytes []byte, port uint16) {
 		original := append([]byte(nil), addressBytes...)
-		source := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.IP(addressBytes)}}, Port: port}
+		ip, _ := netip.AddrFromSlice(addressBytes)
+		source := &sctp.Addr{IPs: []netip.Addr{ip}, Port: port}
 		address, err := canonicalRoutingAddress(source)
-		if !reflect.DeepEqual([]byte(source.IPAddrs[0].IP), addressBytes) || !reflect.DeepEqual(original, append([]byte(nil), addressBytes...)) {
+		if !bytes.Equal(original, addressBytes) {
 			testContext.Fatal("canonicalization mutated its input")
 		}
 		if err != nil {
 			return
 		}
-		if port < 1 || port > 65535 || address.Port != uint16(port) || !address.Address.IsValid() || address.Address.IsUnspecified() || address.Address.IsMulticast() || address.Address.Is4In6() {
+		if port == 0 || address.Port != port || !address.Address.IsValid() || address.Address.IsUnspecified() || address.Address.IsMulticast() || address.Address.Is4In6() {
 			testContext.Fatalf("accepted noncanonical address: %+v", address)
 		}
-		roundTrip, err := canonicalRoutingAddress(&sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.IP(address.Address.AsSlice())}}, Port: int(address.Port)})
+		roundTrip, err := canonicalRoutingAddress(&sctp.Addr{IPs: []netip.Addr{address.Address}, Port: address.Port})
 		if err != nil || roundTrip != address {
 			testContext.Fatalf("canonical address did not round trip: %+v %v", roundTrip, err)
 		}
@@ -148,7 +146,7 @@ func TestRoutingInventoryPairsByIdentityAndReversedActualTransport(testContext *
 		}
 	}
 	before := append([]routingAssociationPair(nil), pairs...)
-	clear(senders[0].Snapshot.LocalAddr.IPAddrs[0].IP)
+	senders[0].Snapshot.LocalAddr.IPs[0] = netip.Addr{}
 	peers[0].Snapshot.SCTP.InboundStreams = 1
 	senders[0].Epoch++
 	peers[0].Epoch++
@@ -219,10 +217,10 @@ func TestRoutingInventoryRejectsIdentityTransportAndNegotiationMismatch(testCont
 			(*peers)[0].Snapshot.RemoteAddr.Port++
 		}},
 		{name: "wrong-local-IP", change: func(_ *routingTopology, _ *[]routingSenderInventory, peers *[]routingPeerInventory) {
-			(*peers)[0].Snapshot.LocalAddr.IPAddrs[0].IP = net.ParseIP("192.0.2.3")
+			(*peers)[0].Snapshot.LocalAddr.IPs[0] = netip.MustParseAddr("192.0.2.3")
 		}},
 		{name: "wrong-remote-IP", change: func(_ *routingTopology, _ *[]routingSenderInventory, peers *[]routingPeerInventory) {
-			(*peers)[0].Snapshot.RemoteAddr.IPAddrs[0].IP = net.ParseIP("192.0.2.3")
+			(*peers)[0].Snapshot.RemoteAddr.IPs[0] = netip.MustParseAddr("192.0.2.3")
 		}},
 		{name: "missing-sender-status", change: func(_ *routingTopology, senders *[]routingSenderInventory, _ *[]routingPeerInventory) {
 			(*senders)[0].Snapshot.SCTP = nil

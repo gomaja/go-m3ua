@@ -8,7 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -46,7 +46,7 @@ type streamRecorder struct {
 	arrivals []streamArrival
 }
 
-func (r *streamRecorder) record(message messages.M3UA, info *sctp.SndRcvInfo) {
+func (r *streamRecorder) record(message messages.M3UA, info *sctp.RcvInfo) {
 	arrival := streamArrival{
 		class: message.MessageClass(),
 		kind:  message.MessageType(),
@@ -155,7 +155,7 @@ func TestSGPSendsEachMessageClassOnItsSection147Stream(t *testing.T) {
 	key := ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	config := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
-	address := &sctp.SCTPAddr{IPAddrs: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, Port: port}
+	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(port)}
 
 	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
 	if err != nil {
@@ -176,19 +176,16 @@ func TestSGPSendsEachMessageClassOnItsSection147Stream(t *testing.T) {
 		}
 	}()
 
-	conn, err := (&sctp.SocketConfig{InitMsg: sctp.InitMsg{NumOstreams: 16, MaxInstreams: 16}}).Dial("sctp", nil, address)
+	conn, err := (&sctp.Config{InitMsg: sctp.InitMsg{OutStreams: 16, MaxInStreams: 16}}).Dial(context.Background(), "sctp", nil, address)
 	if err != nil {
 		t.Fatalf("raw ASP dial: %v", err)
 	}
 	defer func() { _ = conn.Close() }()
-	if err := conn.SetRecvRcvInfo(true); err != nil {
-		t.Fatal(err)
-	}
 	recorder := &streamRecorder{}
 	go func() {
 		buf := make([]byte, 65535)
 		for {
-			n, info, err := conn.SCTPRead(buf)
+			n, info, err := recvWithInfo(conn, buf)
 			if err != nil {
 				return
 			}
@@ -199,7 +196,7 @@ func TestSGPSendsEachMessageClassOnItsSection147Stream(t *testing.T) {
 	}()
 	send := func(b []byte, stream uint16) {
 		t.Helper()
-		if _, err := conn.SCTPWrite(b, &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: stream}); err != nil {
+		if _, err := sendWithInfo(conn, b, &sctp.SndInfo{PPID: M3UAPPID, Stream: stream}); err != nil {
 			t.Fatalf("raw ASP send: %v", err)
 		}
 	}
@@ -278,11 +275,11 @@ func TestASPSendsEachMessageClassOnItsSection147Stream(t *testing.T) {
 	defer cancel()
 
 	const port = 3294
-	addr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
+	addr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.2:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := (&sctp.SocketConfig{InitMsg: sctp.InitMsg{NumOstreams: sctpStreams, MaxInstreams: sctpStreams}}).Listen("sctp", addr)
+	ln, err := (&sctp.Config{InitMsg: sctp.InitMsg{OutStreams: sctpStreams, MaxInStreams: sctpStreams}}).Listen("sctp", addr)
 	if err != nil {
 		if isSCTPUnsupported(err) {
 			t.Skipf("skipping socket-backed test: %v", err)
@@ -300,14 +297,10 @@ func TestASPSendsEachMessageClassOnItsSection147Stream(t *testing.T) {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		if err := conn.SetRecvRcvInfo(true); err != nil {
-			t.Errorf("peer SCTP_RECVRCVINFO: %v", err)
-			return
-		}
-		control := &sctp.SndRcvInfo{PPID: M3UAPPID, Stream: 0}
+		control := &sctp.SndInfo{PPID: M3UAPPID, Stream: 0}
 		buf := make([]byte, 65535)
 		for {
-			n, info, err := conn.SCTPRead(buf)
+			n, info, err := recvWithInfo(conn, buf)
 			if err != nil {
 				return
 			}
@@ -336,13 +329,13 @@ func TestASPSendsEachMessageClassOnItsSection147Stream(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if _, err := conn.SCTPWrite(b, control); err != nil {
+			if _, err := sendWithInfo(conn, b, control); err != nil {
 				return
 			}
 		}
 	}()
 
-	laddr, err := sctp.ResolveSCTPAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
+	laddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}

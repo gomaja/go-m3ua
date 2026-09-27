@@ -103,7 +103,7 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 			return runRecord{}, fmt.Errorf("startup dial: %w", err)
 		}
 	} else {
-		localAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+		localAddress, err := sctp.ResolveAddr("sctp", config.SCTPAddress)
 		if err != nil {
 			return runRecord{}, fmt.Errorf("startup resolve-listen-address: %w", err)
 		}
@@ -141,13 +141,13 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 // readiness contract explicitly before the association serves readiness or
 // ReadData.
 func dialAndRead(ctx context.Context, endpoint *m3ua.Endpoint, config commandConfig, control *receiverControl, fatal chan<- error) error {
-	remoteAddress, err := sctp.ResolveSCTPAddr("sctp", config.SCTPAddress)
+	remoteAddress, err := sctp.ResolveAddr("sctp", config.SCTPAddress)
 	if err != nil {
 		return fmt.Errorf("resolve ASP address: %w", err)
 	}
-	var localAddress *sctp.SCTPAddr
+	var localAddress *sctp.Addr
 	if config.LocalAddress != "" {
-		localAddress, err = sctp.ResolveSCTPAddr("sctp", config.LocalAddress)
+		localAddress, err = sctp.ResolveAddr("sctp", config.LocalAddress)
 		if err != nil {
 			return fmt.Errorf("resolve SGP local address: %w", err)
 		}
