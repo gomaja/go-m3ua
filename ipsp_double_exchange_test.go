@@ -942,8 +942,8 @@ func TestIPSPSingleASPSMPeerDownDoesNotStartANewASPUp(t *testing.T) {
 
 func TestIPSPSingleASPSMDelayedDownAckDoesNotResetNewASPUp(t *testing.T) {
 	association := singleASPSMWithCompletedDownForTest(t, 1)
-	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
-		t.Fatalf("delayed duplicate ASP Down Ack: %v", err)
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); !errors.Is(err, errDuplicateASPDownAck) {
+		t.Fatalf("delayed ASP Down Ack result = %v, want duplicate", err)
 	}
 	if got := association.IPSPState(); got != (IPSPState{
 		TrafficToLocal: StateASPInactive,
@@ -953,10 +953,80 @@ func TestIPSPSingleASPSMDelayedDownAckDoesNotResetNewASPUp(t *testing.T) {
 	}
 }
 
+func TestIPSPSingleASPSMDownAckReceivePathAfterLocalASPUp(t *testing.T) {
+	association, sent := newDoubleExchangeIPSPForTest(t)
+	association.cfg.IPSP.ASPSMExchange = IPSPASPSMExchangeSingle
+	association.cfg.TAck = time.Hour
+	association.setIPSPState(IPSPState{
+		TrafficToLocal: StateASPActive,
+		TrafficToPeer:  StateASPActive,
+	})
+	association.muState.Lock()
+	association.appliedState = StateASPActive
+	association.stateEntered = true
+	association.muState.Unlock()
+	association.terminating.Store(true)
+
+	request, err := association.initiateASPDown()
+	if err != nil {
+		t.Fatalf("send ASP Down: %v", err)
+	}
+	if _, err := association.writeControl(request.msg); err != nil {
+		t.Fatalf("retransmit ASP Down: %v", err)
+	}
+	association.handleReceivedSignals(context.Background(), messages.NewAspDownAck(nil), nil)
+	assertPublishedIPSPStateForTest(t, association, StateASPDown, IPSPState{
+		TrafficToLocal: StateASPDown,
+		TrafficToPeer:  StateASPDown,
+	})
+
+	if err := association.initiateASPSM(); err != nil {
+		t.Fatalf("start local ASP Up: %v", err)
+	}
+	if got := countType(*sent, "ASP Up"); got != 1 {
+		t.Fatalf("local ASP Up transmissions = %d, want 1", got)
+	}
+	association.handleReceivedSignals(context.Background(), messages.NewAspUpAck(nil, nil), nil)
+	wantInactive := IPSPState{TrafficToLocal: StateASPInactive, TrafficToPeer: StateASPInactive}
+	assertPublishedIPSPStateForTest(t, association, StateASPInactive, wantInactive)
+
+	association.handleReceivedSignals(context.Background(), messages.NewAspDownAck(nil), nil)
+	assertPublishedIPSPStateForTest(t, association, stateUnchanged, wantInactive)
+	select {
+	case err := <-association.errChan:
+		t.Fatalf("duplicate ASP Down Ack reported as error: %v", err)
+	default:
+	}
+
+	association.handleReceivedSignals(context.Background(), messages.NewAspDownAck(nil), nil)
+	assertPublishedIPSPStateForTest(t, association, StateASPDown, IPSPState{
+		TrafficToLocal: StateASPDown,
+		TrafficToPeer:  StateASPDown,
+	})
+}
+
+func assertPublishedIPSPStateForTest(t *testing.T, association *Association, wantPublished State, want IPSPState) {
+	t.Helper()
+	select {
+	case published := <-association.stateChan:
+		if published != wantPublished {
+			t.Fatalf("published state = %v, want %v", published, wantPublished)
+		}
+		if err := association.handlePublishedStateUpdate(published); err != nil {
+			t.Fatalf("apply published state %v: %v", published, err)
+		}
+	default:
+		t.Fatal("ASP message published no state")
+	}
+	if got := association.IPSPState(); got != want {
+		t.Fatalf("IPSP state = %+v, want %+v", got, want)
+	}
+}
+
 func TestIPSPSingleASPSMUnsolicitedDownAckAfterDuplicatesTakesDown(t *testing.T) {
 	association := singleASPSMWithCompletedDownForTest(t, 1)
-	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
-		t.Fatalf("delayed duplicate ASP Down Ack: %v", err)
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); !errors.Is(err, errDuplicateASPDownAck) {
+		t.Fatalf("delayed ASP Down Ack result = %v, want duplicate", err)
 	}
 	if got := association.IPSPState(); got != (IPSPState{
 		TrafficToLocal: StateASPInactive,
@@ -978,8 +1048,8 @@ func TestIPSPSingleASPSMUnsolicitedDownAckAfterDuplicatesTakesDown(t *testing.T)
 func TestIPSPSingleASPSMTwoDelayedDownAcksThenUnsolicited(t *testing.T) {
 	association := singleASPSMWithCompletedDownForTest(t, 2)
 	for i := 0; i < 2; i++ {
-		if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
-			t.Fatalf("delayed duplicate ASP Down Ack %d: %v", i+1, err)
+		if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); !errors.Is(err, errDuplicateASPDownAck) {
+			t.Fatalf("delayed ASP Down Ack %d result = %v, want duplicate", i+1, err)
 		}
 		if got := association.IPSPState(); got != (IPSPState{
 			TrafficToLocal: StateASPInactive,
@@ -1010,8 +1080,8 @@ func TestIPSPSingleASPSMNewDownKeepsEarlierAckDebt(t *testing.T) {
 	if err := association.handleAspUp(messages.NewAspUp(nil, nil)); err != nil {
 		t.Fatalf("peer ASP Up after newer ASP Down Ack: %v", err)
 	}
-	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); err != nil {
-		t.Fatalf("second remaining ASP Down Ack: %v", err)
+	if err := association.handleAspDownAck(messages.NewAspDownAck(nil)); !errors.Is(err, errDuplicateASPDownAck) {
+		t.Fatalf("second remaining ASP Down Ack result = %v, want duplicate", err)
 	}
 	if got := association.IPSPState(); got != (IPSPState{
 		TrafficToLocal: StateASPInactive,

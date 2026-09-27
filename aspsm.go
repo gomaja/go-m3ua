@@ -5,9 +5,14 @@
 package m3ua
 
 import (
+	"errors"
+
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
+
+// errDuplicateASPDownAck tells the dispatcher to publish no ASP-DOWN transition.
+var errDuplicateASPDownAck = errors.New("duplicate ASP Down Ack")
 
 func (c *Association) initiateASPSM() error {
 	_, err := c.beginASPSM()
@@ -369,7 +374,9 @@ func (c *Association) handleAspDownDoubleExchange() error {
 //
 // In the SG-AS model this travels SGP to ASP (RFC 4666 Section 4.3.4.2), so an
 // SGP that receives one reports an Error. RFC 4666 Section 4.3.4.1.2 also
-// permits an IPSP to receive it and consider the remote IPSP ASP-DOWN.
+// permits an IPSP to receive it and consider the remote IPSP ASP-DOWN. A
+// delayed duplicate returns errDuplicateASPDownAck so the dispatcher leaves
+// the state reached by any newer ASP Up unchanged.
 func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 	// Validated first, as in handleAspUpAck. This one matters most: below, an
 	// unsolicited ASP Down Ack takes the ASP down, so accepting one that
@@ -388,7 +395,7 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 			// RFC 4666 Section 4.3.4.2 gives an unsolicited Ack its own
 			// ASP-DOWN transition once all sent ASP Downs have been answered.
 			if duplicate {
-				return nil
+				return errDuplicateASPDownAck
 			}
 			c.commitLocalIPSPState(StateASPDown)
 			c.noteNoRoutingContextsAcked()
