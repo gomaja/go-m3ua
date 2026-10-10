@@ -23,6 +23,7 @@ const maximumJSONInputBytes = 64 * 1024
 type request struct {
 	Direction perfstats.Direction `json:"direction"`
 	Boundary  *float64            `json:"boundary"`
+	PairCount int                 `json:"pair_count"`
 	Pairs     []requestPair       `json:"pairs"`
 }
 
@@ -53,7 +54,7 @@ func run(input io.Reader, output io.Writer) int {
 		writeInvalidResponse(output, err)
 		return invalidInputExitStatus
 	}
-	result, err := perfstats.Compare(pairs, perfstats.Gate{Direction: request.Direction, Boundary: *request.Boundary})
+	result, err := perfstats.CompareWithPairCount(pairs, perfstats.Gate{Direction: request.Direction, Boundary: *request.Boundary}, request.PairCount)
 	if err != nil {
 		writeInvalidResponse(output, err)
 		return invalidInputExitStatus
@@ -92,7 +93,7 @@ func decodeRequest(input io.Reader) (request, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 
-	var decoded request
+	decoded := request{PairCount: perfstats.RequiredPairCount}
 	if err := decoder.Decode(&decoded); err != nil {
 		return request{}, fmt.Errorf("decode request: %w", err)
 	}
@@ -115,11 +116,18 @@ func enforceExactJSONFields(data []byte) error {
 		return err
 	}
 	if err := rejectFieldsOutside(topLevel, map[string]struct{}{
-		"direction": {},
-		"boundary":  {},
-		"pairs":     {},
+		"direction":  {},
+		"boundary":   {},
+		"pair_count": {},
+		"pairs":      {},
 	}, "request"); err != nil {
 		return err
+	}
+	// RFC 8259 §3 distinguishes null from a number; only an absent count
+	// receives the default. Numeric grammar: §6, verified Errata 7600.
+	// https://www.rfc-editor.org/rfc/rfc8259.html#section-3
+	if countJSON, exists := topLevel["pair_count"]; exists && bytes.Equal(bytes.TrimSpace(countJSON), []byte("null")) {
+		return errors.New("pair_count must be 5 or 20, cannot be null")
 	}
 
 	pairsJSON, exists := topLevel["pairs"]
