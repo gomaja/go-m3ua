@@ -26,7 +26,6 @@ func TestASPMultiSGTransferWhenASPInitiatesSCTPAssociations(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = aspEndpoint.Close() })
 
-	aspAssociations := make(map[SignallingGatewayID]*Association)
 	sgpAssociations := make(map[SignallingGatewayID]*Association)
 	for _, peer := range integrationPeers() {
 		sgpEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
@@ -49,14 +48,13 @@ func TestASPMultiSGTransferWhenASPInitiatesSCTPAssociations(t *testing.T) {
 			accepted <- associationResult{association: association, err: acceptErr}
 		}()
 
-		aspAssociation, err := aspEndpoint.Dial(
+		_, err = aspEndpoint.Dial(
 			ctx, "m3ua", mcAddr(0, "127.0.0.1"), listener.Addr().(*sctp.Addr),
 			integrationAssociationConfig(RoleASP, peer),
 		)
 		if err != nil {
 			t.Fatalf("Dial ASP to %s: %v", peer.gateway, err)
 		}
-		aspAssociations[peer.gateway] = aspAssociation
 		select {
 		case result := <-accepted:
 			if result.err != nil {
@@ -68,7 +66,7 @@ func TestASPMultiSGTransferWhenASPInitiatesSCTPAssociations(t *testing.T) {
 		}
 	}
 
-	exerciseASPMultiSGTransfer(t, aspEndpoint, aspAssociations, sgpAssociations)
+	exerciseASPMultiSGTransfer(t, aspEndpoint, sgpAssociations)
 }
 
 func TestASPMultiSGTransferWhenSGPsInitiateSCTPAssociations(t *testing.T) {
@@ -123,19 +121,17 @@ func TestASPMultiSGTransferWhenSGPsInitiateSCTPAssociations(t *testing.T) {
 		sgpAssociations[peer.gateway] = association
 	}
 
-	aspAssociations := make(map[SignallingGatewayID]*Association)
 	for range peers {
 		select {
 		case result := <-accepted:
 			if result.err != nil {
 				t.Fatalf("Accept at ASP: %v", result.err)
 			}
-			aspAssociations[result.association.cfg.PeerSGP.SignallingGateway] = result.association
 		case <-ctx.Done():
 			t.Fatalf("Accept at ASP: %v", ctx.Err())
 		}
 	}
-	exerciseASPMultiSGTransfer(t, aspEndpoint, aspAssociations, sgpAssociations)
+	exerciseASPMultiSGTransfer(t, aspEndpoint, sgpAssociations)
 }
 
 func TestASPMultiSGConcurrentTransferAndRouteChanges(t *testing.T) {
@@ -250,7 +246,6 @@ func integrationAssociationConfig(role Role, peer integrationPeer) *AssociationC
 func exerciseASPMultiSGTransfer(
 	t *testing.T,
 	aspEndpoint *Endpoint,
-	aspAssociations map[SignallingGatewayID]*Association,
 	sgpAssociations map[SignallingGatewayID]*Association,
 ) {
 	t.Helper()
@@ -261,9 +256,9 @@ func exerciseASPMultiSGTransfer(
 		t.Fatalf("report DUNA from sg-a: %v", err)
 	}
 	if !waitFor(func() bool {
-		return retainedAvailabilityForNetworkAndRoutingContext(
-			aspAssociations["sg-a"], 7, 1, pointCode,
-		) == DestinationUnavailable
+		return integrationAvailabilityReady(
+			aspEndpoint, "sg-a", pointCode, DestinationUnavailable,
+		)
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-a DUNA")
 	}
@@ -273,17 +268,19 @@ func exerciseASPMultiSGTransfer(
 		t.Fatalf("report DRST from sg-b: %v", err)
 	}
 	if !waitFor(func() bool {
-		return retainedAvailabilityForNetworkAndRoutingContext(
-			aspAssociations["sg-b"], 9, 42, pointCode,
-		) == DestinationRestricted
+		return integrationAvailabilityReady(
+			aspEndpoint, "sg-b", pointCode, DestinationRestricted,
+		)
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-b DRST")
 	}
 
 	request := MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 5, []byte("through-sg-b"))}
-	if _, err := aspEndpoint.MTPTransfer(request); err != nil {
+	result, err := aspEndpoint.MTPTransfer(request)
+	if err != nil {
 		t.Fatalf("MTPTransfer through sg-b: %v", err)
 	}
+	requireIntegrationGateway(t, result, "sg-b")
 	requireIntegrationData(t, sgpAssociations["sg-b"], request.ProtocolData)
 
 	if err := reportAvailability(
@@ -292,16 +289,18 @@ func exerciseASPMultiSGTransfer(
 		t.Fatalf("report DAVA from sg-a: %v", err)
 	}
 	if !waitFor(func() bool {
-		return retainedAvailabilityForNetworkAndRoutingContext(
-			aspAssociations["sg-a"], 7, 1, pointCode,
-		) == DestinationAvailable
+		return integrationAvailabilityReady(
+			aspEndpoint, "sg-a", pointCode, DestinationAvailable,
+		)
 	}, 5*time.Second) {
 		t.Fatal("ASP did not apply sg-a DAVA")
 	}
 	request = MTPTransferRequest{ProtocolData: transferProtocolData(pointCode, 5, []byte("through-sg-a"))}
-	if _, err := aspEndpoint.MTPTransfer(request); err != nil {
+	result, err = aspEndpoint.MTPTransfer(request)
+	if err != nil {
 		t.Fatalf("same-flow MTPTransfer through recovered sg-a: %v", err)
 	}
+	requireIntegrationGateway(t, result, "sg-a")
 	requireIntegrationData(t, sgpAssociations["sg-a"], request.ProtocolData)
 }
 
@@ -347,4 +346,33 @@ func expectedConcurrentMTPTransferError(err error) bool {
 		}
 	}
 	return true
+}
+
+// integrationAvailabilityReady waits on the per-SG knowledge used by routing
+// (RFC 4666 Section 4.5.2.2), which is published after the private cache update.
+func integrationAvailabilityReady(
+	endpoint *Endpoint,
+	gateway SignallingGatewayID,
+	pointCode uint32,
+	want DestinationAvailability,
+) bool {
+	partition := canonicalSSNMPartition(gateway, "as-core")
+	for _, knowledge := range endpoint.SSNMKnowledge().Partitions {
+		if knowledge.Partition != partition {
+			continue
+		}
+		for _, destination := range knowledge.Destinations {
+			if destination.Destination == (PointCodeRange{PointCode: pointCode}) {
+				return destination.AvailabilitySet && destination.Availability.State == want
+			}
+		}
+	}
+	return false
+}
+
+func requireIntegrationGateway(t *testing.T, result MTPTransferResult, want SignallingGatewayID) {
+	t.Helper()
+	if len(result.SuccessfulPaths) != 1 || result.SuccessfulPaths[0].SGP.SignallingGateway != want {
+		t.Fatalf("MTPTransfer successful paths = %+v, want exactly one through %s", result.SuccessfulPaths, want)
+	}
 }
