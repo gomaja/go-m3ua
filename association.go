@@ -2241,17 +2241,24 @@ func (c *Association) dynamicRoutingContexts(local bool) []uint32 {
 	return routingContexts
 }
 
-// resolveNetworkAppearanceScope resolves the Network Appearance outbound
-// traffic for the given Routing Contexts must carry. The returned Param is
-// owned by the caller — freshly built or copied, never the shared
-// configuration's — so it can be handed to a message constructor without a
-// further copy. The uniform owned return costs one copy on the read-only
-// receive validation path, which discards the Param; that is the price of
-// keeping every caller free of shared-configuration aliasing.
+// resolveNetworkAppearanceScope returns a caller-owned parameter for message
+// construction and management callers. DATA validation reads only its scalar
+// scope, avoiding an ownership transfer (RFC 4666 Section 3.3.1).
 func (c *Association) resolveNetworkAppearanceScope(
 	routingContext *params.Param,
 	local bool,
 ) (*params.Param, bool, error) {
+	value, set, all, err := c.resolveNetworkAppearanceValue(routingContext, local)
+	if err != nil {
+		return nil, false, err
+	}
+	return networkAppearanceParam(value, set), all, nil
+}
+
+func (c *Association) resolveNetworkAppearanceValue(
+	routingContext *params.Param,
+	local bool,
+) (uint32, bool, bool, error) {
 	var contexts []uint32
 	if routingContext != nil {
 		contexts = routingContext.RoutingContexts()
@@ -2264,9 +2271,9 @@ func (c *Association) resolveNetworkAppearanceScope(
 	if len(contexts) == 0 {
 		contextless := c.contextlessASKey(local)
 		if !contextless.NetworkAppearanceSet {
-			return nil, false, nil
+			return 0, false, false, nil
 		}
-		return params.NewNetworkAppearance(contextless.NetworkAppearance), false, nil
+		return contextless.NetworkAppearance, true, false, nil
 	}
 
 	var resolvedValue uint32
@@ -2294,16 +2301,16 @@ func (c *Association) resolveNetworkAppearanceScope(
 			// RFC 4666 Section 3.4 gives one Network Appearance parameter to
 			// an SSNM message. Every Routing Context named by that message must
 			// therefore resolve to the same appearance scope.
-			return nil, false, ErrInvalidNetworkAppearance
+			return 0, false, false, ErrInvalidNetworkAppearance
 		}
 	}
 	if allNetworkAppearances {
-		return nil, true, nil
+		return 0, false, true, nil
 	}
 	if !resolvedSet {
-		return nil, false, nil
+		return 0, false, false, nil
 	}
-	return params.NewNetworkAppearance(resolvedValue), false, nil
+	return resolvedValue, true, false, nil
 }
 
 func (c *Association) resolveASPAuthorization(identifier *params.Param) error {
@@ -2358,6 +2365,10 @@ func (c *Association) resolveASPAuthorization(identifier *params.Param) error {
 	for _, rtCtx := range configured {
 		if _, allowed := authorizedSet[rtCtx]; allowed {
 			owned = append(owned, rtCtx)
+			// Distinct ASKeys can share an RC under different appearances.
+			// RFC 4666 Section 3.3.1 counts distinct RCs for DATA omission;
+			// publish each once while retaining declaration order and ownership.
+			delete(authorizedSet, rtCtx)
 		}
 	}
 	keys := c.asKeysForRoutingContexts(owned)

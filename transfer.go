@@ -175,7 +175,15 @@ func (c *Association) validateDataRoutingContext(peer *params.Param) error {
 		return nil
 	}
 	if theirs, ok := singleDataRoutingContext(peer); ok {
-		if _, _, carries := c.dataRoutingContextScope(theirs); !carries {
+		var carries bool
+		if c.isIPSPDoubleExchange() {
+			// Inbound double-exchange DATA names the local traffic scope
+			// (RFC 4666 Section 5.6.2); the outbound helper names the peer.
+			_, _, carries = c.dataRoutingContextScope(theirs)
+		} else {
+			carries = c.routingContextConfigured(theirs)
+		}
+		if !carries {
 			// RFC 4666 Section 3.8.1 requires the offending value in ERR.
 			return NewInvalidRoutingContextError(theirs)
 		}
@@ -221,30 +229,30 @@ func (c *Association) receivedDataRoutingContext(peer *params.Param) (uint32, bo
 }
 
 func (c *Association) validateDataNetworkAppearance(peer, routingContext *params.Param) error {
-	configured, allNetworkAppearances, err := c.resolveDataNetworkAppearanceScope(routingContext)
+	value, set, allNetworkAppearances, err := c.resolveDataNetworkAppearanceScope(routingContext)
 	if err != nil {
 		return err
 	}
-	return c.validateNetworkAppearanceAgainst(peer, configured, allNetworkAppearances)
+	return c.validateNetworkAppearanceValue(peer, value, set, allNetworkAppearances)
 }
 
 // DATA's single flow selects its Network Appearance (RFC 4666 Section 3.3.1).
 // Preserve NA-first validation and the list resolver for malformed/multi-value
 // DATA, including its mixed-appearance error before Routing Context validation.
-// The configured parameter remains caller-owned, as in the generic resolver.
-func (c *Association) resolveDataNetworkAppearanceScope(routingContext *params.Param) (*params.Param, bool, error) {
+// Read the scalar scope without constructing a temporary owned NA parameter.
+func (c *Association) resolveDataNetworkAppearanceScope(routingContext *params.Param) (uint32, bool, bool, error) {
 	local := c.isIPSPDoubleExchange()
 	value, single := singleDataRoutingContext(routingContext)
 	if routingContext == nil {
 		count, inferred, _ := c.dataRoutingContextScope(0)
 		if count == 0 {
 			key := c.contextlessASKey(local)
-			return networkAppearanceParam(key.NetworkAppearance, key.NetworkAppearanceSet), false, nil
+			return key.NetworkAppearance, key.NetworkAppearanceSet, false, nil
 		}
 		value, single = inferred, count == 1
 	}
 	if !single {
-		return c.resolveNetworkAppearanceScope(routingContext, local)
+		return c.resolveNetworkAppearanceValue(routingContext, local)
 	}
 	key := c.staticASKeyForRoutingContext(value, local)
 	all := false
@@ -252,7 +260,7 @@ func (c *Association) resolveDataNetworkAppearanceScope(routingContext *params.P
 		key = dynamic
 		all = !key.NetworkAppearanceSet
 	}
-	return networkAppearanceParam(key.NetworkAppearance, key.NetworkAppearanceSet), all, nil
+	return key.NetworkAppearance, key.NetworkAppearanceSet, all, nil
 }
 
 func (c *Association) validateSSNMNetworkAppearance(peer, routingContext *params.Param) error {
@@ -264,6 +272,15 @@ func (c *Association) validateSSNMNetworkAppearance(peer, routingContext *params
 }
 
 func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.Param, allNetworkAppearances bool) error {
+	set := configured != nil && configured.Tag == params.NetworkAppearance && len(configured.Data) == 4
+	var value uint32
+	if set {
+		value = configured.NetworkAppearance()
+	}
+	return c.validateNetworkAppearanceValue(peer, value, set, allNetworkAppearances)
+}
+
+func (c *Association) validateNetworkAppearanceValue(peer *params.Param, value uint32, set, allNetworkAppearances bool) error {
 	if peer == nil {
 		return nil
 	}
@@ -288,9 +305,7 @@ func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.
 		return nil
 	}
 
-	if configured == nil || configured.Tag != params.NetworkAppearance ||
-		len(configured.Data) != 4 ||
-		configured.NetworkAppearance() != peer.NetworkAppearance() {
+	if !set || value != peer.NetworkAppearance() {
 		return NewInvalidNetworkAppearanceError(peer.NetworkAppearance())
 	}
 

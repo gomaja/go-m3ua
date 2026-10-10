@@ -162,8 +162,13 @@ func TestDataNetworkAppearanceScopeMatchesListReference(testContext *testing.T) 
 				1: {RoutingContext: 1, RoutingContextSet: true, NetworkAppearance: 0, NetworkAppearanceSet: true}}
 		}
 		for _, peer := range peers {
-			got, gotAll, gotErr := conn.resolveDataNetworkAppearanceScope(peer)
-			want, wantAll, wantErr := conn.resolveNetworkAppearanceScope(peer, conn.isIPSPDoubleExchange())
+			gotValue, gotSet, gotAll, gotErr := conn.resolveDataNetworkAppearanceScope(peer)
+			got := networkAppearanceParam(gotValue, gotSet && !gotAll)
+			want, wantAll, wantErr := conn.referenceNetworkAppearanceScope(peer, conn.isIPSPDoubleExchange())
+			owned, ownedAll, ownedErr := conn.resolveNetworkAppearanceScope(peer, conn.isIPSPDoubleExchange())
+			if !reflect.DeepEqual(owned, want) || ownedAll != wantAll || !sameDataScopeError(ownedErr, wantErr) {
+				testContext.Fatalf("owned resolver changed: got (%+v, %t, %v), want (%+v, %t, %v)", owned, ownedAll, ownedErr, want, wantAll, wantErr)
+			}
 			if !reflect.DeepEqual(got, want) || gotAll != wantAll || !sameDataScopeError(gotErr, wantErr) {
 				testContext.Fatalf("iteration %d role %v peer %+v: got (%+v, %t, %v), want (%+v, %t, %v)",
 					iteration, conn.role, peer, got, gotAll, gotErr, want, wantAll, wantErr)
