@@ -9,10 +9,19 @@ import (
 )
 
 const (
+	// RequiredPairCount is the default for requests that omit pair_count.
 	RequiredPairCount       = 20
 	studentTCritical975DF19 = 2.093024054408263
 	maximumBaselineSpread   = 0.10
 )
+
+// studentTCritical975DF4 is the binary64 rounding of t(0.975, 4).
+// Source: NIST/SEMATECH e-Handbook §1.3.6.6.4, probability density function:
+// https://www.itl.nist.gov/div898/handbook/eda/section3/eda3664.htm
+// For df=4, integrating f(t)=3/8*(1+t²/4)^(-5/2) gives
+// F(t)=1/2+(3u-u³)/4, u=t/sqrt(t²+4). Inverting F(t)=0.975 by
+// 90-digit decimal bisection gives 2.77644510519779435780310484674862756...
+const studentTCritical975DF4 = 2.7764451051977943
 
 type Direction string
 
@@ -77,6 +86,7 @@ type Result struct {
 	Decision             Decision   `json:"decision"`
 	Mode                 Mode       `json:"mode"`
 	PairCount            int        `json:"pair_count"`
+	TCritical975         float64    `json:"t_critical_975"`
 	Estimate             RatioValue `json:"estimate"`
 	Lower                RatioValue `json:"lower"`
 	Upper                RatioValue `json:"upper"`
@@ -88,10 +98,20 @@ type Result struct {
 }
 
 func Compare(pairs []Pair, gate Gate) (Result, error) {
+	return CompareWithPairCount(pairs, gate, RequiredPairCount)
+}
+
+// CompareWithPairCount compares exactly pairCount matched pairs. Only 5 and 20
+// are supported; Compare retains the default twenty-pair contract.
+func CompareWithPairCount(pairs []Pair, gate Gate, pairCount int) (Result, error) {
+	criticalValue, err := studentTCritical975(pairCount)
+	if err != nil {
+		return Result{}, err
+	}
 	if err := validateGate(gate); err != nil {
 		return Result{}, err
 	}
-	if err := validatePairs(pairs); err != nil {
+	if err := validatePairs(pairs, pairCount); err != nil {
 		return Result{}, err
 	}
 
@@ -105,16 +125,27 @@ func Compare(pairs []Pair, gate Gate) (Result, error) {
 	}
 
 	if zeroBaselineRegression {
-		return zeroCostResult(Fail, ZeroBaselineRegressionReason), nil
+		return zeroCostResult(Fail, ZeroBaselineRegressionReason, pairCount, criticalValue), nil
 	}
-	if zeroBaselineCount == RequiredPairCount {
-		return zeroCostResult(Pass, ""), nil
+	if zeroBaselineCount == pairCount {
+		return zeroCostResult(Pass, "", pairCount, criticalValue), nil
 	}
 	if zeroBaselineCount > 0 {
-		return Result{}, errors.New("mixed zero and positive baselines cannot form 20 log ratios")
+		return Result{}, fmt.Errorf("mixed zero and positive baselines cannot form %d log ratios", pairCount)
 	}
 
-	return comparePositivePairs(pairs, gate), nil
+	return comparePositivePairs(pairs, gate, criticalValue), nil
+}
+
+func studentTCritical975(pairCount int) (float64, error) {
+	switch pairCount {
+	case 5:
+		return studentTCritical975DF4, nil
+	case RequiredPairCount:
+		return studentTCritical975DF19, nil
+	default:
+		return 0, fmt.Errorf("pair_count must be 5 or 20, got %d", pairCount)
+	}
 }
 
 func validateGate(gate Gate) error {
@@ -127,12 +158,12 @@ func validateGate(gate Gate) error {
 	return nil
 }
 
-func validatePairs(pairs []Pair) error {
-	if len(pairs) != RequiredPairCount {
-		return fmt.Errorf("exactly %d matched pairs are required, got %d", RequiredPairCount, len(pairs))
+func validatePairs(pairs []Pair, pairCount int) error {
+	if len(pairs) != pairCount {
+		return fmt.Errorf("exactly %d matched pairs are required, got %d", pairCount, len(pairs))
 	}
 
-	seenIDs := make(map[string]struct{}, RequiredPairCount)
+	seenIDs := make(map[string]struct{}, pairCount)
 	for index, pair := range pairs {
 		pairID := strings.TrimSpace(pair.ID)
 		if pairID == "" {
@@ -156,8 +187,9 @@ func validatePairs(pairs []Pair) error {
 	return nil
 }
 
-func comparePositivePairs(pairs []Pair, gate Gate) Result {
-	logRatios := make([]LogRatio, 0, RequiredPairCount)
+func comparePositivePairs(pairs []Pair, gate Gate, criticalValue float64) Result {
+	pairCount := len(pairs)
+	logRatios := make([]LogRatio, 0, pairCount)
 	meanLog := 0.0
 	sumSquaredDifferences := 0.0
 	for index, pair := range pairs {
@@ -169,8 +201,11 @@ func comparePositivePairs(pairs []Pair, gate Gate) Result {
 		sumSquaredDifferences += difference * (logRatio - meanLog)
 	}
 
-	standardDeviationLog := math.Sqrt(sumSquaredDifferences / float64(RequiredPairCount-1))
-	margin := studentTCritical975DF19 * standardDeviationLog / math.Sqrt(RequiredPairCount)
+	// NIST/SEMATECH §1.3.5.2: mean ± t(0.975, n-1)*s/sqrt(n),
+	// applied to paired log ratios and exponentiated below.
+	// https://www.itl.nist.gov/div898/handbook/eda/section3/eda352.htm
+	standardDeviationLog := math.Sqrt(sumSquaredDifferences / float64(pairCount-1))
+	margin := criticalValue * standardDeviationLog / math.Sqrt(float64(pairCount))
 	lowerLog := meanLog - margin
 	upperLog := meanLog + margin
 	boundaryLog := math.Log(gate.Boundary)
@@ -184,7 +219,8 @@ func comparePositivePairs(pairs []Pair, gate Gate) Result {
 	return Result{
 		Decision:             decision,
 		Mode:                 RatioMode,
-		PairCount:            RequiredPairCount,
+		PairCount:            pairCount,
+		TCritical975:         criticalValue,
 		Estimate:             ratioValue(meanLog),
 		Lower:                ratioValue(lowerLog),
 		Upper:                ratioValue(upperLog),
@@ -228,16 +264,17 @@ func decide(direction Direction, lowerLog float64, upperLog float64, boundaryLog
 	return Inconclusive, IntervalStraddlesBoundaryReason
 }
 
-func zeroCostResult(decision Decision, reason string) Result {
+func zeroCostResult(decision Decision, reason string, pairCount int, criticalValue float64) Result {
 	undefined := RatioValue{Range: UndefinedRange}
 	return Result{
-		Decision:  decision,
-		Mode:      ZeroCostMode,
-		PairCount: RequiredPairCount,
-		Estimate:  undefined,
-		Lower:     undefined,
-		Upper:     undefined,
-		Reason:    reason,
+		Decision:     decision,
+		Mode:         ZeroCostMode,
+		PairCount:    pairCount,
+		TCritical975: criticalValue,
+		Estimate:     undefined,
+		Lower:        undefined,
+		Upper:        undefined,
+		Reason:       reason,
 	}
 }
 
@@ -247,9 +284,13 @@ func calculateBaselineSpread(pairs []Pair) float64 {
 		baselines[index] = pair.Baseline
 	}
 	sort.Float64s(baselines)
-	median := (baselines[RequiredPairCount/2-1] + baselines[RequiredPairCount/2]) / 2
-	if math.IsInf(median, 0) {
-		median = baselines[RequiredPairCount/2-1]/2 + baselines[RequiredPairCount/2]/2
+	middle := len(baselines) / 2
+	median := baselines[middle]
+	if len(baselines)%2 == 0 {
+		median = (baselines[middle-1] + baselines[middle]) / 2
+		if math.IsInf(median, 0) {
+			median = baselines[middle-1]/2 + baselines[middle]/2
+		}
 	}
 	spread := (baselines[len(baselines)-1] - baselines[0]) / median
 	if math.IsInf(spread, 1) {

@@ -1,24 +1,61 @@
 # Matched-pair performance ratios
 
-This package implements the approved fixed-sample comparison for 20 independent
-matched run pairs. It computes each run-level log ratio from a finite quotient,
+This package implements the approved fixed-sample comparison for independent
+matched run pairs. The request's `pair_count` accepts exactly 20 or 5; omission
+defaults to 20. The 2026-10-10 acceptance decision uses 5 pairs for capacity
+rows with warm-started searches and retains 20 for fixed70 and echo70 rows.
+It computes each run-level log ratio from a finite quotient,
 using `log1p` near one, and falls back to `log(candidate) - log(baseline)` only
 when the quotient overflows or underflows. It then reports the geometric-mean
-ratio and the two-sided 95% Student-t interval using
-`t(0.975, 19) = 2.093024054408263`.
+ratio and the two-sided 95% Student-t interval on the mean log ratio,
+`mean_log ± t(0.975, n-1) * sample_sd_log / sqrt(n)`, transformed back to ratio
+units. The critical values are `t(0.975, 19) = 2.093024054408263` for 20 pairs
+and `t(0.975, 4) = 2.7764451051977943` for 5 pairs. The latter is the full
+binary64 rounding of a 90-digit numerical inversion of the integrated
+[NIST Student-t density, §1.3.6.6.4](https://www.itl.nist.gov/div898/handbook/eda/section3/eda3664.htm):
+for df=4, `F(t) = 1/2 + (3u-u³)/4`, where `u = t/sqrt(t²+4)`.
 
 The mean interval follows the [NIST one-sample mean confidence interval](https://www.itl.nist.gov/div898/handbook/eda/section3/eda352.htm), applied to paired run-level log ratios and transformed back to ratio units.
 
-Zero baselines are not assigned artificial ratios. Twenty matched zero-cost
-pairs pass only when every candidate is also zero; any positive candidate is a
-failure. Mixing zero-baseline pairs with positive-baseline pairs is invalid
-because it cannot produce the required 20 log ratios.
+`Compare(pairs, gate)` retains the twenty-pair contract;
+`CompareWithPairCount(pairs, gate, n)` selects either supported count explicitly
+and rejects every other value, including zero. Results report `pair_count` and
+`t_critical_975`. Existing twenty-pair estimates, intervals and decisions stay
+unchanged; the critical-value field is additive and recorded outputs are not
+rewritten. The upper/lower interval-bound gates remain unchanged, including
+equality passing. Baseline spread remains `(max-min)/median`, inconclusive
+above 10%; the median is the middle of 5 sorted values or the average of the
+middle two for 20.
+
+Zero baselines are not assigned artificial ratios. For either selected count,
+all-zero baselines pass only when every candidate is also zero; any positive
+candidate paired with a zero baseline is a failure, including mixed baselines.
+Otherwise mixing zero-baseline pairs with positive-baseline pairs is invalid
+because it cannot produce the selected number of log ratios. Zero-cost output
+retains undefined ratios and reports the selected count and critical value as
+method metadata; it does not compute a Student-t interval.
 
 The CLI at `internal/cmd/perfratio` reads one strict JSON request from standard
 input and writes one JSON result. Its exit statuses are 0 for pass, 1 for fail,
 2 for inconclusive, and 3 for invalid input. Input is limited to 64 KiB and uses
-the exact, case-sensitive top-level fields `direction`, `boundary`, and `pairs`.
-Each of the exactly 20 pair objects uses only `id`, `baseline`, and `candidate`.
+the exact, case-sensitive top-level fields `direction`, `boundary`, `pairs`, and
+optional `pair_count`. An explicit count must be a JSON integer 5 or 20; null
+is invalid. Each of exactly `pair_count` pair objects uses only `id`, `baseline`,
+and `candidate`. See the [CLI contract](../cmd/perfratio/README.md) for an example
+and the required campaign-driver revision.
+
+The interval-width regression uses log ratios `[-0.2, -0.1, 0, 0.1, 0.2]`
+and repeats those five values four times for the 20-pair sample. Both estimates
+are 1. The 5-pair interval is `[0.8217456860621741, 1.2169215086385485]`; the
+20-pair interval is `[0.9343476746864942, 1.070265413070712]`. Ratio-unit width
+`upper-lower` is **2.9074631999781765 times** as large for 5 pairs, and log width
+is 2.891090432132389 times as large. The lower bound moves down by
+0.1126019886243201. This is a controlled arithmetic demonstration, not a universal
+width multiplier or evidence that repeated ratios are independent measurements.
+
+Acceptance tracking: [issue #44](https://github.com/gomaja/go-m3ua/issues/44).
+
+Plan-revision comment URL: **PLACEHOLDER — insert the owner's issue #44 comment URL.**
 
 A passing result covers only this numerical comparison. It does not establish
 that runs were independent, that log ratios met the interval's distributional
