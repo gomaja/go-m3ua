@@ -58,6 +58,7 @@ type request struct {
 	Initial     *int      `json:"initial"`
 	Maximum     *int      `json:"maximum"`
 	MaxProbes   *int      `json:"max_probes"`
+	UpperHint   *int      `json:"upper_hint"`
 	Probes      []rateRun `json:"probes"`
 	Repetitions []rateRun `json:"repetitions"`
 }
@@ -123,6 +124,10 @@ type response struct {
 	Environments []runEnvironment       `json:"environments,omitempty"`
 	SearchStatus perfstats.SearchStatus `json:"search_status,omitempty"`
 	SelectedRate int                    `json:"selected_rate,omitempty"`
+	// Hint metadata is absent for ordinary searches. Used means the hint
+	// selected a pending probe; the recorded outcomes remain its evidence.
+	UpperHint     *int  `json:"upper_hint,omitempty"`
+	UpperHintUsed *bool `json:"upper_hint_used,omitempty"`
 	// NextProbeRate is the rate the unfinished search selected for its next
 	// probe, so a campaign driver can run the search one probe at a time
 	// without reimplementing it. It is absent once the search has terminated.
@@ -185,7 +190,13 @@ func evaluate(decoded request) (response, error) {
 	if decoded.MaxProbes != nil {
 		maxProbes = *decoded.MaxProbes
 	}
-	search, err := perfstats.NewCapacitySearch(*decoded.Initial, maximum, maxProbes)
+	var search *perfstats.CapacitySearch
+	var err error
+	if decoded.UpperHint != nil {
+		search, err = perfstats.NewCapacitySearchWithUpperHint(*decoded.Initial, maximum, maxProbes, *decoded.UpperHint)
+	} else {
+		search, err = perfstats.NewCapacitySearch(*decoded.Initial, maximum, maxProbes)
+	}
 	if err != nil {
 		return response{}, err
 	}
@@ -257,6 +268,11 @@ func evaluate(decoded request) (response, error) {
 		return response{}, fmt.Errorf("repetition %d: no validation repetition is pending (status %q)", repetitionIndex+1, search.Status())
 	}
 	result.SearchStatus = search.Status()
+	if decoded.UpperHint != nil {
+		used := search.UpperHintUsed()
+		result.UpperHint = decoded.UpperHint
+		result.UpperHintUsed = &used
+	}
 	result.Probes = search.Probes()
 	result.ValidationRounds = search.ValidationRounds()
 	if result.NextProbeRate != 0 || result.NextRepetitionRate != 0 {

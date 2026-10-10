@@ -681,6 +681,9 @@ func FuzzRunNeverPanicsAndAlwaysWritesJSON(fuzzContext *testing.F) {
 	fuzzContext.Add(fmt.Appendf(nil, `{"initial":10,"probes":[{"rate":10,"run":%s}]}`, passingRunJSON()))
 	fuzzContext.Add(fmt.Appendf(nil, `{"initial":10,"probes":[{"rate":10,"run":%s}]}`, bidirectionalRunJSON(10, -1, 0, -1, 0)))
 	fuzzContext.Add([]byte(`{"initial":10,"probes":null,"repetitions":null}`))
+	fuzzContext.Add([]byte(`{"initial":1000,"upper_hint":1050}`))
+	fuzzContext.Add([]byte(`{"initial":1000,"upper_hint":1051}`))
+	fuzzContext.Add([]byte(`{"upper_hint":1050}`))
 	fuzzContext.Add([]byte{0xff, 0x00, '{', '}'})
 	fuzzContext.Fuzz(func(testContext *testing.T, input []byte) {
 		var output bytes.Buffer
