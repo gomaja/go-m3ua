@@ -32,8 +32,74 @@ func warmRequestJSON(testContext *testing.T, probes, repetitions []rateRun, budg
 	initial, maximum, upper := 37, 100, 38
 	return string(mustJSON(testContext, request{
 		Initial: &initial, Maximum: &maximum, MaxProbes: &budget, UpperHint: &upper,
-		Probes: distinctMeasurementEntries(probes, "probe"), Repetitions: distinctMeasurementEntries(repetitions, "repetition"),
+		Probes: distinctMeasurementEntries(probes, "probe", 0), Repetitions: distinctMeasurementEntries(repetitions, "repetition", len(probes)),
 	}))
+}
+
+func TestUpperHintSharedClockRepeatsAndValidation(testContext *testing.T) {
+	for _, mode := range []string{"unidirectional", "bidirectional"} {
+		testContext.Run(mode, func(testContext *testing.T) {
+			entry := func(rate int, lower, upper float64) rateRun {
+				evidence := bidirectionalRunJSON(rate, lower, upper, -1, 0)
+				if mode == "unidirectional" {
+					evidence = unidirectionalRunJSON(testContext, rate, "asp-to-sgp", lower, upper)
+				}
+				return rateRun{Rate: &rate, Run: json.RawMessage(evidence)}
+			}
+			probes := []rateRun{
+				entry(37, -1, 1), entry(37, -1, 1), entry(37, -1, 0),
+				entry(38, -1, 1), entry(38, -1, 1), entry(38, 1, 2),
+			}
+			repetitions := []rateRun{entry(37, -1, 1), entry(37, -1, 1)}
+			for range 5 {
+				repetitions = append(repetitions, entry(37, -1, 0))
+			}
+			status, result := runRequest(testContext, warmRequestJSON(testContext, probes, repetitions, 24))
+			if status != passingExitStatus || result.SelectedRate != 37 || result.SearchStatus != perfstats.SearchBracketed ||
+				len(result.Probes) != 2 || len(result.ProbeDecisions) != 6 || len(result.RepetitionDecisions) != 7 ||
+				len(result.ValidationRounds) != 1 || len(result.ValidationRounds[0].Outcomes) != 5 ||
+				result.ProbeDecisions[2].Attempt != 3 || result.ProbeDecisions[5].Attempt != 3 ||
+				result.RepetitionDecisions[2].Attempt != 3 || result.UpperHintUsed == nil || !*result.UpperHintUsed {
+				testContext.Fatalf("status %d result %+v, want distinct shared-clock repeats and five validated passes at 37", status, result)
+			}
+		})
+	}
+}
+
+func TestUpperHintRejectsReplayedSharedClockWindow(testContext *testing.T) {
+	for _, mode := range []string{"unidirectional", "bidirectional"} {
+		for _, renamed := range []bool{false, true} {
+			name := mode + "/original cohort"
+			if renamed {
+				name = mode + "/renamed cohort"
+			}
+			testContext.Run(name, func(testContext *testing.T) {
+				lower := bidirectionalRunJSON(37, -1, 0, -1, 0)
+				upper := bidirectionalRunJSON(38, -1, 1, -1, 0)
+				if mode == "unidirectional" {
+					lower = unidirectionalRunJSON(testContext, 37, "asp-to-sgp", -1, 0)
+					upper = unidirectionalRunJSON(testContext, 38, "asp-to-sgp", -1, 1)
+				}
+				input, err := decodeRequest(strings.NewReader(warmRequestJSON(testContext, []rateRun{
+					{Rate: new(37), Run: json.RawMessage(lower)},
+					{Rate: new(38), Run: json.RawMessage(upper)},
+				}, nil, 24)))
+				if err != nil {
+					testContext.Fatal(err)
+				}
+				replay := input.Probes[1]
+				if renamed {
+					replay.Run = json.RawMessage(strings.ReplaceAll(string(replay.Run), "probe-window-2", "renamed-replay"))
+				}
+				input.Probes = append(input.Probes, replay)
+				status, result := runRequest(testContext, string(mustJSON(testContext, input)))
+				if status != invalidInputExitStatus || !strings.Contains(result.Error, "duplicate measurement") ||
+					!strings.Contains(result.Error, "rate 38") || !strings.Contains(result.Error, "probe 2") {
+					testContext.Fatalf("status %d error %q, want the replayed hinted-rate window rejected as probe 2 at rate 38", status, result.Error)
+				}
+			})
+		}
+	}
 }
 
 func TestUpperHintPartialSearchReportsHowItWasUsed(testContext *testing.T) {
