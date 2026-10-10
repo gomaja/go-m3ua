@@ -24,14 +24,15 @@ func repeatRequest(testContext *testing.T, probes, repetitions []rateRun, budget
 	initial, maximum := 10, 100
 	return string(mustJSON(testContext, request{
 		Initial: &initial, Maximum: &maximum, MaxProbes: &budget,
-		Probes: distinctMeasurementEntries(probes, "probe"), Repetitions: distinctMeasurementEntries(repetitions, "repetition"),
+		Probes: distinctMeasurementEntries(probes, "probe", 0), Repetitions: distinctMeasurementEntries(repetitions, "repetition", len(probes)),
 	}))
 }
 
-func distinctMeasurementEntries(entries []rateRun, prefix string) []rateRun {
+func distinctMeasurementEntries(entries []rateRun, prefix string, firstWindow int) []rateRun {
 	distinct := make([]rateRun, len(entries))
 	for index, entry := range entries {
 		distinct[index] = withMeasurementCohort(entry, fmt.Sprintf("%s-window-%d", prefix, index+1))
+		distinct[index].Run = json.RawMessage(shiftSharedClockWindow(string(distinct[index].Run), firstWindow+index))
 	}
 	return distinct
 }
@@ -120,7 +121,7 @@ func repeatValidationRequest(testContext *testing.T, repetitions []rateRun) stri
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	decoded.Repetitions = distinctMeasurementEntries(repetitions, "repetition")
+	decoded.Repetitions = distinctMeasurementEntries(repetitions, "repetition", len(decoded.Probes))
 	return string(mustJSON(testContext, decoded))
 }
 

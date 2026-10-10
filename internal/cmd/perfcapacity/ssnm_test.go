@@ -171,7 +171,7 @@ func ssnmWarmupJSON(testContext *testing.T, rate int, mutate func(map[string]any
 // like a no-update one: it bounds the bracket from above.
 func TestSSNMLoadedFailedWarmupBoundsTheSearch(testContext *testing.T) {
 	input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
-		ssnmRunJSON(testContext, 10, "pass", nil), ssnmWarmupJSON(testContext, 20, nil))
+		ssnmRunJSON(testContext, 10, "pass", nil), shiftSharedClockWindow(ssnmWarmupJSON(testContext, 20, nil), 1))
 	status, decoded := runRequest(testContext, input)
 	if status == invalidInputExitStatus || decoded.Error != "" || len(decoded.ProbeDecisions) != 2 {
 		testContext.Fatalf("SSNM-loaded failed warm-up rejected: status=%d result=%+v", status, decoded)

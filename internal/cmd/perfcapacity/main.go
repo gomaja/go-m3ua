@@ -889,8 +889,9 @@ type runIdentity struct {
 }
 
 // measurementIdentity identifies evidence, independently of its counters,
-// verdict or seed. Legacy unaligned runs have no absolute window identity;
-// their cohort identifies the window at this rate and duration instead.
+// verdict or seed. Shared-clock runs are identified only by their clock domain
+// and window timestamps. Legacy unaligned runs have no absolute timestamps,
+// so cohort, rate, duration and phase are the best available, weaker identity.
 type measurementIdentity struct {
 	cohort   string
 	rate     uint64
@@ -917,6 +918,11 @@ type campaignIdentity struct {
 // this inventory from its complete history, so replaying that history is valid.
 func (campaign *campaignIdentity) recordMeasurement(identity measurementIdentity, warmup bool, kind string, index int) error {
 	key := measurementKey{identity: identity, warmup: warmup}
+	if identity.clock.Clock != "" {
+		// Labels, rates and phases cannot turn a recorded absolute window
+		// into a new measurement. Keep them only for legacy unaligned runs.
+		key = measurementKey{identity: measurementIdentity{clock: identity.clock}}
+	}
 	if previous, exists := campaign.measurements[key]; exists {
 		phase := "measurement"
 		if warmup {

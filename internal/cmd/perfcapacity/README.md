@@ -42,12 +42,14 @@ and `repetitions` arrays. Every array entry is `{"rate": N, "run": evidence}`.
 The tool replays the lists in the order selected by the search. Append every
 run, including deferred attempts, to its list and submit the complete history
 again. Do not supply an outcome or attempt number in the request.
-Each run must be a distinct measurement. Reusing the same cohort and window
-at the same rate and phase is invalid, including reuse from a probe in
-validation. Shared-clock windows are identified by their clock domain and
-start/end timestamps; for legacy unaligned evidence, use a fresh cohort for
-each window. Changing a seed, counters or verdict does not create a new
-measurement. Re-submitting the complete history remains valid.
+Each run must be a distinct measurement, including validation after a probe.
+Shared-clock windows are identified only by their clock domain and start/end
+timestamps. Renaming a cohort or changing the declared rate or phase does not
+make the same absolute window distinct. Legacy unaligned evidence has no
+absolute timestamps, so cohort, rate, duration and phase provide the best
+available, weaker identity; use a fresh cohort for each window. Changing a
+seed, counters or verdict does not create a new measurement. Re-submitting
+the complete history remains valid.
 
 While a run is pending, exactly one of `next_probe_rate` and
 `next_repetition_rate` names its rate. The response also supplies

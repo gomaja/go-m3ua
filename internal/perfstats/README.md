@@ -304,11 +304,13 @@ appended in execution order to the appropriate request list, even when they
 do not yet contribute a counted outcome. Skipping a required repeat to
 provide a different rate or phase, or supplying a fourth attempt after the
 third straddle, is invalid input.
-Two entries at the same rate and phase must not reuse the same cohort and
-window, including a probe reused as validation. Shared-clock window identity
-includes the clock domain and start/end timestamps. Legacy unaligned windows
-require a fresh cohort; seed, counter or verdict changes do not distinguish
-measurements. Re-submitting the full history is still supported.
+Shared-clock entries must not reuse the same clock domain and start/end
+timestamps, including a probe reused as validation. Cohort labels, declared
+rates and phases are excluded from absolute window identity. Legacy unaligned
+evidence has no absolute timestamps, so cohort, rate, duration and phase are
+the best available, weaker identity; use a fresh cohort for each window.
+Seed, counter or verdict changes do not distinguish measurements.
+Re-submitting the full history is still supported.
 
 Each run record must carry `send_duration.max_ns` and a `manifest`. Neither is
 optional: a record without the send-duration maximum cannot show whether a

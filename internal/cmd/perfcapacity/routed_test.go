@@ -148,7 +148,7 @@ func TestRoutedWarmupsFollowTheThroughputSearchRules(testContext *testing.T) {
 	for _, mode := range []string{"routed", "routed-direct"} {
 		testContext.Run(mode+"/overloaded", func(testContext *testing.T) {
 			input := fmt.Sprintf(`{"initial":10,"maximum":20,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`,
-				routedRunJSON(testContext, 10, mode), routedWarmupJSON(testContext, 20, mode, warmupOverloadError))
+				routedRunJSON(testContext, 10, mode), shiftSharedClockWindow(routedWarmupJSON(testContext, 20, mode, warmupOverloadError), 1))
 			status, decoded := runRequest(testContext, input)
 			if status == invalidInputExitStatus || decoded.Error != "" || len(decoded.ProbeDecisions) != 2 {
 				testContext.Fatalf("routed failed warm-up rejected: status=%d result=%+v", status, decoded)

@@ -58,7 +58,7 @@ func TestRouteReferenceCampaignsCannotMix(testContext *testing.T) {
 		}
 	}
 	control := referenceRunJSON(testContext, 10, "static", "pass", nil)
-	sameControl := referenceRunJSON(testContext, 20, "static", "pass", nil)
+	sameControl := shiftSharedClockWindow(referenceRunJSON(testContext, 20, "static", "pass", nil), 1)
 	input := fmt.Sprintf(`{"initial":10,"maximum":40,"probes":[{"rate":10,"run":%s},{"rate":20,"run":%s}]}`, control, sameControl)
 	if status, decoded := runRequest(testContext, input); status == invalidInputExitStatus {
 		testContext.Fatalf("a consistent control campaign was refused: %q", decoded.Error)
