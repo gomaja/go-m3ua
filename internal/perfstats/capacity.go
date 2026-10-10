@@ -8,8 +8,9 @@ import (
 
 // This file implements the predeclared bounded capacity search: integer
 // rates, a bracket between the highest demonstrated rate and the lowest rate
-// that failed or was not demonstrated, refined to within five percent, no
-// probe retries, and a fixed probe budget. It deliberately does not widen those semantics: a
+// that failed or was not demonstrated, refined to within five percent,
+// bounded repeats for backlog-only undecided windows, and a fixed decided-probe
+// budget. It deliberately does not widen those semantics: a
 // search that cannot refine the bracket, finds no upper failure bound, or
 // exhausts its budget is not a capacity measurement.
 //
@@ -27,6 +28,11 @@ const (
 	DefaultMaxProbes   = 24
 
 	RequiredFullRepetitions = 5
+	// MaxRateAttempts bounds attempts for one probe or validation repetition.
+	// Only backlog-growth bounds straddling the floor qualify for another
+	// attempt. The owner decision amends the no-retry rules in #105 and #140:
+	// https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906
+	MaxRateAttempts = 3
 	// MaxValidationRounds bounds how many selected rates the search may try
 	// to validate. Each round that a repetition fails or does not demonstrate
 	// moves the search below that rate; after this many rounds the search
@@ -49,11 +55,18 @@ type ProbeOutcome string
 const (
 	ProbePassing ProbeOutcome = "pass"
 	ProbeFailing ProbeOutcome = "fail"
+	// ProbeBacklogUndecided requests the same rate again without contributing
+	// a probe or repetition outcome. After MaxRateAttempts such windows, the
+	// rate is recorded once as ProbeNotDemonstrated. Callers must use this only
+	// when backlog straddling is the run's sole inconclusive cause.
+	ProbeBacklogUndecided ProbeOutcome = "backlog-undecided"
 	// ProbeNotDemonstrated is a probe that did not demonstrate a sustained
-	// rate for a rate-related reason: a transport stall, or backlog growth
-	// bounds that straddle the floor. Near and above capacity those are the
-	// expected outcomes, so the rate bounds the bracket from above exactly as a
-	// failure does, and the search continues. Only demonstrated rates pass.
+	// rate for a rate-related reason: a transport stall, backlog growth bounds
+	// still straddling the floor after MaxRateAttempts, or a straddle with
+	// another non-passing verdict that rules out repeats. Backlog-only
+	// straddles must first be recorded as ProbeBacklogUndecided. The rate bounds
+	// the bracket from above exactly as a failure does, and the search continues.
+	// Only demonstrated rates pass.
 	ProbeNotDemonstrated ProbeOutcome = "not-demonstrated"
 	// ProbeInconclusive is a probe whose evidence was missing or invalid. It
 	// says nothing about the rate, so it terminates the search.
@@ -122,6 +135,9 @@ type CapacitySearch struct {
 	next      int
 	status    SearchStatus
 	maxProbes int
+	// undecidedAttempts belongs to the current probe or validation repetition,
+	// not to all repetitions at a selected rate. Deciding it resets the count.
+	undecidedAttempts int
 }
 
 // NewCapacitySearch validates the search bounds: positive integer initial,
@@ -160,7 +176,8 @@ func (search *CapacitySearch) Upper() int {
 	return search.upper
 }
 
-// Probes returns the recorded probe history in execution order.
+// Probes returns the decided probe history in execution order. Deferred
+// backlog-only attempts do not appear here or consume the probe budget.
 func (search *CapacitySearch) Probes() []ProbeRecord {
 	return append([]ProbeRecord(nil), search.probes...)
 }
@@ -197,7 +214,8 @@ func (search *CapacitySearch) NextRepetitionRate() (int, bool) {
 // failed probe, the highest passing probe below it becomes the lower bound,
 // and the search resumes, at most MaxValidationRounds rounds in all. An
 // inconclusive repetition (missing or invalid evidence) says nothing about the
-// rate and ends validation. No repetition is ever retried.
+// rate and ends validation. A backlog-only undecided attempt leaves the same
+// repetition pending, for at most MaxRateAttempts runs in all.
 func (search *CapacitySearch) RecordRepetition(rate int, outcome ProbeOutcome) error {
 	next, pending := search.NextRepetitionRate()
 	if !pending {
@@ -207,9 +225,13 @@ func (search *CapacitySearch) RecordRepetition(rate int, outcome ProbeOutcome) e
 		return fmt.Errorf("repetition rate %d does not match the selected rate %d", rate, next)
 	}
 	switch outcome {
-	case ProbePassing, ProbeFailing, ProbeNotDemonstrated, ProbeInconclusive:
+	case ProbePassing, ProbeFailing, ProbeNotDemonstrated, ProbeInconclusive, ProbeBacklogUndecided:
 	default:
 		return fmt.Errorf("repetition returned an unknown outcome %q", outcome)
+	}
+	outcome = search.resolveAttempt(outcome)
+	if outcome == ProbeBacklogUndecided {
+		return nil
 	}
 	if count := len(search.rounds); count == 0 || search.rounds[count-1].Rate != rate || !search.rounds[count-1].open() {
 		search.rounds = append(search.rounds, ValidationRound{Rate: rate})
@@ -252,7 +274,8 @@ func (search *CapacitySearch) NextRate() (int, bool) {
 // Record adds one probe outcome. The rate must equal the selected NextRate;
 // an unknown outcome or a finished search is an error. A not-demonstrated
 // probe bounds the bracket from above like a failure; an inconclusive probe
-// terminates the search. No probe is ever retried.
+// terminates the search. A backlog-only undecided attempt leaves the same
+// probe pending without using its budget, up to MaxRateAttempts runs in all.
 func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 	if search.status != SearchRunning {
 		if next, pending := search.NextRepetitionRate(); pending {
@@ -264,9 +287,13 @@ func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 		return fmt.Errorf("probe rate %d does not match the selected rate %d", rate, search.next)
 	}
 	switch outcome {
-	case ProbePassing, ProbeFailing, ProbeNotDemonstrated, ProbeInconclusive:
+	case ProbePassing, ProbeFailing, ProbeNotDemonstrated, ProbeInconclusive, ProbeBacklogUndecided:
 	default:
 		return fmt.Errorf("probe returned an unknown outcome %q", outcome)
+	}
+	outcome = search.resolveAttempt(outcome)
+	if outcome == ProbeBacklogUndecided {
+		return nil
 	}
 	search.probes = append(search.probes, ProbeRecord{Rate: rate, Outcome: outcome})
 	if outcome == ProbeInconclusive {
@@ -280,6 +307,32 @@ func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 	}
 	search.advance()
 	return nil
+}
+
+// NextAttempt is the one-based attempt number for the pending probe or
+// validation repetition, or zero when no run is pending. A new repetition at
+// the same selected rate starts at one again.
+func (search *CapacitySearch) NextAttempt() int {
+	_, probe := search.NextRate()
+	_, repetition := search.NextRepetitionRate()
+	if !probe && !repetition {
+		return 0
+	}
+	return search.undecidedAttempts + 1
+}
+
+// resolveAttempt defers only backlog-only undecided windows. It runs after
+// rate and outcome validation, so rejected input cannot spend an attempt.
+func (search *CapacitySearch) resolveAttempt(outcome ProbeOutcome) ProbeOutcome {
+	if outcome == ProbeBacklogUndecided {
+		search.undecidedAttempts++
+		if search.undecidedAttempts < MaxRateAttempts {
+			return outcome
+		}
+		outcome = ProbeNotDemonstrated
+	}
+	search.undecidedAttempts = 0
+	return outcome
 }
 
 func (search *CapacitySearch) advance() {

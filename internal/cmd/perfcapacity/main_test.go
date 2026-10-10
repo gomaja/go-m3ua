@@ -139,7 +139,8 @@ func requestJSON(initial int, schedule []struct {
 		if probe.passing {
 			run = passingRunJSON()
 		}
-		fmt.Fprintf(&builder, `{"rate":%d,"run":%s}`, probe.rate, runAtRateJSON(run, probe.rate))
+		run = strings.ReplaceAll(runAtRateJSON(run, probe.rate), `"cohort-a`, fmt.Sprintf(`"probe-window-%d`, index+1))
+		fmt.Fprintf(&builder, `{"rate":%d,"run":%s}`, probe.rate, run)
 	}
 	builder.WriteString(`],"repetitions":[`)
 	builder.WriteString(repetitions)
@@ -150,7 +151,8 @@ func requestJSON(initial int, schedule []struct {
 func repetitionsJSON(rate, count int, run string) string {
 	entries := make([]string, 0, count)
 	for index := 0; index < count; index++ {
-		entries = append(entries, fmt.Sprintf(`{"rate":%d,"run":%s}`, rate, runAtRateJSON(run, rate)))
+		evidence := strings.ReplaceAll(runAtRateJSON(run, rate), `"cohort-a`, fmt.Sprintf(`"repetition-window-%d`, index+1))
+		entries = append(entries, fmt.Sprintf(`{"rate":%d,"run":%s}`, rate, evidence))
 	}
 	return strings.Join(entries, ",")
 }
@@ -334,18 +336,21 @@ func TestNoPassingRateFails(testContext *testing.T) {
 	}
 }
 
-// A probe that did not demonstrate its rate for a rate-related reason (here a
-// backlog trend that cannot be shown not to grow) bounds the bracket from
-// above, and the search continues downward.
+// A stall bounds the bracket immediately; a backlog-only straddle does so
+// after its three attempts are exhausted.
 func TestUndemonstratedProbeBoundsTheSearchFromAbove(testContext *testing.T) {
 	for name, run := range map[string]string{"straddling backlog": straddlingRunJSON(), "transport stall": stalledRunJSON()} {
 		testContext.Run(name, func(testContext *testing.T) {
-			input := fmt.Sprintf(`{"initial":10,"probes":[{"rate":10,"run":%s}]}`, run)
+			count := 1
+			if name == "straddling backlog" {
+				count = 3
+			}
+			input := fmt.Sprintf(`{"initial":10,"probes":[%s]}`, repetitionsJSON(10, count, run))
 			status, decoded := runRequest(testContext, input)
 			if status == invalidInputExitStatus || decoded.Decision != "inconclusive" || decoded.SearchStatus != perfstats.SearchRunning {
 				testContext.Fatalf("status %d decision %+v, want a running search", status, decoded)
 			}
-			if len(decoded.ProbeDecisions) != 1 || decoded.ProbeDecisions[0].SearchOutcome != perfstats.ProbeNotDemonstrated ||
+			if len(decoded.ProbeDecisions) != count || decoded.ProbeDecisions[count-1].SearchOutcome != perfstats.ProbeNotDemonstrated ||
 				len(decoded.Probes) != 1 || decoded.Probes[0].Outcome != perfstats.ProbeNotDemonstrated || decoded.NextProbeRate != 5 {
 				testContext.Fatalf("probe %+v next %d, want not-demonstrated at 10 and next probe 5", decoded.ProbeDecisions, decoded.NextProbeRate)
 			}

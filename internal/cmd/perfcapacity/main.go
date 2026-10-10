@@ -82,6 +82,14 @@ type probeDecision struct {
 	Phase string `json:"phase,omitempty"`
 	// SearchOutcome is what the probe contributes to the capacity search.
 	SearchOutcome perfstats.ProbeOutcome `json:"search_outcome,omitempty"`
+	// Attempt counts runs for this probe or validation repetition, including
+	// backlog-only repeats. Only a resolved SearchOutcome is counted.
+	Attempt      int    `json:"attempt"`
+	MaxAttempts  int    `json:"max_attempts"`
+	RepeatReason string `json:"repeat_reason,omitempty"`
+	// repeatBlocked retains non-passing component verdicts even when the
+	// final reason comes from a different component under decision precedence.
+	repeatBlocked bool
 }
 
 type directionDecision struct {
@@ -122,6 +130,9 @@ type response struct {
 	// NextRepetitionRate is the rate the next validation repetition must run
 	// at, present while a bracketed search awaits one.
 	NextRepetitionRate   int                         `json:"next_repetition_rate,omitempty"`
+	NextAttempt          int                         `json:"next_attempt,omitempty"`
+	MaxAttempts          int                         `json:"max_attempts,omitempty"`
+	RepeatReason         string                      `json:"repeat_reason,omitempty"`
 	AggregateOfferedRate uint64                      `json:"aggregate_offered_rate,omitempty"`
 	Probes               []perfstats.ProbeRecord     `json:"probes,omitempty"`
 	ValidationRounds     []perfstats.ValidationRound `json:"validation_rounds,omitempty"`
@@ -199,10 +210,11 @@ func evaluate(decoded request) (response, error) {
 			if err != nil {
 				return response{}, err
 			}
-			result.ProbeDecisions = append(result.ProbeDecisions, decision)
+			attempt := search.NextAttempt()
 			if err := search.Record(*probe.Rate, decision.SearchOutcome); err != nil {
 				return response{}, fmt.Errorf("probe %d: %w", probeIndex, err)
 			}
+			result.ProbeDecisions = append(result.ProbeDecisions, describeAttempt(decision, attempt))
 			continue
 		}
 		if next, pending := search.NextRepetitionRate(); pending {
@@ -216,10 +228,11 @@ func evaluate(decoded request) (response, error) {
 			if err != nil {
 				return response{}, err
 			}
-			result.RepetitionDecisions = append(result.RepetitionDecisions, decision)
+			attempt := search.NextAttempt()
 			if err := search.RecordRepetition(*repetition.Rate, decision.SearchOutcome); err != nil {
 				return response{}, fmt.Errorf("repetition %d: %w", repetitionIndex, err)
 			}
+			result.RepetitionDecisions = append(result.RepetitionDecisions, describeAttempt(decision, attempt))
 			continue
 		}
 		break
@@ -246,6 +259,13 @@ func evaluate(decoded request) (response, error) {
 	result.SearchStatus = search.Status()
 	result.Probes = search.Probes()
 	result.ValidationRounds = search.ValidationRounds()
+	if result.NextProbeRate != 0 || result.NextRepetitionRate != 0 {
+		result.NextAttempt = search.NextAttempt()
+		result.MaxAttempts = perfstats.MaxRateAttempts
+		if result.NextAttempt > 1 {
+			result.RepeatReason = perfstats.BacklogUnresolvedReason
+		}
+	}
 
 	result.Environments = campaign.environments()
 	capacity := perfstats.DecideCapacity(search)
@@ -272,18 +292,43 @@ func decideCampaignRun(campaign *campaignIdentity, entry rateRun, kind string, i
 	if err := campaign.add(fixture.identity, fixture.warmup); err != nil {
 		return probeDecision{}, fmt.Errorf("%s %d run: %w", kind, index, err)
 	}
+	if err := campaign.recordMeasurement(fixture.identity.measurement, fixture.warmup, kind, index); err != nil {
+		return probeDecision{}, fmt.Errorf("%s %d run: %w", kind, index, err)
+	}
 	decision := decideFixtureRun(fixture, *entry.Rate)
 	decision.SearchOutcome = searchOutcome(decision)
 	return decision, nil
 }
 
+// describeAttempt preserves every run decision, including attempts that do
+// not yet contribute an outcome to the search. The third straddling window
+// exhausts its repeats and contributes not-demonstrated instead.
+func describeAttempt(decision probeDecision, attempt int) probeDecision {
+	decision.Attempt = attempt
+	decision.MaxAttempts = perfstats.MaxRateAttempts
+	if decision.SearchOutcome == perfstats.ProbeBacklogUndecided {
+		if attempt < perfstats.MaxRateAttempts {
+			decision.RepeatReason = perfstats.BacklogUnresolvedReason
+		} else {
+			decision.SearchOutcome = perfstats.ProbeNotDemonstrated
+		}
+	}
+	return decision
+}
+
 // searchOutcome is what one probe or repetition decision contributes to the
 // capacity search.
 // An inconclusive probe whose every inconclusive reason is a transport stall
-// or a backlog trend straddling the floor did not demonstrate its rate: near
-// and above capacity those are the expected outcomes, so the rate bounds the
-// bracket from above. Any other inconclusive reason is missing or invalid
-// evidence, which says nothing about the rate and ends the search.
+// or a backlog trend straddling the floor is rate-related. Backlog straddling
+// alone is undecided and requests bounded same-rate repeats under the owner
+// decision amending the no-retry rules in #105 and #140:
+// https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906
+// Every contributing DATA, SSNM and route-reference verdict must pass or be
+// a backlog straddle; aggregate reason precedence cannot establish that alone.
+// A stall did not demonstrate its rate, so it bounds the bracket from above
+// immediately. Any other aggregate inconclusive reason is missing or invalid
+// evidence, which says nothing about the rate and ends the search. Existing
+// decision precedence is retained when an auxiliary verdict rules out repeats.
 func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
 	switch perfstats.Decision(decision.Decision) {
 	case perfstats.Pass:
@@ -309,10 +354,15 @@ func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
 	if len(reasons) == 0 {
 		return perfstats.ProbeInconclusive
 	}
+	backlogOnly := true
 	for _, reason := range reasons {
 		if reason != perfstats.TransportStallReason && reason != perfstats.BacklogUnresolvedReason {
 			return perfstats.ProbeInconclusive
 		}
+		backlogOnly = backlogOnly && reason == perfstats.BacklogUnresolvedReason
+	}
+	if backlogOnly && !decision.repeatBlocked {
+		return perfstats.ProbeBacklogUndecided
 	}
 	return perfstats.ProbeNotDemonstrated
 }
@@ -327,6 +377,7 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	result := probeDecision{
 		Rate: rate, Decision: string(forward.Decision), Backlog: string(forward.Backlog),
 		Reason: forward.Reason, Stall: forward.Stall,
+		repeatBlocked: fixture.cohortError || blocksBacklogRepeat(forward),
 	}
 	if fixture.warmup {
 		result.Phase = "warmup"
@@ -358,6 +409,7 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 		return result
 	}
 	reverse := perfstats.DecideRun(*fixture.reverse)
+	result.repeatBlocked = result.repeatBlocked || blocksBacklogRepeat(reverse)
 	result.AggregateOfferedRate = fixture.aggregateOfferedRate
 	if fixture.aggregateAchieved != nil {
 		result.AggregateAchievedRateLower = &fixture.aggregateAchieved.lower
@@ -406,6 +458,13 @@ func decideFixtureRun(fixture fixtureRun, rate int) probeDecision {
 	result.Backlog = ""
 	result.Stall = nil
 	return result
+}
+
+// blocksBacklogRepeat checks each DATA verdict before aggregation can hide its
+// reason. Auxiliary verdicts apply the same restriction in their modifiers.
+func blocksBacklogRepeat(decision perfstats.RunDecision) bool {
+	return decision.Decision != perfstats.Pass &&
+		(decision.Decision != perfstats.Inconclusive || decision.Reason != perfstats.BacklogUnresolvedReason)
 }
 
 // fixtureEvidence is the subset of one perftraffic sender or receiver record
@@ -826,6 +885,23 @@ type runIdentity struct {
 	environment    campaignEnvironment
 	streams        string
 	reverseStreams string
+	measurement    measurementIdentity
+}
+
+// measurementIdentity identifies evidence, independently of its counters,
+// verdict or seed. Shared-clock runs are identified only by their clock domain
+// and window timestamps. Legacy unaligned runs have no absolute timestamps,
+// so cohort, rate, duration and phase are the best available, weaker identity.
+type measurementIdentity struct {
+	cohort   string
+	rate     uint64
+	duration time.Duration
+	clock    clockIdentity
+}
+
+type measurementKey struct {
+	identity measurementIdentity
+	warmup   bool
 }
 
 type campaignIdentity struct {
@@ -834,6 +910,31 @@ type campaignIdentity struct {
 	environment    campaignEnvironment
 	streams        string
 	reverseStreams string
+	measurements   map[measurementKey]string
+}
+
+// recordMeasurement rejects reuse within one request, including a probe's
+// evidence reused as a validation repetition. The next request reconstructs
+// this inventory from its complete history, so replaying that history is valid.
+func (campaign *campaignIdentity) recordMeasurement(identity measurementIdentity, warmup bool, kind string, index int) error {
+	key := measurementKey{identity: identity, warmup: warmup}
+	if identity.clock.Clock != "" {
+		// Labels, rates and phases cannot turn a recorded absolute window
+		// into a new measurement. Keep them only for legacy unaligned runs.
+		key = measurementKey{identity: measurementIdentity{clock: identity.clock}}
+	}
+	if previous, exists := campaign.measurements[key]; exists {
+		phase := "measurement"
+		if warmup {
+			phase = "warmup"
+		}
+		return fmt.Errorf("duplicate measurement at rate %d in %s phase for cohort %q (already supplied as %s)", identity.rate, phase, identity.cohort, previous)
+	}
+	if campaign.measurements == nil {
+		campaign.measurements = make(map[measurementKey]string)
+	}
+	campaign.measurements[key] = fmt.Sprintf("%s %d", kind, index)
+	return nil
 }
 
 // add checks one run against the campaign identity. A failed warm-up ran the
@@ -1072,7 +1173,18 @@ func evidenceFromSenderRecord(record *fixtureEvidence, declaredRate int, complet
 	if isRoutedWorkload(workload.Mode) && environment.FlowCount != routedFlowCount {
 		return perfstats.RunEvidence{}, runIdentity{}, fmt.Errorf("routed workloads require manifest flow_count %d, one ordered flow per configured route", routedFlowCount)
 	}
-	identity := runIdentity{workload: workload, environment: environment, streams: string(streams)}
+	clock, err := clockFromSpec(record.Spec)
+	if err != nil {
+		return perfstats.RunEvidence{}, runIdentity{}, err
+	}
+	// Resolution describes precision, not a new clock domain or window.
+	// Keep validating it in the evidence, but exclude it from distinctness.
+	measurementClock := clock
+	measurementClock.Resolution = 0
+	identity := runIdentity{
+		workload: workload, environment: environment, streams: string(streams),
+		measurement: measurementIdentity{cohort: *record.Spec.Cohort, rate: *record.Spec.Rate, duration: workload.Duration, clock: measurementClock},
+	}
 
 	evidence := perfstats.RunEvidence{
 		FixtureValid: *record.FixtureVerdict == "pass",

@@ -662,17 +662,19 @@ func TestBidirectionalReceiverFailureIsRefused(testContext *testing.T) {
 
 func TestBidirectionalCapacityReportsPerDirectionAndAggregateOfferedRate(testContext *testing.T) {
 	var probes []string
-	for _, probe := range capacity37Schedule {
+	for index, probe := range capacity37Schedule {
 		lower, upper := -1.0, 0.0
 		if !probe.passing {
 			lower, upper = 1, 2
 		}
 		probes = append(probes, fmt.Sprintf(`{"rate":%d,"run":%s}`, probe.rate,
-			bidirectionalRunJSON(probe.rate, lower, upper, lower, upper)))
+			shiftSharedClockWindow(bidirectionalRunJSON(probe.rate, lower, upper, lower, upper), index)))
 	}
 	var repetitions []string
-	for range 5 {
-		repetitions = append(repetitions, fmt.Sprintf(`{"rate":37,"run":%s}`, bidirectionalRunJSON(37, -1, 0, -1, 0)))
+	for index := range 5 {
+		run := strings.ReplaceAll(bidirectionalRunJSON(37, -1, 0, -1, 0), `"cohort-a`, fmt.Sprintf(`"repetition-window-%d`, index+1))
+		run = shiftSharedClockWindow(run, len(probes)+index)
+		repetitions = append(repetitions, fmt.Sprintf(`{"rate":37,"run":%s}`, run))
 	}
 	input := fmt.Sprintf(`{"initial":10,"maximum":100,"max_probes":24,"probes":[%s],"repetitions":[%s]}`,
 		strings.Join(probes, ","), strings.Join(repetitions, ","))
@@ -731,7 +733,7 @@ func TestBidirectionalCampaignAllowsIndependentCohortSeedAndClockWindow(testCont
 
 func TestBidirectionalCampaignTracksBothStreamInventories(testContext *testing.T) {
 	first := bidirectionalRunJSON(10, -1, 0, -1, 0)
-	second := bidirectionalRunJSON(20, -1, 0, -1, 0)
+	second := shiftSharedClockWindow(bidirectionalRunJSON(20, -1, 0, -1, 0), 1)
 	changedReverse := mutateBidirectionalJSON(testContext, second, func(cohort map[string]any) {
 		streams := cohort["reverse_sender"].(map[string]any)["negotiated_outbound_streams"].([]any)
 		streams[0] = float64(9)
