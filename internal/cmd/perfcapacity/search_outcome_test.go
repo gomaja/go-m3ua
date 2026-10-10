@@ -286,7 +286,19 @@ func TestSearchOutcomeSeparatesRateEvidenceFromMissingEvidence(testContext *test
 		{probeDecision{Decision: "pass"}, perfstats.ProbePassing},
 		{probeDecision{Decision: "fail", Reason: perfstats.DeliveryFailuresReason}, perfstats.ProbeFailing},
 		{probeDecision{Decision: "inconclusive", Reason: perfstats.TransportStallReason}, perfstats.ProbeNotDemonstrated},
-		{probeDecision{Decision: "inconclusive", Reason: perfstats.BacklogUnresolvedReason}, perfstats.ProbeNotDemonstrated},
+		{probeDecision{Decision: "inconclusive", Reason: perfstats.BacklogUnresolvedReason}, perfstats.ProbeBacklogUndecided},
+		{probeDecision{Decision: "inconclusive", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{
+			direction(perfstats.Pass, ""), direction(perfstats.Inconclusive, perfstats.BacklogUnresolvedReason)}},
+			perfstats.ProbeBacklogUndecided},
+		{probeDecision{Decision: "inconclusive", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{
+			direction(perfstats.Inconclusive, perfstats.BacklogUnresolvedReason), direction(perfstats.Inconclusive, perfstats.BacklogUnresolvedReason)}},
+			perfstats.ProbeBacklogUndecided},
+		{probeDecision{Decision: "inconclusive", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{
+			direction(perfstats.Inconclusive, perfstats.BacklogUnresolvedReason), direction(perfstats.Inconclusive, perfstats.BacklogEvidenceMissingReason)}},
+			perfstats.ProbeInconclusive},
+		{probeDecision{Decision: "fail", Reason: "bidirectional-direction-failed", Directions: []directionDecision{
+			direction(perfstats.Fail, perfstats.DeliveryFailuresReason), direction(perfstats.Inconclusive, perfstats.BacklogUnresolvedReason)}},
+			perfstats.ProbeFailing},
 		{probeDecision{Decision: "inconclusive", Reason: perfstats.BacklogEvidenceMissingReason}, perfstats.ProbeInconclusive},
 		{probeDecision{Decision: "inconclusive", Reason: perfstats.StallEvidenceMissingReason}, perfstats.ProbeInconclusive},
 		{probeDecision{Decision: "inconclusive", Reason: "bidirectional-direction-inconclusive", Directions: []directionDecision{

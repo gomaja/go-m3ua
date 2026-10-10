@@ -82,6 +82,11 @@ type probeDecision struct {
 	Phase string `json:"phase,omitempty"`
 	// SearchOutcome is what the probe contributes to the capacity search.
 	SearchOutcome perfstats.ProbeOutcome `json:"search_outcome,omitempty"`
+	// Attempt counts runs for this probe or validation repetition, including
+	// backlog-only repeats. Only a resolved SearchOutcome is counted.
+	Attempt      int    `json:"attempt"`
+	MaxAttempts  int    `json:"max_attempts"`
+	RepeatReason string `json:"repeat_reason,omitempty"`
 }
 
 type directionDecision struct {
@@ -122,6 +127,9 @@ type response struct {
 	// NextRepetitionRate is the rate the next validation repetition must run
 	// at, present while a bracketed search awaits one.
 	NextRepetitionRate   int                         `json:"next_repetition_rate,omitempty"`
+	NextAttempt          int                         `json:"next_attempt,omitempty"`
+	MaxAttempts          int                         `json:"max_attempts,omitempty"`
+	RepeatReason         string                      `json:"repeat_reason,omitempty"`
 	AggregateOfferedRate uint64                      `json:"aggregate_offered_rate,omitempty"`
 	Probes               []perfstats.ProbeRecord     `json:"probes,omitempty"`
 	ValidationRounds     []perfstats.ValidationRound `json:"validation_rounds,omitempty"`
@@ -199,10 +207,11 @@ func evaluate(decoded request) (response, error) {
 			if err != nil {
 				return response{}, err
 			}
-			result.ProbeDecisions = append(result.ProbeDecisions, decision)
+			attempt := search.NextAttempt()
 			if err := search.Record(*probe.Rate, decision.SearchOutcome); err != nil {
 				return response{}, fmt.Errorf("probe %d: %w", probeIndex, err)
 			}
+			result.ProbeDecisions = append(result.ProbeDecisions, describeAttempt(decision, attempt))
 			continue
 		}
 		if next, pending := search.NextRepetitionRate(); pending {
@@ -216,10 +225,11 @@ func evaluate(decoded request) (response, error) {
 			if err != nil {
 				return response{}, err
 			}
-			result.RepetitionDecisions = append(result.RepetitionDecisions, decision)
+			attempt := search.NextAttempt()
 			if err := search.RecordRepetition(*repetition.Rate, decision.SearchOutcome); err != nil {
 				return response{}, fmt.Errorf("repetition %d: %w", repetitionIndex, err)
 			}
+			result.RepetitionDecisions = append(result.RepetitionDecisions, describeAttempt(decision, attempt))
 			continue
 		}
 		break
@@ -246,6 +256,13 @@ func evaluate(decoded request) (response, error) {
 	result.SearchStatus = search.Status()
 	result.Probes = search.Probes()
 	result.ValidationRounds = search.ValidationRounds()
+	if result.NextProbeRate != 0 || result.NextRepetitionRate != 0 {
+		result.NextAttempt = search.NextAttempt()
+		result.MaxAttempts = perfstats.MaxRateAttempts
+		if result.NextAttempt > 1 {
+			result.RepeatReason = perfstats.BacklogUnresolvedReason
+		}
+	}
 
 	result.Environments = campaign.environments()
 	capacity := perfstats.DecideCapacity(search)
@@ -277,12 +294,31 @@ func decideCampaignRun(campaign *campaignIdentity, entry rateRun, kind string, i
 	return decision, nil
 }
 
+// describeAttempt preserves every run decision, including attempts that do
+// not yet contribute an outcome to the search. The third straddling window
+// exhausts its repeats and contributes not-demonstrated instead.
+func describeAttempt(decision probeDecision, attempt int) probeDecision {
+	decision.Attempt = attempt
+	decision.MaxAttempts = perfstats.MaxRateAttempts
+	if decision.SearchOutcome == perfstats.ProbeBacklogUndecided {
+		if attempt < perfstats.MaxRateAttempts {
+			decision.RepeatReason = perfstats.BacklogUnresolvedReason
+		} else {
+			decision.SearchOutcome = perfstats.ProbeNotDemonstrated
+		}
+	}
+	return decision
+}
+
 // searchOutcome is what one probe or repetition decision contributes to the
 // capacity search.
 // An inconclusive probe whose every inconclusive reason is a transport stall
-// or a backlog trend straddling the floor did not demonstrate its rate: near
-// and above capacity those are the expected outcomes, so the rate bounds the
-// bracket from above. Any other inconclusive reason is missing or invalid
+// or a backlog trend straddling the floor is rate-related. Backlog straddling
+// alone is undecided and requests bounded same-rate repeats under the owner
+// decision of 2026-10-10 on the #44 method:
+// https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5791476384
+// A stall did not demonstrate its rate, so it bounds the bracket from above
+// immediately. Any other inconclusive reason is missing or invalid
 // evidence, which says nothing about the rate and ends the search.
 func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
 	switch perfstats.Decision(decision.Decision) {
@@ -309,10 +345,15 @@ func searchOutcome(decision probeDecision) perfstats.ProbeOutcome {
 	if len(reasons) == 0 {
 		return perfstats.ProbeInconclusive
 	}
+	backlogOnly := true
 	for _, reason := range reasons {
 		if reason != perfstats.TransportStallReason && reason != perfstats.BacklogUnresolvedReason {
 			return perfstats.ProbeInconclusive
 		}
+		backlogOnly = backlogOnly && reason == perfstats.BacklogUnresolvedReason
+	}
+	if backlogOnly {
+		return perfstats.ProbeBacklogUndecided
 	}
 	return perfstats.ProbeNotDemonstrated
 }

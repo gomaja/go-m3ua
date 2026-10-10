@@ -1011,6 +1011,13 @@ strictly within the measurement window (at least eight), as described in
 `insufficient-samples` or `invalid-samples` when no trend can be fitted. The
 raw `samples` are retained so `perfcapacity` can recompute the trend before it
 applies the predeclared decision; the fixture does not decide capacity itself.
+Under the owner decision of 2026-10-10 on the
+[#44 method](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5791476384),
+`perfcapacity` requests up to two same-rate repeats when backlog straddling is
+the only inconclusive cause. Only the first decided outcome counts as a
+probe or validation repetition; three straddles count once as not demonstrated.
+The whole interval must still lie at or below the floor to pass. See the
+[driver protocol](../perfcapacity/README.md#driver-protocol) for attempt reporting.
 Capacity remains unavailable pending paired-series calibration and the full
 campaign. HTTP observation overhead remains in whole-process
 CPU/allocation accounting; it is not silently subtracted.

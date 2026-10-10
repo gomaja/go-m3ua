@@ -158,7 +158,7 @@ gates passed, or that any campaign-level repetition requirement was met.
 between the highest rate that demonstrated a sustained, loss-free,
 not-growing run and the lowest rate that did not, refined to within five
 percent (`100*upper <= 105*lower`), downward and upward halving/doubling
-between bounds, no probe retries, and a fixed probe budget. Rates are bounded by
+between bounds, bounded backlog-only repeats, and a fixed decided-probe budget. Rates are bounded by
 `MaximumSearchRate` so that the products those comparisons form stay exact;
 a maximum above it is rejected by the constructor rather than allowed to wrap
 a comparison and report a bracket that was never refined. Probes must be recorded in
@@ -180,25 +180,47 @@ probe does, the highest passing probe below it becomes the lower bound, and
 the search resumes: it refines the new bracket and validates the rate it
 selects there with a fresh round of five. A round ends at its first repetition
 that does not pass, so a driver runs one repetition at a time and stops the
-round there; repetitions are never retried and a rejected rate is never
+round there; only backlog-only undecided windows are repeated and a rejected rate is never
 probed again. After `MaxValidationRounds` (3) rounds that did not validate the
 search ends `validation-rounds-exhausted`. An inconclusive repetition (missing
 or invalid evidence) says nothing about the rate and ends validation
 inconclusive, as an inconclusive probe ends the search. If no rate below the
 rejected one passes, the search ends `no-passing-rate` under the rule below.
 
-Each probe contributes one of four outcomes:
+The owner decision of 2026-10-10 amends the
+[#44 sustained-backlog method](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5791476384)
+and its [#105 search note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5792719087):
+when a probe or validation repetition is undecided **only** because its 99%
+backlog-growth interval straddles the 10 ms floor
+(`backlog-growth-bounds-straddle-floor`), run it again at the same rate, up to
+two more times. The first pass, fail, or not-demonstrated outcome for another
+rate-related reason (such as a transport stall) decides that probe or
+repetition. Missing or invalid evidence still ends the search immediately.
+If all three attempts straddle, count one `not-demonstrated` outcome, exactly
+as before. Passing still requires the entire growth interval at or below the
+floor; no intervals are pooled or averaged across attempts.
+
+Deferred attempts neither consume the probe budget nor count toward the five
+validation repetitions. The attempt counter resets for each new probe and
+each new validation repetition, including repetitions at the same rate.
+With a probe budget of N, at most `3*N + 3*3*5` (default 117) fixture runs
+can be requested: three attempts per probe and per repetition, five counted
+repetitions per round, and at most three validation rounds. The 5% bracket,
+three-way backlog rule, stall precedence and all numerical budgets are
+unchanged.
+
+Each decided probe contributes one of four outcomes:
 
 - `pass`: the run demonstrated the rate.
 - `fail`: the run failed at the rate, for example with delivery or
   submission loss.
 - `not-demonstrated`: the run was inconclusive only because of a detected
-  transport stall or a backlog trend straddling the floor. Near and above
+  transport stall, or all three backlog-only attempts straddled the floor. Near and above
   capacity these are the observed outcomes. On the reference environment, with
   one association and 128-byte payloads, a 120,000 messages/s probe was
   loss-free but its backlog trend straddled the floor; probes at 140,000 and
   160,000 messages/s filled the outstanding cap within their first second and
-  each blocked one send for about 1.03 seconds. The rate was not shown to be
+  each blocked one send for about 1.03 seconds. After any allowed repeats, the rate was not shown to be
   sustained, so it bounds the bracket from above exactly as a failure does and
   the search continues. Under the former rule, which ended the search at any
   inconclusive probe, none of these searches could converge.
@@ -258,7 +280,24 @@ asks again, so the order is always the search's own; when neither field is
 present the search is decided. The request lists probes and repetitions each
 in execution order, and the CLI replays them interleaved as the search asked
 for them; a run at another rate, or one the search did not ask for, is invalid
-input. `validation_rounds` records each round's rate and repetition outcomes.
+input. A pending repeat is requested through the same rate field as the
+original attempt. `next_attempt` (1 through 3), `max_attempts` (3), and
+`repeat_reason` make the next requested run explicit; `repeat_reason` is
+present only when the next run repeats a straddling window. These fields are
+absent when no run is pending. No new request fields are needed, and a driver
+that already follows the next-rate fields needs no change.
+
+`probe_decisions` and `repetition_decisions` retain every executed attempt,
+with `attempt`, `max_attempts`, and `repeat_reason` when another attempt is
+requested. Deferred decisions carry `search_outcome: "backlog-undecided"`;
+the third straddling decision carries `search_outcome: "not-demonstrated"`.
+The original run decision remains `inconclusive`, with its backlog reason.
+`probes` records only decided outcomes; `validation_rounds` records each
+round's rate and only its counted repetition outcomes. All attempts must be
+appended in execution order to the appropriate request list, even when they
+do not yet contribute a counted outcome. Skipping a required repeat to
+provide a different rate or phase, or supplying a fourth attempt after the
+third straddle, is invalid input.
 
 Each run record must carry `send_duration.max_ns` and a `manifest`. Neither is
 optional: a record without the send-duration maximum cannot show whether a
