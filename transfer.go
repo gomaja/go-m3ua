@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"context"
+	"encoding/binary"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -167,17 +168,34 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 // Routing Keys share the association, because without it the traffic flow is
 // unknowable.
 func (c *Association) validateDataRoutingContext(peer *params.Param) error {
-	configured := c.configuredRoutingContexts()
-	if c.isIPSPDoubleExchange() {
-		configured = c.configuredLocalRoutingContexts()
-	}
 	if peer == nil {
-		if len(configured) > 1 {
+		if count, _, _ := c.dataRoutingContextScope(0); count > 1 {
 			return ErrMissingRoutingContext
 		}
 		return nil
 	}
+	if theirs, ok := singleDataRoutingContext(peer); ok {
+		var carries bool
+		if c.isIPSPDoubleExchange() {
+			// Inbound double-exchange DATA names the local traffic scope
+			// (RFC 4666 Section 5.6.2); the outbound helper names the peer.
+			_, _, carries = c.dataRoutingContextScope(theirs)
+		} else {
+			carries = c.routingContextConfigured(theirs)
+		}
+		if !carries {
+			// RFC 4666 Section 3.8.1 requires the offending value in ERR.
+			return NewInvalidRoutingContextError(theirs)
+		}
+		return nil
+	}
 
+	// Keep list validation's exact malformed/multi-value error and offending
+	// contexts, including a list mixing configured and unconfigured values.
+	configured := c.configuredRoutingContexts()
+	if c.isIPSPDoubleExchange() {
+		configured = c.configuredLocalRoutingContexts()
+	}
 	if err := validateRoutingContextAgainst(peer, configured); err != nil {
 		return err
 	}
@@ -187,29 +205,62 @@ func (c *Association) validateDataRoutingContext(peer *params.Param) error {
 	return nil
 }
 
+// RFC 4666 Section 3.3.1 gives DATA one 32-bit Routing Context. Checking both
+// tag and cardinality before decoding keeps an explicit zero distinct from an
+// omitted or malformed parameter, without building an owned management list.
+func singleDataRoutingContext(peer *params.Param) (uint32, bool) {
+	if peer == nil || peer.Tag != params.RoutingContext || len(peer.Data) != 4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(peer.Data), true
+}
+
 // receivedDataRoutingContext returns the DATA's explicit flow, or the single
 // configured flow an omitted parameter unambiguously implies. With no
 // coordinated Routing Key there is no per-AS state to consult.
 func (c *Association) receivedDataRoutingContext(peer *params.Param) (uint32, bool) {
 	if peer != nil {
-		return peer.RoutingContexts()[0], true
+		return singleDataRoutingContext(peer)
 	}
-	configured := c.configuredRoutingContexts()
-	if c.isIPSPDoubleExchange() {
-		configured = c.configuredLocalRoutingContexts()
-	}
-	if len(configured) == 1 {
-		return configured[0], true
+	if count, single, _ := c.dataRoutingContextScope(0); count == 1 {
+		return single, true
 	}
 	return 0, false
 }
 
 func (c *Association) validateDataNetworkAppearance(peer, routingContext *params.Param) error {
-	configured, allNetworkAppearances, err := c.resolveNetworkAppearanceScope(routingContext, c.isIPSPDoubleExchange())
+	value, set, allNetworkAppearances, err := c.resolveDataNetworkAppearanceScope(routingContext)
 	if err != nil {
 		return err
 	}
-	return c.validateNetworkAppearanceAgainst(peer, configured, allNetworkAppearances)
+	return c.validateNetworkAppearanceValue(peer, value, set, allNetworkAppearances)
+}
+
+// DATA's single flow selects its Network Appearance (RFC 4666 Section 3.3.1).
+// Preserve NA-first validation and the list resolver for malformed/multi-value
+// DATA, including its mixed-appearance error before Routing Context validation.
+// Read the scalar scope without constructing a temporary owned NA parameter.
+func (c *Association) resolveDataNetworkAppearanceScope(routingContext *params.Param) (uint32, bool, bool, error) {
+	local := c.isIPSPDoubleExchange()
+	value, single := singleDataRoutingContext(routingContext)
+	if routingContext == nil {
+		count, inferred, _ := c.dataRoutingContextScope(0)
+		if count == 0 {
+			key := c.contextlessASKey(local)
+			return key.NetworkAppearance, key.NetworkAppearanceSet, false, nil
+		}
+		value, single = inferred, count == 1
+	}
+	if !single {
+		return c.resolveNetworkAppearanceValue(routingContext, local)
+	}
+	key := c.staticASKeyForRoutingContext(value, local)
+	all := false
+	if dynamic, ok := c.dynamicASKey(value, local); ok {
+		key = dynamic
+		all = !key.NetworkAppearanceSet
+	}
+	return key.NetworkAppearance, key.NetworkAppearanceSet, all, nil
 }
 
 func (c *Association) validateSSNMNetworkAppearance(peer, routingContext *params.Param) error {
@@ -221,6 +272,15 @@ func (c *Association) validateSSNMNetworkAppearance(peer, routingContext *params
 }
 
 func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.Param, allNetworkAppearances bool) error {
+	set := configured != nil && configured.Tag == params.NetworkAppearance && len(configured.Data) == 4
+	var value uint32
+	if set {
+		value = configured.NetworkAppearance()
+	}
+	return c.validateNetworkAppearanceValue(peer, value, set, allNetworkAppearances)
+}
+
+func (c *Association) validateNetworkAppearanceValue(peer *params.Param, value uint32, set, allNetworkAppearances bool) error {
 	if peer == nil {
 		return nil
 	}
@@ -245,9 +305,7 @@ func (c *Association) validateNetworkAppearanceAgainst(peer, configured *params.
 		return nil
 	}
 
-	if configured == nil || configured.Tag != params.NetworkAppearance ||
-		len(configured.Data) != 4 ||
-		configured.NetworkAppearance() != peer.NetworkAppearance() {
+	if !set || value != peer.NetworkAppearance() {
 		return NewInvalidNetworkAppearanceError(peer.NetworkAppearance())
 	}
 
