@@ -139,7 +139,8 @@ func requestJSON(initial int, schedule []struct {
 		if probe.passing {
 			run = passingRunJSON()
 		}
-		fmt.Fprintf(&builder, `{"rate":%d,"run":%s}`, probe.rate, runAtRateJSON(run, probe.rate))
+		run = strings.ReplaceAll(runAtRateJSON(run, probe.rate), `"cohort-a`, fmt.Sprintf(`"probe-window-%d`, index+1))
+		fmt.Fprintf(&builder, `{"rate":%d,"run":%s}`, probe.rate, run)
 	}
 	builder.WriteString(`],"repetitions":[`)
 	builder.WriteString(repetitions)
@@ -150,7 +151,8 @@ func requestJSON(initial int, schedule []struct {
 func repetitionsJSON(rate, count int, run string) string {
 	entries := make([]string, 0, count)
 	for index := 0; index < count; index++ {
-		entries = append(entries, fmt.Sprintf(`{"rate":%d,"run":%s}`, rate, runAtRateJSON(run, rate)))
+		evidence := strings.ReplaceAll(runAtRateJSON(run, rate), `"cohort-a`, fmt.Sprintf(`"repetition-window-%d`, index+1))
+		entries = append(entries, fmt.Sprintf(`{"rate":%d,"run":%s}`, rate, evidence))
 	}
 	return strings.Join(entries, ",")
 }

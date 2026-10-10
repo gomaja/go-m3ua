@@ -187,9 +187,11 @@ or invalid evidence) says nothing about the rate and ends validation
 inconclusive, as an inconclusive probe ends the search. If no rate below the
 rejected one passes, the search ends `no-passing-rate` under the rule below.
 
-The owner decision of 2026-10-10 amends the
-[#44 sustained-backlog method](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5791476384)
-and its [#105 search note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5792719087):
+The [owner decision of 2026-10-10](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906)
+amends “no probe is retried” in the
+[#105 search note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5792719087)
+and “Nothing is retried” in the
+[#140 validation note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5819247631):
 when a probe or validation repetition is undecided **only** because its 99%
 backlog-growth interval straddles the 10 ms floor
 (`backlog-growth-bounds-straddle-floor`), run it again at the same rate, up to
@@ -199,10 +201,14 @@ repetition. Missing or invalid evidence still ends the search immediately.
 If all three attempts straddle, count one `not-demonstrated` outcome, exactly
 as before. Passing still requires the entire growth interval at or below the
 floor; no intervals are pooled or averaged across attempts.
+Every contributing DATA direction, SSNM and route-reference verdict must
+pass or be a backlog straddle; any other non-pass verdict rules out repeats.
 
 Deferred attempts neither consume the probe budget nor count toward the five
 validation repetitions. The attempt counter resets for each new probe and
 each new validation repetition, including repetitions at the same rate.
+The probe budget counts decided probes: a re-measured window is the same
+probe measured again.
 With a probe budget of N, at most `3*N + 3*3*5` (default 117) fixture runs
 can be requested: three attempts per probe and per repetition, five counted
 repetitions per round, and at most three validation rounds. The 5% bracket,
@@ -298,6 +304,11 @@ appended in execution order to the appropriate request list, even when they
 do not yet contribute a counted outcome. Skipping a required repeat to
 provide a different rate or phase, or supplying a fourth attempt after the
 third straddle, is invalid input.
+Two entries at the same rate and phase must not reuse the same cohort and
+window, including a probe reused as validation. Shared-clock window identity
+includes the clock domain and start/end timestamps. Legacy unaligned windows
+require a fresh cohort; seed, counter or verdict changes do not distinguish
+measurements. Re-submitting the full history is still supported.
 
 Each run record must carry `send_duration.max_ns` and a `manifest`. Neither is
 optional: a record without the send-duration maximum cannot show whether a

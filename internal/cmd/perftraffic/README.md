@@ -1011,11 +1011,18 @@ strictly within the measurement window (at least eight), as described in
 `insufficient-samples` or `invalid-samples` when no trend can be fitted. The
 raw `samples` are retained so `perfcapacity` can recompute the trend before it
 applies the predeclared decision; the fixture does not decide capacity itself.
-Under the owner decision of 2026-10-10 on the
-[#44 method](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5791476384),
+Under the [owner decision of 2026-10-10](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906),
+which amends “no probe is retried” in the
+[#105 note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5792719087)
+and “Nothing is retried” in the
+[#140 note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5819247631),
 `perfcapacity` requests up to two same-rate repeats when backlog straddling is
 the only inconclusive cause. Only the first decided outcome counts as a
 probe or validation repetition; three straddles count once as not demonstrated.
+The probe budget counts decided probes: a re-measured window is the same
+probe measured again. Any other non-pass verdict, including SSNM or
+route-reference evidence, rules out a repeat. Each attempt uses a distinct
+measurement window; recorded evidence cannot be counted again.
 The whole interval must still lie at or below the floor to pass. See the
 [driver protocol](../perfcapacity/README.md#driver-protocol) for attempt reporting.
 Capacity remains unavailable pending paired-series calibration and the full

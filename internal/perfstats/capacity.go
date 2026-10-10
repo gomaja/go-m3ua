@@ -30,8 +30,8 @@ const (
 	RequiredFullRepetitions = 5
 	// MaxRateAttempts bounds attempts for one probe or validation repetition.
 	// Only backlog-growth bounds straddling the floor qualify for another
-	// attempt. See the owner decision of 2026-10-10 on the #44 method:
-	// https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5791476384
+	// attempt. The owner decision amends the no-retry rules in #105 and #140:
+	// https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906
 	MaxRateAttempts = 3
 	// MaxValidationRounds bounds how many selected rates the search may try
 	// to validate. Each round that a repetition fails or does not demonstrate
@@ -61,10 +61,12 @@ const (
 	// when backlog straddling is the run's sole inconclusive cause.
 	ProbeBacklogUndecided ProbeOutcome = "backlog-undecided"
 	// ProbeNotDemonstrated is a probe that did not demonstrate a sustained
-	// rate for a rate-related reason: a transport stall, or backlog growth
-	// bounds that straddle the floor. Near and above capacity those are the
-	// expected outcomes, so the rate bounds the bracket from above exactly as a
-	// failure does, and the search continues. Only demonstrated rates pass.
+	// rate for a rate-related reason: a transport stall, backlog growth bounds
+	// still straddling the floor after MaxRateAttempts, or a straddle with
+	// another non-passing verdict that rules out repeats. Backlog-only
+	// straddles must first be recorded as ProbeBacklogUndecided. The rate bounds
+	// the bracket from above exactly as a failure does, and the search continues.
+	// Only demonstrated rates pass.
 	ProbeNotDemonstrated ProbeOutcome = "not-demonstrated"
 	// ProbeInconclusive is a probe whose evidence was missing or invalid. It
 	// says nothing about the rate, so it terminates the search.

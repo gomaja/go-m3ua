@@ -12,21 +12,28 @@ rounds, and five counted passing repetitions at the selected rate.
 
 ## Same-rate repeats
 
-The owner decision of 2026-10-10 amends the
-[#44 method](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5791476384)
-and [#105 note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5792719087).
+The [owner decision of 2026-10-10](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906)
+amends “no probe is retried” in the
+[#105 note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5792719087)
+and “Nothing is retried” in the
+[#140 note](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-5819247631).
 A probe or validation repetition undecided solely because its 99%
 backlog-growth interval straddles the 10 ms floor is run again at the same
 rate, up to two more times. The first decided outcome counts once. If all
 three attempts straddle, count one not-demonstrated outcome and apply the
 existing upper-bracket rule. Each new validation repetition has its own
 three-attempt limit; deferred attempts do not count toward its five passes.
+The probe budget counts decided probes: a re-measured window is the same
+probe measured again.
 
 Pass still requires the whole growth interval at or below the floor. A
 transport stall immediately contributes not-demonstrated, including when
 another direction straddles. A failure immediately contributes fail.
 Missing evidence ends the search inconclusive, and malformed evidence is
 invalid input. Failed warm-up handling is unchanged.
+Every contributing DATA direction, SSNM and route-reference verdict must
+pass or be a backlog straddle to qualify. Any other non-pass verdict rules
+out a repeat even when the final decision retains the DATA backlog reason.
 
 ## Driver protocol
 
@@ -35,6 +42,12 @@ and `repetitions` arrays. Every array entry is `{"rate": N, "run": evidence}`.
 The tool replays the lists in the order selected by the search. Append every
 run, including deferred attempts, to its list and submit the complete history
 again. Do not supply an outcome or attempt number in the request.
+Each run must be a distinct measurement. Reusing the same cohort and window
+at the same rate and phase is invalid, including reuse from a probe in
+validation. Shared-clock windows are identified by their clock domain and
+start/end timestamps; for legacy unaligned evidence, use a fresh cohort for
+each window. Changing a seed, counters or verdict does not create a new
+measurement. Re-submitting the complete history remains valid.
 
 While a run is pending, exactly one of `next_probe_rate` and
 `next_repetition_rate` names its rate. The response also supplies

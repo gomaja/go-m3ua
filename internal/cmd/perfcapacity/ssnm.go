@@ -225,6 +225,7 @@ func ssnmLoadedVerdict(identity ssnmIdentity, warmup bool, sender, receiver *fix
 // disturbance that did not run at its declared intensity cannot support a
 // pass. A transport stall keeps its inconclusive DATA decision.
 func applySSNMDecision(result *probeDecision, verdict string, stalled bool) {
+	result.repeatBlocked = result.repeatBlocked || verdict != "" && verdict != "pass"
 	switch verdict {
 	case "fail":
 		if !stalled {

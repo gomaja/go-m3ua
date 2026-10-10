@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gomaja/go-m3ua/internal/perfstats"
 )
@@ -21,8 +23,17 @@ func repeatRequest(testContext *testing.T, probes, repetitions []rateRun, budget
 	testContext.Helper()
 	initial, maximum := 10, 100
 	return string(mustJSON(testContext, request{
-		Initial: &initial, Maximum: &maximum, MaxProbes: &budget, Probes: probes, Repetitions: repetitions,
+		Initial: &initial, Maximum: &maximum, MaxProbes: &budget,
+		Probes: distinctMeasurementEntries(probes, "probe"), Repetitions: distinctMeasurementEntries(repetitions, "repetition"),
 	}))
+}
+
+func distinctMeasurementEntries(entries []rateRun, prefix string) []rateRun {
+	distinct := make([]rateRun, len(entries))
+	for index, entry := range entries {
+		distinct[index] = withMeasurementCohort(entry, fmt.Sprintf("%s-window-%d", prefix, index+1))
+	}
+	return distinct
 }
 
 // A straddling window cannot shrink the bracket or spend a probe before the
@@ -109,7 +120,7 @@ func repeatValidationRequest(testContext *testing.T, repetitions []rateRun) stri
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	decoded.Repetitions = repetitions
+	decoded.Repetitions = distinctMeasurementEntries(repetitions, "repetition")
 	return string(mustJSON(testContext, decoded))
 }
 
@@ -151,6 +162,7 @@ func TestBacklogRepeatCannotClaimAnAttemptInInput(testContext *testing.T) {
 
 func TestBacklogRepeatBidirectionalEligibility(testContext *testing.T) {
 	straddleAndStall := strings.Replace(bidirectionalRunJSON(10, -1, 1, -1, 0), `"max_ns":262144`, `"max_ns":1030000000`, 1)
+	stallAndOtherStraddle := strings.Replace(bidirectionalRunJSON(10, -1, 0, -1, 1), `"max_ns":262144`, `"max_ns":1030000000`, 1)
 	for _, scenario := range []struct {
 		name  string
 		run   string
@@ -161,7 +173,11 @@ func TestBacklogRepeatBidirectionalEligibility(testContext *testing.T) {
 		{"reverse straddle", bidirectionalRunJSON(10, -1, 0, -1, 1), 10, 0},
 		{"both straddle", bidirectionalRunJSON(10, -1, 1, -1, 1), 10, 0},
 		{"failure and straddle", bidirectionalRunJSON(10, 1, 2, -1, 1), 5, 1},
-		{"straddle and stall", straddleAndStall, 5, 1},
+		{"straddle and stall in same direction", straddleAndStall, 5, 1},
+		{"forward stall and reverse straddle", stallAndOtherStraddle, 5, 1},
+		{"forward straddle and reverse stall", mutateBidirectionalJSON(testContext, bidirectionalRunJSON(10, -1, 1, -1, 0), func(cohort map[string]any) {
+			cohort["reverse_sender"].(map[string]any)["send_duration"].(map[string]any)["max_ns"] = 1_030_000_000
+		}), 5, 1},
 	} {
 		testContext.Run(scenario.name, func(testContext *testing.T) {
 			status, result := runRequest(testContext, repeatRequest(testContext, []rateRun{{Rate: new(10), Run: json.RawMessage(scenario.run)}}, nil, 24))
@@ -170,6 +186,76 @@ func TestBacklogRepeatBidirectionalEligibility(testContext *testing.T) {
 				testContext.Fatalf("status %d result %+v, want next %d and %d counted", status, result, scenario.next, scenario.count)
 			}
 		})
+	}
+}
+
+func TestBacklogRepeatRequiresPassingAuxiliaryVerdicts(testContext *testing.T) {
+	for _, workload := range []struct {
+		name string
+		run  func(int, string, float64, float64) string
+	}{
+		{"SSNM", func(rate int, verdict string, lower, upper float64) string {
+			return ssnmRunJSON(testContext, rate, verdict, replaceBacklogWindow(testContext, rate, lower, upper))
+		}},
+		{"route references", func(rate int, verdict string, lower, upper float64) string {
+			return referenceRunJSON(testContext, rate, "churn", verdict, replaceBacklogWindow(testContext, rate, lower, upper))
+		}},
+	} {
+		for _, verdict := range []string{"pass", "inconclusive", "fail"} {
+			testContext.Run(workload.name+"/"+verdict, func(testContext *testing.T) {
+				status, result := runRequest(testContext, repeatRequest(testContext, []rateRun{{Rate: new(10), Run: json.RawMessage(workload.run(10, verdict, -1, 1))}}, nil, 24))
+				wantNext, wantCount, wantOutcome := 5, 1, perfstats.ProbeNotDemonstrated
+				switch verdict {
+				case "pass":
+					wantNext, wantCount, wantOutcome = 10, 0, perfstats.ProbeBacklogUndecided
+				case "fail":
+					wantOutcome = perfstats.ProbeFailing
+				}
+				if status != inconclusiveExitStatus || result.NextProbeRate != wantNext || len(result.Probes) != wantCount ||
+					len(result.ProbeDecisions) != 1 || result.ProbeDecisions[0].SearchOutcome != wantOutcome {
+					testContext.Fatalf("status %d result %+v, want next %d, %d counted and %s", status, result, wantNext, wantCount, wantOutcome)
+				}
+			})
+			testContext.Run(workload.name+"/validation/"+verdict, func(testContext *testing.T) {
+				var probes []rateRun
+				for _, probe := range capacity37Schedule {
+					lower, upper := -1.0, 0.0
+					if !probe.passing {
+						lower, upper = 1, 2
+					}
+					probes = append(probes, rateRun{Rate: new(probe.rate), Run: json.RawMessage(workload.run(probe.rate, "pass", lower, upper))})
+				}
+				status, result := runRequest(testContext, repeatRequest(testContext, probes, []rateRun{{Rate: new(37), Run: json.RawMessage(workload.run(37, verdict, -1, 1))}}, 24))
+				wantNext, wantCount, wantOutcome := 36, 1, perfstats.ProbeNotDemonstrated
+				switch verdict {
+				case "pass":
+					wantNext, wantCount, wantOutcome = 0, 0, perfstats.ProbeBacklogUndecided
+				case "fail":
+					wantOutcome = perfstats.ProbeFailing
+				}
+				if status != inconclusiveExitStatus || result.NextProbeRate != wantNext || len(result.ValidationRounds) != wantCount ||
+					len(result.RepetitionDecisions) != 1 || result.RepetitionDecisions[0].SearchOutcome != wantOutcome {
+					testContext.Fatalf("status %d result %+v, want next %d, %d counted validation rounds and %s", status, result, wantNext, wantCount, wantOutcome)
+				}
+				if verdict == "pass" && (result.NextRepetitionRate != 37 || result.NextAttempt != 2) {
+					testContext.Fatalf("result %+v, want repeat 37 at attempt 2", result)
+				}
+			})
+		}
+	}
+}
+
+func replaceBacklogWindow(testContext *testing.T, rate int, lower, upper float64) func(map[string]any) {
+	testContext.Helper()
+	return func(cohort map[string]any) {
+		var window map[string]any
+		if err := json.Unmarshal([]byte("{"+backlogWindowJSON(uint64(rate), 120*time.Second, lower, upper)+"}"), &window); err != nil {
+			testContext.Fatal(err)
+		}
+		senderWindow := cohort["sender"].(map[string]any)["sender_window"].(map[string]any)
+		for key, value := range window {
+			senderWindow[key] = value
+		}
 	}
 }
 

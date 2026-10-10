@@ -671,8 +671,9 @@ func TestBidirectionalCapacityReportsPerDirectionAndAggregateOfferedRate(testCon
 			bidirectionalRunJSON(probe.rate, lower, upper, lower, upper)))
 	}
 	var repetitions []string
-	for range 5 {
-		repetitions = append(repetitions, fmt.Sprintf(`{"rate":37,"run":%s}`, bidirectionalRunJSON(37, -1, 0, -1, 0)))
+	for index := range 5 {
+		run := strings.ReplaceAll(bidirectionalRunJSON(37, -1, 0, -1, 0), `"cohort-a`, fmt.Sprintf(`"repetition-window-%d`, index+1))
+		repetitions = append(repetitions, fmt.Sprintf(`{"rate":37,"run":%s}`, run))
 	}
 	input := fmt.Sprintf(`{"initial":10,"maximum":100,"max_probes":24,"probes":[%s],"repetitions":[%s]}`,
 		strings.Join(probes, ","), strings.Join(repetitions, ","))
