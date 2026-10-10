@@ -1,4 +1,4 @@
-//go:build !race && go1.25 && !go1.26
+//go:build !race
 
 package m3ua
 
@@ -9,9 +9,15 @@ import (
 
 var receiveAllocationSink *DataMessage
 
-const maxHandleDataReadDataAllocations = 9
+// At cc659cf, Go 1.25.10 measures 6/9 allocations for one/32 ASs, while
+// Go 1.26.9 measures 11/14; d0c7552 also measures 11/14 with Go 1.26.9.
+// Account for those five toolchain allocations while preserving the former
+// three-allocation headroom for one AS. Both limits remain below the approved
+// 24-allocation receive budget recorded in PR #83's acceptance evidence:
+// https://github.com/gomaja/go-m3ua/pull/83#issuecomment-5792346793
+const maxHandleDataReadDataAllocations = 14
 
-const max32ASHandleDataReadDataAllocations = 9
+const max32ASHandleDataReadDataAllocations = 14
 
 func TestHandleDataReadDataAllocationCount(testContext *testing.T) {
 	tests := []struct {
