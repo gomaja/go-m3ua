@@ -41,8 +41,11 @@ func TestCompareFivePairsHandComputedInterval(testContext *testing.T) {
 	}
 	// Integrating the NIST df=4 density gives F(t)=1/2+(3u-u^3)/4,
 	// u=t/sqrt(t^2+4). This independently checks the selected quantile.
+	// The tolerance allows one unit of rounding in this arithmetic, which
+	// differs between fused and separate multiply-add (arm64 versus amd64)
+	// while staying far inside the precision of any published t table.
 	u := result.TCritical975 / math.Sqrt(result.TCritical975*result.TCritical975+4)
-	assertClose(testContext, "df4 CDF at selected quantile", 0.5+(3*u-u*u*u)/4, 0.975, 1e-16)
+	assertClose(testContext, "df4 CDF at selected quantile", 0.5+(3*u-u*u*u)/4, 0.975, 1e-12)
 }
 
 func TestCompareExplicitTwentyMatchesDefault(testContext *testing.T) {
