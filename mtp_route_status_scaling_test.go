@@ -6,9 +6,10 @@ package m3ua
 
 import (
 	"fmt"
-	"math"
 	"math/rand"
 	"reflect"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"testing"
@@ -508,28 +509,6 @@ func BenchmarkMTPRouteStatus(b *testing.B) {
 	}
 }
 
-// fastestMTPRouteStatuses returns the fastest of up to runs calls, stopping
-// early once the calls have taken budget in total. The fastest call is the one
-// least disturbed by scheduling and garbage collection, which is what a growth
-// ratio between two small timings needs; the budget keeps a return to the old
-// cubic cost from turning into a test timeout rather than a failure.
-func fastestMTPRouteStatuses(tb testing.TB, endpoint *Endpoint, runs int, budget time.Duration) time.Duration {
-	tb.Helper()
-	_ = endpoint.MTPRouteStatuses() // warm-up
-	fastest := time.Duration(math.MaxInt64)
-	var total time.Duration
-	for run := 0; run < runs && total < budget; run++ {
-		start := time.Now()
-		_ = endpoint.MTPRouteStatuses()
-		elapsed := time.Since(start)
-		total += elapsed
-		if elapsed < fastest {
-			fastest = elapsed
-		}
-	}
-	return fastest
-}
-
 // TestMTPRouteStatusesScalesWithRouteCount is the failing-first scaling gate
 // for issue #111. On the pre-fix O(routes) x O(derived) x O(routes)
 // implementation, 1,000 routes measured ~10.1s per call, which blows both the
@@ -541,28 +520,72 @@ func TestMTPRouteStatusesScalesWithRouteCount(t *testing.T) {
 	}
 
 	smallEndpoint, _ := buildMTPRouteStatusPerfFixture(t, 250)
-	smallElapsed := fastestMTPRouteStatuses(t, smallEndpoint, 20, time.Second)
-
 	largeEndpoint, _ := buildMTPRouteStatusPerfFixture(t, 1000)
-	largeElapsed := fastestMTPRouteStatuses(t, largeEndpoint, 20, time.Second)
-
-	t.Logf("MTPRouteStatuses fastest call: 250 routes %s, 1,000 routes %s", smallElapsed, largeElapsed)
-
 	const ceiling = 250 * time.Millisecond
+	_ = smallEndpoint.MTPRouteStatuses() // warm both inventories before sampling
+	_ = largeEndpoint.MTPRouteStatuses()
+
+	// Measure the route traversal's growth, without charging whichever sample
+	// crosses the heap trigger for a collection. Under -race that GC work can
+	// dominate the larger sample even after pairing. Collect setup garbage first
+	// and suspend heap-percentage GC for this bounded, non-parallel timing window.
+	runtime.GC()
+	previousGCPercent := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(previousGCPercent)
+
+	// Pair nearby samples and alternate their order so changes in CPU speed,
+	// scheduling and GC pressure do not favor one inventory. Average five calls
+	// per sample to avoid comparing isolated sub-millisecond calls under -race.
+	// Bound both the samples and the total sampling time: the historical cubic
+	// implementation should fail the gate rather than exhaust the test timeout.
+	measure := func(endpoint *Endpoint) time.Duration {
+		start := time.Now()
+		calls := 0
+		for calls < 5 {
+			_ = endpoint.MTPRouteStatuses()
+			calls++
+			if time.Since(start) >= ceiling {
+				break
+			}
+		}
+		return time.Since(start) / time.Duration(calls)
+	}
+	var smallSamples, largeSamples []time.Duration
+	var growths []float64
+	samplingStart := time.Now()
+	for round := 0; round < 20; round++ {
+		var small, large time.Duration
+		if round%2 == 0 {
+			small, large = measure(smallEndpoint), measure(largeEndpoint)
+		} else {
+			large, small = measure(largeEndpoint), measure(smallEndpoint)
+		}
+		smallSamples = append(smallSamples, small)
+		largeSamples = append(largeSamples, large)
+		growths = append(growths, float64(large)/float64(small))
+		if time.Since(samplingStart) >= time.Second {
+			break
+		}
+	}
+	sort.Slice(smallSamples, func(i, j int) bool { return smallSamples[i] < smallSamples[j] })
+	sort.Slice(largeSamples, func(i, j int) bool { return largeSamples[i] < largeSamples[j] })
+	sort.Float64s(growths)
+	middle := len(growths) / 2
+	smallElapsed, largeElapsed, growth := smallSamples[middle], largeSamples[middle], growths[middle]
+	t.Logf("MTPRouteStatuses median call: 250 routes %s, 1,000 routes %s; median paired growth %.2fx (%d rounds)",
+		smallElapsed, largeElapsed, growth, len(growths))
+
 	if largeElapsed > ceiling {
-		t.Fatalf("MTPRouteStatuses over 1,000 routes took %s at its fastest, want under %s", largeElapsed, ceiling)
+		t.Fatalf("MTPRouteStatuses over 1,000 routes took %s at its median, want under %s", largeElapsed, ceiling)
 	}
 
 	// 1,000 routes is 4x 250 routes: linear or n*log(n) growth is about 4-5x,
-	// quadratic about 16x and cubic (the historical defect) about 64x. Taking
-	// the fastest of repeated calls keeps jitter out of the ratio, so the limit
-	// can sit below quadratic.
+	// quadratic about 16x and cubic (the historical defect) about 64x. The
+	// median of paired ratios tolerates isolated stalls without admitting
+	// quadratic growth, including when the race detector instruments each call.
 	const maxGrowth = 10.0
-	if smallElapsed > 0 {
-		growth := float64(largeElapsed) / float64(smallElapsed)
-		if growth > maxGrowth {
-			t.Fatalf("MTPRouteStatuses grew %.1fx from 250 to 1,000 routes (%s -> %s/call); want under %.1fx",
-				growth, smallElapsed, largeElapsed, maxGrowth)
-		}
+	if growth > maxGrowth {
+		t.Fatalf("MTPRouteStatuses grew %.1fx from 250 to 1,000 routes (%s -> %s/call); want under %.1fx",
+			growth, smallElapsed, largeElapsed, maxGrowth)
 	}
 }
