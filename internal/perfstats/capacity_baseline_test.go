@@ -1,3 +1,7 @@
+// Frozen capacity search from commit 9c86a37, internal/perfstats/capacity.go.
+// Only top-level names are prefixed to coexist with the current search.
+// Keep this oracle independent of production search logic.
+
 package perfstats
 
 import (
@@ -21,25 +25,25 @@ import (
 // transient peak. A repetition that fails or does not demonstrate the rate
 // shows that the selected rate was such a peak: it bounds the bracket from
 // above like a failed probe and the search resumes below it, for at most
-// MaxValidationRounds rounds.
+// BaselineMaxValidationRounds rounds.
 
 const (
-	DefaultMaximumRate = 1_000_000
-	DefaultMaxProbes   = 24
+	BaselineDefaultMaximumRate = 1_000_000
+	BaselineDefaultMaxProbes   = 24
 
-	RequiredFullRepetitions = 5
-	// MaxRateAttempts bounds attempts for one probe or validation repetition.
+	BaselineRequiredFullRepetitions = 5
+	// BaselineMaxRateAttempts bounds attempts for one probe or validation repetition.
 	// Only backlog-growth bounds straddling the floor qualify for another
 	// attempt. The owner decision amends the no-retry rules in #105 and #140:
 	// https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906
-	MaxRateAttempts = 3
-	// MaxValidationRounds bounds how many selected rates the search may try
+	BaselineMaxRateAttempts = 3
+	// BaselineMaxValidationRounds bounds how many selected rates the search may try
 	// to validate. Each round that a repetition fails or does not demonstrate
 	// moves the search below that rate; after this many rounds the search
 	// ends inconclusive rather than descending further.
-	MaxValidationRounds = 3
+	BaselineMaxValidationRounds = 3
 
-	// MaximumSearchRate is the largest rate the search accepts. Every probe
+	// BaselineMaximumSearchRate is the largest rate the search accepts. Every probe
 	// rate the search can select is bounded by the configured maximum, and
 	// the widest products advance() forms from those rates are 105*lower and
 	// 100*upper, so bounding the maximum at math.MaxInt/105 keeps the bracket
@@ -47,64 +51,64 @@ const (
 	// large but "valid" maximum wraps 2*lower to a negative probe rate and
 	// wraps 100*upper negative, which satisfies the five-percent comparison
 	// on an arbitrarily wide bracket and lets a capacity campaign pass.
-	MaximumSearchRate = math.MaxInt / 105
+	BaselineMaximumSearchRate = math.MaxInt / 105
 )
 
-type ProbeOutcome string
+type BaselineProbeOutcome string
 
 const (
-	ProbePassing ProbeOutcome = "pass"
-	ProbeFailing ProbeOutcome = "fail"
-	// ProbeBacklogUndecided requests the same rate again without contributing
-	// a probe or repetition outcome. After MaxRateAttempts such windows, the
-	// rate is recorded once as ProbeNotDemonstrated. Callers must use this only
+	BaselineProbePassing BaselineProbeOutcome = "pass"
+	BaselineProbeFailing BaselineProbeOutcome = "fail"
+	// BaselineProbeBacklogUndecided requests the same rate again without contributing
+	// a probe or repetition outcome. After BaselineMaxRateAttempts such windows, the
+	// rate is recorded once as BaselineProbeNotDemonstrated. Callers must use this only
 	// when backlog straddling is the run's sole inconclusive cause.
-	ProbeBacklogUndecided ProbeOutcome = "backlog-undecided"
-	// ProbeNotDemonstrated is a probe that did not demonstrate a sustained
+	BaselineProbeBacklogUndecided BaselineProbeOutcome = "backlog-undecided"
+	// BaselineProbeNotDemonstrated is a probe that did not demonstrate a sustained
 	// rate for a rate-related reason: a transport stall, backlog growth bounds
-	// still straddling the floor after MaxRateAttempts, or a straddle with
+	// still straddling the floor after BaselineMaxRateAttempts, or a straddle with
 	// another non-passing verdict that rules out repeats. Backlog-only
-	// straddles must first be recorded as ProbeBacklogUndecided. The rate bounds
+	// straddles must first be recorded as BaselineProbeBacklogUndecided. The rate bounds
 	// the bracket from above exactly as a failure does, and the search continues.
 	// Only demonstrated rates pass.
-	ProbeNotDemonstrated ProbeOutcome = "not-demonstrated"
-	// ProbeInconclusive is a probe whose evidence was missing or invalid. It
+	BaselineProbeNotDemonstrated BaselineProbeOutcome = "not-demonstrated"
+	// BaselineProbeInconclusive is a probe whose evidence was missing or invalid. It
 	// says nothing about the rate, so it terminates the search.
-	ProbeInconclusive ProbeOutcome = "inconclusive"
+	BaselineProbeInconclusive BaselineProbeOutcome = "inconclusive"
 )
 
-type SearchStatus string
+type BaselineSearchStatus string
 
 const (
-	SearchRunning                SearchStatus = ""
-	SearchBracketed              SearchStatus = "bracketed"
-	SearchIntegerResolutionLimit SearchStatus = "integer-resolution-limit"
-	SearchLowerBoundOnly         SearchStatus = "lower-bound-only"
-	SearchNoPassingRate          SearchStatus = "no-passing-rate"
-	SearchInconclusive           SearchStatus = "inconclusive"
-	SearchProbeBudgetExhausted   SearchStatus = "probe-budget-exhausted"
-	// SearchValidationRoundsExhausted is a search whose selected rate failed
-	// validation MaxValidationRounds times.
-	SearchValidationRoundsExhausted SearchStatus = "validation-rounds-exhausted"
+	BaselineSearchRunning                BaselineSearchStatus = ""
+	BaselineSearchBracketed              BaselineSearchStatus = "bracketed"
+	BaselineSearchIntegerResolutionLimit BaselineSearchStatus = "integer-resolution-limit"
+	BaselineSearchLowerBoundOnly         BaselineSearchStatus = "lower-bound-only"
+	BaselineSearchNoPassingRate          BaselineSearchStatus = "no-passing-rate"
+	BaselineSearchInconclusive           BaselineSearchStatus = "inconclusive"
+	BaselineSearchProbeBudgetExhausted   BaselineSearchStatus = "probe-budget-exhausted"
+	// BaselineSearchValidationRoundsExhausted is a search whose selected rate failed
+	// validation BaselineMaxValidationRounds times.
+	BaselineSearchValidationRoundsExhausted BaselineSearchStatus = "validation-rounds-exhausted"
 )
 
-type ProbeRecord struct {
-	Rate    int          `json:"rate"`
-	Outcome ProbeOutcome `json:"outcome"`
+type BaselineProbeRecord struct {
+	Rate    int                  `json:"rate"`
+	Outcome BaselineProbeOutcome `json:"outcome"`
 }
 
-// ValidationRound is the repetitions run at one selected rate, in execution
+// BaselineValidationRound is the repetitions run at one selected rate, in execution
 // order. A round ends at five passing repetitions or at its first repetition
 // that did not pass.
-type ValidationRound struct {
-	Rate     int            `json:"rate"`
-	Outcomes []ProbeOutcome `json:"outcomes"`
+type BaselineValidationRound struct {
+	Rate     int                    `json:"rate"`
+	Outcomes []BaselineProbeOutcome `json:"outcomes"`
 }
 
 // allPassed reports whether every repetition of the round so far passed.
-func (round ValidationRound) allPassed() bool {
+func (round BaselineValidationRound) allPassed() bool {
 	for _, outcome := range round.Outcomes {
-		if outcome != ProbePassing {
+		if outcome != BaselineProbePassing {
 			return false
 		}
 	}
@@ -113,40 +117,36 @@ func (round ValidationRound) allPassed() bool {
 
 // open reports whether the round still takes repetitions: every outcome so
 // far passed and fewer than the required number ran.
-func (round ValidationRound) open() bool {
-	return len(round.Outcomes) < RequiredFullRepetitions && round.allPassed()
+func (round BaselineValidationRound) open() bool {
+	return len(round.Outcomes) < BaselineRequiredFullRepetitions && round.allPassed()
 }
 
 // validated reports whether the round's every required repetition passed.
-func (round ValidationRound) validated() bool {
-	return len(round.Outcomes) == RequiredFullRepetitions && round.allPassed()
+func (round BaselineValidationRound) validated() bool {
+	return len(round.Outcomes) == BaselineRequiredFullRepetitions && round.allPassed()
 }
 
-// CapacitySearch is a strict-replay bounded search state machine. Probes and
+// BaselineCapacitySearch is a strict-replay bounded search state machine. Probes and
 // validation repetitions must be recorded at exactly the rate the search
 // selected; any deviation is an error so an executed campaign cannot silently
 // reorder its evidence.
-type CapacitySearch struct {
+type BaselineCapacitySearch struct {
 	maximum   int
-	probes    []ProbeRecord
-	rounds    []ValidationRound
+	probes    []BaselineProbeRecord
+	rounds    []BaselineValidationRound
 	lower     int
 	upper     int
 	next      int
-	status    SearchStatus
+	status    BaselineSearchStatus
 	maxProbes int
-	upperHint int
-	// upperHintUsed records that the hint selected a pending probe. A hint
-	// replaces only the doubling step after the first decided probe passes.
-	upperHintUsed bool
 	// undecidedAttempts belongs to the current probe or validation repetition,
 	// not to all repetitions at a selected rate. Deciding it resets the count.
 	undecidedAttempts int
 }
 
-// NewCapacitySearch validates the search bounds: positive integer initial,
+// BaselineNewCapacitySearch validates the search bounds: positive integer initial,
 // maximum and probe budget, initial not above maximum.
-func NewCapacitySearch(initial, maximum, maxProbes int) (*CapacitySearch, error) {
+func BaselineNewCapacitySearch(initial, maximum, maxProbes int) (*BaselineCapacitySearch, error) {
 	for name, value := range map[string]int{"initial": initial, "maximum": maximum, "max_probes": maxProbes} {
 		if value <= 0 {
 			return nil, fmt.Errorf("%s must be a positive integer", name)
@@ -158,66 +158,39 @@ func NewCapacitySearch(initial, maximum, maxProbes int) (*CapacitySearch, error)
 	// initial is already bounded by maximum, and every rate the search can
 	// select afterwards is bounded by maximum too, so bounding maximum alone
 	// keeps all of the search arithmetic exact.
-	if maximum > MaximumSearchRate {
-		return nil, fmt.Errorf("maximum must not exceed %d", MaximumSearchRate)
+	if maximum > BaselineMaximumSearchRate {
+		return nil, fmt.Errorf("maximum must not exceed %d", BaselineMaximumSearchRate)
 	}
-	return &CapacitySearch{maximum: maximum, maxProbes: maxProbes, next: initial}, nil
+	return &BaselineCapacitySearch{maximum: maximum, maxProbes: maxProbes, next: initial}, nil
 }
 
-// NewCapacitySearchWithUpperHint adds an optional warm-start upper bracket
-// hint to the ordinary search. The hint is not evidence: initial must pass
-// before the hint selects the second decided probe, and that probe must be
-// measured under the same repeat rule. See the owner plan revision in
-// https://github.com/gomaja/go-m3ua/issues/44.
-func NewCapacitySearchWithUpperHint(initial, maximum, maxProbes, upperHint int) (*CapacitySearch, error) {
-	search, err := NewCapacitySearch(initial, maximum, maxProbes)
-	if err != nil {
-		return nil, err
-	}
-	if upperHint <= initial || upperHint > maximum {
-		return nil, errors.New("upper_hint must satisfy initial < upper_hint <= maximum")
-	}
-	// Both rates are bounded by MaximumSearchRate before forming products.
-	if 100*upperHint > 105*initial {
-		return nil, errors.New("upper_hint must be within five percent of initial")
-	}
-	search.upperHint = upperHint
-	return search, nil
-}
-
-// UpperHintUsed reports whether the hint selected a pending probe. Repeats
-// at that rate belong to the same probe, and never use the hint again.
-func (search *CapacitySearch) UpperHintUsed() bool {
-	return search.upperHintUsed
-}
-
-// Status is the terminal search status, or SearchRunning while more probes
+// Status is the terminal search status, or BaselineSearchRunning while more probes
 // are required.
-func (search *CapacitySearch) Status() SearchStatus {
+func (search *BaselineCapacitySearch) Status() BaselineSearchStatus {
 	return search.status
 }
 
 // Lower is the highest proven passing rate, or zero when none exists.
-func (search *CapacitySearch) Lower() int {
+func (search *BaselineCapacitySearch) Lower() int {
 	return search.lower
 }
 
 // Upper is the lowest proven failing rate, or zero when none exists.
-func (search *CapacitySearch) Upper() int {
+func (search *BaselineCapacitySearch) Upper() int {
 	return search.upper
 }
 
 // Probes returns the decided probe history in execution order. Deferred
 // backlog-only attempts do not appear here or consume the probe budget.
-func (search *CapacitySearch) Probes() []ProbeRecord {
-	return append([]ProbeRecord(nil), search.probes...)
+func (search *BaselineCapacitySearch) Probes() []BaselineProbeRecord {
+	return append([]BaselineProbeRecord(nil), search.probes...)
 }
 
 // ValidationRounds returns the recorded validation rounds in execution order.
-func (search *CapacitySearch) ValidationRounds() []ValidationRound {
-	rounds := make([]ValidationRound, len(search.rounds))
+func (search *BaselineCapacitySearch) ValidationRounds() []BaselineValidationRound {
+	rounds := make([]BaselineValidationRound, len(search.rounds))
 	for index, round := range search.rounds {
-		rounds[index] = ValidationRound{Rate: round.Rate, Outcomes: append([]ProbeOutcome(nil), round.Outcomes...)}
+		rounds[index] = BaselineValidationRound{Rate: round.Rate, Outcomes: append([]BaselineProbeOutcome(nil), round.Outcomes...)}
 	}
 	return rounds
 }
@@ -225,8 +198,8 @@ func (search *CapacitySearch) ValidationRounds() []ValidationRound {
 // NextRepetitionRate returns the rate the next validation repetition must run
 // at: the bracketed lower passing rate, while its round is not yet decided.
 // The second result is false when no repetition is pending.
-func (search *CapacitySearch) NextRepetitionRate() (int, bool) {
-	if search.status != SearchBracketed {
+func (search *BaselineCapacitySearch) NextRepetitionRate() (int, bool) {
+	if search.status != BaselineSearchBracketed {
 		return 0, false
 	}
 	if count := len(search.rounds); count != 0 {
@@ -243,11 +216,11 @@ func (search *CapacitySearch) NextRepetitionRate() (int, bool) {
 // A failed or not-demonstrated repetition shows that the rate was a transient
 // peak rather than a sustained rate: it bounds the bracket from above like a
 // failed probe, the highest passing probe below it becomes the lower bound,
-// and the search resumes, at most MaxValidationRounds rounds in all. An
+// and the search resumes, at most BaselineMaxValidationRounds rounds in all. An
 // inconclusive repetition (missing or invalid evidence) says nothing about the
 // rate and ends validation. A backlog-only undecided attempt leaves the same
-// repetition pending, for at most MaxRateAttempts runs in all.
-func (search *CapacitySearch) RecordRepetition(rate int, outcome ProbeOutcome) error {
+// repetition pending, for at most BaselineMaxRateAttempts runs in all.
+func (search *BaselineCapacitySearch) RecordRepetition(rate int, outcome BaselineProbeOutcome) error {
 	next, pending := search.NextRepetitionRate()
 	if !pending {
 		return errors.New("no validation repetition is pending")
@@ -256,47 +229,47 @@ func (search *CapacitySearch) RecordRepetition(rate int, outcome ProbeOutcome) e
 		return fmt.Errorf("repetition rate %d does not match the selected rate %d", rate, next)
 	}
 	switch outcome {
-	case ProbePassing, ProbeFailing, ProbeNotDemonstrated, ProbeInconclusive, ProbeBacklogUndecided:
+	case BaselineProbePassing, BaselineProbeFailing, BaselineProbeNotDemonstrated, BaselineProbeInconclusive, BaselineProbeBacklogUndecided:
 	default:
 		return fmt.Errorf("repetition returned an unknown outcome %q", outcome)
 	}
 	outcome = search.resolveAttempt(outcome)
-	if outcome == ProbeBacklogUndecided {
+	if outcome == BaselineProbeBacklogUndecided {
 		return nil
 	}
 	if count := len(search.rounds); count == 0 || search.rounds[count-1].Rate != rate || !search.rounds[count-1].open() {
-		search.rounds = append(search.rounds, ValidationRound{Rate: rate})
+		search.rounds = append(search.rounds, BaselineValidationRound{Rate: rate})
 	}
 	round := &search.rounds[len(search.rounds)-1]
 	round.Outcomes = append(round.Outcomes, outcome)
-	if outcome == ProbeFailing || outcome == ProbeNotDemonstrated {
+	if outcome == BaselineProbeFailing || outcome == BaselineProbeNotDemonstrated {
 		search.rejectLower()
 	}
 	return nil
 }
 
 // rejectLower moves the bracket below a selected rate that failed validation
-// and resumes the search, or ends it once MaxValidationRounds rounds failed.
-func (search *CapacitySearch) rejectLower() {
+// and resumes the search, or ends it once BaselineMaxValidationRounds rounds failed.
+func (search *BaselineCapacitySearch) rejectLower() {
 	search.upper = search.lower
 	search.lower = 0
 	for _, probe := range search.probes {
-		if probe.Outcome == ProbePassing && probe.Rate < search.upper && probe.Rate > search.lower {
+		if probe.Outcome == BaselineProbePassing && probe.Rate < search.upper && probe.Rate > search.lower {
 			search.lower = probe.Rate
 		}
 	}
-	if len(search.rounds) >= MaxValidationRounds {
-		search.status = SearchValidationRoundsExhausted
+	if len(search.rounds) >= BaselineMaxValidationRounds {
+		search.status = BaselineSearchValidationRoundsExhausted
 		return
 	}
-	search.status = SearchRunning
+	search.status = BaselineSearchRunning
 	search.advance()
 }
 
 // NextRate returns the rate the search selected for the next probe. The
 // second result is false once the search has terminated.
-func (search *CapacitySearch) NextRate() (int, bool) {
-	if search.status != SearchRunning {
+func (search *BaselineCapacitySearch) NextRate() (int, bool) {
+	if search.status != BaselineSearchRunning {
 		return 0, false
 	}
 	return search.next, true
@@ -306,9 +279,9 @@ func (search *CapacitySearch) NextRate() (int, bool) {
 // an unknown outcome or a finished search is an error. A not-demonstrated
 // probe bounds the bracket from above like a failure; an inconclusive probe
 // terminates the search. A backlog-only undecided attempt leaves the same
-// probe pending without using its budget, up to MaxRateAttempts runs in all.
-func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
-	if search.status != SearchRunning {
+// probe pending without using its budget, up to BaselineMaxRateAttempts runs in all.
+func (search *BaselineCapacitySearch) Record(rate int, outcome BaselineProbeOutcome) error {
+	if search.status != BaselineSearchRunning {
 		if next, pending := search.NextRepetitionRate(); pending {
 			return fmt.Errorf("no probe is pending: the search awaits a validation repetition at %d", next)
 		}
@@ -318,20 +291,20 @@ func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 		return fmt.Errorf("probe rate %d does not match the selected rate %d", rate, search.next)
 	}
 	switch outcome {
-	case ProbePassing, ProbeFailing, ProbeNotDemonstrated, ProbeInconclusive, ProbeBacklogUndecided:
+	case BaselineProbePassing, BaselineProbeFailing, BaselineProbeNotDemonstrated, BaselineProbeInconclusive, BaselineProbeBacklogUndecided:
 	default:
 		return fmt.Errorf("probe returned an unknown outcome %q", outcome)
 	}
 	outcome = search.resolveAttempt(outcome)
-	if outcome == ProbeBacklogUndecided {
+	if outcome == BaselineProbeBacklogUndecided {
 		return nil
 	}
-	search.probes = append(search.probes, ProbeRecord{Rate: rate, Outcome: outcome})
-	if outcome == ProbeInconclusive {
-		search.status = SearchInconclusive
+	search.probes = append(search.probes, BaselineProbeRecord{Rate: rate, Outcome: outcome})
+	if outcome == BaselineProbeInconclusive {
+		search.status = BaselineSearchInconclusive
 		return nil
 	}
-	if outcome == ProbePassing {
+	if outcome == BaselineProbePassing {
 		search.lower = rate
 	} else {
 		search.upper = rate
@@ -343,7 +316,7 @@ func (search *CapacitySearch) Record(rate int, outcome ProbeOutcome) error {
 // NextAttempt is the one-based attempt number for the pending probe or
 // validation repetition, or zero when no run is pending. A new repetition at
 // the same selected rate starts at one again.
-func (search *CapacitySearch) NextAttempt() int {
+func (search *BaselineCapacitySearch) NextAttempt() int {
 	_, probe := search.NextRate()
 	_, repetition := search.NextRepetitionRate()
 	if !probe && !repetition {
@@ -354,128 +327,123 @@ func (search *CapacitySearch) NextAttempt() int {
 
 // resolveAttempt defers only backlog-only undecided windows. It runs after
 // rate and outcome validation, so rejected input cannot spend an attempt.
-func (search *CapacitySearch) resolveAttempt(outcome ProbeOutcome) ProbeOutcome {
-	if outcome == ProbeBacklogUndecided {
+func (search *BaselineCapacitySearch) resolveAttempt(outcome BaselineProbeOutcome) BaselineProbeOutcome {
+	if outcome == BaselineProbeBacklogUndecided {
 		search.undecidedAttempts++
-		if search.undecidedAttempts < MaxRateAttempts {
+		if search.undecidedAttempts < BaselineMaxRateAttempts {
 			return outcome
 		}
-		outcome = ProbeNotDemonstrated
+		outcome = BaselineProbeNotDemonstrated
 	}
 	search.undecidedAttempts = 0
 	return outcome
 }
 
-func (search *CapacitySearch) advance() {
+func (search *BaselineCapacitySearch) advance() {
 	if search.lower != 0 && search.upper != 0 {
 		switch {
 		case 100*search.upper <= 105*search.lower:
-			search.status = SearchBracketed
+			search.status = BaselineSearchBracketed
 			return
 		case search.upper-search.lower == 1:
-			search.status = SearchIntegerResolutionLimit
+			search.status = BaselineSearchIntegerResolutionLimit
 			return
 		default:
 			search.next = (search.lower + search.upper) / 2
 		}
 	} else if search.lower != 0 {
 		if search.lower == search.maximum {
-			search.status = SearchLowerBoundOnly
+			search.status = BaselineSearchLowerBoundOnly
 			return
 		}
-		if search.upperHint != 0 && len(search.probes) == 1 && len(search.probes) < search.maxProbes && !search.upperHintUsed {
-			search.next = search.upperHint
-			search.upperHintUsed = true
-		} else {
-			search.next = min(2*search.lower, search.maximum)
-		}
+		search.next = min(2*search.lower, search.maximum)
 	} else {
 		if search.upper == 1 {
-			search.status = SearchNoPassingRate
+			search.status = BaselineSearchNoPassingRate
 			return
 		}
 		search.next = max(1, search.upper/2)
 	}
 	if len(search.probes) >= search.maxProbes {
-		search.status = SearchProbeBudgetExhausted
+		search.status = BaselineSearchProbeBudgetExhausted
 	}
 }
 
-// CapacityDecision is the campaign-level outcome of one completed capacity
+// BaselineCapacityDecision is the campaign-level outcome of one completed capacity
 // search plus its validation repetitions.
-type CapacityDecision struct {
-	Decision     Decision     `json:"decision"`
-	Status       SearchStatus `json:"search_status"`
-	SelectedRate int          `json:"selected_rate,omitempty"`
-	Reason       string       `json:"reason,omitempty"`
+type BaselineCapacityDecision struct {
+	Decision     Decision             `json:"decision"`
+	Status       BaselineSearchStatus `json:"search_status"`
+	SelectedRate int                  `json:"selected_rate,omitempty"`
+	Reason       string               `json:"reason,omitempty"`
 }
 
 const (
-	SearchIncompleteReason          = "search-incomplete"
-	SearchNotRefinedReason          = "search-did-not-refine-a-pass-fail-bracket"
-	NoPassingRateReason             = "no-passing-rate"
-	NoDemonstratedRateReason        = "no-demonstrated-rate-with-undemonstrated-probes"
-	RejectedSearchNotRefinedReason  = "search-did-not-refine-a-bracket-below-a-rejected-rate"
-	RepetitionsMissingReason        = "validation-repetitions-missing"
-	RepetitionInconclusiveReason    = "validation-repetition-inconclusive"
-	ValidationRoundsExhaustedReason = "validation-rounds-exhausted"
+	BaselineSearchIncompleteReason          = "search-incomplete"
+	BaselineSearchNotRefinedReason          = "search-did-not-refine-a-pass-fail-bracket"
+	BaselineNoPassingRateReason             = "no-passing-rate"
+	BaselineNoDemonstratedRateReason        = "no-demonstrated-rate-with-undemonstrated-probes"
+	BaselineRejectedSearchNotRefinedReason  = "search-did-not-refine-a-bracket-below-a-rejected-rate"
+	BaselineRepetitionsMissingReason        = "validation-repetitions-missing"
+	BaselineRepetitionInconclusiveReason    = "validation-repetition-inconclusive"
+	BaselineValidationRoundsExhaustedReason = "validation-rounds-exhausted"
 )
 
-// DecideCapacity maps a search and its validation rounds to a campaign
+// BaselineDecideCapacity maps a search and its validation rounds to a campaign
 // decision. Only a bracket refined to within five percent proceeds to
 // validation; five full repetitions at the selected lower passing rate must
 // all pass, and that lower rate is the result. Lower-bound-only,
 // integer-resolution-limit, budget exhaustion and validation-round exhaustion
 // are inconclusive, never a widened pass.
-func DecideCapacity(search *CapacitySearch) CapacityDecision {
+func BaselineDecideCapacity(search *BaselineCapacitySearch) BaselineCapacityDecision {
 	status := search.Status()
 	switch status {
-	case SearchRunning:
-		return CapacityDecision{Decision: Inconclusive, Status: status, Reason: SearchIncompleteReason}
-	case SearchNoPassingRate:
+	case BaselineSearchRunning:
+		return BaselineCapacityDecision{Decision: Inconclusive, Status: status, Reason: BaselineSearchIncompleteReason}
+	case BaselineSearchNoPassingRate:
 		// Failure needs demonstrated failures. A search that found no
 		// demonstrated rate only because some probe or repetition was not
 		// demonstrated has not shown that the workload cannot be sustained.
 		for _, probe := range search.probes {
-			if probe.Outcome == ProbeNotDemonstrated {
-				return CapacityDecision{Decision: Inconclusive, Status: status, Reason: NoDemonstratedRateReason}
+			if probe.Outcome == BaselineProbeNotDemonstrated {
+				return BaselineCapacityDecision{Decision: Inconclusive, Status: status, Reason: BaselineNoDemonstratedRateReason}
 			}
 		}
 		for _, round := range search.rounds {
 			for _, outcome := range round.Outcomes {
-				if outcome == ProbeNotDemonstrated {
-					return CapacityDecision{Decision: Inconclusive, Status: status, Reason: NoDemonstratedRateReason}
+				if outcome == BaselineProbeNotDemonstrated {
+					return BaselineCapacityDecision{Decision: Inconclusive, Status: status, Reason: BaselineNoDemonstratedRateReason}
 				}
 			}
 		}
-		return CapacityDecision{Decision: Fail, Status: status, Reason: NoPassingRateReason}
-	case SearchValidationRoundsExhausted:
-		return CapacityDecision{Decision: Inconclusive, Status: status, Reason: ValidationRoundsExhaustedReason}
-	case SearchBracketed:
+		return BaselineCapacityDecision{Decision: Fail, Status: status, Reason: BaselineNoPassingRateReason}
+	case BaselineSearchValidationRoundsExhausted:
+		return BaselineCapacityDecision{Decision: Inconclusive, Status: status, Reason: BaselineValidationRoundsExhaustedReason}
+	case BaselineSearchBracketed:
 	default:
 		if len(search.rounds) != 0 {
 			// It refined a bracket once; validation rejected that rate, and
 			// the search below it then ended without a new one.
-			return CapacityDecision{Decision: Inconclusive, Status: status, Reason: RejectedSearchNotRefinedReason}
+			return BaselineCapacityDecision{Decision: Inconclusive, Status: status, Reason: BaselineRejectedSearchNotRefinedReason}
 		}
-		return CapacityDecision{Decision: Inconclusive, Status: status, Reason: SearchNotRefinedReason}
+		return BaselineCapacityDecision{Decision: Inconclusive, Status: status, Reason: BaselineSearchNotRefinedReason}
 	}
 
 	selected := search.Lower()
 	count := len(search.rounds)
 	if count == 0 || search.rounds[count-1].Rate != selected {
-		return CapacityDecision{Decision: Inconclusive, Status: status, SelectedRate: selected, Reason: RepetitionsMissingReason}
+		return BaselineCapacityDecision{Decision: Inconclusive, Status: status, SelectedRate: selected, Reason: BaselineRepetitionsMissingReason}
 	}
 	round := search.rounds[count-1]
 	switch {
 	case round.validated():
-		return CapacityDecision{Decision: Pass, Status: status, SelectedRate: selected}
+		return BaselineCapacityDecision{Decision: Pass, Status: status, SelectedRate: selected}
 	case round.open():
-		return CapacityDecision{Decision: Inconclusive, Status: status, SelectedRate: selected, Reason: RepetitionsMissingReason}
+		return BaselineCapacityDecision{Decision: Inconclusive, Status: status, SelectedRate: selected, Reason: BaselineRepetitionsMissingReason}
 	default:
 		// A closed round at the selected rate that did not validate ended
 		// at an inconclusive repetition: a failed one would have moved the
 		// search below this rate.
-		return CapacityDecision{Decision: Inconclusive, Status: status, SelectedRate: selected, Reason: RepetitionInconclusiveReason}
+		return BaselineCapacityDecision{Decision: Inconclusive, Status: status, SelectedRate: selected, Reason: BaselineRepetitionInconclusiveReason}
 	}
 }

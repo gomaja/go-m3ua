@@ -168,6 +168,28 @@ and that lower rate is the result. `lower-bound-only`,
 `integer-resolution-limit`, `probe-budget-exhausted` and
 `validation-rounds-exhausted` are inconclusive, never widened into a pass.
 
+The [owner plan revision of 2026-10-10](https://github.com/gomaja/go-m3ua/issues/44)
+uses five matched pairs of capacity searches per row and permits a warm start
+for later searches of the same row and build. `NewCapacitySearchWithUpperHint`
+accepts the previous validated rate L as `initial` and final bracket upper U
+as a hint. It requires `L < U <= maximum` and `100*U <= 105*L`, otherwise
+the input is invalid. `NewCapacitySearch` retains the ordinary no-hint search.
+
+Plan revision comment URL (PLACEHOLDER; owner to fill): `<comment URL>`.
+
+L is always the first probe. Only if that probe passes, after the bounded
+repeat rule resolves it, does U replace the next doubling step, once. If U
+fails or is not demonstrated after its repeats, the measured bracket (L, U)
+is complete and ordinary validation follows. If L does not pass, or U passes,
+the search follows its ordinary rules from its own records. Missing evidence
+still ends the search inconclusive. The hint supplies no evidence and cannot
+spend an extra probe: five consecutive passing repetitions, three validation
+rounds, the five-percent bracket and all budgets remain unchanged.
+`UpperHintUsed` reports whether U selected a pending probe. The CLI records
+the supplied `upper_hint` and `upper_hint_used`, including false for an unused
+hint; its decided probe and validation-round histories retain the evidence
+for the bracket. These fields are absent for no-hint requests.
+
 The budget asks for "the lower passing rate, not a transient peak". A bracket
 refined to within five percent puts the selected rate within five percent of
 one that failed, and on the reference environment run-to-run capacity varies
@@ -290,8 +312,9 @@ input. A pending repeat is requested through the same rate field as the
 original attempt. `next_attempt` (1 through 3), `max_attempts` (3), and
 `repeat_reason` make the next requested run explicit; `repeat_reason` is
 present only when the next run repeats a straddling window. These fields are
-absent when no run is pending. No new request fields are needed, and a driver
-that already follows the next-rate fields needs no change.
+absent when no run is pending. Same-rate repeats need no new request fields;
+an optional warm start adds only the `upper_hint` described above. A driver
+that already follows the next-rate fields retains the same run protocol.
 
 `probe_decisions` and `repetition_decisions` retain every executed attempt,
 with `attempt`, `max_attempts`, and `repeat_reason` when another attempt is

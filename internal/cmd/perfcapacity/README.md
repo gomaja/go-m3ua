@@ -10,6 +10,37 @@ The [method and evidence contract](../../perfstats/README.md#bounded-capacity-se
 define the 5% search bracket, fixed probe budget, up to three validation
 rounds, and five counted passing repetitions at the selected rate.
 
+## Optional upper bracket hint
+
+The [owner plan revision of 2026-10-10](https://github.com/gomaja/go-m3ua/issues/44)
+uses five matched pairs of capacity searches per row. After the first search
+of a row and build, later searches may start with the previous search's
+validated rate L as `initial` and its final bracket upper U as `upper_hint`.
+
+Plan revision comment URL (PLACEHOLDER; owner to fill): `<comment URL>`.
+
+`upper_hint` is an optional integer. It requires
+`initial < upper_hint <= maximum` and `100*upper_hint <= 105*initial`;
+invalid bounds or a hint without `initial` are invalid input (exit 3).
+An omitted or null hint uses the ordinary search.
+
+The first probe is still L. If L passes after any allowed straddle repeats,
+the next probe is U once, instead of doubling L. A fail or not-demonstrated
+outcome at U, after any allowed repeats, closes the bracket and requests
+validation at L. If L does not pass, or U passes, the ordinary rules resume
+from this search's recorded evidence. Missing evidence still terminates the
+search inconclusive. The previous bracket supplies no outcomes: every search
+establishes its own bracket and requires five consecutive passing
+repetitions, with at most three validation rounds and the same probe budget.
+
+For example, `{"initial":1000,"upper_hint":1050,"maximum":10000}` first
+requests 1000, then requests 1050 only if 1000 passes. When the hint is
+supplied, responses retain `upper_hint` and `upper_hint_used`. The latter is
+false until the hint selects a pending probe, then remains true, including
+if validation later rejects L. Deferred attempts at U belong to that one
+probe. `probes` and `validation_rounds` show how this search found and
+validated its final bracket. Hint metadata is absent without a hint.
+
 ## Same-rate repeats
 
 The [owner decision of 2026-10-10](https://github.com/gomaja/go-m3ua/issues/44#issuecomment-6100413906)
@@ -37,8 +68,9 @@ out a repeat even when the final decision retains the DATA backlog reason.
 
 ## Driver protocol
 
-Requests contain `initial`, optional `maximum` and `max_probes`, and `probes`
-and `repetitions` arrays. Every array entry is `{"rate": N, "run": evidence}`.
+Requests contain `initial`, optional `maximum`, `max_probes` and `upper_hint`,
+and `probes` and `repetitions` arrays. Every array entry is
+`{"rate": N, "run": evidence}`.
 The tool replays the lists in the order selected by the search. Append every
 run, including deferred attempts, to its list and submit the complete history
 again. Do not supply an outcome or attempt number in the request.
