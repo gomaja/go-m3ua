@@ -86,7 +86,7 @@ type aspGatewayRouteSnapshot struct {
 }
 
 type aspTransferFlowLock struct {
-	mu         sync.Mutex
+	mu         contextMutex
 	references int
 }
 

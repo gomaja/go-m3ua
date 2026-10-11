@@ -573,6 +573,7 @@ method Association.State
 method Association.StateChanges
 method Association.StreamID
 method Association.WriteData
+method Association.WriteDataContext
 method Association.WriteSignal
 method AssociationConfig.EnableHeartbeat
 method AssociationConfig.SetASPIdentifier
@@ -607,6 +608,7 @@ method Endpoint.MTPIndications
 method Endpoint.MTPRouteStatus
 method Endpoint.MTPRouteStatuses
 method Endpoint.MTPTransfer
+method Endpoint.MTPTransferContext
 method Endpoint.ReportDestinationAvailability
 method Endpoint.Role
 method Endpoint.SSNMKnowledge
