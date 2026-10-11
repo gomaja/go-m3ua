@@ -207,6 +207,22 @@ func (search *CapacitySearch) Upper() int {
 	return search.upper
 }
 
+// CapacityBracket is a snapshot of the search's demonstrated lower rate and
+// failing or not-demonstrated upper rate. It does not imply validation passed.
+type CapacityBracket struct {
+	Lower int `json:"lower"`
+	Upper int `json:"upper"`
+}
+
+// Bracket returns both current bounds, or nil when either is absent. A search
+// may hold a bracket while still running or after an inconclusive termination.
+func (search *CapacitySearch) Bracket() *CapacityBracket {
+	if search.lower == 0 || search.upper == 0 {
+		return nil
+	}
+	return &CapacityBracket{Lower: search.lower, Upper: search.upper}
+}
+
 // Probes returns the decided probe history in execution order. Deferred
 // backlog-only attempts do not appear here or consume the probe budget.
 func (search *CapacitySearch) Probes() []ProbeRecord {
