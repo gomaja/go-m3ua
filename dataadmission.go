@@ -4,6 +4,8 @@
 
 package m3ua
 
+import "context"
+
 // admitDataWrite decides whether one DATA may be sent for the exact
 // Application Server scope it names, and holds the delivery barrier for as long
 // as the caller keeps the returned release.
@@ -15,6 +17,13 @@ package m3ua
 // and re-reads the binding under it, so a write that arrives after the mark is
 // refused, and a write admitted before it completes before the withdrawal does.
 func (c *Association) admitDataWrite(requested ASKey) (func(), error) {
+	return c.admitDataWriteContext(context.Background(), requested)
+}
+
+func (c *Association) admitDataWriteContext(ctx context.Context, requested ASKey) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	binding, err := c.resolveOutboundDataBinding(normalizeOutboundASKey(requested))
 	if err != nil {
 		return nil, err
@@ -22,7 +31,7 @@ func (c *Association) admitDataWrite(requested ASKey) (func(), error) {
 	if !c.outboundASKeyActive(binding) {
 		return nil, ErrRoutingContextNotActive
 	}
-	return c.lockOutboundDataScopeForKey(binding)
+	return c.lockOutboundDataScopeForKeyContext(ctx, binding)
 }
 
 // normalizeOutboundASKey discards the value of a parameter the caller did not
@@ -146,13 +155,16 @@ func (c *Association) outboundASKeyActive(key ASKey) bool {
 // across the transport write. It is lockResolvedOutboundDataScope for one exact
 // Application Server, taking a single barrier rather than building the scope's
 // key set per message.
-func (c *Association) lockOutboundDataScopeForKey(key ASKey) (func(), error) {
+func (c *Association) lockOutboundDataScopeForKeyContext(ctx context.Context, key ASKey) (func(), error) {
 	if c.role != RoleSGP && c.role != RoleIPSP {
 		return noDeliveryBarrier, nil
 	}
 
-	releaseApplicationServer, err := c.lockOutboundApplicationServerForKey(key)
+	releaseApplicationServer, err := c.lockOutboundApplicationServerForKeyContext(ctx, key)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if c.State() != StateASPActive {
 			return nil, ErrNotEstablished
 		}
@@ -165,7 +177,10 @@ func (c *Association) lockOutboundDataScopeForKey(key ASKey) (func(), error) {
 	// A contextless SGP scope and every IPSP scope also use the association's
 	// own barrier, which is what an ASP Down Ack and an ASP Inactive Ack wait
 	// on when there is no Application Server to drain.
-	c.unscopedDeliveryMu.Lock()
+	if err := c.unscopedDeliveryMu.LockContext(ctx); err != nil {
+		releaseApplicationServer()
+		return nil, err
+	}
 	release := func() {
 		c.unscopedDeliveryMu.Unlock()
 		releaseApplicationServer()
@@ -189,7 +204,7 @@ func (c *Association) lockOutboundDataScopeForKey(key ASKey) (func(), error) {
 // until there are sufficient resources", and for the n+k redundancy case ASPs
 // "should start sending traffic only after n ASPs are active". A direct write
 // therefore honors the same aggregate state as Endpoint distribution.
-func (c *Association) lockOutboundApplicationServerForKey(key ASKey) (func(), error) {
+func (c *Association) lockOutboundApplicationServerForKeyContext(ctx context.Context, key ASKey) (func(), error) {
 	if (c.role != RoleSGP && c.role != RoleIPSP) || c.as == nil {
 		return noDeliveryBarrier, nil
 	}
@@ -198,7 +213,9 @@ func (c *Association) lockOutboundApplicationServerForKey(key ASKey) (func(), er
 		return nil, ErrRoutingContextNotActive
 	}
 
-	applicationServer.deliveryMu.Lock()
+	if err := applicationServer.deliveryMu.LockContext(ctx); err != nil {
+		return nil, err
+	}
 	applicationServer.mu.Lock()
 	closed := applicationServer.closed
 	applicationServerActive := applicationServer.state == ASActive

@@ -1588,66 +1588,51 @@ func TestBroadcastWithinASignallingGatewayIncludesARestrictedSGP(t *testing.T) {
 // elements of the outgoing message, such as the SLS value)" without fixing
 // which; taking the whole routing label, Originating Point Code included, is
 // this library's choice, and a Routing Key may be "the DPC/OPC combination"
-// (Section 1.4.2.1). They are assigned separately and neither waits behind the
-// other.
+// (Section 1.4.2.1). They are assigned separately and their ordering locks are
+// independent.
 func TestDifferentOriginatingPointCodesAreDifferentFlows(t *testing.T) {
 	const pointCode = uint32(0x123456)
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	config.Routing.MTPRoutes[0].OriginatingPointCodes = []uint32{0x111111, 0x222222}
 	useSignallingGateways(config, "sg-a")
-	endpoint, associations, _ := newASPTransferFixture(t, config)
-
-	firstStarted := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	secondStarted := make(chan struct{})
-	associations["sg-a/sgp-a1"].dataWriter = func(raw []byte, _ *sctp.SndInfo) (int, error) {
-		payload, err := capturedMTPTransferPayload(raw)
-		if err != nil {
-			return 0, err
-		}
-		switch payload {
-		case "first":
-			close(firstStarted)
-			<-releaseFirst
-		case "second":
-			close(secondStarted)
-		}
-		return len(raw), nil
+	endpoint, _, captures := newASPTransferFixture(t, config)
+	firstRequest := MTPTransferRequest{
+		ProtocolData: params.NewProtocolDataPayload(
+			0x111111, pointCode, params.ServiceIndSCCP, 0, 0, 1, []byte("first")),
 	}
-	send := func(originatingPointCode uint32, payload string) <-chan error {
-		done := make(chan error, 1)
-		go func() {
-			_, err := endpoint.MTPTransfer(MTPTransferRequest{
-				ProtocolData: params.NewProtocolDataPayload(
-					originatingPointCode, pointCode, params.ServiceIndSCCP, 0, 0, 1, []byte(payload)),
-			})
-			done <- err
-		}()
-		return done
+	first, err := endpoint.aspRoutes.lockTransferSequence(firstRequest)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	firstDone := send(0x111111, "first")
-	select {
-	case <-firstStarted:
-	case <-time.After(time.Second):
-		t.Fatal("the first MTPTransfer did not reach the transport")
-	}
-	secondDone := send(0x222222, "second")
-	select {
-	case <-secondStarted:
-	case <-time.After(time.Second):
-		close(releaseFirst)
-		<-firstDone
+	// Hold the ordering lock: independent flows still share the socket's
+	// submission gate, so a parked transport write cannot prove this property.
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := endpoint.MTPTransfer(MTPTransferRequest{
+			ProtocolData: params.NewProtocolDataPayload(
+				0x222222, pointCode, params.ServiceIndSCCP, 0, 0, 1, []byte("second")),
+		})
+		secondDone <- err
+	}()
+	err, returned := contextResult(secondDone)
+	first.release()
+	if !returned {
 		<-secondDone
 		t.Fatal("a request with a different Originating Point Code waited behind another flow")
 	}
-	close(releaseFirst)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first MTPTransfer: %v", err)
-	}
-	if err := <-secondDone; err != nil {
+	if err != nil {
 		t.Fatalf("second MTPTransfer: %v", err)
+	}
+	capture := captures["sg-a/sgp-a1"]
+	if capture.count() != 1 {
+		t.Fatalf("independent flow submissions = %d, want 1", capture.count())
+	}
+	if _, err := endpoint.MTPTransfer(firstRequest); err != nil {
+		t.Fatalf("first MTPTransfer after releasing its flow: %v", err)
+	}
+	if capture.count() != 2 {
+		t.Fatalf("submissions after releasing both flows = %d, want 2", capture.count())
 	}
 }
 

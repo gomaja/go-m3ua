@@ -114,7 +114,7 @@ type applicationServer struct {
 	// deliveryMu orders DATA messages within this AS. State changes use mu
 	// independently, so a peer that stops reading cannot hold teardown behind a
 	// blocked socket write; closing that socket is what releases the write.
-	deliveryMu sync.Mutex
+	deliveryMu contextMutex
 	mu         sync.Mutex
 	// asps is every association that has claimed this Routing Context, and the
 	// ASP state each is in.
@@ -1216,7 +1216,7 @@ func (r *applicationServers) quiesceASPFor(c *Association, rtCtxs []uint32) func
 	}
 }
 
-func waitForTrafficBarrier(mu *sync.Mutex) {
+func waitForTrafficBarrier(mu sync.Locker) {
 	mu.Lock()
 	defer mu.Unlock()
 }

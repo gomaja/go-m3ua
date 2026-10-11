@@ -381,44 +381,14 @@ func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testi
 func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
-	endpoint, associations, _ := newASPTransferFixture(t, config)
-	firstWriteStarted := make(chan struct{})
-	releaseFirstWrite := make(chan struct{})
-	secondWriteStarted := make(chan struct{})
-	firstAssociation := associations["sg-a/sgp-a1"]
-	firstAssociation.dataWriter = func(raw []byte, _ *sctp.SndInfo) (int, error) {
-		payload, err := capturedMTPTransferPayload(raw)
-		if err != nil {
-			return 0, err
-		}
-		switch payload {
-		case "first":
-			close(firstWriteStarted)
-			<-releaseFirstWrite
-		case "second":
-			close(secondWriteStarted)
-		}
-		return len(raw), nil
+	endpoint, _, captures := newASPTransferFixture(t, config)
+	firstRequest := MTPTransferRequest{ProtocolData: transferProtocolData(0x123456, 4, []byte("first"))}
+	first, err := endpoint.aspRoutes.lockTransferSequence(firstRequest)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	firstDone := make(chan error, 1)
-	go func() {
-		_, err := endpoint.MTPTransfer(MTPTransferRequest{
-			ProtocolData: transferProtocolData(0x123456, 4, []byte("first")),
-		})
-		firstDone <- err
-	}()
-	select {
-	case <-firstWriteStarted:
-	case <-time.After(time.Second):
-		// The deadline expiring does not mean the write never starts, and a
-		// write left blocked here holds the Endpoint's in-flight operation
-		// count, which Close waits on. Releasing it first turns a loaded
-		// machine's missed deadline into a failure rather than a hang.
-		close(releaseFirstWrite)
-		<-firstDone
-		t.Fatal("first MTPTransfer did not reach the first Signalling Gateway")
-	}
+	// Hold the flow's ordering barrier, rather than a socket write: transport
+	// submissions on one socket serialize even when their flows differ.
 	secondDone := make(chan error, 1)
 	go func() {
 		_, err := endpoint.MTPTransfer(MTPTransferRequest{
@@ -426,20 +396,19 @@ func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
 		})
 		secondDone <- err
 	}()
-	select {
-	case <-secondWriteStarted:
-	case <-time.After(time.Second):
-		close(releaseFirstWrite)
-		<-firstDone
+	err, returned := contextResult(secondDone)
+	first.release()
+	if !returned {
 		<-secondDone
 		t.Fatal("independent MTP traffic flow waited for a blocked flow")
 	}
-	close(releaseFirstWrite)
-	if err := <-firstDone; err != nil {
-		t.Fatalf("first MTPTransfer: %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := <-secondDone; err != nil {
-		t.Fatalf("second MTPTransfer: %v", err)
+	for identity, capture := range captures {
+		if capture.count() != 1 {
+			t.Fatalf("%s submissions = %d, want 1", identity, capture.count())
+		}
 	}
 }
 

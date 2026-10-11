@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"container/list"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -338,6 +339,29 @@ type aspCongestionDecision struct {
 // MTPTransfer selects the SGP, Association, and SCTP stream for one
 // MTP-TRANSFER request as required by RFC 4666 Section 5.5.1.1.1.
 func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, error) {
+	return e.MTPTransferContext(context.Background(), request)
+}
+
+// MTPTransferContext selects and sends one MTP-TRANSFER request with per-call
+// cancellation. It observes ctx before admission, while waiting for the flow's
+// ordering lock and the selected association's activation barrier, and during
+// the socket admission and send-buffer waits described by WriteDataContext.
+// Congestion policy callbacks run synchronously and must return before the call
+// can observe cancellation again. ctx must be non-nil.
+//
+// Cancellation before selection returns a *DataWriteError with DataNotSent and
+// a cause matching ctx.Err() through errors.Is. After selection, each failed
+// path in *MTPTransferError carries its own *DataWriteError: DataNotSent means
+// no octet was accepted and no submission remains pending; DataSendIndeterminate
+// means resending could duplicate DATA. Paths already accepted remain in
+// SuccessfulPaths, including when cancellation interrupts a broadcast. They
+// are not retracted, and the request is never retried on another path. Acceptance
+// does not prove peer delivery (RFC 4666 §3.3.1). MTPTransfer uses
+// context.Background().
+func (e *Endpoint) MTPTransferContext(ctx context.Context, request MTPTransferRequest) (MTPTransferResult, error) {
+	if err := ctx.Err(); err != nil {
+		return MTPTransferResult{}, newDataNotSent(ASKey{}, 0, err)
+	}
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return MTPTransferResult{}, ErrUnsupportedRole
 	}
@@ -361,13 +385,19 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 		e.aspRoutes.config.congestionPolicy,
 		request.ProtocolData.MessagePriority,
 	)
-	sequence, err := e.aspRoutes.lockTransferSequence(request)
+	sequence, err := e.aspRoutes.lockTransferSequenceContext(ctx, request)
 	if err != nil {
+		if ctx.Err() != nil {
+			return MTPTransferResult{}, newDataNotSent(ASKey{}, 0, ctx.Err())
+		}
 		return MTPTransferResult{}, err
 	}
 	defer sequence.release()
 
 	targets, err := e.aspRoutes.selectTransfer(request, congestionDecision, e.ssnm)
+	if ctx.Err() != nil {
+		return MTPTransferResult{}, newDataNotSent(ASKey{}, 0, ctx.Err())
+	}
 	if err != nil {
 		return MTPTransferResult{}, err
 	}
@@ -381,7 +411,7 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 	failures := make([]MTPTransferFailure, 0)
 	for _, target := range targets {
 		description := target.describe()
-		written, writeErr := target.association.writeMTPTransfer(request, target.as)
+		written, writeErr := target.association.writeMTPTransferContext(ctx, request, target.as)
 		if writeErr != nil {
 			failures = append(failures, MTPTransferFailure{Target: description, Err: writeErr})
 			continue
@@ -418,6 +448,13 @@ type aspTransferSequence struct {
 }
 
 func (r *aspRoutes) lockTransferSequence(request MTPTransferRequest) (aspTransferSequence, error) {
+	return r.lockTransferSequenceContext(context.Background(), request)
+}
+
+func (r *aspRoutes) lockTransferSequenceContext(ctx context.Context, request MTPTransferRequest) (aspTransferSequence, error) {
+	if err := ctx.Err(); err != nil {
+		return aspTransferSequence{}, err
+	}
 	r.mu.RLock()
 	mtpRoute, err := r.resolveTransferMTPRouteLocked(request.MTPRoute, request.ProtocolData)
 	r.mu.RUnlock()
@@ -441,16 +478,25 @@ func (r *aspRoutes) lockTransferSequence(request MTPTransferRequest) (aspTransfe
 	flowLock.references++
 	r.transferSequenceMu.Unlock()
 
-	flowLock.mu.Lock()
-	return aspTransferSequence{routes: r, flowKey: flowKey, flowLock: flowLock}, nil
+	sequence := aspTransferSequence{routes: r, flowKey: flowKey, flowLock: flowLock}
+	if err := flowLock.mu.LockContext(ctx); err != nil {
+		sequence.retire()
+		return aspTransferSequence{}, err
+	}
+	return sequence, nil
 }
 
 // release unlocks the flow and, once no transfer holds or waits for it,
 // retires its lock. A retired lock is unlocked and unreferenced, so reusing it
 // for any later flow is safe.
 func (sequence aspTransferSequence) release() {
-	routes := sequence.routes
 	sequence.flowLock.mu.Unlock()
+	sequence.retire()
+}
+
+// retire drops either a holder's or a cancelled waiter's reference.
+func (sequence aspTransferSequence) retire() {
+	routes := sequence.routes
 	routes.transferSequenceMu.Lock()
 	sequence.flowLock.references--
 	if sequence.flowLock.references == 0 {
@@ -1096,11 +1142,13 @@ func (r *aspRoutes) invalidateAssociationTransferFlowsLocked(association *Associ
 	}
 }
 
-func (c *Association) writeMTPTransfer(request MTPTransferRequest, key ASKey) (int, error) {
+func (c *Association) writeMTPTransferContext(ctx context.Context, request MTPTransferRequest, key ASKey) (int, error) {
 	if c == nil || c.role != RoleASP || request.ProtocolData == nil {
 		return 0, ErrInvalidMTPTransfer
 	}
-	c.aspTransferMu.RLock()
+	if err := c.aspTransferMu.RLockContext(ctx); err != nil {
+		return 0, newDataNotSent(key, 0, err)
+	}
 	defer c.aspTransferMu.RUnlock()
 	if !aspAssociationEligibleForAS(c, key) {
 		return 0, newDataNotSent(key, 0, ErrRoutingContextNotActive)
@@ -1121,8 +1169,8 @@ func (c *Association) writeMTPTransfer(request MTPTransferRequest, key ASKey) (i
 	if err := c.checkDataStream(stream); err != nil {
 		return 0, newDataNotSent(key, 0, err)
 	}
-	if err := c.submitData(c.encodeDataFrame(&data), stream); err != nil {
-		return 0, newDataSubmissionError(key, stream, err)
+	if err := c.submitDataContext(ctx, c.encodeDataFrame(&data), key, stream); err != nil {
+		return 0, err
 	}
 	return len(data.ProtocolData.Data), nil
 }

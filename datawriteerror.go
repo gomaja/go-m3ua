@@ -50,7 +50,8 @@ func (o DataSendOutcome) String() string {
 }
 
 // DataWriteError is the error every failed DATA send reports, whether it came
-// from WriteData or from WriteSignal carrying a DATA message.
+// from WriteData, WriteDataContext, an Endpoint-selected MTP-TRANSFER path,
+// or WriteSignal carrying a DATA message.
 //
 // It classifies the failure without hiding it: Unwrap returns the cause, so
 // errors.Is and errors.As reach the sentinel, the *RoutingContextError, the

@@ -33,8 +33,8 @@ const M3UAPPID uint32 = 3
 // It is not a net.Conn and deliberately not a byte stream: M3UA is
 // message-oriented, and every DATA message carries its own MTP3 routing label,
 // Application Server scope and stream selection (RFC 4666 Section 3.3.1). The
-// I/O surface is WriteData and ReadData, which carry those per message. The
-// address, close and deadline operations remain, because they describe the
+// I/O surface is WriteData, WriteDataContext and ReadData, which carry those
+// per-message values. The address, close and deadline operations describe the
 // transport rather than the message.
 //
 // An association ends once, whatever ends it -- Close, Abort, ShutdownContext,
@@ -100,7 +100,7 @@ type Association struct {
 	role Role
 	// aspTransferMu keeps a selected ASP MTP-TRANSFER write ordered before a
 	// concurrent loss of the Association or its active Application Server scope.
-	aspTransferMu sync.RWMutex
+	aspTransferMu contextRWMutex
 	// state is to see the current state
 	state State
 	// localIPSPState is the local IPSP's state for traffic directed to this
@@ -299,7 +299,7 @@ type Association struct {
 	asReservation *applicationServerReservation
 	// unscopedDeliveryMu covers peer-directed DATA on an IPSP and DATA/SSNM on
 	// a dedicated association where no Routing Context was coordinated.
-	unscopedDeliveryMu sync.Mutex
+	unscopedDeliveryMu contextMutex
 	// localIPSPSSNMDeliveryMu is the independent Double Exchange barrier for
 	// local-directed SCON. RFC 4666 Section 3.4.4 lets an M3UA layer send SCON
 	// "indicating that the congestion level of the M3UA layer or the ASP has
@@ -386,9 +386,17 @@ type Association struct {
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
 	dataWriter func([]byte, *sctp.SndInfo) (int, error)
-	// applicationWriteDeadline records whether DATA sends should wait for socket
-	// buffer space. The socket itself enforces the deadline when it is set.
-	applicationWriteDeadline atomic.Bool
+	// sendMu owns every SendMsg on this socket, including control replies and
+	// deadline-bound writes. A context send can therefore abandon admission
+	// here without entering go-sctp's uncancellable send-mutex wait.
+	sendMu contextMutex
+	// applicationWriteDeadline is nil or an immutable copy of the write deadline.
+	// Keeping time.Time preserves its monotonic clock and dates outside UnixNano's
+	// range. The socket enforces it too; context sends consult it between retries.
+	applicationWriteDeadline atomic.Pointer[time.Time]
+	// writeDeadlineMu keeps concurrent setters' socket update and local copy in
+	// the same order. It is never acquired by the DATA hot path.
+	writeDeadlineMu sync.Mutex
 	// Abort can interrupt a graceful transport close after the M3UA teardown
 	// has started. These channels separate the start and end of that release.
 	gracefulReleaseStarted chan struct{}
@@ -753,11 +761,13 @@ func (c *Association) setUpSocket() error {
 	return nil
 }
 
+// writeSCTPData requires sendMu and preserves the legacy deadline behavior.
+// Context submissions instead retry NoWait while holding the same gate.
 func (c *Association) writeSCTPData(data []byte, info *sctp.SndInfo) (int, error) {
 	if c.dataWriter != nil {
 		return c.dataWriter(data, info)
 	}
-	return c.sctpConn.SendMsg(data, sctp.SendOptions{Info: info, NoWait: !c.applicationWriteDeadline.Load()})
+	return c.controlSender().SendMsg(data, sctp.SendOptions{Info: info, NoWait: c.applicationWriteDeadline.Load() == nil})
 }
 
 func (c *Association) inboundDataActive() bool {
@@ -917,6 +927,8 @@ const (
 // wait: closing the SCTP association releases any write parked in the poller
 // before the descriptor goes.
 func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	transport := c.controlSender()
 	_, err := transport.SendMsg(frame, sctp.SendOptions{Info: info, NoWait: true})
 	if !sendBufferFull(err) {
@@ -1061,7 +1073,9 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	if origin == libraryWrite {
 		err = c.writeControlFrame(buf, &sctpInfo)
 	} else {
-		_, err = c.controlSender().SendMsg(buf, sctp.SendOptions{Info: &sctpInfo, NoWait: !c.applicationWriteDeadline.Load()})
+		c.sendMu.Lock()
+		_, err = c.controlSender().SendMsg(buf, sctp.SendOptions{Info: &sctpInfo, NoWait: c.applicationWriteDeadline.Load() == nil})
+		c.sendMu.Unlock()
 	}
 	if err != nil {
 		return 0, fmt.Errorf("failed to write M3UA: %w", err)
@@ -1633,6 +1647,9 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 }
 
 func (c *Association) closeTransport() error {
+	// Release bypasses sendMu: a parked send owns that gate, and closing the
+	// transport must be able to wake it. go-sctp's release and SCTP shutdown
+	// paths do not acquire its send mutex. Abort must bypass the gate too.
 	if c.transportCloser != nil {
 		return c.transportCloser()
 	}
@@ -1727,7 +1744,8 @@ func (c *Association) readTimeout() (<-chan time.Time, func(), bool) {
 	return timer.C, func() { timer.Stop() }, false
 }
 
-// SetWriteDeadline sets the deadline for future WriteData and WriteSignal calls.
+// SetWriteDeadline sets the deadline for future WriteData, WriteDataContext
+// and WriteSignal calls.
 // A zero time removes it.
 //
 // The deadline belongs to the SCTP socket, so it also governs the messages the
@@ -1738,10 +1756,16 @@ func (c *Association) readTimeout() (<-chan time.Time, func(), bool) {
 // os.ErrDeadlineExceeded rather than ErrControlWriteTimeout: the message could
 // not be sent, and nothing can wait beyond a deadline the socket enforces.
 func (c *Association) SetWriteDeadline(t time.Time) error {
+	c.writeDeadlineMu.Lock()
+	defer c.writeDeadlineMu.Unlock()
 	if err := c.sctpConn.SetWriteDeadline(t); err != nil {
 		return err
 	}
-	c.applicationWriteDeadline.Store(!t.IsZero())
+	var deadline *time.Time
+	if !t.IsZero() {
+		deadline = &t
+	}
+	c.applicationWriteDeadline.Store(deadline)
 	return nil
 }
 

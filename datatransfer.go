@@ -5,11 +5,15 @@
 package m3ua
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"os"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
 )
 
 // DataRequest is one outbound DATA message.
@@ -78,6 +82,30 @@ const (
 // application that owns outbound selection has already made that decision, and
 // SSNM state is published to it separately.
 func (c *Association) WriteData(request DataRequest) (int, error) {
+	return c.WriteDataContext(context.Background(), request)
+}
+
+// WriteDataContext sends one DATA message with cancellation for this call.
+// It observes ctx before admission, while waiting for Application Server and
+// association delivery barriers, while waiting behind any sender on the socket,
+// and while waiting for send-buffer space under an association write deadline.
+// Without a write deadline, a full buffer still returns EAGAIN immediately.
+// It neither changes socket deadlines nor cancels other sends.
+//
+// A cancellation before any octet is accepted returns zero and a *DataWriteError
+// with Outcome DataNotSent and a cause matching ctx.Err() through errors.Is.
+// The call retains no pending submission after returning DataNotSent. A failure
+// after acceptance may have begun has Outcome DataSendIndeterminate: resending
+// could duplicate DATA. A completed acceptance returns success even if ctx is
+// cancelled concurrently; success says nothing about delivery to the peer
+// (RFC 4666 §3.3.1). The transport's single nonblocking attempt must finish
+// before the call can determine its outcome.
+//
+// ctx must be non-nil. WriteData uses context.Background().
+func (c *Association) WriteDataContext(ctx context.Context, request DataRequest) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, newDataNotSent(request.AS, 0, err)
+	}
 	if !c.outboundDataActive() {
 		return 0, newDataNotSent(request.AS, 0, ErrNotEstablished)
 	}
@@ -101,34 +129,101 @@ func (c *Association) WriteData(request DataRequest) (int, error) {
 	// only across the transport write, not across marshalling.
 	frame := c.encodeDataFrame(&request)
 
-	release, err := c.admitDataWrite(request.AS)
+	release, err := c.admitDataWriteContext(ctx, request.AS)
 	if err != nil {
 		return 0, newDataNotSent(request.AS, stream, err)
 	}
 	defer release()
 
-	if err := c.submitData(frame, stream); err != nil {
-		return 0, newDataSubmissionError(request.AS, stream, err)
+	if err := c.submitDataContext(ctx, frame, request.AS, stream); err != nil {
+		return 0, err
 	}
 	return len(request.ProtocolData.Data), nil
 }
 
-// submitData hands one encoded message to the transport. The transport has seen
-// the message, so its errors are indeterminate unless the transport refused
-// the message whole; newDataSubmissionError tells the two apart.
-func (c *Association) submitData(frame []byte, stream uint16) error {
+// submitDataContext owns the socket gate across submission. Every other
+// SendMsg takes the same gate, so NoWait cannot queue on go-sctp's send mutex.
+func (c *Association) submitDataContext(ctx context.Context, frame []byte, key ASKey, stream uint16) error {
+	if err := c.sendMu.LockContext(ctx); err != nil {
+		return newDataNotSent(key, stream, err)
+	}
+	defer c.sendMu.Unlock()
 	// Copied by value: the template is shared by every send on this
 	// association, and only the stream varies per message.
 	info := *c.sctpInfo
 	info.Stream = stream
-	written, err := c.writeSCTPData(frame, &info)
-	if err != nil {
-		return err
+	if ctx.Done() == nil {
+		written, err := c.writeSCTPData(frame, &info)
+		if result := dataSubmissionResult(key, stream, len(frame), written, err); result != nil {
+			return result
+		}
+		return nil
 	}
-	if written != len(frame) {
-		// An M3UA message is one SCTP user message, so a partial acceptance
-		// cannot be completed by sending the remainder.
-		return ErrPartialDataWrite
+
+	waitForSpace := c.applicationWriteDeadline.Load() != nil
+	var retry *time.Timer
+	defer func() {
+		if retry != nil {
+			retry.Stop()
+		}
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return newDataNotSent(key, stream, err)
+		}
+		if deadline := c.applicationWriteDeadline.Load(); deadline != nil && !time.Now().Before(*deadline) {
+			return newDataNotSent(key, stream, os.ErrDeadlineExceeded)
+		}
+		var written int
+		var err error
+		if c.dataWriter != nil {
+			written, err = c.dataWriter(frame, &info)
+		} else {
+			written, err = c.controlSender().SendMsg(frame, sctp.SendOptions{Info: &info, NoWait: true})
+		}
+		if written != 0 || !sendBufferFull(err) || !waitForSpace {
+			// Once an attempt succeeds, cancellation cannot retract it. On an
+			// error retain both causes without turning uncertainty into a
+			// promise that nothing was submitted.
+			result := dataSubmissionResult(key, stream, len(frame), written, err)
+			if result != nil && ctx.Err() != nil {
+				result.Err = errors.Join(result.Err, ctx.Err())
+			}
+			if result != nil {
+				return result
+			}
+			return nil
+		}
+		// NoWait refused the whole message (RFC 6458 §3.1.4). go-sctp has
+		// no per-call poller wake-up, so the uncommon deadline-bound context
+		// path retries at 1 ms intervals. The timer is reused, and cancellation
+		// wakes this wait directly. There is no detached send to finish later.
+		if retry == nil {
+			retry = time.NewTimer(time.Millisecond)
+		} else {
+			retry.Reset(time.Millisecond)
+		}
+		select {
+		case <-ctx.Done():
+			return newDataNotSent(key, stream, ctx.Err())
+		case <-c.done:
+			return newDataNotSent(key, stream, errors.Join(ErrAssociationClosed, ctx.Err()))
+		case <-retry.C:
+		}
+	}
+}
+
+func dataSubmissionResult(key ASKey, stream uint16, size, written int, err error) *DataWriteError {
+	if err != nil {
+		if written > 0 {
+			return newDataSendIndeterminate(key, stream, err)
+		}
+		return newDataSubmissionError(key, stream, err)
+	}
+	if written != size {
+		// RFC 4666 §3.3.1 defines one DATA message; a partially accepted
+		// SCTP user message cannot be completed by sending the remainder.
+		return newDataSendIndeterminate(key, stream, ErrPartialDataWrite)
 	}
 	return nil
 }
@@ -273,8 +368,8 @@ func (c *Association) writeRawData(
 		}
 		return written, nil
 	}
-	if err := c.submitData(frame, stream); err != nil {
-		return 0, newDataSubmissionError(scope, stream, err)
+	if err := c.submitDataContext(context.Background(), frame, scope, stream); err != nil {
+		return 0, err
 	}
 	return encoded, nil
 }
