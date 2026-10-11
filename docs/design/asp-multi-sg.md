@@ -255,6 +255,9 @@ Configuration validation rejects:
   neither;
 - an `ASKey` carrying a Network Appearance or Routing Context value while its
   corresponding presence field is false;
+- a repeated static Routing Context within one SGP's Application Server
+  inventory, including explicit zero and entries with different Network
+  Appearances (RFC 4666 Sections 1.2 and 1.4.2.1);
 - negative flow-cache or indication-queue sizes;
 - SSNM per-SG reservations that do not fit the Endpoint limit;
 - invalid point-code masks or point-code values.
@@ -262,6 +265,12 @@ Configuration validation rejects:
 Overlapping MTP Routes are permitted because an application may name one
 explicitly. An MTP-TRANSFER request that omits `MTPRoute` is rejected when its
 routing label has more than one equally specific best match.
+
+Routing Context uniqueness is per SGP inventory; different SGPs may reuse the
+same value. Registration results are also checked before installation: one
+Routing Context cannot bind two provisioned canonical Application Servers,
+even when their wire scopes otherwise match. Re-registration of the same
+canonical Application Server remains permitted.
 
 ### Selection modes
 

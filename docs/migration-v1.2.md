@@ -161,6 +161,17 @@ Mode. An Association may declare at most one contextless Application Server, and
 not beside Routing-Context-scoped ones, because a message that omitted the
 Routing Context would otherwise name both.
 
+Routing Contexts must also be unique within each association inventory,
+including explicit zero. Two entries with different Network Appearances or
+Traffic Modes cannot reuse a Routing Context; identical duplicates are refused
+as well (RFC 4666 Sections 1.2 and 1.4.2.1). The configuration error names the
+duplicated value. This also applies to each SGP's static Application Server
+inventory in `ASPConfig.SignallingGateways`, and separately to `TrafficToLocal`
+and `TrafficToPeer` in IPSP Double Exchange. Independent SGPs and directions
+may reuse a value. A registration result that assigns one Routing Context to
+two provisioned canonical Application Servers is refused before installing
+the results.
+
 ## The I/O break: `net.Conn` is gone
 
 v1.1 presented an association as something close to a `net.Conn`, with `Read`,

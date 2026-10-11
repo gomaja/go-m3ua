@@ -437,6 +437,7 @@ type Association struct {
 	rkmCorrelationMu                 sync.Mutex
 	rkmPendingLocalIDs               map[uint32]struct{}
 	rkmRegistrationRequests          map[uint32]RoutingKeyRegistrationRequest
+	rkmRegistrationRemoteAS          map[uint32]SGASKey
 	rkmDeliveredRegistrationResults  map[uint32]RoutingKeyRegistrationResult
 	rkmUnresolvedRegistrations       map[uint32]RoutingKeyRegistrationRequest
 	rkmPendingDeregistrationRCs      map[uint32]struct{}
