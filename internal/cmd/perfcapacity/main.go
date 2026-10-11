@@ -120,10 +120,11 @@ type runEnvironment struct {
 }
 
 type response struct {
-	Decision     string                 `json:"decision"`
-	Environments []runEnvironment       `json:"environments,omitempty"`
-	SearchStatus perfstats.SearchStatus `json:"search_status,omitempty"`
-	SelectedRate int                    `json:"selected_rate,omitempty"`
+	Decision     string                     `json:"decision"`
+	Environments []runEnvironment           `json:"environments,omitempty"`
+	SearchStatus perfstats.SearchStatus     `json:"search_status,omitempty"`
+	SelectedRate int                        `json:"selected_rate,omitempty"`
+	Bracket      *perfstats.CapacityBracket `json:"bracket,omitempty"`
 	// Hint metadata is absent for ordinary searches. Used means the hint
 	// selected a pending probe; the recorded outcomes remain its evidence.
 	UpperHint     *int  `json:"upper_hint,omitempty"`
@@ -268,6 +269,7 @@ func evaluate(decoded request) (response, error) {
 		return response{}, fmt.Errorf("repetition %d: no validation repetition is pending (status %q)", repetitionIndex+1, search.Status())
 	}
 	result.SearchStatus = search.Status()
+	result.Bracket = search.Bracket()
 	if decoded.UpperHint != nil {
 		used := search.UpperHintUsed()
 		result.UpperHint = decoded.UpperHint

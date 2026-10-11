@@ -99,6 +99,22 @@ one straddle at a probe rate of 28,000/s, the response includes:
 }
 ```
 
+When the search holds both measured bounds, the response includes
+`"bracket": {"lower": L, "upper": U}`. The lower is the current demonstrated
+passing rate; the upper is the current failing or not-demonstrated rate,
+including any rate rejected during validation. For example, probes 37/pass
+and 38/fail followed by five passing repetitions at 37 report
+`"selected_rate": 37` and `"bracket": {"lower": 37, "upper": 38}`.
+If validation rejects 37 and the resumed search validates 36, the bracket
+becomes 36/37 even when the original `upper_hint` was 38.
+
+The field is absent whenever either bound is missing, including a search
+that reaches `maximum` without an upper bound. It is also present while a
+search is unfinished or ends with a non-pass decision if both bounds exist,
+such as probe-budget exhaustion. The bracket describes search state; only
+`decision: "pass"` certifies a validated capacity, and `selected_rate` retains
+its existing meaning.
+
 Each entry in `probe_decisions` and `repetition_decisions` retains its run's
 decision, reason and `search_outcome`, and adds `attempt` and `max_attempts`.
 Attempts 1 and 2 that straddle report `search_outcome: "backlog-undecided"`
