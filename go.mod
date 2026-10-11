@@ -3,9 +3,9 @@ module github.com/gomaja/go-m3ua
 go 1.26
 
 require (
-	github.com/gomaja/go-sctp v1.1.1-0.20261010090839-614ae6465de4
+	github.com/gomaja/go-sctp v0.0.0-20261011145106-fb1185169ee7
 	github.com/google/go-cmp v0.7.0
 	github.com/pascaldekloe/goe v0.1.1
 )
 
-retract [v1.0.0, v1.2.0] // superseded: go get github.com/gomaja/go-m3ua@main
+retract [v1.0.0, v1.3.1] // superseded: go get github.com/gomaja/go-m3ua@main

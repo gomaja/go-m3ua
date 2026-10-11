@@ -14,7 +14,24 @@ Applications upgrading from v1.0 should read the
 
 ### Installation
 
-Run `go get github.com/gomaja/go-m3ua@main` in your project's directory.
+`main` is the only supported version. Run `go get github.com/gomaja/go-m3ua`
+or `go get github.com/gomaja/go-m3ua@main` in your project's directory; both
+resolve to the newest commit on `main`, recorded as a `v0.0.0-…` pseudo-version.
+Every published version, v1.0.0 through v1.3.1, is retracted; v1.3.1 exists
+only to carry the retraction in its `go.mod`, because
+[Go reads retractions from the newest version](https://go.dev/ref/mod#go-mod-file-retract).
+
+If your module still requires an earlier version, including a
+`v1.3.1-0.…` pseudo-version, move both modules together:
+
+```sh
+go get github.com/gomaja/go-m3ua@main github.com/gomaja/go-sctp@main
+```
+
+Go reports this move as a downgrade: the earlier versions sort above
+`main`'s `v0.0.0-…` pseudo-versions, so `go get -u` does not move those pins.
+Moving go-sctp alone while go-m3ua still requires its old pin removes go-m3ua
+from `go.mod`, because no published go-m3ua version accepts go-sctp's `main`.
 
 **Requirements:** Linux 5.0 or later for SCTP associations; Rocky Linux / RHEL 9 is the primary target.
 
