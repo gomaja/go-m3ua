@@ -108,6 +108,15 @@ carries the Traffic Mode agreed for that one Application Server — not for the
 association. An empty inventory is the contextless Application Server of RFC
 4666 Section 3.6.1.
 
+Each Routing Context must occur only once in an association's inventory,
+including explicit zero, regardless of Network Appearance or Traffic Mode
+(RFC 4666 Sections 1.2 and 1.4.2.1). Identical duplicate declarations are also
+refused. Configuration errors name the reused Routing Context. The same rule
+applies to each SGP's static `RemoteASConfig` inventory and to each independent
+direction of IPSP Double Exchange; separate SGPs or directions may reuse a value.
+Registration results cannot bind one Routing Context to two provisioned
+canonical Application Servers, even when their Network Appearance values match.
+
 The configuration holds no message defaults. Every DATA carries its own MTP3
 routing label, Application Server scope and Correlation Id, as RFC 4666 Section
 3.3.1 defines them, so there is nothing about a message for an association to

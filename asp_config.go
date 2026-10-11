@@ -134,6 +134,10 @@ type RemoteASConfig struct {
 
 // SignallingGatewayProcessConfig provisions one SGP peer and the Application
 // Servers it serves for this ASP.
+// Static Routing Contexts must be unique within this SGP's inventory,
+// regardless of Network Appearance, including explicit zero (RFC 4666
+// §§1.2 and 1.4.2.1). Duplicate declarations are refused by NewEndpoint.
+// Different SGPs may reuse a Routing Context value.
 type SignallingGatewayProcessConfig struct {
 	ID                 SignallingGatewayProcessID
 	ApplicationServers []RemoteASConfig
@@ -554,6 +558,7 @@ func compileSGPApplicationServers(
 		routeCandidates:    make(map[MTPRouteID][]aspRouteCandidate),
 	}
 	staticKeys := compiled.asByStaticKey
+	staticRoutingContexts := make(map[uint32]RemoteASID, len(sgp.ApplicationServers))
 	dynamicKeys := make([]canonicalRoutingKey, 0, len(sgp.ApplicationServers))
 	contextless := false
 	for _, applicationServer := range sgp.ApplicationServers {
@@ -589,6 +594,16 @@ func compileSGPApplicationServers(
 				return aspSGPConfig{}, invalidASPConfig(
 					"Application Server %q of SGP %q in Signalling Gateway %q has Routing Context %d without presence",
 					applicationServer.ID, sgp.ID, signallingGateway, key.RoutingContext)
+			}
+			if key.RoutingContextSet {
+				// RFC 4666 §§1.2 and 1.4.2.1 require a 1:1 binding from
+				// Routing Context to Routing Key and Application Server.
+				if owner, exists := staticRoutingContexts[key.RoutingContext]; exists {
+					return aspSGPConfig{}, invalidASPConfig(
+						"Application Servers %q and %q of SGP %q in Signalling Gateway %q share Routing Context %d",
+						owner, applicationServer.ID, sgp.ID, signallingGateway, key.RoutingContext)
+				}
+				staticRoutingContexts[key.RoutingContext] = applicationServer.ID
 			}
 			if owner, exists := staticKeys[key]; exists {
 				return aspSGPConfig{}, invalidASPConfig(

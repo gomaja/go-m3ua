@@ -341,6 +341,8 @@ const (
 // the only thing the direction declares. RFC 4666 Section 5.6.2 keeps the two
 // directions of a Double Exchange independent, so neither reads the other's
 // membership, Network Appearance or Traffic Mode.
+// Each direction requires unique Routing Contexts, including explicit zero,
+// as ASConfig describes; the two directions may reuse the same value.
 //
 // A nil IPSPTrafficConfig is no traffic in that direction at all. A non-nil one
 // with an empty inventory is the contextless Application Server of Section
@@ -489,9 +491,11 @@ type ASPAuthorizer func(ASPIdentity) []uint32
 // Section 3.3.1 makes the Network Appearance "of local significance only,
 // coordinated between the SGP and ASP", and Section 1.4.2.1 makes a Routing
 // Context "an index into a sending node's Message Distribution Table", so the
-// pair identifies the Application Server and the Routing Context alone does
-// not. That pair is what a DataRequest names and what a received message is
-// resolved against.
+// pair is what a DataRequest names and what a received message is resolved
+// against. Within this inventory, each Routing Context must occur only once,
+// even if Network Appearance or Traffic Mode differs. RFC 4666 §§1.2 and
+// 1.4.2.1 give a Routing Context a 1:1 relationship with a Routing Key and its
+// Application Server. Identical duplicate declarations are also refused.
 //
 // An ASKey without a Routing Context is the contextless Application Server of
 // Section 3.6.1, the one an SGP serving a single Routing Key needs no Routing
@@ -580,6 +584,10 @@ type AssociationConfig struct {
 	// carries. It is the whole of the Association's membership: each entry
 	// names one Application Server by the exact ASKey a DataRequest must name,
 	// and carries the Traffic Mode agreed for that one Application Server.
+	// Routing Contexts must be unique, including explicit zero; changing the
+	// Network Appearance does not allow reuse. Duplicate declarations are
+	// refused when Dial or Listen configures the association, or when a
+	// listener's selected configuration is applied to an accepted association.
 	//
 	// An empty inventory is the contextless Application Server of RFC 4666
 	// Section 3.6.1 with no Network Appearance and no agreed Traffic Mode.
@@ -825,6 +833,7 @@ func validateIPSPTrafficConfig(name string, config *IPSPTrafficConfig) error {
 // two equal scopes compare unequal and is refused rather than normalized.
 func validateApplicationServers(name string, servers []ASConfig) error {
 	seen := make(map[ASKey]struct{}, len(servers))
+	seenRoutingContexts := make(map[uint32]struct{}, len(servers))
 	contextless := false
 	routingContextScoped := false
 	for _, server := range servers {
@@ -840,6 +849,16 @@ func validateApplicationServers(name string, servers []ASConfig) error {
 		if server.TrafficMode != 0 && !validTrafficMode(server.TrafficMode) {
 			return fmt.Errorf("%w: %s has undefined Traffic Mode %d for %+v",
 				ErrInvalidApplicationServerConfig, name, server.TrafficMode, key)
+		}
+		if key.RoutingContextSet {
+			// RFC 4666 §§1.2, 1.4.2.1 and 3.3.1: a Routing Context names
+			// one Routing Key and Application Server on this association.
+			// A different Network Appearance cannot disambiguate it.
+			if _, duplicate := seenRoutingContexts[key.RoutingContext]; duplicate {
+				return fmt.Errorf("%w: %s declares duplicate Routing Context %d",
+					ErrInvalidApplicationServerConfig, name, key.RoutingContext)
+			}
+			seenRoutingContexts[key.RoutingContext] = struct{}{}
 		}
 		if _, duplicate := seen[key]; duplicate {
 			return fmt.Errorf("%w: %s names %+v twice",

@@ -243,7 +243,7 @@ func TestASPInventoryApplicationServerBinding(t *testing.T) {
 			name: "explicit zero Network Appearance is not an absent one",
 			config: gateway(sgp(
 				RemoteASConfig{ID: "as-zero", ASKey: &ASKey{NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}},
-				RemoteASConfig{ID: "as-absent", ASKey: &ASKey{RoutingContext: 1, RoutingContextSet: true}},
+				RemoteASConfig{ID: "as-absent", ASKey: &ASKey{RoutingContext: 2, RoutingContextSet: true}},
 			)),
 		},
 		{

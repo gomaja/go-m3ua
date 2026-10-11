@@ -9,17 +9,14 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func sharedRoutingContextAssociation(testContext *testing.T, value uint32, explicit bool) *Association {
+func singleRoutingContextAssociation(testContext *testing.T, value uint32, explicit bool) *Association {
 	testContext.Helper()
 	cfg := newSGPAssociationConfigForTest(nil, 1, params.TrafficModeLoadshare, 7, []uint32{value})
-	second := cfg.ApplicationServers[0]
-	second.ASKey.NetworkAppearance = 9
-	cfg.ApplicationServers = append(cfg.ApplicationServers, second)
 	if explicit {
 		cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{value, value} }
 	}
 	if err := validateAssociationConfigForRole(RoleSGP, cfg); err != nil {
-		testContext.Fatalf("distinct ASKeys sharing an RC must be legal: %v", err)
+		testContext.Fatalf("single Routing Context must be legal: %v", err)
 	}
 	conn := newAssociation(RoleSGP, cfg)
 	conn.state = StateASPActive
@@ -31,11 +28,11 @@ func sharedRoutingContextAssociation(testContext *testing.T, value uint32, expli
 	return conn
 }
 
-// RFC 4666 Section 3.3.1 counts Routing Contexts, even when configuration
-// distinguishes the same RC by Network Appearance. Publish each RC once.
-func TestASPAuthorizationDeduplicatesRoutingContextAcrossNetworkAppearances(testContext *testing.T) {
+// Publish each RC once when static membership is also dynamically registered
+// (RFC 4666 Sections 3.3.1 and 4.4.1).
+func TestASPAuthorizationDeduplicatesStaticAndDynamicRoutingContext(testContext *testing.T) {
 	for _, explicit := range []bool{false, true} {
-		conn := sharedRoutingContextAssociation(testContext, 17, explicit)
+		conn := singleRoutingContextAssociation(testContext, 17, explicit)
 		owned := conn.staticallyConfiguredRoutingContexts()
 		if !slices.Equal(owned, []uint32{17}) {
 			testContext.Fatalf("explicit authorization %t: static contexts %v, want [17]", explicit, owned)
@@ -54,11 +51,11 @@ func TestASPAuthorizationDeduplicatesRoutingContextAcrossNetworkAppearances(test
 	}
 }
 
-// Preserve the existing first-declaration NA choice, dedicated-flow inference
-// and explicit-zero presence (RFC 4666 Sections 3.3.1 and 3.8.1).
-func TestDataSharedRoutingContextAcrossNetworkAppearancesPreservesInboundDecision(testContext *testing.T) {
+// Preserve dedicated-flow inference and explicit-zero presence for a valid
+// inventory (RFC 4666 Sections 3.3.1 and 3.8.1).
+func TestDataSingleRoutingContextPreservesInboundDecision(testContext *testing.T) {
 	for _, value := range []uint32{0, 17} {
-		conn := sharedRoutingContextAssociation(testContext, value, false)
+		conn := singleRoutingContextAssociation(testContext, value, false)
 		for _, peer := range []*params.Param{nil, params.NewRoutingContext(value)} {
 			if err := conn.validateDataRoutingContext(peer); err != nil {
 				testContext.Fatalf("RC %d, peer %v: %v", value, peer, err)
@@ -66,7 +63,7 @@ func TestDataSharedRoutingContextAcrossNetworkAppearancesPreservesInboundDecisio
 			if got, set := conn.receivedDataRoutingContext(peer); !set || got != value {
 				testContext.Fatalf("inferred (%d, %t), want (%d, true)", got, set, value)
 			}
-			data := inboundData(value, "shared context")
+			data := inboundData(value, "single context")
 			data.RoutingContext = peer
 			conn.handleData(context.Background(), data, nil)
 			select {
@@ -80,7 +77,7 @@ func TestDataSharedRoutingContextAcrossNetworkAppearancesPreservesInboundDecisio
 				testContext.Fatalf("DATA was not delivered: %v", <-conn.errChan)
 			}
 			if err := conn.validateDataNetworkAppearance(params.NewNetworkAppearance(9), peer); !errors.Is(err, ErrInvalidNetworkAppearance) {
-				testContext.Fatalf("second declaration changed first-NA selection: %v", err)
+				testContext.Fatalf("wrong Network Appearance accepted: %v", err)
 			}
 		}
 	}

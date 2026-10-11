@@ -33,6 +33,9 @@ type RoutingKeyRegistration struct {
 
 // RegisterRoutingKeys performs the RFC 4666 Section 4.4.1 Registration
 // procedure and returns one result in input order for every Routing Key.
+// On a provisioned ASP Endpoint, a Routing Context cannot be assigned to two
+// canonical Application Servers, even with matching Network Appearance.
+// Conflicting results are refused before installing any result in the batch.
 func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...RoutingKeyRegistration) ([]RoutingKeyRegistrationResult, error) {
 	if c == nil || (c.role != RoleASP && c.role != RoleIPSP) {
 		return nil, ErrUnsupportedRole
@@ -92,6 +95,17 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 	if err != nil {
 		return nil, err
 	}
+	// RFC 4666 §4.4.1 correlates a REG RSP by Local RK Identifier. Keep its
+	// canonical AS identity with that identifier until even a late outcome is
+	// resolved, so cancellation cannot bypass the 1:1 binding of §1.4.2.1.
+	c.rkmCorrelationMu.Lock()
+	if c.rkmRegistrationRemoteAS == nil {
+		c.rkmRegistrationRemoteAS = make(map[uint32]SGASKey, len(requests))
+	}
+	for index, request := range requests {
+		c.rkmRegistrationRemoteAS[request.LocalRoutingKeyIdentifier] = remoteASKeys[index]
+	}
+	c.rkmCorrelationMu.Unlock()
 	requestWritten := false
 	completed := false
 	defer func() { c.endRegistrationResponseCorrelation(requestWritten, completed) }()
@@ -522,6 +536,7 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	lateRequests := make(map[uint32]RoutingKeyRegistrationRequest, len(results))
 	for _, decoded := range results {
 		identifier := decoded.result.LocalRoutingKeyIdentifier
+		decoded.result.RemoteAS = c.rkmRegistrationRemoteAS[identifier]
 		if request, late := c.rkmUnresolvedRegistrations[identifier]; late {
 			if previous, duplicate := lateResults[identifier]; duplicate {
 				if previous != decoded.result {
@@ -576,6 +591,7 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	}
 	for identifier := range lateResults {
 		delete(c.rkmUnresolvedRegistrations, identifier)
+		delete(c.rkmRegistrationRemoteAS, identifier)
 	}
 	c.rkmCorrelationMu.Unlock()
 
@@ -803,6 +819,11 @@ func (c *Association) endRegistrationResponseCorrelation(requestWritten, complet
 			c.rkmUnresolvedRegistrations[identifier] = requests[identifier]
 		}
 	}
+	for identifier := range requests {
+		if _, unresolved := c.rkmUnresolvedRegistrations[identifier]; !unresolved {
+			delete(c.rkmRegistrationRemoteAS, identifier)
+		}
+	}
 	c.rkmAwaiting = rkmAwaitingNone
 	c.rkmPendingLocalIDs = nil
 	c.rkmRegistrationRequests = nil
@@ -845,6 +866,7 @@ type assignedRegistrationResultScope struct {
 	key            ASKey
 	trafficMode    uint32
 	trafficModeSet bool
+	remoteAS       RemoteASID
 }
 
 func (c *Association) applyRegistrationResults(applications []registrationResultApplication) error {
@@ -866,10 +888,13 @@ func (c *Association) applyRegistrationResults(applications []registrationResult
 	assigned := make(map[uint32]assignedRegistrationResultScope, len(configuredContexts)+len(applications))
 	for _, routingContext := range configuredContexts {
 		trafficMode, trafficModeSet := trafficModes.configured(routingContext)
+		key := c.staticASKeyForRoutingContext(routingContext, local)
+		remoteAS, _ := c.canonicalRemoteASFor(key)
 		assigned[routingContext] = assignedRegistrationResultScope{
-			key:            c.staticASKeyForRoutingContext(routingContext, local),
+			key:            key,
 			trafficMode:    trafficMode,
 			trafficModeSet: trafficModeSet,
+			remoteAS:       remoteAS,
 		}
 	}
 	c.muDynamicASKeys.RLock()
@@ -886,6 +911,7 @@ func (c *Association) applyRegistrationResults(applications []registrationResult
 			return NewInvalidRoutingContextError(routingContext)
 		}
 		scope.key = key
+		scope.remoteAS, _ = c.canonicalRemoteASFor(key)
 		if trafficMode, ok := dynamicTrafficModes[routingContext]; ok {
 			if scope.trafficModeSet && scope.trafficMode != trafficMode {
 				c.muDynamicASKeys.RUnlock()
@@ -920,6 +946,17 @@ func (c *Association) applyRegistrationResults(applications []registrationResult
 		// one Association to identify one AS traffic flow. Validate the whole
 		// successful result batch before publishing any requester scope.
 		existing, exists := assigned[result.RoutingContext]
+		if c.aspPeerInventory() != nil && result.RemoteAS.ApplicationServer != "" {
+			// RFC 4666 §§1.2 and 1.4.2.1: matching wire scopes cannot
+			// make two provisioned Application Servers share one Routing
+			// Context. Validate ownership before publishing any results.
+			if existing.remoteAS != "" && existing.remoteAS != result.RemoteAS.ApplicationServer {
+				return fmt.Errorf("%w: Routing Context %d names Application Servers %q and %q",
+					NewInvalidRoutingContextError(result.RoutingContext), result.RoutingContext,
+					existing.remoteAS, result.RemoteAS.ApplicationServer)
+			}
+			existing.remoteAS = result.RemoteAS.ApplicationServer
+		}
 		if exists {
 			if existing.key != key || existing.trafficModeSet && effectiveRoutingKey.TrafficModeSet &&
 				existing.trafficMode != effectiveRoutingKey.TrafficMode {
