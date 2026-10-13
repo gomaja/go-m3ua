@@ -84,6 +84,22 @@ Double Exchange leaves the opposite direction undisturbed; only the agreed
 single-ASPSM ASP Down procedure quiesces the whole communication.
 
 T(ack) retransmission is retained per request and per Routing Context subset.
+On a received ASP Down in Single Exchange or agreed single-ASPSM Double
+Exchange, the shared withdrawal supersedes pending ASP Up, ASP Active and ASP
+Inactive procedures (RFC 4666 Sections 4.3 and 4.3.4.2). Their in-flight initial
+writes and retries drain before Down Ack, queued writes stop, and explicit
+callers receive `ErrASPProcedureSuperseded` after the acknowledgement settles.
+A crossed local ASP Down still waits for its own Ack. Normal Double Exchange retains every
+independent local procedure (Section 5.6.2).
+
+A late Up Ack from the superseded procedure is reported as Unexpected Message
+and leaves the shared communication down. Section 4.3.4.1.2 permits an IPSP to
+consider its peer inactive on Up Ack; applying that transition after a shared
+withdrawal would undo the completed Down. Old ASPTM acknowledgements are also
+refused until a fresh ASP Up completes. An explicit ASPUp, a new peer ASP Up,
+or SCTP restart can establish a fresh procedure. Ordinary unsolicited Up Ack
+handling and unrequested Down Ack recovery retain their existing policy.
+
 The scopes acknowledged during one SCTP association epoch are retained as a
 bounded set. A later ASP Active Ack or ASP Inactive Ack caused by a request
 retransmission is recognized as the completed local procedure and cannot

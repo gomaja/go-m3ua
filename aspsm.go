@@ -26,7 +26,7 @@ func (c *Association) beginASPSM() (*pendingRequest, error) {
 	// will never come while the SGP waits for a request it never saw.
 	aspUp := messages.NewAspUp(c.cfg.ASPIdentifier.Copy(), nil)
 	request := c.startTAck(aspUp, requestAspUp)
-	if _, err := c.writeControl(aspUp); err != nil {
+	if _, err := c.writePendingControl(request, aspUp); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}
@@ -203,6 +203,13 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspUpAck)
 	}
+	// RFC 4666 §4.3.4.1.2 permits an IPSP to become inactive on Up Ack.
+	// A shared withdrawal (§4.3, §4.3.4.2) has superseded this Up instead:
+	// report it as unsolicited through the existing IPSP error path, which
+	// holds state, rather than undoing the peer's completed Down procedure.
+	if !solicited && c.isPeerDownSupersededASPUpAck() {
+		return NewUnexpectedMessageError(aspUpAck)
+	}
 	// RFC 4666 Section 4.3.4.1 permits ASP Up retransmission under T(ack), and
 	// the peer answers every copy. Once this SCTP epoch completed the procedure,
 	// a later Ack is that request's delayed duplicate rather than a new state
@@ -319,6 +326,8 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 	if c.isIPSPDoubleExchange() {
 		return c.handleAspDownDoubleExchange()
 	}
+	superseded := c.supersedePeerDownProcedures()
+	defer c.finishPeerDownProcedures(superseded)
 
 	// ASP Down carries only an optional INFO String (RFC 4666 Section 3.5.3),
 	// so there is nothing further to validate: any parameter combination is
@@ -354,6 +363,8 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 }
 
 func (c *Association) handleAspDownDoubleExchange() error {
+	superseded := c.supersedePeerDownProcedures()
+	defer c.finishPeerDownProcedures(superseded)
 	c.commitPeerDownState()
 	if c.usesSingleASPSMExchange() {
 		c.commitLocalIPSPState(StateASPDown)
