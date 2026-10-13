@@ -108,6 +108,7 @@ func exerciseIPSPSingleExchangeIntegration(t *testing.T, sctpInitiator, aspsmIni
 	assertIPSPTransfer(t, associationA, associationB, []byte("A-to-B"))
 	assertIPSPTransfer(t, associationB, associationA, []byte("B-to-A"))
 
+	associationB.ManagementIndications()
 	if _, err := associationA.WriteSignal(messages.NewNotify(
 		params.NewStatus(params.AsStateActive), nil, params.NewRoutingContext(1), nil,
 	)); err != nil {

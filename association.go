@@ -39,10 +39,10 @@ const M3UAPPID uint32 = 3
 //
 // An association ends once, whatever ends it -- Close, Abort, ShutdownContext,
 // a cancelled context or a failure -- and in two steps. Done closes as the
-// teardown begins. State reaches ASP-DOWN, and StateChanges and
-// ManagementIndications report the end and close, once the SCTP association
-// has been released, which for a SHUTDOWN can take up to three seconds. A
-// caller that needs the final state waits for StateChanges to close.
+// teardown begins, publishing ASP-DOWN through State and IPSPState.
+// StateChanges and ManagementIndications report the end and close once the
+// SCTP association has been released, which for a SHUTDOWN can take up to
+// three seconds.
 type Association struct {
 	// sctpConn is the SCTP association this Association owns.
 	//
@@ -352,13 +352,15 @@ type Association struct {
 	epoch atomic.Uint64
 	// malformedLogs bounds peer-triggered diagnostic logging per association.
 	malformedLogs malformedLogLimiter
-	// stateEventChan delivers ASP state transitions to the user. An overflow
-	// closes the association so Layer Management cannot mistake a partial event
-	// history for a complete one.
+	// stateEventChan delivers ASP state transitions after StateChanges subscribes.
+	// An overflow closes the association so Layer Management cannot mistake a
+	// partial event history for a complete one.
 	stateEventChan chan State
 	muStateEvent   sync.Mutex
 	// stateEventClosed records that stateEventChan has been closed.
 	stateEventClosed bool
+	// stateEventSubscribed is protected by muStateEvent.
+	stateEventSubscribed bool
 	// mgmtChan delivers the M3UA-to-Layer-Management indications of RFC 4666
 	// Section 1.6.3. An overflow closes the association rather than dropping an
 	// unrecoverable indication.
@@ -366,6 +368,9 @@ type Association struct {
 	muMgmt   sync.Mutex
 	// mgmtClosed records that mgmtChan has been closed.
 	mgmtClosed bool
+	// mgmtSubscribed is protected by muMgmt; indications are not queued until
+	// ManagementIndications subscribes.
+	mgmtSubscribed bool
 	// indicationOverflow ensures one state or management queue overflow starts
 	// one asynchronous association teardown.
 	indicationOverflow atomic.Bool
@@ -656,8 +661,18 @@ func (c *Association) IPSPState() IPSPState {
 	if c == nil {
 		return IPSPState{}
 	}
+	select {
+	case <-c.done:
+		return IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPDown}
+	default:
+	}
 	c.muState.RLock()
 	defer c.muState.RUnlock()
+	select {
+	case <-c.done:
+		return IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPDown}
+	default:
+	}
 	if !c.isIPSPDoubleExchange() {
 		return IPSPState{TrafficToLocal: c.state, TrafficToPeer: c.state}
 	}
@@ -1537,13 +1552,13 @@ func (c *Association) Abort() error {
 // poll State until it read ASP-DOWN, or to wait for a Read or Write to start
 // failing — neither of which says why.
 //
-// Done marks the start of the teardown, not its end. It closes first, so every
-// operation waiting on the association stops at once and reports Err, and no
-// message still being handled can move the state. The SCTP release follows,
-// and only after it does State reach ASP-DOWN and StateChanges and
-// ManagementIndications report the end and close. Until then State can still
-// read the state the association was in. A caller that needs the final state
-// ranges over StateChanges until it closes.
+// Done marks the start of the teardown, not its end. When it closes, Err
+// already records the cause and State and IPSPState report ASP-DOWN. Every
+// operation waiting on the association stops at once, and no message still
+// being handled can move the state. The SCTP release follows, then StateChanges
+// reports the final transition. Both indication channels close only after the
+// affected destinations have been paused; ManagementIndications reports the
+// release before closing.
 func (c *Association) Done() <-chan struct{} {
 	return c.done
 }
@@ -1583,6 +1598,11 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		if cause != nil {
 			c.closeErr.Store(cause)
 		}
+		// Publish the terminal state through State and IPSPState without taking
+		// muState or aspTransferMu. A control entry action can hold muState
+		// while a writer waits for Done or transport release, so acquiring it
+		// here would deadlock teardown. The locked bookkeeping and final
+		// indications remain after release (RFC 4666 Sections 4.3.1 and 4.3.3).
 		close(c.done)
 		// Retransmitters check done before each resend, and are cancelled here
 		// as well so none starts another. stopAllTAck does not take the retry
@@ -1771,10 +1791,22 @@ func (c *Association) SetWriteDeadline(t time.Time) error {
 
 // State returns the current RFC 4666 ASP/IPSP state of the Association. For
 // IPSP Double Exchange it is the remote IPSP state governing TrafficToPeer;
-// IPSPState returns both independent directions.
+// IPSPState returns both independent directions. Once Done closes it reports
+// ASP-DOWN, including while the transport is being released (RFC 4666
+// Sections 4.3.1 and 4.3.3).
 func (c *Association) State() State {
+	select {
+	case <-c.done:
+		return StateASPDown
+	default:
+	}
 	c.muState.RLock()
 	defer c.muState.RUnlock()
+	select {
+	case <-c.done:
+		return StateASPDown
+	default:
+	}
 	return c.state
 }
 
@@ -3164,8 +3196,8 @@ func (c *Association) finishTermination(cause error) error {
 	return cause
 }
 
-// StateChanges reports every ASP state transition this association makes, in
-// order, and is closed when the association ends. For IPSP Double Exchange it
+// StateChanges subscribes to ASP state transitions, in order, and returns a
+// channel closed when the association ends. For IPSP Double Exchange it
 // reports the remote IPSP transitions governing TrafficToPeer; query IPSPState
 // when both independent directions matter.
 //
@@ -3177,18 +3209,28 @@ func (c *Association) finishTermination(cause error) error {
 // already knew about, and a transition that came and went between two polls was
 // simply lost.
 //
-// Delivery never stalls the dispatcher. A reader that allows the bounded queue
-// to fill closes the association with ErrIndicationQueueFull, rather than
-// receiving a partial transition history. Read it in a dedicated goroutine if
-// every edge matters.
+// The first call starts delivery; earlier transitions are not queued or
+// replayed, and no initial state is sent. Use State for the current state.
+// Repeated calls return the same channel. Until the first call, state
+// indications cannot fill a queue or close the association. This subscription
+// is independent of ManagementIndications.
 //
+// Delivery never stalls the dispatcher. Once subscribed, the application must
+// drain this 16-slot queue: allowing it to overflow closes the association with
+// ErrIndicationQueueFull, rather than receiving a partial transition history.
+// Read it in a dedicated goroutine if every edge matters.
+//
+//	states := association.StateChanges()
 //	go func() {
-//		for st := range association.StateChanges() {
+//		for st := range states {
 //			log.Printf("ASP state: %v", st)
 //		}
 //		// the channel closes with the association
 //	}()
 func (c *Association) StateChanges() <-chan State {
+	c.muStateEvent.Lock()
+	defer c.muStateEvent.Unlock()
+	c.stateEventSubscribed = true
 	return c.stateEventChan
 }
 
@@ -3198,7 +3240,7 @@ func (c *Association) notifyStateChange(s State) {
 	c.muStateEvent.Lock()
 	defer c.muStateEvent.Unlock()
 
-	if c.stateEventClosed {
+	if c.stateEventClosed || !c.stateEventSubscribed {
 		return
 	}
 
@@ -3530,8 +3572,8 @@ func uint32ParamOf(p *params.Param, tag uint16, read func(*params.Param) uint32)
 	return read(p), true
 }
 
-// ManagementIndications reports what RFC 4666 Section 1.6.3 calls the M3UA to
-// Layer Management indications, and is closed when the association ends.
+// ManagementIndications subscribes to the M3UA to Layer Management indications
+// of RFC 4666 Section 1.6.3 and returns a channel closed when the association ends.
 //
 // Section 4.2: "M-NOTIFY indication and M-ERROR indication primitives indicate
 // to Layer Management the notification or error information contained in a
@@ -3541,16 +3583,26 @@ func uint32ParamOf(p *params.Param, tag uint16, read func(*params.Param) uint32)
 // could not see that the peer had reported AS-INACTIVE, or Insufficient ASP
 // Resources, or refused something with an error code.
 //
-// Delivery never stalls the dispatcher. A reader that allows the bounded queue
-// to fill closes the association with ErrIndicationQueueFull, rather than
-// silently losing M-NOTIFY or M-ERROR.
+// The first call starts delivery; earlier indications are not queued or
+// replayed. Use State for the current ASP/IPSP state. Repeated calls return the
+// same channel. Until the first call, management indications cannot fill a
+// queue or close the association. This subscription is independent of
+// StateChanges.
 //
+// Delivery never stalls the dispatcher. Once subscribed, the application must
+// drain this 64-slot queue: allowing it to overflow closes the association with
+// ErrIndicationQueueFull, rather than silently losing M-NOTIFY or M-ERROR.
+//
+//	indications := association.ManagementIndications()
 //	go func() {
-//		for ind := range association.ManagementIndications() {
+//		for ind := range indications {
 //			log.Printf("%v: %s", ind.Kind, ind.Description)
 //		}
 //	}()
 func (c *Association) ManagementIndications() <-chan *ManagementIndication {
+	c.muMgmt.Lock()
+	defer c.muMgmt.Unlock()
+	c.mgmtSubscribed = true
 	return c.mgmtChan
 }
 
@@ -3560,6 +3612,12 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 	if ind == nil {
 		return
 	}
+	c.muMgmt.Lock()
+	defer c.muMgmt.Unlock()
+
+	if c.mgmtClosed || !c.mgmtSubscribed {
+		return
+	}
 	snapshot := *ind
 	snapshot.Association = c.ID()
 	snapshot.ASKeys = append([]ASKey(nil), ind.ASKeys...)
@@ -3567,13 +3625,6 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 	snapshot.AffectedDestinations = append(
 		[]AffectedDestination(nil), ind.AffectedDestinations...,
 	)
-
-	c.muMgmt.Lock()
-	defer c.muMgmt.Unlock()
-
-	if c.mgmtClosed {
-		return
-	}
 
 	select {
 	case c.mgmtChan <- &snapshot:

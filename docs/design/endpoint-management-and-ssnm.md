@@ -503,12 +503,16 @@ as complete. The indication owns its slices, so an application may retain or
 modify them.
 
 The bounded `StateChanges` and `ManagementIndications` streams remain
-association-scoped. Overflow closes that association with
+association-scoped and subscribe independently on their first method call.
+Earlier events, including the handshake, are not queued or replayed; `State`
+provides the current state. Unsubscribed streams cannot overflow. Each method
+returns the same channel on later calls, and applications must drain every
+subscribed stream for the association's lifetime. Overflow closes it with
 `ErrIndicationQueueFull`; `Done` closes, `Err` returns the cause, and no later
 mandatory event is represented as delivered. MTP3-User destination indications
 retain their explicit resynchronization marker because an authoritative
 Endpoint destination snapshot exists. No mandatory management event is silently
-dropped.
+dropped from a subscribed stream.
 
 ## Concurrency and ownership
 

@@ -11,10 +11,15 @@ import (
 )
 
 func TestStateChangesOverflowClosesWithAnExplicitCause(t *testing.T) {
-	connection, _ := newTestConn(t, StateASPActive, RoleASP)
-	connection.stateEventChan = make(chan State, 1)
+	connection := newIndicationAssociation(t)
+	states := connection.StateChanges()
 
-	connection.notifyStateChange(StateASPInactive)
+	for range cap(states) {
+		connection.notifyStateChange(StateASPInactive)
+	}
+	if connection.indicationOverflow.Load() || len(states) != cap(states) {
+		t.Fatal("state queue overflowed before its last slot was filled")
+	}
 	connection.notifyStateChange(StateASPActive)
 
 	select {
@@ -28,10 +33,15 @@ func TestStateChangesOverflowClosesWithAnExplicitCause(t *testing.T) {
 }
 
 func TestManagementIndicationsOverflowClosesWithAnExplicitCause(t *testing.T) {
-	connection, _ := newTestConn(t, StateASPActive, RoleASP)
-	connection.mgmtChan = make(chan *ManagementIndication, 1)
+	connection := newIndicationAssociation(t)
+	management := connection.ManagementIndications()
 
-	connection.notifyManagement(&ManagementIndication{Kind: ManagementNotify})
+	for range cap(management) {
+		connection.notifyManagement(&ManagementIndication{Kind: ManagementNotify})
+	}
+	if connection.indicationOverflow.Load() || len(management) != cap(management) {
+		t.Fatal("management queue overflowed before its last slot was filled")
+	}
 	connection.notifyManagement(&ManagementIndication{Kind: ManagementError})
 
 	select {

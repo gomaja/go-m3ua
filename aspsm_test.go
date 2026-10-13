@@ -79,6 +79,10 @@ func newTestConn(t *testing.T, state State, role Role) (*Association, *[]message
 		sent = append(sent, m3)
 		return m3.MarshalLen(), nil
 	}
+	// Handler tests inspect both indication histories. Subscribe before any
+	// stimulus; newIndicationAssociation covers the production opt-in default.
+	conn.StateChanges()
+	conn.ManagementIndications()
 	// Use the production once-only teardown. Closing done directly leaves
 	// closeOnce unclaimed, so an asynchronous failure that later reaches
 	// closeWith can close the same channel a second time and panic during test
