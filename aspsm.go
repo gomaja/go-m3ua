@@ -332,7 +332,14 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 	// selected this ASP, but hold the resulting AS-state Notify messages until
 	// the Ack is on the wire. The dispatcher publishes the association-level
 	// entry action after this returns.
-	c.commitState(StateASPDown)
+	if c.role == RoleIPSP {
+		// RFC 4666 §4.3 and §5.6.1: the peer removes the shared Single
+		// Exchange communication from service. This is a Down request, not
+		// the unrequested Down Ack that calls for recovery in §4.3.4.2.
+		c.commitPeerDownState()
+	} else {
+		c.commitState(StateASPDown)
+	}
 	postAckNotify := func() {}
 	if c.as != nil {
 		postAckNotify = c.as.quiesceASPDown(c)
@@ -347,10 +354,7 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 }
 
 func (c *Association) handleAspDownDoubleExchange() error {
-	c.muState.Lock()
-	c.peerDownAwaitingEntry = true
-	c.muState.Unlock()
-	c.commitState(StateASPDown)
+	c.commitPeerDownState()
 	if c.usesSingleASPSMExchange() {
 		c.commitLocalIPSPState(StateASPDown)
 		c.noteNoRoutingContextsAcked()

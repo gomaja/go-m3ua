@@ -1242,7 +1242,7 @@ func (c *Association) overrideOtherASPs(activated []uint32) {
 				peer.noteRoutingContextsInactive(nil)
 			}
 			if peer.stateForActiveRoutingContexts() == StateASPInactive {
-				peer.commitState(StateASPInactive)
+				peer.commitOverrideInactiveState()
 			}
 		}
 		waitForTrafficBarrier(&as.deliveryMu)
@@ -1258,7 +1258,7 @@ func (c *Association) overrideOtherASPs(activated []uint32) {
 		}
 		for _, peer := range peers {
 			if peer.stateForActiveRoutingContexts() == StateASPInactive {
-				peer.sendState(StateASPInactive)
+				peer.sendOverrideInactiveState()
 			}
 			notifyAlternateASPActive(peer, key, c.peerASPIdentifierParam())
 		}

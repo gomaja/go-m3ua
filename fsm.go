@@ -276,10 +276,12 @@ func (c *Association) handleStateUpdateAsIPSPSingleExchange(current, previous St
 
 	switch current {
 	case StateASPDown:
+		peerDown := c.peerDownAwaitingEntry
+		c.peerDownAwaitingEntry = false
 		if entering {
 			c.forgetActiveRoutingContexts()
 		}
-		if !entering || c.terminating.Load() ||
+		if !entering || peerDown || c.terminating.Load() ||
 			c.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic {
 			return nil
 		}
@@ -560,7 +562,17 @@ func (c *Association) sendState(s State) {
 	if !c.commitState(s) {
 		return
 	}
+	c.publishState(s)
+}
 
+func (c *Association) sendOverrideInactiveState() {
+	if !c.commitOverrideInactiveState() {
+		return
+	}
+	c.publishState(StateASPInactive)
+}
+
+func (c *Association) publishState(s State) {
 	select {
 	case c.stateChan <- s:
 	case <-c.done:
@@ -571,6 +583,24 @@ func (c *Association) sendState(s State) {
 // entry actions. stateUnchanged is only a publication token and changes no
 // state.
 func (c *Association) commitState(s State) bool {
+	return c.commitStateGuarded(s, false, false)
+}
+
+// commitPeerDownState keeps the peer's withdrawal and its entry-action cause
+// indivisible under muState. RFC 4666 §4.3 and §5.6.1 make Single Exchange Down
+// effective for the whole communication; §5.6.2 retains the DE direction.
+func (c *Association) commitPeerDownState() bool {
+	return c.commitStateGuarded(StateASPDown, true, false)
+}
+
+// commitOverrideInactiveState rejects a displaced-peer snapshot overtaken by
+// ASP Down. RFC 4666 §4.3.4.3 makes previously active ASPs inactive on Override;
+// it does not reestablish an ASP removed from service under §4.3.4.2.
+func (c *Association) commitOverrideInactiveState() bool {
+	return c.commitStateGuarded(StateASPInactive, false, true)
+}
+
+func (c *Association) commitStateGuarded(s State, peerDown, override bool) bool {
 	if s == stateUnchanged {
 		return true
 	}
@@ -583,9 +613,16 @@ func (c *Association) commitState(s State) bool {
 		return false
 	default:
 	}
+	if override && c.state == StateASPDown {
+		c.muState.Unlock()
+		unlockTransfer()
+		return false
+	}
 	stateChanged := c.state != s
 	c.state = s
-	if s != StateASPDown {
+	if peerDown {
+		c.peerDownAwaitingEntry = true
+	} else if s != StateASPDown {
 		c.peerDownAwaitingEntry = false
 	}
 	c.muState.Unlock()
