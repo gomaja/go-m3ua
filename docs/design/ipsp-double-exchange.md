@@ -39,11 +39,14 @@ The ASPSM agreement is explicit because the two IPSPs cannot infer it from SCTP
 association initiation or from the first message without risking different
 state models at each end.
 
-With normal Double Exchange, `InitiateASPSM` requires `TrafficToLocal`: the
-local ASP Up procedure establishes the direction in which the peer sends DATA
-to this IPSP. Under the agreed single-ASPSM simplification, either direction
-may cause that one exchange to establish both directions. `InitiateASPTM`
-always requires `TrafficToLocal`.
+An IPSP Association must set `AssociationConfig.ASPProcedures` to select
+automatic or explicit Layer Management initiation for each ASP procedure.
+With normal Double Exchange, `ASPProcedures.ASPUp` set to
+`ASPProcedureAutomatic` requires `TrafficToLocal`: the local ASP Up procedure
+establishes the direction in which the peer sends DATA to this IPSP. Under the
+agreed single-ASPSM simplification, either direction may cause that one
+exchange to establish both directions. `ASPProcedures.ASPActive` set to
+`ASPProcedureAutomatic` always requires `TrafficToLocal`.
 
 ## Traffic identity
 
