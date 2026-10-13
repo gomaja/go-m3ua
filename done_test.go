@@ -91,6 +91,9 @@ func TestErrReportsHeartbeatExpiry(t *testing.T) {
 	if got := conn.Err(); !errors.Is(got, ErrHeartbeatExpired) {
 		t.Errorf("Err() = %v, want ErrHeartbeatExpired", got)
 	}
+	if got := conn.State(); got != StateASPDown {
+		t.Errorf("State() after Done() = %v, want ASP-DOWN", got)
+	}
 }
 
 // Cancelling the context that owns the association reports the cancellation,
@@ -203,10 +206,9 @@ func (release *blockingRelease) open() {
 // Done marks the start of the teardown, not its end. It closes as soon as the
 // association has begun to end -- before the SCTP release, which for a
 // SHUTDOWN waits on the peer -- so every waiter and every guard that checks it
-// stops at once, and Err already says why. State reaches ASP-DOWN, and
-// StateChanges and ManagementIndications report the end and close, only once
-// the release has finished: a caller that needs the final state ranges over
-// StateChanges until it closes.
+// stops at once, and Err already says why. State reports ASP-DOWN immediately;
+// StateChanges and ManagementIndications report the end and close only once
+// the release has finished.
 func TestDoneMarksTheStartOfTheTeardown(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -340,4 +342,110 @@ func TestNoHandlerMovesTheStateOnceTheTeardownHasBegun(t *testing.T) {
 	if names := typeNames(*sent); len(names) != 0 {
 		t.Errorf("the association answered %v after its teardown began", names)
 	}
+}
+
+// RFC 4666 Sections 4.3.1 and 4.3.3 put an unavailable ASP/IPSP in ASP-DOWN.
+// Done waiters must see that terminal state even while transport release waits
+// for the peer. Every termination path shares endWith.
+func TestDonePublishesFinalStateBeforeTransportRelease(t *testing.T) {
+	transportError := errors.New("transport read failed")
+	for _, test := range []struct {
+		name  string
+		call  func(*Association) error
+		cause error
+	}{
+		{"Close", (*Association).Close, ErrAssociationClosed},
+		{"Abort", (*Association).Abort, ErrAssociationAborted},
+		{"ShutdownContext", func(c *Association) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return c.ShutdownContext(ctx)
+		}, context.Canceled},
+		{"heartbeat expiry", func(c *Association) error { return c.closeWith(ErrHeartbeatExpired) }, ErrHeartbeatExpired},
+		{"peer release", func(c *Association) error { return c.closeWith(ErrSCTPNotAlive) }, ErrSCTPNotAlive},
+		{"transport error", func(c *Association) error { return c.closeWith(transportError) }, transportError},
+		{"indication overflow", func(c *Association) error { return c.closeWith(ErrIndicationQueueFull) }, ErrIndicationQueueFull},
+	} {
+		for _, role := range []Role{RoleASP, RoleSGP, RoleIPSP} {
+			t.Run(test.name+"/"+role.String(), func(t *testing.T) {
+				conn, _ := newTestConn(t, StateASPActive, role)
+				if role == RoleIPSP {
+					conn.cfg = newDoubleExchangeAssociationConfigForTest()
+					conn.localIPSPState = StateASPActive
+				}
+				release := installBlockingRelease(t, conn)
+				finished := make(chan error, 1)
+				go func() { finished <- test.call(conn) }()
+				select {
+				case <-conn.Done():
+				case <-time.After(time.Second):
+					t.Fatal("Done did not close before transport release")
+				}
+				if got := conn.State(); got != StateASPDown {
+					t.Errorf("State after Done = %v, want ASP-DOWN", got)
+				}
+				want := IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPDown}
+				if got := conn.IPSPState(); got != want {
+					t.Errorf("IPSPState after Done = %+v, want %+v", got, want)
+				}
+				if got := conn.Err(); got != test.cause {
+					t.Errorf("Err after Done = %v, want %v", got, test.cause)
+				}
+				<-release.reached
+				select {
+				case <-finished:
+					t.Fatal("termination returned before transport release finished")
+				default:
+				}
+				release.open()
+				<-finished
+			})
+		}
+	}
+}
+
+// A control entry action can hold muState while waiting for Done or transport
+// release. Terminal state queries must not wait for that entry action's lock.
+func TestDonePublishesFinalStateWithoutWaitingForStateLock(t *testing.T) {
+	conn, _ := newTestConn(t, StateASPActive, RoleIPSP)
+	conn.cfg = newDoubleExchangeAssociationConfigForTest()
+	conn.localIPSPState = StateASPActive
+	release := installBlockingRelease(t, conn)
+	conn.muState.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			conn.muState.Unlock()
+		}
+	}()
+	finished := make(chan error, 1)
+	go func() { finished <- conn.Close() }()
+	select {
+	case <-conn.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done waited for the state lock held by a control entry action")
+	}
+	queried := make(chan struct{})
+	go func() {
+		defer close(queried)
+		if got := conn.State(); got != StateASPDown {
+			t.Errorf("State after Done = %v, want ASP-DOWN", got)
+		}
+		if got := conn.IPSPState(); got != (IPSPState{}) {
+			t.Errorf("IPSPState after Done = %+v, want both directions ASP-DOWN", got)
+		}
+	}()
+	select {
+	case <-queried:
+	case <-time.After(time.Second):
+		conn.muState.Unlock()
+		locked = false
+		release.open()
+		<-queried
+		t.Fatal("terminal state query waited for the state lock")
+	}
+	conn.muState.Unlock()
+	locked = false
+	release.open()
+	<-finished
 }

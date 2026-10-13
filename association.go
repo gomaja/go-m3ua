@@ -39,10 +39,10 @@ const M3UAPPID uint32 = 3
 //
 // An association ends once, whatever ends it -- Close, Abort, ShutdownContext,
 // a cancelled context or a failure -- and in two steps. Done closes as the
-// teardown begins. State reaches ASP-DOWN, and StateChanges and
-// ManagementIndications report the end and close, once the SCTP association
-// has been released, which for a SHUTDOWN can take up to three seconds. A
-// caller that needs the final state waits for StateChanges to close.
+// teardown begins, publishing ASP-DOWN through State and IPSPState.
+// StateChanges and ManagementIndications report the end and close once the
+// SCTP association has been released, which for a SHUTDOWN can take up to
+// three seconds.
 type Association struct {
 	// sctpConn is the SCTP association this Association owns.
 	//
@@ -656,8 +656,18 @@ func (c *Association) IPSPState() IPSPState {
 	if c == nil {
 		return IPSPState{}
 	}
+	select {
+	case <-c.done:
+		return IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPDown}
+	default:
+	}
 	c.muState.RLock()
 	defer c.muState.RUnlock()
+	select {
+	case <-c.done:
+		return IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPDown}
+	default:
+	}
 	if !c.isIPSPDoubleExchange() {
 		return IPSPState{TrafficToLocal: c.state, TrafficToPeer: c.state}
 	}
@@ -1537,13 +1547,13 @@ func (c *Association) Abort() error {
 // poll State until it read ASP-DOWN, or to wait for a Read or Write to start
 // failing — neither of which says why.
 //
-// Done marks the start of the teardown, not its end. It closes first, so every
-// operation waiting on the association stops at once and reports Err, and no
-// message still being handled can move the state. The SCTP release follows,
-// and only after it does State reach ASP-DOWN and StateChanges and
-// ManagementIndications report the end and close. Until then State can still
-// read the state the association was in. A caller that needs the final state
-// ranges over StateChanges until it closes.
+// Done marks the start of the teardown, not its end. When it closes, Err
+// already records the cause and State and IPSPState report ASP-DOWN. Every
+// operation waiting on the association stops at once, and no message still
+// being handled can move the state. The SCTP release follows, then StateChanges
+// reports the final transition. Both indication channels close only after the
+// affected destinations have been paused; ManagementIndications reports the
+// release before closing.
 func (c *Association) Done() <-chan struct{} {
 	return c.done
 }
@@ -1583,6 +1593,11 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		if cause != nil {
 			c.closeErr.Store(cause)
 		}
+		// Publish the terminal state through State and IPSPState without taking
+		// muState or aspTransferMu. A control entry action can hold muState
+		// while a writer waits for Done or transport release, so acquiring it
+		// here would deadlock teardown. The locked bookkeeping and final
+		// indications remain after release (RFC 4666 Sections 4.3.1 and 4.3.3).
 		close(c.done)
 		// Retransmitters check done before each resend, and are cancelled here
 		// as well so none starts another. stopAllTAck does not take the retry
@@ -1771,10 +1786,22 @@ func (c *Association) SetWriteDeadline(t time.Time) error {
 
 // State returns the current RFC 4666 ASP/IPSP state of the Association. For
 // IPSP Double Exchange it is the remote IPSP state governing TrafficToPeer;
-// IPSPState returns both independent directions.
+// IPSPState returns both independent directions. Once Done closes it reports
+// ASP-DOWN, including while the transport is being released (RFC 4666
+// Sections 4.3.1 and 4.3.3).
 func (c *Association) State() State {
+	select {
+	case <-c.done:
+		return StateASPDown
+	default:
+	}
 	c.muState.RLock()
 	defer c.muState.RUnlock()
+	select {
+	case <-c.done:
+		return StateASPDown
+	default:
+	}
 	return c.state
 }
 
