@@ -392,13 +392,13 @@ type Association struct {
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
 	dataWriter func([]byte, *sctp.SndInfo) (int, error)
-	// sendMu owns every SendMsg on this socket, including control replies and
-	// deadline-bound writes. A context send can therefore abandon admission
-	// here without entering go-sctp's uncancellable send-mutex wait.
+	// sendMu orders DATA and control submissions, including both attempts of a
+	// control write that waits for space. A context send can abandon this gate.
 	sendMu contextMutex
 	// applicationWriteDeadline is nil or an immutable copy of the write deadline.
 	// Keeping time.Time preserves its monotonic clock and dates outside UnixNano's
-	// range. The socket enforces it too; context sends consult it between retries.
+	// range. Its presence selects whether application sends wait for space;
+	// the transport enforces the deadline, including changes during a send.
 	applicationWriteDeadline atomic.Pointer[time.Time]
 	// writeDeadlineMu keeps concurrent setters' socket update and local copy in
 	// the same order. It is never acquired by the DATA hot path.
@@ -778,7 +778,6 @@ func (c *Association) setUpSocket() error {
 }
 
 // writeSCTPData requires sendMu and preserves the legacy deadline behavior.
-// Context submissions instead retry NoWait while holding the same gate.
 func (c *Association) writeSCTPData(data []byte, info *sctp.SndInfo) (int, error) {
 	if c.dataWriter != nil {
 		return c.dataWriter(data, info)
@@ -898,6 +897,7 @@ const (
 // controlSender sends control messages with explicit per-message SCTP options.
 type controlSender interface {
 	SendMsg(b []byte, opts sctp.SendOptions) (int, error)
+	SendMsgContext(ctx context.Context, b []byte, opts sctp.SendOptions) (int, error)
 }
 
 func (c *Association) controlSender() controlSender {

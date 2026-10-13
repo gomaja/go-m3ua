@@ -8,8 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"os"
-	"time"
+	"net"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -90,18 +89,20 @@ func (c *Association) WriteData(request DataRequest) (int, error) {
 // association delivery barriers, while waiting behind any sender on the socket,
 // and while waiting for send-buffer space under an association write deadline.
 // Without a write deadline, a full buffer still returns EAGAIN immediately.
-// It neither changes socket deadlines nor cancels other sends.
+// It preserves application socket deadlines and does not cancel other sends.
 //
-// A cancellation before any octet is accepted returns zero and a *DataWriteError
-// with Outcome DataNotSent and a cause matching ctx.Err() through errors.Is.
-// The call retains no pending submission after returning DataNotSent. A failure
-// after acceptance may have begun has Outcome DataSendIndeterminate: resending
-// could duplicate DATA. A completed acceptance returns success even if ctx is
-// cancelled concurrently; success says nothing about delivery to the peer
-// (RFC 4666 §3.3.1). The transport's single nonblocking attempt must finish
-// before the call can determine its outcome.
+// A context interruption returns zero and a *DataWriteError with Outcome
+// DataNotSent and a cause matching ctx.Err() through errors.Is. The transport
+// queues a complete message or nothing (RFC 6458 §3.1.4; Errata 6111 clarifies
+// explicit EOR, which Linux does not implement), so every SendMsgContext error
+// is DataNotSent; DataSendIndeterminate is not reachable on that transport path.
+// The call retains no pending submission after returning. Completed acceptance
+// returns success even if ctx is cancelled concurrently; success says nothing
+// about delivery to the peer (RFC 4666 §3.3.1).
 //
-// ctx must be non-nil. WriteData uses context.Background().
+// ctx must be non-nil. A context with no Done channel uses WriteData's ordinary
+// submission path and conservative outcome classification. WriteData uses
+// context.Background().
 func (c *Association) WriteDataContext(ctx context.Context, request DataRequest) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, newDataNotSent(request.AS, 0, err)
@@ -141,8 +142,8 @@ func (c *Association) WriteDataContext(ctx context.Context, request DataRequest)
 	return len(request.ProtocolData.Data), nil
 }
 
-// submitDataContext owns the socket gate across submission. Every other
-// SendMsg takes the same gate, so NoWait cannot queue on go-sctp's send mutex.
+// submitDataContext owns the socket gate across submission, so DATA cannot
+// overtake a control frame between its NoWait attempt and blocking retry.
 func (c *Association) submitDataContext(ctx context.Context, frame []byte, key ASKey, stream uint16) error {
 	if err := c.sendMu.LockContext(ctx); err != nil {
 		return newDataNotSent(key, stream, err)
@@ -153,6 +154,8 @@ func (c *Association) submitDataContext(ctx context.Context, frame []byte, key A
 	info := *c.sctpInfo
 	info.Stream = stream
 	if ctx.Done() == nil {
+		// Keep ordinary writes on their existing submission path and outcome
+		// classification; only cancellable calls need SendMsgContext.
 		written, err := c.writeSCTPData(frame, &info)
 		if result := dataSubmissionResult(key, stream, len(frame), written, err); result != nil {
 			return result
@@ -160,57 +163,35 @@ func (c *Association) submitDataContext(ctx context.Context, frame []byte, key A
 		return nil
 	}
 
-	waitForSpace := c.applicationWriteDeadline.Load() != nil
-	var retry *time.Timer
-	defer func() {
-		if retry != nil {
-			retry.Stop()
+	if c.dataWriter != nil {
+		// The test seam can model partial acceptance; retain its conservative
+		// outcome classification independently of the transport's guarantee.
+		written, err := c.dataWriter(frame, &info)
+		result := dataSubmissionResult(key, stream, len(frame), written, err)
+		if result != nil && ctx.Err() != nil {
+			result.Err = errors.Join(result.Err, ctx.Err())
 		}
-	}()
-	for {
-		if err := ctx.Err(); err != nil {
-			return newDataNotSent(key, stream, err)
+		if result != nil {
+			return result
 		}
-		if deadline := c.applicationWriteDeadline.Load(); deadline != nil && !time.Now().Before(*deadline) {
-			return newDataNotSent(key, stream, os.ErrDeadlineExceeded)
-		}
-		var written int
-		var err error
-		if c.dataWriter != nil {
-			written, err = c.dataWriter(frame, &info)
-		} else {
-			written, err = c.controlSender().SendMsg(frame, sctp.SendOptions{Info: &info, NoWait: true})
-		}
-		if written != 0 || !sendBufferFull(err) || !waitForSpace {
-			// Once an attempt succeeds, cancellation cannot retract it. On an
-			// error retain both causes without turning uncertainty into a
-			// promise that nothing was submitted.
-			result := dataSubmissionResult(key, stream, len(frame), written, err)
-			if result != nil && ctx.Err() != nil {
-				result.Err = errors.Join(result.Err, ctx.Err())
-			}
-			if result != nil {
-				return result
-			}
-			return nil
-		}
-		// NoWait refused the whole message (RFC 6458 §3.1.4). go-sctp has
-		// no per-call poller wake-up, so the uncommon deadline-bound context
-		// path retries at 1 ms intervals. The timer is reused, and cancellation
-		// wakes this wait directly. There is no detached send to finish later.
-		if retry == nil {
-			retry = time.NewTimer(time.Millisecond)
-		} else {
-			retry.Reset(time.Millisecond)
-		}
-		select {
-		case <-ctx.Done():
-			return newDataNotSent(key, stream, ctx.Err())
-		case <-c.done:
-			return newDataNotSent(key, stream, errors.Join(ErrAssociationClosed, ctx.Err()))
-		case <-retry.C:
-		}
+		return nil
 	}
+	_, err := c.controlSender().SendMsgContext(ctx, frame, sctp.SendOptions{
+		Info: &info, NoWait: c.applicationWriteDeadline.Load() == nil,
+	})
+	if err != nil {
+		// RFC 6458 §3.1.4 and Errata 6111: without explicit EOR, sendmsg
+		// is atomic. go-sctp guarantees that no error queues any of DATA.
+		if errors.Is(err, net.ErrClosed) {
+			select {
+			case <-c.done:
+				err = errors.Join(err, ErrAssociationClosed, ctx.Err())
+			default:
+			}
+		}
+		return newDataNotSent(key, stream, err)
+	}
+	return nil
 }
 
 func dataSubmissionResult(key ASKey, stream uint16, size, written int, err error) *DataWriteError {

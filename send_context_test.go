@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"runtime"
 	"sync"
@@ -25,6 +26,12 @@ func setContextTestWriteDeadline(c *Association, deadline time.Time) {
 		c.applicationWriteDeadline.Store(nil)
 	} else {
 		c.applicationWriteDeadline.Store(&deadline)
+	}
+	if b, ok := c.controlTransport.(*contextSendBuffer); ok {
+		select {
+		case b.changed <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -190,6 +197,13 @@ func (s *exclusiveSendTransport) SendMsg(b []byte, _ sctp.SendOptions) (int, err
 	return len(b), nil
 }
 
+func (s *exclusiveSendTransport) SendMsgContext(ctx context.Context, b []byte, opts sctp.SendOptions) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return s.SendMsg(b, opts)
+}
+
 func TestSocketGateSerializesEverySubmission(t *testing.T) {
 	c, _ := newDataWriteAssociation(t, 1)
 	c.dataWriter, c.signalWriter = nil, nil
@@ -322,15 +336,25 @@ func TestMTPTransferContextCancelsActivationBarrier(t *testing.T) {
 }
 
 type contextSendBuffer struct {
-	refused  atomic.Bool
-	attempt  chan struct{}
-	accepted atomic.Int32
+	association *Association
+	failure     error
+	refused     atomic.Bool
+	attempt     chan struct{}
+	changed     chan struct{}
+	accepted    atomic.Int32
+}
+
+func newContextSendBuffer(c *Association) *contextSendBuffer {
+	return &contextSendBuffer{association: c, attempt: make(chan struct{}, 1), changed: make(chan struct{}, 1)}
 }
 
 func (b *contextSendBuffer) SendMsg(frame []byte, opts sctp.SendOptions) (int, error) {
+	if b.failure != nil {
+		return 0, b.failure
+	}
 	if b.refused.Load() {
 		if !opts.NoWait {
-			return 0, errors.New("context send attempted a blocking transport write")
+			return 0, errors.New("blocking send needs SendMsgContext")
 		}
 		select {
 		case b.attempt <- struct{}{}:
@@ -342,10 +366,54 @@ func (b *contextSendBuffer) SendMsg(frame []byte, opts sctp.SendOptions) (int, e
 	return len(frame), nil
 }
 
+func (b *contextSendBuffer) SendMsgContext(ctx context.Context, frame []byte, opts sctp.SendOptions) (int, error) {
+	if b.failure != nil {
+		return 0, b.failure
+	}
+	if opts.NoWait {
+		return b.SendMsg(frame, opts)
+	}
+	select {
+	case b.attempt <- struct{}{}:
+	default:
+	}
+	for b.refused.Load() {
+		var deadline <-chan time.Time
+		var timer *time.Timer
+		if d := b.association.applicationWriteDeadline.Load(); d != nil {
+			if !time.Now().Before(*d) {
+				return 0, os.ErrDeadlineExceeded
+			}
+			timer = time.NewTimer(time.Until(*d))
+			deadline = timer.C
+		}
+		select {
+		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
+			return 0, ctx.Err()
+		case <-b.association.done:
+			if timer != nil {
+				timer.Stop()
+			}
+			return 0, net.ErrClosed
+		case <-deadline:
+			return 0, os.ErrDeadlineExceeded
+		case <-b.changed:
+			if timer != nil {
+				timer.Stop()
+			}
+		}
+	}
+	b.accepted.Add(1)
+	return len(frame), nil
+}
+
 func TestWriteDataContextCancelsBufferWait(t *testing.T) {
 	c, _ := newDataWriteAssociation(t, 1)
 	c.dataWriter = nil
-	b := &contextSendBuffer{attempt: make(chan struct{}, 1)}
+	b := newContextSendBuffer(c)
 	b.refused.Store(true)
 	c.controlTransport = b
 	setContextTestWriteDeadline(c, time.Now().Add(time.Minute))
@@ -377,7 +445,7 @@ func TestWriteDataContextCancelsBufferWait(t *testing.T) {
 func TestWriteDataContextBufferWaitEndsOnRelease(t *testing.T) {
 	c, _ := newDataWriteAssociation(t, 1)
 	c.dataWriter = nil
-	b := &contextSendBuffer{attempt: make(chan struct{}, 1)}
+	b := newContextSendBuffer(c)
 	b.refused.Store(true)
 	c.controlTransport = b
 	setContextTestWriteDeadline(c, time.Now().Add(time.Minute))
@@ -421,7 +489,7 @@ func TestWriteDataContextBufferOutcomes(t *testing.T) {
 		t.Run(variant.name, func(t *testing.T) {
 			c, _ := newDataWriteAssociation(t, 1)
 			c.dataWriter = nil
-			b := &contextSendBuffer{attempt: make(chan struct{}, 1)}
+			b := newContextSendBuffer(c)
 			b.refused.Store(true)
 			c.controlTransport = b
 			if !variant.deadline.IsZero() {
@@ -443,30 +511,59 @@ func TestWriteDataContextObservesDeadlineChanges(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			c, _ := newDataWriteAssociation(t, 1)
 			setContextTestWriteDeadline(c, time.Now().Add(time.Minute))
-			calls := 0
-			c.dataWriter = func(b []byte, _ *sctp.SndInfo) (int, error) {
-				calls++
-				if calls != 1 {
-					return len(b), nil
-				}
-				switch change {
-				case "remove":
-					setContextTestWriteDeadline(c, time.Time{})
-				case "expire":
-					setContextTestWriteDeadline(c, time.Now().Add(-time.Second))
-				case "far future":
-					setContextTestWriteDeadline(c, time.Date(2500, 1, 1, 0, 0, 0, 0, time.UTC))
-				}
-				return 0, syscall.EAGAIN
-			}
+			b := newContextSendBuffer(c)
+			b.refused.Store(true)
+			c.dataWriter = nil
+			c.controlTransport = b
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			n, err := c.WriteDataContext(ctx, allocationRequest(128))
+			done := make(chan error, 1)
+			go func() { _, err := c.WriteDataContext(ctx, allocationRequest(128)); done <- err }()
+			select {
+			case <-b.attempt:
+			case <-time.After(time.Second):
+				t.Fatal("send did not reach full buffer")
+			}
+			switch change {
+			case "remove":
+				setContextTestWriteDeadline(c, time.Time{})
+			case "expire":
+				setContextTestWriteDeadline(c, time.Now().Add(-time.Second))
+			case "far future":
+				setContextTestWriteDeadline(c, time.Date(2500, 1, 1, 0, 0, 0, 0, time.UTC))
+			}
+			if change != "expire" {
+				b.refused.Store(false)
+				b.changed <- struct{}{}
+			}
+			err, returned := contextResult(done)
+			if !returned {
+				t.Fatal("changed deadline did not release buffer wait")
+			}
 			if change == "expire" {
 				requireDataWriteError(t, err, DataNotSent, os.ErrDeadlineExceeded)
-			} else if n != 128 || err != nil || calls != 2 {
-				t.Fatalf("changed deadline: %d, %v, calls=%d", n, err, calls)
+			} else if err != nil || b.accepted.Load() != 1 {
+				t.Fatalf("changed deadline: %v, accepted=%d", err, b.accepted.Load())
 			}
+		})
+	}
+}
+
+func TestWriteDataContextTransportErrorsQueueNothing(t *testing.T) {
+	for _, cause := range []error{io.ErrUnexpectedEOF, context.Canceled, syscall.EIO} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			c, _ := newDataWriteAssociation(t, 1)
+			c.dataWriter = nil
+			b := newContextSendBuffer(c)
+			b.failure = cause
+			c.controlTransport = b
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			n, err := c.WriteDataContext(ctx, allocationRequest(128))
+			if n != 0 {
+				t.Fatalf("failed send returned %d octets", n)
+			}
+			requireDataWriteError(t, err, DataNotSent, cause)
 		})
 	}
 }
