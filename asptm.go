@@ -37,7 +37,7 @@ func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRe
 		)
 		request := c.startTAck(aspActive, requestAspActive)
 		pending = append(pending, request)
-		if _, err := c.writeControl(aspActive); err != nil {
+		if _, err := c.writePendingControl(request, aspActive); err != nil {
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
@@ -121,7 +121,7 @@ func (c *Association) initiateASPInactive(routingContext *params.Param) error {
 func (c *Association) beginASPInactive(routingContext *params.Param) (*pendingRequest, error) {
 	aspInactive := messages.NewAspInactive(routingContext.Copy(), nil)
 	request := c.startTAck(aspInactive, requestAspInactive)
-	if _, err := c.writeControl(aspInactive); err != nil {
+	if _, err := c.writePendingControl(request, aspInactive); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}
@@ -1242,7 +1242,7 @@ func (c *Association) overrideOtherASPs(activated []uint32) {
 				peer.noteRoutingContextsInactive(nil)
 			}
 			if peer.stateForActiveRoutingContexts() == StateASPInactive {
-				peer.commitState(StateASPInactive)
+				peer.commitOverrideInactiveState()
 			}
 		}
 		waitForTrafficBarrier(&as.deliveryMu)
@@ -1258,7 +1258,7 @@ func (c *Association) overrideOtherASPs(activated []uint32) {
 		}
 		for _, peer := range peers {
 			if peer.stateForActiveRoutingContexts() == StateASPInactive {
-				peer.sendState(StateASPInactive)
+				peer.sendOverrideInactiveState()
 			}
 			notifyAlternateASPActive(peer, key, c.peerASPIdentifierParam())
 		}

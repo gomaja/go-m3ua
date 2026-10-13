@@ -53,9 +53,9 @@ type pendingRequest struct {
 // in this package, seen from the other end.
 type tackRetransmitter struct {
 	mu sync.Mutex
-	// retryMu orders the small number of T(ack) retransmission writes against
-	// association-epoch boundaries. It does not serialize ordinary Association writes:
-	// only retries take it. A restart or orderly termination can therefore wait
+	// retryMu orders initial pending-procedure writes and T(ack) retries against
+	// association-epoch and peer-withdrawal boundaries. Ordinary application
+	// writes remain independent. A restart or orderly termination can wait
 	// for an already-started old request to leave the wire, cancel the rest, and
 	// then send the new epoch's first request without an old retry overtaking it.
 	retryMu sync.Mutex
@@ -80,11 +80,16 @@ type tackRetransmitter struct {
 	// Serializes an ASP Down write and its count update with Ack classification.
 	// An Ack may arrive before the sending goroutine resumes from SendMsg.
 	aspDownDeliveryMu sync.Mutex
-	// awaitingRestartAspUp rejects ASPTM Acks left over from the prior SCTP
-	// epoch until the mandatory fresh ASP-Up procedure completes. Stream 0 has
+	// awaitingAspUp rejects ASPTM Acks after SCTP restart or a shared-ASPSM
+	// peer withdrawal until a fresh ASP-Up procedure completes. Stream 0 has
 	// no request identifier with which an old ASPTM Ack could otherwise be
 	// distinguished from an unsolicited Ack whose RFC procedure changes state.
-	awaitingRestartAspUp bool
+	awaitingAspUp bool
+	// peerDownSuperseded distinguishes an Up Ack following the peer's shared
+	// withdrawal from an ordinary unsolicited Ack. A fresh Up procedure clears it.
+	peerDownSuperseded bool
+	// peerDownHandling refuses a new shared procedure until Down Ack is written.
+	peerDownHandling bool
 }
 
 type acknowledgedASPTMScope struct {
@@ -165,8 +170,18 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 	if terminationBoundary {
 		c.cancelAllTAckLocked()
 	}
+	if c.tack.peerDownHandling && ackFor != requestAspDown ||
+		c.tack.peerDownSuperseded && (ackFor == requestAspActive || ackFor == requestAspInactive) {
+		c.tack.mu.Unlock()
+		if terminationBoundary {
+			c.tack.retryMu.Unlock()
+		}
+		req.finish(ErrASPProcedureSuperseded)
+		return req
+	}
 	if ackFor == requestAspUp {
 		c.tack.aspUpAcknowledged = false
+		c.tack.peerDownSuperseded = false
 	}
 	// Association-wide ASPSM procedures have one current epoch and a newer one
 	// supersedes it. ASPTM is per AS: RFC 4666 explicitly permits multiple Active
@@ -192,6 +207,24 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 
 func (p *pendingRequest) cancel() {
 	p.finish(ErrAssociationClosed)
+}
+
+// writePendingControl orders the initial write with the retry/withdrawal fence.
+// Registration remains independent so a newer request can supersede a blocked
+// timer. A superseded request returns its result through waitTAck; it must not
+// put its initial message on the wire after the peer's Down Ack (§4.3.4.2).
+func (c *Association) writePendingControl(request *pendingRequest, message messages.M3UA) (int, error) {
+	if c.tack == nil || request == nil {
+		return c.writeControl(message)
+	}
+	c.tack.retryMu.Lock()
+	defer c.tack.retryMu.Unlock()
+	select {
+	case <-request.stop:
+		return 0, nil
+	default:
+		return c.writeControl(message)
+	}
 }
 
 func (p *pendingRequest) acknowledge() {
@@ -500,7 +533,7 @@ func (c *Association) forgetTAck(kind requestKind) bool {
 	}
 	if found && kind == requestAspUp {
 		c.tack.aspUpAcknowledged = true
-		c.tack.awaitingRestartAspUp = false
+		c.tack.awaitingAspUp = false
 	}
 	return found
 }
@@ -512,6 +545,56 @@ func (c *Association) isRepeatedASPUpAcknowledgement() bool {
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
 	return c.tack.aspUpAcknowledged
+}
+
+// supersedePeerDownProcedures retires the procedures invalidated by a shared
+// withdrawal (RFC 4666 §4.3, §4.3.4.2 and §5.6.1). Normal Double Exchange
+// retains its independent local procedures (§5.6.2). Drain an in-flight retry
+// or initial write before Down Ack; queued writes observe their closed stop channel.
+// Waiters are released by the handler after state and acknowledgement settle.
+func (c *Association) supersedePeerDownProcedures() []*pendingRequest {
+	if c.tack == nil || c.role != RoleIPSP ||
+		(c.isIPSPDoubleExchange() && !c.usesSingleASPSMExchange()) {
+		return nil
+	}
+	c.tack.retryMu.Lock()
+	defer c.tack.retryMu.Unlock()
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	c.tack.peerDownSuperseded = true
+	c.tack.peerDownHandling = true
+	c.tack.awaitingAspUp = true
+	c.tack.aspUpAcknowledged = false
+	clear(c.tack.acknowledgedASPTM)
+	var superseded []*pendingRequest
+	for message, request := range c.tack.pending {
+		if request.kind == requestAspUp || request.kind == requestAspActive || request.kind == requestAspInactive {
+			request.stopRetries()
+			delete(c.tack.pending, message)
+			superseded = append(superseded, request)
+		}
+	}
+	return superseded
+}
+
+func (c *Association) finishPeerDownProcedures(requests []*pendingRequest) {
+	if c.tack != nil {
+		c.tack.mu.Lock()
+		c.tack.peerDownHandling = false
+		c.tack.mu.Unlock()
+	}
+	for _, request := range requests {
+		request.finish(ErrASPProcedureSuperseded)
+	}
+}
+
+func (c *Association) isPeerDownSupersededASPUpAck() bool {
+	if c.tack == nil {
+		return false
+	}
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	return c.tack.peerDownSuperseded
 }
 
 // claimASPDownAcknowledgement consumes one owed response whether or not a
@@ -534,8 +617,10 @@ func (c *Association) claimASPDownAcknowledgement() (pendingTAckAcknowledgement,
 }
 
 // rejectStaleASPTMAck reports an ASPTM Ack that cannot belong to the current
-// control procedure. After SCTP restart, RFC 4666 Section 4.3.3 requires
-// recovery to begin with ASP Up, so no ASP Active/Inactive Ack is actionable
+// control procedure. After SCTP restart or a shared-ASPSM peer withdrawal,
+// RFC 4666 §4.3.3 requires ASP Up after restart; §4.3.1 and §4.3.4.2
+// leave withdrawn communication ASP-DOWN, where ASPTM cannot establish service.
+// No ASP Active/Inactive Ack is actionable
 // until that fresh ASP Up is acknowledged. During orderly termination, only
 // the request currently being awaited may change state; all earlier timers were
 // cancelled before the first withdrawal message was written.
@@ -549,7 +634,7 @@ func (c *Association) rejectStaleASPTMAck(kind requestKind) bool {
 	}
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
-	if !c.tack.awaitingRestartAspUp && !c.terminating.Load() {
+	if !c.tack.awaitingAspUp && !c.terminating.Load() {
 		return false
 	}
 	return len(c.pendingRequestsLocked(kind)) == 0
@@ -699,7 +784,8 @@ func (c *Association) resetTAckEpoch() {
 	c.tack.retryMu.Lock()
 	c.tack.aspDownDeliveryMu.Lock()
 	c.tack.mu.Lock()
-	c.tack.awaitingRestartAspUp = c.role == RoleASP || c.role == RoleIPSP
+	c.tack.awaitingAspUp = c.role == RoleASP || c.role == RoleIPSP
+	c.tack.peerDownSuperseded = false
 	c.tack.aspUpAcknowledged = false
 	c.tack.aspDownAcksOutstanding = 0
 	c.cancelAllTAckLocked()
@@ -714,7 +800,8 @@ func (c *Association) completeRestartASPSM() {
 		return
 	}
 	c.tack.mu.Lock()
-	c.tack.awaitingRestartAspUp = false
+	c.tack.awaitingAspUp = false
+	c.tack.peerDownSuperseded = false
 	c.tack.mu.Unlock()
 }
 

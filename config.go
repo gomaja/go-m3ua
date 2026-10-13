@@ -569,8 +569,7 @@ type AssociationConfig struct {
 	Compatibility CompatibilityPolicy
 	// ASPProcedures selects automatic or explicit Layer Management initiation
 	// for ASP Up, ASP Down, ASP Active, and ASP Inactive. A nil policy preserves
-	// the historical role-specific lifecycle. A non-nil policy fully supersedes
-	// IPSPConfig.InitiateASPSM and IPSPConfig.InitiateASPTM.
+	// the role-specific lifecycle. An IPSP Association must set a non-nil policy.
 	ASPProcedures *ASPProcedurePolicy
 	// PeerSGP identifies the remote Signalling Gateway Process for an
 	// Association owned by an ASP Endpoint. It is invalid for an SGP Endpoint.

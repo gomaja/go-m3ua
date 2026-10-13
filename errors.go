@@ -42,6 +42,10 @@ func (e *AssociationEstablishmentError) Unwrap() error {
 
 // Error definitions.
 var (
+	// ErrASPProcedureSuperseded reports that a peer ASP Down ended a pending
+	// ASP Up, ASP Active or ASP Inactive on a shared IPSP ASPSM exchange.
+	ErrASPProcedureSuperseded = errors.New("ASP procedure superseded by peer ASP Down")
+
 	ErrSCTPNotAlive      = errors.New("SCTP is no longer alive")
 	ErrInvalidState      = errors.New("invalid state")
 	ErrNotEstablished    = errors.New("M3UA association not established")

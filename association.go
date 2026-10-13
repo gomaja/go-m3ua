@@ -107,7 +107,8 @@ type Association struct {
 	// IPSP in the RFC 4666 Double Exchange model. state retains the remote
 	// IPSP's state for traffic directed to the peer.
 	localIPSPState State
-	// A peer ASP Down ends its ASPSM exchange under RFC 4666 Section 5.6.2.
+	// A peer ASP Down ends its ASPSM exchange under RFC 4666 §4.3, §5.6.1
+	// and §5.6.2, including the shared Single Exchange communication.
 	// The resulting ASP-DOWN publication must not initiate another ASP Up.
 	// Guarded by muState and consumed by that publication's entry action.
 	peerDownAwaitingEntry bool
