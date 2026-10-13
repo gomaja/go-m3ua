@@ -417,18 +417,18 @@ func (sender *ledgerSender) stop() senderResult {
 }
 
 // drainChannels reads an association's indication channels until the library
-// closes them. StateChanges and ManagementIndications close the association
-// with ErrIndicationQueueFull if left unread, so every association has a
-// reader for its whole life. onEnd, when set, runs once they are all closed,
+// closes them. Once subscribed, StateChanges and ManagementIndications close
+// the association with ErrIndicationQueueFull if left unread, so subscribe
+// before starting a reader for its whole life. onEnd runs once they are all closed,
 // which is when the association has ended.
 func drainChannels(association *m3ua.Association, onEnd func()) <-chan struct{} {
 	done := make(chan struct{})
+	states, indications := association.StateChanges(), association.ManagementIndications()
 	go func() {
 		defer close(done)
 		if onEnd != nil {
 			defer onEnd()
 		}
-		states, indications := association.StateChanges(), association.ManagementIndications()
 		for states != nil || indications != nil {
 			select {
 			case _, open := <-states:

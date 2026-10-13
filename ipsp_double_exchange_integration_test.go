@@ -122,6 +122,8 @@ func exerciseIPSPDoubleExchangeIntegration(
 	if sctpInitiator == "IPSP-B" {
 		associationA, associationB = acceptedAssociation, dialed
 	}
+	associationA.ManagementIndications()
+	associationB.ManagementIndications()
 	if !fullExchange {
 		exerciseOneIPSPTrafficDirection(t, ctx, associationA, associationB, initiateA)
 		return

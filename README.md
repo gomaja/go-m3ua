@@ -102,6 +102,15 @@ initiates the SCTP association. Accordingly, this API never uses Client or
 Server as an M3UA role: `RoleASP`, `RoleSGP`, and `RoleIPSP` select protocol
 procedures, while `Dial`, `Listen`, and `Accept` describe SCTP establishment.
 
+`Association.StateChanges()` and `ManagementIndications()` are optional,
+independent subscriptions. Call either after `Dial` or `Accept` to receive
+future events; earlier events, including the handshake, are not replayed.
+`State()` gives the current ASP/IPSP state. Repeated calls return the same
+channel. Once subscribed, drain the stream for the association's lifetime: a
+full queue (16 state transitions or 64 management indications) closes the
+association with `ErrIndicationQueueFull`. An application that never subscribes
+to a stream does not queue its events and cannot overflow that stream.
+
 The base `AssociationConfig` is role-neutral and is snapshotted for each M3UA
 association. Role-specific setters must then match the Endpoint; this ASP
 example sets an ASP Identifier:
@@ -880,8 +889,11 @@ opening a subscription.
 `Association.ManagementIndications` reports M-NOTIFY, M-ERROR,
 M-SCTP_RELEASE, and M-SCTP_RESTART. Each indication owns its slices and carries
 its `AssociationID`, exact `ASKeys`, affected destination masks and scope, and
-local cause where applicable. A full bounded queue closes the Association with
-`ErrIndicationQueueFull` rather than silently losing a mandatory event.
+local cause where applicable. Calling the method subscribes to future
+indications; it shares no queue with `StateChanges` and replays no earlier
+events. Once subscribed, a full bounded queue closes the Association with
+`ErrIndicationQueueFull` rather than silently losing an event. Drain every
+subscribed stream, or leave it unsubscribed when polling `State()` is sufficient.
 
 See the [Endpoint management and SSNM design](./docs/design/endpoint-management-and-ssnm.md),
 the [procedure coverage](./docs/procedure-coverage.md), and the

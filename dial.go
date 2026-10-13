@@ -162,6 +162,12 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Add
 // M3UA signals and M3UA BEAT messages are automatically handled in background
 // goroutines.
 //
+// StateChanges and ManagementIndications are optional subscriptions. Calling
+// either starts delivery of future events on that channel; earlier events,
+// including the handshake, are not replayed. State gives the current ASP/IPSP
+// state. Drain each subscribed channel for the association's lifetime: a full
+// queue closes it with ErrIndicationQueueFull.
+//
 // Dial makes at most one SCTP association attempt — one INIT if ctx is live,
 // none if ctx is already done — bounded by AssociationConfig.InitTimeout, and never
 // retries. A caller that wants to keep trying loops over Dial and chooses its

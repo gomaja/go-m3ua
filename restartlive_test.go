@@ -125,9 +125,9 @@ func TestSCTPRestartIsReportedFromARealRestart(t *testing.T) {
 	if sgp.assocID.Load() == 0 {
 		t.Fatal("the accepted association has no id; the restart cannot be routed to it")
 	}
-	// Accept returns only after ASP-ACTIVE, so all opening state indications are
-	// already queued. Remove them to make every edge observed below attributable
-	// to the SCTP restart rather than to the initial handshake.
+	// Subscribe before inducing the restart. The opening handshake is not
+	// replayed, so later indications describe the restart and its recovery.
+	sgp.ManagementIndications()
 drainInitialStates:
 	for {
 		select {

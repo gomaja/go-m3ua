@@ -720,7 +720,7 @@ func newFuzzConn(t testing.TB, role Role) *Association {
 		destinations: newDestinations(),
 		tack:         newTAckRetransmitter(),
 
-		// See newTestConn: nil here drops every transition and panics on close.
+		// Keep closeable queues, but leave optional indication streams unsubscribed.
 		stateEventChan: make(chan State, 16),
 		mgmtChan:       make(chan *ManagementIndication, 64),
 	}

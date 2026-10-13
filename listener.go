@@ -430,6 +430,12 @@ func (l *Listener) applySelectedSendBuffer(sctpAssociation *sctp.Conn, selected 
 // DATA is read with Association.ReadData; M3UA control procedures continue in
 // background goroutines.
 //
+// StateChanges and ManagementIndications are optional subscriptions. Calling
+// either starts delivery of future events on that channel; earlier events,
+// including the handshake, are not replayed. State gives the current ASP/IPSP
+// state. Drain each subscribed channel for the association's lifetime: a full
+// queue closes it with ErrIndicationQueueFull.
+//
 // Accept does not return until the M3UA handshake for that peer has completed,
 // or until it gives up on it after AssociationConfig.EstablishTimeout. A single
 // accept loop therefore serves peers strictly one at a time, and one silent peer

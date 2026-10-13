@@ -34,6 +34,12 @@ and optional ASP-to-SGP SCON procedures. Endpoint exposes SGP-originated SCON
 and DUPU fan-out to the concerned active ASPs. ManagementIndications preserves
 the exact Association, ASKey, destination, and local failure scope.
 
+StateChanges and ManagementIndications are independent optional subscriptions.
+Calling either starts delivery of future events, without replaying earlier
+events or the handshake. State gives the current ASP/IPSP state. Applications
+must drain each subscribed channel for the association's lifetime: a full queue
+closes it with ErrIndicationQueueFull. Unsubscribed streams do not queue events.
+
 M3UA BEAT/BEAT Ack liveness is application-layer logic from RFC 4666 and is
 configured with HeartbeatInfo. It is separate from SCTP HEARTBEAT chunks and
 SCTP path-management timers, which remain transport/kernel behavior below this

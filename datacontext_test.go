@@ -462,6 +462,7 @@ func TestNetworkAppearanceValidationAcrossAssociation(t *testing.T) {
 			delivered.Scope.NetworkAppearance, delivered.Scope.NetworkAppearanceSet)
 	}
 
+	aspAssociation.ManagementIndications()
 	rawInvalid, err := data(8, "unconfigured-network").MarshalBinary()
 	if err != nil {
 		t.Fatalf("marshal invalid DATA: %v", err)

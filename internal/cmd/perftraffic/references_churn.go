@@ -313,7 +313,7 @@ type routeReferenceEvent struct {
 // on the shared clock. The same observer runs for churn and for the static
 // control. Its goroutines end with their association: the library closes both
 // channels and Done when it ends, and they must be drained until then, since
-// an unread indication channel closes the association.
+// an unread subscribed indication channel closes the association.
 type routeReferenceObserver struct {
 	clock  measurementClock
 	mutex  sync.Mutex
@@ -323,13 +323,14 @@ type routeReferenceObserver struct {
 func newRouteReferenceObserver(clock measurementClock, associations []*m3ua.Association) *routeReferenceObserver {
 	observer := &routeReferenceObserver{clock: clock}
 	for _, association := range associations {
+		states, indications := association.StateChanges(), association.ManagementIndications()
 		go func(association *m3ua.Association) {
-			for state := range association.StateChanges() {
+			for state := range states {
 				observer.record(association.ID(), "state-change", state.String())
 			}
 		}(association)
 		go func(association *m3ua.Association) {
-			for indication := range association.ManagementIndications() {
+			for indication := range indications {
 				observer.record(association.ID(), "management-indication", fmt.Sprintf("kind %d: %s", indication.Kind, indication.Description))
 			}
 		}(association)
