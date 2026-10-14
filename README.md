@@ -455,6 +455,18 @@ does when its send buffer is full, so a resend cannot duplicate — or
 `DataSendIndeterminate`, where submission had begun and the application owns the
 retry decision. `errors.Is` and `errors.As` still reach the cause.
 
+Use `WriteDataContext(ctx, request)` or `MTPTransferContext(ctx, request)` to
+cancel one send while it waits for admission or send-buffer space. Without an
+application write deadline, a full buffer returns `EAGAIN` immediately. With a
+deadline, `SendMsgContext` waits in the transport until space is available, the
+deadline passes, or the context ends. A context interruption matches `ctx.Err()`;
+application deadlines are preserved and other sends remain usable. Every error
+from `SendMsgContext` queues nothing and reports `DataNotSent`, so
+`DataSendIndeterminate` is unreachable on that transport path. Local acceptance
+wins over concurrent cancellation and still does not prove peer delivery.
+Contexts that cannot be cancelled retain `WriteData`'s ordinary submission path
+and conservative outcome classification.
+
 A zero `Stream` selects the negotiated stream this message's own Signalling
 Link Selection maps to, which is what keeps one SLS in sequence (Section 1.4.7);
 an explicit stream is validated against the negotiated maximum, and stream 0 is

@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -50,6 +51,16 @@ func (f *fullSendBuffer) SendMsg(b []byte, opts sctp.SendOptions) (int, error) {
 	return f.waitSend(b, opts.Info)
 }
 
+func (f *fullSendBuffer) SendMsgContext(ctx context.Context, b []byte, opts sctp.SendOptions) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if opts.NoWait {
+		return f.noWaitSend(b, opts.Info)
+	}
+	return f.waitSendContext(ctx, b, opts.Info)
+}
+
 func (f *fullSendBuffer) noWaitSend(b []byte, info *sctp.SndInfo) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -64,6 +75,10 @@ func (f *fullSendBuffer) noWaitSend(b []byte, info *sctp.SndInfo) (int, error) {
 }
 
 func (f *fullSendBuffer) waitSend(b []byte, info *sctp.SndInfo) (int, error) {
+	return f.waitSendContext(context.Background(), b, info)
+}
+
+func (f *fullSendBuffer) waitSendContext(ctx context.Context, b []byte, info *sctp.SndInfo) (int, error) {
 	f.waiting <- struct{}{}
 	select {
 	case <-f.space:
@@ -76,6 +91,8 @@ func (f *fullSendBuffer) waitSend(b []byte, info *sctp.SndInfo) (int, error) {
 		return len(b), nil
 	case <-f.closed:
 		return 0, net.ErrClosed
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
 }
 

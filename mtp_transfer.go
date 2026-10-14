@@ -353,10 +353,12 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 // a cause matching ctx.Err() through errors.Is. After selection, each failed
 // path in *MTPTransferError carries its own *DataWriteError: DataNotSent means
 // no octet was accepted and no submission remains pending; DataSendIndeterminate
-// means resending could duplicate DATA. Paths already accepted remain in
-// SuccessfulPaths, including when cancellation interrupts a broadcast. They
-// are not retracted, and the request is never retried on another path. Acceptance
-// does not prove peer delivery (RFC 4666 §3.3.1). MTPTransfer uses
+// means resending could duplicate DATA. Every error from the cancellable
+// SendMsgContext transport path is DataNotSent, as described by
+// WriteDataContext. Paths already accepted remain in SuccessfulPaths,
+// including when cancellation interrupts a broadcast. They are not retracted,
+// and the request is never retried on another path. Acceptance does not prove
+// peer delivery (RFC 4666 §3.3.1). MTPTransfer uses
 // context.Background().
 func (e *Endpoint) MTPTransferContext(ctx context.Context, request MTPTransferRequest) (MTPTransferResult, error) {
 	if err := ctx.Err(); err != nil {

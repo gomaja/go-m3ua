@@ -234,6 +234,18 @@ if errors.As(err, &writeErr) {
 an `*InvalidSCTPStreamIDError` or the transport's own error is matchable exactly
 as before.
 
+For per-call cancellation, use `WriteDataContext(ctx, request)` or
+`MTPTransferContext(ctx, request)`. Cancellation can end admission and transport
+buffer waits without closing the association. A full buffer returns `EAGAIN`
+immediately without an application write deadline; with one, the transport waits
+for space until that deadline or the context ends. A context interruption matches
+`ctx.Err()` and queues nothing. Every `SendMsgContext` error is `DataNotSent`,
+so `DataSendIndeterminate` is unreachable on that transport path. A send already
+accepted reports success even if cancellation occurs concurrently. Application
+deadlines are preserved, including changes made during the call.
+Contexts that cannot be cancelled retain the ordinary send's conservative
+outcome classification.
+
 Reading is context-scoped:
 
 ```go

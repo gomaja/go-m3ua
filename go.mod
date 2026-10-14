@@ -3,7 +3,7 @@ module github.com/gomaja/go-m3ua
 go 1.26
 
 require (
-	github.com/gomaja/go-sctp v0.0.0-20261011145106-fb1185169ee7
+	github.com/gomaja/go-sctp v0.0.0-20261014114506-6dc7c7827367
 	github.com/google/go-cmp v0.7.0
 	github.com/pascaldekloe/goe v0.1.1
 )

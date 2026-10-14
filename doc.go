@@ -27,6 +27,13 @@ Outcome distinguishes a message that never reached the transport from one whose
 fate is unknown. ReadData is context-scoped: cancelling a read ends that read
 and neither closes the association nor discards queued DATA.
 
+WriteDataContext and MTPTransferContext cancel one send's admission and buffer
+waits. A full buffer returns EAGAIN without an application write deadline; with
+one, the transport waits until space is available, the deadline passes, or the
+context ends. SendMsgContext errors queue nothing and report DataNotSent; known
+local acceptance wins over concurrent cancellation. Application deadlines and
+other sends are preserved.
+
 Endpoint exposes the RFC 4666 Layer Management status boundary for
 Associations, ASPs, Application Servers, MTP Routes, and destinations.
 Association exposes explicit ASP Up, ASP Down, ASP Active, ASP Inactive, DAUD,
