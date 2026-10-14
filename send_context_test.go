@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gomaja/go-ctxsync"
 	"github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-sctp"
 )
@@ -58,7 +59,7 @@ func TestWriteDataContextCancelsScopeAdmission(t *testing.T) {
 	for _, role := range []Role{RoleSGP, RoleIPSP} {
 		t.Run(role.String(), func(t *testing.T) {
 			var c *Association
-			var barrier *contextMutex
+			var barrier *ctxsync.Mutex
 			var scope ASKey
 			if role == RoleSGP {
 				_, as, association, _ := distributionFixture(t, params.TrafficModeLoadshare)
@@ -89,9 +90,6 @@ func TestWriteDataContextCancelsScopeAdmission(t *testing.T) {
 				t.Fatal("context did not cancel scope admission")
 			}
 			requireDataWriteError(t, err, DataNotSent, context.DeadlineExceeded)
-			if barrier.waiters.count.Load() != 0 {
-				t.Fatal("cancelled scope admission retained a waiter")
-			}
 			if _, err := c.WriteData(request); err != nil {
 				t.Fatal(err)
 			}
@@ -156,9 +154,6 @@ func TestWriteDataContextCancelsBehindEverySender(t *testing.T) {
 				t.Fatal("context send queued behind the transport")
 			}
 			requireDataWriteError(t, err, DataNotSent, context.DeadlineExceeded)
-			if c.sendMu.waiters.count.Load() != 0 {
-				t.Fatal("cancelled send left a socket waiter")
-			}
 			unblock()
 			if err := <-first; err != nil {
 				t.Fatal(err)
@@ -324,9 +319,6 @@ func TestMTPTransferContextCancelsActivationBarrier(t *testing.T) {
 		t.Fatal("context did not cancel activation admission")
 	}
 	requireDataWriteError(t, err, DataNotSent, context.DeadlineExceeded)
-	if c.aspTransferMu.waiters.count.Load() != 0 {
-		t.Fatal("cancelled transfer retained an activation waiter")
-	}
 	if _, err := e.MTPTransfer(request); err != nil {
 		t.Fatal(err)
 	}
@@ -632,6 +624,19 @@ func TestMTPTransferContextKeepsCompletedBroadcastPaths(t *testing.T) {
 	}
 }
 
+// Observing Done lets the test wait for each sender to reach the contended
+// acquisition without depending on a lock implementation's private queue.
+type observedDoneContext struct {
+	context.Context
+	once     sync.Once
+	observed chan<- struct{}
+}
+
+func (c *observedDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() { c.observed <- struct{}{} })
+	return c.Context.Done()
+}
+
 func TestWriteDataContextWaitersDoNotLeak(t *testing.T) {
 	c, capture := newDataWriteAssociation(t, 1)
 	baseline := runtime.NumGoroutine()
@@ -639,33 +644,38 @@ func TestWriteDataContextWaitersDoNotLeak(t *testing.T) {
 	const writers = 128
 	var group sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observed := make(chan struct{}, writers)
 	for range writers {
 		group.Go(func() {
-			_, err := c.WriteDataContext(ctx, allocationRequest(128))
+			waiter := &observedDoneContext{Context: ctx, observed: observed}
+			_, err := c.WriteDataContext(waiter, allocationRequest(128))
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("cancelled writer: %v", err)
 			}
 		})
 	}
-	deadline := time.Now().Add(time.Second)
-	for c.sendMu.waiters.count.Load() != writers && time.Now().Before(deadline) {
-		runtime.Gosched()
+	timeout := time.After(time.Second)
+	for range writers {
+		select {
+		case <-observed:
+		case <-timeout:
+			cancel()
+			c.sendMu.Unlock()
+			group.Wait()
+			t.Fatal("senders did not reach the contended acquisition")
+		}
 	}
-	parked := c.sendMu.waiters.count.Load()
 	cancel()
 	group.Wait()
-	retained := c.sendMu.waiters.count.Load()
 	c.sendMu.Unlock()
-	if parked != writers || retained != 0 {
-		t.Fatalf("socket waiters: parked=%d retained=%d", parked, retained)
-	}
 	if _, err := c.WriteData(allocationRequest(128)); err != nil {
 		t.Fatal(err)
 	}
 	if capture.submissions() != 1 {
 		t.Fatal("cancelled waiters submitted late")
 	}
-	deadline = time.Now().Add(time.Second)
+	deadline := time.Now().Add(time.Second)
 	for runtime.NumGoroutine() > baseline && time.Now().Before(deadline) {
 		runtime.Gosched()
 	}

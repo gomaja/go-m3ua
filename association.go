@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gomaja/go-ctxsync"
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-sctp"
@@ -100,7 +101,7 @@ type Association struct {
 	role Role
 	// aspTransferMu keeps a selected ASP MTP-TRANSFER write ordered before a
 	// concurrent loss of the Association or its active Application Server scope.
-	aspTransferMu contextRWMutex
+	aspTransferMu ctxsync.RWMutex
 	// state is to see the current state
 	state State
 	// localIPSPState is the local IPSP's state for traffic directed to this
@@ -300,7 +301,7 @@ type Association struct {
 	asReservation *applicationServerReservation
 	// unscopedDeliveryMu covers peer-directed DATA on an IPSP and DATA/SSNM on
 	// a dedicated association where no Routing Context was coordinated.
-	unscopedDeliveryMu contextMutex
+	unscopedDeliveryMu ctxsync.Mutex
 	// localIPSPSSNMDeliveryMu is the independent Double Exchange barrier for
 	// local-directed SCON. RFC 4666 Section 3.4.4 lets an M3UA layer send SCON
 	// "indicating that the congestion level of the M3UA layer or the ASP has
@@ -394,7 +395,7 @@ type Association struct {
 	dataWriter func([]byte, *sctp.SndInfo) (int, error)
 	// sendMu orders DATA and control submissions, including both attempts of a
 	// control write that waits for space. A context send can abandon this gate.
-	sendMu contextMutex
+	sendMu ctxsync.Mutex
 	// applicationWriteDeadline is nil or an immutable copy of the write deadline.
 	// Keeping time.Time preserves its monotonic clock and dates outside UnixNano's
 	// range. Its presence selects whether application sends wait for space;
