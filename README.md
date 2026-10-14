@@ -78,17 +78,12 @@ cd examples/asp
 go run m3ua-asp.go
 ```
 
-There is also an example for Point Code format conversion, which works like this;
-
-```shell-session
-$ ./pc-conv -raw 1234 -variant 3-8-3
-2023/04/05 06:07:08 PC successfully converted.
-        Raw: 1234, Formatted: 0-154-2, Variant: 3-8-3
-$ 
-$ ./pc-conv -str 1-234-5 -variant 4-3-7
-2023/04/05 06:07:08 PC successfully converted.
-        Raw: 29957, Formatted: 1-234-5, Variant: 4-3-7
-```
+Point-code notation is not part of this module. International signalling point
+codes (ITU-T Q.708 `2-068-1` notation, SANCs) and national presentation layouts
+are provided by [go-pointcode](https://github.com/gomaja/go-pointcode), which
+also hosts the `pc-conv` converter. go-m3ua carries point codes as plain `uint32`
+values, matching the 32-bit Originating and Destination Point Code fields of
+Protocol Data (RFC 4666 Section 3.3.1).
 
 ### For Developers
 

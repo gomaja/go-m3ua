@@ -13,7 +13,6 @@
 /internal/cmd/perfratio/perfratio
 /internal/cmd/perftraffic/perftraffic
 /examples/asp/asp
-/examples/pc-conv/pc-conv
 /examples/sgp/sgp
 
 # Output of the go coverage tool, specifically when used with LiteIDE

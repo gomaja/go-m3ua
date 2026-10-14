@@ -778,7 +778,7 @@ func TestEveryProcedureCoverageCitationExists(t *testing.T) {
 	const coverage = "docs/procedure-coverage.md"
 
 	declared := map[string]string{}
-	roots := []string{".", "messages", "messages/params", "pc"}
+	roots := []string{".", "messages", "messages/params"}
 	for _, root := range roots {
 		entries, err := os.ReadDir(root)
 		if err != nil {
