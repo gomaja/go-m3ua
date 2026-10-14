@@ -12,7 +12,7 @@ package messages
 import (
 	"testing"
 
-	"github.com/pascaldekloe/goe/verify"
+	"github.com/google/go-cmp/cmp"
 )
 
 type serializeable interface {
@@ -39,8 +39,8 @@ func runTests(t *testing.T, cases []testCase, decode decoderFunc) {
 					t.Fatal(err)
 				}
 
-				if got, want := v, c.structured; !verify.Values(t, "", got, want) {
-					t.Fail()
+				if diff := cmp.Diff(c.structured, v); diff != "" {
+					t.Errorf("decoded value mismatch (-want +got):\n%s", diff)
 				}
 			})
 
@@ -50,8 +50,8 @@ func runTests(t *testing.T, cases []testCase, decode decoderFunc) {
 					t.Fatal(err)
 				}
 
-				if got, want := b, c.serialized; !verify.Values(t, "", got, want) {
-					t.Fail()
+				if diff := cmp.Diff(c.serialized, b); diff != "" {
+					t.Errorf("encoded bytes mismatch (-want +got):\n%s", diff)
 				}
 			})
 
