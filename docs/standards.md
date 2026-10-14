@@ -1,7 +1,7 @@
 # M3UA standards and security contract
 
 Audit date: 2026-08-31. RFC 4666 relationships, errata and the SIGTRAN working
-group rechecked 2026-09-19; see [Recheck log](#recheck-log).
+group rechecked 2026-10-14; see [Recheck log](#recheck-log).
 
 This document defines which authorities govern go-m3ua v1.2.0 and where the
 library boundary ends. The implementation status for each RFC 4666 area is in
@@ -28,7 +28,7 @@ interpretation.
 
 | Subject | Current authority | Relationship and project use |
 | --- | --- | --- |
-| M3UA | [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html) | Proposed Standard. It obsoletes RFC 3332 and has no `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc4666.json). The [Datatracker record](https://datatracker.ietf.org/doc/rfc4666/) and [incoming relationship API](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4666&limit=100&format=json) agree. |
+| M3UA | [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html) | Proposed Standard. It obsoletes RFC 3332 and has no `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc4666.json). The [Datatracker record](https://datatracker.ietf.org/doc/rfc4666/) and [incoming relationship API](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4666&relationship__slug__in=obs,updates&format=json) agree. |
 | SIGTRAN security | [RFC 3788](https://www.rfc-editor.org/rfc/rfc3788.html) | Proposed Standard with no formal update or replacement. RFC 4666 [Section 6](https://www.rfc-editor.org/rfc/rfc4666.html#section-6) requires implementations to follow its normative guidance. Its concrete protocol references require the modernization described below. |
 | SCTP | [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html) | Current Proposed Standard SCTP base specification. It obsoletes RFCs 4460, 4960, 6096, 7053, and 8540 and has no later formal `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc9260.json). |
 | SCTP zero-checksum extension | [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) | Current optional extension for negotiated zero-checksum operation when an alternate error-detection method provides at least equivalent integrity. It does not formally update RFC 9260: the RFC Editor records and the Datatracker incoming-relationship API list no `Updates` relationship. |
@@ -44,27 +44,28 @@ RFC Editor on the publication status of every document above. Its
 incoming-relationship API agrees that RFC 4666, RFC 3788, and RFC 9260 have no
 later formal update or replacement and that RFC 8996 updates RFC 3436 and RFC
 6083. RFC 9653 extends SCTP without declaring an `Updates: 9260` relationship.
-The same API does not return every update relationship shown by some supporting
-RFC Editor records, including the RFC 6040 and RFC 7619 updates in the
-[RFC 4301 RFC Editor record](https://www.rfc-editor.org/rfc/rfc4301.json), which
-are absent from the matching
-[Datatracker incoming-relationship API result](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4301&limit=100&format=json).
-This is recorded as a database discrepancy; the modernization table uses the
-RFC Editor's published relationships rather than treating an absent
-Datatracker API result as evidence that no relationship exists.
+Relationship queries against that API are filtered to `obs` and `updates`
+(`relationship__slug__in=obs,updates`). Unfiltered, it also returns every
+normative and informative citation and stops at its page limit, so a missing
+row there proves nothing about a heavily cited RFC. Filtered, it returns the
+RFC 6040 and RFC 7619 updates of the
+[RFC 4301 RFC Editor record](https://www.rfc-editor.org/rfc/rfc4301.json) as
+well ([Datatracker result](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4301&relationship__slug__in=obs,updates&format=json)).
+Earlier versions of this document recorded those two updates as missing from
+the Datatracker; the 2026-10-14 recheck found no such discrepancy.
 
 The [SIGTRAN working group](https://datatracker.ietf.org/wg/sigtran/documents/)
-is concluded and has no active M3UA Internet-Draft. The active
-[TSVWG documents](https://datatracker.ietf.org/wg/tsvwg/documents/) include
-`draft-ietf-tsvwg-sctp-dtls-chunk-04` and
-`draft-ietf-tsvwg-dtls-chunk-key-management-01`. They may change future SCTP
-security choices but are not normative for v1.2.0. The expired
-`draft-ietf-tsvwg-dtls-over-sctp-bis` and
+is concluded and has no active M3UA Internet-Draft. Among the
+[TSVWG documents](https://datatracker.ietf.org/wg/tsvwg/documents/),
+`draft-ietf-tsvwg-sctp-dtls-chunk-05` is an active working group document that
+may change future SCTP security choices; it is not normative for v1.2.0. Its
+companion `draft-ietf-tsvwg-dtls-chunk-key-management-01` expired on
+2026-09-03. The expired `draft-ietf-tsvwg-dtls-over-sctp-bis` and
 `draft-ietf-tsvwg-rfc4895-bis` are historical context only.
 
 ## RFC 4666 errata
 
-The [RFC 4666 errata registry](https://www.rfc-editor.org/errata/rfc4666)
+The [RFC 4666 errata registry](https://errata.rfc-editor.org/search/?rfc_number=4666&presentation=records)
 contains no Verified erratum.
 
 | Errata ID | Status | Effect on this project |
@@ -78,7 +79,7 @@ text. Any later status change requires a fresh audit and a dedicated change.
 
 ## SCTP and security-extension errata
 
-The current [RFC 9260 errata registry](https://www.rfc-editor.org/errata/rfc9260)
+The current [RFC 9260 errata registry](https://errata.rfc-editor.org/search/?rfc_number=9260&presentation=records)
 contains five Verified errata:
 
 - [Errata 7148](https://www.rfc-editor.org/errata/eid7148) corrects INIT ACK
@@ -231,9 +232,27 @@ confidentiality or peer authentication.
 
 ## Recheck log
 
-Standards decisions are rechecked when a subsystem is revisited, not once. RFC
-4666 was rechecked on 2026-09-19 against both databases and the errata registry,
-with every endpoint called in that session:
+Standards decisions are rechecked when a subsystem is revisited, not once.
+
+On 2026-10-14 the published relationships and errata were rechecked against both
+databases, with every endpoint called in that session:
+
+| Source | Result |
+| --- | --- |
+| RFC Editor records for [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.json), [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.json), [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.json) and [RFC 3788](https://www.rfc-editor.org/rfc/rfc3788.json) | `obsoleted_by` and `updated_by` empty for all four. |
+| Datatracker relationships filtered to `obs,updates` for [RFC 4666](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4666&relationship__slug__in=obs,updates&format=json), [RFC 9260](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc9260&relationship__slug__in=obs,updates&format=json), [RFC 6458](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc6458&relationship__slug__in=obs,updates&format=json) and [RFC 3788](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc3788&relationship__slug__in=obs,updates&format=json) | `total_count` 0 for all four. |
+| The same pair for RFC 3436, RFC 6083 and RFC 4301, and the RFC Editor record for [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.json) | Both databases list RFC 8996 as updating RFC 3436 and RFC 6083, and RFC 6040 and RFC 7619 as updating RFC 4301. RFC 9653 declares no `updates` relationship, and the Datatracker lists nothing updating RFC 9260. |
+| [RFC 4666 errata](https://errata.rfc-editor.org/search/?rfc_number=4666&presentation=records) | No Verified erratum; 2065 and 4475 Held for Document Update; 2518 Rejected. |
+| [RFC 9260 errata](https://errata.rfc-editor.org/search/?rfc_number=9260&presentation=records) | Verified 7147, 7148, 7387, 7852, 8402; Held 8772; Rejected 7988, 8387, 8774. |
+| [RFC 6458 errata](https://errata.rfc-editor.org/search/?rfc_number=6458&presentation=records) | Verified 6111, 6112, 6115, 6980, 7547, 7548; Held 4921, 6113, 6114, 6116; Rejected 6081, 6131, 6132, 6133. |
+| TSVWG drafts named above | `draft-ietf-tsvwg-sctp-dtls-chunk` at revision 05, active; `draft-ietf-tsvwg-dtls-chunk-key-management` at 01, expired 2026-09-03. |
+
+The databases agree on every point. The RFC 4666 and RFC 9260 errata match the
+errata sections above and, for RFC 4666, the 2026-09-19 recheck below. RFC 6458,
+which the code cites for socket options, is recorded here for the first time.
+
+RFC 4666 was rechecked on 2026-09-19 against both databases and the errata
+registry, with every endpoint called in that session:
 
 | Source | Result |
 | --- | --- |
@@ -245,6 +264,6 @@ with every endpoint called in that session:
 
 The two databases agree on every point above. The RFC Editor and the Datatracker
 are separate databases, so agreement is the evidence and a disagreement would be
-reported rather than averaged; the one disagreement this project has found is the
-RFC 4301 relationship discrepancy recorded above, which concerns a supporting
-document rather than M3UA.
+reported rather than averaged. The RFC 4301 relationship discrepancy recorded
+before 2026-10-14 did not survive a query filtered to `obs` and `updates`; no
+disagreement between the databases is known.
