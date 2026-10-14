@@ -40,8 +40,14 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           set +e
-          "$(go env GOPATH)/bin/govulncheck" ./... 2>&1 | tee govulncheck.txt
-          status=${PIPESTATUS[0]}
+          status=0
+          for module in . tools; do
+            (cd "$module" && "$(go env GOPATH)/bin/govulncheck" ./...) 2>&1 | tee "govulncheck-${module//./root}.txt"
+            module_status=${PIPESTATUS[0]}
+            if (( module_status != 0 )); then
+              status=$module_status
+            fi
+          done
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit 0
 
