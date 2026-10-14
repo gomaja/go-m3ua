@@ -679,6 +679,53 @@ during the longest pause the receiver has to ride out, roughly rate × pause ×
 payloads stalled that way in 5 of 6 two-minute runs at the default buffer, and
 in none of 6 with `net.core.rmem_default` raised to 16 MiB.
 
+There is another source of missing DATA: a discarded zero-window probe. In
+the loopback captures reported in [go-sctp#35](https://github.com/gomaja/go-sctp/issues/35)
+and [lksctp-tools#72](https://github.com/sctp/lksctp-tools/issues/72), Linux
+sent the first probe within microseconds of a zero-window SACK with no DATA
+in flight, rather than waiting one RTO as RFC 9260 Section 6.1 rule A
+recommends. The receiver discarded its new TSN, as Section 6.2 requires when
+the advertised window is zero and the TSN is larger than any received so far.
+Other holes followed DATA sent while the advertised window was still open.
+Separate traced runs located every counted packet discard at socket-backlog
+admission, whose limit counts receive memory while the window counts payload.
+Those drops are the likely source of these other holes, but the trace did not
+record the discarded TSNs or tie individual drops to individual stalls.
+
+`config.SocketSendBuffer` (`SO_SNDBUF`) also affects recovery from a hole.
+Fast retransmit needs three qualifying miss reports (RFC 9260 Section 7.2.4),
+and further DATA can supply them. The sender needs both usable peer credit
+and room in its send buffer: Linux keeps sent DATA charged there until it is
+cumulatively acknowledged. In the captured timer stalls there were too few
+qualifying reports, so recovery waited for T3-rtx. Raising only the receive
+buffer still stalled with ample advertised window; in that capture the
+sender's charged memory exceeded its send-buffer limit during the quiet
+interval. The stalls followed the configured RTO minimum, sometimes with
+delayed SACKs and scheduling adding to the application's pause.
+
+The buffer measurements in [#178](https://github.com/gomaja/go-m3ua/issues/178)
+used a C program over loopback with `SCTP_NODELAY` and default sysctls, sending
+for about ten seconds per run and letting the last send complete. They were
+not repeated through go-m3ua. With 128-byte messages, the T3-rtx expiry counts
+in three runs were 1, 0, 1 at default buffers; 0, 1, 0 with only the receive
+buffer raised four-fold (851,968 bytes effective); and 0, 0, 0 raised
+sixteen-fold (3,407,872 bytes effective). That supports sizing the receive
+buffer for small messages. With 4096-byte messages, the same receive-buffer
+controls gave 10, 10, 10; 9, 9, 8; and 3, 3, 3 expiries, respectively.
+
+In a separate 4096-byte matrix, default buffers gave 10, 10, 10 T3-rtx
+expiries, raising only `SO_RCVBUF` four-fold gave 8, 8, 8, and raising only
+`SO_SNDBUF` four-fold gave 9, 9, 8. Raising both four-fold, to 851,968 bytes
+effective each, gave 0, 0, 0. A probe hole still occurred with both raised,
+but fast retransmit repaired it within a fraction of a millisecond. Both
+buffers needed room in these controls; the measurements do not establish a
+buffer size that prevents stalls on other workloads or paths.
+
+The defect is in Linux SCTP, tracked in the two upstream reports linked above;
+go-m3ua does not work around it. It reproduced on Debian 6.12.107, WSL2
+6.18.54 and vanilla 7.3-rc7; the packet captures were taken only on 6.18.54.
+Buffer sizing is configuration guidance, not a kernel fix.
+
 Linux caps a request at `net.core.rmem_max` (`wmem_max` for the send buffer) and
 then doubles it, as `socket(7)` describes, so where the cap allows, the 8 MiB
 request above gives a 16 MiB buffer and an 8 MiB window. A socket left unset
