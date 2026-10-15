@@ -177,6 +177,38 @@ func TestMTP3UserIdentityValues(t *testing.T) {
 	}
 }
 
+// TestServiceIndicatorValues pins the SS7 SI values carried by DATA (RFC 4666
+// §3.3.1) and their alignment with the MTP3-User Identity table (§3.4.5).
+func TestServiceIndicatorValues(t *testing.T) {
+	if ServiceIndUnused != 0 {
+		t.Errorf("ServiceIndUnused = %d, want 0", ServiceIndUnused)
+	}
+	for _, c := range []struct {
+		name         string
+		got          uint8
+		want         uint8
+		userIdentity uint16
+	}{
+		{"SCCP", ServiceIndSCCP, 3, SCCP},
+		{"TUP", ServiceIndTUP, 4, TUP},
+		{"ISUP", ServiceIndISUP, 5, ISUP},
+		{"Broadband ISUP", ServiceIndBroadbandISUP, 9, BroadbandISUP},
+		{"Satellite ISUP", ServiceIndSatelliteISUP, 10, SatelliteISUP},
+		{"AAL type 2 Signalling", ServiceIndAALType2Signalling, 12, AAL2Signalling},
+		{"BICC", ServiceIndBICC, 13, BICC},
+		{"Gateway Control Protocol", ServiceIndGatewayControlProtocol, 14, GatewayControlProtocol},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.got != c.want {
+				t.Errorf("Service Indicator = %d, RFC 4666 §3.3.1 and §3.4.5 assign %d", c.got, c.want)
+			}
+			if uint16(c.got) != c.userIdentity {
+				t.Errorf("Service Indicator = %d, MTP3-User Identity = %d; RFC 4666 §3.4.5 requires alignment", c.got, c.userIdentity)
+			}
+		})
+	}
+}
+
 // TestUnavailabilityCauseValues covers the companion table in the same section:
 //
 //	0         Unknown

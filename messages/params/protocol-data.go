@@ -9,22 +9,18 @@ import (
 	"fmt"
 )
 
-// ServiceIndicator definitions.
+// Service Indicator definitions. RFC 4666 §3.3.1 carries the original SS7 SI
+// in Protocol Data; §3.4.5 aligns these values with the MTP3-User Identity table.
 const (
-	ServiceIndUnused uint8 = iota
-	_
-	_
-	ServiceIndSCCP
-	ServiceIndTUP
-	ServiceIndISUP
-	_
-	ServiceIndBroadbandISUP
-	ServiceIndSatelliteISUP
-	_
-	ServiceIndAALType2Signalling
-	ServiceIndBICC
-	ServiceIndGatewayControlProtocol
-	_
+	ServiceIndUnused                 uint8 = 0
+	ServiceIndSCCP                   uint8 = 3
+	ServiceIndTUP                    uint8 = 4
+	ServiceIndISUP                   uint8 = 5
+	ServiceIndBroadbandISUP          uint8 = 9
+	ServiceIndSatelliteISUP          uint8 = 10
+	ServiceIndAALType2Signalling     uint8 = 12
+	ServiceIndBICC                   uint8 = 13
+	ServiceIndGatewayControlProtocol uint8 = 14
 )
 
 // ProtocolDataPayload is a M3UA ProtocolDataPayload.

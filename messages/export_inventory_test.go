@@ -135,6 +135,20 @@ func readPackageAPI(t *testing.T, dir string) packageAPI {
 		for path, file := range pkg.Files {
 			api.files = append(api.files, path)
 			for _, decl := range file.Decls {
+				if gen, ok := decl.(*ast.GenDecl); ok {
+					for _, spec := range gen.Specs {
+						docText := gen.Doc.Text()
+						switch spec := spec.(type) {
+						case *ast.ValueSpec:
+							docText += spec.Doc.Text()
+							for _, name := range spec.Names {
+								api.doc[gen.Tok.String()+" "+name.Name] = docText
+							}
+						case *ast.TypeSpec:
+							api.doc["type "+spec.Name.Name] = docText + spec.Doc.Text()
+						}
+					}
+				}
 				fn, ok := decl.(*ast.FuncDecl)
 				if !ok {
 					continue

@@ -18,12 +18,6 @@ const (
 	Inaccessible
 )
 
-// UserIdentityUnknown is the Unavailability Cause "Unknown".
-//
-// DEPRECATED: it was grouped with the MTP3-User Identity values under a
-// misleading name; use UnknownCause. The value is unchanged.
-const UserIdentityUnknown = UnknownCause
-
 // MTP3-User Identity definitions, from the table in RFC 4666 Section 3.4.5:
 //
 //	0 to 2   Reserved
