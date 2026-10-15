@@ -10,6 +10,8 @@ import (
 	"slices"
 	"sort"
 	"sync"
+
+	"github.com/gomaja/go-ctxsync"
 )
 
 type aspRouteRangeKey struct {
@@ -86,7 +88,7 @@ type aspGatewayRouteSnapshot struct {
 }
 
 type aspTransferFlowLock struct {
-	mu         contextMutex
+	mu         ctxsync.Mutex
 	references int
 }
 

@@ -34,6 +34,15 @@ context ends. SendMsgContext errors queue nothing and report DataNotSent; known
 local acceptance wins over concurrent cancellation. Application deadlines and
 other sends are preserved.
 
+Admission and send locks use github.com/gomaja/go-ctxsync. Cancellable and
+ordinary senders share its queue and starvation handoff; transfer readers
+queued behind a routing-state writer are admitted before the next writer.
+This policy does not impose a maximum wait: holders must release their locks
+and waiting goroutines must be scheduled. A context ending before admission
+returns DataNotSent with a cause matching ctx.Err(). Contexts with no Done
+channel retain the ordinary submission path. Close and Abort bypass the send
+lock so they can release a blocked transport write.
+
 Endpoint exposes the RFC 4666 Layer Management status boundary for
 Associations, ASPs, Application Servers, MTP Routes, and destinations.
 Association exposes explicit ASP Up, ASP Down, ASP Active, ASP Inactive, DAUD,

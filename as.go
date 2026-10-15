@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gomaja/go-ctxsync"
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -114,7 +115,7 @@ type applicationServer struct {
 	// deliveryMu orders DATA messages within this AS. State changes use mu
 	// independently, so a peer that stops reading cannot hold teardown behind a
 	// blocked socket write; closing that socket is what releases the write.
-	deliveryMu contextMutex
+	deliveryMu ctxsync.Mutex
 	mu         sync.Mutex
 	// asps is every association that has claimed this Routing Context, and the
 	// ASP state each is in.

@@ -256,6 +256,14 @@ deadlines are preserved, including changes made during the call.
 Contexts that cannot be cancelled retain the ordinary send's conservative
 outcome classification.
 
+Admission and send barriers use `github.com/gomaja/go-ctxsync`: plain and
+cancellable callers share its queue and starvation handoff. Transfer readers
+waiting behind a routing-state writer are admitted before the next writer.
+This does not bound acquisition latency; lock holders must release and waiting
+goroutines must be scheduled. Cancellation before admission reports
+`DataNotSent` with a cause matching `ctx.Err()`. `Close` and `Abort` bypass the
+send barrier so a parked transport write can be released.
+
 Reading is context-scoped:
 
 ```go
