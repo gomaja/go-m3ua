@@ -11,6 +11,7 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 const (
@@ -46,7 +47,7 @@ type broadcastFlowKey struct {
 	originatingPointCode uint32
 	destinationPointCode uint32
 	serviceIndicator     uint8
-	networkIndicator     uint8
+	networkIndicator     pointcode.NetworkIndicator
 	signalingLink        uint8
 	applicationFlow      string
 }
@@ -163,6 +164,9 @@ func prepareDistributionData(registry *applicationServers, routingKeys *routingK
 	protocolData, err := owned.ProtocolData.ProtocolData()
 	if err != nil {
 		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", err)
+	}
+	if err := validateNetworkIndicator(protocolData.NetworkIndicator); err != nil {
+		return nil, nil, 0, ASKey{}, err
 	}
 	key, err := resolveDistributionRoutingContext(registry, routingKeys, owned, protocolData)
 	if err != nil {

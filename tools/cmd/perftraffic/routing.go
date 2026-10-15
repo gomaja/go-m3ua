@@ -6,6 +6,7 @@ import (
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 const routingRouteCount = 1000
@@ -68,7 +69,7 @@ func routeProtocolData(route uint16, payload []byte) (params.ProtocolDataPayload
 	}
 	return params.ProtocolDataPayload{
 		OriginatingPointCode: 0x110000 + uint32(route), DestinationPointCode: 0x220000 + uint32(route),
-		ServiceIndicator: 3 + 2*uint8(route%2), NetworkIndicator: uint8(route % 4),
+		ServiceIndicator: 3 + 2*uint8(route%2), NetworkIndicator: pointcode.NetworkIndicator(route % 4),
 		MessagePriority: uint8((route / 4) % 4), SignallingLinkSelection: uint8(route % 16), Data: payload,
 	}, nil
 }

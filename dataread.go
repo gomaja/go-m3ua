@@ -11,6 +11,7 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 // DataMessage is one received DATA and everything the association knows about
@@ -159,7 +160,7 @@ func (c *Association) Epoch() uint64 {
 // says so without the library having to be told its own point code.
 type DataQueueOverflowError struct {
 	DestinationPointCode uint32
-	NetworkIndicator     uint8
+	NetworkIndicator     pointcode.NetworkIndicator
 }
 
 func (e *DataQueueOverflowError) Error() string {

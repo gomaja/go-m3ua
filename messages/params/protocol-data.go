@@ -7,6 +7,8 @@ package params
 import (
 	"encoding/binary"
 	"fmt"
+
+	"github.com/gomaja/go-pointcode"
 )
 
 // Service Indicator definitions. RFC 4666 §3.3.1 carries the original SS7 SI
@@ -25,10 +27,12 @@ const (
 
 // ProtocolDataPayload is a M3UA ProtocolDataPayload.
 type ProtocolDataPayload struct {
-	OriginatingPointCode    uint32
-	DestinationPointCode    uint32
-	ServiceIndicator        uint8
-	NetworkIndicator        uint8
+	OriginatingPointCode uint32
+	DestinationPointCode uint32
+	ServiceIndicator     uint8
+	// NetworkIndicator preserves the received octet, including unknown values.
+	// Applications can call Valid to check the Q.704 (07/96) §14.2.2 range.
+	NetworkIndicator        pointcode.NetworkIndicator
 	MessagePriority         uint8
 	SignallingLinkSelection uint8
 	Data                    []byte
@@ -37,7 +41,7 @@ type ProtocolDataPayload struct {
 // NewProtocolDataPayload creates a new ProtocolDataPayload payload.
 // Note that this does not contain the Tag and Length inside.
 // You need to create new Param using serialized ProtocolDataPayload.
-func NewProtocolDataPayload(opc, dpc uint32, si, ni, mp, sls uint8, data []byte) *ProtocolDataPayload {
+func NewProtocolDataPayload(opc, dpc uint32, si uint8, ni pointcode.NetworkIndicator, mp, sls uint8, data []byte) *ProtocolDataPayload {
 	return &ProtocolDataPayload{
 		OriginatingPointCode:    opc,
 		DestinationPointCode:    dpc,
@@ -52,7 +56,7 @@ func NewProtocolDataPayload(opc, dpc uint32, si, ni, mp, sls uint8, data []byte)
 // NewProtocolData creates a new ProtocolData.
 // Note that this returns *Param, as no specific structure in this parameter.
 // Also, Payload will be serialized and not accessible until calling ProtocolData() func.
-func NewProtocolData(opc, dpc uint32, si, ni, mp, sls uint8, data []byte) *Param {
+func NewProtocolData(opc, dpc uint32, si uint8, ni pointcode.NetworkIndicator, mp, sls uint8, data []byte) *Param {
 	pd, _ := NewProtocolDataPayload(opc, dpc, si, ni, mp, sls, data).MarshalBinary()
 	p := &Param{
 		Tag:  ProtocolData,
@@ -90,7 +94,7 @@ func (p *ProtocolDataPayload) MarshalTo(b []byte) error {
 	binary.BigEndian.PutUint32(b[0:4], p.OriginatingPointCode)
 	binary.BigEndian.PutUint32(b[4:8], p.DestinationPointCode)
 	b[8] = p.ServiceIndicator
-	b[9] = p.NetworkIndicator
+	b[9] = uint8(p.NetworkIndicator)
 	b[10] = p.MessagePriority
 	b[11] = p.SignallingLinkSelection
 	copy(b[12:p.MarshalLen()], p.Data)
@@ -116,7 +120,8 @@ func (p *ProtocolDataPayload) UnmarshalBinary(b []byte) error {
 	p.OriginatingPointCode = binary.BigEndian.Uint32(b[0:4])
 	p.DestinationPointCode = binary.BigEndian.Uint32(b[4:8])
 	p.ServiceIndicator = b[8]
-	p.NetworkIndicator = b[9]
+	// RFC 4666 §3.3.1 specifies no receive error for unused NI bits.
+	p.NetworkIndicator = pointcode.NetworkIndicator(b[9])
 	p.MessagePriority = b[10]
 	p.SignallingLinkSelection = b[11]
 	p.Data = b[12:]

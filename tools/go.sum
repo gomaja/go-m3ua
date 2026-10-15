@@ -1,5 +1,7 @@
 github.com/gomaja/go-ctxsync v0.0.0-20261014212015-de26fb453109 h1:Gtss4S+dHo2G5OaLQTie3Jxxao+Mm++1jQArPw6xyto=
 github.com/gomaja/go-ctxsync v0.0.0-20261014212015-de26fb453109/go.mod h1:DHmXkdnCX0SXFMVg+lQy+VX3T+8wOl9pyHL59VMzcPw=
+github.com/gomaja/go-pointcode v0.0.0-20261015102047-53f963a604bd h1:n1swzbzyzoKaeylXfuMeYQoaMpNbM9M9o/KR14hBTxw=
+github.com/gomaja/go-pointcode v0.0.0-20261015102047-53f963a604bd/go.mod h1:NAsi6anBNB3+ouwMYUncMwB9fz7Ye1Q00bHWz0yJwWc=
 github.com/gomaja/go-sctp v0.0.0-20261015040308-001e3ddea46c h1:eF6Bx9PmjgbbYAXcIUskMbCIeS8vKMFA5Rub6THi4ws=
 github.com/gomaja/go-sctp v0.0.0-20261015040308-001e3ddea46c/go.mod h1:vhJBNP0FsbqGN7MavOEB7sFzrxQ74mJdkaoz4e/ViFs=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=

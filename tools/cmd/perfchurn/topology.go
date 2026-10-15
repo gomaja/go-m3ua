@@ -6,6 +6,7 @@ import (
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 // The reference memory inventory of performance-budgets.md section 4: 32
@@ -348,7 +349,7 @@ func dataTuple(stableIndex, flow int, towardSGP bool) (m3ua.ASKey, params.Protoc
 		OriginatingPointCode:    local,
 		DestinationPointCode:    remote,
 		ServiceIndicator:        3,
-		NetworkIndicator:        2,
+		NetworkIndicator:        pointcode.NINational,
 		MessagePriority:         0,
 		SignallingLinkSelection: uint8((stableIndex%4)*flowsPerAssociation + flow),
 	}
