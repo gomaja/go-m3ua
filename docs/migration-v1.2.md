@@ -21,6 +21,7 @@ Contents:
 - [Local route references versus Routing Keys](#local-route-references-versus-routing-keys)
 - [What is immutable, what changes at runtime, what needs a reconnect](#what-is-immutable-what-changes-at-runtime-what-needs-a-reconnect)
 - [Ownership and shutdown](#ownership-and-shutdown)
+- [Service Indicator values and Unknown cause](#service-indicator-values-and-unknown-cause)
 - [Codec cleanup](#codec-cleanup)
 - [Complete v1.1.1 API disposition](#complete-v111-api-disposition)
 - [After v1.2.0: SSNM events are deltas](#after-v120-ssnm-events-are-deltas)
@@ -649,6 +650,26 @@ Nothing calls it for you.
 
 The `ctx` given to `Dial` and `Accept` is the association's lifetime, not just
 its handshake. Cancelling it closes the associations it produced.
+
+## Service Indicator values and Unknown cause
+
+Five Service Indicator constants now carry the SS7 values required by RFC 4666
+§3.3.1 and §3.4.5. Earlier values mislabeled DATA on the wire.
+
+| Constant in `params` | Before | After |
+| --- | --- | --- |
+| `ServiceIndBroadbandISUP` | 7 | 9 |
+| `ServiceIndSatelliteISUP` | 8 | 10 |
+| `ServiceIndAALType2Signalling` | 10 | 12 |
+| `ServiceIndBICC` | 11 | 13 |
+| `ServiceIndGatewayControlProtocol` | 12 | 14 |
+
+Rebuild callers to use the corrected constants, and update any persisted numeric
+values, filters or comparisons that used the earlier assignments. `ServiceIndUnused`,
+`ServiceIndSCCP`, `ServiceIndTUP` and `ServiceIndISUP` keep their values.
+
+`params.UserIdentityUnknown` is removed. Use `params.UnknownCause` for the
+Unavailability Cause "Unknown" in the User/Cause parameter; its value remains 0.
 
 ## Codec cleanup
 
