@@ -83,7 +83,10 @@ codes (ITU-T Q.708 `2-068-1` notation, SANCs) and national presentation layouts
 are provided by [go-pointcode](https://github.com/gomaja/go-pointcode), which
 also hosts the `pc-conv` converter. go-m3ua carries point codes as plain `uint32`
 values, matching the 32-bit Originating and Destination Point Code fields of
-Protocol Data (RFC 4666 Section 3.3.1).
+Protocol Data (RFC 4666 Section 3.3.1). go-m3ua carries the Network Indicator
+as go-pointcode's `pointcode.NetworkIndicator` (ITU-T Q.704 (07/96) §14.2.2).
+Send APIs refuse values outside 0–3; received octets are preserved for the
+application to inspect with `Valid()`.
 
 ### For Developers
 
@@ -329,13 +332,14 @@ individually. See [Ownership and shutdown](#ownership-and-shutdown) below.
 For an ASP with provisioned routes, submit the RFC 4666 MTP-TRANSFER request to
 the Endpoint. It resolves the MTP Route, selects the path candidate, SGP and
 Association, applies that peer's `ASKey`, and derives the SCTP stream from the
-Protocol Data SLS:
+Protocol Data SLS. Import `github.com/gomaja/go-pointcode` for the Network
+Indicator constants:
 
 ```go
 result, err := endpoint.MTPTransfer(m3ua.MTPTransferRequest{
     MTPRoute: "sccp",
     ProtocolData: params.NewProtocolDataPayload(
-        opc, dpc, params.ServiceIndSCCP, ni, priority, sls, d,
+        opc, dpc, params.ServiceIndSCCP, pointcode.NINational, priority, sls, d,
     ),
 })
 if err != nil {

@@ -21,6 +21,7 @@ import (
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sctp"
 )
 
@@ -34,6 +35,8 @@ func main() {
 		gateway = flag.String("signalling-gateway", "sg-a", "Peer Signalling Gateway identity.")
 		process = flag.String("signalling-gateway-process", "sgp-a1", "Peer SGP identity.")
 	)
+	var ni pointcode.NetworkIndicator
+	flag.TextVar(&ni, "network-indicator", pointcode.NIInternational, "SS7 network: international, international-spare, national, national-reserved.")
 	flag.Parse()
 	if *network > math.MaxUint32 {
 		log.Fatalf("Network Appearance %d exceeds 32 bits", *network)
@@ -176,7 +179,7 @@ traffic:
 		result, err := endpoint.MTPTransfer(m3ua.MTPTransferRequest{
 			MTPRoute: "sccp",
 			ProtocolData: params.NewProtocolDataPayload(
-				0x111111, 0x222222, params.ServiceIndSCCP, 0, 0, 1, payload,
+				0x111111, 0x222222, params.ServiceIndSCCP, ni, 0, 1, payload,
 			),
 		})
 		if err == nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 const (
@@ -43,7 +44,7 @@ type messageTuple struct {
 	OriginatingPointCode    uint32
 	DestinationPointCode    uint32
 	ServiceIndicator        uint8
-	NetworkIndicator        uint8
+	NetworkIndicator        pointcode.NetworkIndicator
 	MessagePriority         uint8
 	SignallingLinkSelection uint8
 	RoutingContext          uint32
@@ -53,7 +54,7 @@ type protocolData struct {
 	OriginatingPointCode    uint32
 	DestinationPointCode    uint32
 	ServiceIndicator        uint8
-	NetworkIndicator        uint8
+	NetworkIndicator        pointcode.NetworkIndicator
 	MessagePriority         uint8
 	SignallingLinkSelection uint8
 	Data                    []byte
@@ -77,7 +78,7 @@ func tupleFor(flow uint8, association uint8) messageTuple {
 		OriginatingPointCode:    0x110000 + uint32(association)<<8 + uint32(flow),
 		DestinationPointCode:    0x220000 + uint32(association)<<8 + uint32(flow),
 		ServiceIndicator:        3 + 2*(flow%2),
-		NetworkIndicator:        flow % 4,
+		NetworkIndicator:        pointcode.NetworkIndicator(flow % 4),
 		MessagePriority:         (flow / 4) % 4,
 		SignallingLinkSelection: flow % 16,
 		RoutingContext:          100 + uint32(flow),

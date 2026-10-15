@@ -15,6 +15,7 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 func TestDistributeDataRejectsMalformedKnownParameterLengths(t *testing.T) {
@@ -635,6 +636,9 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 	f.Add(uint8(3), true, []byte{0, 0, 0, 1})
 	f.Add(uint8(0), true, []byte{0, 0, 0})
 	f.Add(uint8(2), false, make([]byte, 12))
+	// Protocol Data whose Network Indicator (octet 9) has unused bits set.
+	f.Add(uint8(2), true, []byte{0, 0, 0, 1, 0, 0, 0, 2, 3, 4, 0, 0})
+	f.Add(uint8(2), true, []byte{0, 0, 0, 1, 0, 0, 0, 2, 3, 128, 0, 0})
 
 	f.Fuzz(func(t *testing.T, slot uint8, correctTag bool, value []byte) {
 		if len(value) > int(^uint16(0)) {
@@ -712,7 +716,19 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 			} else if !errors.Is(err, ErrInvalidRoutingContext) {
 				t.Fatalf("unconfigured Routing Context error = %v, want ErrInvalidRoutingContext", err)
 			}
-		case 2, 3:
+		case 2:
+			// RFC 4666 §3.3.1: unused Network Indicator bits are coded zero, so
+			// distribution refuses Protocol Data that sets them.
+			if ni := pointcode.NetworkIndicator(value[9]); !ni.Valid() {
+				if !errors.Is(err, ErrInvalidParameterValue) {
+					t.Fatalf("Network Indicator %d error = %v, want ErrInvalidParameterValue", ni, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid slot %d parameter error = %v, want nil", slot, err)
+			}
+		case 3:
 			if err != nil {
 				t.Fatalf("valid slot %d parameter error = %v, want nil", slot, err)
 			}

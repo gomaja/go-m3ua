@@ -12,6 +12,7 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sctp"
 )
 
@@ -126,7 +127,7 @@ func TestConcurrentWriteDataCarriesEachMessagesOwnLabelAndScope(t *testing.T) {
 						OriginatingPointCode:    uint32(0x110000 + message),
 						DestinationPointCode:    uint32(0x220000 + message),
 						ServiceIndicator:        uint8(message%2)*2 + params.ServiceIndSCCP,
-						NetworkIndicator:        uint8(message % 4),
+						NetworkIndicator:        pointcode.NetworkIndicator(message % 4),
 						MessagePriority:         uint8((message / 4) % 4),
 						SignallingLinkSelection: uint8(message % 16),
 						Data:                    []byte(fmt.Sprintf("message-%04d", message)),

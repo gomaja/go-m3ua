@@ -7,6 +7,7 @@ import (
 
 	"github.com/gomaja/go-m3ua"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 func TestRoutingTopologyHasApprovedInventory(testContext *testing.T) {
@@ -95,7 +96,7 @@ func TestRoutingTuplesCoverDistinctDestinationsWithStableLabels(testContext *tes
 			testContext.Fatal(err)
 		}
 		if data.DestinationPointCode != 0x220000+uint32(route) || data.OriginatingPointCode != 0x110000+uint32(route) ||
-			data.ServiceIndicator != 3+2*uint8(route%2) || data.NetworkIndicator != uint8(route%4) ||
+			data.ServiceIndicator != 3+2*uint8(route%2) || data.NetworkIndicator != pointcode.NetworkIndicator(route%4) ||
 			data.MessagePriority != uint8((route/4)%4) || data.SignallingLinkSelection != uint8(route%16) || !reflect.DeepEqual(data.Data, payload) {
 			testContext.Fatalf("route %d tuple differs: %+v", route, data)
 		}

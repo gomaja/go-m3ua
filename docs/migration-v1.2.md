@@ -9,6 +9,15 @@ There are no compatibility aliases. Every removal below has a named replacement,
 and the replacement is checked against the exported surface by
 `export_inventory_test.go`, so this document cannot quietly drift from the code.
 
+`ProtocolDataPayload.NetworkIndicator` and `DataQueueOverflowError.NetworkIndicator`
+now use `pointcode.NetworkIndicator` from `github.com/gomaja/go-pointcode`, as does
+the `ni` parameter of `params.NewProtocolDataPayload` and `params.NewProtocolData`.
+Use its named constants (for example, `pointcode.NINational`) or explicitly
+convert existing `uint8` variables. All DATA send APIs, including SGP distribution,
+refuse NI values outside 0–3 before transport submission (RFC 4666 §3.3.1;
+ITU-T Q.704 (07/96) §14.2.2). The codec still encodes any octet, and receive
+delivers unknown values unchanged; applications can call `Valid()` to check them.
+
 Contents:
 
 - [Endpoint role](#endpoint-role)

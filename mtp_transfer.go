@@ -14,6 +14,7 @@ import (
 	"sort"
 
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 )
 
 // MTPTransferRequest is the MTP-TRANSFER request primitive described by RFC
@@ -207,7 +208,7 @@ type aspTransferFlowKey struct {
 	opc      uint32
 	dpc      uint32
 	si       uint8
-	ni       uint8
+	ni       pointcode.NetworkIndicator
 	sls      uint8
 }
 
@@ -374,6 +375,9 @@ func (e *Endpoint) MTPTransferContext(ctx context.Context, request MTPTransferRe
 	}
 	if request.ProtocolData == nil {
 		return MTPTransferResult{}, ErrMissingProtocolData
+	}
+	if err := validateNetworkIndicator(request.ProtocolData.NetworkIndicator); err != nil {
+		return MTPTransferResult{}, newDataNotSent(ASKey{}, 0, fmt.Errorf("%w: %w", ErrInvalidMTPTransfer, err))
 	}
 	if !e.beginOperation() {
 		return MTPTransferResult{}, ErrEndpointClosed
@@ -1032,7 +1036,7 @@ func hashASPTransferFlow(key aspTransferFlowKey, domain aspTransferHashDomain, g
 	binary.BigEndian.PutUint32(encoded[0:4], key.opc)
 	binary.BigEndian.PutUint32(encoded[4:8], key.dpc)
 	encoded[8] = key.si
-	encoded[9] = key.ni
+	encoded[9] = uint8(key.ni)
 	encoded[10] = key.sls
 	_, _ = hash.Write(encoded[:])
 	mixed := hash.Sum64()

@@ -8,10 +8,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sctp"
 )
 
@@ -31,7 +33,8 @@ type DataRequest struct {
 	AS ASKey
 
 	// ProtocolData is the complete MTP3 routing label and user octets. The
-	// Data slice is read during the call and never retained.
+	// Data slice is read during the call and never retained. NetworkIndicator
+	// must be Valid; RFC 4666 §3.3.1 requires unused NI bits to be zero.
 	ProtocolData params.ProtocolDataPayload
 
 	// Stream selects the SCTP stream. Zero asks for the stream this message's
@@ -109,6 +112,9 @@ func (c *Association) WriteDataContext(ctx context.Context, request DataRequest)
 	}
 	if !c.outboundDataActive() {
 		return 0, newDataNotSent(request.AS, 0, ErrNotEstablished)
+	}
+	if err := validateNetworkIndicator(request.ProtocolData.NetworkIndicator); err != nil {
+		return 0, newDataNotSent(request.AS, 0, err)
 	}
 	if len(request.ProtocolData.Data) > maxProtocolDataOctets {
 		return 0, newDataNotSent(request.AS, 0, ErrProtocolDataTooLarge)
@@ -270,7 +276,7 @@ func (c *Association) encodeDataFrame(request *DataRequest) []byte {
 	binary.BigEndian.PutUint32(frame[offset:offset+4], request.ProtocolData.OriginatingPointCode)
 	binary.BigEndian.PutUint32(frame[offset+4:offset+8], request.ProtocolData.DestinationPointCode)
 	frame[offset+8] = request.ProtocolData.ServiceIndicator
-	frame[offset+9] = request.ProtocolData.NetworkIndicator
+	frame[offset+9] = uint8(request.ProtocolData.NetworkIndicator)
 	frame[offset+10] = request.ProtocolData.MessagePriority
 	frame[offset+11] = request.ProtocolData.SignallingLinkSelection
 	offset += routingLabelOctets
@@ -382,6 +388,9 @@ func (c *Association) outboundDataStream(data *messages.Data) (uint16, error) {
 	if err != nil {
 		return 0, err
 	}
+	if err := validateNetworkIndicator(payload.NetworkIndicator); err != nil {
+		return 0, err
+	}
 	stream := c.streamFor(payload.SignallingLinkSelection)
 	if err := c.checkDataStream(stream); err != nil {
 		return 0, err
@@ -436,4 +445,14 @@ func (c *Association) outboundDataScopeForMessage(data *messages.Data) (ASKey, e
 	}
 	key.NetworkAppearance, key.NetworkAppearanceSet = data.NetworkAppearance.NetworkAppearance(), true
 	return key, nil
+}
+
+// validateNetworkIndicator enforces RFC 4666 §3.3.1: unused NI bits are zero
+// on transmission. Q.704 (07/96) §14.2.2 defines the four two-bit NI codes.
+// The codec remains a plain encoder so received octets can be inspected intact.
+func validateNetworkIndicator(ni pointcode.NetworkIndicator) error {
+	if !ni.Valid() {
+		return fmt.Errorf("%w: Network Indicator %d has unused bits set (RFC 4666 §3.3.1)", ErrInvalidParameterValue, ni)
+	}
+	return nil
 }
