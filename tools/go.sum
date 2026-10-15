@@ -1,4 +1,6 @@
-github.com/gomaja/go-sctp v0.0.0-20261014114506-6dc7c7827367 h1:kem3JlVbR6ybBLDJ1+7yylykXhfcmveVdHOqDKMNrMU=
-github.com/gomaja/go-sctp v0.0.0-20261014114506-6dc7c7827367/go.mod h1:++BMUqs1e9AH4YU9j6fsualvD9HhppbbJ3MLnpmjrGA=
+github.com/gomaja/go-ctxsync v0.0.0-20261014212015-de26fb453109 h1:Gtss4S+dHo2G5OaLQTie3Jxxao+Mm++1jQArPw6xyto=
+github.com/gomaja/go-ctxsync v0.0.0-20261014212015-de26fb453109/go.mod h1:DHmXkdnCX0SXFMVg+lQy+VX3T+8wOl9pyHL59VMzcPw=
+github.com/gomaja/go-sctp v0.0.0-20261015040308-001e3ddea46c h1:eF6Bx9PmjgbbYAXcIUskMbCIeS8vKMFA5Rub6THi4ws=
+github.com/gomaja/go-sctp v0.0.0-20261015040308-001e3ddea46c/go.mod h1:vhJBNP0FsbqGN7MavOEB7sFzrxQ74mJdkaoz4e/ViFs=
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
