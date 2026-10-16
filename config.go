@@ -518,6 +518,25 @@ type ASConfig struct {
 // association uses an immutable AssociationConfig snapshot selected by
 // ListenerConfig before any M3UA message is parsed.
 type AssociationConfig struct {
+	// Subscribe, when non-nil, is called once by Dial or Accept on its calling
+	// goroutine, after SCTP establishment, Endpoint tracking and socket setup. ID,
+	// LocalAddr and RemoteAddr are valid. Accept uses the Listener's config
+	// or the config returned by SelectAssociationConfig. Failed SCTP attempts
+	// and failed config selection do not call Subscribe.
+	//
+	// Call StateChanges and/or ManagementIndications here and start draining
+	// them to receive handshake events: RFC 4666 Sections 1.6.3, 4.3.4.1 and
+	// 4.3.4.3 define the M-ASP_UP and M-ASP_ACTIVE confirms. Each stream is
+	// optional; calling neither accessor queues no indications.
+	//
+	// Return promptly: the handshake and EstablishTimeout start only after
+	// Subscribe returns. It must not block or call methods that wait on the
+	// peer, including ASP procedures, ReadData and ShutdownContext. A shared
+	// Listener config can invoke Subscribe concurrently for different
+	// associations. If Subscribe panics, the association is torn down before
+	// the panic propagates. Subscribed channels close on teardown, including
+	// handshake failure.
+	Subscribe func(*Association)
 	// HeartbeatInfo controls M3UA BEAT/BEAT Ack liveness only; it is separate
 	// from SCTP HEARTBEAT path management.
 	*HeartbeatInfo
@@ -531,7 +550,7 @@ type AssociationConfig struct {
 	// TAck to be answered, so an unanswered request fails TAck x (TAckRetries
 	// + 1) after it was first sent. Zero selects DefaultTAckRetries.
 	TAckRetries int
-	// EstablishTimeout bounds the M3UA handshake once the association is up.
+	// EstablishTimeout bounds the M3UA handshake after Subscribe returns.
 	// Zero selects DefaultEstablishTimeout.
 	EstablishTimeout time.Duration
 	// ControlWriteTimeout bounds how long a message the library writes on its

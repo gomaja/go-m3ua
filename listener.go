@@ -431,10 +431,12 @@ func (l *Listener) applySelectedSendBuffer(sctpAssociation *sctp.Conn, selected 
 // background goroutines.
 //
 // StateChanges and ManagementIndications are optional subscriptions. Calling
-// either starts delivery of future events on that channel; earlier events,
-// including the handshake, are not replayed. State gives the current ASP/IPSP
-// state. Drain each subscribed channel for the association's lifetime: a full
-// queue closes it with ErrIndicationQueueFull.
+// either starts delivery of future events on that channel; earlier events are
+// not replayed. To see the handshake, call them from AssociationConfig.Subscribe,
+// which runs on this goroutine before the handshake and its EstablishTimeout
+// start. State gives the current ASP/IPSP state. Drain each subscribed channel
+// for the association's lifetime: a full queue closes it with
+// ErrIndicationQueueFull.
 //
 // Accept does not return until the M3UA handshake for that peer has completed,
 // or until it gives up on it after AssociationConfig.EstablishTimeout. A single
@@ -543,7 +545,9 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}
 
-	// The opening ASP-DOWN transition is applied by monitor() itself, before it
+	association.subscribeBeforeHandshake()
+
+	// The opening ASP-DOWN entry is applied by monitor() itself, before it
 	// starts dispatching, rather than published from a goroutine here that
 	// raced the reader for it.
 	go association.monitor(ctx)

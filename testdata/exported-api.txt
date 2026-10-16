@@ -176,6 +176,7 @@ field AssociationConfig.DataQueueSize
 field AssociationConfig.EstablishTimeout
 field AssociationConfig.IPSP
 field AssociationConfig.PeerSGP
+field AssociationConfig.Subscribe
 field AssociationConfig.TAck
 field AssociationConfig.TAckRetries
 field AssociationEstablishmentError.Err

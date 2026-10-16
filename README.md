@@ -101,8 +101,42 @@ Server as an M3UA role: `RoleASP`, `RoleSGP`, and `RoleIPSP` select protocol
 procedures, while `Dial`, `Listen`, and `Accept` describe SCTP establishment.
 
 `Association.StateChanges()` and `ManagementIndications()` are optional,
-independent subscriptions. Call either after `Dial` or `Accept` to receive
-future events; earlier events, including the handshake, are not replayed.
+independent subscriptions. Calling either starts delivery of future events;
+earlier events are not replayed. To receive the handshake, set
+`AssociationConfig.Subscribe` to call the accessors and start their readers
+before `Dial` or `Accept` starts M3UA:
+```go
+config.Subscribe = func(association *m3ua.Association) {
+    states := association.StateChanges()
+    management := association.ManagementIndications()
+    go func() {
+        for state := range states {
+            log.Printf("ASP state: %v", state)
+        }
+    }()
+    go func() {
+        for indication := range management {
+            log.Printf("%v: %s", indication.Kind, indication.Description)
+        }
+    }()
+}
+```
+
+The callback runs once on the `Dial` or `Accept` goroutine after SCTP and
+socket setup, with valid identity and addresses. Accept uses its selected
+config when `SelectAssociationConfig` is set. Return promptly: the handshake
+and `EstablishTimeout` start when the callback returns. Do not block or call
+methods that wait on the peer (ASP procedures, `ReadData`, `ShutdownContext`).
+A shared Listener config may invoke it concurrently for different associations.
+A panic tears down the association and propagates to the caller. On handshake
+failure, subscribed streams retain their reported events and close.
+
+`StateChanges` delivers ASP-INACTIVE and ASP-ACTIVE during an ASP handshake,
+representing the M-ASP_UP and M-ASP_ACTIVE confirms (RFC 4666 Sections 1.6.3,
+4.3.4.1 and 4.3.4.3). The opening ASP-DOWN is the initial state, not an edge
+(Section 4.3.1). `ManagementIndications` delivers the peer's NTFY and ERR.
+Calling neither accessor in `Subscribe` queues nothing.
+
 `State()` gives the current ASP/IPSP state. Repeated calls return the same
 channel. Once subscribed, drain the stream for the association's lifetime: a
 full queue (16 state transitions or 64 management indications) closes the
@@ -949,7 +983,9 @@ M-SCTP_RELEASE, and M-SCTP_RESTART. Each indication owns its slices and carries
 its `AssociationID`, exact `ASKeys`, affected destination masks and scope, and
 local cause where applicable. Calling the method subscribes to future
 indications; it shares no queue with `StateChanges` and replays no earlier
-events. Once subscribed, a full bounded queue closes the Association with
+events. Use `AssociationConfig.Subscribe` to subscribe before the handshake
+and receive its NTFY and ERR; return promptly and drain the channels in separate
+goroutines. Once subscribed, a full bounded queue closes the Association with
 `ErrIndicationQueueFull` rather than silently losing an event. Drain every
 subscribed stream, or leave it unsubscribed when polling `State()` is sufficient.
 

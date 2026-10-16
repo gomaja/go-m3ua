@@ -3,6 +3,7 @@ package m3ua
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,15 +12,24 @@ import (
 )
 
 func TestIndicationSubscriptionsKeepNotifyTrafficAndDataAlive(t *testing.T) {
-	for index, subscribed := range []bool{false, true} {
+	for index, subscribed := range []bool{false, true, false} {
 		name := "unsubscribed"
 		if subscribed {
 			name = "subscribed and draining"
 		}
+		if index == 2 {
+			name = "callback without accessors"
+		}
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			asp, sgp, err := setupConn(t, ctx, 27971+index)
+			var subscribe func(*Association)
+			var calls atomic.Int32
+			if index == 2 {
+				subscribe = func(*Association) { calls.Add(1) }
+			}
+			asp, sgp, err := setupConnHB(t, ctx, 27971+index,
+				&HeartbeatInfo{Enabled: false}, &HeartbeatInfo{Enabled: false}, subscribe)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -62,6 +72,12 @@ func TestIndicationSubscriptionsKeepNotifyTrafficAndDataAlive(t *testing.T) {
 			case <-asp.Done():
 				t.Fatalf("ASP ended after Notify traffic: %v", asp.Err())
 			default:
+			}
+			if index == 2 && calls.Load() != 1 {
+				t.Fatalf("Subscribe calls = %d, want 1", calls.Load())
+			}
+			if !subscribed && (len(asp.stateEventChan) != 0 || len(asp.mgmtChan) != 0) {
+				t.Fatal("unsubscribed streams queued indications")
 			}
 			if got := asp.State(); got != StateASPActive {
 				t.Fatalf("ASP state after Notify traffic = %v, want ASP-ACTIVE", got)
