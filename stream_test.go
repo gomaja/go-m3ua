@@ -39,7 +39,7 @@ import (
 // packet reordering on the path. Loopback has none, so the two socket tests
 // here pass with random stream selection in place — they are end-to-end sanity
 // checks, not the proof. The proof is TestStreamForIsStableAcrossCalls, which
-// fails immediately on a random mapping, plus local/validate-ordering.sh, which
+// fails immediately on a random mapping, plus an out-of-tree harness that
 // runs the two ends in separate containers under netem and shows the SLS-derived
 // mapping holding order (0 inversions) where a stream-per-message does not.
 

@@ -23,15 +23,17 @@ import (
 // matter of passing it through unchanged — which nothing verified.
 //
 // These tests need several usable loopback addresses and skip without them.
-// The container adds them (local/run-tests.sh); on a bare host:
+// In a privileged Linux container, add the extra addresses:
 //
 //	ip addr add 127.0.0.2/8 dev lo
+//	ip addr add 127.0.0.3/8 dev lo
+//	ip addr add 127.0.0.4/8 dev lo
 //
 // A path *failure* cannot be produced on loopback — traffic between two of a
 // host's own addresses never leaves lo, so dropping one address is not a path
 // failure and the kernel never marks the path down. Real failover therefore
-// runs outside the Go suite, across two containers on two networks
-// (local/validate-failover.sh).
+// is exercised by an out-of-tree harness across two containers on two
+// networks.
 
 // usableLoopbacks returns the 127.0.0.x addresses that can actually be bound,
 // determined by binding them rather than by parsing interface configuration.
