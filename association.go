@@ -363,6 +363,11 @@ type Association struct {
 	stateEventClosed bool
 	// stateEventSubscribed is protected by muStateEvent.
 	stateEventSubscribed bool
+	// stateEventPending retains committed edges until the monitor processes a
+	// publication, including a stale one. It shares stateEventChan's capacity
+	// and subscription boundary. Guarded by muStateEvent; commits and drains
+	// also hold muState, preserving commit order (RFC 4666 Sections 4.2, 4.2.1).
+	stateEventPending []State
 	// mgmtChan delivers the M3UA-to-Layer-Management indications of RFC 4666
 	// Section 1.6.3. An overflow closes the association rather than dropping an
 	// unrecoverable indication.
@@ -1622,7 +1627,11 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		// while a writer waits for Done or transport release, so acquiring it
 		// here would deadlock teardown. The locked bookkeeping and final
 		// indications remain after release (RFC 4666 Sections 4.3.1 and 4.3.3).
+		// Serialize the start of teardown with state-history delivery. Neither
+		// path waits for a subscriber; muStateEvent never acquires muState.
+		c.muStateEvent.Lock()
 		close(c.done)
+		c.muStateEvent.Unlock()
 		// Retransmitters check done before each resend, and are cancelled here
 		// as well so none starts another. stopAllTAck does not take the retry
 		// lock, so a resend already past those checks can still reach the
@@ -1658,9 +1667,15 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 			c.muAckedRCs.Unlock()
 		}
 		c.notifyASPRouteStateChanged()
+		c.muState.Lock()
 		if previousState != StateASPDown {
-			c.notifyStateChange(StateASPDown)
+			c.recordStateChange(StateASPDown)
 		}
+		// Preserve every earlier commit before the final DOWN, even if the
+		// monitor exited without processing its publication. Release and route
+		// reconciliation precede these indications, as on the ordinary path.
+		c.flushStateChanges(true)
+		c.muState.Unlock()
 		c.pauseDestinations()
 		// Ends any range over StateChanges(); see closeStateChanges.
 		c.closeStateChanges()
@@ -2928,6 +2943,9 @@ func (c *Association) commitPeerRoutingContextsActive(rcs []uint32) bool {
 	c.muAckedRCs.Unlock()
 	stateChanged := c.state != StateASPActive
 	c.state = StateASPActive
+	if stateChanged {
+		c.recordStateChange(StateASPActive)
+	}
 	// The Application Server registry authorizes outbound traffic, and it is
 	// committed here rather than left to the dispatcher's later
 	// applicationServers.aspStateChanged. Publishing the state first made the
@@ -3220,13 +3238,12 @@ func (c *Association) finishTermination(cause error) error {
 // reports the remote IPSP transitions governing TrafficToPeer; query IPSPState
 // when both independent directions matter.
 //
-// RFC 4666 Section 1.6.3 gives Layer Management an indication for each of these
-// transitions -- M-ASP_UP, M-ASP_DOWN, M-ASP_ACTIVE and M-ASP_INACTIVE, in
-// their confirm and indication forms -- and Section 4.2.1 has the M3UA layer
-// invoke them "upon successful state changes". State() could only answer the
-// question when asked, so a management layer had to poll for edges the library
-// already knew about, and a transition that came and went between two polls was
-// simply lost.
+// RFC 4666 Section 4.2 specifies: "Upon successful completion, a corresponding
+// confirm primitive is provided by the M3UA layer to Layer Management."
+// Section 4.2.1 says the layer "MAY invoke" indication primitives upon
+// successful state changes caused by received ASP Up, ASP Down, ASP Active,
+// and ASP Inactive messages. State queries cannot retain a transition that
+// starts and ends between calls.
 //
 // The first call starts delivery; earlier transitions are not queued or
 // replayed, and no initial state is sent (RFC 4666 Section 4.3.1). Call this
@@ -3236,6 +3253,9 @@ func (c *Association) finishTermination(cause error) error {
 // Repeated calls return the same channel. Until the first call, state
 // indications cannot fill a queue or close the association. This subscription
 // is independent of ManagementIndications.
+// Committed transitions are delivered even if a newer decision supersedes
+// their entry actions. State and ApplicationServerState report the current
+// state when queried, which may already be newer than the delivered event.
 //
 // Delivery never stalls the dispatcher. Once subscribed, the application must
 // drain this 16-slot queue: allowing it to overflow closes the association with
@@ -3261,7 +3281,10 @@ func (c *Association) StateChanges() <-chan State {
 func (c *Association) notifyStateChange(s State) {
 	c.muStateEvent.Lock()
 	defer c.muStateEvent.Unlock()
+	c.notifyStateChangeLocked(s)
+}
 
+func (c *Association) notifyStateChangeLocked(s State) {
 	if c.stateEventClosed || !c.stateEventSubscribed {
 		return
 	}
@@ -3271,6 +3294,43 @@ func (c *Association) notifyStateChange(s State) {
 	default:
 		c.closeForIndicationOverflow()
 	}
+}
+
+// recordStateChange is called under muState at each state commit. Recording
+// here, rather than at entry, retains edges overtaken before monitor runs.
+// muStateEvent never acquires muState, and overflow starts teardown on another
+// goroutine, so neither recording nor delivery waits for a subscriber.
+func (c *Association) recordStateChange(s State) {
+	c.muStateEvent.Lock()
+	defer c.muStateEvent.Unlock()
+	if c.stateEventClosed || !c.stateEventSubscribed {
+		return
+	}
+	if len(c.stateEventPending)+len(c.stateEventChan) >= cap(c.stateEventChan) {
+		c.closeForIndicationOverflow()
+		return
+	}
+	c.stateEventPending = append(c.stateEventPending, s)
+}
+
+// flushStateChanges runs under muState before entry actions, including for a
+// stale publication. Only teardown passes final, after SCTP release. Checking
+// done under muStateEvent orders delivery against its closure, so pending
+// history cannot escape during release. The shared bound is at most 16 events.
+func (c *Association) flushStateChanges(final bool) {
+	c.muStateEvent.Lock()
+	defer c.muStateEvent.Unlock()
+	if !final {
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+	}
+	for _, state := range c.stateEventPending {
+		c.notifyStateChangeLocked(state)
+	}
+	c.stateEventPending = c.stateEventPending[:0]
 }
 
 func (c *Association) closeForIndicationOverflow() {

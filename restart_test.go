@@ -99,6 +99,9 @@ func TestSCTPRestartMovesRemoteASPDownInEveryApplicationServer(t *testing.T) {
 	if err := conn.handleStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("entering ASP-ACTIVE: %v", err)
 	}
+	if len(conn.StateChanges()) != 0 {
+		t.Fatal("applying the seeded ASP-ACTIVE reported a transition")
+	}
 
 	registry := newApplicationServers(time.Hour)
 	t.Cleanup(func() {
@@ -165,6 +168,9 @@ func TestSCTPRestartAtASPStartsASPUpRecoveryAndPausesDestinations(t *testing.T) 
 	conn.assocID.Store(7)
 	if err := conn.handleStateUpdate(StateASPActive); err != nil {
 		t.Fatalf("entering ASP-ACTIVE: %v", err)
+	}
+	if len(conn.StateChanges()) != 0 {
+		t.Fatal("applying the seeded ASP-ACTIVE reported a transition")
 	}
 
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
@@ -463,6 +469,9 @@ func TestSCTPRestartIsSerializedAfterEarlierInboundMessage(t *testing.T) {
 	conn.assocID.Store(7)
 	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("entering ASP-INACTIVE: %v", err)
+	}
+	if len(conn.StateChanges()) != 0 {
+		t.Fatal("applying the seeded ASP-INACTIVE reported a transition")
 	}
 
 	handlerStarted := make(chan struct{})
