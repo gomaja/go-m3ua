@@ -438,3 +438,49 @@ func TestEstablishTimeoutBoundsTheM3UAHandshake(t *testing.T) {
 		t.Errorf("Dial took %v with a 1s EstablishTimeout; the handshake budget is not being honoured", elapsed)
 	}
 }
+
+func TestDialHandshakeError(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		endpointClosed   bool
+		operationCause   error
+		associationCause error
+		want             error
+	}{
+		{"Endpoint close before callback", true, nil, ErrAssociationClosed, ErrEndpointClosed},
+		{"Endpoint close after callback", true, ErrEndpointClosed, ErrAssociationClosed, ErrEndpointClosed},
+		{"Endpoint close after caller cancellation", true, context.Canceled, context.Canceled, ErrEndpointClosed},
+		{"operation Endpoint cause", false, ErrEndpointClosed, ErrAssociationClosed, ErrEndpointClosed},
+		{"association close", false, nil, ErrAssociationClosed, ErrAssociationClosed},
+		{"caller cancellation", false, context.Canceled, context.Canceled, context.Canceled},
+		{"handshake failure", false, nil, ErrTimeout, ErrTimeout},
+		{"unspecified failure", false, nil, nil, ErrFailedToEstablish},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = endpoint.Close() })
+			// Keep the contexts independent to model the interval before
+			// operationContext's AfterFunc propagates Endpoint cancellation.
+			operationCtx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			if test.operationCause != nil {
+				cancel(test.operationCause)
+			}
+			if test.endpointClosed {
+				if err := endpoint.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			association := newAssociation(RoleASP, NewAssociationConfig())
+			if err := association.closeWith(test.associationCause); err != nil {
+				t.Fatal(err)
+			}
+			if err := endpoint.dialHandshakeError(operationCtx, association); !errors.Is(err, test.want) {
+				t.Fatalf("Dial handshake error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
