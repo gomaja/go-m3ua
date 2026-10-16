@@ -163,10 +163,12 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Add
 // goroutines.
 //
 // StateChanges and ManagementIndications are optional subscriptions. Calling
-// either starts delivery of future events on that channel; earlier events,
-// including the handshake, are not replayed. State gives the current ASP/IPSP
-// state. Drain each subscribed channel for the association's lifetime: a full
-// queue closes it with ErrIndicationQueueFull.
+// either starts delivery of future events on that channel; earlier events are
+// not replayed. To see the handshake, call them from AssociationConfig.Subscribe,
+// which runs on this goroutine before the handshake and its EstablishTimeout
+// start. State gives the current ASP/IPSP state. Drain each subscribed channel
+// for the association's lifetime: a full queue closes it with
+// ErrIndicationQueueFull.
 //
 // Dial makes at most one SCTP association attempt — one INIT if ctx is live,
 // none if ctx is already done — bounded by AssociationConfig.InitTimeout, and never
@@ -267,7 +269,9 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 		return nil, err
 	}
 
-	// The opening ASP-DOWN transition is applied inside monitor(), ahead of
+	association.subscribeBeforeHandshake()
+
+	// The opening ASP-DOWN entry is applied inside monitor(), ahead of
 	// dispatching, instead of racing the reader from here.
 	go association.monitor(operationCtx)
 

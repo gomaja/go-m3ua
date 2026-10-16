@@ -489,6 +489,23 @@ func newAssociation(role Role, cfg *AssociationConfig) *Association {
 	return newAssociationWithTrafficModePolicy(role, cfg, newTrafficModePolicy(cfg))
 }
 
+// subscribeBeforeHandshake runs without association or Endpoint locks held.
+// A panic must unwind transport and ownership before reaching Dial or Accept's
+// caller, including when the callback has already started channel readers.
+func (c *Association) subscribeBeforeHandshake() {
+	if c.cfg.Subscribe == nil {
+		return
+	}
+	returned := false
+	defer func() {
+		if !returned {
+			_ = c.closeWith(ErrFailedToEstablish)
+		}
+	}()
+	c.cfg.Subscribe(c)
+	returned = true
+}
+
 func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, trafficModes trafficModePolicy) *Association {
 	dataQueueSize := cfg.DataQueueSize
 	if dataQueueSize <= 0 {
@@ -3212,7 +3229,10 @@ func (c *Association) finishTermination(cause error) error {
 // simply lost.
 //
 // The first call starts delivery; earlier transitions are not queued or
-// replayed, and no initial state is sent. Use State for the current state.
+// replayed, and no initial state is sent (RFC 4666 Section 4.3.1). Call this
+// accessor from AssociationConfig.Subscribe to receive handshake transitions,
+// including the M-ASP_UP and M-ASP_ACTIVE confirms of Sections 4.3.4.1 and
+// 4.3.4.3. Use State for the current state.
 // Repeated calls return the same channel. Until the first call, state
 // indications cannot fill a queue or close the association. This subscription
 // is independent of ManagementIndications.
@@ -3586,10 +3606,11 @@ func uint32ParamOf(p *params.Param, tag uint16, read func(*params.Param) uint32)
 // Resources, or refused something with an error code.
 //
 // The first call starts delivery; earlier indications are not queued or
-// replayed. Use State for the current ASP/IPSP state. Repeated calls return the
-// same channel. Until the first call, management indications cannot fill a
-// queue or close the association. This subscription is independent of
-// StateChanges.
+// replayed. Call this accessor from AssociationConfig.Subscribe to receive
+// the peer's handshake-time NTFY and ERR indications. Use State for the current
+// ASP/IPSP state. Repeated calls return the same channel. Until the first call,
+// management indications cannot fill a queue or close the association. This
+// subscription is independent of StateChanges.
 //
 // Delivery never stalls the dispatcher. Once subscribed, the application must
 // drain this 64-slot queue: allowing it to overflow closes the association with

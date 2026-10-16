@@ -43,7 +43,7 @@ func skipIfSCTPUnsupported(t *testing.T, err error) {
 
 // setupConnHB is setupConn with per-end heartbeat configuration, so tests can
 // exercise the BEAT/BEAT Ack exchange over a real association.
-func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *HeartbeatInfo) (*Association, *Association, error) {
+func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *HeartbeatInfo, subscribers ...func(*Association)) (*Association, *Association, error) {
 	t.Helper()
 
 	// Both buffered, so the accept goroutine below can always finish its send
@@ -96,6 +96,9 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 
 	cliCfg := newASPAssociationConfigForTest(cliHB, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	// set nil on unnecessary parameters.
+	if len(subscribers) > 0 {
+		cliCfg.Subscribe = subscribers[0]
+	}
 
 	laddr, err := sctp.ResolveAddr("sctp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {

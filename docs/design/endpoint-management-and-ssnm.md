@@ -504,9 +504,16 @@ modify them.
 
 The bounded `StateChanges` and `ManagementIndications` streams remain
 association-scoped and subscribe independently on their first method call.
-Earlier events, including the handshake, are not queued or replayed; `State`
-provides the current state. Unsubscribed streams cannot overflow. Each method
-returns the same channel on later calls, and applications must drain every
+Earlier events are not queued or replayed; `State` provides the current state.
+`AssociationConfig.Subscribe` runs once on the Dial or Accept goroutine after
+socket setup and Endpoint tracking, and before the handshake and its
+establishment timeout start, so accessors called there also receive the
+handshake: at an ASP, the M-ASP_UP and M-ASP_ACTIVE confirms of RFC 4666
+Sections 4.3.4.1 and 4.3.4.3 as ASP-INACTIVE and ASP-ACTIVE, and the peer's NTFY
+and ERR. The opening ASP-DOWN is the initial state (Section 4.3.1), not a
+transition. The field's documentation states the callback's restrictions.
+Calling neither accessor queues nothing, and unsubscribed streams cannot
+overflow. Each method returns the same channel on later calls, and applications must drain every
 subscribed stream for the association's lifetime. Overflow closes it with
 `ErrIndicationQueueFull`; `Done` closes, `Err` returns the cause, and no later
 mandatory event is represented as delivered. MTP3-User destination indications

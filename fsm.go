@@ -206,13 +206,14 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 	entering := current != previous || !c.stateEntered
 	c.stateEntered = true
 	c.appliedState = current
-	if entering {
+	if current != previous {
 		// Reported here rather than in handleStateUpdate because this is where
 		// a genuine entry is distinguishable from a restatement of the state
 		// the association is already in; StateChanges() promises edges, and a
 		// caller counting them must not see one that did not happen. The send
 		// is non-blocking and takes a different lock, so holding muState across
-		// it is safe.
+		// it is safe. RFC 4666 Section 4.3.1 makes the opening ASP-DOWN the
+		// initial state, so its entry action runs without reporting an edge.
 		c.notifyStateChange(current)
 	}
 	// Still written here as well as in sendState: applyStateUpdate is reached
@@ -427,6 +428,14 @@ func (c *Association) notifyReady() {
 	reached, reachable := readinessRank(c.currentReadinessState())
 	if !wanted || !reachable || reached < want {
 		return
+	}
+	// Subscribe can overlap teardown before monitor applies its opening entry.
+	// An explicit ASP Up policy is ready at ASP-DOWN, but teardown's ASP-DOWN
+	// must not make a closed association appear established.
+	select {
+	case <-c.done:
+		return
+	default:
 	}
 	c.notifyEstablished()
 }
@@ -1143,6 +1152,17 @@ func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
 }
 
 func (c *Association) monitor(ctx context.Context) {
+	// Subscribe can outlive ctx or overlap teardown. Stop before creating
+	// workers or publishing explicit ASP Up readiness at ASP-DOWN.
+	select {
+	case <-ctx.Done():
+		_ = c.closeWith(ctx.Err())
+		return
+	case <-c.done:
+		return
+	default:
+	}
+
 	go c.heartbeat(ctx)
 
 	// readErr is buffered so the reader can report a failed read and exit even

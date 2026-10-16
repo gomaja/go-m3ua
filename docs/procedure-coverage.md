@@ -125,6 +125,16 @@ Routing Context scoping described under
 [errata 2065](standards.md#rfc-4666-errata): `TestNotifyIsSentOnASStateChange`
 and the `notify_scope_test.go` suite.
 
+`AssociationConfig.Subscribe` can install `StateChanges` and
+`ManagementIndications` readers before the handshake. RFC 4666 Sections 1.6.3,
+4.3.4.1 and 4.3.4.3 define the M-ASP_UP and M-ASP_ACTIVE confirms exposed as
+state transitions. `TestDialSubscribeReceivesHandshakeIndications` and
+`TestAcceptSubscribeReceivesEachPeersHandshake` cover their early delivery,
+and `TestDialSubscribeCountsEveryPeerHandshakeNotify` compares M-NOTIFY counts
+with the peer's successful writes. The opening ASP-DOWN is the initial state,
+not a transition (Section 4.3.1); `TestOpeningASPDownIsNotAStateChange` covers
+every role.
+
 ## 6. RKM — RFC 4666 Sections 3.6 and 4.4 (optional)
 
 Both sides of all four messages are implemented.
@@ -151,7 +161,7 @@ request from deterministic replay state.
 | T(ack) and its retry budget | `AssociationConfig.TAck`, `TAckRetries` | `TestAssociationASPUpReportsTAckExpiry`, `TestShutdownRetransmitsAspDownUntilAcked` |
 | T(beat) | `HeartbeatInfo` | `TestHeartbeatKeepsAssociationAlive` |
 | T(r), the AS recovery timer | `ApplicationServerConfig.RecoveryTimer` | `TestRecoveryTimerResolvesPending`, `TestASPActiveBeforeRecoveryTimerRestoresActive` |
-| M3UA handshake budget | `AssociationConfig.EstablishTimeout` | `TestEstablishTimeoutBoundsTheM3UAHandshake` |
+| M3UA handshake budget, starting after `Subscribe` returns | `AssociationConfig.EstablishTimeout` | `TestEstablishTimeoutBoundsTheM3UAHandshake`, `TestSubscribeReturnsBeforeHandshakeAndBudgetStart` |
 | One SCTP association attempt | `SCTPConfig.InitTimeout` | `dial_test.go` |
 | Send-buffer wait for messages the library sends itself | `AssociationConfig.ControlWriteTimeout` | `TestLibraryRepliesWaitForAStalledPeerToResume`, `TestStalledPeerClosesTheAssociationAfterControlWriteTimeout`, `TestSSNMPublicationWaitsOutAFullSendBuffer` |
 

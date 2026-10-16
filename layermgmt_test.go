@@ -27,7 +27,9 @@ func TestStateChangesReportsEveryTransitionInOrder(t *testing.T) {
 		}
 	}
 
-	want := []State{StateASPDown, StateASPInactive, StateASPActive}
+	// RFC 4666 Section 4.3.1 defines ASP-DOWN as the initial state, so
+	// applying it runs its entry action without reporting a transition.
+	want := []State{StateASPInactive, StateASPActive}
 	for i, w := range want {
 		select {
 		case got := <-conn.StateChanges():
