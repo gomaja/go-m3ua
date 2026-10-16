@@ -290,13 +290,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 		// before rolling back provisional ASKeys, so Endpoint membership has
 		// already been removed when the reservation checks whether a scope is empty.
 		_ = association.closeWith(nil)
-		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
-			return nil, ErrEndpointClosed
-		}
-		if err := association.Err(); err != nil {
-			return nil, err
-		}
-		return nil, ErrFailedToEstablish
+		return nil, e.dialHandshakeError(operationCtx, association)
 	case <-operationCtx.Done():
 		cause := context.Cause(operationCtx)
 		_ = association.closeWith(cause)
@@ -305,4 +299,18 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 		_ = association.closeWith(ErrTimeout)
 		return nil, ErrTimeout
 	}
+}
+
+func (e *Endpoint) dialHandshakeError(operationCtx context.Context, association *Association) error {
+	// Endpoint.Close cancels e.ctx before Association.Close closes done.
+	// Dial's receive from done therefore observes that cancellation even if
+	// operationContext's AfterFunc has not run yet.
+	if errors.Is(context.Cause(e.ctx), ErrEndpointClosed) ||
+		errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
+		return ErrEndpointClosed
+	}
+	if err := association.Err(); err != nil {
+		return err
+	}
+	return ErrFailedToEstablish
 }
