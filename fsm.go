@@ -99,9 +99,9 @@ func (c *Association) handlePublishedStateUpdate(current State) error {
 }
 
 func (c *Association) handleStateUpdateFrom(current State, published bool) error {
-	// Nothing moved: no transition to apply, no entry action to run, and
-	// nothing for the Application Server to hear about.
-	if current == stateUnchanged {
+	// An unchanged publication can follow a handler's earlier commit when a
+	// control write fails. Let it drain history without running an entry action.
+	if current == stateUnchanged && !published {
 		return nil
 	}
 
@@ -169,6 +169,16 @@ func (c *Association) applyStateUpdate(current State) error {
 // newer dispatcher decision has already replaced it in c.state.
 func (c *Association) applyPublishedStateUpdate(current State) (bool, error) {
 	c.muState.Lock()
+	// Receipt of a publication does not synchronize its entry action with the
+	// next commit. Deliver the committed history even when this entry is stale.
+	// Once teardown begins it owns delivery, after the transport release.
+	select {
+	case <-c.done:
+		c.muState.Unlock()
+		return false, nil
+	default:
+	}
+	c.flushStateChanges(false)
 	if c.state != current {
 		c.muState.Unlock()
 		return false, nil
@@ -206,20 +216,14 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 	entering := current != previous || !c.stateEntered
 	c.stateEntered = true
 	c.appliedState = current
-	if current != previous {
-		// Reported here rather than in handleStateUpdate because this is where
-		// a genuine entry is distinguishable from a restatement of the state
-		// the association is already in; StateChanges() promises edges, and a
-		// caller counting them must not see one that did not happen. The send
-		// is non-blocking and takes a different lock, so holding muState across
-		// it is safe. RFC 4666 Section 4.3.1 makes the opening ASP-DOWN the
-		// initial state, so its entry action runs without reporting an edge.
-		c.notifyStateChange(current)
+	if c.state != current {
+		c.recordStateChange(current)
 	}
 	// Still written here as well as in sendState: applyStateUpdate is reached
 	// directly, without a publish, by callers that place an Association in a state
 	// outright, and it must remain correct for them.
 	c.state = current
+	c.flushStateChanges(false)
 
 	switch c.role {
 	case RoleASP:
@@ -629,6 +633,9 @@ func (c *Association) commitStateGuarded(s State, peerDown, override bool) bool 
 	}
 	stateChanged := c.state != s
 	c.state = s
+	if stateChanged {
+		c.recordStateChange(s)
+	}
 	if peerDown {
 		c.peerDownAwaitingEntry = true
 	} else if s != StateASPDown {

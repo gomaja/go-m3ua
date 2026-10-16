@@ -14,10 +14,8 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// RFC 4666 Section 4.2.1 has the M3UA layer invoke an indication primitive to
-// Layer Management "upon successful state changes". State() could only answer
-// when asked, so a management layer had to poll for edges the library already
-// knew about, and any transition between two polls was lost outright.
+// RFC 4666 Section 4.2.1 permits state-change indications to Layer Management.
+// The initial ASP-DOWN entry (Section 4.3.1) is not a transition.
 func TestStateChangesReportsEveryTransitionInOrder(t *testing.T) {
 	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
 
@@ -27,8 +25,6 @@ func TestStateChangesReportsEveryTransitionInOrder(t *testing.T) {
 		}
 	}
 
-	// RFC 4666 Section 4.3.1 defines ASP-DOWN as the initial state, so
-	// applying it runs its entry action without reporting a transition.
 	want := []State{StateASPInactive, StateASPActive}
 	for i, w := range want {
 		select {
