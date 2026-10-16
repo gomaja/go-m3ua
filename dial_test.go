@@ -10,7 +10,6 @@ import (
 	"os"
 	"reflect"
 	"runtime"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -133,13 +132,14 @@ func TestOneShotSCTPDialPolicyRTOStaysPastBudget(t *testing.T) {
 	}
 }
 
-// blackholeAddr is an address in TEST-NET-1 (RFC 5737), reserved for
-// documentation, so an INIT sent there is never answered.
+// blackholeAddr is in TEST-NET-1 (RFC 5737), reserved for documentation.
+// These tests require traffic to it to be silently dropped, for example in a
+// privileged Linux container with: ip route add blackhole 192.0.2.0/24
 //
-// It has to be firewalled off as well: a gateway that answers with an ICMP
-// unreachable turns the attempt into an immediate ECONNREFUSED, which tests
-// nothing about timeouts. local/run-tests.sh installs the DROP rule; without it
-// these tests skip rather than pass for the wrong reason.
+// An ABORT answering the INIT gives ECONNREFUSED. An ICMP Protocol Unreachable
+// answering the INIT in COOKIE-WAIT is handled like an ABORT (RFC 9260 Section
+// 10, ICMP8); Linux reports ENOPROTOOPT. ICMP Port Unreachable is ignored
+// (RFC 9260 Section 10, ICMP3). An immediate refusal exercises no timeout.
 func blackholeAddr(t *testing.T) *sctp.Addr {
 	t.Helper()
 
@@ -161,8 +161,8 @@ func skipUnlessBlackholed(t *testing.T, err error) {
 	if isSCTPUnsupported(err) {
 		t.Skipf("skipping socket-backed test: %v", err)
 	}
-	if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(err.Error(), "connection refused") {
-		t.Skip("TEST-NET-1 is not blackholed here; run under local/run-tests.sh with --privileged")
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOPROTOOPT) {
+		t.Skip("TEST-NET-1 must silently drop traffic; use a privileged Linux container with: ip route add blackhole 192.0.2.0/24")
 	}
 }
 
