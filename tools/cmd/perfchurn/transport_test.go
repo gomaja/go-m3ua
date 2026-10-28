@@ -48,7 +48,7 @@ func TestAssociationEvidenceJoinsSocketsKernelAndLibrary(t *testing.T) {
 	source := procSource{root: fakeProc(t)}
 	snapshots := []m3ua.AssociationSnapshot{
 		{Association: 11, LocalAddr: sctpAddress(2905), RemoteAddr: sctpAddress(30000),
-			SCTP: &m3ua.AssociationStatus{InboundStreams: 16, OutboundStreams: 16, PrimaryMTU: 1500, FragmentationPoint: 1452}},
+			SCTP: &m3ua.AssociationStatus{InboundStreams: 16, OutboundStreams: 16, Primary: sctp.PathInfo{MTU: 1500}, FragmentationPoint: 1452}},
 		{Association: 12, LocalAddr: sctpAddress(2905), RemoteAddr: sctpAddress(30103), SCTPError: errors.New("status unavailable")},
 	}
 	options := func(fd int) (socketOptions, error) {

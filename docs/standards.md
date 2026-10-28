@@ -31,6 +31,8 @@ interpretation.
 | M3UA | [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html) | Proposed Standard. It obsoletes RFC 3332 and has no `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc4666.json). The [Datatracker record](https://datatracker.ietf.org/doc/rfc4666/) and [incoming relationship API](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4666&relationship__slug__in=obs,updates&format=json) agree. |
 | SIGTRAN security | [RFC 3788](https://www.rfc-editor.org/rfc/rfc3788.html) | Proposed Standard with no formal update or replacement. RFC 4666 [Section 6](https://www.rfc-editor.org/rfc/rfc4666.html#section-6) requires implementations to follow its normative guidance. Its concrete protocol references require the modernization described below. |
 | SCTP | [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html) | Current Proposed Standard SCTP base specification. It obsoletes RFCs 4460, 4960, 6096, 7053, and 8540 and has no later formal `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc9260.json). |
+| SCTP sockets API | [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html) | Informational; no formal update or replacement. Sections 6.1.2, 8.1.9, 8.1.12, 8.2.1, 8.2.2, 9.3 and 9.5 govern path notifications, controls and status. Verified erratum 6115 corrects the status state list. |
+| SCTP Potentially Failed paths | [RFC 7829](https://www.rfc-editor.org/rfc/rfc7829.html) | Proposed Standard; no formal update or replacement and no errata. Sections 7.1–7.3 govern PF notifications, thresholds and exposure. |
 | SCTP zero-checksum extension | [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) | Current optional extension for negotiated zero-checksum operation when an alternate error-detection method provides at least equivalent integrity. It does not formally update RFC 9260: the RFC Editor records and the Datatracker incoming-relationship API list no `Updates` relationship. |
 | SCTP authenticated chunks | [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) | Current optional SCTP-AUTH extension. It protects selected SCTP chunks but does not provide M3UA payload confidentiality and is not a substitute for RFC 3788 transport or network protection. |
 | TLS over SCTP | [RFC 3436](https://www.rfc-editor.org/rfc/rfc3436.html) | Current TLS-over-SCTP mapping, updated by [RFC 8996](https://www.rfc-editor.org/rfc/rfc8996.html) to prohibit TLS 1.0 and TLS 1.1. TLS support is optional under RFC 3788 [Section 7](https://www.rfc-editor.org/rfc/rfc3788.html#section-7). |
@@ -233,6 +235,18 @@ confidentiality or peer authentication.
 ## Recheck log
 
 Standards decisions are rechecked when a subsystem is revisited, not once.
+
+On 2026-10-28, the RFC Editor JSON records and Datatracker document pages,
+document APIs and incoming relationships filtered to `obs,updates` were
+called for RFC 4666, RFC 9260, RFC 6458 and RFC 7829. Both databases agree:
+none has an update or replacement. Their errata records match the October 14
+lists below; RFC 7829 has no errata. RFC 6458 verified erratum 6115 applies
+to association status; no verified erratum changes the path controls or
+peer-address-change structure. Held erratum 6116 describes
+`SCTP_ADDR_CONFIRMED`, which is exposed as Linux behavior rather than adopted
+as a normative correction. The other Held and Rejected errata remain context,
+not specification changes. The TSVWG active-document list was also checked;
+Internet-Drafts do not override these published path-management primitives.
 
 On 2026-10-14 the published relationships and errata were rechecked against both
 databases, with every endpoint called in that session:

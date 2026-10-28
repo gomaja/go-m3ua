@@ -37,6 +37,9 @@ traffic identity explicit:
   M3UA parsing while shared AS, destination, and NIF state remains Endpoint-owned.
 - `ASKey` includes Network Appearance presence/value and Routing Context
   presence/value; RC-only helpers fail closed when the result is ambiguous.
+- SCTP path management exposes live addresses and paths, primary selection,
+  per-path controls and M-SCTP_STATUS indications. `AssociationStatus.Primary`
+  replaces the four former `Primary*` metric fields; see the migration guide.
 - ASP procedures, RKM, Layer Management, MTP3-User, routing, and SSNM operations
   have typed APIs with role and scope validation.
 

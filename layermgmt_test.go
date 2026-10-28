@@ -190,8 +190,8 @@ func TestAssociationStatusReportsTheLiveAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SCTP Status: %v", err)
 	}
-	if st.PrimarySmoothedRTTTicks != raw.Primary.SRTTTicks {
-		t.Errorf("PrimarySmoothedRTTTicks = %d, want raw kernel ticks %d", st.PrimarySmoothedRTTTicks, raw.Primary.SRTTTicks)
+	if st.Primary.SRTTTicks != raw.Primary.SRTTTicks {
+		t.Errorf("Primary.SRTTTicks = %d, want raw kernel ticks %d", st.Primary.SRTTTicks, raw.Primary.SRTTTicks)
 	}
 
 	// The association is up and carrying an M3UA handshake, so this is the only
@@ -211,7 +211,7 @@ func TestAssociationStatusReportsTheLiveAssociation(t *testing.T) {
 	// A real path has a non-zero MTU and a congestion window; zero for both
 	// would mean the primary path was never populated, which is the failure
 	// mode of reading the wrong struct offset.
-	if st.PrimaryMTU == 0 && st.PrimaryCongestionWindow == 0 {
+	if st.Primary.MTU == 0 && st.Primary.Cwnd == 0 {
 		t.Error("primary path reports MTU 0 and cwnd 0; the peer address info " +
 			"was not filled in")
 	}

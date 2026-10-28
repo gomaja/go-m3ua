@@ -1100,17 +1100,21 @@ const (
 	// inboundSCTPRestart carries the association restart notification that was
 	// observed between the M3UA messages before and after it.
 	inboundSCTPRestart
+	// inboundSCTPPeerAddrChange carries one owned peer-address notification
+	// in the same reader order as messages and association restarts.
+	inboundSCTPPeerAddrChange
 )
 
 // inbound is one ordered event read from the SCTP association. Message events
 // carry their octets, arrival stream and host-order PPID; notification events
-// use kind and leave those fields empty. Keeping one extensible value for both
-// preserves receive order and per-message SCTP metadata.
+// use kind and their typed payload, leaving the message fields empty. Keeping
+// one extensible value for both preserves receive order and SCTP metadata.
 type inbound struct {
-	kind   inboundKind
-	data   []byte
-	stream uint16
-	ppid   uint32
+	kind           inboundKind
+	data           []byte
+	stream         uint16
+	ppid           uint32
+	peerAddrChange *sctp.PeerAddrChange
 }
 
 // newInboundMessage preserves the ancillary data ReadMsg returned for one
@@ -1289,5 +1293,7 @@ func (c *Association) dispatchInbound(ctx context.Context, event inbound) {
 		c.dispatchRaw(ctx, event)
 	case inboundSCTPRestart:
 		c.handleSCTPRestart()
+	case inboundSCTPPeerAddrChange:
+		c.handleSCTPPeerAddrChange(event.peerAddrChange)
 	}
 }

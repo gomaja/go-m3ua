@@ -37,8 +37,8 @@ func (b socketBuffers) apply(config *sctp.Config) {
 	}
 }
 
-// validateSCTPConfig refuses socket buffer sizes the kernel cannot be asked
-// for.
+// validateSCTPConfig refuses conflicting path settings and socket buffer sizes
+// the kernel cannot be asked for.
 //
 // setsockopt takes SO_RCVBUF and SO_SNDBUF as a C int, and
 // syscall.SetsockoptInt converts its argument to int32 unchecked, so a larger
@@ -46,6 +46,12 @@ func (b socketBuffers) apply(config *sctp.Config) {
 func validateSCTPConfig(config *SCTPConfig) error {
 	if config == nil {
 		return nil
+	}
+
+	if p, t := config.PathParams, config.PathThresholds; p != nil && t != nil &&
+		p.PathMaxRetrans != nil && t.PathMaxRetrans != nil && *p.PathMaxRetrans != *t.PathMaxRetrans {
+		return fmt.Errorf("%w: PathParams.PathMaxRetrans %d differs from PathThresholds.PathMaxRetrans %d",
+			ErrInvalidSCTPConfig, *p.PathMaxRetrans, *t.PathMaxRetrans)
 	}
 	if err := validateSocketBufferSize("SocketReceiveBuffer", config.SocketReceiveBuffer); err != nil {
 		return err

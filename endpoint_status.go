@@ -11,7 +11,8 @@ import (
 type AssociationID uint64
 
 // AssociationSnapshot is the M-SCTP_STATUS and current M3UA state of one
-// Association at the time of an Endpoint query.
+// Association at the time of an Endpoint query. SCTP includes live local
+// addresses and peer paths, read separately rather than as an atomic snapshot.
 //
 // RFC 4666 Sections 1.6.3 and 4.2 define status as a local Layer Management
 // query. No peer message is sent.
