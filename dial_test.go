@@ -30,9 +30,11 @@ import (
 // attempt is now a single bounded one — the caller loops if it wants to retry —
 // and the socket is released before Dial returns, on every path.
 //
-// The one-shot contract is enforced per socket: Dial raises SCTP_RTOINFO's
-// Initial and Max values beyond the attempt budget before connecting, because
-// InitMsg.MaxInitTimeout only caps each RTO rather than moving the first one.
+// The one-shot contract uses a setup RTO.Initial beyond the attempt budget.
+// go-sctp restores the association's RTO.Initial once established, and Dial
+// leaves RTO.Min and RTO.Max unchanged. Linux paths retain the setup RTO until
+// their first RTT measurement, retransmission timeout or association restart;
+// see Dial and https://github.com/sctp/lksctp-tools/issues/74.
 
 func TestOneShotSCTPDialPolicy(t *testing.T) {
 	tests := []struct {
@@ -40,6 +42,12 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 		timeout     time.Duration
 		wantInitial time.Duration
 	}{
+		{name: "zero", timeout: 0, wantInitial: time.Millisecond},
+		{name: "negative", timeout: -time.Second, wantInitial: time.Millisecond},
+		{name: "whole millisecond", timeout: time.Millisecond, wantInitial: 1001 * time.Millisecond},
+		{name: "round up", timeout: time.Millisecond + time.Nanosecond, wantInitial: 1002 * time.Millisecond},
+		{name: "below saturation", timeout: time.Duration(uint64(^uint32(0))-rtoMarginMillis-1) * time.Millisecond, wantInitial: time.Duration(uint64(^uint32(0))-1) * time.Millisecond},
+		{name: "at saturation", timeout: time.Duration(uint64(^uint32(0))-rtoMarginMillis) * time.Millisecond, wantInitial: time.Duration(^uint32(0)) * time.Millisecond},
 		{name: "sub-millisecond", timeout: time.Nanosecond, wantInitial: 1001 * time.Millisecond},
 		{name: "default budget", timeout: DefaultInitTimeout, wantInitial: 6000 * time.Millisecond},
 		{name: "longer than default kernel max", timeout: 2 * time.Minute, wantInitial: 121000 * time.Millisecond},
@@ -58,11 +66,12 @@ func TestOneShotSCTPDialPolicy(t *testing.T) {
 			if policy.init.MaxInitTimeout != time.Millisecond {
 				t.Errorf("MaxInitTimeout = %d, want 1", policy.init.MaxInitTimeout)
 			}
-			if policy.rto.Initial != test.wantInitial {
-				t.Errorf("RTO Initial = %d, want %d", policy.rto.Initial, test.wantInitial)
+			if policy.setupRTOInitial != test.wantInitial {
+				t.Errorf("setup RTO.Initial = %v, want %v", policy.setupRTOInitial, test.wantInitial)
 			}
-			if policy.rto.Max != policy.rto.Initial {
-				t.Errorf("RTO Max = %d, want Initial %d", policy.rto.Max, policy.rto.Initial)
+			cfg := policy.socketConfig(&restartWatcher{})
+			if cfg.RTOInfo != nil || cfg.SetupRTOInitial != policy.setupRTOInitial {
+				t.Errorf("Config RTOInfo = %+v, SetupRTOInitial = %v; want nil, %v", cfg.RTOInfo, cfg.SetupRTOInitial, policy.setupRTOInitial)
 			}
 			if policy.abandon != sctp.AbandonQuiet {
 				t.Errorf("abandon policy = %v, want AbandonQuiet", policy.abandon)
@@ -117,16 +126,18 @@ func TestOneShotSCTPDialPolicyRTOStaysPastBudget(t *testing.T) {
 
 	for _, timeout := range tests {
 		t.Run(timeout.String(), func(t *testing.T) {
-			rto := oneShotSCTPDialPolicy(timeout).rto
+			policy := oneShotSCTPDialPolicy(timeout)
+			rto := policy.setupRTOInitial
 			budgetMillis := uint64(timeout / time.Millisecond)
 			if timeout%time.Millisecond != 0 {
 				budgetMillis++
 			}
-			if uint64(rto.Initial/time.Millisecond) <= budgetMillis {
-				t.Fatalf("RTO Initial = %dms, not beyond InitTimeout %dms", rto.Initial, budgetMillis)
+			if uint64(rto/time.Millisecond) <= budgetMillis {
+				t.Fatalf("RTO Initial = %dms, not beyond InitTimeout %dms", rto/time.Millisecond, budgetMillis)
 			}
-			if rto.Max < rto.Initial {
-				t.Fatalf("RTO Max = %dms, below Initial %dms", rto.Max, rto.Initial)
+			cfg := policy.socketConfig(&restartWatcher{})
+			if cfg.RTOInfo != nil || cfg.SetupRTOInitial != rto {
+				t.Errorf("Config RTOInfo = %+v, SetupRTOInitial = %v; want nil, %v", cfg.RTOInfo, cfg.SetupRTOInitial, rto)
 			}
 		})
 	}

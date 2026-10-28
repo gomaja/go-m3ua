@@ -106,7 +106,9 @@ type SCTPConfig struct {
 	PFExposure sctp.PFExposure
 
 	// InitTimeout bounds Dial's one-shot SCTP association attempt. Zero
-	// selects DefaultInitTimeout.
+	// selects DefaultInitTimeout. Dial raises only the setup RTO.Initial past
+	// this budget; once established the association uses the socket's value.
+	// RTO.Min and RTO.Max are unchanged. See Dial for Linux's residual path RTO.
 	InitTimeout time.Duration
 
 	// ReadBufferSize is the size of the buffer each read from the association
@@ -181,11 +183,18 @@ type SCTPConfig struct {
 // 342 seconds on Linux defaults, which is far too long for an application to
 // react to anything.
 //
-// Dial enforces the one-shot contract per socket by raising SCTP_RTOINFO's
-// Initial and Max values beyond this budget before connecting. If no INIT-ACK
-// arrives before the timeout, Dial returns ErrInitTimeout; if ctx is cancelled
-// first, Dial quietly abandons the in-flight socket promptly and returns
-// ctx.Err().
+// Dial sets the attempt up with an RTO.Initial beyond this budget, so its
+// single INIT is not retransmitted within it. If no INIT-ACK arrives before the
+// timeout, Dial returns ErrInitTimeout; if ctx is cancelled first, Dial quietly
+// abandons the in-flight socket promptly and returns ctx.Err().
+//
+// Once the association is established, RTO.Initial returns to the socket's
+// value, and Dial never changes RTO.Min or RTO.Max (RFC 6458 Section 8.1.1).
+// Linux keeps the setup value as each path's RTO until that path's first RTT
+// measurement, retransmission timeout or association restart (RFC 9260 Section
+// 6.3.1 rule C1; https://github.com/sctp/lksctp-tools/issues/74), so DATA lost
+// before the first measurement, normally the first M3UA message, is
+// retransmitted only after about InitTimeout + 1 s.
 const DefaultInitTimeout = 5 * time.Second
 
 // DefaultEstablishTimeout bounds the M3UA handshake once the association is up:

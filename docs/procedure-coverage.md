@@ -162,7 +162,7 @@ request from deterministic replay state.
 | T(beat) | `HeartbeatInfo` | `TestHeartbeatKeepsAssociationAlive` |
 | T(r), the AS recovery timer | `ApplicationServerConfig.RecoveryTimer` | `TestRecoveryTimerResolvesPending`, `TestASPActiveBeforeRecoveryTimerRestoresActive` |
 | M3UA handshake budget, starting after `Subscribe` returns | `AssociationConfig.EstablishTimeout` | `TestEstablishTimeoutBoundsTheM3UAHandshake`, `TestSubscribeReturnsBeforeHandshakeAndBudgetStart` |
-| One SCTP association attempt | `SCTPConfig.InitTimeout` | `dial_test.go` |
+| One SCTP association attempt | `SCTPConfig.InitTimeout`, setup RTO.Initial beyond the budget | `dial_test.go`, `dial_rto_linux_test.go` |
 | Send-buffer wait for messages the library sends itself | `AssociationConfig.ControlWriteTimeout` | `TestLibraryRepliesWaitForAStalledPeerToResume`, `TestStalledPeerClosesTheAssociationAfterControlWriteTimeout`, `TestSSNMPublicationWaitsOutAFullSendBuffer` |
 
 A full SCTP send buffer is backpressure, not a failure. Acknowledgements, BEAT
@@ -178,6 +178,17 @@ T(ack) retransmission is bounded rather than unbounded. RFC 4666 says to resend
 "until it receives an ASP Up Ack message", and the equivalent for the other three
 requests; a budget turns a peer that will never answer into a reportable failure
 instead of indefinite load on a network already in trouble.
+
+Dial sets up the attempt with RTO.Initial beyond InitTimeout so its single INIT
+is not retransmitted inside the budget. Once established, RTO.Initial returns
+to the socket's value; Dial never changes RTO.Min or RTO.Max
+([RFC 6458 Section 8.1.1](https://www.rfc-editor.org/rfc/rfc6458.html#section-8.1.1)).
+On Linux each path keeps the setup value as its current RTO until its first RTT
+measurement, retransmission timeout or association restart
+([RFC 9260 Section 6.3.1 rule C1](https://www.rfc-editor.org/rfc/rfc9260.html#section-6.3.1)).
+A DATA chunk lost before that measurement, normally the first M3UA message,
+therefore waits about InitTimeout + 1 s for retransmission; see
+[sctp/lksctp-tools issue 74](https://github.com/sctp/lksctp-tools/issues/74).
 
 ## 8. Unexpected messages
 

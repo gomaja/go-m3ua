@@ -13,7 +13,7 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// oneShotRTOMillisFor is the SCTP_RTOINFO RTO to use for one attempt.
+// oneShotRTOMillisFor is the setup RTO.Initial to use for one attempt.
 //
 // The kernel schedules its first INIT retransmission at this value, so putting
 // it beyond the caller's budget is what keeps the attempt to a single INIT.
@@ -22,7 +22,7 @@ import (
 // value still puts a second INIT on the wire at net.sctp.rto_initial.
 //
 // A margin is added so the retransmission timer never races the deadline. The
-// result saturates at SCTP_RTOINFO's uint32 millisecond limit; that still covers
+// result saturates at the setup value's uint32 millisecond limit; that still covers
 // any operationally useful InitTimeout by weeks.
 func oneShotRTOMillisFor(timeout time.Duration) uint32 {
 	if timeout <= 0 {
@@ -33,7 +33,7 @@ func oneShotRTOMillisFor(timeout time.Duration) uint32 {
 	if timeout%time.Millisecond != 0 {
 		ms++
 	}
-	if ms >= maxRTOInfoMillis-uint64(rtoMarginMillis) {
+	if ms >= maxSetupRTOMillis-uint64(rtoMarginMillis) {
 		return ^uint32(0)
 	}
 	return uint32(ms + uint64(rtoMarginMillis))
@@ -42,7 +42,7 @@ func oneShotRTOMillisFor(timeout time.Duration) uint32 {
 // rtoMarginMillis keeps the first retransmission clear of the deadline.
 const rtoMarginMillis = 1000
 
-const maxRTOInfoMillis = uint64(^uint32(0))
+const maxSetupRTOMillis = uint64(^uint32(0))
 
 // sctpStreams is how many SCTP streams an association asks for in each
 // direction: stream 0, where RFC 4666 Section 1.4.7 rule 2 puts the management
@@ -61,9 +61,9 @@ const maxRTOInfoMillis = uint64(^uint32(0))
 const sctpStreams = 257
 
 type sctpDialPolicy struct {
-	init    sctp.InitMsg
-	rto     sctp.RTOInfo
-	abandon sctp.AbandonPolicy
+	init            sctp.InitMsg
+	setupRTOInitial time.Duration
+	abandon         sctp.AbandonPolicy
 	// events are subscribed before the socket connects; see associationEvents.
 	events []sctp.EventType
 	// buffers are sized before the socket connects, so the INIT announces the
@@ -82,15 +82,9 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 			MaxAttempts:    1,
 			MaxInitTimeout: time.Millisecond,
 		},
-		rto: sctp.RTOInfo{
-			Initial: time.Duration(rtoMillis) * time.Millisecond,
-			// Initial can exceed the kernel default maximum when a caller
-			// deliberately uses a long InitTimeout. Set Max with it so the
-			// one-shot invariant does not silently disappear above 60 seconds.
-			Max: time.Duration(rtoMillis) * time.Millisecond,
-		},
-		abandon: sctp.AbandonQuiet,
-		events:  associationEvents(),
+		setupRTOInitial: time.Duration(rtoMillis) * time.Millisecond,
+		abandon:         sctp.AbandonQuiet,
+		events:          associationEvents(),
 	}
 }
 
@@ -100,7 +94,7 @@ func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.Config {
 		// association ID; it is set once Dial has an Association to route to.
 		NotificationHandler: restarts.handle,
 		InitMsg:             p.init,
-		RTOInfo:             &p.rto,
+		SetupRTOInitial:     p.setupRTOInitial,
 		Notifications:       p.events,
 		AbandonPolicy:       p.abandon,
 	}
@@ -133,9 +127,12 @@ func (p sctpDialPolicy) dialContext(
 // non-established socket before returning without intentionally emitting a local
 // ABORT. What is left here is keeping the attempt to a single INIT, which needs
 // the initial RTO raised past the budget before the socket is connected.
-// Config applies RTOInfo, notification subscriptions and socket buffers
-// before connect. AbandonQuiet releases an unfinished attempt without a
-// locally initiated ABORT. RFC 6458 Sections 6.2.2, 8.1.1 and 8.1.3.
+// Config applies SetupRTOInitial, notification subscriptions and socket buffers
+// before connect (RFC 6458 Sections 6.2.2, 8.1.1 and 8.1.3). go-sctp restores
+// the association's RTO.Initial to the socket's value once established; Dial
+// never changes RTO.Min or RTO.Max. Linux does not bound T1-init or T1-cookie
+// by RTO.Max, so raising it is unnecessary. AbandonQuiet releases an unfinished
+// attempt without a locally initiated ABORT.
 func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Addr, timeout time.Duration, buffers socketBuffers, restarts *restartWatcher) (*sctp.Conn, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -176,6 +173,15 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Add
 // own cadence, which is the point: left to the kernel's defaults an unanswered
 // attempt runs to nine INIT chunks over 342 seconds, far too long for an
 // application to react to anything.
+//
+// The attempt uses an RTO.Initial beyond InitTimeout to prevent an INIT
+// retransmission inside the budget. Once established, RTO.Initial returns to
+// the socket's value; Dial never changes RTO.Min or RTO.Max (RFC 6458 Section
+// 8.1.1). On Linux each path keeps the setup value as its current RTO until its
+// first RTT measurement, retransmission timeout or association restart (RFC
+// 9260 Section 6.3.1 rule C1). A DATA chunk lost before that first measurement,
+// normally the first M3UA message, therefore waits about InitTimeout + 1 s for
+// retransmission. See https://github.com/sctp/lksctp-tools/issues/74.
 //
 // Every path releases the socket before returning. On a timeout or a cancelled
 // context the non-established attempt is quietly abandoned at the deadline, so
