@@ -45,6 +45,12 @@ func skipIfSCTPUnsupported(t *testing.T, err error) {
 // exercise the BEAT/BEAT Ack exchange over a real association.
 func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *HeartbeatInfo, subscribers ...func(*Association)) (*Association, *Association, error) {
 	t.Helper()
+	return setupConnHBWithInitTimeout(t, ctx, port, cliHB, srvHB, 0, subscribers...)
+}
+
+// setupConnHBWithInitTimeout also configures the dialled attempt's budget.
+func setupConnHBWithInitTimeout(t *testing.T, ctx context.Context, port int, cliHB, srvHB *HeartbeatInfo, initTimeout time.Duration, subscribers ...func(*Association)) (*Association, *Association, error) {
+	t.Helper()
 
 	// Both buffered, so the accept goroutine below can always finish its send
 	// and exit. While they were unbuffered, every setup that ended by any route
@@ -95,6 +101,7 @@ func setupConnHB(t *testing.T, ctx context.Context, port int, cliHB, srvHB *Hear
 	}()
 
 	cliCfg := newASPAssociationConfigForTest(cliHB, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
+	cliCfg.InitTimeout = initTimeout
 	// set nil on unnecessary parameters.
 	if len(subscribers) > 0 {
 		cliCfg.Subscribe = subscribers[0]
