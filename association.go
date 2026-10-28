@@ -772,6 +772,11 @@ func (c *Association) setUpSocket() error {
 		}
 	}
 
+	if err := c.setUpPaths(); err != nil {
+		_ = c.sctpConn.Close()
+		return err
+	}
+
 	// ReadMsg always returns SCTP_RCVINFO with stream and PPID in host order
 	// (RFC 6458 Section 5.3.5); go-sctp enables it before association setup.
 	r, err := c.sctpConn.Status()
@@ -794,8 +799,8 @@ func (c *Association) setUpSocket() error {
 	// event belongs to: a Listener installs one handler for every association
 	// it accepts, and the kernel names the association only by this ID.
 	c.assocID.Store(int32(c.sctpConn.AssocID()))
-	// EventAssocChange is already subscribed: Dial and Listen subscribe it
-	// before the association exists; see associationEvents.
+	// Association and peer-address events are already subscribed: Dial and
+	// Listen subscribe before the association exists; see associationEvents.
 
 	return nil
 }
@@ -1736,12 +1741,14 @@ func (c *Association) abortTransport() error {
 	return nil
 }
 
-// LocalAddr returns the local network address.
+// LocalAddr returns a snapshot of all local SCTP addresses as an *sctp.Addr.
+// AssociationStatus.LocalAddrs queries the live address list.
 func (c *Association) LocalAddr() net.Addr {
 	return c.sctpConn.LocalAddr()
 }
 
-// RemoteAddr returns the remote network address.
+// RemoteAddr returns a snapshot of all peer SCTP addresses as an *sctp.Addr.
+// It does not follow peer ASCONF changes; AssociationStatus.Paths queries live paths.
 func (c *Association) RemoteAddr() net.Addr {
 	return c.sctpConn.RemoteAddr()
 }
@@ -3361,9 +3368,11 @@ func (c *Association) closeStateChanges() {
 // primitive; no peer protocol is involved. The values below are that status,
 // read from the association at the moment of the call.
 //
-// Round-trip time and retransmission timeout describe the primary path only.
-// SCTP associations are multi-homed, and a secondary path can be in a quite
-// different condition; this reports the path traffic is actually taking.
+// The primary path, address lists and individual paths are read separately;
+// this is not an atomic snapshot. Paths retain kernel order, omitting a peer
+// address removed during the query. If every peer path disappears, the query
+// returns the PathInfo error. A Potentially Failed path hidden by PF
+// exposure settings is included with its address and state, and zero metrics.
 type AssociationStatus struct {
 	// State is the association's SCTP state, as a name (for example
 	// "ESTABLISHED"). RFC 9260 Section 4 defines the state machine.
@@ -3385,20 +3394,15 @@ type AssociationStatus struct {
 	// FragmentationPoint is the largest payload that will be sent without
 	// being fragmented across DATA chunks, in octets.
 	FragmentationPoint uint32
-	// PrimaryCongestionWindow is the primary path's congestion window, in
-	// octets.
-	PrimaryCongestionWindow uint32
-	// PrimarySmoothedRTTTicks is the primary path's raw spinfo_srtt value in
-	// kernel ticks. Linux net/sctp/socket.c copies transport->srtt without
-	// converting it, although RFC 6458 Section 8.2.2 specifies milliseconds.
-	// A tick's length depends on the kernel's CONFIG_HZ.
-	PrimarySmoothedRTTTicks uint32
-	// PrimaryRetransmissionTimeout is the primary path's current RTO. It is the
-	// delay before an unacknowledged chunk is resent, so it bounds how long a
-	// lost message can go unnoticed.
-	PrimaryRetransmissionTimeout time.Duration
-	// PrimaryMTU is the primary path's maximum transmission unit, in octets.
-	PrimaryMTU uint32
+
+	// Primary is the primary peer path from the same SCTP_STATUS read as the
+	// association metrics (RFC 6458 Section 8.2.1, verified Erratum 6115).
+	Primary sctp.PathInfo
+	// Paths contains every live peer path (RFC 6458 Sections 9.3 and 8.2.2).
+	// PathInfo.SRTTTicks is Linux's raw kernel-tick value, not milliseconds.
+	Paths []sctp.PathInfo
+	// LocalAddrs contains the live local addresses (RFC 6458 Section 9.5).
+	LocalAddrs *sctp.Addr
 }
 
 // associationStateName renders an SCTP association state as the name the
@@ -3454,18 +3458,29 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 		return nil, err
 	}
 
+	local, err := c.sctpConn.LocalAddrs()
+	if err != nil {
+		return nil, err
+	}
+	peers, err := c.sctpConn.PeerAddrs()
+	if err != nil {
+		return nil, err
+	}
+	paths, err := peerPathInfos(peers, c.sctpConn.PathInfo)
+	if err != nil {
+		return nil, err
+	}
 	return &AssociationStatus{
-		State:                        associationStateName(r.State),
-		ReceiverWindow:               r.PeerRwnd,
-		UnackedDataChunks:            r.Unacked,
-		PendingDataChunks:            r.Pending,
-		InboundStreams:               r.InStreams,
-		OutboundStreams:              r.OutStreams,
-		FragmentationPoint:           r.FragmentationPoint,
-		PrimaryCongestionWindow:      r.Primary.Cwnd,
-		PrimarySmoothedRTTTicks:      r.Primary.SRTTTicks,
-		PrimaryRetransmissionTimeout: r.Primary.RTO,
-		PrimaryMTU:                   r.Primary.MTU,
+		State:              associationStateName(r.State),
+		ReceiverWindow:     r.PeerRwnd,
+		UnackedDataChunks:  r.Unacked,
+		PendingDataChunks:  r.Pending,
+		InboundStreams:     r.InStreams,
+		OutboundStreams:    r.OutStreams,
+		FragmentationPoint: r.FragmentationPoint,
+		Primary:            r.Primary,
+		Paths:              paths,
+		LocalAddrs:         local,
 	}, nil
 }
 
@@ -3524,6 +3539,9 @@ const (
 	// ManagementSCTPRelease is the M-SCTP_RELEASE indication/confirm emitted
 	// when the association is released locally, remotely, or by failure.
 	ManagementSCTPRelease
+	// ManagementSCTPStatus reports an SCTP path change to Layer Management
+	// (RFC 4666 Section 1.6.3; RFC 9260 Section 11.2.3).
+	ManagementSCTPStatus
 )
 
 // String names the indication as Section 1.6.3 does.
@@ -3537,6 +3555,8 @@ func (k ManagementIndicationKind) String() string {
 		return "M-SCTP_RESTART"
 	case ManagementSCTPRelease:
 		return "M-SCTP_RELEASE"
+	case ManagementSCTPStatus:
+		return "M-SCTP_STATUS"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
@@ -3556,6 +3576,9 @@ func causeDescription(cause error) string {
 // logged without a lookup table.
 type ManagementIndication struct {
 	Kind ManagementIndicationKind
+	// PeerAddrChange is set only for ManagementSCTPStatus. The indication owns
+	// this copy of the SCTP notification (RFC 6458 Section 6.1.2).
+	PeerAddrChange *sctp.PeerAddrChange
 	// Association is the stable Endpoint-local identity of the Association that
 	// produced this indication. Zero means the Association was not owned by an
 	// Endpoint.
@@ -3672,9 +3695,12 @@ func uint32ParamOf(p *params.Param, tag uint16, read func(*params.Param) uint32)
 // management indications cannot fill a queue or close the association. This
 // subscription is independent of StateChanges.
 //
-// Delivery never stalls the dispatcher. Once subscribed, the application must
-// drain this 64-slot queue: allowing it to overflow closes the association with
-// ErrIndicationQueueFull, rather than silently losing M-NOTIFY or M-ERROR.
+// SCTP path indications keep the reader's order among M3UA messages and SCTP
+// restarts. The reader may wait for the ordered dispatcher handoff; indication
+// delivery never waits for the application. Once subscribed, the application
+// must drain this 64-slot queue: allowing it to overflow closes the association
+// with ErrIndicationQueueFull, rather than silently losing management
+// indications.
 //
 //	indications := association.ManagementIndications()
 //	go func() {
@@ -3702,6 +3728,10 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 		return
 	}
 	snapshot := *ind
+	if ind.PeerAddrChange != nil {
+		change := *ind.PeerAddrChange
+		snapshot.PeerAddrChange = &change
+	}
 	snapshot.Association = c.ID()
 	snapshot.ASKeys = append([]ASKey(nil), ind.ASKeys...)
 	snapshot.RoutingContexts = append([]uint32(nil), ind.RoutingContexts...)

@@ -11,8 +11,8 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
-// restartWatcher handles EventAssocChange, the one notification this package
-// subscribes to (see associationEvents), and acts on two of its states.
+// restartWatcher handles association and peer-address notifications (see
+// associationEvents). Peer-address changes are delivered to Layer Management.
 //
 // The AssocRestart state becomes the M-SCTP_RESTART indication of RFC 4666 Section
 // 1.6.3: "M3UA informs LM that an SCTP restart indication has been received."
@@ -40,6 +40,15 @@ type restartWatcher struct {
 	route func(sctp.AssocID) *Association
 }
 
+// associationForSCTPID routes Dial's notifications only after the association
+// identifier is known. An unknown identifier cannot identify this Association.
+func (c *Association) associationForSCTPID(id sctp.AssocID) *Association {
+	if id != 0 && int32(id) == c.assocID.Load() {
+		return c
+	}
+	return nil
+}
+
 // setRoute installs the lookup. Dial sets it once after building the
 // Association; a Listener sets it before it can accept anything.
 func (w *restartWatcher) setRoute(f func(sctp.AssocID) *Association) {
@@ -54,6 +63,17 @@ func (w *restartWatcher) setRoute(f func(sctp.AssocID) *Association) {
 // It returns an error for SCTP_COMM_LOST alone. The dependency passes parsed
 // notifications to this handler and propagates its error out of the read.
 func (w *restartWatcher) handle(n sctp.Notification) error {
+	if change, ok := n.(*sctp.PeerAddrChange); ok {
+		w.mu.Lock()
+		route := w.route
+		w.mu.Unlock()
+		if route != nil {
+			if c := route(change.AssocID); c != nil {
+				c.enqueueSCTPPeerAddrChange(change)
+			}
+		}
+		return nil
+	}
 	ac, ok := n.(*sctp.AssocChange)
 	if ok && ac.State == sctp.AssocCommLost {
 		// RFC 6458 Section 6.1.1: "The association has failed. The association
@@ -124,6 +144,36 @@ func (c *Association) enqueueSCTPRestart() {
 	case c.inboundChan <- inbound{kind: inboundSCTPRestart}:
 	case <-c.done:
 	}
+}
+
+// enqueueSCTPPeerAddrChange hands an owned notification to the same dispatcher
+// as M3UA messages and SCTP restarts. Like enqueueSCTPRestart, it may wait for
+// the ordered handoff, but never waits for an application to read indications.
+func (c *Association) enqueueSCTPPeerAddrChange(change *sctp.PeerAddrChange) {
+	// Without the queue there is no reader/dispatcher ordering to preserve.
+	if c.inboundChan == nil {
+		return
+	}
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+	snapshot := *change
+	select {
+	case c.inboundChan <- inbound{kind: inboundSCTPPeerAddrChange, peerAddrChange: &snapshot}:
+	case <-c.done:
+	}
+}
+
+// handleSCTPPeerAddrChange publishes only from the ordered dispatcher, so an
+// earlier M3UA message or SCTP restart finishes its indications first
+// (RFC 4666 Section 1.6.3; RFC 6458 Section 6.1.2).
+func (c *Association) handleSCTPPeerAddrChange(change *sctp.PeerAddrChange) {
+	c.notifyManagement(&ManagementIndication{
+		Kind: ManagementSCTPStatus, PeerAddrChange: change,
+		Description: fmt.Sprintf("%s: %s", peerAddrChangeName(change.State), change.Addr),
+	})
 }
 
 // handleSCTPRestart applies the M3UA procedure for an SCTP restart while
@@ -219,8 +269,34 @@ func (c *Association) initiatesASPSM() bool {
 		c.aspProcedureMode(aspProcedureUp) == ASPProcedureAutomatic
 }
 
-// associationEvents lists the notification delivered to our handler. It must be
+// associationEvents lists the notifications delivered to our handler. It must be
 // subscribed before connect or listen, because Linux snapshots subscriptions
 // when it creates an association (RFC 6458 Section 6.2.2; Linux
 // net/sctp/associola.c). The v1.1.0 Config subscribes through SCTP_EVENT.
-func associationEvents() []sctp.EventType { return []sctp.EventType{sctp.EventAssocChange} }
+func associationEvents() []sctp.EventType {
+	return []sctp.EventType{sctp.EventAssocChange, sctp.EventPeerAddrChange}
+}
+
+// peerAddrChangeName uses RFC 6458 Section 6.1.2 and RFC 7829 Section 7.1.
+// SCTP_ADDR_CONFIRMED is Linux's path-verification event; Held RFC 6458
+// Erratum 6116 describes it, but is not a normative correction.
+func peerAddrChangeName(state sctp.AddrChangeState) string {
+	switch state {
+	case sctp.AddrAvailable:
+		return "SCTP_ADDR_AVAILABLE"
+	case sctp.AddrUnreachable:
+		return "SCTP_ADDR_UNREACHABLE"
+	case sctp.AddrRemoved:
+		return "SCTP_ADDR_REMOVED"
+	case sctp.AddrAdded:
+		return "SCTP_ADDR_ADDED"
+	case sctp.AddrMadePrimary:
+		return "SCTP_ADDR_MADE_PRIM"
+	case sctp.AddrConfirmed:
+		return "SCTP_ADDR_CONFIRMED"
+	case sctp.AddrPotentiallyFailed:
+		return "SCTP_ADDR_POTENTIALLY_FAILED"
+	default:
+		return fmt.Sprintf("unknown(%d)", state)
+	}
+}

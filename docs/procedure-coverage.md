@@ -197,6 +197,7 @@ instead of indefinite load on a network already in trouble.
 | Aspect | Roles | Evidence |
 | --- | --- | --- |
 | MTP3 restart, Section 4.6 | SGP | `mtp3restart_test.go`, `sgp_publication_test.go` |
+| SCTP path status, primary selection, per-path controls and pre-handshake configuration | all | `TestSCTPPathSocketManagement`, `TestSCTPPathEventRouting`, `TestSCTPPathInfoRacesAndErrors` |
 | SCTP restart and re-establishment | ASP, SGP, SE, DE | `restart_test.go`, `TestSSNMStateSourceResetAndFreshReactivationStartANewEpoch` |
 | NIF unavailable, Section 4.7 | SGP | `nif_test.go`, `nif_quiescence_test.go`, `nif_askey_test.go` |
 | Graceful ASP withdrawal, Sections 4.9 and 5.3 | ASP, SE, DE | `shutdown_test.go` |

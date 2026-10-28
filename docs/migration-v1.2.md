@@ -862,3 +862,26 @@ state still comes only from `SubscribeSSNM`, `Resync` and `SSNMKnowledge`,
 unchanged. `SubscriptionQueueBytes` accounting charges 256 bytes per `Updated`
 entry, as it charged per `States` entry, so the same byte budget now queues far
 more one-destination reports.
+
+
+## SCTP path status and controls
+
+`AssociationStatus` replaces `PrimaryCongestionWindow`,
+`PrimarySmoothedRTTTicks`, `PrimaryRetransmissionTimeout` and `PrimaryMTU`
+with `Primary sctp.PathInfo`. Migrate reads to `Primary.Cwnd`,
+`Primary.SRTTTicks`, `Primary.RTO` and `Primary.MTU`, respectively. No aliases
+remain. `Paths []sctp.PathInfo` reports all current peer paths and
+`LocalAddrs *sctp.Addr` reports live local addresses. Separate socket reads
+make this a non-atomic snapshot; hidden Potentially Failed paths carry zero
+metrics, and paths removed during the query are omitted.
+
+`SetSCTPPrimaryAddr`, `SCTPPathParams`/`SetSCTPPathParams` and
+`SCTPPathThresholds`/`SetSCTPPathThresholds` expose runtime path controls.
+`SCTPConfig.PathParams`, `PathThresholds` and `PFExposure` configure every new
+Dial or Accept before its M3UA handshake. Wildcard settings cover current and
+future paths (RFC 6458 Section 8.1.12; RFC 7829 Section 7.2).
+`ManagementSCTPStatus` is appended to the indication kinds; it carries an
+owned `PeerAddrChange` through the existing optional management subscription.
+Applications switching on indication kinds should handle it and continue
+draining the bounded stream. Potentially Failed transitions require
+`sctp.PFExposeEnabled` (RFC 7829 Section 7.3).

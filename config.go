@@ -93,6 +93,18 @@ type SCTPConfig struct {
 	*SCTPSACKInfo
 	*SCTPNoDelayInfo
 
+	// PathParams configures the association and every current and future path
+	// before the M3UA handshake (RFC 6458 Section 8.1.12).
+	PathParams *sctp.PathParams
+	// PathThresholds configures failure and primary-switchover thresholds for
+	// every current and future path (RFC 7829 Section 7.2). If both this and
+	// PathParams set PathMaxRetrans, the values must agree.
+	PathThresholds *sctp.PathThresholds
+	// PFExposure controls visibility of Potentially Failed paths (RFC 7829
+	// Section 7.3). PFExposeUnset leaves the socket default, which follows
+	// net.sctp.pf_expose. PF transitions are notified only with PFExposeEnabled.
+	PFExposure sctp.PFExposure
+
 	// InitTimeout bounds Dial's one-shot SCTP association attempt. Zero
 	// selects DefaultInitTimeout.
 	InitTimeout time.Duration
@@ -716,6 +728,8 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 			noDelay := *config.SCTPConfig.SCTPNoDelayInfo
 			sctpConfig.SCTPNoDelayInfo = &noDelay
 		}
+		sctpConfig.PathParams = snapshotPathParams(sctpConfig.PathParams)
+		sctpConfig.PathThresholds = snapshotPathThresholds(sctpConfig.PathThresholds)
 		snapshot.SCTPConfig = &sctpConfig
 	} else {
 		snapshot.SCTPConfig = &SCTPConfig{}

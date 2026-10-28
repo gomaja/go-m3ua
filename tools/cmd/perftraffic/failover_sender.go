@@ -332,7 +332,7 @@ func readFailoverTimers(associations []*m3ua.Association) failoverTimers {
 	}
 	for _, association := range associations {
 		if status, err := association.AssociationStatus(); err == nil && status != nil {
-			timers.PrimaryRTO[fmt.Sprint(association.ID())] = int64(status.PrimaryRetransmissionTimeout)
+			timers.PrimaryRTO[fmt.Sprint(association.ID())] = int64(status.Primary.RTO)
 		}
 	}
 	return timers

@@ -683,6 +683,38 @@ association, err := endpoint.Dial(associationCtx, "m3ua", nil, remote, config)
 _ = association.ShutdownContext(shutdownCtx) // Written while associationCtx is live.
 ```
 
+### SCTP paths and multi-homing
+
+`Association.LocalAddr()` and `RemoteAddr()` return `*sctp.Addr` snapshots
+containing all negotiated addresses. They do not query live peer address
+changes. `AssociationStatus()` supplies the M-SCTP_STATUS confirm of RFC 4666
+Sections 1.6.3 and 4.2, with live `LocalAddrs`, every peer path in `Paths`, and
+the primary peer path in `Primary`. Endpoint association snapshots carry the
+same status in `SCTP`. These socket queries run separately, so the result is
+not an atomic snapshot. Paths retain kernel order; a path removed during the
+query is omitted, and if every peer path disappears the query returns the path
+error. A Potentially Failed path hidden by PF exposure settings has its address
+and state reported with zero metrics. `Primary.SRTTTicks` and
+`Paths[i].SRTTTicks` are Linux kernel ticks, not milliseconds.
+
+Select the default peer path with `SetSCTPPrimaryAddr(netip.Addr)`. Read and
+change path options with `SCTPPathParams`/`SetSCTPPathParams` and
+`SCTPPathThresholds`/`SetSCTPPathThresholds`. The zero `netip.Addr{}` queries
+association defaults or applies settings to the association and all current
+and future paths (RFC 6458 Section 8.1.12; RFC 7829 Section 7.2). An explicit
+peer address affects only that path. Nil option fields leave settings unchanged;
+go-sctp validates values and returns socket errors.
+
+`SCTPConfig.PathParams`, `PathThresholds`, and `PFExposure` apply before the
+M3UA handshake on each Dial and each accepted association, including a
+Listener's `DefaultAssociationConfig`. Conflicting explicit `PathMaxRetrans`
+values in `PathParams` and `PathThresholds` are refused. `PFExposeUnset` leaves
+the socket default, which follows `net.sctp.pf_expose`; select
+`sctp.PFExposeEnabled` to receive Potentially Failed transitions (RFC 7829
+Sections 7.1 and 7.3). These are SCTP HEARTBEAT and failure controls, separate
+from M3UA BEAT configuration. Each Association owns one SCTP association;
+applications create a replacement with a new Dial or Accept.
+
 ### SCTP tuning
 
 `AssociationConfig.SetSCTPSACK` and `SetSCTPNoDelay` set the delayed-SACK timer
@@ -979,9 +1011,16 @@ opening a subscription.
 ### Management indications
 
 `Association.ManagementIndications` reports M-NOTIFY, M-ERROR,
-M-SCTP_RELEASE, and M-SCTP_RESTART. Each indication owns its slices and carries
-its `AssociationID`, exact `ASKeys`, affected destination masks and scope, and
-local cause where applicable. Calling the method subscribes to future
+M-SCTP_RELEASE, M-SCTP_RESTART, and M-SCTP_STATUS. `ManagementSCTPStatus`
+contains an owned `PeerAddrChange` copy, naming the affected peer address and
+change (RFC 6458 Section 6.1.2; RFC 7829 Section 7.1). Linux also reports
+`SCTP_ADDR_CONFIRMED`, described by Held erratum 6116 rather than a verified
+correction. Path indications never end the SCTP read. M-SCTP_STATUS keeps the
+reader's order among M3UA messages and SCTP restarts: the reader may wait for
+the dispatcher handoff, while delivery to the application stays nonblocking.
+Each indication owns its slices and carries its `AssociationID`, exact
+`ASKeys`, affected destination masks and scope, and local cause where
+applicable. Calling the method subscribes to future
 indications; it shares no queue with `StateChanges` and replays no earlier
 events. Use `AssociationConfig.Subscribe` to subscribe before the handshake
 and receive its NTFY and ERR; return promptly and drain the channels in separate

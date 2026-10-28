@@ -60,6 +60,7 @@ const ManagementError
 const ManagementNotify
 const ManagementSCTPRelease
 const ManagementSCTPRestart
+const ManagementSCTPStatus
 const ProtocolAccept
 const ProtocolDropParameter
 const ProtocolReject
@@ -193,12 +194,11 @@ field AssociationSnapshot.SCTPError
 field AssociationSnapshot.State
 field AssociationStatus.FragmentationPoint
 field AssociationStatus.InboundStreams
+field AssociationStatus.LocalAddrs
 field AssociationStatus.OutboundStreams
+field AssociationStatus.Paths
 field AssociationStatus.PendingDataChunks
-field AssociationStatus.PrimaryCongestionWindow
-field AssociationStatus.PrimaryMTU
-field AssociationStatus.PrimaryRetransmissionTimeout
-field AssociationStatus.PrimarySmoothedRTTTicks
+field AssociationStatus.Primary
 field AssociationStatus.ReceiverWindow
 field AssociationStatus.State
 field AssociationStatus.UnackedDataChunks
@@ -328,6 +328,7 @@ field ManagementIndication.ErrorCode
 field ManagementIndication.Kind
 field ManagementIndication.NetworkAppearance
 field ManagementIndication.NetworkAppearanceSet
+field ManagementIndication.PeerAddrChange
 field ManagementIndication.RoutingContexts
 field ManagementIndication.StatusInfo
 field ManagementIndication.StatusType
@@ -390,6 +391,9 @@ field RoutingKeyRegistrationResult.Status
 field SCTPConfig.<embedded *SCTPNoDelayInfo>
 field SCTPConfig.<embedded *SCTPSACKInfo>
 field SCTPConfig.InitTimeout
+field SCTPConfig.PFExposure
+field SCTPConfig.PathParams
+field SCTPConfig.PathThresholds
 field SCTPConfig.ReadBufferSize
 field SCTPConfig.SocketReceiveBuffer
 field SCTPConfig.SocketSendBuffer
@@ -557,12 +561,17 @@ method Association.ReadData
 method Association.RegisterRoutingKeys
 method Association.RemoteAddr
 method Association.Role
+method Association.SCTPPathParams
+method Association.SCTPPathThresholds
 method Association.SetASAvailable
 method Association.SetASAvailableForAS
 method Association.SetDeadline
 method Association.SetNIFAvailable
 method Association.SetReadDeadline
 method Association.SetSCTPNoDelay
+method Association.SetSCTPPathParams
+method Association.SetSCTPPathThresholds
+method Association.SetSCTPPrimaryAddr
 method Association.SetSCTPSACK
 method Association.SetWriteDeadline
 method Association.Shutdown

@@ -177,7 +177,7 @@ func associationEvidenceFor(source procSource, snapshots []m3ua.AssociationSnaps
 		}
 		if status := snapshot.SCTP; status != nil {
 			row.InboundStreams, row.OutboundStreams = status.InboundStreams, status.OutboundStreams
-			row.PrimaryMTU, row.FragmentationPoint = status.PrimaryMTU, status.FragmentationPoint
+			row.PrimaryMTU, row.FragmentationPoint = status.Primary.MTU, status.FragmentationPoint
 		} else if snapshot.SCTPError != nil {
 			row.StatusError = snapshot.SCTPError.Error()
 		}

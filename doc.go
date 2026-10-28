@@ -165,7 +165,18 @@ AssociationSnapshot carry *sctp.Addr values whose IPs hold every address
 the peer confirmed for that association, not one representative address. A
 selector matching a peer by address matches against the whole list, because
 which of those addresses a given SCTP packet arrives from is a transport
-decision that can change during the association's life without M3UA noticing.
+decision that can change during the association's life.
+
+AssociationStatus reports live local addresses, the primary peer path and all
+current peer paths. Its separate socket reads are not an atomic snapshot.
+SetSCTPPrimaryAddr, SCTPPathParams/SetSCTPPathParams and
+SCTPPathThresholds/SetSCTPPathThresholds provide runtime path management.
+SCTPConfig applies path parameters and failure thresholds before each M3UA
+handshake, to all current and future paths (RFC 6458 Section 8.1.12; RFC 7829
+Section 7.2). ManagementIndications carries peer-address changes as
+ManagementSCTPStatus with an owned PeerAddrChange (RFC 4666 Section 1.6.3;
+RFC 6458 Section 6.1.2). Potentially Failed transitions require PFExposeEnabled
+(RFC 7829 Section 7.3).
 
 # Signalling domain isolation
 

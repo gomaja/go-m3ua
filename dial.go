@@ -249,7 +249,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	// route it to this Association, and ignore events that arrive before an SCTP
 	// association identifier exists.
 	restarts := &restartWatcher{}
-	restarts.setRoute(func(sctp.AssocID) *Association { return association })
+	restarts.setRoute(association.associationForSCTPID)
 
 	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, socketBuffersFor(cfg.SCTPConfig), restarts)
 	if err != nil {

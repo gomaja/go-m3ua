@@ -56,7 +56,8 @@ reused, and does not expose the kernel SCTP association identifier.
 
 RFC 4666 Sections 1.6.3 and 4.2 define M-SCTP_STATUS, M-ASP_STATUS, and
 M-AS_STATUS as local Layer Management queries. They do not send peer messages.
-Every returned slice and address is caller-owned and deterministically ordered.
+Every returned slice and address is caller-owned. Association snapshots are
+ordered by AssociationID; SCTP paths retain kernel order.
 
 ```go
 type AssociationSnapshot struct {
@@ -79,7 +80,10 @@ func (e *Endpoint) AssociationStatuses() []AssociationSnapshot
 ```
 
 `SCTPError` makes a close racing a snapshot explicit instead of silently
-dropping that association. A successful snapshot owns its SCTP status value.
+dropping that association. A successful snapshot owns its SCTP status value, including live `LocalAddrs`,
+`Paths` and `Primary`. These are separate socket reads rather than an atomic
+snapshot. M-SCTP_STATUS indications carry owned peer-address-change events
+through `ManagementIndications`; the query remains the confirm primitive.
 
 An ASP status is keyed by association and exact AS traffic identity. The two
 presence bits avoid conflating an omitted value with numeric zero. Local and
