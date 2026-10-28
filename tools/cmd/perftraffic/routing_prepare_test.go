@@ -578,7 +578,8 @@ func TestRoutingPeerPreparationConcurrentStopDoesNotDeadlockPublication(testCont
 	go func() { stopped <- operations.Stop(context.Background()) }()
 	for name, result := range map[string]<-chan error{"publish": published, "stop": stopped} {
 		select {
-		case <-result:
+		case err := <-result:
+			_ = err // Stop interrupts publication; this test only requires completion.
 		case <-time.After(time.Second):
 			testContext.Fatalf("%s deadlocked", name)
 		}
@@ -619,7 +620,8 @@ func TestRoutingPeerPreparationRejectsConcurrentPublication(testContext *testing
 		testContext.Fatal(err)
 	}
 	select {
-	case <-first:
+	case err := <-first:
+		_ = err // Stop interrupts publication; this test only requires completion.
 	case <-time.After(time.Second):
 		testContext.Fatal("first publication did not exit after stop")
 	}

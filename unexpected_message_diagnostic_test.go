@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"bytes"
+	"errors"
 	"sync"
 	"testing"
 
@@ -71,7 +72,9 @@ func TestUnexpectedMessageErrorQuotesTheReceivedOctets(t *testing.T) {
 
 	unexpected := NewUnexpectedMessageError(msg)
 	conn.sendErrForMessage(msg, received, unexpected)
-	<-conn.errChan
+	if err := <-conn.errChan; !errors.Is(err, unexpected) {
+		t.Fatalf("reported error = %v, want %v", err, unexpected)
+	}
 
 	for i := range received {
 		received[i] ^= 0xff
@@ -110,7 +113,9 @@ func TestReportedErrorsDoNotAliasTheDispatchersBuffer(t *testing.T) {
 
 	unexpected := NewUnexpectedMessageError(msg)
 	conn.sendErrForMessage(msg, received, unexpected)
-	<-conn.errChan
+	if err := <-conn.errChan; !errors.Is(err, unexpected) {
+		t.Fatalf("reported error = %v, want %v", err, unexpected)
+	}
 
 	snapshots := map[string][]byte{
 		"unexpected message":  unexpected.Raw,
@@ -144,9 +149,13 @@ func TestAttachedOctetsAreNotOverwritten(t *testing.T) {
 
 	unexpected := NewUnexpectedMessageError(msg)
 	conn.sendErrForMessage(msg, first, unexpected)
-	<-conn.errChan
+	if err := <-conn.errChan; !errors.Is(err, unexpected) {
+		t.Fatalf("reported error = %v, want %v", err, unexpected)
+	}
 	conn.sendErrForMessage(msg, second, unexpected)
-	<-conn.errChan
+	if err := <-conn.errChan; !errors.Is(err, unexpected) {
+		t.Fatalf("reported error = %v, want %v", err, unexpected)
+	}
 
 	if !bytes.Equal(unexpected.Raw, first) {
 		t.Errorf("attached octets = % x, want the first report's % x", unexpected.Raw, first)

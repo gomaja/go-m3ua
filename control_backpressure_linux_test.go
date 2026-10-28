@@ -593,7 +593,10 @@ func TestCloseReleasesAWaitingLibraryWrite(t *testing.T) {
 	closed := make(chan error, 1)
 	go func() { closed <- association.Close() }()
 	select {
-	case <-closed:
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Close did not return while a library write was waiting")
 	}

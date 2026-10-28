@@ -350,21 +350,22 @@ func TestNoHandlerMovesTheStateOnceTheTeardownHasBegun(t *testing.T) {
 func TestDonePublishesFinalStateBeforeTransportRelease(t *testing.T) {
 	transportError := errors.New("transport read failed")
 	for _, test := range []struct {
-		name  string
-		call  func(*Association) error
-		cause error
+		name    string
+		call    func(*Association) error
+		cause   error
+		wantErr error
 	}{
-		{"Close", (*Association).Close, ErrAssociationClosed},
-		{"Abort", (*Association).Abort, ErrAssociationAborted},
+		{"Close", (*Association).Close, ErrAssociationClosed, nil},
+		{"Abort", (*Association).Abort, ErrAssociationAborted, nil},
 		{"ShutdownContext", func(c *Association) error {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			return c.ShutdownContext(ctx)
-		}, context.Canceled},
-		{"heartbeat expiry", func(c *Association) error { return c.closeWith(ErrHeartbeatExpired) }, ErrHeartbeatExpired},
-		{"peer release", func(c *Association) error { return c.closeWith(ErrSCTPNotAlive) }, ErrSCTPNotAlive},
-		{"transport error", func(c *Association) error { return c.closeWith(transportError) }, transportError},
-		{"indication overflow", func(c *Association) error { return c.closeWith(ErrIndicationQueueFull) }, ErrIndicationQueueFull},
+		}, context.Canceled, context.Canceled},
+		{"heartbeat expiry", func(c *Association) error { return c.closeWith(ErrHeartbeatExpired) }, ErrHeartbeatExpired, nil},
+		{"peer release", func(c *Association) error { return c.closeWith(ErrSCTPNotAlive) }, ErrSCTPNotAlive, nil},
+		{"transport error", func(c *Association) error { return c.closeWith(transportError) }, transportError, nil},
+		{"indication overflow", func(c *Association) error { return c.closeWith(ErrIndicationQueueFull) }, ErrIndicationQueueFull, nil},
 	} {
 		for _, role := range []Role{RoleASP, RoleSGP, RoleIPSP} {
 			t.Run(test.name+"/"+role.String(), func(t *testing.T) {
@@ -393,12 +394,14 @@ func TestDonePublishesFinalStateBeforeTransportRelease(t *testing.T) {
 				}
 				<-release.reached
 				select {
-				case <-finished:
-					t.Fatal("termination returned before transport release finished")
+				case err := <-finished:
+					t.Fatalf("termination returned before transport release finished: %v", err)
 				default:
 				}
 				release.open()
-				<-finished
+				if err := <-finished; !errors.Is(err, test.wantErr) {
+					t.Errorf("termination error = %v, want %v", err, test.wantErr)
+				}
 			})
 		}
 	}
@@ -447,5 +450,7 @@ func TestDonePublishesFinalStateWithoutWaitingForStateLock(t *testing.T) {
 	conn.muState.Unlock()
 	locked = false
 	release.open()
-	<-finished
+	if err := <-finished; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 }

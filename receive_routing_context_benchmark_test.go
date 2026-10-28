@@ -87,7 +87,8 @@ func BenchmarkHandleDataRoutingContextScope(benchmark *testing.B) {
 					conn.handleData(ctx, data, frame)
 					select {
 					case <-conn.dataChan:
-					case <-conn.errChan:
+					case err := <-conn.errChan:
+						_ = err // The benchmark measures delivery and rejection; only drain the result.
 					default:
 						benchmark.Fatal("DATA produced neither a delivery nor an error")
 					}

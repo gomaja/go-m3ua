@@ -86,7 +86,8 @@ func TestWriteDataContextCancelsScopeAdmission(t *testing.T) {
 			err, returned := contextResult(done)
 			barrier.Unlock()
 			if !returned {
-				<-done
+				doneErr := <-done
+				_ = doneErr // Joined only for cleanup; this path fails the test.
 				t.Fatal("context did not cancel scope admission")
 			}
 			requireDataWriteError(t, err, DataNotSent, context.DeadlineExceeded)
@@ -139,7 +140,8 @@ func TestWriteDataContextCancelsBehindEverySender(t *testing.T) {
 			case <-started:
 			case <-time.After(time.Second):
 				unblock()
-				<-first
+				firstErr := <-first
+				_ = firstErr // Joined only for cleanup; this path fails the test.
 				t.Fatal("first sender did not park")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -149,8 +151,10 @@ func TestWriteDataContextCancelsBehindEverySender(t *testing.T) {
 			err, returned := contextResult(done)
 			if !returned {
 				unblock()
-				<-first
-				<-done
+				firstErr := <-first
+				_ = firstErr // Joined only for cleanup; this path fails the test.
+				doneErr := <-done
+				_ = doneErr // Joined only for cleanup; this path fails the test.
 				t.Fatal("context send queued behind the transport")
 			}
 			requireDataWriteError(t, err, DataNotSent, context.DeadlineExceeded)
@@ -315,7 +319,8 @@ func TestMTPTransferContextCancelsActivationBarrier(t *testing.T) {
 	err, returned := contextResult(done)
 	c.aspTransferMu.Unlock()
 	if !returned {
-		<-done
+		doneErr := <-done
+		_ = doneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("context did not cancel activation admission")
 	}
 	requireDataWriteError(t, err, DataNotSent, context.DeadlineExceeded)
@@ -741,7 +746,8 @@ func TestMTPTransferContextCancelsFlowWait(t *testing.T) {
 		requireDataWriteError(t, err, DataNotSent, context.DeadlineExceeded)
 	case <-time.After(time.Second):
 		sequence.release()
-		<-done
+		doneErr := <-done
+		_ = doneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("context did not cancel the flow wait")
 	}
 	sequence.release()

@@ -50,7 +50,8 @@ func TestASPMultiSGCanonicalPublicationGatesRoutingReadiness(t *testing.T) {
 	defer func() {
 		if held {
 			first.tack.mu.Unlock()
-			<-finished
+			finishedErr := <-finished
+			_ = finishedErr // Only join cleanup here; the test already failed.
 		}
 	}()
 	if !waitFor(func() bool {

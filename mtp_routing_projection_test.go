@@ -1618,7 +1618,8 @@ func TestDifferentOriginatingPointCodesAreDifferentFlows(t *testing.T) {
 	err, returned := contextResult(secondDone)
 	first.release()
 	if !returned {
-		<-secondDone
+		secondDoneErr := <-secondDone
+		_ = secondDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("a request with a different Originating Point Code waited behind another flow")
 	}
 	if err != nil {
