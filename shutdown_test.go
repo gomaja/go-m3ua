@@ -68,7 +68,10 @@ func TestShutdownWaitsForEachAckBeforeAdvancing(t *testing.T) {
 
 	conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 	select {
-	case <-shutdownDone:
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Shutdown did not finish after ASP Down Ack")
 	}
@@ -225,7 +228,10 @@ func TestShutdownIgnoresDelayedCancelledAspActiveAck(t *testing.T) {
 
 	conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 	select {
-	case <-shutdownDone:
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Shutdown did not finish")
 	}
@@ -257,7 +263,10 @@ func TestShutdownWaitsForEveryPartialInactiveAck(t *testing.T) {
 	}
 	conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 	select {
-	case <-shutdownDone:
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Shutdown did not finish after the final Ack")
 	}
@@ -319,7 +328,10 @@ func TestShutdownRetransmitsAspDownUntilAcked(t *testing.T) {
 	}
 	conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 	select {
-	case <-shutdownDone:
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("Shutdown: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Shutdown did not finish after retransmitted ASP Down was acknowledged")
 	}

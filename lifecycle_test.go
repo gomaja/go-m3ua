@@ -648,7 +648,8 @@ func TestCloseInterruptsAParkedAccept(t *testing.T) {
 	_ = ln.Close()
 
 	select {
-	case <-returned:
+	case err := <-returned:
+		_ = err // Any Accept result is fine once Close unblocks it.
 		// Any error is fine; that Accept returned at all is the contract.
 	case <-time.After(5 * time.Second):
 		t.Fatal("Accept was still parked 5s after Listener.Close; " +
@@ -673,7 +674,10 @@ func TestListenerCloseDoesNotDeadlockOnAssociationDeregistration(t *testing.T) {
 	go func() { done <- srvConn.listener.Close() }()
 
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Listener.Close: %v", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Listener.Close deadlocked: it holds muConns while Association.Close reacquires it")
 	}

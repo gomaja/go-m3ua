@@ -341,7 +341,8 @@ func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testi
 		// count, which Close waits on. Releasing it first turns a loaded
 		// machine's missed deadline into a failure rather than a hang.
 		close(releaseFirstWrite)
-		<-firstDone
+		firstDoneErr := <-firstDone
+		_ = firstDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("first MTPTransfer did not reach the first Signalling Gateway")
 	}
 	secondDone := make(chan error, 1)
@@ -399,7 +400,8 @@ func TestMTPTransferKeepsDifferentFlowsConcurrent(t *testing.T) {
 	err, returned := contextResult(secondDone)
 	first.release()
 	if !returned {
-		<-secondDone
+		secondDoneErr := <-secondDone
+		_ = secondDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("independent MTP traffic flow waited for a blocked flow")
 	}
 	if err != nil {
@@ -927,7 +929,8 @@ func TestMTPTransferOrdersScopeLossAfterInFlightWrite(t *testing.T) {
 	select {
 	case <-scopeChanged:
 		close(releaseWrite)
-		<-transferDone
+		transferDoneErr := <-transferDone
+		_ = transferDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("Application Server scope changed before the in-flight DATA write completed")
 	case <-time.After(30 * time.Millisecond):
 	}
@@ -990,8 +993,10 @@ func TestAssociationCloseClosesTransportBeforeWaitingForMTPTransfer(t *testing.T
 	case <-transportClosed:
 	case <-time.After(100 * time.Millisecond):
 		release()
-		<-transferDone
-		<-closeDone
+		transferDoneErr := <-transferDone
+		_ = transferDoneErr // Joined only for cleanup; this path fails the test.
+		closeDoneErr := <-closeDone
+		_ = closeDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("Association.Close waited for MTPTransfer before closing the transport")
 	}
 	if err := <-closeDone; err != nil {

@@ -136,7 +136,8 @@ func TestUnkeyedASPManagementIncludesContextlessAndDynamicAS(t *testing.T) {
 	}
 	if active.RoutingContext != nil {
 		cancel()
-		<-activeResult
+		activeResultErr := <-activeResult
+		_ = activeResultErr // Joined only for cleanup; this path fails the test.
 		t.Fatalf("contextless ASP Active carried Routing Context %v",
 			active.RoutingContext.RoutingContexts())
 	}

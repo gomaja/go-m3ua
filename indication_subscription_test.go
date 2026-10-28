@@ -146,7 +146,9 @@ func TestIndicationSubscriptionDuringTransportRelease(t *testing.T) {
 		t.Fatal("terminal indications arrived before transport release")
 	}
 	release.open()
-	<-finished
+	if err := <-finished; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	if got, ok := <-states; !ok || got != StateASPDown {
 		t.Errorf("final state = %v (open %v), want ASP-DOWN", got, ok)
 	}

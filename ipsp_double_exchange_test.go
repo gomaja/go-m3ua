@@ -710,7 +710,8 @@ func TestIPSPDoubleExchangeLocalInactiveAckDoesNotWaitForTrafficToPeerDATA(t *te
 		}
 	case <-time.After(2 * time.Second):
 		close(releaseData)
-		<-writeDone
+		writeDoneErr := <-writeDone
+		_ = writeDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("TrafficToLocal ASP Inactive Ack waited behind TrafficToPeer DATA")
 	}
 	if got := association.IPSPState(); got != (IPSPState{
@@ -795,7 +796,8 @@ func TestIPSPDoubleExchangeLocalWithdrawalDrainsAdmittedSCON(t *testing.T) {
 			select {
 			case err := <-withdrawalDone:
 				close(releaseSCON)
-				<-sconDone
+				sconDoneErr := <-sconDone
+				_ = sconDoneErr // Joined only for cleanup; this path fails the test.
 				t.Fatalf("local withdrawal completed before admitted SCON drained: %v", err)
 			case <-time.After(50 * time.Millisecond):
 			}
@@ -861,10 +863,11 @@ func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testin
 			go func() { ackDone <- association.handleAspDownAck(messages.NewAspDownAck(nil)) }()
 			if test.wantBlocked {
 				select {
-				case <-ackDone:
+				case err := <-ackDone:
 					close(releaseData)
-					<-writeDone
-					t.Fatal("Single ASPSM ASP Down Ack did not wait for TrafficToPeer DATA")
+					writeDoneErr := <-writeDone
+					_ = writeDoneErr // Joined only for cleanup; this path fails the test.
+					t.Fatalf("Single ASPSM ASP Down Ack did not wait for TrafficToPeer DATA: %v", err)
 				case <-time.After(25 * time.Millisecond):
 					close(releaseData)
 					if err := <-writeDone; err != nil {
@@ -882,7 +885,8 @@ func TestIPSPDoubleExchangeDownAckQuiescesOnlyTheAgreedASPSMDirections(t *testin
 					}
 				case <-time.After(2 * time.Second):
 					close(releaseData)
-					<-writeDone
+					writeDoneErr := <-writeDone
+					_ = writeDoneErr // Joined only for cleanup; this path fails the test.
 					t.Fatal("normal Double Exchange ASP Down Ack waited behind TrafficToPeer DATA")
 				}
 			}
@@ -1193,8 +1197,10 @@ func TestIPSPSingleASPSMDownAckDefersASNotifyUntilTrafficDrains(t *testing.T) {
 	select {
 	case <-notify:
 		close(releaseData)
-		<-writeDone
-		<-ackDone
+		writeDoneErr := <-writeDone
+		_ = writeDoneErr // Joined only for cleanup; this path fails the test.
+		ackDoneErr := <-ackDone
+		_ = ackDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatal("AS-state Notify overtook admitted TrafficToPeer DATA")
 	case <-time.After(50 * time.Millisecond):
 	}
@@ -1252,7 +1258,8 @@ func TestIPSPDoubleExchangeSingleASPSMUpAckQuiescesTrafficToPeer(t *testing.T) {
 	select {
 	case err := <-ackDone:
 		close(releaseData)
-		<-writeDone
+		writeDoneErr := <-writeDone
+		_ = writeDoneErr // Joined only for cleanup; this path fails the test.
 		t.Fatalf("single-ASPSM ASP Up Ack completed before TrafficToPeer DATA drained: %v", err)
 	case <-time.After(25 * time.Millisecond):
 	}
@@ -1992,7 +1999,8 @@ func TestIPSPDoubleExchangeRestartDrainsOutboundDATABeforeFreshASPSM(t *testing.
 	select {
 	case <-freshASPUp:
 		close(releaseData)
-		<-writeDone
+		writeDoneErr := <-writeDone
+		_ = writeDoneErr // Joined only for cleanup; this path fails the test.
 		<-restartDone
 		t.Fatal("fresh ASP Up overtook old-epoch DATA")
 	default:

@@ -76,7 +76,8 @@ func runExchange(t *testing.T, association *Association, sent *[]messages.M3UA, 
 		// Errors are reported to monitor(), which logs them; drain so a full
 		// channel cannot be mistaken for a settled exchange.
 		select {
-		case <-association.errChan:
+		case err := <-association.errChan:
+			_ = err // Peer rejection errors are allowed; only convergence is under test.
 			continue
 		default:
 		}

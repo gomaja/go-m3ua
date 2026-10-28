@@ -1046,7 +1046,8 @@ func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 			t.Fatalf("first RegisterRoutingKeys: %v", err)
 		}
 		if !returnedBeforeRelease {
-			<-secondDone
+			secondDoneErr := <-secondDone
+			_ = secondDoneErr // Joined only for cleanup; this path fails the test.
 			t.Fatal("queued RegisterRoutingKeys ignored its context deadline until the first procedure completed")
 		}
 		if !errors.Is(secondErr, context.DeadlineExceeded) {
@@ -1105,7 +1106,8 @@ func TestRKMRequesterSerializationWaitRespectsContext(t *testing.T) {
 			t.Fatalf("first DeregisterApplicationServers: %v", err)
 		}
 		if !returnedBeforeRelease {
-			<-secondDone
+			secondDoneErr := <-secondDone
+			_ = secondDoneErr // Joined only for cleanup; this path fails the test.
 			t.Fatal("queued DeregisterApplicationServers ignored its context deadline until the first procedure completed")
 		}
 		if !errors.Is(secondErr, context.DeadlineExceeded) {
