@@ -162,6 +162,7 @@ request from deterministic replay state.
 | T(beat) | `HeartbeatInfo` | `TestHeartbeatKeepsAssociationAlive` |
 | T(r), the AS recovery timer | `ApplicationServerConfig.RecoveryTimer` | `TestRecoveryTimerResolvesPending`, `TestASPActiveBeforeRecoveryTimerRestoresActive` |
 | M3UA handshake budget, starting after `Subscribe` returns | `AssociationConfig.EstablishTimeout` | `TestEstablishTimeoutBoundsTheM3UAHandshake`, `TestSubscribeReturnsBeforeHandshakeAndBudgetStart` |
+| RTO bounds and association failure threshold | `SCTPConfig.RTOInfo`, `AssociationMaxRetrans`; runtime getters and setters | `TestSCTPRTOSocketConfiguration`, `TestSCTPRTOSelectedRefusalKeepsListenerServing`, `TestSCTPAssociationMaxRetransSetupOrdering` |
 | One SCTP association attempt | `SCTPConfig.InitTimeout`, setup RTO.Initial beyond the budget | `dial_test.go`, `dial_rto_linux_test.go` |
 | Send-buffer wait for messages the library sends itself | `AssociationConfig.ControlWriteTimeout` | `TestLibraryRepliesWaitForAStalledPeerToResume`, `TestStalledPeerClosesTheAssociationAfterControlWriteTimeout`, `TestSSNMPublicationWaitsOutAFullSendBuffer` |
 
@@ -181,7 +182,8 @@ instead of indefinite load on a network already in trouble.
 
 Dial sets up the attempt with RTO.Initial beyond InitTimeout so its single INIT
 is not retransmitted inside the budget. Once established, RTO.Initial returns
-to the socket's value; Dial never changes RTO.Min or RTO.Max
+to the socket's value, including `SCTPConfig.RTOInfo` when configured. The
+setup override leaves the configured RTO.Min and RTO.Max unchanged
 ([RFC 6458 Section 8.1.1](https://www.rfc-editor.org/rfc/rfc6458.html#section-8.1.1)).
 On Linux each path keeps the setup value as its current RTO until its first RTT
 measurement, retransmission timeout or association restart
@@ -189,6 +191,18 @@ measurement, retransmission timeout or association restart
 A DATA chunk lost before that measurement, normally the first M3UA message,
 therefore waits about InitTimeout + 1 s for retransmission; see
 [sctp/lksctp-tools issue 74](https://github.com/sctp/lksctp-tools/issues/74).
+
+`RTOInfo` is applied before connect or listen (RFC 6458 Section 8.1.1).
+A listener's selected value is applied after accept: zero fields retain the
+listener's values. On Linux it changes the association's bounds immediately,
+but existing paths keep the listener's Initial until their first RTT measurement
+or retransmission timeout, and T5-shutdown-guard keeps five times the listener's
+Max. The selected Initial reaches paths added later and paths reset by restart;
+see `ListenerConfig` and the lksctp-tools issue above. `AssociationMaxRetrans`
+is applied after path settings (RFC 6458 Section 8.1.2); Linux refuses it with
+EINVAL on a multi-homed association if it exceeds the sum of path limits, as
+advised by the Note in RFC 9260 Section 8.2. Status and Endpoint snapshots
+include the association parameters and each path's independently current RTO.
 
 ## 8. Unexpected messages
 

@@ -192,6 +192,7 @@ field AssociationSnapshot.Role
 field AssociationSnapshot.SCTP
 field AssociationSnapshot.SCTPError
 field AssociationSnapshot.State
+field AssociationStatus.AssociationMaxRetrans
 field AssociationStatus.FragmentationPoint
 field AssociationStatus.InboundStreams
 field AssociationStatus.LocalAddrs
@@ -199,6 +200,7 @@ field AssociationStatus.OutboundStreams
 field AssociationStatus.Paths
 field AssociationStatus.PendingDataChunks
 field AssociationStatus.Primary
+field AssociationStatus.RTOInfo
 field AssociationStatus.ReceiverWindow
 field AssociationStatus.State
 field AssociationStatus.UnackedDataChunks
@@ -390,10 +392,12 @@ field RoutingKeyRegistrationResult.RoutingContext
 field RoutingKeyRegistrationResult.Status
 field SCTPConfig.<embedded *SCTPNoDelayInfo>
 field SCTPConfig.<embedded *SCTPSACKInfo>
+field SCTPConfig.AssociationMaxRetrans
 field SCTPConfig.InitTimeout
 field SCTPConfig.PFExposure
 field SCTPConfig.PathParams
 field SCTPConfig.PathThresholds
+field SCTPConfig.RTOInfo
 field SCTPConfig.ReadBufferSize
 field SCTPConfig.SocketReceiveBuffer
 field SCTPConfig.SocketSendBuffer
@@ -561,17 +565,21 @@ method Association.ReadData
 method Association.RegisterRoutingKeys
 method Association.RemoteAddr
 method Association.Role
+method Association.SCTPAssociationMaxRetrans
 method Association.SCTPPathParams
 method Association.SCTPPathThresholds
+method Association.SCTPRTOInfo
 method Association.SetASAvailable
 method Association.SetASAvailableForAS
 method Association.SetDeadline
 method Association.SetNIFAvailable
 method Association.SetReadDeadline
+method Association.SetSCTPAssociationMaxRetrans
 method Association.SetSCTPNoDelay
 method Association.SetSCTPPathParams
 method Association.SetSCTPPathThresholds
 method Association.SetSCTPPrimaryAddr
+method Association.SetSCTPRTOInfo
 method Association.SetSCTPSACK
 method Association.SetWriteDeadline
 method Association.Shutdown

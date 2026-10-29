@@ -69,6 +69,7 @@ type sctpDialPolicy struct {
 	// buffers are sized before the socket connects, so the INIT announces the
 	// receive window they give; see socketBuffers.apply.
 	buffers socketBuffers
+	rtoInfo *sctp.RTOInfo
 }
 
 func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
@@ -95,6 +96,7 @@ func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.Config {
 		NotificationHandler: restarts.handle,
 		InitMsg:             p.init,
 		SetupRTOInitial:     p.setupRTOInitial,
+		RTOInfo:             p.rtoInfo,
 		Notifications:       p.events,
 		AbandonPolicy:       p.abandon,
 	}
@@ -127,18 +129,20 @@ func (p sctpDialPolicy) dialContext(
 // non-established socket before returning without intentionally emitting a local
 // ABORT. What is left here is keeping the attempt to a single INIT, which needs
 // the initial RTO raised past the budget before the socket is connected.
-// Config applies SetupRTOInitial, notification subscriptions and socket buffers
-// before connect (RFC 6458 Sections 6.2.2, 8.1.1 and 8.1.3). go-sctp restores
-// the association's RTO.Initial to the socket's value once established; Dial
-// never changes RTO.Min or RTO.Max. Linux does not bound T1-init or T1-cookie
-// by RTO.Max, so raising it is unnecessary. AbandonQuiet releases an unfinished
-// attempt without a locally initiated ABORT.
-func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Addr, timeout time.Duration, buffers socketBuffers, restarts *restartWatcher) (*sctp.Conn, error) {
+// Config applies RTOInfo, SetupRTOInitial, notification subscriptions and
+// socket buffers before connect (RFC 6458 Sections 6.2.2, 8.1.1 and 8.1.3).
+// go-sctp restores the association's RTO.Initial to the socket's configured
+// value once established; the setup override leaves the configured RTO.Min and
+// RTO.Max unchanged. Linux does not bound T1-init or T1-cookie by RTO.Max, so
+// raising it is unnecessary. AbandonQuiet releases an unfinished attempt
+// without a locally initiated ABORT.
+func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Addr, timeout time.Duration, buffers socketBuffers, rtoInfo *sctp.RTOInfo, restarts *restartWatcher) (*sctp.Conn, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	policy := oneShotSCTPDialPolicy(timeout)
 	policy.buffers = buffers
+	policy.rtoInfo = rtoInfo
 	// There is one constructor call. Linux can report an ICMP Protocol
 	// Unreachable for the INIT as ENOPROTOOPT (RFC 9260 Section 10, ICMP8);
 	// return that dial error without trying a second socket or INIT.
@@ -176,7 +180,8 @@ func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Add
 //
 // The attempt uses an RTO.Initial beyond InitTimeout to prevent an INIT
 // retransmission inside the budget. Once established, RTO.Initial returns to
-// the socket's value; Dial never changes RTO.Min or RTO.Max (RFC 6458 Section
+// the socket's value, including RTOInfo when configured; the setup override
+// leaves the configured RTO.Min and RTO.Max unchanged (RFC 6458 Section
 // 8.1.1). On Linux each path keeps the setup value as its current RTO until its
 // first RTT measurement, retransmission timeout or association restart (RFC
 // 9260 Section 6.3.1 rule C1). A DATA chunk lost before that first measurement,
@@ -257,7 +262,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	restarts := &restartWatcher{}
 	restarts.setRoute(association.associationForSCTPID)
 
-	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, socketBuffersFor(cfg.SCTPConfig), restarts)
+	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, socketBuffersFor(cfg.SCTPConfig), cfg.RTOInfo, restarts)
 	if err != nil {
 		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
 			return nil, ErrEndpointClosed

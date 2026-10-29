@@ -164,7 +164,7 @@ func TestPeerAbortEndsTheReadAfterAWriteTookTheSocketError(t *testing.T) {
 		&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2}))
 	restarts := &restartWatcher{}
 	restarts.setRoute(func(sctp.AssocID) *Association { return association })
-	conn, err := dialAssociation(ctx, "sctp", laddr, peer.addr, 5*time.Second, socketBuffers{}, restarts)
+	conn, err := dialAssociation(ctx, "sctp", laddr, peer.addr, 5*time.Second, socketBuffers{}, nil, restarts)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestPeerAbortOnAnAcceptedAssociationEndsTheReadAfterAWriteTookTheSocketErro
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := listenSCTP("sctp", laddr, socketBuffers{}, &restartWatcher{})
+	ln, err := listenSCTP("sctp", laddr, socketBuffers{}, nil, &restartWatcher{})
 	if err != nil {
 		skipIfSCTPUnsupported(t, err)
 		t.Fatalf("listen: %v", err)
