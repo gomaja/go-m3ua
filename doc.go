@@ -171,6 +171,15 @@ AssociationStatus reports live local addresses, the primary peer path and all
 current peer paths. Its separate socket reads are not an atomic snapshot.
 SetSCTPPrimaryAddr, SCTPPathParams/SetSCTPPathParams and
 SCTPPathThresholds/SetSCTPPathThresholds provide runtime path management.
+SCTPRTOInfo/SetSCTPRTOInfo and
+SCTPAssociationMaxRetrans/SetSCTPAssociationMaxRetrans read and change the
+association's RTO parameters and failure threshold (RFC 9260 Sections 6.3.1,
+6.3.3 and 8.1; RFC 6458 Sections 8.1.1 and 8.1.2). AssociationStatus includes
+both values. SCTPConfig.RTOInfo is applied before connect or listen; a
+selector's overrides and runtime changes have Linux's per-path and
+T5-shutdown-guard limits described by SetSCTPRTOInfo. AssociationMaxRetrans is
+applied after path settings so Linux checks the live path limits against the
+Note in RFC 9260 Section 8.2.
 SCTPConfig applies path parameters and failure thresholds before each M3UA
 handshake, to all current and future paths (RFC 6458 Section 8.1.12; RFC 7829
 Section 7.2). ManagementIndications carries peer-address changes as

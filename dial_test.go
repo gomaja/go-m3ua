@@ -32,9 +32,9 @@ import (
 //
 // The one-shot contract uses a setup RTO.Initial beyond the attempt budget.
 // go-sctp restores the association's RTO.Initial once established, and Dial
-// leaves RTO.Min and RTO.Max unchanged. Linux paths retain the setup RTO until
-// their first RTT measurement, retransmission timeout or association restart;
-// see Dial and https://github.com/sctp/lksctp-tools/issues/74.
+// leaves the configured RTO.Min and RTO.Max unchanged. Linux paths retain the
+// setup RTO until their first RTT measurement, retransmission timeout or
+// association restart; see Dial and https://github.com/sctp/lksctp-tools/issues/74.
 
 func TestOneShotSCTPDialPolicy(t *testing.T) {
 	tests := []struct {

@@ -52,6 +52,8 @@ type Listener struct {
 	// with, and so the sizes every accepted association inherits; see
 	// ListenerConfig.
 	buffers socketBuffers
+	// rtoInfo is fixed at Listen, before accepted associations are created.
+	rtoInfo *sctp.RTOInfo
 
 	// nif records isolation from the nodal interworking function, which
 	// RFC 4666 Section 4.7 makes the SGP answer differently.
@@ -231,6 +233,7 @@ func newListener(endpoint *Endpoint, config *ListenerConfig) *Listener {
 		endpoint:          endpoint,
 		closeDone:         make(chan struct{}),
 		buffers:           socketBuffersFor(listenerConfig.DefaultAssociationConfig.SCTPConfig),
+		rtoInfo:           snapshotOption(listenerConfig.DefaultAssociationConfig.RTOInfo),
 	}
 	if endpoint != nil {
 		switch endpoint.Role() {
@@ -296,7 +299,7 @@ func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig)
 	}
 	l.restarts = &restartWatcher{}
 	l.restarts.setRoute(l.associationForSCTPID)
-	l.sctpListener, err = listenSCTP(n, laddr, l.buffers, l.restarts)
+	l.sctpListener, err = listenSCTP(n, laddr, l.buffers, l.rtoInfo, l.restarts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen SCTP: %w", err)
 	}
@@ -319,9 +322,15 @@ func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig)
 // then, so subscribing on the accepted socket afterwards came too late for an
 // ABORT that arrived in between. The socket buffers are sized there for the
 // same reason; see socketBuffers.apply.
-func listenSCTP(network string, laddr *sctp.Addr, buffers socketBuffers, restarts *restartWatcher) (*sctp.Listener, error) {
+func listenSCTP(network string, laddr *sctp.Addr, buffers socketBuffers, rtoInfo *sctp.RTOInfo, restarts *restartWatcher) (*sctp.Listener, error) {
+	scfg := sctpListenConfig(buffers, rtoInfo, restarts)
+	return scfg.Listen(network, laddr)
+}
+
+func sctpListenConfig(buffers socketBuffers, rtoInfo *sctp.RTOInfo, restarts *restartWatcher) *sctp.Config {
 	scfg := &sctp.Config{
 		NotificationHandler: restarts.handle,
+		RTOInfo:             rtoInfo,
 		// The same stream request Dial makes; see sctpStreams. Left zero,
 		// the kernel default applied (10 outbound on Linux), so every
 		// accepted association had nine DATA streams for its Signalling Link
@@ -330,7 +339,7 @@ func listenSCTP(network string, laddr *sctp.Addr, buffers socketBuffers, restart
 		Notifications: associationEvents(),
 	}
 	buffers.apply(scfg)
-	return scfg.Listen(network, laddr)
+	return scfg
 }
 
 // associationForSCTPID finds the accepted Association with the given SCTP
@@ -405,6 +414,23 @@ func (l *Listener) validateSelectedReceiveBuffer(selected *AssociationConfig) er
 	}
 	return fmt.Errorf("%w: selected SocketReceiveBuffer %d differs from the Listener's %d, "+
 		"which sized the receive window already announced to this peer", ErrInvalidSCTPConfig, requested, l.buffers.receive)
+}
+
+// applySelectedRTOInfo changes only parameters that differ from the defaults
+// fixed at Listen; zero fields preserve the inherited values. See ListenerConfig
+// for the existing paths and T5-shutdown-guard that Linux leaves unchanged.
+func (l *Listener) applySelectedRTOInfo(conn *sctp.Conn, selected *AssociationConfig) error {
+	if !l.selectsAssociationConfig() || equalRTOInfo(selected.RTOInfo, l.rtoInfo) {
+		return nil
+	}
+	r := selected.RTOInfo
+	if r == nil {
+		r = &sctp.RTOInfo{}
+	}
+	if err := conn.SetRTOInfo(r); err != nil {
+		return fmt.Errorf("failed to set selected SCTP RTO parameters: %w", err)
+	}
+	return nil
 }
 
 // applySelectedSendBuffer gives an accepted association the SocketSendBuffer
@@ -537,6 +563,10 @@ func (l *Listener) Accept(ctx context.Context) (*Association, error) {
 	}
 
 	if err := l.applySelectedSendBuffer(sctpAssociation, associationConfig); err != nil {
+		_ = association.closeWith(err)
+		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
+	}
+	if err := l.applySelectedRTOInfo(sctpAssociation, associationConfig); err != nil {
 		_ = association.closeWith(err)
 		return nil, &AssociationEstablishmentError{RemoteAddr: acceptInfo.RemoteAddr, Err: err}
 	}

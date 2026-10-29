@@ -777,6 +777,15 @@ func (c *Association) setUpSocket() error {
 		return err
 	}
 
+	// RFC 9260 §8.2 Note; RFC 6458 §8.1.2: Linux checks the live paths'
+	// limits here, so apply their settings before Association.Max.Retrans.
+	if n := c.cfg.AssociationMaxRetrans; n != 0 {
+		if err := c.SetSCTPAssociationMaxRetrans(n); err != nil {
+			_ = c.sctpConn.Close()
+			return fmt.Errorf("failed to set SCTP association retransmission limit: %w", err)
+		}
+	}
+
 	// ReadMsg always returns SCTP_RCVINFO with stream and PPID in host order
 	// (RFC 6458 Section 5.3.5); go-sctp enables it before association setup.
 	r, err := c.sctpConn.Status()
@@ -3368,10 +3377,10 @@ func (c *Association) closeStateChanges() {
 // primitive; no peer protocol is involved. The values below are that status,
 // read from the association at the moment of the call.
 //
-// The primary path, address lists and individual paths are read separately;
-// this is not an atomic snapshot. Paths retain kernel order, omitting a peer
-// address removed during the query. If every peer path disappears, the query
-// returns the PathInfo error. A Potentially Failed path hidden by PF
+// The RTO parameters, retransmission limit, primary path, address lists and
+// individual paths are read separately; this is not an atomic snapshot. Paths
+// retain kernel order, omitting a peer address removed during the query. If
+// every peer path disappears, the query returns the PathInfo error. A Potentially Failed path hidden by PF
 // exposure settings is included with its address and state, and zero metrics.
 type AssociationStatus struct {
 	// State is the association's SCTP state, as a name (for example
@@ -3394,12 +3403,22 @@ type AssociationStatus struct {
 	// FragmentationPoint is the largest payload that will be sent without
 	// being fragmented across DATA chunks, in octets.
 	FragmentationPoint uint32
+	// RTOInfo contains the association's current RTO parameters (RFC 6458
+	// Section 8.1.1). Each path's current RTO is in Paths.
+	RTOInfo sctp.RTOInfo
+	// AssociationMaxRetrans is the association's current failure threshold,
+	// Association.Max.Retrans (RFC 9260 Section 8.1; RFC 6458 Section 8.1.2).
+	AssociationMaxRetrans uint16
 
 	// Primary is the primary peer path from the same SCTP_STATUS read as the
 	// association metrics (RFC 6458 Section 8.2.1, verified Erratum 6115).
 	Primary sctp.PathInfo
 	// Paths contains every live peer path (RFC 6458 Sections 9.3 and 8.2.2).
 	// PathInfo.SRTTTicks is Linux's raw kernel-tick value, not milliseconds.
+	// Paths[i].RTO is that path's current RTO and can lie outside RTOInfo's
+	// bounds after a change. An RTT measurement applies both bounds; a timeout
+	// doubles the current RTO and caps it at Max, without clamping to Min.
+	// See SetSCTPRTOInfo for Linux's per-path and T5-shutdown-guard limits.
 	Paths []sctp.PathInfo
 	// LocalAddrs contains the live local addresses (RFC 6458 Section 9.5).
 	LocalAddrs *sctp.Addr
@@ -3470,17 +3489,28 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	rto, err := c.SCTPRTOInfo()
+	if err != nil {
+		return nil, err
+	}
+	maxRetrans, err := c.SCTPAssociationMaxRetrans()
+	if err != nil {
+		return nil, err
+	}
+
 	return &AssociationStatus{
-		State:              associationStateName(r.State),
-		ReceiverWindow:     r.PeerRwnd,
-		UnackedDataChunks:  r.Unacked,
-		PendingDataChunks:  r.Pending,
-		InboundStreams:     r.InStreams,
-		OutboundStreams:    r.OutStreams,
-		FragmentationPoint: r.FragmentationPoint,
-		Primary:            r.Primary,
-		Paths:              paths,
-		LocalAddrs:         local,
+		State:                 associationStateName(r.State),
+		ReceiverWindow:        r.PeerRwnd,
+		UnackedDataChunks:     r.Unacked,
+		PendingDataChunks:     r.Pending,
+		InboundStreams:        r.InStreams,
+		OutboundStreams:       r.OutStreams,
+		FragmentationPoint:    r.FragmentationPoint,
+		RTOInfo:               *rto,
+		AssociationMaxRetrans: maxRetrans,
+		Primary:               r.Primary,
+		Paths:                 paths,
+		LocalAddrs:            local,
 	}, nil
 }
 

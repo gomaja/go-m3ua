@@ -705,6 +705,17 @@ and future paths (RFC 6458 Section 8.1.12; RFC 7829 Section 7.2). An explicit
 peer address affects only that path. Nil option fields leave settings unchanged;
 go-sctp validates values and returns socket errors.
 
+`SCTPConfig.RTOInfo` sets RTO.Initial, RTO.Min and RTO.Max before connect or
+listen. `SCTPRTOInfo`/`SetSCTPRTOInfo` read and change the association parameters;
+`AssociationStatus.RTOInfo` reports them alongside each path's current RTO.
+Selected and runtime changes have Linux's per-path and T5-shutdown-guard limits
+documented on `ListenerConfig` and `SetSCTPRTOInfo`.
+`SCTPConfig.AssociationMaxRetrans` sets the association failure threshold after
+the path options; `SCTPAssociationMaxRetrans`/`SetSCTPAssociationMaxRetrans` and
+`AssociationStatus.AssociationMaxRetrans` expose its current value. Linux
+returns EINVAL if it exceeds the sum of path limits on a multi-homed association
+(RFC 9260 Section 8.2 Note; RFC 6458 Sections 8.1.1–8.1.2).
+
 `SCTPConfig.PathParams`, `PathThresholds`, and `PFExposure` apply before the
 M3UA handshake on each Dial and each accepted association, including a
 Listener's `DefaultAssociationConfig`. Conflicting explicit `PathMaxRetrans`

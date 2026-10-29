@@ -93,6 +93,40 @@ type SCTPConfig struct {
 	*SCTPSACKInfo
 	*SCTPNoDelayInfo
 
+	// RTOInfo configures RTO.Initial, RTO.Min and RTO.Max (RFC 9260
+	// §6.3.1 rules C1, C6 and C7; §6.3.3 rule E2; RFC 6458 §8.1.1).
+	// Nil or a zero field keeps the value the association would otherwise have.
+	// Dial applies it before connect, then temporarily overrides only Initial
+	// during setup; see InitTimeout. A Listener applies its default before listen.
+	//
+	// A selected RTOInfo changes the accepted association's bounds at once;
+	// zero fields retain the listener's values. On Linux, each existing path
+	// keeps the listener's RTO.Initial as its current RTO until its first RTT
+	// measurement or retransmission timeout. The first measurement is normally
+	// the first M3UA message this end sends, once acknowledged without a
+	// retransmission; a HEARTBEAT ACK can also supply it. A selected Initial
+	// reaches only paths added later or reset by an association restart. The
+	// T5-shutdown-guard stays at five times the listener's RTO.Max.
+	//
+	// Linux: net/sctp/associola.c, sctp_association_init and sctp_assoc_add_peer;
+	// net/sctp/socket.c, sctp_setsockopt_rtoinfo; net/sctp/transport.c,
+	// sctp_transport_update_rto and sctp_transport_reset; net/sctp/outqueue.c,
+	// sctp_check_transmitted; net/sctp/sm_sideeffect.c, sctp_do_8_2_transport_strike
+	// and sctp_cmd_transport_on. See https://github.com/sctp/lksctp-tools/issues/74.
+	// Unlike SocketReceiveBuffer, whose window is already announced at accept,
+	// selected RTOInfo can be applied later with these limits; see ListenerConfig.
+	RTOInfo *sctp.RTOInfo
+
+	// AssociationMaxRetrans configures Association.Max.Retrans before the M3UA
+	// handshake, after the path settings (RFC 9260 §8.1; RFC 6458 §8.1.2).
+	// Zero keeps the current value. The Note in RFC 9260 §8.2 advises keeping
+	// it at most the sum of all peer paths' Path.Max.Retrans, or every path
+	// could be inactive while the peer is still considered reachable. Linux
+	// refuses a larger value on a multi-homed association with EINVAL
+	// (net/sctp/socket.c, sctp_setsockopt_associnfo). The check needs the live
+	// paths, so a failure closes that association during socket setup.
+	AssociationMaxRetrans uint16
+
 	// PathParams configures the association and every current and future path
 	// before the M3UA handshake (RFC 6458 Section 8.1.12).
 	PathParams *sctp.PathParams
@@ -108,7 +142,8 @@ type SCTPConfig struct {
 	// InitTimeout bounds Dial's one-shot SCTP association attempt. Zero
 	// selects DefaultInitTimeout. Dial raises only the setup RTO.Initial past
 	// this budget; once established the association uses the socket's value.
-	// RTO.Min and RTO.Max are unchanged. See Dial for Linux's residual path RTO.
+	// RTO.Min and RTO.Max come from RTOInfo when set. See Dial for Linux's
+	// residual path RTO.
 	InitTimeout time.Duration
 
 	// ReadBufferSize is the size of the buffer each read from the association
@@ -189,7 +224,8 @@ type SCTPConfig struct {
 // abandons the in-flight socket promptly and returns ctx.Err().
 //
 // Once the association is established, RTO.Initial returns to the socket's
-// value, and Dial never changes RTO.Min or RTO.Max (RFC 6458 Section 8.1.1).
+// value, including RTOInfo when configured. The setup override leaves the
+// configured RTO.Min and RTO.Max unchanged (RFC 6458 Section 8.1.1).
 // Linux keeps the setup value as each path's RTO until that path's first RTT
 // measurement, retransmission timeout or association restart (RFC 9260 Section
 // 6.3.1 rule C1; https://github.com/sctp/lksctp-tools/issues/74), so DATA lost
@@ -684,6 +720,25 @@ type AssociationConfigSelector func(AcceptInfo) (*AssociationConfig, error)
 //
 // A selected SocketSendBuffer is announced to no one, so a non-zero one is
 // applied to the accepted socket exactly.
+//
+// DefaultAssociationConfig.RTOInfo is also applied before listen, so accepted
+// associations are created with its RTO parameters (net/sctp/associola.c,
+// sctp_association_init and sctp_assoc_add_peer). A different selected RTOInfo
+// changes the association's bounds at once; zero fields keep the listener's
+// values. Unlike SocketReceiveBuffer, whose window has already been announced,
+// it can be applied after accept, but Linux leaves each existing path's current
+// RTO at the listener's RTO.Initial until its first RTT measurement or
+// retransmission timeout. That measurement is normally the first M3UA message
+// this end sends, once acknowledged without retransmission, or a HEARTBEAT ACK
+// (net/sctp/outqueue.c, sctp_check_transmitted; net/sctp/sm_sideeffect.c,
+// sctp_cmd_transport_on). The selected Initial reaches only paths added later
+// or reset by a restart (sctp_assoc_add_peer, sctp_transport_reset). The
+// T5-shutdown-guard stays at five times the listener's RTO.Max. See
+// net/sctp/socket.c, sctp_setsockopt_rtoinfo; net/sctp/transport.c,
+// sctp_transport_update_rto; net/sctp/sm_sideeffect.c,
+// sctp_do_8_2_transport_strike; https://github.com/sctp/lksctp-tools/issues/74.
+// A selected RTOInfo error refuses only that association; the Listener keeps
+// serving.
 type ListenerConfig struct {
 	DefaultAssociationConfig *AssociationConfig
 	SelectAssociationConfig  AssociationConfigSelector
@@ -737,6 +792,7 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 			noDelay := *config.SCTPConfig.SCTPNoDelayInfo
 			sctpConfig.SCTPNoDelayInfo = &noDelay
 		}
+		sctpConfig.RTOInfo = snapshotOption(sctpConfig.RTOInfo)
 		sctpConfig.PathParams = snapshotPathParams(sctpConfig.PathParams)
 		sctpConfig.PathThresholds = snapshotPathThresholds(sctpConfig.PathThresholds)
 		snapshot.SCTPConfig = &sctpConfig

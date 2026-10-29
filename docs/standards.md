@@ -31,7 +31,7 @@ interpretation.
 | M3UA | [RFC 4666](https://www.rfc-editor.org/rfc/rfc4666.html) | Proposed Standard. It obsoletes RFC 3332 and has no `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc4666.json). The [Datatracker record](https://datatracker.ietf.org/doc/rfc4666/) and [incoming relationship API](https://datatracker.ietf.org/api/v1/doc/relateddocument/?target__name=rfc4666&relationship__slug__in=obs,updates&format=json) agree. |
 | SIGTRAN security | [RFC 3788](https://www.rfc-editor.org/rfc/rfc3788.html) | Proposed Standard with no formal update or replacement. RFC 4666 [Section 6](https://www.rfc-editor.org/rfc/rfc4666.html#section-6) requires implementations to follow its normative guidance. Its concrete protocol references require the modernization described below. |
 | SCTP | [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html) | Current Proposed Standard SCTP base specification. It obsoletes RFCs 4460, 4960, 6096, 7053, and 8540 and has no later formal `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc9260.json). |
-| SCTP sockets API | [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html) | Informational; no formal update or replacement. Sections 6.1.2, 8.1.1, 8.1.3, 8.1.9, 8.1.12, 8.2.1, 8.2.2, 9.3 and 9.5 govern attempt setup, path notifications, controls and status. Verified erratum 6115 corrects the status state list. |
+| SCTP sockets API | [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html) | Informational; no formal update or replacement. Sections 6.1.2, 8.1.1, 8.1.2, 8.1.3, 8.1.9, 8.1.12, 8.2.1, 8.2.2, 9.3 and 9.5 govern attempt setup, path notifications, controls and status. Verified erratum 6115 corrects the status state list. |
 | SCTP Potentially Failed paths | [RFC 7829](https://www.rfc-editor.org/rfc/rfc7829.html) | Proposed Standard; no formal update or replacement and no errata. Sections 7.1–7.3 govern PF notifications, thresholds and exposure. |
 | SCTP zero-checksum extension | [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) | Current optional extension for negotiated zero-checksum operation when an alternate error-detection method provides at least equivalent integrity. It does not formally update RFC 9260: the RFC Editor records and the Datatracker incoming-relationship API list no `Updates` relationship. |
 | SCTP authenticated chunks | [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) | Current optional SCTP-AUTH extension. It protects selected SCTP chunks but does not provide M3UA payload confidentiality and is not a substitute for RFC 3788 transport or network protection. |
@@ -235,6 +235,21 @@ confidentiality or peer authentication.
 ## Recheck log
 
 Standards decisions are rechecked when a subsystem is revisited, not once.
+
+On 2026-10-29, the RFC Editor JSON records, Datatracker document pages and
+incoming relationships filtered to `obs,updates` were called for RFC 9260 and
+RFC 6458. Both databases still show no formal update or replacement. Their
+errata records match the lists below; none of the verified corrections changes
+RFC 6458 Sections 8.1.1–8.1.2 or RFC 9260 Sections 6.3.1, 6.3.3, 8.1–8.2.
+Held and Rejected records remain context. The TSVWG active documents include
+multipath and socket API proposals, not normative replacements for these
+options. `SCTPConfig.RTOInfo` and its runtime methods expose RFC 9260 Section
+6.3.1 rules C1, C6 and C7 and Section 6.3.3 rule E2 through RFC 6458 Section
+8.1.1. `AssociationMaxRetrans` and its runtime methods expose RFC 9260 Section
+8.1 through RFC 6458 Section 8.1.2, with the Section 8.2 Note checked by Linux
+after the configured path limits. Selected and runtime RTO changes retain the
+Linux limits described in `ListenerConfig` and `SetSCTPRTOInfo`; status reports
+both association parameters and current path RTOs.
 
 On 2026-10-28, the RFC Editor JSON records and Datatracker document pages,
 document APIs and incoming relationships filtered to `obs,updates` were
