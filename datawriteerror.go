@@ -7,6 +7,7 @@ package m3ua
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"syscall"
 )
@@ -96,7 +97,7 @@ func newDataSendIndeterminate(key ASKey, stream uint16, cause error) *DataWriteE
 // while the send waited for space -- leaves nothing of the message queued, let
 // alone on the wire. Reporting that as indeterminate told the application a
 // resend might duplicate exactly when backpressure made resending the right
-// thing to do.
+// thing to do. Shutdown and closed-transport refusals also queue nothing.
 func newDataSubmissionError(key ASKey, stream uint16, cause error) *DataWriteError {
 	if transportRefusedWhole(cause) {
 		return newDataNotSent(key, stream, cause)
@@ -107,5 +108,16 @@ func newDataSubmissionError(key ASKey, stream uint16, cause error) *DataWriteErr
 // transportRefusedWhole reports a transport error that means the SCTP stack
 // refused the whole message rather than failing partway.
 func transportRefusedWhole(err error) bool {
-	return sendBufferFull(err) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, syscall.EMSGSIZE)
+	// RFC 9260 Section 9.2 refuses new data during shutdown. Linux's
+	// sctp_sendmsg_to_asoc checks buffer space before allocating the message;
+	// PRIMITIVE_SEND in the shutdown states calls sctp_sf_error_shutdown
+	// (net/sctp/socket.c, sm_statetable.c and sm_statefuns.c in Linux v5.14).
+	// go-sctp SendMsg also maps an EAGAIN in those states, or a locally woken
+	// buffer wait, to ESHUTDOWN. EPIPE after association removal and
+	// net.ErrClosed from descriptor release likewise queue nothing. SCTP's
+	// atomic send contract is RFC 6458 Section 3.1.4 with Errata 6111;
+	// callers classify a positive short write separately before reaching
+	// this function.
+	return sendBufferFull(err) || errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, syscall.EMSGSIZE) ||
+		errors.Is(err, syscall.ESHUTDOWN) || errors.Is(err, syscall.EPIPE) || errors.Is(err, net.ErrClosed)
 }

@@ -23,6 +23,12 @@ var transportRefusals = []struct {
 	err   error
 	cause error
 }{
+	{"local shutdown", syscall.ESHUTDOWN, syscall.ESHUTDOWN},
+	{"shutdown wrapped", &net.OpError{Op: "write", Net: "sctp", Err: syscall.ESHUTDOWN}, syscall.ESHUTDOWN},
+	{"local close", net.ErrClosed, net.ErrClosed},
+	{"local close wrapped", &net.OpError{Op: "write", Net: "sctp", Err: net.ErrClosed}, net.ErrClosed},
+	{"completed peer shutdown", syscall.EPIPE, syscall.EPIPE},
+	{"completed peer shutdown wrapped", &net.OpError{Op: "write", Net: "sctp", Err: syscall.EPIPE}, syscall.EPIPE},
 	{"a full send buffer", syscall.EAGAIN, syscall.EAGAIN},
 	{"a full send buffer reported as EWOULDBLOCK", syscall.EWOULDBLOCK, syscall.EWOULDBLOCK},
 	// A write deadline the send waited out: the last attempt was refused
@@ -109,7 +115,7 @@ func TestMTPTransferReportsATransportRefusalAsNotSent(t *testing.T) {
 // Everything else the transport reports stays indeterminate: the message was
 // submitted and the library cannot say how much of it left.
 func TestOtherTransportFailuresStayIndeterminate(t *testing.T) {
-	for _, failure := range []error{syscall.EPIPE, syscall.ECONNRESET, errors.New("unclassified transport failure")} {
+	for _, failure := range []error{syscall.ECONNRESET, errors.New("unclassified transport failure")} {
 		conn, capture := newDataWriteAssociation(t, 1)
 		capture.err = failure
 		_, err := conn.WriteData(DataRequest{AS: writeScope(1), ProtocolData: simpleProtocolData("submitted")})

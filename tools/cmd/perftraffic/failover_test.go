@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -561,6 +562,9 @@ func TestFailoverNotificationClassifiesHowTheAssociationEnded(testContext *testi
 		eof, lost, userAborted bool
 	}{
 		{name: "completed SHUTDOWN", err: io.EOF, eof: true},
+		{name: "wrapped completed SHUTDOWN", err: fmt.Errorf("read: %w", io.EOF), eof: true},
+		{name: "transport abort interrupts reader", err: &net.OpError{Op: "read", Net: "sctp", Err: net.ErrClosed}},
+		{name: "abandoned partial message", err: fmt.Errorf("read: %w", sctp.ErrMessageInterrupted)},
 		{name: "ABORT", err: errFailoverUserAbort, lost: true, userAborted: true},
 		{name: "path failure", err: fmt.Errorf("%w: SCTP association lost (SCTP_COMM_LOST, %s)", m3ua.ErrSCTPNotAlive,
 			sctp.CauseNone.String()), lost: true},

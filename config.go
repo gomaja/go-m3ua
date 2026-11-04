@@ -136,7 +136,8 @@ type SCTPConfig struct {
 	PathThresholds *sctp.PathThresholds
 	// PFExposure controls visibility of Potentially Failed paths (RFC 7829
 	// Section 7.3). PFExposeUnset leaves the socket default, which follows
-	// net.sctp.pf_expose. PF transitions are notified only with PFExposeEnabled.
+	// net.sctp.pf_expose at socket creation. PF transitions are notified only
+	// with PFExposeEnabled.
 	PFExposure sctp.PFExposure
 
 	// InitTimeout bounds Dial's one-shot SCTP association attempt. Zero

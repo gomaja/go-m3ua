@@ -90,7 +90,10 @@ type failoverNotification struct {
 	SGP         m3ua.SGPIdentity   `json:"sgp"`
 	At          int64              `json:"at_ns"`
 	Error       string             `json:"error"`
-	// EndOfStream is the io.EOF a completed SHUTDOWN leaves the reader.
+	// EndOfStream is the io.EOF a peer SHUTDOWN leaves the reader, as
+	// Association.Err reports it. When go-sctp aborts an association itself,
+	// Err matches net.ErrClosed instead: none of these flags is set, and it is
+	// not evidence of a peer SHUTDOWN.
 	EndOfStream bool `json:"end_of_stream"`
 	// CommunicationLost is the SCTP_COMM_LOST an ABORT or a path failure
 	// raises, which the library reports as ErrSCTPNotAlive.
