@@ -249,12 +249,17 @@ For per-call cancellation, use `WriteDataContext(ctx, request)` or
 buffer waits without closing the association. A full buffer returns `EAGAIN`
 immediately without an application write deadline; with one, the transport waits
 for space until that deadline or the context ends. A context interruption matches
-`ctx.Err()` and queues nothing. Every `SendMsgContext` error is `DataNotSent`,
-so `DataSendIndeterminate` is unreachable on that transport path. A send already
+`ctx.Err()` and queues nothing. A `SendMsgContext` error with zero accepted bytes
+is `DataNotSent`. An unexpected partial submission is `DataSendIndeterminate`,
+including a short count reported without an error. A complete send already
 accepted reports success even if cancellation occurs concurrently. Application
 deadlines are preserved, including changes made during the call.
 Contexts that cannot be cancelled retain the ordinary send's conservative
 outcome classification.
+Shutdown and closed-transport refusals also report `DataNotSent`. Local SCTP
+shutdown or close wakes a send waiting for buffer space. A peer's SHUTDOWN alone
+does not wake it: space becoming available, the deadline or context ending, or
+the association ending releases that wait.
 
 Admission and send barriers use `github.com/gomaja/go-ctxsync`: plain and
 cancellable callers share its queue and starvation handoff. Transfer readers
@@ -877,6 +882,11 @@ metrics, and paths removed during the query are omitted.
 
 `SetSCTPPrimaryAddr`, `SCTPPathParams`/`SetSCTPPathParams` and
 `SCTPPathThresholds`/`SetSCTPPathThresholds` expose runtime path controls.
+Before passing an `SCTPPathParams` result to `SetSCTPPathParams`, clear
+`HeartbeatInterval` when `Heartbeat` is false, `PathMTU` when `PMTUD` is true,
+and `SACKDelay` when `DelayedSACK` is false. An association-wide threshold update applies retained
+association defaults for nil fields to every path, overwriting differing
+per-path thresholds.
 `SCTPConfig.PathParams`, `PathThresholds` and `PFExposure` configure every new
 Dial or Accept before its M3UA handshake. Wildcard settings cover current and
 future paths (RFC 6458 Section 8.1.12; RFC 7829 Section 7.2).

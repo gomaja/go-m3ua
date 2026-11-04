@@ -487,18 +487,26 @@ nothing reached the transport, or the transport refused the whole message as SCT
 does when its send buffer is full, so a resend cannot duplicate — or
 `DataSendIndeterminate`, where submission had begun and the application owns the
 retry decision. `errors.Is` and `errors.As` still reach the cause.
+An SCTP send refused because the association is shutting down or closed also
+reports `DataNotSent`; this describes that message's submission, not the fate of
+messages accepted earlier.
 
 Use `WriteDataContext(ctx, request)` or `MTPTransferContext(ctx, request)` to
 cancel one send while it waits for admission or send-buffer space. Without an
 application write deadline, a full buffer returns `EAGAIN` immediately. With a
 deadline, `SendMsgContext` waits in the transport until space is available, the
 deadline passes, or the context ends. A context interruption matches `ctx.Err()`;
-application deadlines are preserved and other sends remain usable. Every error
-from `SendMsgContext` queues nothing and reports `DataNotSent`, so
-`DataSendIndeterminate` is unreachable on that transport path. Local acceptance
+application deadlines are preserved and other sends remain usable. An error
+from `SendMsgContext` with zero bytes accepted reports `DataNotSent`. An
+unexpected partial submission reports `DataSendIndeterminate`, including when
+the transport reports a short count without an error. Full local acceptance
 wins over concurrent cancellation and still does not prove peer delivery.
 Contexts that cannot be cancelled retain `WriteData`'s ordinary submission path
 and conservative outcome classification.
+
+Local SCTP shutdown or close wakes a send waiting for buffer space. A peer's
+SHUTDOWN does not itself wake a parked send: it returns when buffer space becomes
+available, its deadline or context ends, or the association ends.
 
 A zero `Stream` selects the negotiated stream this message's own Signalling
 Link Selection maps to, which is what keeps one SLS in sequence (Section 1.4.7);
@@ -704,6 +712,11 @@ association defaults or applies settings to the association and all current
 and future paths (RFC 6458 Section 8.1.12; RFC 7829 Section 7.2). An explicit
 peer address affects only that path. Nil option fields leave settings unchanged;
 go-sctp validates values and returns socket errors.
+`SCTPPathParams` retains inactive values in readback. Before passing it to
+`SetSCTPPathParams`, clear `HeartbeatInterval` when `Heartbeat` is false, `PathMTU` when `PMTUD` is
+true, and `SACKDelay` when `DelayedSACK` is false. For association-wide
+`SetSCTPPathThresholds`, nil fields retain association defaults, which Linux
+applies to every path even when a path previously had a different value.
 
 `SCTPConfig.RTOInfo` sets RTO.Initial, RTO.Min and RTO.Max before connect or
 listen. `SCTPRTOInfo`/`SetSCTPRTOInfo` read and change the association parameters;
@@ -720,7 +733,7 @@ returns EINVAL if it exceeds the sum of path limits on a multi-homed association
 M3UA handshake on each Dial and each accepted association, including a
 Listener's `DefaultAssociationConfig`. Conflicting explicit `PathMaxRetrans`
 values in `PathParams` and `PathThresholds` are refused. `PFExposeUnset` leaves
-the socket default, which follows `net.sctp.pf_expose`; select
+the socket default, which follows `net.sctp.pf_expose` at socket creation; select
 `sctp.PFExposeEnabled` to receive Potentially Failed transitions (RFC 7829
 Sections 7.1 and 7.3). These are SCTP HEARTBEAT and failure controls, separate
 from M3UA BEAT configuration. Each Association owns one SCTP association;

@@ -140,6 +140,7 @@ func TestSSNMPublicationWaitsOutAFullSendBuffer(t *testing.T) {
 // number in the first eight octets of every DATA payload.
 type stalledASP struct {
 	resume chan struct{}
+	conn   *sctp.Conn
 
 	mu          sync.Mutex
 	dunas       []stalledAck
@@ -172,7 +173,7 @@ func dialStalledASPWith(t *testing.T, sgp *sctp.Addr, routingContext uint32, ini
 	if err != nil {
 		t.Fatalf("raw ASP dial: %v", err)
 	}
-	peer := &stalledASP{resume: make(chan struct{})}
+	peer := &stalledASP{resume: make(chan struct{}), conn: conn}
 	stop := make(chan struct{})
 	t.Cleanup(func() {
 		close(stop)

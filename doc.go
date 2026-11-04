@@ -30,9 +30,13 @@ and neither closes the association nor discards queued DATA.
 WriteDataContext and MTPTransferContext cancel one send's admission and buffer
 waits. A full buffer returns EAGAIN without an application write deadline; with
 one, the transport waits until space is available, the deadline passes, or the
-context ends. SendMsgContext errors queue nothing and report DataNotSent; known
-local acceptance wins over concurrent cancellation. Application deadlines and
-other sends are preserved.
+context ends. SendMsgContext errors with zero accepted bytes report DataNotSent;
+unexpected partial submissions report DataSendIndeterminate. Full local
+acceptance wins over concurrent cancellation. Application deadlines and other
+sends are preserved.
+Local SCTP shutdown or close wakes a send waiting for buffer space; a peer's
+SHUTDOWN alone does not wake it. Shutdown and closed-transport refusals report
+DataNotSent without changing the outcome of earlier accepted messages.
 
 Admission and send locks use github.com/gomaja/go-ctxsync. Cancellable and
 ordinary senders share its queue and starvation handoff; transfer readers
@@ -171,6 +175,11 @@ AssociationStatus reports live local addresses, the primary peer path and all
 current peer paths. Its separate socket reads are not an atomic snapshot.
 SetSCTPPrimaryAddr, SCTPPathParams/SetSCTPPathParams and
 SCTPPathThresholds/SetSCTPPathThresholds provide runtime path management.
+Before passing an SCTPPathParams result to SetSCTPPathParams, clear
+HeartbeatInterval when Heartbeat is false, PathMTU when PMTUD is true, and
+SACKDelay when DelayedSACK is false.
+Association-wide SetSCTPPathThresholds applies the association defaults for nil
+fields to every path, overwriting differing per-path thresholds.
 SCTPRTOInfo/SetSCTPRTOInfo and
 SCTPAssociationMaxRetrans/SetSCTPAssociationMaxRetrans read and change the
 association's RTO parameters and failure threshold (RFC 9260 Sections 6.3.1,

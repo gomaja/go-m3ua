@@ -1,7 +1,7 @@
 # M3UA standards and security contract
 
-Audit date: 2026-08-31. RFC 4666 relationships, errata and the SIGTRAN working
-group rechecked 2026-10-14; see [Recheck log](#recheck-log).
+Audit date: 2026-08-31. The M3UA and SCTP dependency contract was rechecked
+2026-11-04; see [Recheck log](#recheck-log).
 
 This document defines which authorities govern go-m3ua v1.2.0 and where the
 library boundary ends. The implementation status for each RFC 4666 area is in
@@ -33,6 +33,9 @@ interpretation.
 | SCTP | [RFC 9260](https://www.rfc-editor.org/rfc/rfc9260.html) | Current Proposed Standard SCTP base specification. It obsoletes RFCs 4460, 4960, 6096, 7053, and 8540 and has no later formal `Updated by` or `Obsoleted by` relationship in the [RFC Editor record](https://www.rfc-editor.org/rfc/rfc9260.json). |
 | SCTP sockets API | [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html) | Informational; no formal update or replacement. Sections 6.1.2, 8.1.1, 8.1.2, 8.1.3, 8.1.9, 8.1.12, 8.2.1, 8.2.2, 9.3 and 9.5 govern attempt setup, path notifications, controls and status. Verified erratum 6115 corrects the status state list. |
 | SCTP Potentially Failed paths | [RFC 7829](https://www.rfc-editor.org/rfc/rfc7829.html) | Proposed Standard; no formal update or replacement and no errata. Sections 7.1–7.3 govern PF notifications, thresholds and exposure. |
+| SCTP dynamic address reconfiguration | [RFC 5061](https://www.rfc-editor.org/rfc/rfc5061.html) | Proposed Standard; no formal update or replacement and no errata. |
+| Partial Reliability SCTP | [RFC 3758](https://www.rfc-editor.org/rfc/rfc3758.html) | Proposed Standard; no formal update or replacement and no errata. Peer abandonment of a partly delivered M3UA message ends the go-m3ua association, as described below. |
+| SCTP message interleaving | [RFC 8260](https://www.rfc-editor.org/rfc/rfc8260.html) | Proposed Standard; no formal update or replacement and no errata. Section 2.2.1 requires both endpoints to advertise I-DATA support; go-m3ua does not enable it. |
 | SCTP zero-checksum extension | [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) | Current optional extension for negotiated zero-checksum operation when an alternate error-detection method provides at least equivalent integrity. It does not formally update RFC 9260: the RFC Editor records and the Datatracker incoming-relationship API list no `Updates` relationship. |
 | SCTP authenticated chunks | [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) | Current optional SCTP-AUTH extension. It protects selected SCTP chunks but does not provide M3UA payload confidentiality and is not a substitute for RFC 3788 transport or network protection. |
 | TLS over SCTP | [RFC 3436](https://www.rfc-editor.org/rfc/rfc3436.html) | Current TLS-over-SCTP mapping, updated by [RFC 8996](https://www.rfc-editor.org/rfc/rfc8996.html) to prohibit TLS 1.0 and TLS 1.1. TLS support is optional under RFC 3788 [Section 7](https://www.rfc-editor.org/rfc/rfc3788.html#section-7). |
@@ -59,10 +62,10 @@ the Datatracker; the 2026-10-14 recheck found no such discrepancy.
 The [SIGTRAN working group](https://datatracker.ietf.org/wg/sigtran/documents/)
 is concluded and has no active M3UA Internet-Draft. Among the
 [TSVWG documents](https://datatracker.ietf.org/wg/tsvwg/documents/),
-`draft-ietf-tsvwg-sctp-dtls-chunk-05` is an active working group document that
+`draft-ietf-tsvwg-sctp-dtls-chunk-06` is an active working group document that
 may change future SCTP security choices; it is not normative for v1.2.0. Its
-companion `draft-ietf-tsvwg-dtls-chunk-key-management-01` expired on
-2026-09-03. The expired `draft-ietf-tsvwg-dtls-over-sctp-bis` and
+companion `draft-ietf-tsvwg-dtls-chunk-key-management-01` is expired.
+The expired `draft-ietf-tsvwg-dtls-over-sctp-bis` and
 `draft-ietf-tsvwg-rfc4895-bis` are historical context only.
 
 ## RFC 4666 errata
@@ -103,15 +106,51 @@ the SACK section. Errata
 [8774](https://www.rfc-editor.org/errata/eid8774) are Rejected and are not
 applied.
 
-go-m3ua now depends on
-[`github.com/gomaja/go-sctp` main revision a7c2cd8](https://github.com/gomaja/go-sctp/commit/a7c2cd80b141),
-which uses operating-system SCTP sockets rather than implementing the SCTP
+go-m3ua depends on [`github.com/gomaja/go-sctp`](https://github.com/gomaja/go-sctp),
+at the version recorded in `go.mod`. It uses operating-system SCTP sockets rather than implementing the SCTP
 packet state machine. INIT, COOKIE, SACK, verification-tag, retransmission, and
 path procedures therefore belong to the deployed kernel's RFC 9260
 implementation. go-sctp and go-m3ua remain responsible for setting socket
 policy correctly, preserving SCTP notifications and errors, and not
 contradicting those procedures. This boundary creates no go-sctp API gap for
 the RFC 9260 errata listed above.
+
+### SCTP message boundaries and reliability
+
+RFC 4666 [Section 1.3.1](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.3.1)
+recommends SCTP as the reliable signalling transport. go-m3ua treats every
+`ReadMsg` error as fatal, including `sctp.ErrMessageInterrupted` when a peer
+abandons a partly delivered PR-SCTP message. It discards the abandoned prefix,
+ends the association, and preserves the cause in `Association.Err()` after
+`Association.Done()` closes; `errors.Is(err, sctp.ErrMessageInterrupted)` remains
+true. go-sctp can continue reading the next message, but go-m3ua deliberately
+requires reliable M3UA message delivery.
+
+go-m3ua leaves `Config.PartialReliability` unset. Linux initializes the network
+namespace's `prsctp_enable` to 1 and copies it into a new SCTP endpoint; a
+deployment can change the namespace default before socket creation
+([Linux v5.14 defaults](https://github.com/torvalds/linux/blob/v5.14/net/sctp/protocol.c#L1362),
+[endpoint inheritance](https://github.com/torvalds/linux/blob/v5.14/net/sctp/endpointola.c#L107);
+[mainline defaults](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/protocol.c#L1355),
+[endpoint inheritance](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/endpointola.c#L112)).
+This permits negotiation of PR-SCTP; go-m3ua does not request per-message
+abandonment for its own sends.
+
+go-m3ua also leaves `Config.MessageInterleaving` unset for both Dial and Listen.
+Linux initializes the endpoint's `intl_enable` to zero. Enabling it requires
+`SCTP_INTERLEAVING_SUPPORTED`, an enabled namespace `intl_enable`, and nonzero
+fragment interleave; setting fragment interleave to zero clears it again
+([Linux v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/socket.c#L4218),
+[mainline](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/socket.c#L4285)).
+The endpoint flag gates advertising and accepting I-DATA in INIT, and INIT ACK
+uses the resulting peer capability
+([Linux v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/sm_make_chunk.c#L273),
+[mainline](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/sm_make_chunk.c#L266)).
+Consequently, enabling only the namespace sysctl cannot make a go-m3ua
+association negotiate I-DATA. This follows RFC 8260
+[Section 2.2.1](https://www.rfc-editor.org/rfc/rfc8260.html#section-2.2.1);
+go-sctp's `ReadMsg` refusal of negotiated I-DATA cannot be reached through
+go-m3ua's socket configuration.
 
 RFC 9653 [Section 7.1](https://www.rfc-editor.org/rfc/rfc9653.html#section-7.1)
 defaults alternate error detection and zero-checksum acceptance to disabled.
@@ -235,6 +274,17 @@ confidentiality or peer authentication.
 ## Recheck log
 
 Standards decisions are rechecked when a subsystem is revisited, not once.
+
+On 2026-11-04, the RFC Editor JSON records and Datatracker document records and
+incoming relationships filtered to `obs,updates` were checked for RFCs 4666,
+9260, 6458, 7829, 5061, 3758 and 8260. Both databases agree that none has a
+formal update or replacement. Their errata registries were also checked:
+RFCs 7829, 5061, 3758 and 8260 have none; the RFC 4666, RFC 9260 and RFC 6458
+Verified, Held and Rejected lists below remain unchanged. Held and Rejected
+records remain context rather than specification changes. SIGTRAN remains
+concluded; the TSVWG active list includes `draft-ietf-tsvwg-sctp-dtls-chunk-06`,
+which is not normative. Linux v5.14 and the mainline source snapshot linked
+above were checked for PR-SCTP defaults and I-DATA negotiation.
 
 On 2026-10-29, the RFC Editor JSON records, Datatracker document pages and
 incoming relationships filtered to `obs,updates` were called for RFC 9260 and

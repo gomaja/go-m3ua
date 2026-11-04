@@ -86,6 +86,10 @@ func (c *Association) SetSCTPPrimaryAddr(addr netip.Addr) error {
 
 // SCTPPathParams reads one path's parameters, or the association defaults for
 // the zero netip.Addr (RFC 6458 Section 8.1.12).
+// Readback includes the current MTU and retained timers even when their switches
+// are inactive. Before passing it to SetSCTPPathParams, clear HeartbeatInterval
+// when Heartbeat is false, PathMTU when PMTUD is true, and SACKDelay when
+// DelayedSACK is false; go-sctp refuses those inactive fields on a write.
 func (c *Association) SCTPPathParams(addr netip.Addr) (*sctp.PathParams, error) {
 	if c.sctpConn == nil {
 		return nil, ErrAssociationClosed
@@ -96,6 +100,7 @@ func (c *Association) SCTPPathParams(addr netip.Addr) (*sctp.PathParams, error) 
 // SetSCTPPathParams changes one path's parameters. The zero netip.Addr applies
 // to the association and all current and future paths (RFC 6458 Section
 // 8.1.12). Nil fields leave settings unchanged; go-sctp validates the values.
+// A read-modify-write must clear inactive fields as SCTPPathParams describes.
 func (c *Association) SetSCTPPathParams(addr netip.Addr, p *sctp.PathParams) error {
 	if c.sctpConn == nil {
 		return ErrAssociationClosed
@@ -114,8 +119,10 @@ func (c *Association) SCTPPathThresholds(addr netip.Addr) (*sctp.PathThresholds,
 
 // SetSCTPPathThresholds changes one path's failure thresholds. The zero
 // netip.Addr applies to the association and all current and future paths
-// (RFC 7829 Section 7.2). Nil fields leave thresholds unchanged; go-sctp
-// validates the values.
+// (RFC 7829 Section 7.2). A nil field keeps the addressed path's threshold;
+// for the zero address it keeps the association default, which Linux then
+// applies to every path, overwriting differing per-path values
+// (net/sctp/socket.c, sctp_setsockopt_paddr_thresholds). go-sctp validates values.
 func (c *Association) SetSCTPPathThresholds(addr netip.Addr, t *sctp.PathThresholds) error {
 	if c.sctpConn == nil {
 		return ErrAssociationClosed

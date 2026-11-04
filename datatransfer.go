@@ -94,11 +94,13 @@ func (c *Association) WriteData(request DataRequest) (int, error) {
 // Without a write deadline, a full buffer still returns EAGAIN immediately.
 // It preserves application socket deadlines and does not cancel other sends.
 //
-// A context interruption returns zero and a *DataWriteError with Outcome
-// DataNotSent and a cause matching ctx.Err() through errors.Is. The transport
-// queues a complete message or nothing (RFC 6458 §3.1.4; Errata 6111 clarifies
-// explicit EOR, which Linux does not implement), so every SendMsgContext error
-// is DataNotSent; DataSendIndeterminate is not reachable on that transport path.
+// A context interruption before the transport accepts any of the message
+// returns zero and a *DataWriteError with Outcome DataNotSent and a cause
+// matching ctx.Err() through errors.Is. The transport queues a complete
+// message or nothing (RFC 6458 §3.1.4; Errata 6111 clarifies explicit EOR,
+// which Linux does not implement), so a SendMsgContext error with zero
+// accepted bytes is DataNotSent. An unexpected positive short count is
+// DataSendIndeterminate and must not be retried as if nothing was queued.
 // The call retains no pending submission after returning. Completed acceptance
 // returns success even if ctx is cancelled concurrently; success says nothing
 // about delivery to the peer (RFC 4666 §3.3.1).
@@ -182,22 +184,29 @@ func (c *Association) submitDataContext(ctx context.Context, frame []byte, key A
 		}
 		return nil
 	}
-	_, err := c.controlSender().SendMsgContext(ctx, frame, sctp.SendOptions{
+	written, err := c.controlSender().SendMsgContext(ctx, frame, sctp.SendOptions{
 		Info: &info, NoWait: c.applicationWriteDeadline.Load() == nil,
 	})
-	if err != nil {
-		// RFC 6458 §3.1.4 and Errata 6111: without explicit EOR, sendmsg
-		// is atomic. go-sctp guarantees that no error queues any of DATA.
-		if errors.Is(err, net.ErrClosed) {
-			select {
-			case <-c.done:
-				err = errors.Join(err, ErrAssociationClosed, ctx.Err())
-			default:
-			}
+	if errors.Is(err, net.ErrClosed) {
+		select {
+		case <-c.done:
+			err = errors.Join(err, ErrAssociationClosed, ctx.Err())
+		default:
 		}
-		return newDataNotSent(key, stream, err)
 	}
-	return nil
+	if written > 0 || err == nil {
+		// go-sctp preserves an unexpected short send's count and reports
+		// io.ErrShortWrite. Never turn that partial acceptance into a safe
+		// retry, or accept a short success as one complete M3UA DATA message
+		// (RFC 4666 Section 3.3.1).
+		if result := dataSubmissionResult(key, stream, len(frame), written, err); result != nil {
+			return result
+		}
+		return nil
+	}
+	// RFC 6458 §3.1.4 and Errata 6111: without explicit EOR, sendmsg is
+	// atomic, so a zero-byte SendMsgContext error queues none of this DATA.
+	return newDataNotSent(key, stream, err)
 }
 
 func dataSubmissionResult(key ASKey, stream uint16, size, written int, err error) *DataWriteError {

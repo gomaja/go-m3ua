@@ -544,10 +544,13 @@ kinds.
 - **Notification.** The sender watches `Association.Done` on all eight
   associations, the earliest public observation of the transport failure, and
   records each one's `Err` with how it ended (`sender.notifications`):
-  `end_of_stream` for the `io.EOF` a completed SHUTDOWN leaves,
+  `end_of_stream` for the `io.EOF` a peer SHUTDOWN leaves,
   `communication_lost` for the `SCTP_COMM_LOST` the library reports as
   `ErrSCTPNotAlive`, and `user_abort` when that loss carries the
   User-Initiated Abort cause of a requested ABORT.
+  When go-sctp aborts an association itself, the recorded `Err` matches
+  `net.ErrClosed`: it carries none of the three flags, does not prove a peer
+  SHUTDOWN, and fails a close trial's `end_of_stream` check.
   The notification instant is the later of the failed
   SGP's two, so the SGP is known down; any surviving association ending fails
   the trial. The time from

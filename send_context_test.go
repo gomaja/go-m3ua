@@ -575,6 +575,12 @@ func TestWriteDataContextSubmissionOutcomes(t *testing.T) {
 		{"unknown failure", 0, io.ErrUnexpectedEOF, DataSendIndeterminate},
 		{"cancelled transport", 0, context.Canceled, DataSendIndeterminate},
 		{"whole refusal", 0, syscall.EAGAIN, DataNotSent},
+		{"shutdown refusal", 0, syscall.ESHUTDOWN, DataNotSent},
+		{"closed refusal", 0, net.ErrClosed, DataNotSent},
+		{"ended refusal", 0, syscall.EPIPE, DataNotSent},
+		{"partial shutdown", 1, syscall.ESHUTDOWN, DataSendIndeterminate},
+		{"partial close", 1, net.ErrClosed, DataSendIndeterminate},
+		{"partial ended", 1, syscall.EPIPE, DataSendIndeterminate},
 		{"partial refusal", 1, syscall.EAGAIN, DataSendIndeterminate},
 		{"short write", 1, nil, DataSendIndeterminate},
 	} {
@@ -771,5 +777,56 @@ func TestMTPTransferContextCancelsFlowWait(t *testing.T) {
 	}
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatal("test context did not expire")
+	}
+}
+
+type contextSubmissionResult struct {
+	written int
+	err     error
+}
+
+func (r contextSubmissionResult) SendMsg([]byte, sctp.SendOptions) (int, error) {
+	return r.written, r.err
+}
+func (r contextSubmissionResult) SendMsgContext(context.Context, []byte, sctp.SendOptions) (int, error) {
+	return r.written, r.err
+}
+
+func TestWriteDataContextRejectsShortTransportSubmission(t *testing.T) {
+	for _, variant := range []struct {
+		name    string
+		written int
+		err     error
+		cause   error
+	}{
+		{"short error", 1, io.ErrShortWrite, io.ErrShortWrite},
+		{"partial shutdown", 1, syscall.ESHUTDOWN, syscall.ESHUTDOWN},
+		{"partial close", 1, net.ErrClosed, net.ErrClosed},
+		{"partial ended", 1, syscall.EPIPE, syscall.EPIPE},
+		{"short success", 1, nil, ErrPartialDataWrite},
+		{"empty success", 0, nil, ErrPartialDataWrite},
+	} {
+		t.Run(variant.name, func(t *testing.T) {
+			c, _ := newDataWriteAssociation(t, 1)
+			c.dataWriter = nil
+			c.controlTransport = contextSubmissionResult{written: variant.written, err: variant.err}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			_, err := c.WriteDataContext(ctx, allocationRequest(128))
+			requireDataWriteError(t, err, DataSendIndeterminate, variant.cause)
+		})
+	}
+}
+
+func TestWriteDataContextFullTransportSubmission(t *testing.T) {
+	c, _ := newDataWriteAssociation(t, 1)
+	c.dataWriter = nil
+	c.controlTransport = newContextSendBuffer(c)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := allocationRequest(128)
+	n, err := c.WriteDataContext(ctx, request)
+	if err != nil || n != len(request.ProtocolData.Data) {
+		t.Fatalf("full transport submission returned (%d, %#v), want (%d, nil)", n, err, len(request.ProtocolData.Data))
 	}
 }
