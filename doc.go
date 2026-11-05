@@ -196,6 +196,27 @@ ManagementSCTPStatus with an owned PeerAddrChange (RFC 4666 Section 1.6.3;
 RFC 6458 Section 6.1.2). Potentially Failed transitions require PFExposeEnabled
 (RFC 7829 Section 7.3).
 
+# SCTP reliability
+
+go-m3ua offers PR-SCTP (RFC 3758) only when SCTPConfig.PartialReliability is
+true. By default Dial's INIT omits Forward-TSN-Supported and a Listener's INIT
+ACK returns a peer's offer in an Unrecognized Parameter, overriding Linux's
+net.sctp.prsctp_enable default, so a peer can never abandon a message it sends
+(RFC 3758 Sections 3.3.1–3.3.3 and 4.2; RFC 7496 Section 4.5). go-m3ua's own
+sends are always fully reliable. A peer that requires PR-SCTP may decline the
+association; set PartialReliability before setup to offer it. A peer can
+decline the offer without error, and SCTPPRSupported and
+AssociationStatus.PRSupported report the negotiated result.
+
+Opting in lets the peer abandon messages: a whole abandoned message never
+arrives and nothing reports it, and abandonment after partial delivery ends the
+association with a cause matching sctp.ErrMessageInterrupted, which
+Association.Err keeps after Association.Done closes. The setting cannot change
+a live association. A Listener fixes it at Listen, before its INIT ACK; every
+selected config must carry the same value or Accept refuses that association
+with ErrInvalidSCTPConfig and the Listener keeps serving. A fresh zero-value
+selection is therefore refused under an opted-in default.
+
 # Signalling domain isolation
 
 Two labels that look global are not. RFC 4666 Section 3.3.1 makes a Network

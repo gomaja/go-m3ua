@@ -197,6 +197,7 @@ field AssociationStatus.FragmentationPoint
 field AssociationStatus.InboundStreams
 field AssociationStatus.LocalAddrs
 field AssociationStatus.OutboundStreams
+field AssociationStatus.PRSupported
 field AssociationStatus.Paths
 field AssociationStatus.PendingDataChunks
 field AssociationStatus.Primary
@@ -395,6 +396,7 @@ field SCTPConfig.<embedded *SCTPSACKInfo>
 field SCTPConfig.AssociationMaxRetrans
 field SCTPConfig.InitTimeout
 field SCTPConfig.PFExposure
+field SCTPConfig.PartialReliability
 field SCTPConfig.PathParams
 field SCTPConfig.PathThresholds
 field SCTPConfig.RTOInfo
@@ -566,6 +568,7 @@ method Association.RegisterRoutingKeys
 method Association.RemoteAddr
 method Association.Role
 method Association.SCTPAssociationMaxRetrans
+method Association.SCTPPRSupported
 method Association.SCTPPathParams
 method Association.SCTPPathThresholds
 method Association.SCTPRTOInfo

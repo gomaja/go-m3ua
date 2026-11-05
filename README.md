@@ -61,6 +61,31 @@ replace, so the edit persists. With the entry commented out, the kernel loads
 the module when the first SCTP socket is opened. Install the
 `kernel-modules-extra` that matches each kernel you boot.
 
+### SCTP reliability
+
+go-m3ua offers PR-SCTP (RFC 3758) only when `SCTPConfig.PartialReliability` is
+`true`. By default Dial's INIT omits Forward-TSN-Supported and a Listener's INIT
+ACK returns a peer's offer in an Unrecognized Parameter, overriding Linux's
+`net.sctp.prsctp_enable` default, so a peer can never abandon a message it sends
+(RFC 3758 §§3.3.1–3.3.3, §4.2; RFC 7496 §4.5). go-m3ua's own sends are always
+fully reliable.
+
+A peer that requires PR-SCTP may decline the association. Set
+`config.SCTPConfig.PartialReliability = true` before Dial or Listen to offer it.
+Opting in lets the peer abandon messages: a whole abandoned message never
+arrives and nothing reports it, and abandonment after partial delivery ends the
+association with an error matching `sctp.ErrMessageInterrupted`. A peer can
+decline the offer without error; `Association.SCTPPRSupported()` and
+`AssociationStatus.PRSupported` report the negotiated result. See
+[the standards contract](docs/standards.md#sctp-message-boundaries-and-reliability).
+
+The value is fixed at setup and cannot change a live association. A Listener
+fixes it from `DefaultAssociationConfig` at Listen. Every config returned by
+`SelectAssociationConfig` must have that same value, including an explicit
+`true` under an opted-in default. A mismatch, including a fresh zero-value
+config under that default, refuses the association with `ErrInvalidSCTPConfig`;
+the Listener keeps serving.
+
 ### Trying Examples
 
 Working examples are available in [examples directory](./examples/).

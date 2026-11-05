@@ -93,6 +93,35 @@ type SCTPConfig struct {
 	*SCTPSACKInfo
 	*SCTPNoDelayInfo
 
+	// PartialReliability offers PR-SCTP (RFC 3758) at association setup. False,
+	// the default, disables it on the socket (SCTP_PR_SUPPORTED, RFC 7496
+	// §4.5), overriding Linux's net.sctp.prsctp_enable: Dial's INIT omits
+	// Forward-TSN-Supported, and a Listener's INIT ACK returns a peer's offer in
+	// an Unrecognized Parameter. The peer can then never send FORWARD TSN, so it
+	// cannot abandon a message it sends here (RFC 3758 §3.3.1–§3.3.3). RFC 3758
+	// §4.2 recommends disabling PR-SCTP by default, and M3UA expects a reliable
+	// transport (RFC 4666 §1.3.1).
+	//
+	// Set it only for a peer that requires PR-SCTP and would otherwise decline
+	// the association (RFC 3758 §3.3.2–§3.3.3). go-m3ua's own sends stay fully
+	// reliable either way. Opting in lets the peer abandon messages it sends: a
+	// whole abandoned message never arrives and nothing reports it, and
+	// abandoning a partly delivered message ends the association with a cause
+	// matching sctp.ErrMessageInterrupted. Opting in is only an offer; a peer
+	// that declines it gets an association without PR-SCTP and no error.
+	//
+	// SCTP_PR_SUPPORTED overrides the sysctl in either direction, including true
+	// with the sysctl at 0 (net/sctp/socket.c, sctp_setsockopt_pr_supported, Linux
+	// v5.14 and mainline). A Linux peer that sends with a PR policy on an
+	// association without PR-SCTP sends reliably (net/sctp/chunk.c,
+	// sctp_chunk_abandoned; net/sctp/outqueue.c, sctp_prsctp_prune).
+	//
+	// The value takes effect at association setup and cannot change a live
+	// association. A Listener fixes it at Listen; see ListenerConfig.
+	// SCTPPRSupported and AssociationStatus.PRSupported report the negotiated
+	// result (RFC 7496 §4.5).
+	PartialReliability bool
+
 	// RTOInfo configures RTO.Initial, RTO.Min and RTO.Max (RFC 9260
 	// §6.3.1 rules C1, C6 and C7; §6.3.3 rule E2; RFC 6458 §8.1.1).
 	// Nil or a zero field keeps the value the association would otherwise have.
@@ -718,6 +747,17 @@ type AssociationConfigSelector func(AcceptInfo) (*AssociationConfig, error)
 // prevent and what RFC 9260 Sections 3.3.2 and 3.3.3 advise against: "During
 // the life of the association, this buffer space SHOULD NOT be reduced". A peer
 // that needs a different receive size needs a Listener of its own.
+//
+// DefaultAssociationConfig.PartialReliability is also fixed at Listen, before
+// the INIT ACK answers the peer (RFC 3758 §3.3.2; RFC 7496 §4.5). Linux uses the
+// listening endpoint's prsctp_enable when processing the INIT; the resulting
+// peer.prsctp_capable controls the INIT ACK's Forward-TSN-Supported parameter
+// (net/sctp/sm_make_chunk.c, sctp_process_param and sctp_make_init_ack, Linux
+// v5.14 and mainline). Every selected config must have the same bool value.
+// A mismatch refuses that association with ErrInvalidSCTPConfig after SCTP
+// establishment, and the Listener keeps serving. False is an explicit value,
+// so a selector returning a fresh config with zero values is refused when the
+// listener's default is true. Use a separate Listener for a different policy.
 //
 // A selected SocketSendBuffer is announced to no one, so a non-zero one is
 // applied to the accepted socket exactly.

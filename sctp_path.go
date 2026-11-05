@@ -13,6 +13,17 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
+// SCTPPRSupported reports whether this association negotiated PR-SCTP
+// (SCTP_PR_SUPPORTED, RFC 7496 §4.5), requiring support at both ends.
+// SCTPConfig.PartialReliability controls the offer before association setup;
+// there is no setter for an existing association.
+func (c *Association) SCTPPRSupported() (bool, error) {
+	if c.sctpConn == nil {
+		return false, ErrAssociationClosed
+	}
+	return c.sctpConn.PRSupported()
+}
+
 // SCTPRTOInfo reads the association's RTO.Initial, RTO.Min and RTO.Max
 // (RFC 6458 §8.1.1). Paths' current RTOs are reported by AssociationStatus.
 func (c *Association) SCTPRTOInfo() (*sctp.RTOInfo, error) {

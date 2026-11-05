@@ -1,7 +1,7 @@
 # M3UA standards and security contract
 
 Audit date: 2026-08-31. The M3UA and SCTP dependency contract was rechecked
-2026-11-04; see [Recheck log](#recheck-log).
+2026-11-05; see [Recheck log](#recheck-log).
 
 This document defines which authorities govern go-m3ua v1.2.0 and where the
 library boundary ends. The implementation status for each RFC 4666 area is in
@@ -34,7 +34,8 @@ interpretation.
 | SCTP sockets API | [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html) | Informational; no formal update or replacement. Sections 6.1.2, 8.1.1, 8.1.2, 8.1.3, 8.1.9, 8.1.12, 8.2.1, 8.2.2, 9.3 and 9.5 govern attempt setup, path notifications, controls and status. Verified erratum 6115 corrects the status state list. |
 | SCTP Potentially Failed paths | [RFC 7829](https://www.rfc-editor.org/rfc/rfc7829.html) | Proposed Standard; no formal update or replacement and no errata. Sections 7.1–7.3 govern PF notifications, thresholds and exposure. |
 | SCTP dynamic address reconfiguration | [RFC 5061](https://www.rfc-editor.org/rfc/rfc5061.html) | Proposed Standard; no formal update or replacement and no errata. |
-| Partial Reliability SCTP | [RFC 3758](https://www.rfc-editor.org/rfc/rfc3758.html) | Proposed Standard; no formal update or replacement and no errata. Peer abandonment of a partly delivered M3UA message ends the go-m3ua association, as described below. |
+| Partial Reliability SCTP | [RFC 3758](https://www.rfc-editor.org/rfc/rfc3758.html) | Proposed Standard; no formal update or replacement and no errata. Disabled by default per §4.2; opt in with `SCTPConfig.PartialReliability`. Peer abandonment after partial delivery ends the association, as described below. |
+| PR-SCTP policies and negotiation option | [RFC 7496](https://www.rfc-editor.org/rfc/rfc7496.html) | Proposed Standard; no formal update or replacement and no errata. §4.5 defines `SCTP_PR_SUPPORTED`: set before setup, query the negotiated result on an existing association. go-m3ua sends use no PR policy. |
 | SCTP message interleaving | [RFC 8260](https://www.rfc-editor.org/rfc/rfc8260.html) | Proposed Standard; no formal update or replacement and no errata. Section 2.2.1 requires both endpoints to advertise I-DATA support; go-m3ua does not enable it. |
 | SCTP zero-checksum extension | [RFC 9653](https://www.rfc-editor.org/rfc/rfc9653.html) | Current optional extension for negotiated zero-checksum operation when an alternate error-detection method provides at least equivalent integrity. It does not formally update RFC 9260: the RFC Editor records and the Datatracker incoming-relationship API list no `Updates` relationship. |
 | SCTP authenticated chunks | [RFC 4895](https://www.rfc-editor.org/rfc/rfc4895.html) | Current optional SCTP-AUTH extension. It protects selected SCTP chunks but does not provide M3UA payload confidentiality and is not a substitute for RFC 3788 transport or network protection. |
@@ -126,15 +127,55 @@ ends the association, and preserves the cause in `Association.Err()` after
 true. go-sctp can continue reading the next message, but go-m3ua deliberately
 requires reliable M3UA message delivery.
 
-go-m3ua leaves `Config.PartialReliability` unset. Linux initializes the network
-namespace's `prsctp_enable` to 1 and copies it into a new SCTP endpoint; a
-deployment can change the namespace default before socket creation
-([Linux v5.14 defaults](https://github.com/torvalds/linux/blob/v5.14/net/sctp/protocol.c#L1362),
-[endpoint inheritance](https://github.com/torvalds/linux/blob/v5.14/net/sctp/endpointola.c#L107);
-[mainline defaults](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/protocol.c#L1355),
-[endpoint inheritance](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/endpointola.c#L112)).
-This permits negotiation of PR-SCTP; go-m3ua does not request per-message
-abandonment for its own sends.
+`SCTPConfig.PartialReliability` is false by default, explicitly disabling
+PR-SCTP with go-sctp's `Config.PartialReliability`. Dial's INIT omits
+Forward-TSN-Supported (parameter 49152, 0xC000). A Listener's INIT ACK returns a
+peer's Forward-TSN-Supported inside an Unrecognized Parameter (0x0008), as
+RFC 3758 [§3.3.2](https://www.rfc-editor.org/rfc/rfc3758.html#section-3.3.2)
+directs for an endpoint without the extension; that peer is then in
+[§3.3.3](https://www.rfc-editor.org/rfc/rfc3758.html#section-3.3.3) and may end
+the setup or continue without PR-SCTP. RFC 3758
+[§3.3.1](https://www.rfc-editor.org/rfc/rfc3758.html#section-3.3.1) and
+[§3.3.2](https://www.rfc-editor.org/rfc/rfc3758.html#section-3.3.2) prevent
+either endpoint from using FORWARD TSN when the extension was declined,
+and [§4.2](https://www.rfc-editor.org/rfc/rfc3758.html#section-4.2) recommends
+that PR-SCTP be "disabled by default". The peer can then never abandon a message
+it sends.
+
+Set `PartialReliability = true` before setup for a peer requiring PR-SCTP.
+Such a peer may decline an association using the new default. Opting in exposes
+silently skipped whole messages and the partial-delivery failure described
+above. go-m3ua's own sends are always fully reliable: `DefaultPrInfo` stays nil and
+no send sets `SendOptions.PR`. The opt-in is an offer, so a declining peer
+still works without error. `Association.SCTPPRSupported()` and
+`AssociationStatus.PRSupported` read the negotiated result through
+`Conn.PRSupported` ([RFC 7496 §4.5](https://www.rfc-editor.org/rfc/rfc7496.html#section-4.5)).
+There is no runtime setter.
+
+Linux initializes an endpoint from `net.sctp.prsctp_enable`, normally 1.
+`SCTP_PR_SUPPORTED` directly sets its `prsctp_enable` in
+`net/sctp/socket.c`, `sctp_setsockopt_pr_supported`; it overrides the sysctl in
+either direction, including enabling PR-SCTP with sysctl 0
+([v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/socket.c#L3950),
+[mainline](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/socket.c#L4016)).
+`net/sctp/sm_make_chunk.c`, `sctp_process_param`, records received support in
+`peer.prsctp_capable` only when the local endpoint enables it;
+`sctp_make_init_ack` uses that resulting capability. On a one-to-one listener,
+this is the listening endpoint's flag, before accept
+([v5.14 processing](https://github.com/torvalds/linux/blob/v5.14/net/sctp/sm_make_chunk.c#L2695),
+[mainline processing](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/sm_make_chunk.c#L2688)).
+Without negotiated support, `net/sctp/chunk.c`, `sctp_chunk_abandoned`, returns
+false and `net/sctp/outqueue.c`, `sctp_prsctp_prune`, does nothing: a peer send
+with a PR policy is sent reliably rather than refused or abandoned
+([v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/chunk.c#L300),
+[mainline](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/chunk.c#L300)).
+
+A Listener fixes the default's `PartialReliability` at Listen; an INIT ACK
+answers before `SelectAssociationConfig` runs. Every selected config must
+carry the identical bool value. A mismatch refuses only that association with
+`ErrInvalidSCTPConfig` after SCTP establishment. False is also the zero value,
+so a selector returning a fresh config under an opted-in default is refused.
+Use a separate Listener for a different negotiation policy.
 
 go-m3ua also leaves `Config.MessageInterleaving` unset for both Dial and Listen.
 Linux initializes the endpoint's `intl_enable` to zero. Enabling it requires
@@ -274,6 +315,18 @@ confidentiality or peer authentication.
 ## Recheck log
 
 Standards decisions are rechecked when a subsystem is revisited, not once.
+
+On 2026-11-05, RFC Editor JSON, Datatracker document API records and incoming
+relationships filtered to `obs,updates` were checked for RFCs 4666, 3758 and
+7496. Both databases agree: Proposed Standard, no formal update or replacement.
+The errata records show none for RFCs 3758 and 7496; RFC 4666 still has Held
+2065 and 4475 and Rejected 2518, with none Verified. Held and Rejected records
+were not applied. The TSVWG document list was checked: it includes
+`draft-ietf-tsvwg-sctp-dtls-chunk-06` and other SCTP work, with no listed
+replacement for either PR-SCTP document. Drafts remain non-normative context.
+Linux v5.14 and mainline `05441d697f7f9a927264f4058cbbc6a03dfcac9d` were read
+for the PR-SCTP option, INIT/INIT ACK negotiation, capability readback and
+non-negotiated policy behavior described above.
 
 On 2026-11-04, the RFC Editor JSON records and Datatracker document records and
 incoming relationships filtered to `obs,updates` were checked for RFCs 4666,

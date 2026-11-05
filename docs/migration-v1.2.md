@@ -895,3 +895,25 @@ owned `PeerAddrChange` through the existing optional management subscription.
 Applications switching on indication kinds should handle it and continue
 draining the bounded stream. Potentially Failed transitions require
 `sctp.PFExposeEnabled` (RFC 7829 Section 7.3).
+
+## PR-SCTP now requires opt-in
+
+go-m3ua no longer offers PR-SCTP by default. Dial's INIT omits
+Forward-TSN-Supported, and a Listener's INIT ACK returns a peer's offer in an
+Unrecognized Parameter (RFC 3758 §§3.3.1–3.3.3 and §4.2; RFC 7496 §4.5). A peer
+that requires PR-SCTP may decline the association. Set
+`SCTPConfig.PartialReliability = true` before setup to restore the offer.
+go-m3ua's own sends are always fully reliable.
+
+Opting in lets the peer abandon messages: a whole abandoned message never
+arrives and nothing reports it, and abandonment after partial delivery ends the
+association with a cause matching `sctp.ErrMessageInterrupted`. A peer can
+decline the offer without error; read `Association.SCTPPRSupported()` or
+`AssociationStatus.PRSupported` for the negotiated result. There is no setter
+for a live association; see
+[the standards contract](standards.md#sctp-message-boundaries-and-reliability).
+
+A Listener fixes the offer from `DefaultAssociationConfig` at Listen. Every
+`SelectAssociationConfig` result must carry that same bool value. False is
+explicit, so a fresh zero-value config under a true default is refused with
+`ErrInvalidSCTPConfig`; the Listener continues serving matching associations.

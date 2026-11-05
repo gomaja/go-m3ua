@@ -55,7 +55,7 @@ func TestSCTPRTOSocketConfigs(t *testing.T) {
 	if got := p.socketConfig(&restartWatcher{}); got.RTOInfo == nil || *got.RTOInfo != *want || got.SetupRTOInitial != 6*time.Second {
 		t.Fatalf("dial config=%+v", got)
 	}
-	if got := sctpListenConfig(socketBuffers{}, want, &restartWatcher{}); got.RTOInfo == nil || *got.RTOInfo != *want {
+	if got := sctpListenConfig(socketBuffers{}, want, false, &restartWatcher{}); got.RTOInfo == nil || *got.RTOInfo != *want {
 		t.Fatalf("listen config=%+v", got)
 	}
 }

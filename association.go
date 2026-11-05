@@ -3377,8 +3377,8 @@ func (c *Association) closeStateChanges() {
 // primitive; no peer protocol is involved. The values below are that status,
 // read from the association at the moment of the call.
 //
-// The RTO parameters, retransmission limit, primary path, address lists and
-// individual paths are read separately; this is not an atomic snapshot. Paths
+// The RTO parameters, retransmission limit, PR-SCTP result, primary path,
+// address lists and individual paths are read separately; this is not an atomic snapshot. Paths
 // retain kernel order, omitting a peer address removed during the query. If
 // every peer path disappears, the query returns the PathInfo error. A Potentially Failed path hidden by PF
 // exposure settings is included with its address and state, and zero metrics.
@@ -3409,6 +3409,9 @@ type AssociationStatus struct {
 	// AssociationMaxRetrans is the association's current failure threshold,
 	// Association.Max.Retrans (RFC 9260 Section 8.1; RFC 6458 Section 8.1.2).
 	AssociationMaxRetrans uint16
+	// PRSupported reports negotiated PR-SCTP support, rather than the local
+	// offer (SCTP_PR_SUPPORTED, RFC 7496 §4.5). See SCTPPRSupported.
+	PRSupported bool
 
 	// Primary is the primary peer path from the same SCTP_STATUS read as the
 	// association metrics (RFC 6458 Section 8.2.1, verified Erratum 6115).
@@ -3498,6 +3501,11 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 		return nil, err
 	}
 
+	prSupported, err := c.SCTPPRSupported()
+	if err != nil {
+		return nil, err
+	}
+
 	return &AssociationStatus{
 		State:                 associationStateName(r.State),
 		ReceiverWindow:        r.PeerRwnd,
@@ -3508,6 +3516,7 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 		FragmentationPoint:    r.FragmentationPoint,
 		RTOInfo:               *rto,
 		AssociationMaxRetrans: maxRetrans,
+		PRSupported:           prSupported,
 		Primary:               r.Primary,
 		Paths:                 paths,
 		LocalAddrs:            local,

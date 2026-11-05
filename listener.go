@@ -52,8 +52,10 @@ type Listener struct {
 	// with, and so the sizes every accepted association inherits; see
 	// ListenerConfig.
 	buffers socketBuffers
-	// rtoInfo is fixed at Listen, before accepted associations are created.
-	rtoInfo *sctp.RTOInfo
+	// rtoInfo and partialReliability are fixed at Listen, before accepted
+	// associations are created.
+	rtoInfo            *sctp.RTOInfo
+	partialReliability bool
 
 	// nif records isolation from the nodal interworking function, which
 	// RFC 4666 Section 4.7 makes the SGP answer differently.
@@ -228,12 +230,13 @@ func newListener(endpoint *Endpoint, config *ListenerConfig) *Listener {
 		listenerConfig.SelectAssociationConfig = config.SelectAssociationConfig
 	}
 	listener := &Listener{
-		AssociationConfig: listenerConfig.DefaultAssociationConfig,
-		listenerConfig:    listenerConfig,
-		endpoint:          endpoint,
-		closeDone:         make(chan struct{}),
-		buffers:           socketBuffersFor(listenerConfig.DefaultAssociationConfig.SCTPConfig),
-		rtoInfo:           snapshotOption(listenerConfig.DefaultAssociationConfig.RTOInfo),
+		AssociationConfig:  listenerConfig.DefaultAssociationConfig,
+		listenerConfig:     listenerConfig,
+		endpoint:           endpoint,
+		closeDone:          make(chan struct{}),
+		buffers:            socketBuffersFor(listenerConfig.DefaultAssociationConfig.SCTPConfig),
+		rtoInfo:            snapshotOption(listenerConfig.DefaultAssociationConfig.RTOInfo),
+		partialReliability: listenerConfig.DefaultAssociationConfig.PartialReliability,
 	}
 	if endpoint != nil {
 		switch endpoint.Role() {
@@ -299,7 +302,7 @@ func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig)
 	}
 	l.restarts = &restartWatcher{}
 	l.restarts.setRoute(l.associationForSCTPID)
-	l.sctpListener, err = listenSCTP(n, laddr, l.buffers, l.rtoInfo, l.restarts)
+	l.sctpListener, err = listenSCTP(n, laddr, l.buffers, l.rtoInfo, l.partialReliability, l.restarts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen SCTP: %w", err)
 	}
@@ -322,13 +325,14 @@ func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig)
 // then, so subscribing on the accepted socket afterwards came too late for an
 // ABORT that arrived in between. The socket buffers are sized there for the
 // same reason; see socketBuffers.apply.
-func listenSCTP(network string, laddr *sctp.Addr, buffers socketBuffers, rtoInfo *sctp.RTOInfo, restarts *restartWatcher) (*sctp.Listener, error) {
-	scfg := sctpListenConfig(buffers, rtoInfo, restarts)
+func listenSCTP(network string, laddr *sctp.Addr, buffers socketBuffers, rtoInfo *sctp.RTOInfo, partialReliability bool, restarts *restartWatcher) (*sctp.Listener, error) {
+	scfg := sctpListenConfig(buffers, rtoInfo, partialReliability, restarts)
 	return scfg.Listen(network, laddr)
 }
 
-func sctpListenConfig(buffers socketBuffers, rtoInfo *sctp.RTOInfo, restarts *restartWatcher) *sctp.Config {
+func sctpListenConfig(buffers socketBuffers, rtoInfo *sctp.RTOInfo, partialReliability bool, restarts *restartWatcher) *sctp.Config {
 	scfg := &sctp.Config{
+		PartialReliability:  new(partialReliability),
 		NotificationHandler: restarts.handle,
 		RTOInfo:             rtoInfo,
 		// The same stream request Dial makes; see sctpStreams. Left zero,
@@ -386,6 +390,9 @@ func (l *Listener) resolveAcceptedAssociationConfig(
 	if err := l.validateSelectedReceiveBuffer(associationConfig); err != nil {
 		return nil, err
 	}
+	if err := l.validateSelectedPartialReliability(associationConfig); err != nil {
+		return nil, err
+	}
 	if err := l.endpoint.validateAssociationConfig(associationConfig); err != nil {
 		return nil, err
 	}
@@ -414,6 +421,15 @@ func (l *Listener) validateSelectedReceiveBuffer(selected *AssociationConfig) er
 	}
 	return fmt.Errorf("%w: selected SocketReceiveBuffer %d differs from the Listener's %d, "+
 		"which sized the receive window already announced to this peer", ErrInvalidSCTPConfig, requested, l.buffers.receive)
+}
+
+// validateSelectedPartialReliability enforces the negotiation already answered
+// by the listening socket's INIT ACK (RFC 3758 §3.3.2; RFC 7496 §4.5).
+func (l *Listener) validateSelectedPartialReliability(selected *AssociationConfig) error {
+	if !l.selectsAssociationConfig() || selected.PartialReliability == l.partialReliability {
+		return nil
+	}
+	return fmt.Errorf("%w: selected PartialReliability %t differs from the Listener's %t, which already answered the peer's INIT", ErrInvalidSCTPConfig, selected.PartialReliability, l.partialReliability)
 }
 
 // applySelectedRTOInfo changes only parameters that differ from the defaults

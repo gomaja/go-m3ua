@@ -15,6 +15,19 @@ obsolete security protocol references embedded in current RFC 3788 and keeps
 library conformance separate from deployment-provided peer authentication,
 integrity, confidentiality, and replay protection.
 
+## SCTP reliability
+
+`SCTPConfig.PartialReliability` defaults to false for Dial and Listen, preventing
+peer abandonment through PR-SCTP (RFC 4666 §1.3.1; RFC 3758 §§3.3.1–3.3.3,
+§4.2; RFC 7496 §4.5). Opting in allows silent whole-message loss; abandonment
+after partial delivery ends the association with `sctp.ErrMessageInterrupted`.
+go-m3ua's own sends are always fully reliable. A peer requiring PR-SCTP may decline
+the new default. `SCTPPRSupported` and `AssociationStatus.PRSupported` report
+negotiated support. A Listener fixes the value at Listen and refuses a
+selector mismatch with `ErrInvalidSCTPConfig` while continuing to serve.
+See [message boundaries and reliability](standards.md#sctp-message-boundaries-and-reliability)
+for Linux behavior and the standards recheck.
+
 ## Application Server n+k activation
 
 SGP and IPSP Endpoints implement the n+k Application Server model described by
