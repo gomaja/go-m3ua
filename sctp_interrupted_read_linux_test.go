@@ -25,6 +25,9 @@ import (
 // case drops selected DATA at the receiver after the M3UA handshake; loopback
 // cannot substitute for the two-host network. The harness supplies a shared
 // directory for barriers and installs the receiver's loss rule before "loss".
+// Each test keeps its barriers in a subdirectory named after the test, so
+// markers left by one test never release another test's waits when both run
+// in one invocation.
 func twoHostSCTP(t *testing.T) (context.Context, string, *sctp.Addr, *sctp.Addr, string) {
 	t.Helper()
 	role := os.Getenv("M3UA_TWOHOST_ROLE")
@@ -45,6 +48,10 @@ func twoHostSCTP(t *testing.T) (context.Context, string, *sctp.Addr, *sctp.Addr,
 	dir := os.Getenv("M3UA_TWOHOST_SYNC")
 	if dir == "" {
 		t.Fatal("M3UA_TWOHOST_SYNC is required")
+	}
+	dir = filepath.Join(dir, t.Name())
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
@@ -77,9 +84,18 @@ func twoHostWait(t *testing.T, ctx context.Context, dir, name string) {
 }
 
 func TestSCTPInterruptedReadEndsAssociation(t *testing.T) {
+	testSCTPPartialDelivery(t, true)
+}
+
+func TestSCTPDefaultReliabilityDeliversWholeMessage(t *testing.T) {
+	testSCTPPartialDelivery(t, false)
+}
+
+func testSCTPPartialDelivery(t *testing.T, partialReliability bool) {
+	t.Helper()
 	ctx, role, local, remote, dir := twoHostSCTP(t)
 	if role == "client" {
-		interruptedReadPeer(t, ctx, local, remote, dir)
+		interruptedReadPeer(t, ctx, local, remote, dir, partialReliability)
 		return
 	}
 	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
@@ -88,6 +104,7 @@ func TestSCTPInterruptedReadEndsAssociation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	cfg := mcSGPConfig()
+	cfg.PartialReliability = partialReliability
 	cfg.ReadBufferSize = 1 << 20
 	cfg.SocketReceiveBuffer = 16384
 	cfg.Subscribe = func(a *Association) {
@@ -107,6 +124,7 @@ func TestSCTPInterruptedReadEndsAssociation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkPartialReliabilityStatus(t, a, partialReliability)
 	management := a.ManagementIndications()
 	first, err := a.ReadData(ctx)
 	if err != nil || !bytes.Equal(first.ProtocolData.Data, []byte("before interruption")) {
@@ -115,6 +133,27 @@ func TestSCTPInterruptedReadEndsAssociation(t *testing.T) {
 	twoHostMark(t, dir, "ready-for-loss")
 	twoHostWait(t, ctx, dir, "loss")
 	twoHostMark(t, dir, "reading")
+	if !partialReliability {
+		whole, err := a.ReadData(ctx)
+		if err != nil {
+			t.Fatalf("reliable DATA: %v", err)
+		}
+		if !bytes.Equal(whole.ProtocolData.Data, bytes.Repeat([]byte{'A'}, 60<<10)) {
+			t.Fatalf("reliable DATA payload = %d bytes, want intact 60 KiB", len(whole.ProtocolData.Data))
+		}
+		following, err := a.ReadData(ctx)
+		if err != nil {
+			t.Fatalf("following reliable DATA: %v", err)
+		}
+		if !bytes.Equal(following.ProtocolData.Data, []byte("following message")) {
+			t.Fatalf("following payload = %q", following.ProtocolData.Data)
+		}
+		if a.State() != StateASPActive || a.Err() != nil {
+			t.Fatalf("association after reliable delivery = %v, %v", a.State(), a.Err())
+		}
+		twoHostMark(t, dir, "received")
+		return
+	}
 	type readResult struct {
 		message *DataMessage
 		err     error
@@ -163,7 +202,7 @@ func TestSCTPInterruptedReadEndsAssociation(t *testing.T) {
 	}
 }
 
-func interruptedReadPeer(t *testing.T, ctx context.Context, local, remote *sctp.Addr, dir string) {
+func interruptedReadPeer(t *testing.T, ctx context.Context, local, remote *sctp.Addr, dir string, partialReliability bool) {
 	t.Helper()
 	twoHostWait(t, ctx, dir, "listening")
 	enabled := true
@@ -177,6 +216,9 @@ func interruptedReadPeer(t *testing.T, ctx context.Context, local, remote *sctp.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
+	if got, err := conn.PRSupported(); err != nil || got != partialReliability {
+		t.Fatalf("peer PRSupported = %t, %v; want %t", got, err, partialReliability)
+	}
 	send := func(message messages.M3UA, stream uint16, pr *sctp.PrInfo) {
 		t.Helper()
 		b, err := message.MarshalBinary()
@@ -214,6 +256,11 @@ func interruptedReadPeer(t *testing.T, ctx context.Context, local, remote *sctp.
 	twoHostWait(t, ctx, dir, "reading")
 	send(data(bytes.Repeat([]byte{'A'}, 60<<10)), 1, &sctp.PrInfo{Policy: sctp.PRRtx, Value: 0})
 	time.Sleep(time.Second)
+	if !partialReliability {
+		send(data([]byte("following message")), 1, nil)
+		twoHostWait(t, ctx, dir, "received")
+		return
+	}
 	// A later reliable message advances the sender beyond the abandoned TSNs.
 	// The receiver must close, rather than deliver either message to M3UA.
 	_, err = conn.SendMsg([]byte("following message"), sctp.SendOptions{Info: &sctp.SndInfo{Stream: 1, PPID: M3UAPPID}})

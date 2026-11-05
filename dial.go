@@ -68,8 +68,9 @@ type sctpDialPolicy struct {
 	events []sctp.EventType
 	// buffers are sized before the socket connects, so the INIT announces the
 	// receive window they give; see socketBuffers.apply.
-	buffers socketBuffers
-	rtoInfo *sctp.RTOInfo
+	buffers            socketBuffers
+	partialReliability bool
+	rtoInfo            *sctp.RTOInfo
 }
 
 func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
@@ -91,6 +92,7 @@ func oneShotSCTPDialPolicy(timeout time.Duration) sctpDialPolicy {
 
 func (p sctpDialPolicy) socketConfig(restarts *restartWatcher) *sctp.Config {
 	base := &sctp.Config{
+		PartialReliability: new(p.partialReliability),
 		// A Dial watcher serves one association, so its route ignores the
 		// association ID; it is set once Dial has an Association to route to.
 		NotificationHandler: restarts.handle,
@@ -136,13 +138,14 @@ func (p sctpDialPolicy) dialContext(
 // RTO.Max unchanged. Linux does not bound T1-init or T1-cookie by RTO.Max, so
 // raising it is unnecessary. AbandonQuiet releases an unfinished attempt
 // without a locally initiated ABORT.
-func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Addr, timeout time.Duration, buffers socketBuffers, rtoInfo *sctp.RTOInfo, restarts *restartWatcher) (*sctp.Conn, error) {
+func dialAssociation(ctx context.Context, network string, laddr, raddr *sctp.Addr, timeout time.Duration, buffers socketBuffers, rtoInfo *sctp.RTOInfo, partialReliability bool, restarts *restartWatcher) (*sctp.Conn, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	policy := oneShotSCTPDialPolicy(timeout)
 	policy.buffers = buffers
 	policy.rtoInfo = rtoInfo
+	policy.partialReliability = partialReliability
 	// There is one constructor call. Linux can report an ICMP Protocol
 	// Unreachable for the INIT as ENOPROTOOPT (RFC 9260 Section 10, ICMP8);
 	// return that dial error without trying a second socket or INIT.
@@ -262,7 +265,7 @@ func (e *Endpoint) Dial(ctx context.Context, network string, laddr, raddr *sctp.
 	restarts := &restartWatcher{}
 	restarts.setRoute(association.associationForSCTPID)
 
-	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, socketBuffersFor(cfg.SCTPConfig), cfg.RTOInfo, restarts)
+	sctpConn, err := dialAssociation(operationCtx, n, laddr, raddr, initTimeout, socketBuffersFor(cfg.SCTPConfig), cfg.RTOInfo, cfg.PartialReliability, restarts)
 	if err != nil {
 		if errors.Is(context.Cause(operationCtx), ErrEndpointClosed) {
 			return nil, ErrEndpointClosed
