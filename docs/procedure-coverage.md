@@ -23,10 +23,13 @@ the integration rows are Linux evidence. Everything else runs anywhere.
 
 ## 1. DATA — RFC 4666 Sections 3.3 and 4.1
 
+Typed receive retains the socket reader's monotonic time in `DataMessage.Received`,
+including parsing, dispatch and receive queue wait but excluding the kernel receive buffer.
+
 | Aspect | Roles | Direction | States | Evidence |
 | --- | --- | --- | --- | --- |
 | Typed send | ASP, SGP, SE, DE | local | ASP-ACTIVE only | `TestConcurrentWriteDataCarriesEachMessagesOwnLabelAndScope`, `TestWriteDataReturnsThePayloadLength`, `TestTypedDataCrossesBothSCTPInitiationDirections` |
-| Typed receive | ASP, SGP, SE, DE | peer | ASP-ACTIVE, per Routing Context | `TestReadDataDeliversThePayloadWhole`, `TestReadDataDeliversEachMessageToExactlyOneReader`, `TestReceivedDataHonoursPerRoutingContextActivation` |
+| Typed receive | ASP, SGP, SE, DE | peer | ASP-ACTIVE, per Routing Context | `TestReadDataDeliversThePayloadWhole`, `TestReadDataDeliversEachMessageToExactlyOneReader`, `TestReadDataReportsReceiveTimeBeforeTheApplicationWait`, `TestReceivedDataHonoursPerRoutingContextActivation` |
 | Per-message scope and routing label | ASP, SGP, DE | both | ASP-ACTIVE | `TestReadDataReportsTheReceivedScopeStreamAndEpoch`, `TestReadDataReturnsCallerOwnedData` |
 | Stream selection from SLS; stream 0 refused | ASP, SGP, SE | both | any | `TestStreamSelectionHandlesEveryNegotiatedCount`, `TestWriteSignalDoesNotPutDataOnStreamZero`, `TestDataOnStreamZeroIsRejected`, `TestMTPTransferSelectsAvailableSGPAndSLSStream` |
 | Partial and failed submission classified | ASP, SGP | local | ASP-ACTIVE | `TestWriteDataClassifiesPartialSubmissionAsIndeterminate`, `TestBroadcastPartialWriteKeepsSynchronizationPending`, `TestWriteDataReportsATransportRefusalAsNotSent`, `TestFullSendBufferReportsDataAsNotSent`, `TestExpiredWriteDeadlineReportsDataAsNotSent` |

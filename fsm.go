@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -990,6 +991,7 @@ func (c *Association) dispatchRaw(ctx context.Context, raw inbound) {
 	// Published before the handlers run, on this same goroutine, so a handler
 	// validating the arrival stream sees this message's.
 	c.recvStream.Store(uint32(raw.stream))
+	c.recvReceived = raw.received
 
 	// RFC 4666 Section 4.4.1 requires an SGP that does not support Routing Key
 	// registration to return Unsupported Message Class. That capability answer
@@ -1106,11 +1108,13 @@ const (
 )
 
 // inbound is one ordered event read from the SCTP association. Message events
-// carry their octets, arrival stream and host-order PPID; notification events
-// use kind and their typed payload, leaving the message fields empty. Keeping
-// one extensible value for both preserves receive order and SCTP metadata.
+// carry their octets, receive time, arrival stream and host-order PPID.
+// Notification events use kind and their typed payload, leaving the message
+// fields empty. Keeping one extensible value for both preserves receive order
+// and SCTP metadata.
 type inbound struct {
 	kind           inboundKind
+	received       time.Time
 	data           []byte
 	stream         uint16
 	ppid           uint32
@@ -1120,8 +1124,8 @@ type inbound struct {
 // newInboundMessage preserves the ancillary data ReadMsg returned for one
 // complete message. go-sctp has already converted PPID to host order, so it
 // is copied without another byte swap.
-func newInboundMessage(data []byte, info sctp.RcvInfo) inbound {
-	event := inbound{kind: inboundMessage, data: data}
+func newInboundMessage(data []byte, info sctp.RcvInfo, received time.Time) inbound {
+	event := inbound{kind: inboundMessage, data: data, received: received}
 	event.stream = info.Stream
 	event.ppid = info.PPID
 	return event
@@ -1153,9 +1157,12 @@ func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
 			}
 			return
 		}
+		// Taken before the hand-off, which waits while the dispatcher handles
+		// earlier messages, so DataMessage.Received covers that wait too.
+		received := time.Now()
 
 		select {
-		case raw <- newInboundMessage(b, info):
+		case raw <- newInboundMessage(b, info, received):
 		case <-c.done:
 			return
 		}

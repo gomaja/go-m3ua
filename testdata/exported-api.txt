@@ -215,6 +215,7 @@ field DataMessage.CorrelationID
 field DataMessage.CorrelationIDSet
 field DataMessage.Epoch
 field DataMessage.ProtocolData
+field DataMessage.Received
 field DataMessage.Scope
 field DataMessage.Stream
 field DataQueueOverflowError.DestinationPointCode

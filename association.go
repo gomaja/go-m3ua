@@ -84,6 +84,9 @@ type Association struct {
 	// by the handlers on that same goroutine; atomic so a reader elsewhere
 	// cannot race the write.
 	recvStream atomic.Uint32
+	// recvReceived is the socket reader's timestamp for the current message.
+	// Only the dispatcher and its inline handlers access it.
+	recvReceived time.Time
 	// hb is this Association's resolved M3UA BEAT settings, copied by value from
 	// AssociationConfig at construction. It is not SCTP HEARTBEAT configuration.
 	//
