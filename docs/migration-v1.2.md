@@ -283,6 +283,10 @@ and still report `os.ErrDeadlineExceeded`, which is recoverable.
 `DataMessage` reports three things separately, and the separation is the point:
 `Scope` is what the peer put on the wire, presence bits included; `AS` is the
 Application Server it resolved to; `Epoch` is the SCTP association generation.
+`Received` records when the socket reader returned the complete message and
+retains its monotonic clock reading, so `time.Since(message.Received)` includes
+parsing, dispatch and receive queue wait, excluding the kernel's socket receive
+buffer.
 `DataMessage.NetworkAppearance`, `NetworkAppearanceSet`, `RoutingContext` and
 `RoutingContextSet` are removed — they were a projection of `Scope` that could
 not represent an absent parameter or a list.

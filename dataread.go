@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -25,6 +26,12 @@ import (
 // the resolved identity, and one answering in the scope the request arrived on
 // needs the exact wire scope.
 type DataMessage struct {
+	// Received is when the socket reader returned this complete message. It
+	// retains its monotonic clock reading, so time.Since(Received) includes
+	// parsing, dispatch and time waiting in the DATA queue, but excludes time
+	// in the kernel's socket receive buffer.
+	Received time.Time
+
 	// ProtocolData is the MTP3 routing label and user octets. It belongs to the
 	// caller: the library keeps no reference to it after delivery, and no two
 	// delivered messages share storage.

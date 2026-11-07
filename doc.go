@@ -26,6 +26,9 @@ local transport acceptance only; every failure is a *DataWriteError whose
 Outcome distinguishes a message that never reached the transport from one whose
 fate is unknown. ReadData is context-scoped: cancelling a read ends that read
 and neither closes the association nor discards queued DATA.
+DataMessage.Received retains the socket reader's monotonic timestamp, so
+time.Since(message.Received) includes parsing, dispatch and receive queue wait;
+time in the kernel's socket receive buffer is excluded.
 
 WriteDataContext and MTPTransferContext cancel one send's admission and buffer
 waits. A full buffer returns EAGAIN without an application write deadline; with
