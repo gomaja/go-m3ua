@@ -564,6 +564,11 @@ log.Printf("DATA for %+v arrived on stream %d: %x",
 Cancelling `ctx` ends that one read: the association stays open and nothing
 queued is discarded.
 
+`message.Received` records when the socket reader returned the complete message,
+retaining its monotonic clock reading. `time.Since(message.Received)` includes
+parsing, dispatch and receive queue wait, excluding time in the kernel's socket
+receive buffer.
+
 Inbound DATA is classified from three separate things, and keeping them separate
 is the point. `message.Scope` is the Network Appearance and Routing Context
 exactly as the peer put them on the wire, presence bits included, which is what

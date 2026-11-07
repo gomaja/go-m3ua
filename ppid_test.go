@@ -41,13 +41,13 @@ func TestM3UAPPIDIsExportedAndUsedForSends(t *testing.T) {
 // dropping it while extracting the stream.
 func TestInboundMessageCarriesHostOrderPPID(t *testing.T) {
 	info := sctp.RcvInfo{Stream: 7, PPID: 0x01020304}
-	event := newInboundMessage([]byte("message"), info)
+	event := newInboundMessage([]byte("message"), info, time.Time{})
 	if event.kind != inboundMessage || event.stream != 7 || event.ppid != 0x01020304 {
 		t.Errorf("inbound metadata = {kind:%d stream:%d ppid:%#x}, want {%d 7 %#x}",
 			event.kind, event.stream, event.ppid, inboundMessage, uint32(0x01020304))
 	}
 
-	unspecified := newInboundMessage([]byte("message"), sctp.RcvInfo{})
+	unspecified := newInboundMessage([]byte("message"), sctp.RcvInfo{}, time.Time{})
 	if unspecified.stream != 0 || unspecified.ppid != 0 {
 		t.Errorf("zero RcvInfo metadata = {stream:%d ppid:%d}, want zero values",
 			unspecified.stream, unspecified.ppid)

@@ -103,6 +103,7 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 	// Routing Context contains exactly one value.
 	msg := &message.message
 	*msg = DataMessage{
+		Received:     c.recvReceived,
 		ProtocolData: &message.protocolData,
 		Scope:        receivedDataScope(data),
 		AS:           c.receivedASKey(data),
