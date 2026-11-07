@@ -24,7 +24,10 @@ after partial delivery ends the association with `sctp.ErrMessageInterrupted`.
 go-m3ua's own sends are always fully reliable. A peer requiring PR-SCTP may decline
 the new default. `SCTPPRSupported` and `AssociationStatus.PRSupported` report
 negotiated support. A Listener fixes the value at Listen and refuses a
-selector mismatch with `ErrInvalidSCTPConfig` while continuing to serve.
+selector mismatch with `ErrInvalidSCTPConfig` while continuing to serve. On
+Linux, a Listener's association answers an SCTP restart from
+`net.sctp.prsctp_enable` instead (sctp/lksctp-tools#81), so hosts that run
+Listeners need that sysctl to match `PartialReliability`.
 See [message boundaries and reliability](standards.md#sctp-message-boundaries-and-reliability)
 for Linux behavior and the standards recheck.
 

@@ -66,9 +66,20 @@ the module when the first SCTP socket is opened. Install the
 go-m3ua offers PR-SCTP (RFC 3758) only when `SCTPConfig.PartialReliability` is
 `true`. By default Dial's INIT omits Forward-TSN-Supported and a Listener's INIT
 ACK returns a peer's offer in an Unrecognized Parameter, overriding Linux's
-`net.sctp.prsctp_enable` default, so a peer can never abandon a message it sends
+`net.sctp.prsctp_enable` default, so a peer cannot abandon a message it sends
 (RFC 3758 §§3.3.1–3.3.3, §4.2; RFC 7496 §4.5). go-m3ua's own sends are always
 fully reliable.
+
+On Linux, a Listener's association answers an SCTP restart from
+`net.sctp.prsctp_enable` rather than from `PartialReliability`
+([sctp/lksctp-tools#81](https://github.com/sctp/lksctp-tools/issues/81)), and
+go-m3ua keeps the association across the restart (RFC 4666 §4.3.3). With the
+sysctl at its default of 1, a restarted peer is offered PR-SCTP and may abandon
+messages. go-m3ua's side rejects each FORWARD TSN, later messages on that stream
+are not delivered, and nothing reports it. On hosts that run Listeners, set the
+sysctl in the Listener's network namespace to match `PartialReliability`:
+`sysctl -w net.sctp.prsctp_enable=0` for the default, persisted under
+`/etc/sysctl.d/`. Dial's associations are not affected.
 
 A peer that requires PR-SCTP may decline the association. Set
 `config.SCTPConfig.PartialReliability = true` before Dial or Listen to offer it.
