@@ -97,8 +97,9 @@ type SCTPConfig struct {
 	// the default, disables it on the socket (SCTP_PR_SUPPORTED, RFC 7496
 	// §4.5), overriding Linux's net.sctp.prsctp_enable: Dial's INIT omits
 	// Forward-TSN-Supported, and a Listener's INIT ACK returns a peer's offer in
-	// an Unrecognized Parameter. The peer can then never send FORWARD TSN, so it
-	// cannot abandon a message it sends here (RFC 3758 §3.3.1–§3.3.3). RFC 3758
+	// an Unrecognized Parameter. The peer then cannot send FORWARD TSN, so it
+	// cannot abandon a message it sends here (RFC 3758 §3.3.1–§3.3.3), unless an
+	// SCTP restart renegotiates a Listener's association; see below. RFC 3758
 	// §4.2 recommends disabling PR-SCTP by default, and M3UA expects a reliable
 	// transport (RFC 4666 §1.3.1).
 	//
@@ -115,6 +116,24 @@ type SCTPConfig struct {
 	// v5.14 and mainline). A Linux peer that sends with a PR policy on an
 	// association without PR-SCTP sends reliably (net/sctp/chunk.c,
 	// sctp_chunk_abandoned; net/sctp/outqueue.c, sctp_prsctp_prune).
+	//
+	// On Linux, a Listener's association does not keep this setting across an
+	// SCTP restart. Accept gives it a socket with an endpoint of its own, which
+	// takes PR-SCTP from net.sctp.prsctp_enable. The INIT that restarts the
+	// association (RFC 9260 §5.2.2) is answered from that endpoint, while the
+	// association keeps its own PR-SCTP state (net/sctp/sm_statefuns.c,
+	// sctp_sf_do_unexpected_init; net/sctp/associola.c, sctp_assoc_update; Linux
+	// v5.14 and mainline; sctp/lksctp-tools#81). go-m3ua keeps the association
+	// across a restart (RFC 4666 §4.3.3). With the sysctl at its default of 1 and
+	// this field false, the restarted peer is offered PR-SCTP and may abandon
+	// messages. This end answers each FORWARD TSN with an ERROR (Unrecognized
+	// Chunk Type), and later messages on that stream are not delivered. Nothing
+	// reports it beyond ManagementSCTPRestart, and SCTPPRSupported still
+	// reports false. With this field true and the sysctl at 0, the peer loses
+	// PR-SCTP while this end still reports it. On a host that runs Listeners,
+	// set net.sctp.prsctp_enable to match this field: 0 for the default false.
+	// Dial's associations keep the setting across a restart, because their
+	// socket's endpoint is the one this field configured.
 	//
 	// The value takes effect at association setup and cannot change a live
 	// association. A Listener fixes it at Listen; see ListenerConfig.
@@ -753,7 +772,9 @@ type AssociationConfigSelector func(AcceptInfo) (*AssociationConfig, error)
 // listening endpoint's prsctp_enable when processing the INIT; the resulting
 // peer.prsctp_capable controls the INIT ACK's Forward-TSN-Supported parameter
 // (net/sctp/sm_make_chunk.c, sctp_process_param and sctp_make_init_ack, Linux
-// v5.14 and mainline). Every selected config must have the same bool value.
+// v5.14 and mainline). An SCTP restart is answered from net.sctp.prsctp_enable
+// instead; see SCTPConfig.PartialReliability. Every selected config must have
+// the same bool value.
 // A mismatch refuses that association with ErrInvalidSCTPConfig after SCTP
 // establishment, and the Listener keeps serving. False is an explicit value,
 // so a selector returning a fresh config with zero values is refused when the

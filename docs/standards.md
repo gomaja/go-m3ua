@@ -139,8 +139,9 @@ the setup or continue without PR-SCTP. RFC 3758
 [§3.3.2](https://www.rfc-editor.org/rfc/rfc3758.html#section-3.3.2) prevent
 either endpoint from using FORWARD TSN when the extension was declined,
 and [§4.2](https://www.rfc-editor.org/rfc/rfc3758.html#section-4.2) recommends
-that PR-SCTP be "disabled by default". The peer can then never abandon a message
-it sends.
+that PR-SCTP be "disabled by default". The peer then cannot abandon a message it
+sends, unless an SCTP restart renegotiates a Listener's association, as
+described below.
 
 Set `PartialReliability = true` before setup for a peer requiring PR-SCTP.
 Such a peer may decline an association using the new default. Opting in exposes
@@ -169,6 +170,50 @@ false and `net/sctp/outqueue.c`, `sctp_prsctp_prune`, does nothing: a peer send
 with a PR policy is sent reliably rather than refused or abandoned
 ([v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/chunk.c#L300),
 [mainline](https://github.com/torvalds/linux/blob/05441d697f7f9a927264f4058cbbc6a03dfcac9d/net/sctp/chunk.c#L300)).
+
+Linux does not carry a Listener's setting into an SCTP restart. `accept()` gives
+the association a socket with an endpoint of its own, which
+`sctp_endpoint_init` initializes from `net.sctp.prsctp_enable`
+([v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/endpointola.c#L107),
+[mainline](https://github.com/torvalds/linux/blob/d48723711bae9b8cdc56719c448ba42fef28cbee/net/sctp/endpointola.c#L112);
+mainline creates it in `sctp_clone_sock`). For an INIT that restarts the
+association, RFC 9260
+[§5.2.2](https://www.rfc-editor.org/rfc/rfc9260.html#section-5.2.2) says:
+"Other parameters for the endpoint SHOULD be copied from the existing
+parameters of the association (e.g., number of outbound streams) into the INIT
+ACK chunk and cookie." Linux builds that INIT ACK from the socket's endpoint
+instead, under a FIXME that says so (`net/sctp/sm_statefuns.c`,
+`sctp_sf_do_unexpected_init`;
+[v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/sm_statefuns.c#L1584),
+[mainline](https://github.com/torvalds/linux/blob/d48723711bae9b8cdc56719c448ba42fef28cbee/net/sctp/sm_statefuns.c#L1615)).
+When the restart completes, `net/sctp/associola.c`, `sctp_assoc_update`, does
+not copy `peer.prsctp_capable`, so the accepted side keeps its earlier state
+([v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/associola.c#L1105),
+[mainline](https://github.com/torvalds/linux/blob/d48723711bae9b8cdc56719c448ba42fef28cbee/net/sctp/associola.c#L1099)).
+go-m3ua keeps the association across the restart: RFC 4666
+[§4.3.3](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.3) moves the
+ASP to ASP-DOWN, and "if it is to recover, must begin any recovery with the
+ASP-Up procedure".
+
+Captures of real restarts against a go-m3ua Listener, on Linux 6.18, show the
+effect. With the sysctl at 1 and `PartialReliability` false, the restart INIT
+ACK offers Forward-TSN-Supported at top level. The peer then abandons messages
+sent under a PR policy, and go-m3ua's side answers each FORWARD TSN with an
+ERROR carrying Unrecognized Chunk Type, because `sctp_sf_eat_fwd_tsn` hands the
+chunk to `sctp_sf_unk_chunk` without negotiated support
+([v5.14](https://github.com/torvalds/linux/blob/v5.14/net/sctp/sm_statefuns.c#L4182),
+[mainline](https://github.com/torvalds/linux/blob/d48723711bae9b8cdc56719c448ba42fef28cbee/net/sctp/sm_statefuns.c#L4267)).
+Later messages on that stream, reliable ones included, are not delivered. The
+association stays ASP-ACTIVE with no error, and `SCTPPRSupported` reports false.
+With the sysctl at 0, the restart INIT ACK returns the offer inside an
+Unrecognized Parameter, the peer retransmits what is lost, and every message is
+delivered. A Dial association keeps its setting across a restart, because its
+socket's endpoint is the one `SCTP_PR_SUPPORTED` configured. The other
+direction also diverges: with `PartialReliability` true and the sysctl at 0,
+the peer loses PR-SCTP while go-m3ua still reports it. The defect is reported as
+[sctp/lksctp-tools#81](https://github.com/sctp/lksctp-tools/issues/81). Until
+Linux changes, a host that runs Listeners needs `net.sctp.prsctp_enable` to
+match `PartialReliability` in the Listener's network namespace.
 
 A Listener fixes the default's `PartialReliability` at Listen; an INIT ACK
 answers before `SelectAssociationConfig` runs. Every selected config must
@@ -315,6 +360,14 @@ confidentiality or peer authentication.
 ## Recheck log
 
 Standards decisions are rechecked when a subsystem is revisited, not once.
+
+On 2026-11-07, RFC Editor JSON records, incoming Datatracker relationships
+filtered to `obs,updates`, and the errata records were checked for RFCs 9260,
+4666, 3758 and 7496. Both databases agree that none has a formal update or
+replacement. The errata lists are unchanged: RFC 9260 has none on §5.2.2; RFC
+4666 still has Held 2065 and 4475 and Rejected 2518; RFCs 3758 and 7496 have
+none. Linux v5.14 and mainline `d48723711bae9b8cdc56719c448ba42fef28cbee` were
+read for how an accepted socket answers a restart INIT.
 
 On 2026-11-05, RFC Editor JSON, Datatracker document API records and incoming
 relationships filtered to `obs,updates` were checked for RFCs 4666, 3758 and

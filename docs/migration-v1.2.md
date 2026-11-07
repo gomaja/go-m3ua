@@ -903,7 +903,10 @@ Forward-TSN-Supported, and a Listener's INIT ACK returns a peer's offer in an
 Unrecognized Parameter (RFC 3758 §§3.3.1–3.3.3 and §4.2; RFC 7496 §4.5). A peer
 that requires PR-SCTP may decline the association. Set
 `SCTPConfig.PartialReliability = true` before setup to restore the offer.
-go-m3ua's own sends are always fully reliable.
+go-m3ua's own sends are always fully reliable. On hosts that run Listeners, also
+set `net.sctp.prsctp_enable` to match (0 for the default): Linux answers an SCTP
+restart of a Listener's association from that sysctl; see
+[the standards contract](standards.md#sctp-message-boundaries-and-reliability).
 
 Opting in lets the peer abandon messages: a whole abandoned message never
 arrives and nothing reports it, and abandonment after partial delivery ends the

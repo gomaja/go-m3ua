@@ -16,7 +16,9 @@ import (
 // SCTPPRSupported reports whether this association negotiated PR-SCTP
 // (SCTP_PR_SUPPORTED, RFC 7496 §4.5), requiring support at both ends.
 // SCTPConfig.PartialReliability controls the offer before association setup;
-// there is no setter for an existing association.
+// there is no setter for an existing association. It reports this end's
+// state, which an SCTP restart of a Listener's association can leave
+// different from the peer's; see SCTPConfig.PartialReliability.
 func (c *Association) SCTPPRSupported() (bool, error) {
 	if c.sctpConn == nil {
 		return false, ErrAssociationClosed

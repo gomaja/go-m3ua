@@ -201,12 +201,21 @@ RFC 6458 Section 6.1.2). Potentially Failed transitions require PFExposeEnabled
 go-m3ua offers PR-SCTP (RFC 3758) only when SCTPConfig.PartialReliability is
 true. By default Dial's INIT omits Forward-TSN-Supported and a Listener's INIT
 ACK returns a peer's offer in an Unrecognized Parameter, overriding Linux's
-net.sctp.prsctp_enable default, so a peer can never abandon a message it sends
-(RFC 3758 Sections 3.3.1–3.3.3 and 4.2; RFC 7496 Section 4.5). go-m3ua's own
-sends are always fully reliable. A peer that requires PR-SCTP may decline the
-association; set PartialReliability before setup to offer it. A peer can
-decline the offer without error, and SCTPPRSupported and
-AssociationStatus.PRSupported report the negotiated result.
+net.sctp.prsctp_enable default, so a peer cannot abandon a message it sends
+(RFC 3758 Sections 3.3.1–3.3.3 and 4.2; RFC 7496 Section 4.5), with the
+Listener exception below. go-m3ua's own sends are always fully reliable. A peer
+that requires PR-SCTP may decline the association; set PartialReliability
+before setup to offer it. A peer can decline the offer without error, and
+SCTPPRSupported and AssociationStatus.PRSupported report the negotiated result.
+
+On Linux, a Listener's association answers an SCTP restart from
+net.sctp.prsctp_enable rather than from PartialReliability
+(sctp/lksctp-tools#81), and go-m3ua keeps the association across the restart
+(RFC 4666 Section 4.3.3). With the sysctl at its default of 1, a restarted peer
+is offered PR-SCTP and may abandon messages; this end rejects each FORWARD TSN,
+later messages on that stream are not delivered, and nothing reports it. On
+hosts that run Listeners, set the sysctl to match PartialReliability (0 for the
+default). Dial's associations are not affected.
 
 Opting in lets the peer abandon messages: a whole abandoned message never
 arrives and nothing reports it, and abandonment after partial delivery ends the
