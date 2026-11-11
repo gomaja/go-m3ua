@@ -3389,14 +3389,25 @@ type AssociationStatus struct {
 	// State is the association's SCTP state, as a name (for example
 	// "ESTABLISHED"). RFC 9260 Section 4 defines the state machine.
 	State string
-	// ReceiverWindow is the peer's advertised receiver window, in octets.
+	// ReceiverWindow is the peer's receiver window as this end tracks it, in
+	// octets (RFC 6458 Section 8.2.1, sstat_rwnd): the window the peer last
+	// advertised, less the DATA still outstanding (RFC 9260 Section 6.2.1).
+	// At zero this end sends no new DATA except zero window probes (RFC 9260
+	// Section 6.1, rule A), and the DATA it has queued is counted by no field
+	// here: SCTP_STATUS does not report the send backlog.
 	ReceiverWindow uint32
 	// UnackedDataChunks is how many DATA chunks this end has sent and not yet
-	// had acknowledged. A number that stays high is the peer, or the path, not
-	// keeping up.
+	// had acknowledged (sstat_unackdata). A number that stays high is the peer,
+	// or the path, not keeping up. A peer that has stopped reading shows
+	// instead, once its receive buffer is full, as a ReceiverWindow of zero,
+	// and this count can then stay as low as the one zero window probe however
+	// much DATA waits to be sent.
 	UnackedDataChunks uint16
-	// PendingDataChunks is how many DATA chunks are queued here awaiting a
-	// send, which is this end's own backlog rather than the peer's.
+	// PendingDataChunks is how many DATA chunks are pending receipt (RFC 6458
+	// Section 8.2.1, sstat_penddata): on Linux, the chunks missing from the
+	// peer below the highest TSN received from it (net/sctp/tsnmap.c,
+	// sctp_tsnmap_pending, Linux v5.14 and mainline). It is the gap in what
+	// the peer has sent, not this end's send backlog.
 	PendingDataChunks uint16
 	// InboundStreams and OutboundStreams are the stream counts negotiated at
 	// association setup. OutboundStreams bounds the stream a message may be
