@@ -361,6 +361,16 @@ confidentiality or peer authentication.
 
 Standards decisions are rechecked when a subsystem is revisited, not once.
 
+On 2026-11-11, RFC Editor JSON records, incoming Datatracker relationships
+filtered to `obs,updates`, and the errata records were checked for RFCs 6458,
+9260 and 4666. Both databases agree that none has a formal update or
+replacement. The errata lists are unchanged. The only Verified erratum on RFC
+6458 §8.2.1, 6115, corrects its list of states and leaves the status counters
+as defined. Linux v5.14 and mainline `067c5c24cef23d913b67eaaf71ae67e7169a6620`
+were read for what `SCTP_STATUS` counts. The individual draft
+`draft-dreibholz-tsvwg-sctpsocket-sqinfo-33` proposes a socket option that
+reports the sender's queue. It is not normative.
+
 On 2026-11-07, RFC Editor JSON records, incoming Datatracker relationships
 filtered to `obs,updates`, and the errata records were checked for RFCs 9260,
 4666, 3758 and 7496. Both databases agree that none has a formal update or
