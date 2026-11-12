@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/gomaja/go-m3ua/internal/rkm"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
@@ -125,11 +126,11 @@ func TestRKMMessageMarshalRejectsInvalidNestedPayloads(t *testing.T) {
 			))),
 		},
 		{
-			name: "successful Registration Result has zero Routing Context",
+			name: "failed Registration Result has nonzero Routing Context",
 			message: NewRegistrationResponse(params.NewRegistrationResult(params.NewRegistrationResultPayload(
 				params.NewLocalRoutingKeyIdentifier(1),
-				params.NewRegistrationStatus(params.SuccessfullyRegistered),
-				params.NewRoutingContext(0),
+				params.NewRegistrationStatus(params.PermissionDenied),
+				params.NewRoutingContext(7),
 			))),
 		},
 		{
@@ -291,6 +292,10 @@ func TestRKMMessageTypedHeaderValidation(t *testing.T) {
 }
 
 func FuzzRKMMessageValidation(f *testing.F) {
+	// A received undefined Traffic Mode is retained for a correlated failure
+	// result, while origination must continue to reject it (RFC 4666 Section 4.4.1).
+	f.Add([]byte{1, 0, MsgClassRKM, MsgTypeRegistrationRequest, 0, 0, 0, 36,
+		2, 7, 0, 28, 2, 10, 0, 8, 0, 0, 0, 1, 2, 11, 0, 8, 0, 0, 0, 100, 0, 11, 0, 8, 0, 0, 0, 4})
 	seeds := []M3UA{
 		NewRegistrationRequest(validRoutingKeyParam(1, 101)),
 		NewRegistrationResponse(validRegistrationResultParam(1, 101)),
@@ -312,7 +317,21 @@ func FuzzRKMMessageValidation(f *testing.F) {
 		}
 		roundTrip, err := message.MarshalBinary()
 		if err != nil {
-			t.Fatalf("accepted RKM message failed to marshal: %v", err)
+			request, ok := message.(*RegistrationRequest)
+			var fault *rkm.SemanticFault
+			if !ok || !errors.As(err, &fault) {
+				t.Fatalf("accepted RKM message failed to marshal: %v", err)
+			}
+			// Only a fault retained in a specific received key can explain
+			// a strict origination failure. Other codec errors remain defects.
+			for _, parameter := range request.RoutingKeys {
+				_, keyErr := parameter.RoutingKey()
+				var keyFault *rkm.SemanticFault
+				if errors.As(keyErr, &keyFault) && keyFault.LocalIdentifier == fault.LocalIdentifier && keyFault.Status == fault.Status {
+					return
+				}
+			}
+			t.Fatalf("origination fault has no correlated received key: %v", err)
 		}
 		if _, err := Parse(roundTrip); err != nil {
 			t.Fatalf("accepted RKM round trip failed to parse: %v", err)

@@ -64,6 +64,25 @@ Section 4 below.
 | [3.7 ASPTM](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.7) | Mandatory | Implemented | ASPAC, ASPAC_ACK, ASPIA, and ASPIA_ACK codecs, parameters, ordering, cardinality, and validation are implemented. Role procedures are assessed under Section 4.3. |
 | [3.8 MGMT](https://www.rfc-editor.org/rfc/rfc4666.html#section-3.8) | Mandatory | Implemented | Error and Notify codecs, diagnostic octets, parameter scope, cardinality, unknown-extension handling, and inactive-ASP targeting for `Insufficient ASP Resources Active in AS` are implemented. Every Section 3.8.1 Error code is decoded and named on receipt; two are never generated, and [procedure coverage](procedure-coverage.md#optional-procedures-concrete-exclusions) says which and why. Held Errata 2065 is a documented project interpretation. |
 
+RKM receive validation follows RFC 4666 Sections 3.6.1, 3.6.2 and 4.4.1.
+A correctly framed Routing Key with exactly one valid Local-RK-Identifier can
+receive its own failure result without discarding valid sibling keys. Invalid
+DPC masks receive Invalid DPC; undefined Traffic Mode values receive
+Unsupported/Invalid Traffic Handling Mode; duplicate Network Appearance fields
+receive Invalid Network Appearance. Other recoverable key semantic faults
+receive Invalid Routing Key. Broken framing, invalid field widths, ambiguous or
+missing identifiers, and nested RKM containers retain message-level ERR handling.
+Unknown extension fields retain Unsupported RK parameter Field handling.
+Strict parameter decoding and origination still reject semantic faults.
+
+The all-Network-Appearances singleton rule counts both static and dynamic
+membership, including static Application Servers without a provisioned RKM
+entry. An omitted appearance still implies the sole configured appearance.
+Successful and Already Registered results accept the peer's actual Routing
+Context, including zero. Choosing nonzero allocated contexts and requiring
+nonzero provisioned RKM contexts are local responder policy, not restrictions
+on valid received results. Other unsuccessful results still require zero.
+
 ## Procedures
 
 | RFC 4666 area | Strength | Status | Evidence and remaining work |

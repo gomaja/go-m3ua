@@ -2,8 +2,10 @@ package m3ua
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/gomaja/go-m3ua/internal/rkm"
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -263,12 +265,19 @@ func (c *Association) handleRegistrationRequest(message *messages.RegistrationRe
 	identifiers := make(map[uint32]struct{}, len(message.RoutingKeys))
 	for index, parameter := range message.RoutingKeys {
 		payload, err := parameter.RoutingKey()
+		var request RoutingKeyRegistrationRequest
 		if err != nil {
-			return err
-		}
-		request, err := routingKeyFromPayload(payload)
-		if err != nil {
-			return err
+			var fault *rkm.SemanticFault
+			if !errors.As(err, &fault) {
+				return err
+			}
+			request.LocalRoutingKeyIdentifier = fault.LocalIdentifier
+			request.semanticStatus = RegistrationStatus(fault.Status)
+		} else {
+			request, err = routingKeyFromPayload(payload)
+			if err != nil {
+				return err
+			}
 		}
 		request.Peer = peer
 		if _, duplicate := identifiers[request.LocalRoutingKeyIdentifier]; duplicate {

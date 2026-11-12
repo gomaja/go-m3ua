@@ -75,6 +75,9 @@ type RoutingKey struct {
 
 // ProvisionedRoutingKey binds a statically provisioned Routing Key to its
 // Routing Context for coexistence with dynamically registered Routing Keys.
+// Local provisioning requires a nonzero context. This responder policy does
+// not restrict the actual contexts accepted in peer Registration Results
+// (RFC 4666 Sections 3.6.2 and 4.4.1).
 type ProvisionedRoutingKey struct {
 	RoutingContext uint32
 	RoutingKey     RoutingKey
@@ -103,6 +106,7 @@ type RoutingKeyRegistrationRequest struct {
 	NetworkAppearanceImplied  bool
 	RoutingKey                RoutingKey
 	unsupportedParameterField bool
+	semanticStatus            RegistrationStatus
 }
 
 // RoutingKeyRegistrationAuthorizer decides whether a peer may register a
@@ -471,7 +475,9 @@ func validateRoutingKeyManagementConfig(config *RoutingKeyManagementConfig) erro
 	canonicalKeys := make([]canonicalRoutingKey, 0, len(config.ProvisionedRoutingKeys))
 	for _, provisioned := range config.ProvisionedRoutingKeys {
 		if provisioned.RoutingContext == 0 {
-			return fmt.Errorf("provisioned Routing Context 0 cannot represent RKM success")
+			// Nonzero responder contexts are local allocation/provisioning policy;
+			// RFC 4666 Sections 3.6.2 and 4.4.1 also permit a peer's actual RC 0.
+			return fmt.Errorf("provisioned Routing Context 0 is excluded by local RKM policy")
 		}
 		if _, duplicate := seenRoutingContexts[provisioned.RoutingContext]; duplicate {
 			return fmt.Errorf("duplicate provisioned Routing Context %d", provisioned.RoutingContext)

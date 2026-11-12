@@ -130,9 +130,9 @@ func (d *RegistrationResultPayload) unmarshalBinaryAtDepth(b []byte, depth int) 
 	status := decoded.RegistrationStatus.RegistrationStatus()
 	routingContext := decoded.RoutingContext.RoutingContext()
 	registered := status == SuccessfullyRegistered || status == RoutingKeyAlreadyRegistered
-	if registered && routingContext == 0 {
-		return invalidNestedParameter("Registration Result", "successful or already registered status requires the actual Routing Context")
-	}
+	// RFC 4666 Section 3.6.2 requires zero on failure; it does not reserve
+	// zero against successful assignment. Section 4.4.1 requires the actual
+	// context for Already Registered, which can also be zero.
 	if !registered && routingContext != 0 {
 		return invalidNestedParameter("Registration Result", "failure status requires Routing Context 0")
 	}
