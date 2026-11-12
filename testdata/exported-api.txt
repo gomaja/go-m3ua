@@ -393,10 +393,10 @@ field RoutingKeyRegistrationResult.LocalRoutingKeyIdentifier
 field RoutingKeyRegistrationResult.RemoteAS
 field RoutingKeyRegistrationResult.RoutingContext
 field RoutingKeyRegistrationResult.Status
-field SCTPConfig.<embedded *SCTPNoDelayInfo>
 field SCTPConfig.<embedded *SCTPSACKInfo>
 field SCTPConfig.AssociationMaxRetrans
 field SCTPConfig.InitTimeout
+field SCTPConfig.Nagle
 field SCTPConfig.PFExposure
 field SCTPConfig.PartialReliability
 field SCTPConfig.PathParams
@@ -405,8 +405,6 @@ field SCTPConfig.RTOInfo
 field SCTPConfig.ReadBufferSize
 field SCTPConfig.SocketReceiveBuffer
 field SCTPConfig.SocketSendBuffer
-field SCTPNoDelayInfo.Enabled
-field SCTPNoDelayInfo.NoDelay
 field SCTPSACKInfo.Enabled
 field SCTPSACKInfo.SackDelay
 field SCTPSACKInfo.SackFrequency
@@ -603,7 +601,7 @@ method Association.WriteSignal
 method AssociationConfig.EnableHeartbeat
 method AssociationConfig.SetASPIdentifier
 method AssociationConfig.SetApplicationServers
-method AssociationConfig.SetSCTPNoDelay
+method AssociationConfig.SetSCTPNagle
 method AssociationConfig.SetSCTPSACK
 method AssociationEstablishmentError.Error
 method AssociationEstablishmentError.Unwrap
@@ -787,7 +785,6 @@ type RoutingKeyRegistrationAuthorizer
 type RoutingKeyRegistrationRequest struct
 type RoutingKeyRegistrationResult struct
 type SCTPConfig struct
-type SCTPNoDelayInfo struct
 type SCTPSACKInfo struct
 type SGASKey struct
 type SGPConfig struct

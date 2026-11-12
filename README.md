@@ -799,9 +799,26 @@ applications create a replacement with a new Dial or Accept.
 
 ### SCTP tuning
 
-`AssociationConfig.SetSCTPSACK` and `SetSCTPNoDelay` set the delayed-SACK timer
-and `SCTP_NODELAY` once an association exists. Its socket buffers are sized in
-`SCTPConfig`, in bytes, before it exists; zero keeps the kernel default:
+Every association starts with `SCTP_NODELAY` on, including accepted sockets and
+configurations returned by `SelectAssociationConfig`. This avoids the Nagle-like
+bundling delay for latency-sensitive signalling, at the cost of potentially more
+packets (RFC 6458 §8.1.5). To enable that delay, set `SCTPConfig.Nagle = true`
+or call `AssociationConfig.SetSCTPNagle(true)`. On Linux, small messages may
+then wait for earlier DATA to be acknowledged unless enough data is queued to
+fill a packet (`net/sctp/output.c`, `sctp_packet_can_append_data`,
+[v5.14](https://raw.githubusercontent.com/torvalds/linux/v5.14/net/sctp/output.c)
+and [v7.4-rc2](https://raw.githubusercontent.com/torvalds/linux/v7.4-rc2/net/sctp/output.c)).
+This can add the peer's delayed-SACK delay: RFC 9260 §16 suggests 200 ms for
+`SACK.Delay`; §6.2 caps it at 500 ms. Linux's `net.sctp.sack_timeout` defaults
+to 200 ms (`Documentation/networking/ip-sysctl.rst`, `sack_timeout`,
+[v5.14](https://raw.githubusercontent.com/torvalds/linux/v5.14/Documentation/networking/ip-sysctl.rst)
+and [v7.4-rc2](https://raw.githubusercontent.com/torvalds/linux/v7.4-rc2/Documentation/networking/ip-sysctl.rst)).
+`Association.SetSCTPNoDelay` changes the live socket; passing `false` enables
+the delay.
+
+`AssociationConfig.SetSCTPSACK` configures the delayed-SACK timer once an
+association exists. Its socket buffers are sized in `SCTPConfig`, in bytes,
+before it exists; zero keeps the kernel default:
 
 ```go
 config := m3ua.NewAssociationConfig()

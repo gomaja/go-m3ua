@@ -63,16 +63,6 @@ type SCTPSACKInfo struct {
 	SackFrequency uint32
 }
 
-// SCTPNoDelayInfo is a set of information for SCTP NODELAY configuration.
-//
-// NoDelay, when true, disables the Nagle-like bundling algorithm so that
-// user messages are sent as soon as possible (SCTP_NODELAY = 1). When
-// false, small messages may be bundled to improve throughput.
-type SCTPNoDelayInfo struct {
-	Enabled bool
-	NoDelay bool
-}
-
 // DefaultReadBufferSize is the read buffer size used when SCTPConfig
 // leaves ReadBufferSize unset.
 //
@@ -91,7 +81,18 @@ const DefaultReadBufferSize = 65535
 // SCTP association and everything derived from it belong to the Association.
 type SCTPConfig struct {
 	*SCTPSACKInfo
-	*SCTPNoDelayInfo
+
+	// Nagle enables the Nagle-like bundling delay (RFC 6458 §8.1.5).
+	// The default, false, sets SCTP_NODELAY on every association for low latency.
+	// When enabled on Linux, small messages may wait for earlier DATA to be
+	// acknowledged unless enough data is queued to fill a packet (Linux v5.14 and
+	// v7.4-rc2 net/sctp/output.c,
+	// sctp_packet_can_append_data). This can add the peer's delayed-SACK delay:
+	// RFC 9260 §16 suggests 200 ms for SACK.Delay; §6.2 caps it at 500 ms.
+	// Linux's net.sctp.sack_timeout defaults to 200 ms (same tags,
+	// Documentation/networking/ip-sysctl.rst, sack_timeout).
+	// Disabling this delay can increase the number of packets sent.
+	Nagle bool
 
 	// PartialReliability offers PR-SCTP (RFC 3758) at association setup. False,
 	// the default, disables it on the socket (SCTP_PR_SUPPORTED, RFC 7496
@@ -850,10 +851,6 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 			sack := *config.SCTPConfig.SCTPSACKInfo
 			sctpConfig.SCTPSACKInfo = &sack
 		}
-		if config.SCTPConfig.SCTPNoDelayInfo != nil {
-			noDelay := *config.SCTPConfig.SCTPNoDelayInfo
-			sctpConfig.SCTPNoDelayInfo = &noDelay
-		}
 		sctpConfig.RTOInfo = snapshotOption(sctpConfig.RTOInfo)
 		sctpConfig.PathParams = snapshotPathParams(sctpConfig.PathParams)
 		sctpConfig.PathThresholds = snapshotPathThresholds(sctpConfig.PathThresholds)
@@ -1134,19 +1131,16 @@ func (c *AssociationConfig) SetSCTPSACK(sackDelay, sackFrequency uint32) *Associ
 	return c
 }
 
-// SetSCTPNoDelay sets the SCTP_NODELAY option.
-//
-// When noDelay is true, the Nagle-like bundling algorithm is disabled and
-// user messages are sent as soon as possible. When false, small messages
-// may be bundled to improve throughput.
-func (c *AssociationConfig) SetSCTPNoDelay(noDelay bool) *AssociationConfig {
+// SetSCTPNagle enables or disables the Nagle-like bundling delay
+// (RFC 6458 §8.1.5). The default is disabled: every association starts with
+// SCTP_NODELAY on. Enabling bundling may add the peer's delayed-SACK delay;
+// see SCTPConfig.Nagle for the Linux conditions and timer sources.
+// This setter is chainable.
+func (c *AssociationConfig) SetSCTPNagle(enabled bool) *AssociationConfig {
 	if c.SCTPConfig == nil {
 		c.SCTPConfig = &SCTPConfig{}
 	}
-	c.SCTPConfig.SCTPNoDelayInfo = &SCTPNoDelayInfo{
-		Enabled: true,
-		NoDelay: noDelay,
-	}
+	c.SCTPConfig.Nagle = enabled
 	return c
 }
 

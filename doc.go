@@ -202,6 +202,21 @@ ManagementSCTPStatus with an owned PeerAddrChange (RFC 4666 Section 1.6.3;
 RFC 6458 Section 6.1.2). Potentially Failed transitions require PFExposeEnabled
 (RFC 7829 Section 7.3).
 
+# SCTP bundling delay
+
+Every association starts with SCTP_NODELAY on, including Dial, Accept and
+SelectAssociationConfig selections (RFC 6458 §8.1.5). This reduces signalling
+latency at the cost of potentially more packets. SCTPConfig.Nagle or
+AssociationConfig.SetSCTPNagle(true) enables the Nagle-like bundling delay.
+On Linux, small messages may then wait for earlier DATA to be acknowledged
+unless enough data is queued to fill a packet (Linux v5.14 and v7.4-rc2,
+net/sctp/output.c, sctp_packet_can_append_data). This can add the peer's
+delayed-SACK delay: RFC 9260 §16 suggests 200 ms for SACK.Delay; §6.2 caps it
+at 500 ms. Linux's net.sctp.sack_timeout defaults to 200 ms (same tags,
+Documentation/networking/ip-sysctl.rst, sack_timeout).
+Association.SetSCTPNoDelay changes the live socket; passing false enables
+the delay.
+
 # SCTP reliability
 
 go-m3ua offers PR-SCTP (RFC 3758) only when SCTPConfig.PartialReliability is

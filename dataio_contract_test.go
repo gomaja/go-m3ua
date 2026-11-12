@@ -318,7 +318,7 @@ func TestM3UABeatIsSeparateFromSCTPHeartbeat(t *testing.T) {
 	config.SCTPConfig = &SCTPConfig{}
 	config.EnableHeartbeat(50*time.Millisecond, 200*time.Millisecond)
 
-	if config.SCTPConfig.SCTPSACKInfo != nil || config.SCTPConfig.SCTPNoDelayInfo != nil {
+	if config.SCTPConfig.SCTPSACKInfo != nil || config.SCTPConfig.Nagle {
 		t.Error("EnableHeartbeat configured SCTP transport options")
 	}
 

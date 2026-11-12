@@ -768,11 +768,11 @@ func (c *Association) setUpSocket() error {
 		}
 	}
 
-	if nd := c.cfg.SCTPNoDelayInfo; nd != nil && nd.Enabled {
-		if err := c.sctpConn.SetNoDelay(nd.NoDelay); err != nil {
-			_ = c.sctpConn.Close()
-			return fmt.Errorf("failed to set no delay: %w", err)
-		}
+	// RFC 6458 §8.1.5: disable the Nagle-like delay unless explicitly enabled.
+	// Apply per association, including accepted sockets with a selected config.
+	if err := c.sctpConn.SetNoDelay(!c.cfg.Nagle); err != nil {
+		_ = c.sctpConn.Close()
+		return fmt.Errorf("failed to set no delay: %w", err)
 	}
 
 	if err := c.setUpPaths(); err != nil {
@@ -2606,9 +2606,10 @@ func (c *Association) SetSCTPSACK(sackDelay, sackFrequency uint32) error {
 
 // SetSCTPNoDelay sets the SCTP_NODELAY option on an active association.
 //
-// When noDelay is true, the Nagle-like bundling algorithm is disabled and
-// user messages are sent as soon as possible. When false, small messages
-// may be bundled to improve throughput.
+// When noDelay is true, the Nagle-like bundling delay is disabled
+// (RFC 6458 §8.1.5) and user messages are sent as soon as possible, at the
+// cost of potentially more packets. Associations start with no delay unless
+// SCTPConfig.Nagle is set. Passing false enables the delay on this association.
 func (c *Association) SetSCTPNoDelay(noDelay bool) error {
 	return c.sctpConn.SetNoDelay(noDelay)
 }

@@ -20,7 +20,7 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	selected.EstablishTimeout = 3 * time.Second
 	setInventoryTrafficModes(&selected.ApplicationServers, map[uint32]uint32{7: params.TrafficModeOverride})
 	selected.SetSCTPSACK(10, 1)
-	selected.SetSCTPNoDelay(true)
+	selected.SetSCTPNagle(true)
 
 	listenerConfig := NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 3, params.TrafficModeLoadshare, 0, []uint32{1}))
 	listenerConfig.SelectAssociationConfig = func(AcceptInfo) (*AssociationConfig, error) {
@@ -46,7 +46,7 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 		TrafficMode: params.TrafficModeBroadcast,
 	}
 	selected.SCTPSACKInfo.SackDelay = 500
-	selected.SCTPNoDelayInfo.NoDelay = false
+	selected.Nagle = false
 	selected.Compatibility = CompatibilityPolicy{}
 	selected.DataQueueSize = 1
 
@@ -77,8 +77,8 @@ func TestListenerConfigSelectsAndSnapshotsAssociationConfig(t *testing.T) {
 	if snapshot.SCTPSACKInfo.SackDelay != 10 {
 		t.Fatalf("SackDelay = %d, want 10", snapshot.SCTPSACKInfo.SackDelay)
 	}
-	if !snapshot.SCTPNoDelayInfo.NoDelay {
-		t.Fatal("NoDelay snapshot changed after selected config mutation")
+	if !snapshot.Nagle {
+		t.Fatal("Nagle snapshot changed after selected config mutation")
 	}
 	if snapshot.Compatibility.Tolerator == nil {
 		t.Fatal("Compatibility policy was not retained in selected snapshot")

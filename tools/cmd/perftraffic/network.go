@@ -39,7 +39,7 @@ func associationConfig(role string) *m3ua.AssociationConfig {
 		}
 	}
 	config := m3ua.NewAssociationConfig()
-	config.SetSCTPNoDelay(sctpNoDelay).
+	config.SetSCTPNagle(!sctpNoDelay).
 		SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).
 		SetApplicationServers(applicationServers...)
 	config.HeartbeatInfo = &m3ua.HeartbeatInfo{Enabled: false}
