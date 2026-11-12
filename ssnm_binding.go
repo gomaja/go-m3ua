@@ -48,6 +48,9 @@ func (c *Association) ssnmASKeys(scope WireScope) []ASKey {
 	if !appearanceSet {
 		appearance, appearanceSet = c.outboundNetworkAppearance()
 	}
+	if c.role == RoleASP && !scope.RoutingContextSet && c.hasConfiguredLocalContextlessAS() {
+		return []ASKey{{NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet}}
+	}
 	routingContexts := scope.RoutingContexts
 	routingContextSet := scope.RoutingContextSet
 	if !routingContextSet {
@@ -193,61 +196,81 @@ func (c *Association) ssnmBindingScopes() []ssnmBindingScope {
 	if c == nil {
 		return nil
 	}
-	pending := make(map[uint32]struct{})
-	if c.role == RoleASP {
-		for _, routingContext := range c.pendingTAckRoutingContexts(requestAspActive) {
-			pending[routingContext] = struct{}{}
-		}
-	}
-	active := c.State() == StateASPActive
 	routingContexts := c.configuredRoutingContexts()
-	if len(routingContexts) == 0 {
-		// A contextless Application Server has no Routing Context to name in
-		// an ASP Active, so no outstanding request can identify it and the
-		// Section 4.5.1 window never opens for one.
-		if !active {
-			return nil
-		}
-		return []ssnmBindingScope{{
-			partition: c.ssnmPartitionFor(contextlessASKeyForConfig(c.cfg)),
-			pending:   !c.contextlessASAcked(),
-		}}
+	// RFC 4666 §3.4.1 permits omitted RC; §4.5.1 and §4.6 admit early state.
+	contextless := c.hasConfiguredLocalContextlessAS() || len(routingContexts) == 0
+	pending := make(map[uint32]struct{})
+	admitted := make(map[uint32]bool)
+	var contextlessAdmitted, contextlessPending bool
+	// State entry already uses muState before tack.mu. Keep that order, and
+	// release both before partition resolution or publication. No socket write
+	// or Endpoint-wide lock belongs to this classification snapshot.
+	c.muState.RLock()
+	if c.role == RoleASP && c.tack != nil {
+		c.tack.mu.Lock()
 	}
-	scopes := make([]ssnmBindingScope, 0, len(routingContexts))
-	seen := make(map[SSNMPartition]int, len(routingContexts))
-	for _, routingContext := range routingContexts {
-		_, pendingActivation := pending[routingContext]
-		var admitted, admittedPending bool
-		switch c.role {
-		case RoleASP:
-			switch {
-			case active && c.routingContextAcked(routingContext) && !c.routingContextOverridden(routingContext):
-				admitted = true
-			case pendingActivation:
-				admitted, admittedPending = true, true
+	active := c.state == StateASPActive
+	legalWindow := c.state == StateASPInactive || active
+	pendingContextless := false
+	if c.role == RoleASP && c.tack != nil && legalWindow {
+		for _, request := range c.tack.pending {
+			if request.kind != requestAspActive {
+				continue
 			}
-		default:
-			admitted = active && c.activeForRoutingContext(routingContext)
+			pendingContextless = pendingContextless || request.routingContextOmitted
+			for rc := range request.remaining {
+				pending[rc] = struct{}{}
+			}
 		}
-		if !admitted {
-			continue
+	}
+	if contextless {
+		switch {
+		case active && c.contextlessASAcked():
+			contextlessAdmitted = true
+		case c.role == RoleASP && pendingContextless:
+			contextlessAdmitted, contextlessPending = true, true
+		case c.role != RoleASP && active:
+			contextlessAdmitted, contextlessPending = true, true
 		}
-		partition := c.ssnmPartitionFor(asKeyForConfigRoutingContext(c.cfg, routingContext))
-		if index, duplicate := seen[partition]; duplicate {
-			// One partition reached through several Routing Contexts is active
-			// as soon as any of them is: the pending window belongs to the
-			// label, not to the Application Server behind it.
-			if !admittedPending {
+	}
+	for _, rc := range routingContexts {
+		_, awaiting := pending[rc]
+		if c.role == RoleASP {
+			switch {
+			case active && c.routingContextAcked(rc) && !c.routingContextOverridden(rc):
+				admitted[rc] = false
+			case awaiting:
+				admitted[rc] = true
+			}
+		} else if active && c.activeForRoutingContext(rc) {
+			admitted[rc] = false
+		}
+	}
+	if c.role == RoleASP && c.tack != nil {
+		c.tack.mu.Unlock()
+	}
+	c.muState.RUnlock()
+
+	scopes := make([]ssnmBindingScope, 0, len(admitted)+1)
+	seen := make(map[SSNMPartition]int)
+	appendScope := func(key ASKey, pending bool) {
+		partition := c.ssnmPartitionFor(key)
+		if index, exists := seen[partition]; exists {
+			if !pending {
 				scopes[index].pending = false
 			}
-			continue
+			return
 		}
 		seen[partition] = len(scopes)
-		scopes = append(scopes, ssnmBindingScope{partition: partition, pending: admittedPending})
+		scopes = append(scopes, ssnmBindingScope{partition: partition, pending: pending})
 	}
-	sort.Slice(scopes, func(i, j int) bool {
-		return lessSSNMPartition(scopes[i].partition, scopes[j].partition)
-	})
+	if contextlessAdmitted {
+		appendScope(contextlessASKeyForConfig(c.cfg), contextlessPending)
+	}
+	for rc, pending := range admitted {
+		appendScope(asKeyForConfigRoutingContext(c.cfg, rc), pending)
+	}
+	sort.Slice(scopes, func(i, j int) bool { return lessSSNMPartition(scopes[i].partition, scopes[j].partition) })
 	return scopes
 }
 
@@ -312,10 +335,18 @@ func (c *Association) publishSSNMReport(report SSNMReport) error {
 	}
 	report.Association = c.ID()
 	partitions := c.ssnmPartitionsForScope(report.Scope)
-	pending := c.ssnmPendingPartitions()
+	bindings := make(map[SSNMPartition]bool)
+	for _, binding := range c.ssnmBindingScopes() {
+		bindings[binding.partition] = binding.pending
+	}
 	var firstErr error
 	for _, partition := range partitions {
-		_, admittedPending := pending[partition]
+		// Admission may have preceded cancellation. Retain that report as
+		// knowledge without inferring authorization from a now-absent request.
+		admittedPending := c.role == RoleASP
+		if pending, classified := bindings[partition]; classified {
+			admittedPending = pending
+		}
 		if err := store.bind(partition, c.ID(), admittedPending); err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -331,17 +362,24 @@ func (c *Association) publishSSNMReport(report SSNMReport) error {
 	return firstErr
 }
 
-// ssnmPendingPartitions reports the partitions this Association currently
-// holds only under the Section 4.5.1 activation window.
-func (c *Association) ssnmPendingPartitions() map[SSNMPartition]struct{} {
-	scopes := c.ssnmBindingScopes()
-	pending := make(map[SSNMPartition]struct{}, len(scopes))
-	for _, scope := range scopes {
-		if scope.pending {
-			pending[scope.partition] = struct{}{}
+// ssnmEarlyNetworkAppearanceMatches checks the activating AS's network before
+// any report mutation. RFC 4666 §3.4.1 scopes the report; §3.8.1 permits silent
+// discard of some unexpected messages, but does not prescribe NA-mismatch
+// discard. This implementation uses that local policy for a pre-Ack mismatch.
+func (c *Association) ssnmEarlyNetworkAppearanceMatches(scope WireScope) bool {
+	for _, key := range c.ssnmASKeys(scope) {
+		configured := contextlessASKeyForConfig(c.cfg)
+		if key.RoutingContextSet {
+			configured = c.staticASKeyForRoutingContext(key.RoutingContext, false)
+			if dynamic, ok := c.dynamicASKey(key.RoutingContext, false); ok {
+				configured = dynamic
+			}
+		}
+		if key.NetworkAppearanceSet != configured.NetworkAppearanceSet || key.NetworkAppearance != configured.NetworkAppearance {
+			return false
 		}
 	}
-	return pending
+	return true
 }
 
 // ssnmAffectedPointCodeLimit reports the Affected Point Code bound applied

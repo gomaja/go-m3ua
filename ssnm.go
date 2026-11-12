@@ -726,6 +726,9 @@ func (c *Association) destinationRoutingContexts(routingContext *params.Param) (
 	if routingContext != nil {
 		return append([]uint32(nil), routingContext.RoutingContexts()...), true
 	}
+	if c.role == RoleASP && c.hasConfiguredLocalContextlessAS() {
+		return nil, false
+	}
 	configured := c.configuredRoutingContexts()
 	if len(configured) != 1 {
 		return nil, false
@@ -753,6 +756,10 @@ func (c *Association) applySSNM(
 ) error {
 	report.Scope = c.ssnmWireScope(networkAppearance, routingContext)
 	report.Source = SSNMPeerReport
+	if c.role == RoleASP && (c.State() != StateASPActive || !c.ssnmRoutingContextsAllowed(routingContext, false)) && !c.ssnmEarlyNetworkAppearanceMatches(report.Scope) {
+		return nil
+	}
+
 	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope)
 	if err != nil {
 		return err
@@ -936,6 +943,9 @@ func (c *Association) ssnmAllowed() bool {
 // "to prevent the ASP from sending traffic for destinations that it might not
 // otherwise know that are inaccessible, restricted, or congested".
 //
+// RFC 4666 §3.4.1 allows a contextless AS to omit RC; §4.6 also admits
+// DAVA in the restart case through this same activation window.
+//
 // The exception is tied to an actual outstanding ASP Active request. Merely
 // being ASP-INACTIVE does not prove that the peer has received one, and a stray
 // SSNM must not be allowed to steer local routing state.
@@ -944,7 +954,7 @@ func (c *Association) ssnmAllowedDuringActivation() bool {
 		return true
 	}
 	return c.role == RoleASP && c.State() == StateASPInactive &&
-		len(c.pendingTAckRoutingContexts(requestAspActive)) > 0
+		(len(c.pendingTAckRoutingContexts(requestAspActive)) > 0 || c.pendingTAckContextless(requestAspActive))
 }
 
 // validateSSNMRoutingContext applies both parts of SSNM's Conditional Routing
@@ -981,6 +991,13 @@ func (c *Association) validateSSNMScope(msg messages.M3UA, routingContext *param
 }
 
 func (c *Association) ssnmRoutingContextsAllowed(routingContext *params.Param, duringActivation bool) bool {
+	if routingContext == nil && c.role == RoleASP && c.hasConfiguredLocalContextlessAS() {
+		if c.State() == StateASPActive && c.contextlessASAcked() {
+			return true
+		}
+		return duringActivation && c.pendingTAckContextless(requestAspActive)
+	}
+
 	routingContexts := routingContext.RoutingContexts()
 	if routingContext == nil {
 		routingContexts = c.configuredRoutingContexts()

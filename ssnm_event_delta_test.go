@@ -457,6 +457,8 @@ type ssnmDeltaWorld struct {
 	store      *ssnmState
 	partitions []SSNMPartition
 	coverage   map[string]int
+	sources    [3]AssociationID
+	nextSource AssociationID
 }
 
 var ssnmDeltaPartitions = []SSNMPartition{
@@ -477,7 +479,7 @@ func (w *ssnmDeltaWorld) association(partition SSNMPartition) AssociationID {
 	if partition.Kind == SSNMStandalonePartition {
 		return partition.Association
 	}
-	return AssociationID(1 + w.random.IntN(3))
+	return w.sources[w.random.IntN(len(w.sources))]
 }
 
 func (w *ssnmDeltaWorld) destination() PointCodeRange {
@@ -575,9 +577,19 @@ func (w *ssnmDeltaWorld) step() string {
 		w.store.retire(partition, association)
 		return fmt.Sprintf("retire %d from %+v", association, partition)
 	case roll < 93:
-		association := AssociationID(1 + w.random.IntN(3))
+		slot := w.random.IntN(len(w.sources))
+		association := w.sources[slot]
 		w.store.retireAssociation(association)
-		return fmt.Sprintf("retire Association %d", association)
+		// Endpoint Association IDs are never reused after permanent teardown.
+		w.nextSource++
+		w.sources[slot] = w.nextSource
+		w.store.registerSource(w.nextSource)
+		for index := range w.partitions {
+			if w.partitions[index].Kind == SSNMStandalonePartition && w.partitions[index].Association == association {
+				w.partitions[index].Association = w.nextSource
+			}
+		}
+		return fmt.Sprintf("retire Association %d; replacement %d", association, w.nextSource)
 	default:
 		var partitions []SSNMPartition
 		for _, partition := range w.partitions {
@@ -585,7 +597,7 @@ func (w *ssnmDeltaWorld) step() string {
 				partitions = append(partitions, partition)
 			}
 		}
-		association := AssociationID(1 + w.random.IntN(3))
+		association := w.sources[w.random.IntN(len(w.sources))]
 		if err := w.store.oversized(partitions, 2000, 1024, association); !errors.Is(err, ErrSSNMOversizedReport) {
 			panic(err)
 		}
@@ -625,8 +637,13 @@ func TestSSNMEventDeltasReplayToKnowledge(t *testing.T) {
 				world := &ssnmDeltaWorld{
 					random:     rand.New(rand.NewPCG(seed, 0x55a1)),
 					store:      endpoint.ssnm,
-					partitions: ssnmDeltaPartitions,
+					partitions: slices.Clone(ssnmDeltaPartitions),
+					sources:    [3]AssociationID{1, 2, 3},
+					nextSource: 3,
 					coverage:   make(map[string]int),
+				}
+				for _, source := range world.sources {
+					world.store.registerSource(source)
 				}
 				healthy := newSSNMDeltaConsumer(t, "healthy", endpoint)
 				slow := newSSNMDeltaConsumer(t, "slow", endpoint)
@@ -778,6 +795,8 @@ func newSSNMPublicationFixture(tb testing.TB, records, subscribers int) *ssnmPub
 	}
 	tb.Cleanup(func() { _ = endpoint.Close() })
 	partition := SSNMPartition{Kind: SSNMCanonicalPartition, SignallingGateway: "sg-a", ApplicationServer: "as-core"}
+	endpoint.ssnm.registerSource(1)
+	endpoint.ssnm.registerSource(2)
 	if err := endpoint.ssnm.bind(partition, 1, false); err != nil {
 		tb.Fatal(err)
 	}

@@ -989,6 +989,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	} else {
 		c.noteNoRoutingContextsAcked()
 	}
+	c.stopCompetingASPActive(acknowledgedContext)
 	acknowledgement := c.claimTAckAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext)
 	acknowledgement.complete()
 	if acknowledgement.solicited || previousState != StateASPActive {

@@ -34,6 +34,8 @@ func ssnmOwnershipReport(count int, kind SSNMReportKind) SSNMReport {
 func newSSNMOwnershipEndpoint(testContext *testing.T, count int, pending bool, limits *SSNMStateConfig) *Endpoint {
 	testContext.Helper()
 	endpoint := newSSNMStateEndpoint(testContext, nil, limits)
+	endpoint.ssnm.registerSource(1)
+	endpoint.ssnm.registerSource(2)
 	partition := ssnmOwnershipReport(count, SSNMDestinationUnavailableReport).Partition
 	if err := endpoint.ssnm.bind(partition, 1, pending); err != nil {
 		testContext.Fatal(err)
@@ -240,6 +242,7 @@ func TestSSNMUnboundPublicationPreservesInputOwnership(testContext *testing.T) {
 	for _, count := range []int{1, 1024} {
 		testContext.Run(fmt.Sprintf("APC%d", count), func(testContext *testing.T) {
 			endpoint := newSSNMStateEndpoint(testContext, nil, nil)
+			endpoint.ssnm.registerSource(1)
 			first := mustSubscribeSSNM(testContext, endpoint)
 			second := mustSubscribeSSNM(testContext, endpoint)
 			before := endpoint.SSNMKnowledge()
@@ -277,6 +280,7 @@ func TestSSNMUnboundPublicationPreservesInputOwnership(testContext *testing.T) {
 
 func TestSSNMPartitionPublicationOrdersPointCodeThenMask(testContext *testing.T) {
 	endpoint := newSSNMStateEndpoint(testContext, nil, nil)
+	endpoint.ssnm.registerSource(1)
 	availability := ssnmOwnershipReport(1, SSNMDestinationUnavailableReport)
 	availability.Destinations = []PointCodeRange{{PointCode: 0x120100, Mask: 8}, {PointCode: 0x120000, Mask: 8}}
 	congestion := ssnmOwnershipReport(1, SSNMSignallingCongestionReport)

@@ -461,6 +461,8 @@ type ssnmState struct {
 	epochs      uint64
 	subscribers map[*SSNMSubscription]struct{}
 	closed      bool
+	// liveSources admits work only from Associations currently owned by the Endpoint.
+	liveSources map[AssociationID]struct{}
 
 	recordsRefused        uint64
 	reportsRefused        uint64
@@ -603,6 +605,9 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 	if s.closed {
 		return ErrEndpointClosed
 	}
+	if _, live := s.liveSources[association]; !live {
+		return ErrAssociationClosed
+	}
 	state, exists := s.partitions[partition]
 	if !exists {
 		if len(s.partitions) >= s.limits.MaxPartitions {
@@ -705,14 +710,37 @@ func (s *ssnmState) retireLocked(partition SSNMPartition, association Associatio
 	})
 }
 
-// retireAssociation withdraws every binding one Association holds. It is what
-// a closed or detached Association owes the store.
+// registerSource runs when the Endpoint first owns an Association, before it
+// exposes the Association or reconciles bindings. Report processing must never
+// register a source: late work cannot restore a permanently departed owner.
+func (s *ssnmState) registerSource(association AssociationID) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	if s.liveSources == nil {
+		s.liveSources = make(map[AssociationID]struct{})
+	}
+	s.liveSources[association] = struct{}{}
+}
+
+// retireAssociation withdraws every binding one Association holds and removes
+// its source membership in the same critical section. Late bind and apply
+// operations are refused without retaining departed Association IDs.
 func (s *ssnmState) retireAssociation(association AssociationID) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.liveSources, association)
+	if len(s.liveSources) == 0 {
+		s.liveSources = nil
+	}
 	partitions := make([]SSNMPartition, 0, len(s.partitions))
 	for partition, state := range s.partitions {
 		if _, bound := state.bindings[association]; bound {
@@ -791,6 +819,9 @@ func (s *ssnmState) apply(report SSNMReport) error {
 	defer s.mu.Unlock()
 	if s.closed {
 		return ErrEndpointClosed
+	}
+	if _, live := s.liveSources[report.Association]; !live {
+		return ErrAssociationClosed
 	}
 	state, exists := s.partitions[report.Partition]
 	if !exists {
@@ -1151,6 +1182,7 @@ func (s *ssnmState) close() {
 		return
 	}
 	s.closed = true
+	s.liveSources = nil
 	subscriptions := make([]*SSNMSubscription, 0, len(s.subscribers))
 	for subscription := range s.subscribers {
 		subscriptions = append(subscriptions, subscription)

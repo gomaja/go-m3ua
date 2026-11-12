@@ -65,6 +65,9 @@ func (c *Association) handleError(e *messages.Error) error {
 		e.NetworkAppearance, params.NetworkAppearance, (*params.Param).NetworkAppearance)
 	ind.ASKeys = c.managementASKeys(ind.NetworkAppearance, ind.NetworkAppearanceSet, e.RoutingContext)
 	ind.AffectedDestinations = managementAffectedDestinations(ind.ASKeys, e.AffectedPointCode)
+	// RFC 4666 §3.8.1 makes Diagnostic Information optional and allows any
+	// information relevant to the error. It is not a transaction identifier:
+	// report the ERR to Layer Management without retiring an ASPAC by its bytes.
 	c.notifyManagement(ind)
 
 	return nil

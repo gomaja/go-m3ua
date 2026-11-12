@@ -965,6 +965,7 @@ func TestDestinationKnowledgeReadsOnlyTheNamedPartition(t *testing.T) {
 		t.Fatalf("newSSNMState: %v", err)
 	}
 	t.Cleanup(store.close)
+	store.registerSource(1)
 	held := SSNMPartition{
 		Kind:              SSNMCanonicalPartition,
 		SignallingGateway: "sg-a",

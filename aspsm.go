@@ -448,6 +448,7 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 		return nil
 	}
 
+	c.stopCompetingASPActive(nil)
 	solicited := c.stopTAck(requestAspDown)
 	if solicited {
 		return nil

@@ -475,7 +475,51 @@ knowledge from before a source reset is never mistaken for knowledge after one.
 `Revision` increases strictly across a subscription's events and is always
 greater than the snapshot it started from.
 
-Reports admitted during the Section 4.5.1 activation window are retained but
+Reports admitted during the RFC 4666 §4.5.1 activation window (DUNA, DRST,
+and SCON) and §4.6 restart window (also DAVA) are retained for both explicit
+Routing Contexts and a contextless AS with an outstanding ASP Active. Section
+3.4.1 permits omitted RC for an uncoordinated Routing Key. An unconfigured RC
+is rejected with Invalid Routing Context, including that RC, under §3.8.1;
+without an outstanding activation, inactive SSNM remains rejected. An omitted-RC
+ASP Active covers both the contextless AS and its configured and dynamically
+registered RCs (§4.3.4.3). Ack, cancellation and T(ack) exhaustion close the
+request's window. Completed ASP Inactive or ASP Down also stops competing ASPAC
+requests whose transmitted scope overlaps the withdrawal; a partial Ack does
+not shrink the message that would be retransmitted (§4.3.4.4).
+
+Classification takes the ASP state and request inventory together under the
+existing T(ack) lock, in state-before-request lock order. An admitted report
+racing cancellation remains pending knowledge unless its AS has completed
+activation. Classification does not hold an Endpoint-wide barrier through
+report handling or socket writes.
+
+A pre-Ack report whose Network Appearance differs from the activating scope is
+discarded before mutation. This is this implementation's interpretation:
+§3.8.1 permits silent discard of some unexpected messages, but does not prescribe
+NA-mismatch discard. The Invalid Network Appearance ERR in that section is
+SGP-originated. Active-state acceptance of Network Appearance is unchanged.
+An accepted report resolving outside the classified scopes now has a pending
+fallback binding, so its binding events and `TrafficAuthorized` can differ from
+the former active fallback.
+
+Accepted early reports remain the SGP's latest knowledge when an activation is
+cancelled, refused or exhausts T(ack), as accepted active reports remain after
+withdrawal. Request retirement does not roll back knowledge or clear derived
+state. Later activation can receive fresh reports or audit with DAUD (§4.5.3).
+Normal association/binding cleanup and configured retention limits still apply.
+Permanent source retirement at Association close prevents late bind or apply
+operations from recreating that source's canonical knowledge. The store tracks
+only live source IDs, registered when the Endpoint takes ownership and removed
+at permanent retirement, so association churn retains no departed source IDs.
+It does not change retention on cancellation of an activation request.
+
+Refusal ERR reaches Layer Management. Section 3.8.1 makes Diagnostic Information
+optional and permits any information relevant to the error; M3UA supplies no
+transaction identifier. The library does not correlate an ASPAC attempt by those
+bytes or retire it on ERR. Its request and early window remain until normal
+completion, cancellation or T(ack) exhaustion; Layer Management can cancel it.
+
+These reports
 authorize nothing on their own: `SSNMPartitionKnowledge.TrafficAuthorized` is
 true only once at least one binding has completed activation, because Section
 4.3.4.3 says "The ASP SHOULD NOT send Data or SSNM messages for the related

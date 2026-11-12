@@ -361,6 +361,7 @@ func TestSSNMStateStandalonePartitionIsOwnedByOneAssociation(t *testing.T) {
 	association.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	association.endpoint = endpoint
 	association.managementID.Store(99)
+	endpoint.ssnm.registerSource(association.ID())
 	t.Cleanup(func() { _ = association.Close() })
 	association.syncSSNMBindings()
 
