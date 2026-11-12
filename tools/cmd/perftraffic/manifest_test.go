@@ -13,8 +13,8 @@ func TestManifestMatchesAssociationSocketSettings(testContext *testing.T) {
 	}
 	for _, role := range []string{"asp", "sgp"} {
 		config := associationConfig(role)
-		if !config.SCTPNoDelayInfo.Enabled || !config.SCTPSACKInfo.Enabled ||
-			manifest.SCTPNoDelay != config.SCTPNoDelayInfo.NoDelay ||
+		if !config.SCTPSACKInfo.Enabled ||
+			manifest.SCTPNoDelay != !config.Nagle ||
 			manifest.SCTPSACKDelay != config.SCTPSACKInfo.SackDelay ||
 			manifest.SCTPSACKFrequency != config.SCTPSACKInfo.SackFrequency {
 			testContext.Fatalf("%s socket settings differ from manifest: %+v", role, manifest)

@@ -735,7 +735,8 @@ Every incompatible declaration and public field across the module.
 | `Config`, `ConnConfig` | Replaced by `AssociationConfig`; the alias and the transport-oriented name are removed. |
 | `ConnConfigSelector` | Replaced by `AssociationConfigSelector`, immutable inside `ListenerConfig` and run before M3UA parsing. |
 | `Conn` | Replaced by `Association`. There is no alias, and it is not a `net.Conn`. |
-| `SctpNoDelayInfo`, `SctpSackInfo` | Replaced by `SCTPNoDelayInfo` and `SCTPSACKInfo`. |
+| `SctpNoDelayInfo`, `SCTPNoDelayInfo` | Removed. Use `SCTPConfig.Nagle` or `AssociationConfig.SetSCTPNagle`; the zero value now disables bundling delay (`SCTP_NODELAY` on). |
+| `SctpSackInfo` | Replaced by `SCTPSACKInfo`. |
 | `Dial`, `Listen` | Replaced by `Endpoint.Dial` and `Endpoint.Listen`; the M3UA role is fixed by the owning `Endpoint`. |
 | `NewConfig`, `NewClientConfig`, `NewServerConfig` | Replaced by `NewEndpoint(EndpointConfig{Role: …})` plus `NewAssociationConfig()` and explicit setters. The removed constructors inferred an M3UA role from transport orientation. |
 | `NewListenerConfig` | Retained with a new signature: it takes `*AssociationConfig` and its result is passed to `Endpoint.Listen`. |
@@ -743,11 +744,13 @@ Every incompatible declaration and public field across the module.
 | `Config.SetAspIdentifier` | Replaced by `AssociationConfig.SetASPIdentifier`. |
 | `Config.SetCorrelationID` | Removed. Correlation Id is per message: `DataRequest.CorrelationID`. |
 | `Config.SetNetworkAppearance`, `Config.SetRoutingContexts`, `Config.SetTrafficModeType` | Replaced by `AssociationConfig.SetApplicationServers` and `ASConfig`. |
-| `Config.SetNoDelayConfig`, `Config.SetSackConfig` | Replaced by `AssociationConfig.SetSCTPNoDelay` and `SetSCTPSACK`. |
+| `Config.SetNoDelayConfig`, `AssociationConfig.SetSCTPNoDelay` | Replaced by `AssociationConfig.SetSCTPNagle` with the opposite boolean: `SetSCTPNoDelay(true)` becomes `SetSCTPNagle(false)`. No delay is now the default. `Association.SetSCTPNoDelay` remains the live socket setter. |
+| `Config.SetSackConfig` | Replaced by `AssociationConfig.SetSCTPSACK`. |
 | `ConnConfig.AspIdentifier` | Replaced by `AssociationConfig.ASPIdentifier`. |
 | `ConnConfig.NetworkAppearance`, `RoutingContexts`, `TrafficModeType`, `TrafficModes` | Replaced by `AssociationConfig.ApplicationServers []ASConfig`. |
 | `ConnConfig.CorrelationID`, `OriginatingPointCode`, `DestinationPointCode`, `ServiceIndicator`, `NetworkIndicator`, `MessagePriority`, `SignalingLinkSelection` | Removed. Every one is per message, in `DataRequest`. |
-| `ConnConfig.SctpNoDelayInfo`, `SctpSackInfo` | Replaced by `AssociationConfig.SCTPNoDelayInfo` and `SCTPSACKInfo`. |
+| `ConnConfig.SctpNoDelayInfo` | Replaced by `SCTPConfig.Nagle` (promoted on `AssociationConfig`); set `true` to restore the bundling delay. |
+| `ConnConfig.SctpSackInfo` | Replaced by `AssociationConfig.SCTPSACKInfo`. |
 | `ConnConfig.RecoveryTimer` | Moved to `EndpointConfig.ApplicationServers.RecoveryTimer`, because T(r) is shared AS state. |
 | `ConnConfig.RecoveryQueue*`, `BroadcastFlow*` | Moved to `EndpointConfig.SGP`; these are SGP-wide limits, not per-Association policy. |
 | `HeartbeatInfo.Data` | Removed. Heartbeat Data is generated per BEAT and echoed exactly as received. |
@@ -772,10 +775,11 @@ Every incompatible declaration and public field across the module.
 | Promoted `Listener.SetAspIdentifier`, `SetNoDelayConfig`, `SetSackConfig` | Removed. Configure the immutable `AssociationConfig` before `Endpoint.Listen`, or return it from `SelectAssociationConfig`. |
 | `Listener.BeginMTP3Restart`, and every `Listener` destination method | Removed. Publication and restart are Endpoint operations. |
 | `Listener.Config` | Replaced by the embedded `Listener.AssociationConfig` snapshot. |
-| `Listener.AspIdentifier`, `SignalingLinkSelection`, `SctpNoDelayInfo`, `SctpSackInfo` | Replaced by `Listener.ASPIdentifier`, `SignallingLinkSelection`, `SCTPNoDelayInfo` and `SCTPSACKInfo`. |
+| `Listener.AspIdentifier`, `SignalingLinkSelection`, `SctpNoDelayInfo`, `SctpSackInfo` | Replaced by `Listener.ASPIdentifier`, `SignallingLinkSelection`, `Nagle` and `SCTPSACKInfo`. Configure `Nagle` before Listen or in a selected `AssociationConfig`. |
 | `Listener.RecoveryTimer`, `RecoveryQueue*`, `BroadcastFlow*` | Removed from Listener promotion; configure `EndpointConfig.ApplicationServers` and `EndpointConfig.SGP`. |
 | `ListenerConfig.DefaultConnConfig`, `SelectConnConfig` | Replaced by `DefaultAssociationConfig` and `SelectAssociationConfig`. |
-| `SCTPConfig.SctpNoDelayInfo`, `SctpSackInfo` | Replaced by `SCTPNoDelayInfo` and `SCTPSACKInfo`. |
+| `SCTPConfig.SctpNoDelayInfo`, `SCTPConfig.SCTPNoDelayInfo` | Removed in favor of `SCTPConfig.Nagle`; `false` now sets `SCTP_NODELAY` on. |
+| `SCTPConfig.SctpSackInfo` | Replaced by `SCTPConfig.SCTPSACKInfo`. |
 | `DestinationState`, `DestinationCongested` | Split into `DestinationAvailability` and `CongestionState`. |
 | `SSNMScope` | Renamed `WireScope`, and joined by `SSNMPartition` for canonical identity. |
 | `SGPRoute`, `SignallingGatewayProcessConfig.Routes`, `SignallingGatewayConfig.SGPSelection` | Replaced by `RemoteASConfig` inventory and `MTPRoutePath` candidates. |

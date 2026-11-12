@@ -212,7 +212,7 @@ func routingSCTPAddress(address routingAddress) *sctp.Addr {
 }
 
 func routingSetupAssociationConfig(peer routingPeer, identifier uint32, sender bool) *m3ua.AssociationConfig {
-	config := m3ua.NewAssociationConfig().SetSCTPNoDelay(sctpNoDelay).SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).SetApplicationServers(peer.ApplicationServers...)
+	config := m3ua.NewAssociationConfig().SetSCTPNagle(!sctpNoDelay).SetSCTPSACK(sctpSACKDelay, sctpSACKFrequency).SetApplicationServers(peer.ApplicationServers...)
 	config.HeartbeatInfo = &m3ua.HeartbeatInfo{Enabled: false}
 	config.DataQueueSize = 1024
 	if sender {

@@ -190,7 +190,7 @@ func applicationServers(role portRole) []m3ua.ASConfig {
 // associationBase is the transport configuration both sides share.
 func associationBase() *m3ua.AssociationConfig {
 	config := m3ua.NewAssociationConfig()
-	config.SetSCTPNoDelay(true).SetSCTPSACK(0, 1)
+	config.SetSCTPNagle(false).SetSCTPSACK(0, 1)
 	config.HeartbeatInfo = &m3ua.HeartbeatInfo{Enabled: false}
 	config.DataQueueSize = dataQueueSize
 	config.EstablishTimeout = establishTimeout
