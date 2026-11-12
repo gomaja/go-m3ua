@@ -157,6 +157,12 @@ func (registry *routingKeyRegistry) register(association *Association, requests 
 				storeRegistrationReplay(replayState, request, results[index])
 				continue
 			}
+			if request.semanticStatus != RegistrationSuccessfullyRegistered {
+				// RFC 4666 Section 4.4.1: refuse this key without authorizing
+				// it or preventing valid siblings from receiving results.
+				results[index] = registrationResult(request.LocalRoutingKeyIdentifier, request.semanticStatus, 0)
+				continue
+			}
 			if request.unsupportedParameterField {
 				// RFC 4666 Section 4.4.1 requires a per-Routing-Key status when
 				// one or more nested parameter fields are unsupported. Do not
@@ -974,6 +980,36 @@ func findRoutingKeyEntry(entries map[uint32]*routingKeyEntry, key canonicalRouti
 }
 
 func associationHasNetworkAppearanceConflict(entries map[uint32]*routingKeyEntry, association *Association, requested canonicalRoutingKey) bool {
+	// RFC 4666 Section 3.6.1 makes an all-NA key the association's only
+	// registration. Section 4.4.1 includes both static and dynamic membership;
+	// a static AS need not have a provisioned entry in the RKM registry.
+	if association != nil && association.as != nil {
+		staticKeys := association.staticallyConfiguredASKeys()
+		inventory := association.applicationServerInventory(false)
+		if key, contextless := asConfigContextlessASKey(inventory); len(inventory) > 0 && contextless && association.hasStaticallyConfiguredContextlessAS() {
+			// An explicit contextless AS is static membership too. The implicit
+			// default with no configured AS is not a separately registered key.
+			staticKeys = append(staticKeys, key)
+		}
+		for _, key := range staticKeys {
+			server, exists := association.as.lookup(key)
+			if !exists {
+				continue
+			}
+			server.mu.Lock()
+			_, staticMember := server.asps[association]
+			server.mu.Unlock()
+			if !staticMember {
+				continue
+			}
+			if entry := entries[key.RoutingContext]; entry != nil && entry.asKey() == key && entry.canonical.equal(requested) {
+				continue
+			}
+			if !key.NetworkAppearanceSet || !requested.networkAppearanceSet {
+				return true
+			}
+		}
+	}
 	for _, entry := range entries {
 		if !entry.hasMember(association) || entry.canonical.equal(requested) {
 			continue
@@ -1225,6 +1261,7 @@ func routingKeyRegistrationRequestsEqual(first, second RoutingKeyRegistrationReq
 		first.RequestedRoutingContext != second.RequestedRoutingContext ||
 		first.RoutingContextRequested != second.RoutingContextRequested ||
 		first.unsupportedParameterField != second.unsupportedParameterField ||
+		first.semanticStatus != second.semanticStatus ||
 		first.RoutingKey.TrafficMode != second.RoutingKey.TrafficMode ||
 		first.RoutingKey.TrafficModeSet != second.RoutingKey.TrafficModeSet {
 		return false

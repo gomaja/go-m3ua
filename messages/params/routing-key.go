@@ -5,7 +5,11 @@
 package params
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
+
+	"github.com/gomaja/go-m3ua/internal/rkm"
 )
 
 // RoutingKeyGroup is one Destination Point Code and its optional Service
@@ -121,6 +125,79 @@ func (r *RoutingKeyPayload) UnmarshalBinary(b []byte) error {
 }
 
 func (r *RoutingKeyPayload) unmarshalBinaryAtDepth(b []byte, depth int) error {
+	err := r.decodeAtDepth(b, depth)
+	// Only the outer key may carry correlation. A fault from a forbidden
+	// nested key must never supply the enclosing key's identifier.
+	if depth == 0 && err != nil && errors.Is(err, ErrInvalidValue) {
+		if fault := correlatedRoutingKeyFault(b, err); fault != nil {
+			return fault
+		}
+	}
+	return err
+}
+
+// correlatedRoutingKeyFault never guesses at correlation or boundaries. RFC
+// 4666 Sections 3.6.1 and 4.4.1 distinguish invalid key values from input that
+// cannot be answered with a Local-RK-Identifier. Check the entire container,
+// including fields after the first semantic fault, before recovering a result.
+func correlatedRoutingKeyFault(b []byte, cause error) *rkm.SemanticFault {
+	fault := &rkm.SemanticFault{Status: InvalidRoutingKey, Cause: cause}
+	identifiers, appearances := 0, 0
+	for len(b) > 0 {
+		if len(b) < 4 {
+			return nil
+		}
+		tag, length := binary.BigEndian.Uint16(b), int(binary.BigEndian.Uint16(b[2:]))
+		if length < 4 || length > len(b) {
+			return nil
+		}
+		data := b[4:length]
+		if validateValueLength(tag, len(data)) != nil {
+			return nil
+		}
+		switch tag {
+		case RoutingContext:
+			if len(data) != 4 {
+				return nil
+			}
+		case LocalRoutingKeyIdentifier:
+			identifiers++
+			fault.LocalIdentifier = binary.BigEndian.Uint32(data)
+		case DestinationPointCode:
+			if data[0] != 0 {
+				fault.Status = InvalidDPC
+			}
+		case TrafficModeType:
+			mode := binary.BigEndian.Uint32(data)
+			if mode < TrafficModeOverride || mode > TrafficModeBroadcast {
+				fault.Status = UnsupportedTrafficHandlingMode
+			}
+		case NetworkAppearance:
+			appearances++
+			if appearances > 1 {
+				fault.Status = InvalidNetworkAppearance
+			}
+		case RoutingKey, RegistrationResult, DeregistrationResult:
+			// A nested container is not a Routing Key field; do not bypass the
+			// generic decoder's recursion limit or try to recover its identifiers.
+			return nil
+		}
+		if length == len(b) {
+			break
+		}
+		padded := (length + 3) &^ 3
+		if padded > len(b) {
+			return nil
+		}
+		b = b[padded:]
+	}
+	if identifiers != 1 {
+		return nil
+	}
+	return fault
+}
+
+func (r *RoutingKeyPayload) decodeAtDepth(b []byte, depth int) error {
 	*r = RoutingKeyPayload{}
 	ps, err := parseMultiParamsAtDepth(b, depth+1)
 	if err != nil {

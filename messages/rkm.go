@@ -1,8 +1,11 @@
 package messages
 
 import (
+	"encoding/binary"
+	"errors"
 	"fmt"
 
+	"github.com/gomaja/go-m3ua/internal/rkm"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
@@ -427,11 +430,45 @@ func parseRKMParameters(b []byte, messageType uint8) (*Header, []*params.Param, 
 	if err != nil {
 		return nil, nil, err
 	}
-	parameters, err := params.ParseMultiParams(header.Payload)
+	var parameters []*params.Param
+	if messageType == MsgTypeRegistrationRequest {
+		parameters, err = parseRegistrationParameters(header.Payload)
+	} else {
+		parameters, err = params.ParseMultiParams(header.Payload)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
 	return header, parameters, nil
+}
+
+// Only REG REQ defers correlated semantic faults to the per-key responder
+// (RFC 4666 Section 4.4.1). Parameter APIs and all other messages stay strict.
+func parseRegistrationParameters(b []byte) ([]*params.Param, error) {
+	var parameters []*params.Param
+	for len(b) > 0 {
+		parameter, err := params.Parse(b)
+		if err != nil {
+			var fault *rkm.SemanticFault
+			if len(b) < 4 || binary.BigEndian.Uint16(b) != params.RoutingKey || !errors.As(err, &fault) {
+				return nil, err
+			}
+			length := int(binary.BigEndian.Uint16(b[2:]))
+			// params.Parse checked the outer framing before examining the key.
+			parameter = params.NewParam(int(params.RoutingKey), b[4:length])
+		}
+		parameters = append(parameters, parameter)
+		length := int(parameter.Length)
+		if length == len(b) {
+			break
+		}
+		padded := (length + 3) &^ 3
+		if padded > len(b) {
+			return nil, params.ErrInvalidLength
+		}
+		b = b[padded:]
+	}
+	return parameters, nil
 }
 
 func validateRepeatedRKMParameter(parameters []*params.Param, tag uint16, name string) error {

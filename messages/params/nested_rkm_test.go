@@ -622,6 +622,8 @@ func TestRegistrationResultStructureAndCrossFieldRules(t *testing.T) {
 		ctx    uint32
 	}{
 		{name: "success carries assigned context", status: SuccessfullyRegistered, ctx: 7},
+		{name: "success carries zero context", status: SuccessfullyRegistered, ctx: 0},
+		{name: "already registered carries zero context", status: RoutingKeyAlreadyRegistered, ctx: 0},
 		{name: "ordinary failure carries zero context", status: PermissionDenied, ctx: 0},
 		{name: "already registered carries actual context", status: RoutingKeyAlreadyRegistered, ctx: 7},
 	}
@@ -655,22 +657,6 @@ func TestRegistrationResultStructureAndCrossFieldRules(t *testing.T) {
 		name   string
 		params []*Param
 	}{
-		{
-			name: "successful registration with zero Routing Context",
-			params: []*Param{
-				localIdentifier,
-				NewRegistrationStatus(SuccessfullyRegistered),
-				NewRoutingContext(0),
-			},
-		},
-		{
-			name: "already registered with zero Routing Context",
-			params: []*Param{
-				localIdentifier,
-				NewRegistrationStatus(RoutingKeyAlreadyRegistered),
-				NewRoutingContext(0),
-			},
-		},
 		{
 			name:   "missing Local RK Identifier",
 			params: []*Param{NewRegistrationStatus(SuccessfullyRegistered), NewRoutingContext(1)},
@@ -960,6 +946,9 @@ func assertRoutingKeyPayloadZero(t *testing.T, payload *RoutingKeyPayload) {
 }
 
 func FuzzNestedRKMValidation(f *testing.F) {
+	for _, status := range []uint32{SuccessfullyRegistered, RoutingKeyAlreadyRegistered} {
+		f.Add(uint8(1), joinNestedParams(f, NewLocalRoutingKeyIdentifier(1), NewRegistrationStatus(status), NewRoutingContext(0)))
+	}
 	f.Add(uint8(0), joinNestedParams(f,
 		NewLocalRoutingKeyIdentifier(1),
 		NewDestinationPointCode(2),
