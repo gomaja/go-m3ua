@@ -176,6 +176,9 @@ decision that can change during the association's life.
 
 AssociationStatus reports live local addresses, the primary peer path and all
 current peer paths. Its separate socket reads are not an atomic snapshot.
+SendBacklog reports the send-buffer memory charge, including overhead, and limit.
+SCTPSendBacklog reads it alone.
+SCTPAssocQueues is a separate optional sock_diag read.
 SetSCTPPrimaryAddr, SCTPPathParams/SetSCTPPathParams and
 SCTPPathThresholds/SetSCTPPathThresholds provide runtime path management.
 Before passing an SCTPPathParams result to SetSCTPPathParams, clear

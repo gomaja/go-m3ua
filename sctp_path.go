@@ -13,6 +13,47 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
+// SCTPSendBacklog reads the association's send-buffer memory charge and limit
+// with one SO_MEMINFO query (Linux 4.12+; net/core/sock.c: sk_get_meminfo).
+// It is cheap enough to poll. Charged includes allocation overhead, not just
+// payload, and can exceed Limit, which equals SocketSendBuffer. Zero means no
+// charged DATA remains: delivered DATA has been acknowledged by the peer,
+// which does not mean its application has read it. See sctp.SendBacklog for
+// the treatment of retransmissions, selective acknowledgements and abandonment.
+// It returns ErrAssociationClosed when there is no SCTP connection.
+func (c *Association) SCTPSendBacklog() (*sctp.SendBacklog, error) {
+	if c.sctpConn == nil {
+		return nil, ErrAssociationClosed
+	}
+	return c.sctpConn.SendBacklog()
+}
+
+// SCTPAssocQueues reads the association's send and receive memory charges,
+// never-transmitted DATA chunk count and primary-path payload bytes in flight
+// through SCTP sock_diag (net/sctp/diag.c: sctp_diag_get_info;
+// net/sctp/socket.c: sctp_get_sctp_info). Memory charges include overhead.
+//
+// It needs Linux 5.1+ and the sctp_diag module. On Rocky Linux 9 the module
+// does not load on demand until an administrator loads it (modprobe sctp_diag)
+// or removes the blacklist line in /etc/modprobe.d/sctp_diag-blacklist.conf.
+// When sctp_diag is unavailable, go-sctp returns an error matching
+// sctp.ErrUnsupported that names sctp_diag, never zero counters. This read is
+// kept out of AssociationStatus so its absence does not fail an M-SCTP_STATUS
+// query.
+//
+// Use it for monitoring, not per message: each call opens a netlink socket and
+// Linux walks the unsent queue. On Linux 6.18, IPv6 link-local lookups can fail
+// with ENOENT because the kernel leaves scope ids uninitialized; see
+// https://github.com/sctp/lksctp-tools/issues/82. Global and loopback addresses
+// are unaffected, and SCTPSendBacklog uses no such lookup. Errors from go-sctp
+// pass through unchanged; no SCTP connection returns ErrAssociationClosed.
+func (c *Association) SCTPAssocQueues() (*sctp.AssocQueues, error) {
+	if c.sctpConn == nil {
+		return nil, ErrAssociationClosed
+	}
+	return c.sctpConn.AssocQueues()
+}
+
 // SCTPPRSupported reports whether this association negotiated PR-SCTP
 // (SCTP_PR_SUPPORTED, RFC 7496 §4.5), requiring support at both ends.
 // SCTPConfig.PartialReliability controls the offer before association setup;

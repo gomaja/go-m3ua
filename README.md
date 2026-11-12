@@ -33,7 +33,10 @@ Go reports this move as a downgrade: the earlier versions sort above
 Moving go-sctp alone while go-m3ua still requires its old pin removes go-m3ua
 from `go.mod`, because no published go-m3ua version accepts go-sctp's `main`.
 
-**Requirements:** Linux 5.0 or later for SCTP associations; Rocky Linux / RHEL 9 is the primary target.
+**Requirements:** Linux 5.0 or later for SCTP associations; Rocky Linux / RHEL 9
+is the primary target. Optional `SCTPAssocQueues` monitoring needs Linux 5.1+
+and `sctp_diag`. On Rocky Linux 9 it does not load on demand until an
+administrator loads it (`modprobe sctp_diag`) or removes the blacklist line.
 
 _This project follows [the Release Policy of Go](https://go.dev/doc/devel/release#policy)._
 
@@ -745,6 +748,20 @@ query is omitted, and if every peer path disappears the query returns the path
 error. A Potentially Failed path hidden by PF exposure settings has its address
 and state reported with zero metrics. `Primary.SRTTTicks` and
 `Paths[i].SRTTTicks` are Linux kernel ticks, not milliseconds.
+
+`AssociationStatus.SendBacklog` reports send-buffer memory charged, including
+overhead. Poll `SCTPSendBacklog()` for that value alone. `Charged` can exceed
+`Limit`, which equals `SocketSendBuffer()`. Zero means no charged DATA remains;
+acknowledged DATA need not have been read by the peer application.
+`SCTPAssocQueues()` adds optional sock_diag counters for monitoring, not per
+message; it requires Linux 5.1+ and `sctp_diag`. On Rocky Linux 9 the module
+does not load on demand until an administrator loads it (`modprobe sctp_diag`)
+or removes the blacklist line. Missing `sctp_diag` returns an error matching
+`sctp.ErrUnsupported`, never zero counters, and does not fail
+`AssociationStatus()`. IPv6 link-local lookups can fail with `ENOENT` because
+of [a kernel scope-id defect](https://github.com/sctp/lksctp-tools/issues/82).
+These counters do not trigger SCON or MTP-STATUS congestion indications
+(RFC 4666 Section 1.4.6).
 
 Select the default peer path with `SetSCTPPrimaryAddr(netip.Addr)`. Read and
 change path options with `SCTPPathParams`/`SetSCTPPathParams` and

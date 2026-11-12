@@ -203,6 +203,7 @@ field AssociationStatus.PendingDataChunks
 field AssociationStatus.Primary
 field AssociationStatus.RTOInfo
 field AssociationStatus.ReceiverWindow
+field AssociationStatus.SendBacklog
 field AssociationStatus.State
 field AssociationStatus.UnackedDataChunks
 field CompatibilityPolicy.Tolerator
@@ -568,11 +569,13 @@ method Association.ReadData
 method Association.RegisterRoutingKeys
 method Association.RemoteAddr
 method Association.Role
+method Association.SCTPAssocQueues
 method Association.SCTPAssociationMaxRetrans
 method Association.SCTPPRSupported
 method Association.SCTPPathParams
 method Association.SCTPPathThresholds
 method Association.SCTPRTOInfo
+method Association.SCTPSendBacklog
 method Association.SetASAvailable
 method Association.SetASAvailableForAS
 method Association.SetDeadline
