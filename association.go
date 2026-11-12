@@ -160,9 +160,12 @@ type Association struct {
 	// closeOnce ensures Close() channel cleanup runs exactly once
 	closeOnce sync.Once
 	// closeErr records why the association ended, reported by Err(). Written
-	// once, inside closeOnce, so the first cause is the one kept: a later Close
-	// must not overwrite the reason the association actually died.
+	// once, inside closeOnce, so a later Close cannot replace the committed
+	// terminal cause.
 	closeErr atomic.Value
+	// peerRelease arbitrates a failed control send against the receive-side
+	// SCTP end indication before closeOnce makes Err immutable.
+	peerRelease peerRelease
 	// cfg is a configuration required to communicate between M3UA endpoints
 	cfg *AssociationConfig
 	// trafficModes is the immutable Traffic Mode policy copied from cfg at
@@ -526,6 +529,7 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		stateChan:              make(chan State),
 		restartStateChan:       make(chan restartStateUpdate),
 		inboundChan:            make(chan inbound),
+		peerRelease:            peerRelease{drain: make(chan struct{})},
 		established:            make(chan struct{}, 1),
 		done:                   make(chan struct{}),
 		gracefulReleaseStarted: make(chan struct{}),
@@ -1041,22 +1045,31 @@ func (c *Association) writeMandatoryControls(control []messages.M3UA, enforceTra
 		entry.result = make(chan error, 1)
 	}
 	c.notificationOnce.Do(func() { go c.writeNotifications() })
+	c.peerRelease.mu.Lock()
 	select {
 	case <-c.done:
+		c.peerRelease.mu.Unlock()
 		if err := c.Err(); err != nil {
 			return err
 		}
 		return ErrAssociationClosed
 	default:
 	}
+	if err := c.peerRelease.writeErr; err != nil {
+		c.peerRelease.mu.Unlock()
+		return err
+	}
 	select {
 	case c.notificationQueue <- entry:
+		c.peerRelease.mu.Unlock()
 	case <-c.done:
+		c.peerRelease.mu.Unlock()
 		if err := c.Err(); err != nil {
 			return err
 		}
 		return ErrAssociationClosed
 	default:
+		c.peerRelease.mu.Unlock()
 		if c.notificationOverflow.CompareAndSwap(false, true) {
 			go func() { _ = c.closeWith(ErrNotificationQueueFull) }()
 		}
@@ -1068,6 +1081,8 @@ func (c *Association) writeMandatoryControls(control []messages.M3UA, enforceTra
 	select {
 	case err := <-entry.result:
 		return err
+	case <-c.peerRelease.drainSignal():
+		return c.peerRelease.writeFailure()
 	case <-c.done:
 		if err := c.Err(); err != nil {
 			return err
@@ -1134,7 +1149,13 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 		c.sendMu.Unlock()
 	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to write M3UA: %w", err)
+		err = fmt.Errorf("failed to write M3UA: %w", err)
+		if sctpAssociationFailure(err) {
+			// The control writer cannot continue. Let the reader consume
+			// SCTP_COMM_LOST/EOF before publishing the terminal cause.
+			c.peerRelease.failedWrite(err)
+		}
+		return 0, err
 	}
 
 	// The encoded length, counted once. It used to have the transport write return
@@ -1600,6 +1621,8 @@ func (c *Association) Abort() error {
 // reports the final transition. Both indication channels close only after the
 // affected destinations have been paused; ManagementIndications reports the
 // release before closing.
+// A failed control send can await the receive-side SCTP end before this
+// publication; Err describes how the terminal cause is selected.
 func (c *Association) Done() <-chan struct{} {
 	return c.done
 }
@@ -1612,6 +1635,15 @@ func (c *Association) Done() <-chan struct{} {
 // T(beat), a context error for a cancelled owner, and the underlying read or
 // protocol error otherwise. Read and Write report ErrNotEstablished for all of
 // them.
+//
+// A received peer ABORT matches ErrSCTPNotAlive and retains the cause the kernel
+// supplies; a graceful peer release matches io.EOF. If a control write notices
+// transport loss first, its write error is returned to that caller. The
+// association consumes the reader's SCTP end indication before publishing the
+// terminal cause. Err remains nonblocking. The cause is final when Done closes,
+// including in the SCTP release indication (RFC 6458 §6.1.1;
+// RFC 9260 §§9.1, 11.2.5). An explicit local close or owner cancellation can
+// still end the association before that indication arrives.
 func (c *Association) Err() error {
 	if v := c.closeErr.Load(); v != nil {
 		if err, ok := v.(error); ok {
@@ -1633,6 +1665,20 @@ func (c *Association) closeWith(cause error) error {
 // performed the teardown, rather than finding it already done or waiting out
 // another's, and err is the transport release's error if it did.
 func (c *Association) endWith(cause error, abortive bool) (ended bool, err error) {
+	if !localEndCause(cause) {
+		var waitForReader bool
+		cause, waitForReader = c.peerRelease.endCause(cause)
+		if waitForReader {
+			select {
+			case <-c.done:
+				// An earlier teardown already committed its cause. Join it
+				// even if a later write also noticed transport loss.
+				cause = c.Err()
+			default:
+				return false, nil
+			}
+		}
+	}
 	c.closeOnce.Do(func() {
 		ended = true
 		c.closingAbortive.Store(abortive)
@@ -3179,7 +3225,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return c.finishTermination(err)
+		return c.finishTermination(ctx, err)
 	}
 
 	// ASP Inactive and ASP Down are initiated by an ASP or, under RFC 4666
@@ -3204,7 +3250,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 			err = c.waitTAck(ctx, request)
 		}
 		if err != nil {
-			return c.finishTermination(err)
+			return c.finishTermination(ctx, err)
 		}
 	}
 
@@ -3215,7 +3261,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 			err = c.waitTAck(ctx, request)
 		}
 		if err != nil {
-			return c.finishTermination(err)
+			return c.finishTermination(ctx, err)
 		}
 	}
 
@@ -3240,12 +3286,20 @@ func (c *Association) releaseAfterWithdrawal() error {
 // When another release ended it first, that release is why the step failed
 // -- the write it could not make, or the T(ack) wait it cancelled -- so it is
 // what ShutdownContext reports, through Err.
-func (c *Association) finishTermination(cause error) error {
+func (c *Association) finishTermination(ctx context.Context, cause error) error {
 	ended, closeErr := c.endWith(cause, false)
 	if !ended {
-		if err := c.Err(); err != nil {
-			return err
+		select {
+		case <-c.done:
+		case <-ctx.Done():
+			_, closeErr = c.endWith(ctx.Err(), false)
 		}
+		// Done publishes the cause before cleanup finishes. Join the actual
+		// teardown as the original synchronous release did.
+		_, _ = c.endWith(c.Err(), false)
+	}
+	if final := c.Err(); final != nil {
+		cause = final
 	}
 	if closeErr != nil {
 		return errors.Join(cause, closeErr)
