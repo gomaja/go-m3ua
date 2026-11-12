@@ -95,6 +95,27 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 		return
 	}
 
+	// RFC 4666 §§1.4.3.2 and 3.3.1 exclude MTP3 management from DATA.
+	// For every role, discard it and report Invalid Parameter Value (§3.8.1),
+	// including the received bytes in Diagnostic Information and an M-ERROR
+	// indication (§4.2). SG/NIF management interworking uses SSNM instead.
+	if message.protocolData.ServiceIndicator == 0 {
+		fault := &mtpManagementDataError{raw: diagnosticInformation(raw)}
+		appearance, appearanceSet := appearanceOf(data.NetworkAppearance)
+		c.notifyManagement(&ManagementIndication{
+			Kind:                 ManagementError,
+			ASKeys:               []ASKey{c.receivedASKey(data)},
+			NetworkAppearance:    appearance,
+			NetworkAppearanceSet: appearanceSet,
+			RoutingContexts:      routingContextsOf(data.RoutingContext),
+			ErrorCode:            params.ErrInvalidParameterValue,
+			Description:          errorCodeName(params.ErrInvalidParameterValue),
+			Cause:                ErrMTPManagementData,
+		})
+		c.sendErrForMessage(data, raw, fault)
+		return
+	}
+
 	// Everything the application needs to distribute this message and to answer
 	// in the scope it arrived on travels with the payload: the exact wire scope,
 	// the Application Server it resolves to, the arrival stream, the peer's

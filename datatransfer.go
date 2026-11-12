@@ -18,6 +18,7 @@ import (
 )
 
 // DataRequest is one outbound DATA message.
+// SI 0 is refused with ErrMTPManagementData (RFC 4666 §1.4.3.2).
 //
 // Everything the message carries is in the request, because RFC 4666 Section
 // 3.3.1 makes all of it per-message: the Protocol Data holds "the MTP3 routing
@@ -69,6 +70,8 @@ const (
 )
 
 // WriteData sends one DATA message and reports the SS7 user octets it carried.
+// MTP3 management (SI 0) returns ErrMTPManagementData wrapped in a
+// *DataWriteError with DataNotSent, before submission (RFC 4666 §1.4.3.2).
 //
 // Success means the local transport accepted the message, not that the peer
 // received it: RFC 4666 defines no acknowledgement for DATA. Every failure is a
@@ -88,6 +91,8 @@ func (c *Association) WriteData(request DataRequest) (int, error) {
 }
 
 // WriteDataContext sends one DATA message with cancellation for this call.
+// Like WriteData, it refuses SI 0 with ErrMTPManagementData and DataNotSent
+// (RFC 4666 §1.4.3.2).
 // It observes ctx before admission, while waiting for Application Server and
 // association delivery barriers, while waiting behind any sender on the socket,
 // and while waiting for send-buffer space under an association write deadline.
@@ -114,6 +119,10 @@ func (c *Association) WriteDataContext(ctx context.Context, request DataRequest)
 	}
 	if !c.outboundDataActive() {
 		return 0, newDataNotSent(request.AS, 0, ErrNotEstablished)
+	}
+	// RFC 4666 §1.4.3.2: MTP3 management terminates at the SG, never in DATA.
+	if request.ProtocolData.ServiceIndicator == 0 {
+		return 0, newDataNotSent(request.AS, 0, ErrMTPManagementData)
 	}
 	if err := validateNetworkIndicator(request.ProtocolData.NetworkIndicator); err != nil {
 		return 0, newDataNotSent(request.AS, 0, err)
@@ -396,6 +405,11 @@ func (c *Association) outboundDataStream(data *messages.Data) (uint16, error) {
 	payload, err := data.ProtocolData.ProtocolData()
 	if err != nil {
 		return 0, err
+	}
+	// Built-in and custom codecs preserve received octets for inspection.
+	// RFC 4666 §1.4.3.2 is enforced here when DATA is offered for sending.
+	if payload.ServiceIndicator == 0 {
+		return 0, ErrMTPManagementData
 	}
 	if err := validateNetworkIndicator(payload.NetworkIndicator); err != nil {
 		return 0, err

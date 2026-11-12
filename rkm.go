@@ -53,7 +53,9 @@ type PointCodeRange struct {
 
 // RoutingKeyGroup is one repeatable Destination Point Code, Service
 // Indicators, and Originating Point Code List grouping from RFC 4666 Section
-// 3.6.1. Empty ServiceIndicators and OriginatingPointCodes mean any value.
+// 3.6.1. Empty ServiceIndicators means every SI except MTP3 management
+// (SI 0); empty OriginatingPointCodes means any originating point code.
+// SI 1 and SI 2 remain selectable: RFC 4666 does not settle their exclusion.
 type RoutingKeyGroup struct {
 	DestinationPointCode  uint32
 	ServiceIndicators     []uint8
@@ -318,7 +320,8 @@ func (key canonicalRoutingKey) matchesTraffic(
 }
 
 func setContains(values []uint8, value uint8) bool {
-	return len(values) == 0 || slices.Contains(values, value)
+	// RFC 4666 §3.6.1 excludes MTP management even when SI is omitted.
+	return value != 0 && (len(values) == 0 || slices.Contains(values, value))
 }
 
 func pointCodeRangesContain(ranges []canonicalPointCodeRange, pointCode uint32) bool {

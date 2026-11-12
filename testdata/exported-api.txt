@@ -851,6 +851,7 @@ var ErrInvalidSSNMStateConfig
 var ErrInvalidState
 var ErrMTP3RestartInProgress
 var ErrMTP3RestartScope
+var ErrMTPManagementData
 var ErrMTPTransferOutsideRoute
 var ErrManagementBlocking
 var ErrMessageTooLarge
