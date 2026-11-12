@@ -491,6 +491,12 @@ type Association struct {
 	rkmAwaiting                      uint32
 	rkmNextLocalID                   uint32
 	rkmResponseChan                  chan messages.M3UA
+	transportMu                      sync.Mutex
+	transportDetector                *transportCongestionDetector
+	transportSnapshot                atomic.Pointer[TransportCongestionState]
+	transportBusy                    atomic.Bool
+	transportProjectionPending       atomic.Bool
+	transportReady                   atomic.Bool
 }
 
 var netMap = map[string]string{
@@ -524,6 +530,7 @@ func newAssociation(role Role, cfg *AssociationConfig) *Association {
 // caller, including when the callback has already started channel readers.
 func (c *Association) subscribeBeforeHandshake() {
 	if c.cfg.Subscribe == nil {
+		c.enableTransportSampling()
 		return
 	}
 	returned := false
@@ -534,6 +541,7 @@ func (c *Association) subscribeBeforeHandshake() {
 	}()
 	c.cfg.Subscribe(c)
 	returned = true
+	c.enableTransportSampling()
 }
 
 func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, trafficModes trafficModePolicy) *Association {
@@ -1023,6 +1031,9 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 		return false, nil
 	default:
 	}
+	if err := c.validateIPSPCongestionFrame(frame); err != nil {
+		return false, err
+	}
 	transport := c.controlSender()
 	_, err := transport.SendMsg(frame, sctp.SendOptions{Info: info, NoWait: true})
 	if !sendBufferFull(err) {
@@ -1234,7 +1245,10 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 		}
 	} else {
 		c.sendMu.Lock()
-		_, err = c.controlSender().SendMsg(buf, sctp.SendOptions{Info: &sctpInfo, NoWait: c.applicationWriteDeadline.Load() == nil})
+		err = c.validateIPSPCongestionFrame(buf)
+		if err == nil {
+			_, err = c.controlSender().SendMsg(buf, sctp.SendOptions{Info: &sctpInfo, NoWait: c.applicationWriteDeadline.Load() == nil})
+		}
 		c.sendMu.Unlock()
 	}
 	if err != nil {
@@ -1391,6 +1405,54 @@ func (c *Association) lockOutboundSSNMContexts(routingContext *params.Param) (fu
 		return c.lockResolvedOutboundDataScope(params.NewRoutingContext(routingContexts...))
 	}
 	return c.lockOutboundApplicationServers(routingContexts)
+}
+
+// validateIPSPCongestionFrame rechecks the local-directed scope after the
+// writer wait. Typed, raw and overflow SCON use the same live admission rule
+// (RFC 4666 Sections 4.3.1 and 5.6.2).
+func (c *Association) validateIPSPCongestionFrame(raw []byte) error {
+	if c.role != RoleIPSP || !isSSNM(raw) || raw[3] != messages.MsgTypeSignallingCongestion {
+		return nil
+	}
+	message, err := messages.Parse(raw)
+	if err != nil {
+		return err
+	}
+	rc, _ := ssnmRoutingContext(message)
+	return c.outboundSCONScopeActive(rc)
+}
+
+func (c *Association) outboundSCONScopeActive(routingContext *params.Param) error {
+	// State entry can hold muState while waiting for sendMu. A writer must
+	// decline optional SCON during that transition instead of reversing order.
+	if !c.muState.TryRLock() {
+		return ErrNotEstablished
+	}
+	state := c.state
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPState
+	}
+	c.muState.RUnlock()
+	if state != StateASPActive {
+		return ErrNotEstablished
+	}
+	if err := c.validateOutboundSSNMRoutingContext(routingContext); err != nil {
+		return err
+	}
+	contexts := c.configuredLocalRoutingContexts()
+	if routingContext != nil {
+		contexts = routingContext.RoutingContexts()
+	}
+	for _, rc := range contexts {
+		active := c.outboundRoutingContextActive(rc)
+		if c.isIPSPDoubleExchange() {
+			active = c.routingContextAcked(rc) && !c.routingContextOverridden(rc)
+		}
+		if !active {
+			return ErrRoutingContextNotActive
+		}
+	}
+	return nil
 }
 
 func (c *Association) validateOutboundSSNMRoutingContext(routingContext *params.Param) error {
@@ -3529,6 +3591,8 @@ func (c *Association) closeStateChanges() {
 // the PathInfo error. A Potentially Failed path hidden by PF exposure settings
 // is included with its address and state, and zero metrics.
 type AssociationStatus struct {
+	// TransportCongestion is the most recent periodic local detector snapshot.
+	TransportCongestion TransportCongestionState
 	// State is the association's SCTP state, as a name (for example
 	// "ESTABLISHED"). RFC 9260 Section 4 defines the state machine.
 	State string
@@ -3680,6 +3744,7 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 		UnackedDataChunks:     r.Unacked,
 		PendingDataChunks:     r.Pending,
 		SendBacklog:           *backlog,
+		TransportCongestion:   c.TransportCongestion(),
 		InboundStreams:        r.InStreams,
 		OutboundStreams:       r.OutStreams,
 		FragmentationPoint:    r.FragmentationPoint,
@@ -3750,14 +3815,16 @@ const (
 	// ManagementSCTPStatus reports an SCTP path change to Layer Management
 	// (RFC 4666 Section 1.6.3; RFC 9260 Section 11.2.3).
 	ManagementSCTPStatus
-	// ManagementDataQueueCongestion reports local inbound queue onset, end,
-	// or scope tracking loss; it is an implementation indication (RFC 4666
-	// Section 1.4.6), not a new wire primitive.
+	// ManagementDataQueueCongestion is the implementation indication for local
+	// inbound queue onset, end, or scope tracking loss (RFC 4666 Section 1.4.6).
 	ManagementDataQueueCongestion
+	// ManagementTransportCongestion is the implementation indication for local
+	// outbound transport pressure (RFC 4666 §§1.4.6, 4.5.2.1).
+	ManagementTransportCongestion
 )
 
-// String names the indication as RFC 4666 Section 1.6.3 does, or uses an
-// implementation-specific name for local queue reports.
+// String names the standard indications of RFC 4666 Section 1.6.3 and
+// uses implementation names for local congestion reports.
 func (k ManagementIndicationKind) String() string {
 	switch k {
 	case ManagementNotify:
@@ -3768,6 +3835,8 @@ func (k ManagementIndicationKind) String() string {
 		return "M-SCTP_RESTART"
 	case ManagementSCTPRelease:
 		return "M-SCTP_RELEASE"
+	case ManagementTransportCongestion:
+		return "TRANSPORT-CONGESTION"
 	case ManagementSCTPStatus:
 		return "M-SCTP_STATUS"
 	case ManagementDataQueueCongestion:
@@ -3787,13 +3856,15 @@ func causeDescription(cause error) string {
 // ManagementIndication is one report from the M3UA layer to Layer Management.
 //
 // Which fields carry meaning depends on Kind; the rest are zero. Description is
-// always set, and names the value as the RFC names it, so an indication can be
-// logged without a lookup table.
+// always set. Standard indications use RFC names; local congestion reports use
+// implementation names, so an indication can be logged without a lookup table.
 type ManagementIndication struct {
 	Kind ManagementIndicationKind
 	// DataQueueCongestion is set only for ManagementDataQueueCongestion.
 	// The indication owns this copy and its wire scope.
 	DataQueueCongestion *DataQueueCongestionIndication
+	// TransportCongestion is the local detector snapshot for ManagementTransportCongestion or ManagementSCTPRestart.
+	TransportCongestion *TransportCongestionState
 	// PeerAddrChange is set only for ManagementSCTPStatus. The indication owns
 	// this copy of the SCTP notification (RFC 6458 Section 6.1.2).
 	PeerAddrChange *sctp.PeerAddrChange
@@ -3950,6 +4021,10 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 		congestion := *ind.DataQueueCongestion
 		congestion.Scope = congestion.Scope.clone()
 		snapshot.DataQueueCongestion = &congestion
+	}
+	if ind.TransportCongestion != nil {
+		state := *ind.TransportCongestion
+		snapshot.TransportCongestion = &state
 	}
 	if ind.PeerAddrChange != nil {
 		change := *ind.PeerAddrChange

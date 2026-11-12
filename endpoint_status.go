@@ -458,38 +458,38 @@ func (e *Endpoint) DestinationStatuses() []DestinationStatusSnapshot {
 	e.destinations.mu.RUnlock()
 
 	// Availability and congestion are separate statements (RFC 4666 Section
-	// 4.5.2.2) and are retained in separate records, so a key's snapshot takes
-	// the newest record for each dimension rather than the newest record.
+	// 4.5.2.2), so a key's snapshot uses each dimension's own chronology,
+	// including when one record retains both dimensions.
 	type sequencedStatus struct {
 		status          DestinationStatusSnapshot
 		availabilitySeq uint64
 		congestionSeq   uint64
 	}
 	latest := make(map[DestinationStatusKey]sequencedStatus, len(records))
-	keepNewest := func(rangeValue destinationRange, dimensions destinationDimensions, sequence uint64) {
+	keepNewest := func(rangeValue destinationRange, dimensions destinationDimensions, availabilitySequence, congestionSequence uint64) {
 		key := destinationStatusKeyFromRange(rangeValue)
 		current := latest[key]
 		current.status.Key = key
-		if dimensions.carries(destinationAvailabilityDimension) && sequence > current.availabilitySeq {
-			current.availabilitySeq = sequence
+		if dimensions.carries(destinationAvailabilityDimension) && availabilitySequence > current.availabilitySeq {
+			current.availabilitySeq = availabilitySequence
 			current.status.State.Availability = rangeValue.State.Availability
 		}
-		if dimensions.carries(destinationCongestionDimension) && sequence > current.congestionSeq {
-			current.congestionSeq = sequence
+		if dimensions.carries(destinationCongestionDimension) && congestionSequence > current.congestionSeq {
+			current.congestionSeq = congestionSequence
 			current.status.State.Congestion = rangeValue.State.Congestion
 		}
 		latest[key] = current
 	}
 	for _, record := range records {
 		if len(record.routingContexts) == 0 {
-			keepNewest(record.rangeValue, record.dimensions, record.sequence)
+			keepNewest(record.rangeValue, record.dimensions, record.availabilitySequence, record.congestionSequence)
 			continue
 		}
 		for _, routingContext := range record.routingContexts {
 			rangeValue := record.rangeValue
 			rangeValue.RoutingContext = routingContext
 			rangeValue.RoutingContextSet = true
-			keepNewest(rangeValue, record.dimensions, record.sequence)
+			keepNewest(rangeValue, record.dimensions, record.availabilitySequence, record.congestionSequence)
 		}
 	}
 	statuses := make([]DestinationStatusSnapshot, 0, len(latest))

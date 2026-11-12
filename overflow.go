@@ -252,7 +252,7 @@ func (c *Association) writeOverflowSCON(overflow *DataQueueOverflowError) error 
 	if !c.dataOverflow.Load() || overflow.generation != c.dataOverflowGeneration {
 		return nil
 	}
-	if err := c.overflowSCONScopeActive(message.RoutingContext); err != nil {
+	if err := c.outboundSCONScopeActive(message.RoutingContext); err != nil {
 		return err
 	}
 	// The generation check and transport admission share the tracker lock with
@@ -266,33 +266,6 @@ func (c *Association) writeOverflowSCON(overflow *DataQueueOverflowError) error 
 	info := *c.sctpInfo
 	_, err = c.controlSender().SendMsg(raw, sctp.SendOptions{Info: &info, NoWait: true})
 	return err
-}
-
-func (c *Association) overflowSCONScopeActive(routingContext *params.Param) error {
-	if err := c.validateOutboundSSNMRoutingContext(routingContext); err != nil {
-		return err
-	}
-	state := c.State()
-	if c.isIPSPDoubleExchange() {
-		state = c.localIPSPStateValue()
-	}
-	if state != StateASPActive {
-		return ErrNotEstablished
-	}
-	contexts := c.configuredLocalRoutingContexts()
-	if routingContext != nil {
-		contexts = routingContext.RoutingContexts()
-	}
-	for _, rc := range contexts {
-		active := c.outboundRoutingContextActive(rc)
-		if c.isIPSPDoubleExchange() {
-			active = c.routingContextAcked(rc) && !c.routingContextOverridden(rc)
-		}
-		if !active {
-			return ErrRoutingContextNotActive
-		}
-	}
-	return nil
 }
 
 func (c *Association) overflowSCON(e *DataQueueOverflowError) *messages.SignallingCongestion {

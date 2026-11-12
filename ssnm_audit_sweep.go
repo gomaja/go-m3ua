@@ -49,7 +49,7 @@ type destinationAuditScratch struct {
 	events                   []auditEvent
 	boundaries               []uint32
 	active                   []bool
-	priorities               []auditPriority
+	priorities               [][2]auditPriority
 	availability, congestion auditHeap
 	affected, completed      []int
 }
@@ -136,15 +136,14 @@ func (scratch *destinationAuditScratch) sweepDestinationAudit(records []destinat
 				known += e.delta
 				if e.delta > 0 {
 					record := records[indices[e.index]]
-					scratch.priorities[e.index] = auditPriority{record.sequence, e.index}
-					priority := &scratch.priorities[e.index]
+					scratch.priorities[e.index] = [2]auditPriority{{record.availabilitySequence, e.index}, {record.congestionSequence, e.index}}
 					availability.prune(active)
 					congestion.prune(active)
-					if record.sequence > 0 && record.dimensions.carries(destinationAvailabilityDimension) {
-						heap.Push(availability, priority)
+					if record.availabilitySequence > 0 && record.dimensions.carries(destinationAvailabilityDimension) {
+						heap.Push(availability, &scratch.priorities[e.index][0])
 					}
-					if record.sequence > 0 && record.dimensions.carries(destinationCongestionDimension) {
-						heap.Push(congestion, priority)
+					if record.congestionSequence > 0 && record.dimensions.carries(destinationCongestionDimension) {
+						heap.Push(congestion, &scratch.priorities[e.index][1])
 					}
 				}
 			} else {

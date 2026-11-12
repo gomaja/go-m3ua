@@ -760,8 +760,89 @@ or removes the blacklist line. Missing `sctp_diag` returns an error matching
 `sctp.ErrUnsupported`, never zero counters, and does not fail
 `AssociationStatus()`. IPv6 link-local lookups can fail with `ENOENT` because
 of [a kernel scope-id defect](https://github.com/sctp/lksctp-tools/issues/82).
-These counters do not trigger SCON or MTP-STATUS congestion indications
-(RFC 4666 Section 1.4.6).
+### Transport congestion
+
+An Endpoint enables periodic outbound SCTP pressure detection by default
+(RFC 4666 §§1.4.6, 4.5.2.1–2). It samples `SCTPSendBacklog` every 100 ms
+with four bounded workers, staggered across established associations. No
+socket query is added to DATA send or receive. Sampling begins after the
+association's `Subscribe` callback returns. The metric is `Charged/Limit`,
+allocated memory including overhead, and can exceed one. High occupancy can
+mean offered load, flight time, path impairment or receiver flow control;
+it does not prove IP loss or measure payload backlog or drain time.
+
+`EndpointConfig.TransportCongestion` configures the interval, workers,
+three onset ratios (0.50/0.70/0.90), three abatement ratios (below
+0.40/0.60/0.80), independent 300 ms onset and 1 s abatement dwell, and a
+3 s stale timeout. These are engineering defaults. Optional paired
+`AbsoluteOnset`/`AbsoluteAbatement` charged-memory thresholds combine with
+ratios by the more severe result. Calibrate both for the deployment's buffer
+sizes and delay budget. `Disabled: true` leaves detection to the application.
+
+`Association.TransportCongestion()` and `AssociationStatus.TransportCongestion`
+expose raw values, level, validity, timestamps, generation, errors and missed
+samples. `Known=false` means unavailable or stale, never measured clear.
+A query failure resets dwell and retains the last level for diagnosis; after
+the stale timeout that level stops contributing as known congestion. A limit
+change retains the level and requires fresh dwell. Restart rejects old samples
+and exposes unknown pressure; teardown removes the route contribution.
+Pending dwell also requires continuous sampling coverage: consecutive valid
+samples may be at most 1.5 times the interval apart (150 ms by default).
+A larger gap or an explicitly missed slot restarts dwell without changing the
+current level. A held association state lock skips that association's slot;
+it does not stop sampling other associations. The held association becomes
+unknown after the stale timeout measured from its last valid observation.
+Destination publication uses a bounded, coalescing worker, so waiting for an
+AS state commit does not occupy the scheduler or sampling workers.
+Separate SCTP status diagnostics are read on level changes and once per second
+while congested. Zero receiver credit suggests peer flow control.
+
+Routed ASPs receive aggregate destination MTP-STATUS onset, level changes and
+abatement through `MTPIndications()`. Alternatives must all be congested;
+broadcast includes every required copy. Received SCON and transport pressure
+remain separate and combine by severity. Transport recovery does not clear
+SCON. `TransportCongestionUnknown` in destination status distinguishes unknown
+transport from abatement. IPSPs have the same bounded channel and snapshot
+methods when `EndpointConfig.IPSPDestinations` explicitly maps peer-directed
+AS scopes to destinations. At the IPSP destination-record limit, refused SSNM
+updates leave the previous retained state in MTP indications and destination
+snapshots. `SubscribeSSNM` reports that loss as `SSNMResourceLossEvent`; taking
+another snapshot alone cannot recover an update that was not retained.
+Without destination mappings the application owns
+projection and uses the per-association detector snapshots and management events.
+The single channel consumer fans out to the application's MTP3-Users.
+Transport aggregation checks each destination against the same ordered AS,
+binding, activation and availability rules used by `MTPTransfer`. A DUNA
+through an earlier AS cannot hide pressure on the usable fallback AS.
+Received SCON and transport pressure are combined on each selected AS/member
+before comparing usable alternatives.
+
+Layer Management receives the implementation indications
+`ManagementTransportCongestion` (`TRANSPORT-CONGESTION`) for outbound transport
+pressure and `ManagementDataQueueCongestion` (`DATA-QUEUE-CONGESTION`) for inbound
+queue onset, end and tracking loss. The sources are independent (RFC 4666 §1.4.6).
+Applications can query the association's current transport detector snapshot.
+The existing management queue overflow policy
+terminates the association rather than losing continuity silently. MTP queue
+overflow produces `ResyncRequired`; resynchronize with `MTPDestinationStatuses`.
+
+`ASPRoutingConfig.CongestionPolicy` receives each eligible association's combined
+received/transport level before selection. An unavailable transport observation
+uses the policy's unknown-level decision (`levelSet=false`); nil policy allows
+unknown candidates. Default selection is unchanged.
+`PreferUncongestedTransport: true` opts into preferring less pressured routes
+after availability, including association members. It can move an SLS flow
+between associations and missequence DATA; no cross-association changeover
+barrier is provided (RFC 4666 §1.4.7). Accepted or indeterminate DATA is never
+retried on a different association because pressure changed.
+
+Outbound pressure sends no automatic SCON. `Association.SignallingCongestion`
+permits deliberate local ASP/IPSP reports; double exchange uses its local-directed
+SCON scope. An SGP exposes detector status to its application/NIF, which owns
+SPMC aggregation and SS7 actions. This detector supplies local pressure events;
+it does not implement national/international congestion-method profiles,
+Message Priority discard, repeated User Part notifications, SCON validity timers,
+DAUD level-zero policy, or SS7 TFC procedures.
 
 Select the default peer path with `SetSCTPPrimaryAddr(netip.Addr)`. Read and
 change path options with `SCTPPathParams`/`SetSCTPPathParams` and

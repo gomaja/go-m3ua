@@ -404,17 +404,34 @@ func (c *Association) handleDeregistrationRequest(message *messages.Deregistrati
 // this publication; static membership in the same AS remains configured.
 func (c *Association) applyDeregistrationResults(results []RoutingKeyDeregistrationResult) func() {
 	var notifications []func()
+	retired := false
 	for _, result := range results {
 		if result.Status != DeregistrationSuccessfullyDeregistered || !result.ASKey.RoutingContextSet {
 			continue
 		}
 		c.removeDynamicASKey(result.RoutingContext, false)
+		c.retireDynamicCongestion(result.ASKey, false)
+		retired = true
 		c.forgetCanonicalRemoteAS(result.RoutingContext)
 		if c.as != nil && !c.hasStaticApplicationServerMembership(result.ASKey) {
 			notifications = append(notifications, c.as.prepareDeregisterDynamicASP(c, result.ASKey, result.removeAS))
 		}
 	}
+	if retired {
+		c.notifyASPRouteStateChanged()
+	}
 	return combineNotificationReleases(notifications)
+}
+
+// Retained received congestion belongs to the registration lifetime. The
+// physical detector, its dwell and publication bit belong to the association,
+// and remain valid for other ASs; publication resolves current membership.
+func (c *Association) retireDynamicCongestion(key ASKey, local bool) {
+	// An SGP's destination store is shared SS7 authority, not a cache of
+	// peer congestion (RFC 4666 Section 3.4.4). A departing ASP cannot erase it.
+	if c.role != RoleSGP && !local && !c.hasStaticallyConfiguredASKey(key) {
+		c.destinations.forgetRoutingContext(key.RoutingContext)
+	}
 }
 
 // retirePeerRegistrations runs after traffic is quiesced and before the ASPSM
@@ -839,7 +856,8 @@ func (c *Association) removeRequesterRoutingKeyVersion(routingContext uint32, ve
 		}
 	}
 	if removed {
-		c.syncSSNMBindings()
+		c.retireDynamicCongestion(key, local)
+		c.notifyASPRouteStateChanged()
 	}
 }
 

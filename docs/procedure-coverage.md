@@ -33,7 +33,7 @@ including parsing, dispatch and receive queue wait but excluding the kernel rece
 | Per-message scope and routing label | ASP, SGP, DE | both | ASP-ACTIVE | `TestReadDataReportsTheReceivedScopeStreamAndEpoch`, `TestReadDataReturnsCallerOwnedData` |
 | Stream selection from SLS; stream 0 refused | ASP, SGP, SE | both | any | `TestStreamSelectionHandlesEveryNegotiatedCount`, `TestWriteSignalDoesNotPutDataOnStreamZero`, `TestDataOnStreamZeroIsRejected`, `TestMTPTransferSelectsAvailableSGPAndSLSStream` |
 | Partial and failed submission classified | ASP, SGP | local | ASP-ACTIVE | `TestWriteDataClassifiesPartialSubmissionAsIndeterminate`, `TestBroadcastPartialWriteKeepsSynchronizationPending`, `TestWriteDataReportsATransportRefusalAsNotSent`, `TestFullSendBufferReportsDataAsNotSent`, `TestExpiredWriteDeadlineReportsDataAsNotSent` |
-| Inbound queue overflow | ASP, IPSP send; all roles report locally | received NA/RC/DPC/OPC | ASP-ACTIVE | `TestOverflowSCONCarriesTheReceivedScope`, `TestOverflowSCONSocketScopesAndSustainedDrain`, `TestOverflowAtSGPDoesNotReportSS7DestinationCongestion`, `TestOverflowIPSPOnsetOmitsConcernedDestination` |
+| Inbound queue overflow | ASP, IPSP send; all roles report locally through implementation indication `ManagementDataQueueCongestion` (`DATA-QUEUE-CONGESTION`) | received NA/RC/DPC/OPC | ASP-ACTIVE | `TestOverflowSCONCarriesTheReceivedScope`, `TestOverflowSCONSocketScopesAndSustainedDrain`, `TestOverflowAtSGPDoesNotReportSS7DestinationCongestion`, `TestOverflowIPSPOnsetOmitsConcernedDestination` |
 | Inbound queue sustained-drain recovery | all | local management only | active episode | `TestOverflowEpisodeEndsAfterSustainedDrain`, `TestOverflowEpisodeStaysWhileOccupancyStaysHigh`, `TestOverflowDrainThresholdAndDwellBoundaries`, `TestOverflowManagementSurvivesFailedSCON`, `TestOverflowScopeLimitReportsContinuityLoss` |
 | Admission and authorization | ASP, SGP, SE, DE | local | INACTIVE→ACTIVE barrier | `TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting` |
 | Contextless Application Server | ASP, SGP, SE, DE | both | ASP-ACTIVE | `TestEncodedDataMatchesTheCodec` (scope), and the RKM and IPSP contextless rows below |
@@ -255,21 +255,25 @@ only as a codec.
 | Routing Key Management | 1.4.2.3, 3.6, 4.4 | Both sides, all four messages, static and dynamic keys in one collision-checked registry |
 | ASP destination auditing with DAUD | 4.5.3 | The ASP originates it; the SGP answers available, restricted, congested, unavailable and unknown from retained state |
 | M3UA heartbeat, BEAT and BEAT Ack | 4.3.4.6 | Either role, independent of SCTP HEARTBEAT path management |
-| SCON from an ASP to an SGP | 3.4.4 | Including Concerned Destination, and deliberately kept out of the SG's own destination state |
+| Local SCON from an ASP or IPSP | 3.4.4 | Including Concerned Destination, and deliberately kept out of the SG's own destination state |
 | Correlation Id | 3.3.1 | Per message, on every DATA path, with presence distinguished from zero |
 | Network Appearance | 3.3.1, 3.4 | Per Application Server, with presence distinguished from zero |
 | Contextless Application Server | 3.6.1 | ASP, SGP and both IPSP exchange models |
 | Destination Restricted | 3.4.6 | Sent and acted on |
 | Override, Loadshare, Broadcast and n+k redundancy | 1.4.4, Appendix A | Configurable per Application Server |
-| Message Priority congestion policy | 1.4.6 | A caller-supplied policy chooses among congested candidates |
+| Message Priority congestion policy | 1.4.6 | A caller-supplied policy filters combined received/transport levels per association |
+| Outbound SCTP pressure | 1.4.6, 4.5.2.1–2 | Periodic bounded sampling, continuous-coverage threshold dwell, explicit unknown/stale status, destination/AS eligibility shared with transfer selection, ASP/IPSP destination MTP-STATUS and implementation indication `ManagementTransportCongestion` (`TRANSPORT-CONGESTION`); no automatic SCON |
 | Multiple SGPs and SGs at an ASP | 1.3.2.5, 4.5.2.2 | Per-SG route state and a derived MTP3-User view |
 | Either SCTP initiation orientation | 1.4.8 | The M3UA role never follows `Dial` or `Accept` |
 
 ## Optional procedures: concrete exclusions
 
 These are the places where the codec exists and the procedure does not, or where
-the capability is out of the library's scope. Nothing else in RFC 4666 is left
-unimplemented.
+the capability is out of the library's scope. Congestion-method profiles, Message
+Priority discard, repeated User Part notifications, SCON validity timers and
+automatic congestion audits are application responsibilities. Transport route
+preference is opt-in: there is no cross-association SLS changeover barrier
+(RFC 4666 §1.4.7).
 
 | Excluded | Section | What exists | What does not |
 | --- | --- | --- | --- |

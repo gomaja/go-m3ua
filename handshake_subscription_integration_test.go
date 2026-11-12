@@ -111,6 +111,9 @@ func TestDialSubscribeReceivesHandshakeIndications(t *testing.T) {
 	got := map[uint32][]uint16{}
 	for len(sub.management) > 0 {
 		ind := receiveSubscription(t, sub.management)
+		if ind.Kind == ManagementTransportCongestion || ind.Kind == ManagementDataQueueCongestion {
+			continue
+		}
 		if ind.Kind != ManagementNotify || ind.Association != asp.ID() || len(ind.RoutingContexts) != 1 {
 			t.Fatalf("unexpected handshake indication: %+v", ind)
 		}
@@ -301,6 +304,9 @@ func TestDialSubscribeHandshakeFailureClosesStreams(t *testing.T) {
 			}
 			if failure == "ERR" {
 				ind := receiveSubscription(t, sub.management)
+				for ind.Kind == ManagementTransportCongestion || ind.Kind == ManagementDataQueueCongestion {
+					ind = receiveSubscription(t, sub.management)
+				}
 				if ind.Kind != ManagementError || ind.ErrorCode != params.ErrRefusedManagementBlocking {
 					t.Fatalf("M-ERROR = %+v", ind)
 				}
@@ -486,11 +492,18 @@ func TestDialSubscribeCountsEveryPeerHandshakeNotify(t *testing.T) {
 	if peer.err != nil {
 		t.Fatal(peer.err)
 	}
-	if got := len(sub.management); got != peer.sent {
+	var notifications []*ManagementIndication
+	for range len(sub.management) {
+		ind := receiveSubscription(t, sub.management)
+		if ind.Kind == ManagementTransportCongestion || ind.Kind == ManagementDataQueueCongestion {
+			continue
+		}
+		notifications = append(notifications, ind)
+	}
+	if got := len(notifications); got != peer.sent {
 		t.Fatalf("M-NOTIFY delivered=%d, peer sent=%d", got, peer.sent)
 	}
-	for i := range peer.sent {
-		ind := receiveSubscription(t, sub.management)
+	for i, ind := range notifications {
 		want := uint16(2)
 		if i >= 3 {
 			want = 3
@@ -556,6 +569,9 @@ func TestAcceptSubscribeHandshakeFailureClosesStreams(t *testing.T) {
 			}
 			if failure == "ERR" {
 				ind := receiveSubscription(t, sub.management)
+				for ind.Kind == ManagementTransportCongestion || ind.Kind == ManagementDataQueueCongestion {
+					ind = receiveSubscription(t, sub.management)
+				}
 				if ind.Kind != ManagementError || ind.ErrorCode != params.ErrRefusedManagementBlocking {
 					t.Fatalf("M-ERROR = %+v", ind)
 				}
@@ -795,7 +811,10 @@ func TestSubscribeStreamsRemainIndependent(t *testing.T) {
 				} else {
 					stream := a.ManagementIndications()
 					readers.Go(func() {
-						for range stream {
+						for indication := range stream {
+							if indication.Kind == ManagementTransportCongestion || indication.Kind == ManagementDataQueueCongestion {
+								continue
+							}
 							received.Add(1)
 						}
 					})

@@ -228,6 +228,7 @@ type aspSelectionStatus struct {
 	congested          bool
 	congestionLevel    uint8
 	congestionLevelSet bool
+	transportUnknown   bool
 }
 
 // usable reports whether the availability dimension permits this candidate.
@@ -265,6 +266,9 @@ func (status aspSelectionStatus) availabilityRank() int {
 }
 
 func (status aspSelectionStatus) congestionRank() int {
+	if status.transportUnknown {
+		return 4
+	}
 	if !status.congested {
 		return 0
 	}
@@ -307,6 +311,7 @@ type aspTransferAssignment struct {
 	key                aspTransferFlowKey
 	targets            []aspTransferTarget
 	storeRevision      uint64
+	transportRevision  uint64
 	congestionDecision aspCongestionDecision
 }
 
@@ -544,6 +549,7 @@ func (r *aspRoutes) selectTransfer(
 		cachedEligible = r.transferTargetsStillHeldLocked(assignment.targets)
 		if cachedEligible &&
 			assignment.storeRevision == storeRevision &&
+			assignment.transportRevision == r.transportRevision &&
 			assignment.congestionDecision == congestionDecision &&
 			r.transferTargetsUseStickyLoadshare(assignment.targets) {
 			r.transferFlowLRU.MoveToFront(element)
@@ -611,6 +617,7 @@ func (r *aspRoutes) selectTransfer(
 		assignment := cachedElement.Value.(*aspTransferAssignment)
 		if cachedEligible && sameASPTransferTargets(assignment.targets, targets) {
 			assignment.storeRevision = storeRevision
+			assignment.transportRevision = r.transportRevision
 			assignment.congestionDecision = congestionDecision
 			r.transferFlowLRU.MoveToFront(cachedElement)
 			return append([]aspTransferTarget(nil), assignment.targets...), nil
@@ -796,7 +803,9 @@ func (r *aspRoutes) transferCandidatesLocked(
 		}
 		candidate.status = candidate.sgps[0].status
 		for _, sgp := range candidate.sgps[1:] {
-			if sgp.status.betterThan(candidate.status) {
+			if candidate.config.sgpSelection == RouteSelectionBroadcast && r.config.preferUncongestedTransport {
+				candidate.status = requiredASPSelectionStatus(candidate.status, sgp.status)
+			} else if sgp.status.betterThan(candidate.status) {
 				candidate.status = sgp.status
 			}
 		}
@@ -855,11 +864,39 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 			rejections = append(rejections, rejection)
 			continue
 		}
-		if !congestionDecision.permits(status) {
-			rejection.Reason = MTPCandidateCongested
-			rejections = append(rejections, rejection)
-			continue
+
+		if congestionDecision.enabled || r.config.preferUncongestedTransport {
+			kept := members[:0]
+			best := status
+			bestSet := false
+			for _, member := range members {
+				effective := r.transportSelectionStatus(member.association, status)
+				if !congestionDecision.permits(effective) {
+					continue
+				}
+				if r.config.preferUncongestedTransport {
+					if !bestSet || effective.betterThan(best) {
+						kept = kept[:0]
+						best = effective
+						bestSet = true
+					}
+					if !effective.sameRankAs(best) {
+						continue
+					}
+				}
+				kept = append(kept, member)
+			}
+			members = kept
+			if len(members) == 0 {
+				rejection.Reason = MTPCandidateCongested
+				rejections = append(rejections, rejection)
+				continue
+			}
+			if r.config.preferUncongestedTransport {
+				status = best
+			}
 		}
+
 		return aspTransferSGP{
 			identity:          identity,
 			path:              candidate.path,
@@ -1090,7 +1127,13 @@ func evaluateASPCongestionPolicy(policy ASPCongestionPolicy, messagePriority uin
 }
 
 func (decision aspCongestionDecision) permits(status aspSelectionStatus) bool {
-	if !decision.enabled || !status.congested {
+	if !decision.enabled {
+		return true
+	}
+	if status.transportUnknown && !decision.unknownLevel {
+		return false
+	}
+	if !status.congested {
 		return true
 	}
 	if !status.congestionLevelSet {
@@ -1124,6 +1167,7 @@ func (r *aspRoutes) rememberTransferFlowLocked(
 		key:                key,
 		targets:            append([]aspTransferTarget(nil), targets...),
 		storeRevision:      storeRevision,
+		transportRevision:  r.transportRevision,
 		congestionDecision: congestionDecision,
 	}
 	element := r.transferFlowLRU.PushFront(assignment)

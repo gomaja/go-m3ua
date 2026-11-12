@@ -202,7 +202,7 @@ func (c *Association) handleSCTPRestart() {
 	// The SCTP association remains usable, but its peer state is a new epoch.
 	// Advance it before anything else, so a DATA delivered from here on is
 	// reported in the epoch it actually arrived in.
-	c.epoch.Add(1)
+	c.resetTransportCongestionEpoch()
 	c.muState.Lock()
 	c.peerDownAwaitingEntry = false
 	c.muState.Unlock()
@@ -228,9 +228,11 @@ func (c *Association) handleSCTPRestart() {
 	// role and leaves an SGP's node-wide destination view untouched.
 	c.pauseDestinations()
 	c.sendRestartState()
+	transportState := c.TransportCongestion()
 	c.notifyManagement(&ManagementIndication{
-		Kind:   ManagementSCTPRestart,
-		ASKeys: endpointASPStatusKeys(c),
+		Kind:                ManagementSCTPRestart,
+		TransportCongestion: &transportState,
+		ASKeys:              endpointASPStatusKeys(c),
 		Description: "the peer restarted the SCTP association; " +
 			"the remote ASP/IPSP state moved to ASP-DOWN and recovery state was cleared",
 	})

@@ -93,6 +93,10 @@ func TestSCTPAssocQueuesTracksStalledPeerAndDrain(t *testing.T) {
 // its receive window. The returned function drains every accepted DATA message.
 // Neither setup nor drain queries sock_diag.
 func stalledSCTPSender(t *testing.T) (*Association, func()) {
+	return stalledSCTPSenderWithEndpoint(t, EndpointConfig{Role: RoleASP})
+}
+
+func stalledSCTPSenderWithEndpoint(t *testing.T, endpointConfig EndpointConfig) (*Association, func()) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
@@ -116,13 +120,16 @@ func stalledSCTPSender(t *testing.T) (*Association, func()) {
 		}
 		ready <- accepted{peer, e}
 	}()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(endpointConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	key := ASKey{NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	cfg := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
+	if endpointConfig.ASP != nil {
+		cfg.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	}
 	cfg.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 	cfg.SocketSendBuffer = 65536
 	a, dialErr := endpoint.Dial(ctx, "m3ua", mcAddr(0, "127.0.0.1"), ln.Addr().(*sctp.Addr), cfg)

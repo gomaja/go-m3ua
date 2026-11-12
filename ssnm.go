@@ -175,8 +175,10 @@ type destinationRecord struct {
 	routingContexts     []uint32
 	routingContextScope string
 	// dimensions is the set of dimensions this record is a statement about.
-	dimensions destinationDimensions
-	sequence   uint64
+	dimensions           destinationDimensions
+	sequence             uint64
+	availabilitySequence uint64
+	congestionSequence   uint64
 }
 
 // ErrSSNMDestinationRecordLimit reports that retained SSNM destination state
@@ -202,6 +204,8 @@ type destinations struct {
 	state      map[destinationKey]destinationRecord
 	sequence   uint64
 	maxRecords int
+	// prefixes indexes only exact appearance/prefix/mask cohorts for reclamation.
+	prefixes map[destinationKey]map[destinationKey]struct{}
 }
 
 func newDestinations() *destinations {
@@ -255,7 +259,49 @@ func (d *destinations) forget() int {
 	defer d.mu.Unlock()
 	released := len(d.state)
 	d.state = make(map[destinationKey]destinationRecord)
+	d.prefixes = nil
 	return released
+}
+
+// forgetRoutingContext retires records owned by a withdrawn dynamic wire label.
+// Routing Contexts are unique within an association's traffic inventory.
+func (d *destinations) forgetRoutingContext(routingContext uint32) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.indexPrefixesLocked()
+	affected := make(map[destinationKey]struct{})
+	for key, record := range d.state {
+		if len(record.routingContexts) > 0 {
+			index := sort.Search(len(record.routingContexts), func(i int) bool { return record.routingContexts[i] >= routingContext })
+			if index == len(record.routingContexts) || record.routingContexts[index] != routingContext {
+				continue
+			}
+			kept := append([]uint32(nil), record.routingContexts[:index]...)
+			kept = append(kept, record.routingContexts[index+1:]...)
+			affected[destinationPrefixKey(key)] = struct{}{}
+			d.deleteRecordLocked(key)
+			if len(kept) > 0 {
+				// Per-dimension stamps preserve isolation and chronology on a canonical
+				// scope collision (RFC 4666 Sections 4.5.2.2 and 4.5.3).
+				record.routingContexts, record.routingContextScope = canonicalRoutingContextScope(kept)
+				newKey := destinationRecordKey(record)
+				if held, ok := d.state[newKey]; ok {
+					record = mergeDestinationDimensions(held, record)
+				}
+				d.putRecordLocked(newKey, record)
+			}
+		} else if key.routingContextSet && key.routingContext == routingContext {
+			affected[destinationPrefixKey(key)] = struct{}{}
+			d.deleteRecordLocked(key)
+		}
+	}
+	for prefix := range affected {
+		plan, _ := d.deadDimensionsLocked(prefix, nil)
+		d.reclaimDimensionsLocked(plan)
+	}
 }
 
 // The nil receiver checks below keep an Association that was assembled directly, rather
@@ -430,56 +476,249 @@ func canonicalRoutingContextScope(routingContexts []uint32) ([]uint32, string) {
 // Overflow policy: a record whose key is already held always replaces it, since
 // replacing costs no memory and discarding an update for a destination the peer
 // has already established would be worse than refusing a new one. A record for
-// a new key is refused once the store holds its budget, and the caller reports
-// the refusal as ErrSSNMDestinationRecordLimit. Refusing is deliberately
+// a new key is refused only if collectively live records still fill the budget
+// after reclamation; the caller reports ErrSSNMDestinationRecordLimit. Refusing is deliberately
 // preferred to evicting the oldest record: eviction would let a peer that names
 // enough unknown point codes push out a genuine DUNA and so restart traffic
 // into a destination the SG has reported unreachable.
 func (d *destinations) storeLocked(record destinationRecord) bool {
-	key := destinationRecordKey(record)
-	held, exists := d.state[key]
-	if !exists && len(d.state) >= d.recordLimitLocked() {
-		return false
-	}
-	if exists {
-		// A record states only the dimensions its update carried. Keeping the
-		// other dimension as the last statement about it left it is what keeps
-		// the two statuses of RFC 4666 Section 4.5 independent: a congestion
-		// report restates no availability, and an availability report clears no
-		// congestion. Section 4.5.1 makes DUNA followed by SCON an ordinary
-		// sequence, and Section 4.5.3 keeps answering that destination's audit
-		// with DUNA until a DAVA arrives.
-		if !record.dimensions.carries(destinationAvailabilityDimension) {
-			record.rangeValue.State.Availability = held.rangeValue.State.Availability
-		}
-		if !record.dimensions.carries(destinationCongestionDimension) {
-			record.rangeValue.State.Congestion = held.rangeValue.State.Congestion
-		}
-		record.dimensions |= held.dimensions
+	d.indexPrefixesLocked()
+	// Renumber before assigning the incoming stamp or inheriting either
+	// dimension, preserving their order across counter wrap.
+	if d.sequence == ^uint64(0) {
+		d.renumberLocked()
 	}
 	d.sequence++
-	if d.sequence == 0 {
-		d.renumberLocked()
-		d.sequence++
-	}
 	record.sequence = d.sequence
-	d.state[key] = record
+	if record.dimensions.carries(destinationAvailabilityDimension) {
+		record.availabilitySequence = d.sequence
+	}
+	if record.dimensions.carries(destinationCongestionDimension) {
+		record.congestionSequence = d.sequence
+	}
+	key := destinationRecordKey(record)
+	held, exists := d.state[key]
+	if exists {
+		record = mergeDestinationDimensions(held, record)
+	}
+	prefix := destinationPrefixKey(key)
+	plan, freed := d.deadDimensionsLocked(prefix, &record)
+	if !exists && len(d.state)-freed >= d.recordLimitLocked() {
+		// An unaccepted report cannot supersede knowledge. Remove only statements
+		// already dead without it; refusal leaves every live dimension unchanged.
+		plan, _ = d.deadDimensionsLocked(prefix, nil)
+		d.reclaimDimensionsLocked(plan)
+		return false
+	}
+	d.reclaimDimensionsLocked(plan)
+	d.putRecordLocked(key, record)
 	return true
 }
 
-func (d *destinations) renumberLocked() {
-	records := make([]destinationRecord, 0, len(d.state))
-	for _, record := range d.state {
-		records = append(records, record)
+// mergeDestinationDimensions preserves each dimension's own newest statement;
+// merging a scope never restates its other dimension (RFC 4666 Section 4.5.3).
+func mergeDestinationDimensions(held, incoming destinationRecord) destinationRecord {
+	if incoming.dimensions.carries(destinationAvailabilityDimension) &&
+		(!held.dimensions.carries(destinationAvailabilityDimension) || incoming.availabilitySequence > held.availabilitySequence) {
+		held.rangeValue.State.Availability = incoming.rangeValue.State.Availability
+		held.availabilitySequence = incoming.availabilitySequence
 	}
-	sort.Slice(records, func(i, j int) bool {
-		return records[i].sequence < records[j].sequence
-	})
+	if incoming.dimensions.carries(destinationCongestionDimension) &&
+		(!held.dimensions.carries(destinationCongestionDimension) || incoming.congestionSequence > held.congestionSequence) {
+		held.rangeValue.State.Congestion = incoming.rangeValue.State.Congestion
+		held.congestionSequence = incoming.congestionSequence
+	}
+	held.dimensions |= incoming.dimensions
+	// Retain the latest wire spelling of this canonical prefix as well.
+	if incoming.sequence > held.sequence {
+		held.rangeValue.PointCode = incoming.rangeValue.PointCode
+		held.sequence = incoming.sequence
+	}
+	return held
+}
+
+func destinationPrefixKey(key destinationKey) destinationKey {
+	key.routingContext = 0
+	key.routingContextSet = false
+	key.routingContextScope = ""
+	return key
+}
+
+func (d *destinations) indexPrefixesLocked() {
+	if d.prefixes != nil {
+		return
+	}
+	d.prefixes = make(map[destinationKey]map[destinationKey]struct{})
+	for key := range d.state {
+		d.indexRecordLocked(key)
+	}
+}
+
+func (d *destinations) indexRecordLocked(key destinationKey) {
+	prefix := destinationPrefixKey(key)
+	if d.prefixes[prefix] == nil {
+		d.prefixes[prefix] = make(map[destinationKey]struct{})
+	}
+	d.prefixes[prefix][key] = struct{}{}
+}
+
+func (d *destinations) putRecordLocked(key destinationKey, record destinationRecord) {
+	d.state[key] = record
+	d.indexRecordLocked(key)
+}
+
+func (d *destinations) deleteRecordLocked(key destinationKey) {
+	delete(d.state, key)
+	prefix := destinationPrefixKey(key)
+	delete(d.prefixes[prefix], key)
+	if len(d.prefixes[prefix]) == 0 {
+		delete(d.prefixes, prefix)
+	}
+}
+
+// deadDimensionsLocked plans collective reclamation within one exact
+// appearance/prefix/mask cohort. It scans only that indexed cohort and its RC
+// lists, O(records + listed RCs), with temporary storage per distinct RC.
+// A baseline applies to every RC and needs a newer baseline to become dead.
+// Strict dimension stamps prevent a newer availability statement from
+// superseding congestion, or the reverse (RFC 4666 Sections 4.5.2.2 and 4.5.3).
+func (d *destinations) deadDimensionsLocked(prefix destinationKey, incoming *destinationRecord) (map[destinationKey]destinationDimensions, int) {
+	bucket := d.prefixes[prefix]
+	var incomingKey destinationKey
+	if incoming != nil {
+		incomingKey = destinationRecordKey(*incoming)
+		if len(bucket) == 0 {
+			return nil, 0
+		}
+		if _, exists := bucket[incomingKey]; exists && len(bucket) == 1 {
+			return nil, 0
+		}
+	}
+	if len(bucket) < 2 && incoming == nil {
+		return nil, 0
+	}
+	newest := make(map[uint32][2]uint64)
+	var baseline [2]uint64
+	visit := func(record destinationRecord) {
+		stamps := [2]uint64{}
+		if record.dimensions.carries(destinationAvailabilityDimension) {
+			stamps[0] = record.availabilitySequence
+		}
+		if record.dimensions.carries(destinationCongestionDimension) {
+			stamps[1] = record.congestionSequence
+		}
+		add := func(rc uint32) {
+			v := newest[rc]
+			v[0] = max(v[0], stamps[0])
+			v[1] = max(v[1], stamps[1])
+			newest[rc] = v
+		}
+		switch {
+		case len(record.routingContexts) > 0:
+			for _, rc := range record.routingContexts {
+				add(rc)
+			}
+		case record.rangeValue.RoutingContextSet:
+			add(record.rangeValue.RoutingContext)
+		default:
+			baseline[0] = max(baseline[0], stamps[0])
+			baseline[1] = max(baseline[1], stamps[1])
+		}
+	}
+	for key := range bucket {
+		if incoming == nil || key != incomingKey {
+			visit(d.state[key])
+		}
+	}
+	if incoming != nil {
+		visit(*incoming)
+	}
+	var plan map[destinationKey]destinationDimensions
+	freed := 0
+	for key := range bucket {
+		if incoming != nil && key == incomingKey {
+			continue
+		}
+		record := d.state[key]
+		dimensions := record.dimensions
+		for i, dimension := range []destinationDimensions{destinationAvailabilityDimension, destinationCongestionDimension} {
+			if !dimensions.carries(dimension) {
+				continue
+			}
+			stamp := record.availabilitySequence
+			if i == 1 {
+				stamp = record.congestionSequence
+			}
+			covered := func(rc uint32) bool { return max(baseline[i], newest[rc][i]) > stamp }
+			dead := baseline[i] > stamp
+			if !dead {
+				switch {
+				case len(record.routingContexts) > 0:
+					dead = true
+					for _, rc := range record.routingContexts {
+						if !covered(rc) {
+							dead = false
+							break
+						}
+					}
+				case record.rangeValue.RoutingContextSet:
+					dead = covered(record.rangeValue.RoutingContext)
+				}
+			}
+			if dead {
+				dimensions &^= dimension
+			}
+		}
+		if dimensions != record.dimensions {
+			if plan == nil {
+				plan = make(map[destinationKey]destinationDimensions)
+			}
+			plan[key] = dimensions
+			if dimensions == 0 {
+				freed++
+			}
+		}
+	}
+	return plan, freed
+}
+
+func (d *destinations) reclaimDimensionsLocked(plan map[destinationKey]destinationDimensions) {
+	for key, dimensions := range plan {
+		if dimensions == 0 {
+			d.deleteRecordLocked(key)
+		} else {
+			record := d.state[key]
+			record.dimensions = dimensions
+			d.state[key] = record
+		}
+	}
+}
+
+func (d *destinations) renumberLocked() {
+	stamps := make([]uint64, 0, 3*len(d.state))
+	for _, record := range d.state {
+		stamps = append(stamps, record.sequence)
+		if record.dimensions.carries(destinationAvailabilityDimension) {
+			stamps = append(stamps, record.availabilitySequence)
+		}
+		if record.dimensions.carries(destinationCongestionDimension) {
+			stamps = append(stamps, record.congestionSequence)
+		}
+	}
+	sort.Slice(stamps, func(i, j int) bool { return stamps[i] < stamps[j] })
+	ranks := map[uint64]uint64{0: 0}
 	d.sequence = 0
-	for _, record := range records {
-		d.sequence++
-		record.sequence = d.sequence
-		d.state[destinationRecordKey(record)] = record
+	for _, stamp := range stamps {
+		if _, exists := ranks[stamp]; !exists {
+			d.sequence++
+			ranks[stamp] = d.sequence
+		}
+	}
+	for key, record := range d.state {
+		record.sequence = ranks[record.sequence]
+		record.availabilitySequence = ranks[record.availabilitySequence]
+		record.congestionSequence = ranks[record.congestionSequence]
+		d.state[key] = record
 	}
 }
 
@@ -612,13 +851,13 @@ func (d *destinations) lookupRangeLocked(scope destinationKey, pointCode uint32,
 		}
 		known = true
 		if record.dimensions.carries(destinationAvailabilityDimension) &&
-			record.sequence > availabilitySeq {
-			availabilitySeq = record.sequence
+			record.availabilitySequence > availabilitySeq {
+			availabilitySeq = record.availabilitySequence
 			state.Availability = record.rangeValue.State.Availability
 		}
 		if record.dimensions.carries(destinationCongestionDimension) &&
-			record.sequence > congestionSeq {
-			congestionSeq = record.sequence
+			record.congestionSequence > congestionSeq {
+			congestionSeq = record.congestionSequence
 			state.Congestion = record.rangeValue.State.Congestion
 		}
 	}
@@ -642,13 +881,13 @@ func (d *destinations) snapshotForScope(scope destinationKey) map[uint32]Destina
 		pointCode := record.rangeValue.PointCode
 		state := out[pointCode]
 		if record.dimensions.carries(destinationAvailabilityDimension) &&
-			record.sequence > availability[pointCode] {
-			availability[pointCode] = record.sequence
+			record.availabilitySequence > availability[pointCode] {
+			availability[pointCode] = record.availabilitySequence
 			state.Availability = record.rangeValue.State.Availability
 		}
 		if record.dimensions.carries(destinationCongestionDimension) &&
-			record.sequence > congestion[pointCode] {
-			congestion[pointCode] = record.sequence
+			record.congestionSequence > congestion[pointCode] {
+			congestion[pointCode] = record.congestionSequence
 			state.Congestion = record.rangeValue.State.Congestion
 		}
 		out[pointCode] = state
@@ -697,7 +936,7 @@ func (d *destinations) pause() {
 	})
 	for _, record := range records {
 		record.rangeValue.State.Availability = DestinationUnavailable
-		record.dimensions |= destinationAvailabilityDimension
+		record.dimensions = destinationAvailabilityDimension
 		// Every key here is already held, so no record is refused.
 		_ = d.storeLocked(record)
 	}
@@ -737,6 +976,13 @@ func (c *Association) destinationRoutingContexts(routingContext *params.Param) (
 }
 
 func (c *Association) pauseDestinations() {
+	// An IPSP peer has no SGP availability reports to restore. Its current
+	// peer-directed lifecycle determines availability; old congestion is retired
+	// at the restart/loss boundary (RFC 4666 §4.3.3).
+	if c.role == RoleIPSP {
+		c.ForgetDestinations()
+		return
+	}
 	if c.role == RoleASP || c.role == RoleIPSP {
 		c.destinations.pause()
 	}
@@ -818,6 +1064,19 @@ func (c *Association) applySSNM(
 		retained = c.destinations.setScopedRangesWithinBudget(routingContexts, updates)
 	default:
 		retained = c.destinations.setRangesWithinBudget(updates)
+	}
+	if c.endpoint != nil {
+		c.endpoint.refreshIPSPDestinations()
+	}
+	// The canonical subscription can accept a report that the association's
+	// independently bounded destination view refused. Expose that local loss
+	// without invalidating canonical knowledge (RFC 4666 Section 4.5.3).
+	if retained != nil {
+		if store := c.ssnmStore(); store != nil {
+			store.mu.Lock()
+			store.refuseLocked(0, fmt.Sprintf("Association %d destination view: %v", c.ID(), retained))
+			store.mu.Unlock()
+		}
 	}
 	if err := c.publishSSNMReport(report); err != nil && retained == nil {
 		retained = err
@@ -1397,13 +1656,22 @@ type destinationAuditGroup struct {
 // On an accepted association this clears the node-wide view the owning SGP
 // Endpoint holds, which is shared by every Listener, Association and ASP it
 // serves and is the view Endpoint.ReportDestinationAvailability writes.
+// At an IPSP, mapped indications and snapshots are refreshed immediately;
+// independent transport congestion is retained.
 func (c *Association) ForgetDestinations() int {
 	if c == nil {
 		return 0
 	}
 	if c.mtp3Restarts != nil {
 		c.mtp3Restarts.procedureMu.Lock()
-		defer c.mtp3Restarts.procedureMu.Unlock()
 	}
-	return c.destinations.forget()
+	released := c.destinations.forget()
+	if c.mtp3Restarts != nil {
+		c.mtp3Restarts.procedureMu.Unlock()
+	}
+	// Projection takes its own snapshots after destination/restart locks end.
+	if c.endpoint != nil {
+		c.endpoint.refreshIPSPDestinations()
+	}
+	return released
 }

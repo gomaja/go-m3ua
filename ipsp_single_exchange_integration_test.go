@@ -114,13 +114,22 @@ func exerciseIPSPSingleExchangeIntegration(t *testing.T, sctpInitiator, aspsmIni
 	)); err != nil {
 		t.Fatalf("send IPSP Notify: %v", err)
 	}
-	select {
-	case indication := <-associationB.ManagementIndications():
-		if indication.Kind != ManagementNotify {
-			t.Fatalf("Notify indication kind = %v, want ManagementNotify", indication.Kind)
+	for {
+		select {
+		case indication, open := <-associationB.ManagementIndications():
+			if !open {
+				t.Fatal("IPSP management stream closed before Notify")
+			}
+			if indication.Kind == ManagementTransportCongestion || indication.Kind == ManagementDataQueueCongestion {
+				continue
+			}
+			if indication.Kind != ManagementNotify {
+				t.Fatalf("Notify indication kind = %v, want ManagementNotify", indication.Kind)
+			}
+		case <-ctx.Done():
+			t.Fatalf("receive IPSP Notify: %v", ctx.Err())
 		}
-	case <-ctx.Done():
-		t.Fatalf("receive IPSP Notify: %v", ctx.Err())
+		break
 	}
 
 	if err := associationA.ShutdownContext(ctx); err != nil {

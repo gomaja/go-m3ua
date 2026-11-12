@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages/params"
 )
@@ -43,7 +44,9 @@ func (r Role) String() string {
 // Endpoint owns an immutable M3UA protocol role independently of SCTP
 // association initiation.
 type Endpoint struct {
-	role Role
+	role      Role
+	transport *transportCongestionMonitor
+	ipspMTP   *ipspMTPState
 
 	mu                sync.Mutex
 	closed            bool
@@ -77,6 +80,14 @@ type Endpoint struct {
 // NewEndpoint creates an M3UA endpoint with an immutable protocol role and
 // role-specific node policy.
 func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
+	transportConfig, err := newTransportCongestionConfig(config.TransportCongestion)
+	if err != nil {
+		return nil, err
+	}
+	ipspMTP, err := newIPSPMTPState(config.Role, config.IPSPDestinations)
+	if err != nil {
+		return nil, err
+	}
 	switch config.Role {
 	case RoleASP, RoleSGP, RoleIPSP:
 		if config.Role != RoleASP && config.ASP != nil {
@@ -135,9 +146,14 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		if err != nil {
 			return nil, err
 		}
+		if routes != nil {
+			routes.ssnm = ssnm
+		}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		endpoint := &Endpoint{
 			role:             config.Role,
+			transport:        &transportCongestionMonitor{config: transportConfig, read: (*Association).SCTPSendBacklog, readStatus: readTransportSCTPStatus, now: time.Now},
+			ipspMTP:          ipspMTP,
 			listeners:        make(map[*Listener]struct{}),
 			associations:     make(map[*Association]struct{}),
 			associationsByID: make(map[AssociationID]*Association),
@@ -244,6 +260,9 @@ func (e *Endpoint) trackAssociation(association *Association) bool {
 	// now. The reconciliation runs outside e.mu: it reads Association state
 	// guarded by other locks.
 	association.syncSSNMBindings()
+	if association.sctpConn != nil && e.aspRoutes != nil {
+		e.aspRoutes.transportChanged(association)
+	}
 	return true
 }
 
@@ -268,6 +287,12 @@ func (e *Endpoint) trackAssociationLocked(association *Association) bool {
 	e.ssnm.registerSource(e.nextAssociationID)
 	e.associations[association] = struct{}{}
 	e.associationsByID[e.nextAssociationID] = association
+	if association.sctpConn != nil {
+		if !e.transport.config.Disabled {
+			state := TransportCongestionState{Association: association.ID(), Epoch: association.Epoch()}
+			association.transportSnapshot.Store(&state)
+		}
+	}
 	return true
 }
 
@@ -291,6 +316,7 @@ func (e *Endpoint) forgetAssociation(association *Association) {
 	// partition losing its last one is retired with its knowledge in the same
 	// critical section, so no reader sees knowledge with no owner.
 	association.retireSSNMBindings()
+	e.refreshIPSPDestinations()
 	sharedDynamicKeys := make([]ASKey, 0)
 	for _, routingContext := range association.dynamicRoutingContexts(false) {
 		if key, ok := association.dynamicASKey(routingContext, false); ok {
@@ -482,6 +508,12 @@ func (e *Endpoint) Close() error {
 		}
 	}
 	e.operations.Wait()
+	if e.transport != nil {
+		e.transport.workers.Wait()
+	}
+	if e.ipspMTP != nil {
+		e.ipspMTP.stream.closeIndications()
+	}
 	if e.aspRoutes != nil {
 		e.aspRoutes.closeIndications()
 	}
