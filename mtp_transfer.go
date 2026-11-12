@@ -17,7 +17,8 @@ import (
 	"github.com/gomaja/go-pointcode"
 )
 
-// MTPTransferRequest is the MTP-TRANSFER request primitive described by RFC
+// MTPTransferRequest carries MTP3-User traffic only; SI 0 is refused with
+// ErrMTPManagementData (RFC 4666 §1.4.3.2). It is the request primitive described by RFC
 // 4666 Sections 1.6.1 and 5.5.1.1.1. MTPRoute may be omitted when the MTP
 // routing label has one unambiguous best match in the ASP routing table.
 type MTPTransferRequest struct {
@@ -339,6 +340,8 @@ type aspCongestionDecision struct {
 
 // MTPTransfer selects the SGP, Association, and SCTP stream for one
 // MTP-TRANSFER request as required by RFC 4666 Section 5.5.1.1.1.
+// SI 0 returns ErrMTPManagementData with DataNotSent before route selection
+// (RFC 4666 §1.4.3.2).
 func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, error) {
 	return e.MTPTransferContext(context.Background(), request)
 }
@@ -361,6 +364,7 @@ func (e *Endpoint) MTPTransfer(request MTPTransferRequest) (MTPTransferResult, e
 // and the request is never retried on another path. Acceptance does not prove
 // peer delivery (RFC 4666 §3.3.1). MTPTransfer uses
 // context.Background().
+// SI 0 is refused as in MTPTransfer (RFC 4666 §1.4.3.2).
 func (e *Endpoint) MTPTransferContext(ctx context.Context, request MTPTransferRequest) (MTPTransferResult, error) {
 	if err := ctx.Err(); err != nil {
 		return MTPTransferResult{}, newDataNotSent(ASKey{}, 0, err)
@@ -375,6 +379,10 @@ func (e *Endpoint) MTPTransferContext(ctx context.Context, request MTPTransferRe
 	}
 	if request.ProtocolData == nil {
 		return MTPTransferResult{}, ErrMissingProtocolData
+	}
+	// RFC 4666 §1.4.3.2: reject management before route selection or policy.
+	if request.ProtocolData.ServiceIndicator == 0 {
+		return MTPTransferResult{}, newDataNotSent(ASKey{}, 0, fmt.Errorf("%w: %w", ErrInvalidMTPTransfer, ErrMTPManagementData))
 	}
 	if err := validateNetworkIndicator(request.ProtocolData.NetworkIndicator); err != nil {
 		return MTPTransferResult{}, newDataNotSent(ASKey{}, 0, fmt.Errorf("%w: %w", ErrInvalidMTPTransfer, err))

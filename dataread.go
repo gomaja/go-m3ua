@@ -25,6 +25,10 @@ import (
 // are reported separately: an application distributing inbound traffic needs
 // the resolved identity, and one answering in the scope the request arrived on
 // needs the exact wire scope.
+//
+// SI 0 is never delivered: RFC 4666 §1.4.3.2 requires management termination
+// at the SG/NIF and appropriate SSNM. Received SI 0 DATA is discarded with
+// ERR Invalid Parameter Value and a ManagementError indication (§3.8.1).
 type DataMessage struct {
 	// Received is when the socket reader returned this complete message. It
 	// retains its monotonic clock reading, so time.Since(Received) includes
@@ -65,6 +69,8 @@ type DataMessage struct {
 }
 
 // ReadData returns the next DATA message received on this association.
+// SI 0 is discarded and reported through ManagementIndications and an ERR
+// Invalid Parameter Value response (RFC 4666 §§1.4.3.2 and 3.8.1).
 //
 // Cancelling ctx ends this one read and nothing else: the association stays
 // open, and neither the message that may have been arriving nor anything queued

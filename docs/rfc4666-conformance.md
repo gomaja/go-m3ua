@@ -126,3 +126,34 @@ test and race suites, all exported fuzz targets, and focused multi-homing,
 multi-Association, concurrent Accept, restart, timeout, cancellation, and
 resource-release scenarios. The pull-request exact head remains the final CI
 and review authority before merge.
+
+## MTP3 management termination
+
+RFC 4666 §1.4.3.2 requires the SG to terminate MTP3 management and generate
+appropriate M3UA management messages. The deployment's Nodal Interworking
+Function maps MTP-PAUSE, MTP-RESUME and MTP-STATUS indications to SSNM; the library
+never forwards SI 0 management as DATA. DATA carries MTP3-User traffic (§3.3.1).
+
+`Association.WriteData`, `WriteDataContext`, `WriteSignal` (including custom raw
+encoders), `Endpoint.MTPTransfer`, `MTPTransferContext`, and Listener/Association
+`DistributeData` refuse SI 0 with an error matching `ErrMTPManagementData` through
+`errors.Is`, before submission or queuing. These management refusals are
+`*DataWriteError` values with `DataNotSent`, including both distribution entry
+points and built-in or custom messages passed to `WriteSignal`.
+
+The message and parameter codecs remain general-purpose serializers. They
+preserve SI 0 when decoding and re-encoding captures for inspection or negative
+tests. RFC 4666 §1.4.3.2 is enforced at send admission, not at serialization.
+
+An omitted Routing Key SI selector matches every SI except SI 0, including in
+registered-key distribution (RFC 4666 §3.6.1). RFC 4666 alone does not settle
+whether SI 1 and SI 2 testing and maintenance messages fall within this
+management prohibition; this implementation excludes only SI 0. SI 1, SI 2 and
+SI 3 (SCCP) remain accepted.
+
+For an otherwise admissible inbound DATA, ASP, SGP and IPSP discard SI 0 before
+user delivery and send ERR Invalid Parameter Value (RFC 4666 §3.8.1), with the
+received message in Diagnostic Information, bounded by the parameter's length
+limit. A local `ManagementError` indication reports the same scope and cause.
+Existing state, stream and scope checks retain their precedence. Decoding keeps
+SI 0 intact so callers can inspect hostile frames without re-encoding them.

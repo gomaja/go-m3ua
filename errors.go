@@ -14,6 +14,18 @@ import (
 	"github.com/gomaja/go-sctp"
 )
 
+// ErrMTPManagementData reports MTP3 management (SI 0) offered as DATA.
+// RFC 4666 §1.4.3.2 requires SG termination and appropriate SSNM instead.
+// Match with errors.Is; send refusals wrap it in a *DataWriteError with DataNotSent.
+var ErrMTPManagementData = errors.New("MTP3 management SI 0 cannot be carried as DATA")
+
+// mtpManagementDataError owns the received bytes for RFC 4666 §3.8.1
+// Diagnostic Information without re-encoding received DATA.
+type mtpManagementDataError struct{ raw []byte }
+
+func (e *mtpManagementDataError) Error() string { return ErrMTPManagementData.Error() }
+func (e *mtpManagementDataError) Unwrap() error { return ErrMTPManagementData }
+
 // AssociationEstablishmentError reports a peer-specific failure after an SCTP
 // association was accepted but before its M3UA procedures became established.
 // Listener.Accept returns transport-listener failures directly, so callers can
@@ -698,6 +710,17 @@ func (c *Association) handleErrors(e error) error {
 			nil, nil,
 		)
 	}
+	// RFC 4666 §§1.4.3.2, 3.3.1 and 3.8.1: SI 0 is not a DATA user
+	// value. Report the violation and quote the received message when retained.
+	if errors.Is(e, ErrMTPManagementData) {
+		var fault *mtpManagementDataError
+		var raw []byte
+		if errors.As(e, &fault) {
+			raw = fault.raw
+		}
+		res = messages.NewError(params.NewErrorCode(params.ErrInvalidParameterValue),
+			errorRoutingContext, errorNetworkAppearance, nil, diagnosticInformationFor(raw))
+	}
 	var parameterFaultError *ParameterFaultError
 	if errors.As(e, &parameterFaultError) {
 		// A fault the dispatcher raised for a message it could not parse
@@ -942,10 +965,12 @@ func diagnosticInformation(raw []byte) []byte {
 	// goroutines, as the RKM procedures do. RFC 4666 Section 3.8.1 makes the
 	// parameter Conditional and says a zero-length Diagnostic Information is
 	// not an error, so quoting nothing is permitted where nothing was kept.
-	b := bytes.Clone(raw)
-	if len(b) > maxDiagnosticInformationLen {
-		return b[:maxDiagnosticInformationLen]
+	if raw == nil {
+		return nil
 	}
+	kept := min(len(raw), maxDiagnosticInformationLen)
+	b := make([]byte, kept)
+	copy(b, raw[:kept])
 	return b
 }
 

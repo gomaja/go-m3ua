@@ -58,6 +58,11 @@ type broadcastFlowKey struct {
 // Broadcast synchronization marker RFC 4666 Section 4.3.4.3 requires after an
 // ASP becomes active.
 //
+// SI 0 is refused with ErrMTPManagementData wrapped in a *DataWriteError
+// with DataNotSent before selection or queuing;
+// the SG/NIF must terminate management and reflect it through SSNM
+// (RFC 4666 §1.4.3.2).
+//
 // The message is copied before the call returns. The caller may reuse or mutate
 // it immediately, including when the result says it was queued.
 func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, error) {
@@ -91,6 +96,9 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 // RFC 4666 Section 1.4.8. Accepted and SCTP-initiating SGP Associations use the
 // same Endpoint-owned registry, so either entry point applies the same AS state
 // and traffic-mode decisions.
+// SI 0 is refused with ErrMTPManagementData wrapped in a *DataWriteError
+// with DataNotSent before selection or queuing
+// (RFC 4666 §1.4.3.2).
 func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, error) {
 	if c == nil {
 		return TrafficDistribution{}, errors.New("cannot distribute DATA through a nil Association")
@@ -164,6 +172,11 @@ func prepareDistributionData(registry *applicationServers, routingKeys *routingK
 	protocolData, err := owned.ProtocolData.ProtocolData()
 	if err != nil {
 		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", err)
+	}
+	// RFC 4666 §1.4.3.2: neither static nor registered AS distribution may
+	// queue or forward management as DATA, even with an explicit context.
+	if protocolData.ServiceIndicator == 0 {
+		return nil, nil, 0, ASKey{}, newDataNotSent(ASKey{}, 0, ErrMTPManagementData)
 	}
 	if err := validateNetworkIndicator(protocolData.NetworkIndicator); err != nil {
 		return nil, nil, 0, ASKey{}, err

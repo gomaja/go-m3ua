@@ -881,6 +881,9 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 }
 
 // WriteSignal writes an M3UA message on the SCTP association.
+// DATA with SI 0 is refused with a *DataWriteError whose Outcome is
+// DataNotSent and whose cause matches ErrMTPManagementData, including messages
+// supplied by built-in and custom encoders (RFC 4666 §1.4.3.2).
 //
 // It takes a message rather than a buffer, so a successful call reports the
 // encoded length of that message.

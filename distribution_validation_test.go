@@ -717,6 +717,13 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 				t.Fatalf("unconfigured Routing Context error = %v, want ErrInvalidRoutingContext", err)
 			}
 		case 2:
+			// RFC 4666 §1.4.3.2 excludes SI 0 before distribution selection.
+			if value[8] == 0 {
+				if !errors.Is(err, ErrMTPManagementData) {
+					t.Fatalf("SI 0 error = %v", err)
+				}
+				return
+			}
 			// RFC 4666 §3.3.1: unused Network Indicator bits are coded zero, so
 			// distribution refuses Protocol Data that sets them.
 			if ni := pointcode.NetworkIndicator(value[9]); !ni.Valid() {
