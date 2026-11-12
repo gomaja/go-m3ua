@@ -1132,6 +1132,7 @@ func newInboundMessage(data []byte, info sctp.RcvInfo, received time.Time) inbou
 }
 
 func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
+	drain := c.peerRelease.drainSignal()
 	max := c.cfg.ReadBufferSize
 	if max <= 0 {
 		max = DefaultReadBufferSize
@@ -1149,7 +1150,24 @@ func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
 			// ErrMessageTooLong. Preserve the M3UA policy of reporting the
 			// limit violation and closing the association.
 			if errors.Is(err, sctp.ErrMessageTooLong) {
-				c.sendErr(ErrMessageTooLarge)
+				select {
+				case <-drain:
+					continue
+				default:
+				}
+				select {
+				case c.errChan <- ErrMessageTooLarge:
+				case <-c.done:
+					return
+				case <-drain:
+					continue
+				}
+			}
+			err = peerReadCause(err)
+			if c.peerRelease.finishedRead(err) {
+				// The monitor may have unwound after its control write failed.
+				// This reader owns the definitive SCTP cause in that case.
+				_, _ = c.endWith(err, false)
 			}
 			select {
 			case readErr <- err:
@@ -1160,9 +1178,19 @@ func (c *Association) readLoop(raw chan<- inbound, readErr chan<- error) {
 		// Taken before the hand-off, which waits while the dispatcher handles
 		// earlier messages, so DataMessage.Received covers that wait too.
 		received := time.Now()
+		select {
+		case <-drain:
+			continue
+		default:
+		}
 
 		select {
 		case raw <- newInboundMessage(b, info, received):
+		case <-drain:
+			// A failed mandatory send already prevents continued M3UA use.
+			// Drain SCTP, without waiting on the unwinding dispatcher, until
+			// its end indication supplies the final cause.
+			continue
 		case <-c.done:
 			return
 		}
@@ -1189,6 +1217,9 @@ func (c *Association) monitor(ctx context.Context) {
 	// notifications among the M3UA messages surrounding them.
 	inboundChan := c.inboundChan
 	readErr := make(chan error, 1)
+	// Publish before starting the goroutine: an opening write can fail before
+	// the scheduler first runs the reader.
+	c.peerRelease.startReader()
 	go c.readLoop(inboundChan, readErr)
 
 	// The opening transition is applied here, synchronously, before the
@@ -1210,7 +1241,7 @@ func (c *Association) monitor(ctx context.Context) {
 	// Applying it inline also means the ASP role's ASP-DOWN entry action has
 	// written its ASP Up before the reader can deliver the answer to it.
 	if err := c.handleStateUpdate(StateASPDown); err != nil {
-		_ = c.closeWith(err)
+		c.finishMonitor(ctx, readErr, err)
 		return
 	}
 
@@ -1244,18 +1275,18 @@ func (c *Association) monitor(ctx context.Context) {
 			// self-sufficient and independent of the reader's timing.
 			return
 		case err := <-readErr:
-			_ = c.closeWith(err)
+			c.finishMonitor(ctx, readErr, err)
 			return
 		case err := <-c.errChan:
 			if e := c.handleErrors(err); e != nil {
-				_ = c.closeWith(e)
+				c.finishMonitor(ctx, readErr, e)
 				return
 			}
 		case state := <-c.stateChan:
 			// Act properly based on current state.
 			if err := c.handlePublishedStateUpdate(state); err != nil {
 				if errors.Is(err, ErrSCTPNotAlive) {
-					_ = c.closeWith(err)
+					c.finishMonitor(ctx, readErr, err)
 					return
 				}
 			}
@@ -1263,9 +1294,26 @@ func (c *Association) monitor(ctx context.Context) {
 			err := c.handlePublishedStateUpdate(StateASPDown)
 			close(restart.applied)
 			if errors.Is(err, ErrSCTPNotAlive) {
-				_ = c.closeWith(err)
+				c.finishMonitor(ctx, readErr, err)
 				return
 			}
+		}
+	}
+}
+
+// finishMonitor keeps owner cancellation observable while a failed send waits
+// for the reader's definitive SCTP cause. It performs no more M3UA procedures.
+func (c *Association) finishMonitor(ctx context.Context, readErr <-chan error, cause error) {
+	_ = c.closeWith(cause)
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-ctx.Done():
+			_ = c.closeWith(ctx.Err())
+			return
+		case err := <-readErr:
+			_ = c.closeWith(err)
 		}
 	}
 }

@@ -138,11 +138,14 @@ func (c *Association) enqueueSCTPRestart() {
 	select {
 	case <-c.done:
 		return
+	case <-c.peerRelease.drainSignal():
+		return
 	default:
 	}
 	select {
 	case c.inboundChan <- inbound{kind: inboundSCTPRestart}:
 	case <-c.done:
+	case <-c.peerRelease.drainSignal():
 	}
 }
 
@@ -157,12 +160,15 @@ func (c *Association) enqueueSCTPPeerAddrChange(change *sctp.PeerAddrChange) {
 	select {
 	case <-c.done:
 		return
+	case <-c.peerRelease.drainSignal():
+		return
 	default:
 	}
 	snapshot := *change
 	select {
 	case c.inboundChan <- inbound{kind: inboundSCTPPeerAddrChange, peerAddrChange: &snapshot}:
 	case <-c.done:
+	case <-c.peerRelease.drainSignal():
 	}
 }
 

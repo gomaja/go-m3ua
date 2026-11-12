@@ -660,12 +660,23 @@ func raceReleasesAgainstIO(t *testing.T, port int, accepted, abortOnly bool) {
 	// association.
 	var written atomic.Int64
 	writeDone := make(chan error, 1)
+	// Keep one DATA outstanding while writes race the releases. An unpaced
+	// flood can exhaust the kernel's receive backlog and discard ABORT before
+	// SCTP processes it. Keep receive pressure bounded during the release race.
+	drained := make(chan struct{}, 1)
 	go func() {
 		for {
 			_, err := writePayload(local, 1, []byte("in-flight"))
 			if err == nil {
 				written.Add(1)
-				continue
+				select {
+				case <-drained:
+					continue
+				case <-local.Done():
+					// Make a real write observe the release, preserving the
+					// assertion on the writer's returned error below.
+					continue
+				}
 			}
 			select {
 			case <-local.Done():
@@ -680,6 +691,11 @@ func raceReleasesAgainstIO(t *testing.T, port int, accepted, abortOnly bool) {
 	go func() {
 		for {
 			if _, err := remote.ReadData(context.Background()); err != nil {
+				return
+			}
+			select {
+			case drained <- struct{}{}:
+			case <-local.Done():
 				return
 			}
 		}

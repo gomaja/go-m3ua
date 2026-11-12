@@ -86,7 +86,16 @@ Section 4 below.
 | [4.6 MTP3 restart](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.6) | Mandatory | Implemented | Local and peer restart, SCTP_RESTART, state reset, ordered recovery, and affected destination behavior are covered. |
 | [4.7 NIF not available](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.7) | Mandatory | Implemented | Endpoint-wide and per-AS NIF availability, ASP Inactive, Notify, partial failure, and recovery are covered. |
 | [4.8 Version control](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.8) | Mandatory | Implemented | Version `1`, ASP Up negotiation, unsupported version Error, and state preservation are covered. |
-| [4.9 M3UA termination](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.9) | Mandatory | Implemented | Graceful shutdown, timeout, cancellation, transport closure, and resource release are covered. |
+| [4.9 M3UA termination](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.9) | Mandatory | Implemented | Graceful shutdown, timeout, cancellation, transport closure, and resource release are covered. Peer release causes are retained when a control write notices transport failure before the reader. |
+
+`Association.Err()` and the `ManagementSCTPRelease` indication retain the same
+terminal cause. A peer ABORT matches `ErrSCTPNotAlive` and includes the cause
+supplied by the SCTP layer; graceful peer shutdown matches `io.EOF`
+(RFC 4666 §4.3.1; RFC 6458 §6.1.1; RFC 9260 §§9.1, 11.2.5). A control write
+still returns its own write error to its caller, but that errno does not replace
+the receive-side association-end indication. `Err()` remains nonblocking and
+the cause is final when `Done()` closes. Explicit local release and owner
+cancellation can complete teardown while a peer indication is pending.
 
 ## Examples, security, IANA, and appendices
 
