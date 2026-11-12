@@ -1,7 +1,7 @@
 # M3UA standards and security contract
 
 Audit date: 2026-08-31. The M3UA and SCTP dependency contract was rechecked
-2026-11-05; see [Recheck log](#recheck-log).
+2026-11-12; see [Recheck log](#recheck-log).
 
 This document defines which authorities govern go-m3ua v1.2.0 and where the
 library boundary ends. The implementation status for each RFC 4666 area is in
@@ -360,6 +360,45 @@ confidentiality or peer authentication.
 ## Recheck log
 
 Standards decisions are rechecked when a subsystem is revisited, not once.
+
+On 2026-11-12, the RFC Editor JSON records, Datatracker document APIs and
+incoming relationships filtered to `obs,updates`, and the errata records were
+called for RFC 4666, RFC 9260 and RFC 6458. Both databases agree: none has a
+formal update or replacement; the relationship queries each returned
+`total_count: 0`. The errata remain unchanged:
+
+- [RFC 4666](https://errata.rfc-editor.org/search/?rfc_number=4666&presentation=records):
+  no Verified errata; Held 2065 and 4475; Rejected 2518.
+- [RFC 9260](https://errata.rfc-editor.org/search/?rfc_number=9260&presentation=records):
+  Verified 7147 (§3.2), 7148 (§3.3.3), 7387 (§5.2.4.1), 8402 (§5.1.6) and
+  7852 (§8.5); Held 8772; Rejected 7988, 8387 and 8774.
+- [RFC 6458](https://errata.rfc-editor.org/search/?rfc_number=6458&presentation=records):
+  Verified 6111, 6112, 6115, 6980, 7547 and 7548; Held 4921, 6113, 6114 and
+  6116; Rejected 6081, 6131, 6132 and 6133. Verified erratum 6115 corrects
+  the §8.2.1 state list; it does not change the queue-counter meanings.
+
+Held and Rejected errata are reported here, not applied as corrections.
+RFC 6458 §8.2.1 reports unacknowledged sent DATA and DATA pending receipt;
+it does not report unsent DATA. The newly exposed send backlog is Linux
+memory accounting: `SO_MEMINFO` returns `sk_wmem_queued` and `sk_sndbuf`
+([v5.14 net/core/sock.c:3403–3423](https://github.com/torvalds/linux/blob/v5.14/net/core/sock.c#L3403-L3423),
+[mainline 9d66f26fefac:4156–4176](https://github.com/torvalds/linux/blob/9d66f26fefacebfeed15de31c1123451a17ff119/net/core/sock.c#L4156-L4176)).
+DATA is charged with allocation overhead
+([v5.14 net/sctp/socket.c:122–145](https://github.com/torvalds/linux/blob/v5.14/net/sctp/socket.c#L122-L145),
+[mainline:126–147](https://github.com/torvalds/linux/blob/9d66f26fefacebfeed15de31c1123451a17ff119/net/sctp/socket.c#L126-L147));
+per-association sock_diag reports that charge separately
+([v5.14 net/sctp/diag.c:413–427](https://github.com/torvalds/linux/blob/v5.14/net/sctp/diag.c#L413-L427),
+[mainline:414–428](https://github.com/torvalds/linux/blob/9d66f26fefacebfeed15de31c1123451a17ff119/net/sctp/diag.c#L414-L428)).
+`AssociationStatus` includes the cheap SO_MEMINFO read; optional
+`SCTPAssocQueues` requires Linux 5.1 and `sctp_diag`. The Rocky Linux 9 RPM
+`kernel-modules-extra-0:5.14.0-687.66.1.el9_8.x86_64` was downloaded and its
+file list and contents inspected: `/etc/modprobe.d/sctp_diag-blacklist.conf`
+contains `blacklist sctp_diag`. The module does not load on demand until an
+administrator loads it (`modprobe sctp_diag`) or removes the blacklist line.
+Neither read adds automatic congestion handling under
+RFC 4666 §1.4.6. The [TSVWG active-document list](https://datatracker.ietf.org/wg/tsvwg/documents/)
+was also checked: `draft-dreibholz-tsvwg-sctpsocket-sqinfo-33` proposes a
+socket send-queue interface; it remains a draft, not a normative replacement.
 
 On 2026-11-11, RFC Editor JSON records, incoming Datatracker relationships
 filtered to `obs,updates`, and the errata records were checked for RFCs 6458,

@@ -3380,11 +3380,12 @@ func (c *Association) closeStateChanges() {
 // primitive; no peer protocol is involved. The values below are that status,
 // read from the association at the moment of the call.
 //
-// The RTO parameters, retransmission limit, PR-SCTP result, primary path,
-// address lists and individual paths are read separately; this is not an atomic snapshot. Paths
-// retain kernel order, omitting a peer address removed during the query. If
-// every peer path disappears, the query returns the PathInfo error. A Potentially Failed path hidden by PF
-// exposure settings is included with its address and state, and zero metrics.
+// The send backlog, RTO parameters, retransmission limit, PR-SCTP result,
+// primary path, address lists and individual paths are read separately; this
+// is not an atomic snapshot. Paths retain kernel order, omitting a peer address
+// removed during the query. If every peer path disappears, the query returns
+// the PathInfo error. A Potentially Failed path hidden by PF exposure settings
+// is included with its address and state, and zero metrics.
 type AssociationStatus struct {
 	// State is the association's SCTP state, as a name (for example
 	// "ESTABLISHED"). RFC 9260 Section 4 defines the state machine.
@@ -3393,22 +3394,29 @@ type AssociationStatus struct {
 	// octets (RFC 6458 Section 8.2.1, sstat_rwnd): the window the peer last
 	// advertised, less the DATA still outstanding (RFC 9260 Section 6.2.1).
 	// At zero this end sends no new DATA except zero window probes (RFC 9260
-	// Section 6.1, rule A), and the DATA it has queued is counted by no field
-	// here: SCTP_STATUS does not report the send backlog.
+	// Section 6.1, rule A). SendBacklog separately reports the charged send
+	// memory; SCTP_STATUS itself does not report the send backlog.
 	ReceiverWindow uint32
 	// UnackedDataChunks is how many DATA chunks this end has sent and not yet
 	// had acknowledged (sstat_unackdata). A number that stays high is the peer,
 	// or the path, not keeping up. A peer that has stopped reading shows
 	// instead, once its receive buffer is full, as a ReceiverWindow of zero,
 	// and this count can then stay as low as the one zero window probe however
-	// much DATA waits to be sent.
+	// much DATA waits to be sent. See SendBacklog for the charged send memory.
 	UnackedDataChunks uint16
 	// PendingDataChunks is how many DATA chunks are pending receipt (RFC 6458
 	// Section 8.2.1, sstat_penddata): on Linux, the chunks missing from the
 	// peer below the highest TSN received from it (net/sctp/tsnmap.c,
 	// sctp_tsnmap_pending, Linux v5.14 and mainline). It is the gap in what
-	// the peer has sent, not this end's send backlog.
+	// the peer has sent. This end's charged send memory is in SendBacklog.
 	PendingDataChunks uint16
+	// SendBacklog is the separately read send-buffer memory charge and limit
+	// (SO_MEMINFO; net/core/sock.c: sk_get_meminfo). It includes overhead,
+	// rather than counting payload bytes. Charged can exceed Limit, which
+	// equals SocketSendBuffer. Zero means no charged DATA remains: delivered
+	// DATA has been acknowledged, not necessarily read by the peer application.
+	// See SCTPSendBacklog. Optional sock_diag counters are in SCTPAssocQueues.
+	SendBacklog sctp.SendBacklog
 	// InboundStreams and OutboundStreams are the stream counts negotiated at
 	// association setup. OutboundStreams bounds the stream a message may be
 	// sent on; see MaxMessageStreamID.
@@ -3519,12 +3527,17 @@ func (c *Association) AssociationStatus() (*AssociationStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	backlog, err := c.sctpConn.SendBacklog()
+	if err != nil {
+		return nil, err
+	}
 
 	return &AssociationStatus{
 		State:                 associationStateName(r.State),
 		ReceiverWindow:        r.PeerRwnd,
 		UnackedDataChunks:     r.Unacked,
 		PendingDataChunks:     r.Pending,
+		SendBacklog:           *backlog,
 		InboundStreams:        r.InStreams,
 		OutboundStreams:       r.OutStreams,
 		FragmentationPoint:    r.FragmentationPoint,
