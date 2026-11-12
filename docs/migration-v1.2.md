@@ -20,6 +20,7 @@ delivers unknown values unchanged; applications can call `Valid()` to check them
 
 Contents:
 
+- [Application-owned withdrawal recovery](#application-owned-withdrawal-recovery)
 - [Endpoint role](#endpoint-role)
 - [Application Server membership](#application-server-membership)
 - [The I/O break: `net.Conn` is gone](#the-io-break-netconn-is-gone)
@@ -961,3 +962,67 @@ Double Exchange direction. A pending onset is discarded if its episode ended
 before transport submission. Local end does not send an international-form wire
 clear; peer validity-timer or audit/current MTP procedure recovery remains
 necessary (RFC 4666 Sections 3.4.4, 4.3.1 and 5.6.2).
+
+## Application-owned withdrawal recovery
+
+Unsolicited ASP Inactive Ack recovery is a deliberate breaking behavior
+change. The library closes the affected traffic gates and emits
+`ManagementASPWithdrawal` (`ASP-WITHDRAWAL`) through `ManagementIndications`;
+it no longer sends ASP Active on its own, even for the last active scope with
+automatic startup configured. This applies to ASP and both IPSP exchange
+models. Subscribe before the handshake and let application policy choose
+whether to call `association.ASPActive(ctx, indication.ASKeys...)` or, for a
+known numeric scope, `association.ActivateRoutingContexts(1)`. These are
+ordinary activation procedures. The new management kind distinguishes the
+unsolicited scopes from confirmations of the application's own deactivation.
+There is no compatibility option.
+
+RFC 4666 §4.3.4.4 uses lowercase "should" for returning to the previous state;
+§4.3.4.3 permits application Layer Management to initiate ASP Active. The new
+report is an implementation indication: §1.6.3 defines no
+unsolicited-withdrawal primitive. A contextless AS beside numeric scopes
+cannot be activated separately on the wire; only call `ASPActive(ctx)` without
+keys when application policy chooses the whole inventory. Automatic activation
+after ASP Up Ack is unchanged. See [the recovery
+example](../README.md#recovery-after-peer-withdrawal).
+
+Known inactive or pending-only scopes are ignored, including alongside an
+active withdrawal. They do not stop the application's activation or consume
+initial startup. Each reported ASKey preserves its own Network Appearance,
+including dynamically registered ASes; Notify indications use the same scope
+resolution. Numeric reported keys can be passed directly to ASPActive.
+Inactive Ack may omit Routing Context (§3.7.4, §4.3.4.4). On a multi-AS
+association, omission while an explicit Inactive is outstanding remains
+ambiguous and is rejected with ErrMissingRoutingContext without changing any
+scope or request. An Ack of an omitted request still confirms it; without an
+outstanding Inactive request, omission withdraws the active scopes. Explicit
+Active Ack correlation retains the echo requirement of §4.3.4.3.
+
+Cancelling a pending activation returns an error wrapping
+ErrASPProcedureSuperseded with its cause while the association remains open.
+Unaccepted control sends are cancelled, and the handler waits only for the
+cancelled request's transport call, before the withdrawal report. It does not
+join unrelated writers through shared mutexes.
+
+SCTP acceptance can win cancellation and cannot be retracted. In that case
+one ManagementError immediately names the ASKeys that the message carried and
+says the peer may consider them active. For an unsolicited withdrawal, this
+error follows ManagementASPWithdrawal. The application chooses whether to
+send ASPInactive to confirm inactivity or ASPActive to recover. Confirmed
+application Inactive and ASP Down cancellation use the same reporting rule. A
+waiting ASPActive call also publishes its ordinary failure ManagementError.
+While its context and association remain live, it waits for the cancelling
+handler's reports first. Context cancellation ends that wait immediately:
+it returns the supersession cause if withdrawal already claimed the request,
+or ctx.Err() otherwise. Its failure indication may then precede the handler's
+reports. Association close ends the wait using the existing terminal-reporting
+policy. ActivateRoutingContexts and initial procedure writes never wait for
+the handler's DATA drain; ActivateRoutingContexts returns its error without a
+generic procedure-failure indication, as before.
+
+No acknowledgement evidence is retained for a cancelled send. Later Active
+Acks use the ordinary duplicate and validation rules; M3UA has no request
+identifier that correlates one with the cancelled message. Delayed duplicate
+Active Ack handling remains a separate deferred behavior. The library changes
+no state and sends no replacement request because SCTP accepted the cancelled
+send.

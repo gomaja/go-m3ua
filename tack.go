@@ -6,7 +6,10 @@ package m3ua
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
@@ -19,6 +22,53 @@ import (
 // request they describe: "T(ack) is provisionable, with a default of 2
 // seconds."
 const DefaultTAck = 2 * time.Second
+
+// pendingControlWrite describes one transport call, never an expected Ack.
+// Closing done publishes its immutable outcome and original per-AS scope.
+type pendingControlWrite struct {
+	done     chan struct{}
+	keys     []ASKey
+	accepted bool
+}
+
+func (p *pendingRequest) beginControlWrite(keys []ASKey) *pendingControlWrite {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	select {
+	case <-p.stop:
+		return nil
+	default:
+	}
+	call := &pendingControlWrite{done: make(chan struct{}), keys: keys}
+	p.write = call
+	return call
+}
+
+func (call *pendingControlWrite) complete(submitted bool, stopped <-chan struct{}) {
+	if submitted {
+		select {
+		case <-stopped:
+			call.accepted = true
+		default:
+		}
+	}
+	close(call.done)
+}
+
+func (p *pendingRequest) joinControlWrite() *pendingControlWrite {
+	p.writeMu.Lock()
+	call := p.write
+	if call == nil {
+		// Stop is already closed. A writer still waiting for sendMu cannot
+		// enter the transport; publish that completed outcome immediately.
+		call = &pendingControlWrite{done: make(chan struct{})}
+		close(call.done)
+		p.write = call
+	}
+	p.writeMu.Unlock()
+	<-call.done
+	return call
+}
 
 // pendingRequest is an ASPSM/ASPTM request awaiting its acknowledgement.
 type pendingRequest struct {
@@ -37,6 +87,11 @@ type pendingRequest struct {
 	result                chan error
 	stopOnce              sync.Once
 	resultOnce            sync.Once
+	writeMu               sync.Mutex
+	write                 *pendingControlWrite
+	// failure is visible before stop closes, including to an initial write
+	// that cancellation prevents from being submitted.
+	failure atomic.Pointer[error]
 }
 
 // tackRetransmitter resends unacknowledged ASPSM/ASPTM requests until their Ack
@@ -62,7 +117,8 @@ type tackRetransmitter struct {
 	retryMu sync.Mutex
 	pending map[messages.M3UA]*pendingRequest
 	// acknowledgedASPTM retains the ASPTM scopes acknowledged during the current
-	// SCTP association epoch. RFC 4666 Sections 4.3.4.3 and 4.3.4.4 permit
+	// SCTP association epoch, with Inactive history retired per reactivated scope.
+	// RFC 4666 Sections 4.3.4.3 and 4.3.4.4 permit
 	// T(ack) retransmission and require the peer to answer each repeated request.
 	// Because ASPTM has no request identifier, an Ack for a retransmission can
 	// arrive after its first Ack completed the procedure. Retaining the bounded
@@ -181,7 +237,7 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 		if terminationBoundary {
 			c.tack.retryMu.Unlock()
 		}
-		req.finish(ErrASPProcedureSuperseded)
+		req.finish(fmt.Errorf("%w by peer ASP Down", ErrASPProcedureSuperseded))
 		return req
 	}
 	if ackFor == requestAspUp {
@@ -223,13 +279,25 @@ func (c *Association) writePendingControl(request *pendingRequest, message messa
 		return c.writeControl(message)
 	}
 	c.tack.retryMu.Lock()
-	defer c.tack.retryMu.Unlock()
+	var n int
+	var err error
 	select {
 	case <-request.stop:
-		return 0, nil
 	default:
-		return c.writeControlUntilStopped(message, request.stop)
+		n, err = c.writeTAckControl(request, message)
 	}
+	c.tack.retryMu.Unlock()
+	if err == nil {
+		if failed := request.failure.Load(); failed != nil {
+			return 0, *failed
+		}
+	}
+	return n, err
+}
+
+// writeTAckControl runs under retryMu, including the accepted-result record.
+func (c *Association) writeTAckControl(req *pendingRequest, message messages.M3UA) (int, error) {
+	return c.writeControlUntilStopped(message, req.stop, req)
 }
 
 func (p *pendingRequest) acknowledge() {
@@ -242,6 +310,9 @@ func (p *pendingRequest) stopRetries() {
 
 func (p *pendingRequest) finish(err error) {
 	p.resultOnce.Do(func() {
+		if err != nil {
+			p.failure.Store(&err)
+		}
 		p.stopRetries()
 		p.result <- err
 		close(p.result)
@@ -275,7 +346,7 @@ func (c *Association) runTAck(req *pendingRequest, kind requestKind) {
 		default:
 		}
 
-		_, err := c.writeControlUntilStopped(req.msg, req.stop)
+		_, err := c.writeTAckControl(req, req.msg)
 		c.tack.retryMu.Unlock()
 		if err != nil {
 			// The association is going away; monitor() will act on the write
@@ -411,6 +482,13 @@ func (c *Association) claimTAckAcknowledgementForScope(kind requestKind, acknowl
 
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
+	return c.claimTAckAcknowledgementLocked(kind, acknowledged, wireRoutingContext)
+}
+
+func (c *Association) claimTAckAcknowledgementLocked(kind requestKind, acknowledged, wireRoutingContext *params.Param) pendingTAckAcknowledgement {
+	if kind == requestAspActive {
+		c.retireInactiveAcknowledgementLocked(acknowledged)
+	}
 	requests := c.pendingRequestEntriesLocked(kind)
 	if len(requests) == 0 {
 		return pendingTAckAcknowledgement{}
@@ -442,7 +520,8 @@ func (c *Association) claimTAckAcknowledgementForScope(kind requestKind, acknowl
 		result.solicited = true
 		// An explicit partial Ack cannot acknowledge an omitted contextless AS.
 		// Its unkeyed Ack completes that scope along with any remaining RCs
-		// (RFC 4666 §4.3.4.3).
+		// (RFC 4666 §4.3.4.3). Inactive Ack may omit RC (§3.7.4, §4.3.4.4),
+		// confirming an omitted request without materializing an explicit scope.
 		contextlessOutstanding := c.role == RoleASP && req.routingContextOmitted && acknowledged != nil && c.hasConfiguredLocalContextlessAS()
 		if len(req.remaining) > 0 || contextlessOutstanding {
 			continue
@@ -471,6 +550,13 @@ func (c *Association) recordASPTMAcknowledgementLocked(kind requestKind, acknowl
 	}
 	if acknowledged == nil {
 		scope.routingContextOmitted = true
+		if kind == requestAspInactive {
+			// Preserve the individually acknowledged ASes if a later scoped
+			// activation ends only part of this duplicate window (RFC 4666 §4.3.4.4).
+			for _, routingContext := range c.configuredLocalRoutingContexts() {
+				scope.routingContexts[routingContext] = struct{}{}
+			}
+		}
 		return
 	}
 	for _, routingContext := range acknowledged.RoutingContexts() {
@@ -494,6 +580,38 @@ func (c *Association) pendingTAckContextless(kind requestKind) bool {
 		}
 	}
 	return false
+}
+
+// retireInactiveAcknowledgementLocked ends duplicate recognition only for
+// scopes whose Active Ack has been accepted or sent in IPSP Single Exchange
+// (RFC 4666 §4.3.4.3.1 and §5.6.1). RFC 4666 §4.3.4.4 describes
+// withdrawing those ASes on a subsequent unsolicited Inactive Ack; §4.7
+// describes partial NIF failure as one source of such a fresh withdrawal.
+func (c *Association) retireInactiveAcknowledgementLocked(activated *params.Param) {
+	if activated == nil {
+		delete(c.tack.acknowledgedASPTM, requestAspInactive)
+		return
+	}
+	scope := c.tack.acknowledgedASPTM[requestAspInactive]
+	if scope == nil {
+		return
+	}
+	// An omitted Ack can no longer be a duplicate for the entire association.
+	// Explicit history for ASes that have not reactivated remains valid.
+	scope.routingContextOmitted = false
+	for _, routingContext := range activated.RoutingContexts() {
+		delete(scope.routingContexts, routingContext)
+	}
+}
+
+func (c *Association) retireInactiveAcknowledgement(activated *params.Param) {
+	if c.tack == nil {
+		return
+	}
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	c.retireInactiveAcknowledgementLocked(activated)
+
 }
 
 // pendingTAckRoutingContexts returns the explicit RCs still awaiting an Ack.
@@ -611,7 +729,7 @@ func (c *Association) finishPeerDownProcedures(requests []*pendingRequest) {
 		c.tack.mu.Unlock()
 	}
 	for _, request := range requests {
-		request.finish(ErrASPProcedureSuperseded)
+		request.finish(fmt.Errorf("%w by peer ASP Down", ErrASPProcedureSuperseded))
 	}
 }
 
@@ -669,14 +787,16 @@ func (c *Association) rejectStaleASPTMAck(kind requestKind) bool {
 
 // isRepeatedASPTMAcknowledgement reports an Ack whose entire scope was already
 // acknowledged during this SCTP association epoch and does not match a current
-// request of the same kind.
+// request of the same kind. Inactive history ends on accepted activation or
+// peer Single Exchange activation (RFC 4666 §4.3.4.3.1, §4.3.4.4, §5.6.1).
 //
 // RFC 4666 Sections 4.3.4.3 and 4.3.4.4 permit the local IPSP to retransmit ASP
 // Active or ASP Inactive until an Ack arrives. The peer answers every copy, so
-// a later Ack must neither reverse a subsequent procedure nor provoke an Error
-// for a request this association did send. A current request wins because the
+// a later Ack before reactivation must not provoke a second withdrawal or an
+// Error for a request this association did send. A current request wins because the
 // protocol provides no request identifier that could distinguish its Ack from
-// an older retransmission's Ack.
+// an older retransmission's Ack. An acknowledged Inactive portion is no
+// longer outstanding, even while other scopes of that request remain pending.
 func (c *Association) isRepeatedASPTMAcknowledgement(kind requestKind, acknowledged *params.Param) bool {
 	return c.isRepeatedASPTMAcknowledgementForScope(kind, acknowledged, acknowledged)
 }
@@ -700,8 +820,12 @@ func (c *Association) isRepeatedASPTMAcknowledgementForScope(kind requestKind, a
 		if request.routingContexts == nil {
 			return false
 		}
+		pendingContexts := request.routingContexts
+		if kind == requestAspInactive {
+			pendingContexts = request.remaining
+		}
 		for _, routingContext := range acknowledged.RoutingContexts() {
-			if _, pending := request.routingContexts[routingContext]; pending {
+			if _, pending := pendingContexts[routingContext]; pending {
 				return false
 			}
 		}
@@ -772,28 +896,12 @@ func (c *Association) cancelTAckRequest(req *pendingRequest) {
 // a withdrawn scope (RFC 4666 §4.3.4.3 and §4.3.4.4). Partial Acks reduce
 // remaining, but retries still carry the original message's full scope.
 func (c *Association) stopCompetingASPActive(scope *params.Param) {
-	if c.tack == nil {
-		return
+	var keys []ASKey
+	if scope != nil {
+		keys = c.managementASKeys(nil, scope)
 	}
-	c.tack.mu.Lock()
-	defer c.tack.mu.Unlock()
-	for message, request := range c.tack.pending {
-		if request.kind != requestAspActive {
-			continue
-		}
-		overlaps := scope == nil || request.routingContextOmitted
-		if scope != nil {
-			for _, rc := range scope.RoutingContexts() {
-				if _, named := request.routingContexts[rc]; named {
-					overlaps = true
-				}
-			}
-		}
-		if overlaps {
-			request.cancel()
-			delete(c.tack.pending, message)
-		}
-	}
+	cancelled := c.cancelASPActivations(keys, "ASP Down")
+	c.reportCancelledActivations(cancelled)
 }
 
 // waitTAck waits for one request to be acknowledged, fail, or be cancelled.
@@ -803,9 +911,17 @@ func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 	}
 	select {
 	case err := <-req.result:
+		if failed := req.failure.Load(); failed != nil {
+			return *failed
+		}
 		return err
 	case <-ctx.Done():
 		c.cancelTAckRequest(req)
+		// A claimed withdrawal supplies the cause, but cannot extend ctx
+		// while its handler waits for admitted DATA to drain.
+		if failed := req.failure.Load(); failed != nil && errors.Is(*failed, ErrASPProcedureSuperseded) {
+			return *failed
+		}
 		return ctx.Err()
 	case <-c.done:
 		if err := c.Err(); err != nil {

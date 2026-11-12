@@ -71,9 +71,13 @@ initiator of every ASPSM and ASPTM request.
 | ASP Active received, Ack sent; refused from ASP-DOWN | SGP, SE, DE | peer | `TestRejectedAspActiveAckDoesNotStorm` |
 | **Partial activation** — some Routing Contexts acknowledged, the rest refused | SGP, SE, DE responding; ASP requesting | both | `TestMixedRoutingContextAcksTheServedOnesAndRefusesTheRest`, `TestWhollyUnservedRoutingContextGetsNoAck` |
 | ASP Inactive, scoped withdrawal, traffic quiesced before the Ack | ASP, SGP, SE, DE | both | `TestASPInactiveAckWaitsUntilScopedTrafficIsHalted` |
+| Unsolicited Inactive Ack after reactivation; delayed duplicate before reactivation (RFC 4666 §4.3.4.4) | ASP | local | `TestASPWithdrawsOnUnsolicitedInactiveAckAfterReactivation`, `TestASPIgnoresDelayedDuplicateInactiveAck`, `TestASPApplicationReactivationNamesOnlyWithdrawnScope`, `TestInactiveAckHistoryRetiresOnlyReactivatedScopes` |
+| Peer Single Exchange reactivation (§4.3.4.3.1, §5.6.1); independent active-scope withdrawal; pending first activation is not active (§4.3.4.4) | ASP, SE | local | `TestIPSPSingleExchangePeerReactivationRetiresInactiveAckHistory`, `TestASPWithdrawsWhileAnotherScopeAwaitsInactiveAck`, `TestASPPendingFirstActivationDoesNotAuthorizeInactiveAck`, `TestASPApplicationReactivatesAfterSGPWithdrawalSCTP` |
 | Override displaces the incumbent | SGP, SE, DE | peer | `TestFigure4TransitionsCellByCell`, `TestTrafficModeCanBeConfiguredPerApplicationServer` |
 | Loadshare and Broadcast add without displacing | SGP | peer, local | `TestBroadcastActivationDropsThePreviousFlowEpoch` |
 | Traffic mode negotiation and rejection | all | both | `TestAspActiveWithIncompatibleTrafficModeIsRefused`, `TestAspActiveWithoutTrafficModeIsAccepted`, `TestTrafficModeTypeOutsideTheDefinedValuesIsRejected`, `TestASPRejectsActiveAckWithWrongRequestedTrafficMode`, `TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement` |
+| Application-owned recovery after unsolicited Inactive Ack (RFC 4666 §4.3.4.4, §4.3.4.4.1) | ASP, SE, DE | application policy | `TestInactiveAckLeavesReactivationToApplication`, `TestIPSPInactiveAckReportsWithdrawalWithoutReactivation`, `TestInactiveAckApplicationActivationUsesOrdinaryProcedure` |
+| Exact unsolicited withdrawal report, including mixed confirmations and contextless AS (RFC 4666 §1.6.3, §4.3.4.4) | ASP, SE, DE | implementation indication | `TestInactiveAckReportsOnlyUnsolicitedScopes`, `TestOmittedInactiveAckReportsContextlessAndDynamicScopes`, `TestInactiveAckReactivatedScopeIsNotSolicitedByOldPartialRequest`, `TestDelayedPartialInactiveAckDoesNotCancelApplicationReactivation`, `TestOmittedPartialInactiveAckPreservesIndependentApplicationActivation` |
 | n+k activation, strict startup, smooth start, T(r) | SGP, SE | local policy | `TestRecoveryTimerResolvesPending`, `TestASPActiveBeforeRecoveryTimerRestoresActive`, `TestNotifyIsSentOnASStateChange` |
 
 ## 4. SSNM — RFC 4666 Sections 3.4 and 4.5
@@ -303,3 +307,39 @@ on local end. The peer needs its validity timer or audit/current MTP procedure;
 complete automatic peer recovery is not provided. National-method wire clears
 await a congestion-method setting. This does not implement outbound backlog,
 host or application overload detection.
+
+After `ManagementASPWithdrawal`, application policy decides whether and when to
+restore `indication.ASKeys` with `association.ASPActive(ctx, indication.ASKeys...)`,
+or a known numeric scope with `association.ActivateRoutingContexts(1)`. The report
+is named `ASP-WITHDRAWAL`, not an RFC M- primitive. No activation is sent until
+that application request, including after last-scope withdrawal with automatic
+startup configured. Automatic activation following ASP Up Ack remains unchanged.
+A contextless AS beside numeric ASes requires a whole-inventory policy decision
+before `ASPActive(ctx)` without keys (RFC 4666 §4.3.4.3).
+
+
+Withdrawals apply only to active scopes; mixed messages ignore their inactive
+portions. `TestInactiveAckMixedDuplicateWithdrawsActiveScope`,
+`TestInactiveAckDuplicatePreservesApplicationActivation`, and
+`TestInactiveAckOvertakingStartupPreservesInitialActivation` cover these rules.
+`TestInactiveAckUsesDynamicNetworkAppearance` and
+`TestNotifyUsesDynamicNetworkAppearance` cover registered AS identities.
+`TestInactiveAckBlockedRetryEndsBeforeWithdrawalReport` pins cancellation of an
+unaccepted transport send; `TestCancelledAcceptedActiveIsReportedImmediately`
+pins immediate M-ERROR reporting after the withdrawal report.
+`TestInactiveAckJoinDoesNotWaitForCompetingWriters` pins the per-call join.
+No cancelled-send evidence changes later Active Ack handling. Cancelled callers
+receive `ErrASPProcedureSuperseded`, not a false association-closed error.
+
+`TestConfirmedInactiveReportsSupersededApplicationActivation` and
+`TestConfirmedDownReportsSupersededApplicationActivation` retain the generic
+M-ERROR for unsuccessful application procedures (RFC 4666 §1.6.3).
+`TestWithdrawalReportsPrecedeSupersededApplicationFailure` checks that the
+cancelling handler publishes its withdrawal and acceptance reports before
+releasing the procedure waiter while its context and association remain live.
+`TestASPActiveContextCancellationEscapesWithdrawalDrain`,
+`TestActivateRoutingContextsDoesNotWaitForWithdrawalDrain` and
+`TestAssociationCloseReleasesASPActiveDuringWithdrawalDrain` check prompt
+context, non-waiting and close exits while admitted DATA holds the drain.
+A cancelled context may put the generic failure before the handler's reports.
+The T(ack) retry path continues without waiting for that drain.

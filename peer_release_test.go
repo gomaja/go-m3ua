@@ -34,7 +34,7 @@ func newPeerReleaseTestConn(t *testing.T) *Association {
 func pendingPeerRelease(t *testing.T) (*Association, error) {
 	t.Helper()
 	conn := newPeerReleaseTestConn(t)
-	_, err := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil)
+	_, err := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil, nil)
 	if !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("control write = %v, want ECONNRESET", err)
 	}
@@ -45,7 +45,7 @@ func TestPeerReleaseRetainsAReaderCausePublishedBeforeTheWriter(t *testing.T) {
 	conn := newPeerReleaseTestConn(t)
 	peerCause := fmt.Errorf("%w: received synthetic ABORT", ErrSCTPNotAlive)
 	conn.peerRelease.finishedRead(peerCause)
-	_, err := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil)
+	_, err := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil, nil)
 	if !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestPendingPeerReleaseReleasesQueuedControlWaiters(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("control was not queued")
 	}
-	if _, err := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil); !errors.Is(err, syscall.ECONNRESET) {
+	if _, err := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil, nil); !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatal(err)
 	}
 	select {
@@ -264,7 +264,7 @@ func TestFailedWithdrawalJoinsAnAlreadyCommittedTeardown(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("internal teardown did not reach transport release")
 	}
-	_, writeErr := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil)
+	_, writeErr := conn.writeSignal(heartbeatAckForTest(), false, libraryWrite, nil, nil)
 	if !errors.Is(writeErr, syscall.ECONNRESET) {
 		t.Fatal(writeErr)
 	}

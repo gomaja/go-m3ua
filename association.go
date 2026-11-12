@@ -924,24 +924,24 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 // WriteSignal or WriteData on the same association waits behind it for the
 // socket.
 func (c *Association) WriteSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, true, applicationWrite, nil)
+	return c.writeSignal(m3, true, applicationWrite, nil, nil)
 }
 
 // writeControl writes a message the library sends on its own behalf. It waits
 // for send-buffer space rather than failing on it; see writeControlFrame.
 func (c *Association) writeControl(m3 messages.M3UA) (n int, err error) {
-	return c.writeControlUntilStopped(m3, nil)
+	return c.writeControlUntilStopped(m3, nil, nil)
 }
 
 // writeControlUntilStopped carries a pending procedure's stop signal to the
 // serialized transport boundary (RFC 4666 §4.3.4.1–§4.3.4.4).
-func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan struct{}) (n int, err error) {
+func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan struct{}, request *pendingRequest) (n int, err error) {
 	if _, isASPDown := m3.(*messages.AspDown); !isASPDown || c.tack == nil || !c.isIPSPDoubleExchange() {
-		return c.writeSignal(m3, true, libraryWrite, stopped)
+		return c.writeSignal(m3, true, libraryWrite, stopped, request)
 	}
 	c.tack.aspDownDeliveryMu.Lock()
 	defer c.tack.aspDownDeliveryMu.Unlock()
-	n, err = c.writeSignal(m3, true, libraryWrite, stopped)
+	n, err = c.writeSignal(m3, true, libraryWrite, stopped, request)
 	if err == nil && n > 0 {
 		c.tack.mu.Lock()
 		c.tack.aspDownAcksOutstanding++
@@ -954,7 +954,7 @@ func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan 
 // been selected and whose deliveryMu is already held by the distribution
 // engine. Re-entering the public scope barrier there would deadlock.
 func (c *Association) writeDistributedSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, false, applicationWrite, nil)
+	return c.writeSignal(m3, false, applicationWrite, nil, nil)
 }
 
 // writeOrigin records who decided a message should be sent, because that
@@ -1014,7 +1014,9 @@ const (
 // EAGAIN with no message queued; only that refusal is retried through a
 // blocking SendMsg carrying the same stream 0 and M3UA PPID (RFC 6458
 // Sections 5.3.4 and 8.1.31; Errata 6111; RFC 4666 Sections 1.4.7 and 7.1). Because
-// both sends carry SndInfo, SCTP_DEFAULT_SNDINFO is unnecessary.
+// both sends carry SndInfo, SCTP_DEFAULT_SNDINFO is unnecessary. A pending
+// procedure uses SendMsgContext for both attempts so stopping it also ends
+// a transport-lock or buffer wait. Accepted messages cannot be retracted.
 //
 // The wait is bounded by ControlWriteTimeout. A waiting write holds the
 // socket's write lock, and whatever ordering barrier its caller holds, so an
@@ -1022,9 +1024,18 @@ const (
 // When the bound expires the association is closed, and that also ends the
 // wait: closing the SCTP association releases any write parked in the poller
 // before the descriptor goes.
-func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}) (bool, error) {
+func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}, request *pendingRequest) (submitted bool, resultErr error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
+	// Entry and cancellation share the request's short lock. The completion
+	// signal belongs only to this call, before any other writer can run.
+	if request != nil {
+		call := request.beginControlWrite(c.managementASKeys(nil, requestRoutingContext(request.msg)))
+		if call == nil {
+			return false, nil
+		}
+		defer func() { call.complete(submitted && resultErr == nil, stopped) }()
+	}
 	// A stopped retry may have waited here behind a different control write.
 	select {
 	case <-stopped:
@@ -1035,7 +1046,36 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 		return false, err
 	}
 	transport := c.controlSender()
-	_, err := transport.SendMsg(frame, sctp.SendOptions{Info: info, NoWait: true})
+	send := transport.SendMsg
+	if stopped != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		finished, joined := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(joined)
+			select {
+			case <-stopped:
+				cancel()
+			case <-finished:
+			}
+		}()
+		defer func() { close(finished); <-joined; cancel() }()
+		send = func(b []byte, opts sctp.SendOptions) (int, error) { return transport.SendMsgContext(ctx, b, opts) }
+	}
+	cancelledSend := func(err error) bool {
+		if !errors.Is(err, context.Canceled) {
+			return false
+		}
+		select {
+		case <-stopped:
+			return true
+		default:
+			return false
+		}
+	}
+	_, err := send(frame, sctp.SendOptions{Info: info, NoWait: true})
+	if cancelledSend(err) {
+		return false, nil
+	}
 	if !sendBufferFull(err) {
 		return true, err
 	}
@@ -1056,14 +1096,18 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 			_ = c.closeWith(expired)
 		}
 	})
-	_, err = transport.SendMsg(frame, sctp.SendOptions{Info: info})
+	_, err = send(frame, sctp.SendOptions{Info: info})
+	cancelled := cancelledSend(err)
+	if cancelled {
+		err = nil
+	}
 	if !state.CompareAndSwap(controlWriteWaiting, controlWriteFinished) {
 		// The watchdog decided first. The association is closing on its
 		// account, whatever this attempt returned, so report the cause.
 		return true, expired
 	}
 	watchdog.Stop()
-	return true, err
+	return !cancelled, err
 }
 
 // writeMandatoryControls writes one ordered control batch. The queue-backed
@@ -1160,7 +1204,7 @@ func (c *Association) writeMandatoryControl(control mandatoryControl, queued boo
 		if queued && c.notificationWriter != nil {
 			_, err = c.notificationWriter(message)
 		} else {
-			_, err = c.writeSignal(message, control.enforceTrafficScope, libraryWrite, nil)
+			_, err = c.writeSignal(message, control.enforceTrafficScope, libraryWrite, nil, nil)
 		}
 		if err != nil {
 			return err
@@ -1169,7 +1213,7 @@ func (c *Association) writeMandatoryControl(control mandatoryControl, queued boo
 	return nil
 }
 
-func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}) (n int, err error) {
+func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest) (n int, err error) {
 	if m3 == nil {
 		return 0, errors.New("cannot write a nil M3UA signal")
 	}
@@ -1239,7 +1283,7 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 
 	if origin == libraryWrite {
 		var submitted bool
-		submitted, err = c.writeControlFrame(buf, &sctpInfo, stopped)
+		submitted, err = c.writeControlFrame(buf, &sctpInfo, stopped, request)
 		if !submitted && err == nil {
 			return 0, nil
 		}
@@ -3821,10 +3865,16 @@ const (
 	// ManagementTransportCongestion is the implementation indication for local
 	// outbound transport pressure (RFC 4666 §§1.4.6, 4.5.2.1).
 	ManagementTransportCongestion
+	// ManagementASPWithdrawal reports scopes made inactive by an unsolicited
+	// ASP Inactive Ack (RFC 4666 §4.3.4.4 and §4.3.4.4.1). It is an
+	// implementation indication, not a primitive defined by §1.6.3. ASKeys
+	// names only the unsolicited withdrawal; local request confirmations and
+	// their delayed duplicates do not produce this indication.
+	ManagementASPWithdrawal
 )
 
-// String names the standard indications of RFC 4666 Section 1.6.3 and
-// uses implementation names for local congestion reports.
+// String names the indication as RFC 4666 Section 1.6.3 does, or uses an
+// implementation-specific name for local reports.
 func (k ManagementIndicationKind) String() string {
 	switch k {
 	case ManagementNotify:
@@ -3841,6 +3891,8 @@ func (k ManagementIndicationKind) String() string {
 		return "M-SCTP_STATUS"
 	case ManagementDataQueueCongestion:
 		return "DATA-QUEUE-CONGESTION"
+	case ManagementASPWithdrawal:
+		return "ASP-WITHDRAWAL"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
@@ -3875,7 +3927,8 @@ type ManagementIndication struct {
 
 	// ASKeys is the complete exact Application Server scope, including Network
 	// Appearance and contextless-AS presence. The slice is owned by the
-	// indication.
+	// indication. For ManagementASPWithdrawal these are the unsolicited scopes,
+	// excluding any portion confirming local deactivation.
 	ASKeys []ASKey
 
 	// StatusType and StatusInfo are the two halves of the Status parameter of
@@ -3888,7 +3941,9 @@ type ManagementIndication struct {
 	ErrorCode uint32
 
 	// RoutingContexts is the complete Application Server scope of the
-	// indication. For ManagementNotify it contains every explicitly named
+	// indication. For ManagementASPWithdrawal it contains only numeric labels
+	// from ASKeys; a contextless AS is represented only in ASKeys. For
+	// ManagementNotify it contains every explicitly named
 	// Routing Context, or the configured AS memberships inferred under RFC 4666
 	// Section 4.3.4.5 when NTFY omitted the parameter. For ManagementError it
 	// contains every Routing Context the peer explicitly named, exactly as it

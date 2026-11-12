@@ -260,8 +260,8 @@ func TestAnOverrideReachesOnlyTheApplicationServersItNames(t *testing.T) {
 				if got := asp.State(); got != StateASPInactive {
 					t.Fatalf("state with only overridden RC 1 remaining = %v, want ASP-INACTIVE", got)
 				}
-				if got := asp.resumeAfterStrayAck(); got != !test.solicited {
-					t.Fatalf("resume after stray Ack = %t, want %t", got, !test.solicited)
+				if asp.resumeAfterStrayAck() || len(asp.pendingTAckRoutingContexts(requestAspActive)) > 0 {
+					t.Fatal("Inactive Ack armed automatic recovery")
 				}
 			})
 		}
