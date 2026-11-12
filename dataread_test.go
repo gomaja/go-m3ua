@@ -423,6 +423,9 @@ func TestDataQueueOverloadIsObservable(t *testing.T) {
 			t.Fatalf("ReadData: %v", err)
 		}
 	}
+	if !waitFor(func() bool { return !conn.DataQueueStats().Congested }, 2*time.Second) {
+		t.Fatal("queue did not recover after sustained drain")
+	}
 	deliver(t, conn, 1, inboundData(1, "recovered"))
 	stats = conn.DataQueueStats()
 	if stats.Congested {

@@ -324,7 +324,8 @@ func TestDataQueueRecoversAfterOverflow(t *testing.T) {
 // this node was discarding from. SCON is the protocol's own way to ask it to
 // back off.
 func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
-	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
+	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)
@@ -379,7 +380,8 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 // overflow must not turn into an SCON flood on an association already in
 // trouble.
 func TestLocalCongestionSCONIsSentOncePerEpisode(t *testing.T) {
-	conn, sent := newTestConn(t, StateASPActive, RoleSGP)
+	conn, sent := newTestConn(t, StateASPActive, RoleASP)
+	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)

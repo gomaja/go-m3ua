@@ -56,6 +56,7 @@ const MTPCandidateUnavailable
 const MTPPauseIndication
 const MTPResumeIndication
 const MTPStatusIndication
+const ManagementDataQueueCongestion
 const ManagementError
 const ManagementNotify
 const ManagementSCTPRelease
@@ -219,12 +220,22 @@ field DataMessage.ProtocolData
 field DataMessage.Received
 field DataMessage.Scope
 field DataMessage.Stream
+field DataQueueCongestionIndication.AS
+field DataQueueCongestionIndication.Congested
+field DataQueueCongestionIndication.DestinationPointCode
+field DataQueueCongestionIndication.NetworkIndicator
+field DataQueueCongestionIndication.OriginatingPointCode
+field DataQueueCongestionIndication.Scope
+field DataQueueCongestionIndication.TrackingLost
 field DataQueueOverflowError.DestinationPointCode
 field DataQueueOverflowError.NetworkIndicator
+field DataQueueOverflowError.OriginatingPointCode
+field DataQueueOverflowError.Scope
 field DataQueueStats.Capacity
 field DataQueueStats.Congested
 field DataQueueStats.Discarded
 field DataQueueStats.Queued
+field DataQueueStats.ScopeTrackingLosses
 field DataRequest.AS
 field DataRequest.CorrelationID
 field DataRequest.CorrelationIDSet
@@ -328,6 +339,7 @@ field ManagementIndication.ASPIdentifierSet
 field ManagementIndication.AffectedDestinations
 field ManagementIndication.Association
 field ManagementIndication.Cause
+field ManagementIndication.DataQueueCongestion
 field ManagementIndication.Description
 field ManagementIndication.ErrorCode
 field ManagementIndication.Kind
@@ -712,6 +724,7 @@ type BroadcastFlowIdentifier
 type CompatibilityPolicy struct
 type CongestionState struct
 type DataMessage struct
+type DataQueueCongestionIndication struct
 type DataQueueOverflowError struct
 type DataQueueStats struct
 type DataRequest struct

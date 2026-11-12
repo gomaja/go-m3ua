@@ -872,32 +872,21 @@ func (c *Association) handleErrors(e error) error {
 		)
 	}
 
-	// Local congestion is told to the peer and must not tear the association
-	// down. RFC 4666 Section 3.4.4: "The SCON message MAY also be sent from the
-	// M3UA layer of an ASP to an M3UA peer, indicating that the congestion
-	// level of the M3UA layer or the ASP has changed." Reporting it only
-	// locally left the peer sending at full rate into a queue this node was
-	// discarding from.
-	//
-	// Affected Point Code is Mandatory in SCON, and the message that could not
-	// be queued names the destination in its own routing label, so no
-	// configured point code of our own is needed for the report to mean
-	// something to the peer. The same section covers both directions this can
-	// be sent in: an SGP may send SCON "to an ASP in response to a DATA or DAUD
-	// message", where the discarded DATA's Destination Point Code is the
-	// destination the ASP was trying to reach, and an ASP may send it
-	// "indicating that the congestion level of the M3UA layer or the ASP has
-	// changed", where that same Destination Point Code is the ASP itself.
+	// RFC 4666 Sections 1.4.6 and 3.4.4 allow ASP/IPSP local congestion
+	// SCON. SGP SCON describes SS7 destination congestion, which exhaustion of
+	// this association's receive queue does not establish. Management was
+	// notified at detection, independently of this optional wire publication.
 	var overflow *DataQueueOverflowError
 	if errors.As(e, &overflow) {
-		if _, err := c.WriteSignal(messages.NewSignallingCongestion(
-			networkAppearanceParam(c.localNetworkAppearance()),
-			c.configuredLocalRoutingContextParam(),
-			params.NewAffectedPointCodeWithMask(0, overflow.DestinationPointCode),
-			nil, nil, nil,
-		)); err != nil {
-			// The peer could not be told, but the association is still up and
-			// the queue is still the thing in trouble: report, do not close.
+		if c.role != RoleASP && c.role != RoleIPSP {
+			return nil
+		}
+		// The inbound scope was already validated. Preserve it exactly rather
+		// than substituting the outbound configured NA. The normal live RC/state
+		// checks and withdrawal barrier still apply at publication.
+		// Preserve the existing best-effort send: optional onset must not enter
+		// mandatory-control backpressure handling and close a healthy association.
+		if err := c.writeOverflowSCON(overflow); err != nil {
 			logf("m3ua: failed to send SCON for local congestion: %v", err)
 		}
 		return nil

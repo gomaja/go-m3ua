@@ -33,7 +33,8 @@ including parsing, dispatch and receive queue wait but excluding the kernel rece
 | Per-message scope and routing label | ASP, SGP, DE | both | ASP-ACTIVE | `TestReadDataReportsTheReceivedScopeStreamAndEpoch`, `TestReadDataReturnsCallerOwnedData` |
 | Stream selection from SLS; stream 0 refused | ASP, SGP, SE | both | any | `TestStreamSelectionHandlesEveryNegotiatedCount`, `TestWriteSignalDoesNotPutDataOnStreamZero`, `TestDataOnStreamZeroIsRejected`, `TestMTPTransferSelectsAvailableSGPAndSLSStream` |
 | Partial and failed submission classified | ASP, SGP | local | ASP-ACTIVE | `TestWriteDataClassifiesPartialSubmissionAsIndeterminate`, `TestBroadcastPartialWriteKeepsSynchronizationPending`, `TestWriteDataReportsATransportRefusalAsNotSent`, `TestFullSendBufferReportsDataAsNotSent`, `TestExpiredWriteDeadlineReportsDataAsNotSent` |
-| Inbound queue overflow | ASP, SGP | peer | ASP-ACTIVE | `TestDataQueueOverloadIsObservable`, `TestFullDataQueueStillAnswersSignalling`, `TestDataQueueRecoversAfterOverflow`, `TestLocalCongestionTellsThePeerWithSCON` |
+| Inbound queue overflow | ASP, IPSP send; all roles report locally | received NA/RC/DPC/OPC | ASP-ACTIVE | `TestOverflowSCONCarriesTheReceivedScope`, `TestOverflowSCONSocketScopesAndSustainedDrain`, `TestOverflowAtSGPDoesNotReportSS7DestinationCongestion`, `TestOverflowIPSPOnsetOmitsConcernedDestination` |
+| Inbound queue sustained-drain recovery | all | local management only | active episode | `TestOverflowEpisodeEndsAfterSustainedDrain`, `TestOverflowEpisodeStaysWhileOccupancyStaysHigh`, `TestOverflowDrainThresholdAndDwellBoundaries`, `TestOverflowManagementSurvivesFailedSCON`, `TestOverflowScopeLimitReportsContinuityLoss` |
 | Admission and authorization | ASP, SGP, SE, DE | local | INACTIVE→ACTIVE barrier | `TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting` |
 | Contextless Application Server | ASP, SGP, SE, DE | both | ASP-ACTIVE | `TestEncodedDataMatchesTheCodec` (scope), and the RKM and IPSP contextless rows below |
 | Epoch across SCTP restart | ASP, SGP | peer, local | any | `TestReadDataReportsTheEpochTheMessageArrivedIn`, `TestBroadcastActivationDropsThePreviousFlowEpoch` |
@@ -284,3 +285,17 @@ Two RFC 4666 errata are Held for Document Update and are followed as
 interoperability decisions rather than as corrections: 2065 (scoped Notify) and
 4475 (Routing Key Service Indicator padding). Erratum 2518 is Rejected and is not
 applied. Their dispositions are in [standards.md](standards.md#rfc-4666-errata).
+
+Inbound DATA queue episodes use the received NA/RC/DPC/OPC, with a 32-scope
+limit and visible tracking loss. The queue capacity is association-wide.
+Occupancy is observed on enqueue/dequeue and every 100 ms during an episode;
+local end requires at most 50% occupancy sustained for 1 s. Management sees onset
+and end even if SCON cannot be written. SGP local queue exhaustion sends no SCON
+because it does not establish SS7 destination congestion (RFC 4666 Sections
+1.4.6 and 3.4.4).
+
+Overflow SCON is international-form: no Congestion Indications and no wire clear
+on local end. The peer needs its validity timer or audit/current MTP procedure;
+complete automatic peer recovery is not provided. National-method wire clears
+await a congestion-method setting. This does not implement outbound backlog,
+host or application overload detection.
