@@ -115,7 +115,15 @@ func (c *Association) canonicalRemoteASFor(key ASKey) (RemoteASID, bool) {
 	}
 	if key.RoutingContextSet {
 		if id, bound := c.canonicalRemoteASBinding(key.RoutingContext); bound {
-			return id, true
+			// RFC 4666 §1.2 and §3.4.1: the report names an SS7 network as
+			// well as a traffic flow. Match the registered scope before
+			// assigning canonical ownership, just as the static lookup does.
+			// Section 3.6.1 permits a key serving all Network Appearances.
+			if registered, ok := c.dynamicASKey(key.RoutingContext, false); ok &&
+				(!registered.NetworkAppearanceSet ||
+					(key.NetworkAppearanceSet && key.NetworkAppearance == registered.NetworkAppearance)) {
+				return id, true
+			}
 		}
 	}
 	sgp, provisioned := inventory.config.sgpByIdentity[*c.cfg.PeerSGP]
@@ -268,7 +276,11 @@ func (c *Association) ssnmBindingScopes() []ssnmBindingScope {
 		appendScope(contextlessASKeyForConfig(c.cfg), contextlessPending)
 	}
 	for rc, pending := range admitted {
-		appendScope(asKeyForConfigRoutingContext(c.cfg, rc), pending)
+		key := asKeyForConfigRoutingContext(c.cfg, rc)
+		if dynamic, ok := c.dynamicASKey(rc, false); ok {
+			key = dynamic
+		}
+		appendScope(key, pending)
 	}
 	sort.Slice(scopes, func(i, j int) bool { return lessSSNMPartition(scopes[i].partition, scopes[j].partition) })
 	return scopes
@@ -372,6 +384,11 @@ func (c *Association) ssnmEarlyNetworkAppearanceMatches(scope WireScope) bool {
 		if key.RoutingContextSet {
 			configured = c.staticASKeyForRoutingContext(key.RoutingContext, false)
 			if dynamic, ok := c.dynamicASKey(key.RoutingContext, false); ok {
+				// RFC 4666 §3.6.1 also applies while activation is pending:
+				// an all-appearance registration accepts this report's NA.
+				if !dynamic.NetworkAppearanceSet {
+					continue
+				}
 				configured = dynamic
 			}
 		}

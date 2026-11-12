@@ -445,10 +445,10 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 			if apc == nil {
 				t.Fatal("DAUD response omitted Affected Point Code")
 			}
-			if got := apc.AffectedPointCodes(); !reflect.DeepEqual(got, []uint32{pointCode}) {
+			if got := apc.AffectedPointCodes(); !reflect.DeepEqual(got, []uint32{destinationRangePrefix(pointCode, mask)}) {
 				t.Errorf("response point codes = %v, want [%#x]", got, pointCode)
 			}
-			if got := apc.AffectedPointCodeMasks(); !reflect.DeepEqual(got, []uint8{mask}) {
+			if got := apc.AffectedPointCodeMasks(); !reflect.DeepEqual(got, []uint8{effectiveDestinationMask(mask)}) {
 				t.Errorf("response masks = %v, want [%d]", got, mask)
 			}
 
@@ -464,7 +464,7 @@ func TestDAUDPreservesAffectedPointCodeRanges(t *testing.T) {
 			if decodedAffectedPointCode == nil {
 				t.Fatal("wire response omitted Affected Point Code")
 			}
-			if got := decodedAffectedPointCode.AffectedPointCodeMasks(); !reflect.DeepEqual(got, []uint8{mask}) {
+			if got := decodedAffectedPointCode.AffectedPointCodeMasks(); !reflect.DeepEqual(got, []uint8{effectiveDestinationMask(mask)}) {
 				t.Errorf("wire response masks = %v, want [%d]", got, mask)
 			}
 		})
@@ -585,7 +585,7 @@ func TestDestinationRangeDAUDOverAssociation(t *testing.T) {
 			}
 
 			status := nextSSNMReport(t, aspAssociation)
-			if status.Destinations[0].PointCode != test.pointCode || status.Destinations[0].Mask != test.mask ||
+			if status.Destinations[0].PointCode != destinationRangePrefix(test.pointCode, test.mask) || status.Destinations[0].Mask != test.mask ||
 				reportedSSNMAvailability(t, status) != test.state || !status.Scope.RoutingContextSet ||
 				!reflect.DeepEqual(status.Scope.RoutingContexts, []uint32{1}) {
 				t.Errorf("wire status = %+v, want RC 1 point code %#x/%d %v",
@@ -608,9 +608,7 @@ func TestDAUDRangeLookupDoesNotLetAnExactOverrideInventAWholeRangeState(t *testi
 	)); err != nil {
 		t.Fatal(err)
 	}
-	if got := typeNames(*sent); !reflect.DeepEqual(got, []string{"Destination Unavailable"}) {
-		t.Fatalf("range DAUD responses = %v, want DUNA for the covering range record", got)
-	}
+	assertAuditRangeReplies(t, *sent, DestinationUnavailable, DestinationAvailable)
 
 	*sent = nil
 	if err := conn.handleDestinationStateAudit(messages.NewDestinationStateAudit(

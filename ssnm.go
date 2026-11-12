@@ -1362,57 +1362,16 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 	}); err != nil {
 		return err
 	}
-	appearance := c.destinationKey(d.NetworkAppearance, 0)
-	routingContexts, routingContextSet := c.destinationRoutingContexts(d.RoutingContext)
-
-	auditState := func(scope destinationKey, pointCode uint32, mask uint8) DestinationNetworkState {
-		// RFC 4666 Section 4.5.3: "An SG SHOULD respond with a DUNA message
-		// when DAUD was received with an unknown Signalling Point Code", so an
-		// unknown destination answers unavailable rather than available.
-		state := DestinationNetworkState{Availability: DestinationUnavailable}
-		if retained, known := c.destinations.lookupRange(scope, pointCode, mask); known {
-			state = retained
-		}
-		if restartForcesUnavailable(c.mtp3Restarts, scope, pointCode, mask) {
-			// Section 4.6 isolates the affected scope until the restart
-			// completes, and an isolated destination reports nothing about
-			// congestion either.
-			state = DestinationNetworkState{Availability: DestinationUnavailable}
-		}
-		return state
+	replies, err := c.destinationAuditResponse(d, pcs, masks)
+	if auditResourceError(err) {
+		return c.refuseDestinationAudit(d)
 	}
-
-	for index, pc := range pcs {
-		groups := make([]destinationAuditGroup, 0, max(1, len(routingContexts)))
-		if routingContextSet {
-			for _, rtCtx := range routingContexts {
-				scope := destinationKey{
-					networkAppearance:    appearance.networkAppearance,
-					networkAppearanceSet: appearance.networkAppearanceSet,
-					routingContext:       rtCtx,
-					routingContextSet:    true,
-				}
-				groups = appendDestinationAuditGroup(
-					groups, auditState(scope, pc, masks[index]), rtCtx,
-				)
-			}
-		} else {
-			scope := destinationKey{
-				networkAppearance:    appearance.networkAppearance,
-				networkAppearanceSet: appearance.networkAppearanceSet,
-			}
-			groups = append(groups, destinationAuditGroup{
-				state: auditState(scope, pc, masks[index]),
-			})
-		}
-
-		for _, group := range groups {
-			if err := c.writeDestinationAuditReply(
-				d.NetworkAppearance, d.RoutingContext != nil, group.routingContexts,
-				pc, masks[index], group.state,
-			); err != nil {
-				return err
-			}
+	if err != nil {
+		return err
+	}
+	for _, reply := range replies {
+		if _, err := c.writeControl(reply); err != nil {
+			return err
 		}
 	}
 
@@ -1422,80 +1381,6 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 type destinationAuditGroup struct {
 	state           DestinationNetworkState
 	routingContexts []uint32
-}
-
-func appendDestinationAuditGroup(
-	groups []destinationAuditGroup,
-	state DestinationNetworkState,
-	routingContext uint32,
-) []destinationAuditGroup {
-	for index := range groups {
-		if groups[index].state == state {
-			groups[index].routingContexts = append(groups[index].routingContexts, routingContext)
-			return groups
-		}
-	}
-	return append(groups, destinationAuditGroup{
-		state:           state,
-		routingContexts: []uint32{routingContext},
-	})
-}
-
-// writeDestinationAuditReply answers one audited destination with what this SG
-// holds in both dimensions.
-//
-// RFC 4666 Section 4.5.3: "The status of each SS7 destination requested is
-// indicated in a DUNA message (if unavailable), a DAVA message (if available),
-// or a DRST (if restricted...). For national networks, the SGP SHOULD
-// additionally respond with a SCON message (if the destination is congested)
-// before the DAVA or DRST." The congestion report therefore precedes an
-// available or restricted answer and is not sent with an unavailable one, for
-// which congestion says nothing.
-func (c *Association) writeDestinationAuditReply(
-	networkAppearance *params.Param,
-	routingContextPresent bool,
-	routingContexts []uint32,
-	pointCode uint32,
-	mask uint8,
-	state DestinationNetworkState,
-) error {
-	routingContext := func() *params.Param {
-		if !routingContextPresent {
-			return nil
-		}
-		return params.NewRoutingContext(routingContexts...)
-	}
-	affectedPointCode := func() *params.Param {
-		return params.NewAffectedPointCodeWithMask(mask, pointCode)
-	}
-
-	if state.Congestion.Congested && state.Availability != DestinationUnavailable {
-		var congestion *params.Param
-		if state.Congestion.LevelSet {
-			congestion = params.NewCongestionIndications(state.Congestion.Level)
-		}
-		if _, err := c.writeControl(messages.NewSignallingCongestion(
-			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil, congestion, nil,
-		)); err != nil {
-			return err
-		}
-	}
-
-	var reply messages.M3UA
-	switch state.Availability {
-	case DestinationUnavailable:
-		reply = messages.NewDestinationUnavailable(
-			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
-	case DestinationRestricted:
-		reply = messages.NewDestinationRestricted(
-			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
-	default:
-		reply = messages.NewDestinationAvailable(
-			networkAppearance.Copy(), routingContext(), affectedPointCode(), nil)
-	}
-
-	_, err := c.writeControl(reply)
-	return err
 }
 
 // ForgetDestinations discards every SSNM destination record the association's

@@ -1406,6 +1406,14 @@ func aspRouteASMatchesStatus(association *Association, key ASKey, status *destin
 		if key == resolved {
 			return true
 		}
+		// RFC 4666 §3.6.1: an omitted-appearance registration applies to
+		// all appearances. An explicit appearance still identifies the
+		// report's network, but it does not narrow that registration.
+		if key.RoutingContextSet && resolved.RoutingContextSet && key.RoutingContext == resolved.RoutingContext && !key.NetworkAppearanceSet {
+			if registered, ok := association.dynamicASKey(key.RoutingContext, false); ok && registered == key {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -1489,7 +1497,11 @@ func (c *Association) dynamicASKeysForRemoteAS(id RemoteASID) []ASKey {
 	})
 	keys := make([]ASKey, 0, len(routingContexts))
 	for _, routingContext := range routingContexts {
-		keys = append(keys, asKeyForConfigRoutingContext(c.cfg, routingContext))
+		// RFC 4666 §3.6.1: registration supplies the complete scope,
+		// including whether it serves every Network Appearance.
+		if key, bound := c.dynamicASKey(routingContext, false); bound {
+			keys = append(keys, key)
+		}
 	}
 	return keys
 }

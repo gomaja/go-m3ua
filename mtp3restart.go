@@ -641,49 +641,6 @@ func destinationRangesOverlap(first, second destinationRange) bool {
 		destinationRangeCovers(second, first.PointCode, first.Mask)
 }
 
-func restartForcesUnavailable(registry *mtp3RestartRegistry, scope destinationKey, pointCode uint32, mask uint8) bool {
-	if registry == nil {
-		return false
-	}
-	registry.mu.Lock()
-	defer registry.mu.Unlock()
-	query := destinationRange{
-		NetworkAppearance:    scope.networkAppearance,
-		NetworkAppearanceSet: scope.networkAppearanceSet,
-		RoutingContext:       scope.routingContext,
-		RoutingContextSet:    scope.routingContextSet,
-		PointCode:            pointCode,
-		Mask:                 mask,
-	}
-	for _, epoch := range registry.active {
-		isolated := false
-		for _, affected := range epoch.affected {
-			if destinationRangesOverlap(affected, query) {
-				isolated = true
-				break
-			}
-		}
-		if !isolated {
-			continue
-		}
-		// A destination whose recovery has already been published has left the
-		// isolation, even though the restart it belonged to is still running
-		// because other destinations could not be delivered. Answering DUNA for
-		// it would contradict the DAVA its own ASPs were just given.
-		released := false
-		for _, completed := range epoch.completed {
-			if destinationRangeContains(completed, query) {
-				released = true
-				break
-			}
-		}
-		if !released {
-			return true
-		}
-	}
-	return false
-}
-
 func writeMTP3RestartStatusBeforeAck(registry *mtp3RestartRegistry, association *Association, served []uint32) error {
 	if registry == nil || association == nil || len(served) == 0 {
 		return nil

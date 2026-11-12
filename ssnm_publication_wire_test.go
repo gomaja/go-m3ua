@@ -16,10 +16,10 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-// ssnmPublicationWireTranscript is the octets this scenario puts on the wire,
-// recorded before SSNM subscription events became deltas. What a subscription
-// delivers is local to this node, so changing it must not change one octet
-// sent to a peer. Regenerate it deliberately, and read the diff, with
+// ssnmPublicationWireTranscript records the expected octets for this scenario.
+// Subscription delivery is local to this node and must not alter these bytes.
+// The DAUD entries preserve narrower exceptions per RFC 4666 §4.5.3.
+// Regenerate deliberately, and read the diff, with
 //
 //	M3UA_UPDATE_SSNM_WIRE_TRANSCRIPT=1 go test -run TestSSNMPublicationLeavesTheWireUnchanged .
 const ssnmPublicationWireTranscript = "testdata/ssnm-publication-wire.txt"

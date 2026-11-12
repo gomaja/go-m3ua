@@ -97,8 +97,12 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 	seen := make(map[SSNMReportKind]bool)
 	for range 3 {
 		report := receiveDestinationStatus(t, ctx, aspAssociation)
+		wantDestination := destination
+		if report.Source == SSNMPeerReport {
+			wantDestination.PointCode = destinationRangePrefix(destination.PointCode, destination.Mask)
+		}
 		if seen[report.Kind] || !reflect.DeepEqual(report.Scope, scope) ||
-			len(report.Destinations) != 1 || report.Destinations[0] != destination {
+			len(report.Destinations) != 1 || report.Destinations[0] != wantDestination {
 			t.Fatalf("duplicate or incorrectly scoped audit exchange report: %+v", report)
 		}
 		switch report.Kind {
