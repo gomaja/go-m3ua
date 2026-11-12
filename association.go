@@ -440,6 +440,11 @@ type Association struct {
 	notificationQueue    chan mandatoryControl
 	notificationOnce     sync.Once
 	notificationOverflow atomic.Bool
+	// asStateNotifyMu keeps AS membership intact during a Notify submission.
+	// Removal takes the write side; queued AS notifications take the read side
+	// only at the actual writer, so a blocked peer cannot hold another peer's
+	// membership retirement or the shared AS state mutex.
+	asStateNotifyMu sync.RWMutex
 	// notificationWriter is the asynchronous control-worker test seam. Production
 	// leaves it nil and writes through WriteSignal.
 	notificationWriter func(messages.M3UA) (int, error)
@@ -484,6 +489,7 @@ var netMap = map[string]string{
 const defaultNotificationQueueSize = 64
 
 type mandatoryControl struct {
+	applicationServer   *applicationServer
 	messages            []messages.M3UA
 	enforceTrafficScope bool
 	result              chan error
@@ -1023,27 +1029,25 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo) error 
 // implementation is shared by proactive SSNM and Notify; hand-built test Associations
 // without that queue retain synchronous observability.
 func (c *Association) writeMandatoryControls(control []messages.M3UA, enforceTrafficScope, wait bool) error {
+	return c.writeMandatoryASControls(control, enforceTrafficScope, wait, nil)
+}
+
+func (c *Association) writeMandatoryASControls(control []messages.M3UA, enforceTrafficScope, wait bool, owner *applicationServer) error {
 	if c == nil || len(control) == 0 {
 		return nil
 	}
-	writeDirect := func() error {
-		for _, message := range control {
-			if _, err := c.writeSignal(message, enforceTrafficScope, libraryWrite); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	// Hand-built state-machine tests intentionally omit the production queue so
-	// their signalWriter remains synchronous and directly observable.
-	if c.notificationQueue == nil {
-		return writeDirect()
-	}
-
 	entry := mandatoryControl{
 		messages:            append([]messages.M3UA(nil), control...),
 		enforceTrafficScope: enforceTrafficScope,
+		applicationServer:   owner,
 	}
+
+	// Hand-built state-machine tests intentionally omit the production queue so
+	// their signalWriter remains synchronous and directly observable.
+	if c.notificationQueue == nil {
+		return c.writeMandatoryControl(entry, false)
+	}
+
 	if wait {
 		entry.result = make(chan error, 1)
 	}
@@ -1092,6 +1096,36 @@ func (c *Association) writeMandatoryControls(control []messages.M3UA, enforceTra
 		}
 		return ErrAssociationClosed
 	}
+}
+
+// writeMandatoryControl is the final admission point for queued or direct
+// control writes. RFC 4666 §4.3.4.5 permits AS-state Notify only to current AS
+// members outside ASP-DOWN. Check here, after both notification queues, and
+// hold the peer's retirement barrier until the transport submission returns.
+func (c *Association) writeMandatoryControl(control mandatoryControl, queued bool) error {
+	if owner := control.applicationServer; owner != nil {
+		c.asStateNotifyMu.RLock()
+		defer c.asStateNotifyMu.RUnlock()
+		owner.mu.Lock()
+		state, member := owner.asps[c]
+		closed := owner.closed
+		owner.mu.Unlock()
+		if closed || !member || state == StateASPDown || c.State() == StateASPDown {
+			return nil
+		}
+	}
+	for _, message := range control.messages {
+		var err error
+		if queued && c.notificationWriter != nil {
+			_, err = c.notificationWriter(message)
+		} else {
+			_, err = c.writeSignal(message, control.enforceTrafficScope, libraryWrite)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin) (n int, err error) {
@@ -1472,17 +1506,7 @@ func (c *Association) writeNotifications() {
 		case <-c.done:
 			return
 		case control := <-c.notificationQueue:
-			var writeErr error
-			for _, message := range control.messages {
-				if c.notificationWriter != nil {
-					_, writeErr = c.notificationWriter(message)
-				} else {
-					_, writeErr = c.writeSignal(message, control.enforceTrafficScope, libraryWrite)
-				}
-				if writeErr != nil {
-					break
-				}
-			}
+			writeErr := c.writeMandatoryControl(control, true)
 			if control.result != nil {
 				control.result <- writeErr
 			}
@@ -3186,10 +3210,11 @@ func (c *Association) peerRoutingContextOverridden(rc uint32) bool {
 // traffic is stopping and that this ASP is going down before the association
 // disappears underneath it, so it can move traffic rather than discover the
 // loss from a vanished socket. DEREG is not sent: the RFC makes it optional,
-// and an ASP that deregisters its Routing Keys on the way down loses the
-// registration it would otherwise reuse on reconnect. An application that does
-// want the Routing Keys withdrawn calls DeregisterApplicationServers itself
-// before shutting down.
+// the SGP retires dynamic registrations on ASP Down (RFC 4666 §4.3.4.2)
+// and on ASP Up while active (§4.3.4.1). Registration must be performed again
+// before those dynamic Application Servers can be activated. An application
+// can call DeregisterApplicationServers before shutting down for explicit
+// per-Routing-Context results.
 //
 // Each request completes its T(ack) procedure before the next is sent. Use
 // ShutdownContext to bound the operation more tightly than the configured

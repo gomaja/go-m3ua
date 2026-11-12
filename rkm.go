@@ -155,6 +155,8 @@ type RoutingKeyManagementConfig struct {
 	AuthorizeRegistration RoutingKeyRegistrationAuthorizer
 	// AuthorizeDeregistration optionally applies deployment permission policy
 	// after the RFC registration and ASP-state checks. Nil permits it.
+	// It governs explicit DEREG only; mandatory SGP retirement on ASP Down
+	// (RFC 4666 §4.3.4.2) or ASP Up while active (§4.3.4.1) cannot be vetoed.
 	AuthorizeDeregistration RoutingKeyDeregistrationAuthorizer
 	// AllocateRoutingContext optionally selects a non-zero unused Routing
 	// Context. Nil selects the lowest available non-zero value.

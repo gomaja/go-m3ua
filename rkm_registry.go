@@ -587,6 +587,13 @@ func registrationTrafficModeCompatible(existing, requested RoutingKey) bool {
 }
 
 func (registry *routingKeyRegistry) deregister(association *Association, routingContexts []uint32) []RoutingKeyDeregistrationResult {
+	return registry.deregisterRoutingContexts(association, routingContexts, false)
+}
+
+// deregisterRoutingContexts applies RFC 4666 §4.4.2 membership retirement.
+// Mandatory withdrawal (§4.3.4.1; §4.3.4.2) skips explicit-request refusal
+// checks, but shares the same membership, replay, and unused-key updates.
+func (registry *routingKeyRegistry) deregisterRoutingContexts(association *Association, routingContexts []uint32, implicit bool) []RoutingKeyDeregistrationResult {
 	results := make([]RoutingKeyDeregistrationResult, len(routingContexts))
 	if registry == nil || registry.config == nil {
 		for index, routingContext := range routingContexts {
@@ -622,7 +629,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 				continue
 			}
 			result := RoutingKeyDeregistrationResult{RoutingContext: routingContext}
-			if replay, ok := deregistrationReplays.byRoutingContext[routingContext]; ok {
+			if replay, ok := deregistrationReplays.byRoutingContext[routingContext]; ok && (!implicit || replay.Status == DeregistrationSuccessfullyDeregistered) {
 				result = replay
 				storeDeregistrationReplay(deregistrationReplays, result)
 			} else {
@@ -632,7 +639,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 					result.Status = DeregistrationInvalidRoutingContext
 				case !entry.hasMember(association):
 					result.Status = DeregistrationNotRegistered
-				case association != nil && association.State() == StateASPActive && association.activeForASKey(entry.asKey()):
+				case !implicit && association != nil && association.State() == StateASPActive && association.activeForASKey(entry.asKey()):
 					result.Status = DeregistrationASPActiveForRoutingContext
 				default:
 					request := RoutingKeyDeregistrationRequest{
@@ -642,7 +649,7 @@ func (registry *routingKeyRegistry) deregister(association *Association, routing
 						Provisioned:    entry.provisioned,
 					}
 					allowed := true
-					if registry.config.AuthorizeDeregistration != nil {
+					if !implicit && registry.config.AuthorizeDeregistration != nil {
 						decision := &authorizations[index]
 						if !decision.set || !routingKeyDeregistrationRequestsEqual(decision.request, request) {
 							decision.request = snapshotRoutingKeyDeregistrationRequest(request)
