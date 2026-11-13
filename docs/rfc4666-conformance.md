@@ -40,7 +40,7 @@ model or show examples without creating a separate implementation requirement.
 | [1.4.3.4 IPSP considerations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.3.4) | Mandatory when IPSP is used | Implemented | `RoleIPSP` requires an explicit Association-level exchange model. Single Exchange and Double Exchange are implemented independently from SCTP association initiation. |
 | [1.4.4 Redundancy models](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.4) | Optional models | Implemented | Override, Loadshare, Broadcast, configurable n+k activation, explicit smooth start, recovery, shortage notification, restoration, and failover are implemented per exact ASKey. |
 | [1.4.5 Flow control](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.5) | Optional | Implemented | Association traffic can be stopped through the ASP Inactive and ASP Down procedures; bounded queues and explicit overflow prevent silent mandatory-event loss. |
-| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Mandatory/Optional | Implemented | Inbound state, explicit level zero abatement, omitted and level 1-3 handling, route preference, Message Priority policy, ASP-to-SGP reporting, and SGP fan-out are implemented. |
+| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Mandatory/Optional | Partial | Received SS7 state, explicit level zero abatement, omitted and level 1-3 handling, route preference, Message Priority policy, ASP-to-SGP reporting, and SGP fan-out are implemented. Inbound queue overload has scoped onset and local sustained-drain recovery; international-form SCON has no wire clear. Automatic outbound transport/host congestion detection and congestion-method selection are not implemented. |
 | [1.4.7 SCTP stream mapping](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.7) | Mandatory/Recommended | Implemented | Management and SSNM use stream 0; DATA uses an SLS-derived nonzero stream while preserving same-flow order. |
 | [1.4.8 SCTP initiation model](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.8) | Recommended | Implemented | ASP and SGP Endpoints can each initiate or accept SCTP Associations. `Dial`, `Listen`, and `Accept` never select the M3UA role. |
 | [1.5 Sample configurations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.5) | Descriptive | Informative | ASP/SGP examples exist, and IPSP Single and Double Exchange configurations and bidirectional transfer matrices are covered. |
@@ -176,3 +176,33 @@ received message in Diagnostic Information, bounded by the parameter's length
 limit. A local `ManagementError` indication reports the same scope and cause.
 Existing state, stream and scope checks retain their precedence. Decoding keeps
 SI 0 intact so callers can inspect hostile frames without re-encoding them.
+
+## Local inbound DATA queue overload
+
+Capacity is association-wide, never per AS. The first discarded DATA in each
+received NA/RC/DPC/OPC scope starts an episode. Omitted parameters and explicit
+zero remain distinct. Up to 32 scopes are retained per episode; the first
+untracked discard produces a management indication with `TrackingLost`, and
+`DataQueueStats.ScopeTrackingLosses` counts every untracked discard. Untracked
+scopes have no individual onset/end guarantee. The bounded management stream
+retains its existing close-on-overflow policy.
+
+ASP and IPSP onset sends SCON with the received NA/RC and one affected DPC;
+ASP-to-SGP includes the triggering OPC as Concerned Destination. SGP queue
+exhaustion produces local management only: it does not establish SS7 destination
+congestion (RFC 4666 Sections 1.4.6 and 3.4.4). All roles report per-scope onset
+and end to Layer Management independently of SCON send success.
+
+Enqueue, dequeue and a 100 ms periodic check observe occupancy. An episode ends
+only after occupancy stays at or below 50% of capacity for 1 s, including a drain
+with no subsequent DATA. These are implementation defaults, not RFC thresholds.
+A refill above 50% or another discard cancels the drain dwell.
+
+Overflow SCON uses the international form, omitting Congestion Indications as
+RFC 4666 Section 3.4.4 requires for methods without multiple levels. Local end
+clears local state and reports to management, sending nothing on the wire.
+The peer relies on its congestion-notification validity timer or audit/current
+MTP procedure; this library does not promise complete automatic peer recovery.
+A later congestion-method setting can add national-method level-zero wire
+clears. This detector covers inbound queue loss only, not SCTP send backlog,
+host overload or application-reported overload.

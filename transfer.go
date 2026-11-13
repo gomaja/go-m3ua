@@ -151,10 +151,21 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 	// dataChan holds the configured, bounded number of payloads. Once an
 	// application has fallen that far behind, the excess is discarded and
 	// reported instead. Section 3.4.4's SCON is the RFC's way of telling the
-	// peer about local congestion, and ErrDataQueueFull originates one.
+	// peer about ASP/IPSP local congestion (RFC 4666 Section 1.4.6).
+	// Sections 3.3.1 and 3.4.4 identify the discarded DPC as the affected
+	// destination; SGP queue exhaustion alone is not SS7 destination congestion.
+	// Observe only an active episode, using the queue's actual occupancy.
+	// Ordinary DATA takes no tracker lock, clock read or extra queue call.
 	select {
 	case c.dataChan <- msg:
-		c.dataOverflow.Store(false)
+		if c.dataOverflow.Load() {
+			// Retain a real high-water observation before waiting for the tracker:
+			// a concurrent dequeue may hide the refill from later occupancy samples.
+			if len(c.dataChan) > cap(c.dataChan)/dataOverflowDrainDivisor {
+				c.recordDataQueueRefill()
+			}
+			c.observeDataQueue()
+		}
 		return
 	case <-c.done:
 		return
@@ -163,23 +174,10 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 	default:
 	}
 
-	// Counted for every discarded payload, because loss an application never
-	// saw is exactly what it needs to be able to measure afterwards.
+	// Count every discarded payload, even when the bounded scope tracker is full.
 	c.dataDiscarded.Add(1)
-
-	// Report the onset of overflow once, not once per discarded payload: under
-	// sustained overflow the report would otherwise be the loudest thing in the
-	// log and would occupy the dispatcher it exists to keep free.
-	//
-	// The report names the destination whose traffic is being discarded, which
-	// is this congested node: RFC 4666 Section 3.3.1 makes the Destination Point
-	// Code of the message the point code it was travelling to, and Section 3.4.4
-	// makes the Affected Point Code of the SCON that follows Mandatory.
-	if !c.dataOverflow.Swap(true) {
-		c.sendErr(&DataQueueOverflowError{
-			DestinationPointCode: message.protocolData.DestinationPointCode,
-			NetworkIndicator:     message.protocolData.NetworkIndicator,
-		})
+	if overflow := c.recordDataOverflow(msg); overflow != nil {
+		c.sendErr(overflow)
 	}
 }
 

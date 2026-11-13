@@ -347,9 +347,22 @@ type Association struct {
 	// zero meaning none. See SetReadDeadline for why it is not pushed down to
 	// the SCTP socket.
 	readDeadline atomic.Int64
-	// dataOverflow records that the inbound DATA queue is full, so the
-	// condition is reported on its onset rather than per discarded payload.
-	dataOverflow atomic.Bool
+	// dataOverflow records an active inbound queue overflow episode.
+	dataOverflow   atomic.Bool
+	muDataOverflow sync.Mutex
+	// muDataOverflowEvents orders onset/end reports without holding the tracker
+	// mutex during management publication. Only active episodes use it.
+	muDataOverflowEvents   sync.Mutex
+	dataOverflowGeneration uint64
+	// dataOverflowRefills is an atomic revision: odd while an episode is
+	// active, even after end. Each send-side high-water observation adds two.
+	dataOverflowRefills      atomic.Uint64
+	dataOverflowSeenRefill   uint64
+	dataOverflowScopes       map[dataOverflowKey]DataQueueCongestionIndication
+	dataOverflowLowSince     time.Time
+	dataOverflowWorker       bool
+	dataOverflowTrackingLost bool
+	dataScopeTrackingLosses  atomic.Uint64
 	// dataDiscarded counts inbound DATA payloads dropped because the queue was
 	// full. Cumulative for the life of the association, so an application can
 	// see loss it did not observe as it happened.
@@ -1313,6 +1326,13 @@ func (c *Association) lockOutboundSSNMScope(raw []byte) (func(), error) {
 	); err != nil {
 		return nil, err
 	}
+	return c.lockOutboundSSNMContexts(routingContext)
+}
+
+// lockOutboundSSNMContexts keeps the live-state and delivery barriers separate
+// from configured Network Appearance validation. An overflow report echoes an
+// already validated inbound NA rather than replacing it with an outbound NA.
+func (c *Association) lockOutboundSSNMContexts(routingContext *params.Param) (func(), error) {
 	if err := c.validateOutboundSSNMRoutingContext(routingContext); err != nil {
 		return nil, err
 	}
@@ -3696,8 +3716,8 @@ func (c *Association) SocketSendBuffer() (int, error) {
 	return c.sctpConn.WriteBuffer()
 }
 
-// ManagementIndicationKind identifies which of RFC 4666's Layer Management
-// indications a ManagementIndication carries.
+// ManagementIndicationKind identifies the Layer Management indication a
+// ManagementIndication carries, including local implementation reports.
 type ManagementIndicationKind uint8
 
 const (
@@ -3717,9 +3737,14 @@ const (
 	// ManagementSCTPStatus reports an SCTP path change to Layer Management
 	// (RFC 4666 Section 1.6.3; RFC 9260 Section 11.2.3).
 	ManagementSCTPStatus
+	// ManagementDataQueueCongestion reports local inbound queue onset, end,
+	// or scope tracking loss; it is an implementation indication (RFC 4666
+	// Section 1.4.6), not a new wire primitive.
+	ManagementDataQueueCongestion
 )
 
-// String names the indication as Section 1.6.3 does.
+// String names the indication as RFC 4666 Section 1.6.3 does, or uses an
+// implementation-specific name for local queue reports.
 func (k ManagementIndicationKind) String() string {
 	switch k {
 	case ManagementNotify:
@@ -3732,6 +3757,8 @@ func (k ManagementIndicationKind) String() string {
 		return "M-SCTP_RELEASE"
 	case ManagementSCTPStatus:
 		return "M-SCTP_STATUS"
+	case ManagementDataQueueCongestion:
+		return "DATA-QUEUE-CONGESTION"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
@@ -3751,6 +3778,9 @@ func causeDescription(cause error) string {
 // logged without a lookup table.
 type ManagementIndication struct {
 	Kind ManagementIndicationKind
+	// DataQueueCongestion is set only for ManagementDataQueueCongestion.
+	// The indication owns this copy and its wire scope.
+	DataQueueCongestion *DataQueueCongestionIndication
 	// PeerAddrChange is set only for ManagementSCTPStatus. The indication owns
 	// this copy of the SCTP notification (RFC 6458 Section 6.1.2).
 	PeerAddrChange *sctp.PeerAddrChange
@@ -3903,6 +3933,11 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 		return
 	}
 	snapshot := *ind
+	if ind.DataQueueCongestion != nil {
+		congestion := *ind.DataQueueCongestion
+		congestion.Scope = congestion.Scope.clone()
+		snapshot.DataQueueCongestion = &congestion
+	}
 	if ind.PeerAddrChange != nil {
 		change := *ind.PeerAddrChange
 		snapshot.PeerAddrChange = &change

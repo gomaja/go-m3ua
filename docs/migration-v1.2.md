@@ -931,3 +931,18 @@ A Listener fixes the offer from `DefaultAssociationConfig` at Listen. Every
 `SelectAssociationConfig` result must carry that same bool value. False is
 explicit, so a fresh zero-value config under a true default is refused with
 `ErrInvalidSCTPConfig`; the Listener continues serving matching associations.
+
+## Inbound DATA queue overflow
+
+`DataQueueStats`, `DataQueueOverflowError`, and `ManagementIndication` gained
+fields for scoped overflow lifecycle and tracking loss. Replace positional
+composite literals for these exported structs with keyed literals; positional
+literals written against the previous field lists no longer compile.
+
+`DataQueueStats.Congested` remains true until the queue has stayed at or below
+half capacity for one second. Overflow SCON preserves received NA/RC while using
+the live SSNM scope checks and withdrawal barrier, including the independent
+Double Exchange direction. A pending onset is discarded if its episode ended
+before transport submission. Local end does not send an international-form wire
+clear; peer validity-timer or audit/current MTP procedure recovery remains
+necessary (RFC 4666 Sections 3.4.4, 4.3.1 and 5.6.2).

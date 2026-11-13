@@ -104,6 +104,9 @@ func (c *Association) ReadData(ctx context.Context) (*DataMessage, error) {
 		if !ok {
 			return nil, ErrNotEstablished
 		}
+		if c.dataOverflow.Load() {
+			c.observeDataQueue()
+		}
 		return message, nil
 	case <-ctx.Done():
 		// Nothing was taken from the queue, so nothing is lost: the next read
@@ -127,27 +130,33 @@ type DataQueueStats struct {
 	// Discarded is the cumulative number of received DATA payloads dropped
 	// because the queue was full.
 	Discarded uint64
-	// Congested reports that the queue is currently overflowing: it became full
-	// and has not accepted a message since.
+	// Congested reports an overflow episode. It ends only after occupancy
+	// stays at or below 50% of capacity for 1 s, observed on enqueue/dequeue
+	// and every 100 ms while an episode is active.
 	Congested bool
+	// ScopeTrackingLosses counts discards whose scope could not be retained
+	// because the episode already tracked 32 distinct NA/RC/DPC/OPC scopes.
+	// It is cumulative; these scopes have no individual onset/end guarantee.
+	ScopeTrackingLosses uint64
 }
 
 // DataQueueStats reports the inbound DATA queue's occupancy and its cumulative
 // loss, so an application can see overload rather than infer it.
 //
-// Overload is never silent: the peer is also told with the SCON of RFC 4666
-// Section 3.4.4, which "MAY also be sent from the M3UA layer of an ASP to an
-// M3UA peer, indicating that the congestion level of the M3UA layer or the ASP
-// has changed".
+// ASP/IPSP overflow onset sends international-form SCON without Congestion
+// Indications (RFC 4666 Sections 1.4.6 and 3.4.4). Local end sends no wire
+// clear: the peer relies on its validity timer or audit/current MTP procedure.
+// SGP receive-queue exhaustion does not establish SS7 destination congestion.
 func (c *Association) DataQueueStats() DataQueueStats {
 	if c == nil {
 		return DataQueueStats{}
 	}
 	return DataQueueStats{
-		Capacity:  cap(c.dataChan),
-		Queued:    len(c.dataChan),
-		Discarded: c.dataDiscarded.Load(),
-		Congested: c.dataOverflow.Load(),
+		Capacity:            cap(c.dataChan),
+		Queued:              len(c.dataChan),
+		Discarded:           c.dataDiscarded.Load(),
+		Congested:           c.dataOverflow.Load(),
+		ScopeTrackingLosses: c.dataScopeTrackingLosses.Load(),
 	}
 }
 
@@ -164,14 +173,22 @@ func (c *Association) Epoch() uint64 {
 	return c.epoch.Load() + 1
 }
 
-// DataQueueOverflowError reports one episode of inbound DATA loss and names the
-// destination whose traffic was discarded.
+// DataQueueOverflowError reports onset in one received NA/RC/DPC/OPC scope of
+// inbound DATA loss. Capacity is association-wide; the error does not describe
+// an independently measured per-AS queue. Repeated discards in the same scope
+// coalesce until sustained-drain recovery.
 //
 // The Affected Point Code of an SCON is Mandatory (RFC 4666 Section 3.4.4) and
 // the congested destination is this node, which is the Destination Point Code
 // of the traffic being discarded — the routing label of the discarded message
 // says so without the library having to be told its own point code.
 type DataQueueOverflowError struct {
+	// generation binds optional wire publication to the detected episode.
+	generation uint64
+	// Scope is the discarded DATA's exact received Network Appearance and RC.
+	Scope WireScope
+	// OriginatingPointCode identifies the triggering originator for ASP SCON.
+	OriginatingPointCode uint32
 	DestinationPointCode uint32
 	NetworkIndicator     pointcode.NetworkIndicator
 }
