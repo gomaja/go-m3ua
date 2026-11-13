@@ -995,6 +995,18 @@ single configured appearance when one exists. Without one, it applies to all
 Network Appearances and RFC 4666 Section 3.6.1 permits no second Routing Key on
 that Association.
 
+At an SGP, dynamic ASP registrations end on ASP Down (RFC 4666 §4.3.4.2)
+and on ASP Up received while that ASP is active (§4.3.4.1). Retirement uses
+the successful deregistration path (§4.4.2) before the ASPSM acknowledgement.
+It preserves static ASP membership, provisioned Routing Keys, and other ASPs'
+memberships. The ASP must register again before activating a retired dynamic
+Routing Context. Mandatory retirement does not call `AuthorizeDeregistration`;
+that policy controls explicit DEREG requests only. The Association's dispatcher
+processes REG/DEREG and withdrawal messages in inbound order. AS-state Notify
+checks current membership when written, after both notification queues, so even
+a released event waiting behind another Ack cannot reach a retired member
+(§4.3.4.5). Retirement notifications follow the related Ack.
+
 RFC 4666 defines no RKM acknowledgement timer. Caller context cancellation
 bounds a local wait; peer retransmissions are handled idempotently rather than
 by inventing an RKM T(ack). If cancellation occurs after a DEREG REQ is written,

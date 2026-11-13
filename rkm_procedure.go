@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/gomaja/go-m3ua/internal/rkm"
 	"github.com/gomaja/go-m3ua/messages"
@@ -383,34 +384,66 @@ func (c *Association) handleDeregistrationRequest(message *messages.Deregistrati
 	}
 	results := registry.deregister(c, routingContexts)
 	parameters := make([]*params.Param, len(results))
-	type successfulDeregistration struct {
-		key      ASKey
-		removeAS bool
-	}
-	successful := make([]successfulDeregistration, 0, len(results))
 	for index, result := range results {
 		parameters[index] = params.NewDeregistrationResult(params.NewDeregResultPayload(
 			params.NewRoutingContext(result.RoutingContext),
 			params.NewDeregistrationStatus(deregistrationStatusParam(result.Status)),
 		))
-		if result.Status == DeregistrationSuccessfullyDeregistered {
-			if result.ASKey.RoutingContextSet {
-				successful = append(successful, successfulDeregistration{key: result.ASKey, removeAS: result.removeAS})
-			}
-		}
 	}
 	if _, err := c.writeControl(messages.NewDeregistrationResponse(parameters...)); err != nil {
 		return err
 	}
 	registry.deregistrationResponseWritten(c, results)
-	for _, deregistration := range successful {
-		c.removeDynamicASKey(deregistration.key.RoutingContext, false)
-		c.forgetCanonicalRemoteAS(deregistration.key.RoutingContext)
-		if c.as != nil && !c.hasStaticApplicationServerMembership(deregistration.key) {
-			c.as.deregisterDynamicASP(c, deregistration.key, deregistration.removeAS)
+	c.applyDeregistrationResults(results)()
+	return nil
+}
+
+// applyDeregistrationResults is shared by explicit DEREG and the mandatory SGP
+// withdrawals in RFC 4666 §4.3.4.1 and §4.3.4.2, using the successful DEREG
+// procedure of §4.4.2. Registry retirement precedes
+// this publication; static membership in the same AS remains configured.
+func (c *Association) applyDeregistrationResults(results []RoutingKeyDeregistrationResult) func() {
+	var notifications []func()
+	for _, result := range results {
+		if result.Status != DeregistrationSuccessfullyDeregistered || !result.ASKey.RoutingContextSet {
+			continue
+		}
+		c.removeDynamicASKey(result.RoutingContext, false)
+		c.forgetCanonicalRemoteAS(result.RoutingContext)
+		if c.as != nil && !c.hasStaticApplicationServerMembership(result.ASKey) {
+			notifications = append(notifications, c.as.prepareDeregisterDynamicASP(c, result.ASKey, result.removeAS))
 		}
 	}
-	return nil
+	return combineNotificationReleases(notifications)
+}
+
+// retirePeerRegistrations runs after traffic is quiesced and before the ASPSM
+// Ack. dispatchLoop invokes these handlers in inbound order, so a preceding
+// REG/DEREG completes before retirement. RFC 4666 §4.3.4.1 and §4.3.4.2
+// require deregistration regardless of explicit DEREG permission or a prior refusal.
+func (c *Association) retirePeerRegistrations() func() {
+	registry := c.routingKeyRegistry()
+	if !registry.enabled() {
+		return func() {}
+	}
+	c.rkmLifecycleMu.Lock()
+	defer c.rkmLifecycleMu.Unlock()
+	registry.mu.Lock()
+	contexts := c.dynamicRoutingContexts(false)
+	for rc, entry := range registry.entries {
+		if entry.hasMember(c) {
+			contexts = append(contexts, rc)
+		}
+	}
+	registry.mu.Unlock()
+	slices.Sort(contexts)
+	contexts = slices.Compact(contexts)
+	results := registry.deregisterRoutingContexts(c, contexts, true)
+	notify := c.applyDeregistrationResults(results)
+	// There is no DEREG RSP for implicit withdrawal. Mark its replay results
+	// completed so they do not occupy the pending-response retention budget.
+	registry.deregistrationResponseWritten(c, results)
+	return notify
 }
 
 func (c *Association) handleDeregistrationResponse(message *messages.DeregistrationResponse) error {

@@ -152,6 +152,7 @@ Both sides of all four messages are implemented.
 | Authorization, allocation and collision checking | SGP, SE | `rkm_registry_test.go`, `rkm_policy_test.go` |
 | Refused when RKM is not configured, or in the wrong direction | SGP, ASP | `rkm_test.go` |
 | Bounded unresolved outcomes | requester | `rkm_procedure_test.go` |
+| SGP retirement on ASP Down and ASP Up while active (§4.3.4.2; §4.3.4.1), through the DEREG path (§4.4.2), with current membership checked at each AS-state Notify write after both queues (§4.3.4.5) | SGP | `dynamic_registration_lifetime_test.go`, `as_notification_membership_test.go`, `as_notification_membership_linux_test.go`, `TestSGPASPDownRetiresRegistrationOverSCTP` |
 
 RFC 4666 defines no RKM acknowledgement timer, so none is invented: a local wait
 is bounded by the caller's context, and a responder answers a retransmitted

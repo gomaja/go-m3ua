@@ -103,6 +103,9 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 		postAckNotify = c.as.quiesceASPFor(c, c.configuredRoutingContexts())
 	}
 	c.quiesceUnscopedTraffic()
+	if c.role == RoleSGP && previousState == StateASPActive {
+		postAckNotify = combineNotificationReleases([]func(){postAckNotify, c.retirePeerRegistrations()})
+	}
 
 	ackErr := c.writeMandatoryControls([]messages.M3UA{
 		messages.NewAspUpAck(
@@ -354,6 +357,9 @@ func (c *Association) handleAspDown(aspDown *messages.AspDown) error {
 		postAckNotify = c.as.quiesceASPDown(c)
 	}
 	c.quiesceUnscopedTraffic()
+	if c.role == RoleSGP {
+		postAckNotify = combineNotificationReleases([]func(){postAckNotify, c.retirePeerRegistrations()})
+	}
 
 	ackErr := c.writeMandatoryControls([]messages.M3UA{
 		messages.NewAspDownAck(nil),

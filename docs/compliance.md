@@ -94,7 +94,13 @@ SGP, and IPSP Endpoints:
   message and nested-parameter fuzz coverage.
 - The SGP/IPSP registry applies authorization, deterministic Routing Context
   allocation, provisioned/dynamic coexistence, duplicate replay, overlap
-  rejection, resource bounds, and inactive-only deregistration atomically.
+  rejection, resource bounds, and inactive-only explicit deregistration atomically.
+- At an SGP, ASP Down retires dynamic registrations (RFC 4666 §4.3.4.2), as
+  does ASP Up while active (§4.3.4.1), through the successful DEREG path
+  (§4.4.2) before the acknowledgement. Static membership, provisioned keys,
+  and other ASPs' memberships are preserved. Retirement notifications follow
+  the Ack. Every AS-state Notify checks current membership at the actual write,
+  including events waiting in either notification queue (§4.3.4.5).
 - Registration batches return one independent result per Routing Key. REG RSP
   and DEREG RSP may be split across messages as RFC 4666 permits.
 - An unsupported nested Routing Key field produces Registration Status 9 for

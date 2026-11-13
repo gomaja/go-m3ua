@@ -297,6 +297,8 @@ func TestASStateNotificationReleaseWaitsForHeadRetirement(t *testing.T) {
 		key: ASKey{RoutingContext: 1, RoutingContextSet: true},
 	}
 	association, _ := newTestConn(t, StateASPInactive, RoleSGP)
+	applicationServer.asps = map[*Association]State{association: StateASPInactive}
+	applicationServer.state = ASInactive
 	writeStarted := make(chan struct{})
 	allowWrite := make(chan struct{})
 	writeFinished := make(chan struct{})

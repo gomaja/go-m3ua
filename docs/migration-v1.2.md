@@ -633,7 +633,10 @@ configuration:
   acknowledged and another is refused.
 - Application Server membership through RKM, when the responder allows it: a
   registration adds an Application Server to an Association's scope and a
-  deregistration removes it, with no new SCTP association.
+  deregistration removes it, with no new SCTP association. At an SGP, ASP Down
+  also retires dynamic registration (RFC 4666 §4.3.4.2), as does ASP Up while
+  active (§4.3.4.1). Register again before activating a retired dynamic scope;
+  static membership and provisioned Routing Keys remain configured.
 - Destination availability and congestion, through SSNM.
 - NIF availability at an SGP, and an MTP3 restart cycle.
 - Which path an `MTPTransfer` chooses, as availability, congestion and

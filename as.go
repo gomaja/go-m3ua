@@ -490,23 +490,30 @@ func (r *applicationServers) registerDynamicASP(association *Association, key AS
 // membership. removeApplicationServer permits deletion only for an AS that was
 // itself created dynamically and has no remaining ASPs.
 func (r *applicationServers) deregisterDynamicASP(association *Association, key ASKey, removeApplicationServer bool) {
+	r.prepareDeregisterDynamicASP(association, key, removeApplicationServer)()
+}
+
+// prepareDeregisterDynamicASP applies the shared retirement immediately and
+// returns its notifications for release after the related acknowledgement
+// (RFC 4666 §4.3.4.5). Explicit DEREG releases them after DEREG RSP (§4.4.2).
+func (r *applicationServers) prepareDeregisterDynamicASP(association *Association, key ASKey, removeApplicationServer bool) func() {
 	if r == nil || association == nil {
-		return
+		return func() {}
 	}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
-		return
+		return func() {}
 	}
 	applicationServer := r.as[key]
 	recovery := r.recoveryTimer
 	r.mu.Unlock()
 	if applicationServer == nil {
-		return
+		return func() {}
 	}
-	applicationServer.remove(association, recovery)
+	notify := applicationServer.prepareRemove(association, recovery)
 	if !removeApplicationServer {
-		return
+		return notify
 	}
 
 	r.mu.Lock()
@@ -514,14 +521,14 @@ func (r *applicationServers) deregisterDynamicASP(association *Association, key 
 	if registration == nil || registration.applicationServer != applicationServer ||
 		!registration.removable || r.as[key] != applicationServer {
 		r.mu.Unlock()
-		return
+		return notify
 	}
 	applicationServer.mu.Lock()
 	empty := len(applicationServer.asps) == 0
 	applicationServer.mu.Unlock()
 	if !empty {
 		r.mu.Unlock()
-		return
+		return notify
 	}
 	if registration.provisional > 0 {
 		// RFC 4666 Section 4.4.2 permits dynamic Routing Key and AS deletion
@@ -530,12 +537,13 @@ func (r *applicationServers) deregisterDynamicASP(association *Association, key 
 		// retain it for commit, but let the last rollback remove it.
 		registration.persistent = false
 		r.mu.Unlock()
-		return
+		return notify
 	}
 	delete(r.registrations, key)
 	delete(r.as, key)
 	r.mu.Unlock()
 	applicationServer.close()
+	return notify
 }
 
 func (r *applicationServers) reserve(keys []ASKey) *applicationServerReservation {
@@ -1384,15 +1392,27 @@ func (as *applicationServer) activateOverride(challenger *Association, recovery 
 
 // remove drops an ASP from the AS and recomputes.
 func (as *applicationServer) remove(c *Association, recovery time.Duration) {
+	as.prepareRemove(c, recovery)()
+}
+
+func (as *applicationServer) prepareRemove(c *Association, recovery time.Duration) func() {
+	if c == nil {
+		return func() {}
+	}
+	// Serialize membership retirement (RFC 4666 §4.3.4.1; §4.3.4.2) with a
+	// Notify already being written to this peer, without holding the shared
+	// AS mutex across transport I/O.
+	c.asStateNotifyMu.Lock()
+	defer c.asStateNotifyMu.Unlock()
 	as.mu.Lock()
 	if as.closed {
 		as.mu.Unlock()
-		return
+		return func() {}
 	}
 	failedState, ok := as.asps[c]
 	if !ok {
 		as.mu.Unlock()
-		return
+		return func() {}
 	}
 	delete(as.asps, c)
 	delete(as.associationOrder, c)
@@ -1405,9 +1425,11 @@ func (as *applicationServer) remove(c *Association, recovery time.Duration) {
 	failureTargets := as.notifyTargetsLocked()
 	as.mu.Unlock()
 
-	notify()
-	if failedState != StateASPDown {
-		notifyASPFailure(failureTargets, as.key, failedIdentifier)
+	return func() {
+		notify()
+		if failedState != StateASPDown {
+			notifyASPFailure(failureTargets, as.key, failedIdentifier)
+		}
 	}
 }
 
@@ -1760,7 +1782,7 @@ func (as *applicationServer) deliverNotifications() {
 		closed := as.closed
 		as.mu.Unlock()
 		if !closed {
-			notifyASStatus(event.targets, event.status, event.key, event.aspIdentifier)
+			as.notifyASStatus(event.targets, event.status, event.aspIdentifier)
 		}
 
 		as.mu.Lock()
@@ -1854,16 +1876,17 @@ func (as *applicationServer) State() ASState {
 }
 
 // notifyASStatus sends one RFC 4666 Section 3.8.2 status to each target.
-func notifyASStatus(targets []*Association, status uint32, key ASKey, aspIdentifier *params.Param) {
+func (as *applicationServer) notifyASStatus(targets []*Association, status uint32, aspIdentifier *params.Param) {
 	for _, c := range targets {
-		// Best effort: a peer that cannot be told is a problem for that
-		// association, not for the Application Server or its other members.
-		c.enqueueNotifyToAvailablePeer(messages.NewNotify(
-			params.NewStatus(status),
-			aspIdentifier.Copy(),
-			routingContextParamForASKey(key),
-			nil,
-		))
+		if c == nil || c.State() == StateASPDown {
+			continue
+		}
+		// Carry the AS identity through the control queue: release of this AS
+		// event does not mean its per-peer transport write has happened yet.
+		_ = c.writeMandatoryASControls([]messages.M3UA{messages.NewNotify(
+			params.NewStatus(status), aspIdentifier.Copy(),
+			routingContextParamForASKey(as.key), nil,
+		)}, true, false, as)
 	}
 }
 
