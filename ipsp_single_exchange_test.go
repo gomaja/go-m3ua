@@ -694,12 +694,14 @@ func TestIPSPSingleExchangeScopedInactiveAckDoesNotActivateUntouchedContexts(t *
 			association, _ := newSingleExchangeIPSPForTest(t, initialState)
 			setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
 
+			association.noteRoutingContextsInactive(nil)
+
 			association.handleSignals(context.Background(), messages.NewAspInactiveAck(
 				params.NewRoutingContext(1), nil,
 			))
 
-			if got := association.State(); got != StateASPInactive {
-				t.Fatalf("state after scoped ASP Inactive Ack = %v, want ASP-INACTIVE", got)
+			if got := association.State(); got != initialState {
+				t.Fatalf("state after scoped ASP Inactive Ack = %v, want %v", got, initialState)
 			}
 			for _, routingContext := range []uint32{1, 2} {
 				if association.activeForRoutingContext(routingContext) {

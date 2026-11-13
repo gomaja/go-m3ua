@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"context"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -67,19 +68,24 @@ func TestTAckRetryCannotWriteAfterCompletedWithdrawal(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("other control write did not acquire the writer")
 	}
-	_, entered, retryDone := startObservedRetry(t, a, messages.NewAspActive(nil, params.NewRoutingContext(2), nil), requestAspActive)
+	request, entered, retryDone := startObservedRetry(t, a, messages.NewAspActive(nil, params.NewRoutingContext(2), nil), requestAspActive)
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
 		close(transport.space)
 		t.Fatal("retry did not pass its outer stop check")
 	}
-	if err := a.handleAspInactiveAck(messages.NewAspInactiveAck(params.NewRoutingContext(2), nil)); err != nil {
-		close(transport.space)
+	withdrawn := make(chan error, 1)
+	go func() {
+		withdrawn <- a.handleAspInactiveAck(messages.NewAspInactiveAck(params.NewRoutingContext(2), nil))
+	}()
+	// The unrelated write is released independently; withdrawal fences the
+	// cancelled retry before completing, even if it waited behind this writer.
+	<-request.stop
+	close(transport.space)
+	if err := <-withdrawn; err != nil {
 		t.Fatal(err)
 	}
-	// Withdrawal has completed while the retry still waits for the writer.
-	close(transport.space)
 	if err := <-writerDone; err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +154,7 @@ func TestStoppedDoubleExchangeDownDoesNotExpectAnAck(t *testing.T) {
 	a, _ := newDoubleExchangeIPSPForTest(t)
 	stopped := make(chan struct{})
 	close(stopped)
-	n, err := a.writeControlUntilStopped(messages.NewAspDown(nil), stopped)
+	n, err := a.writeControlUntilStopped(messages.NewAspDown(nil), stopped, nil)
 	if err != nil || n != 0 {
 		t.Fatalf("stopped Down returned %d, %v", n, err)
 	}
@@ -175,6 +181,12 @@ func (s *stopOnFullControlSender) SendMsg(frame []byte, options sctp.SendOptions
 	}
 	s.blocking.Add(1)
 	return len(frame), nil
+}
+func (s *stopOnFullControlSender) SendMsgContext(ctx context.Context, frame []byte, opts sctp.SendOptions) (int, error) {
+	if opts.NoWait {
+		return s.SendMsg(frame, opts)
+	}
+	return s.fullSendBuffer.SendMsgContext(ctx, frame, opts)
 }
 func TestTAckStoppedAfterNoWaitDoesNotStartBlockingSend(t *testing.T) {
 	a, _ := newTestConnWithContexts(t, StateASPDown, RoleASP)

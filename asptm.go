@@ -41,7 +41,8 @@ func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRe
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
-			return nil, err
+			// The waiting API retains the failed request's bounded result wait.
+			return pending, err
 		}
 	}
 	return pending, nil
@@ -419,6 +420,11 @@ func (c *Association) handleAspActive(aspActive *messages.AspActive) error {
 			servedContexts = served.RoutingContexts()
 		}
 		c.commitPeerRoutingContextsActive(servedContexts)
+		if c.role == RoleIPSP && !c.isIPSPDoubleExchange() {
+			// RFC 4666 §4.3.4.3.1 and §5.6.1: Single Exchange
+			// reactivation is shared even when initiated by the peer.
+			c.retireInactiveAcknowledgement(served)
+		}
 
 		// Override, after the Ack and only after it. Section 4.3.4.3: "In the
 		// case of an Override mode AS, receipt of an ASP Active message at an SGP
@@ -903,8 +909,10 @@ func (c *Association) handleAspInactive(aspInactive *messages.AspInactive) error
 	return nil
 }
 
-// handleAspInactiveAck validates the ASP Inactive Ack that answers our ASP
-// Inactive.
+// handleAspInactiveAck validates a solicited or unsolicited ASP Inactive Ack.
+// A solicited Ack's duplicate window ends when an Active Ack is accepted for
+// that scope, so a fresh withdrawal after reactivation follows the unsolicited
+// procedure in RFC 4666 §4.3.4.4.
 //
 // In the SG-AS model this is an SGP-to-ASP message (RFC 4666 Section 4.3.4.4),
 // so an SGP that receives one reports an Error. RFC 4666 Section 4.3.4.4.1
@@ -932,17 +940,29 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	}
 
 	// ASP Inactive Ack carries no Traffic Mode Type (Section 3.7.4), so only
-	// the Routing Context is checked: the Ack must concern contexts we asked
-	// to deactivate.
+	// the Routing Context is checked. RFC 4666 §4.3.4.4 also permits an
+	// unsolicited withdrawal of active scopes outside a pending request.
 	if err := c.validateLocalRoutingContext(acknowledgedContext); err != nil {
 		return err
 	}
-	if err := c.validateTAckRoutingContexts(requestAspInactive, acknowledgedContext); err != nil {
-		return err
+	// Inactive Ack RC is optional (RFC 4666 §3.7.4, §4.3.4.4), unlike
+	// Active Ack's explicit echo (§4.3.4.3). Preserve correlation when an
+	// omitted Ack cannot distinguish our explicit request from withdrawal
+	// of other ASes. Reject that ambiguity before changing any scope.
+	if acknowledgedContext == nil {
+		if err := c.validateTAckRoutingContexts(requestAspInactive, nil); err != nil {
+			return err
+		}
 	}
+	acknowledgement, withdrawn, affected := c.claimInactiveAckWithdrawal(acknowledgedContext, aspAcAck.RoutingContext)
+	if len(affected) == 0 {
+		return nil
+	}
+	acknowledgedContext = inactiveAckEffectiveScope(affected)
+	// Release cancelled control writers before taking transfer-drain barriers.
+	cancelled := c.stopInactiveAckActivations(affected)
 	if c.role == RoleIPSP {
 		if c.isIPSPDoubleExchange() {
-			acknowledgement := c.claimTAckAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext)
 			if previousState == StateASPActive {
 				c.noteRoutingContextsUnacked(acknowledgedContext)
 			} else {
@@ -951,10 +971,11 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 			c.commitLocalIPSPState(c.stateForAcknowledgedRoutingContexts())
 			c.quiesceLocalIPSPSSNMTraffic()
 			acknowledgement.complete()
+			c.reportInactiveAckWithdrawal(withdrawn)
+			c.reportCancelledActivations(cancelled)
 			return nil
 		}
-		acknowledgement := c.claimTAckAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext)
-		routingContexts := c.configuredRoutingContexts()
+		var routingContexts []uint32
 		if acknowledgedContext != nil {
 			routingContexts = acknowledgedContext.RoutingContexts()
 		}
@@ -970,7 +991,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 			c.noteRoutingContextsInactive(nil)
 			quiescedRoutingContexts = c.configuredRoutingContexts()
 		}
-		c.commitState(c.stateForActiveRoutingContexts())
+		c.commitInactiveAckState(c.stateForActiveRoutingContexts())
 		postTransitionNotify := func() {}
 		if c.as != nil {
 			postTransitionNotify = c.as.quiesceASPFor(c, quiescedRoutingContexts)
@@ -978,6 +999,8 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 		c.quiesceUnscopedTraffic()
 		postTransitionNotify()
 		acknowledgement.complete()
+		c.reportInactiveAckWithdrawal(withdrawn)
+		c.reportCancelledActivations(cancelled)
 		return nil
 	}
 
@@ -989,23 +1012,10 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	} else {
 		c.noteNoRoutingContextsAcked()
 	}
-	c.stopCompetingASPActive(acknowledgedContext)
-	acknowledgement := c.claimTAckAcknowledgementForScope(requestAspInactive, acknowledgedContext, aspAcAck.RoutingContext)
+	c.commitInactiveAckState(c.stateForAcknowledgedRoutingContexts())
 	acknowledgement.complete()
-	if acknowledgement.solicited || previousState != StateASPActive {
-		return nil
-	}
-
-	// An unsolicited Ack first makes the affected AS inactive, then Section
-	// 4.3.4.4 asks an ASP that was active to return to its previous state. If a
-	// sibling RC remains active, the association never enters ASP-INACTIVE, so
-	// restart only the displaced scope here. Otherwise the ASP-INACTIVE entry
-	// action initiates the return after that required intermediate state.
-	if c.stateForAcknowledgedRoutingContexts() == StateASPActive {
-		return c.initiateASPActive(acknowledgedContext)
-	}
-	c.armResumeAfterStrayAck()
-
+	c.reportInactiveAckWithdrawal(withdrawn)
+	c.reportCancelledActivations(cancelled)
 	return nil
 }
 

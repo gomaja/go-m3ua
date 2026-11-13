@@ -206,7 +206,7 @@ func (c *Association) refuseDestinationAudit(d *messages.DestinationStateAudit) 
 		}
 	}
 	scope := c.ssnmWireScope(networkAppearance, routingContext)
-	keys := c.managementASKeys(scope.NetworkAppearance, scope.NetworkAppearanceSet, routingContext)
+	keys := c.managementASKeys(networkAppearance, routingContext)
 	c.notifyManagement(&ManagementIndication{Kind: ManagementError, ErrorCode: params.ErrDestinationStatusUnknown, Description: "destination audit exceeds local reply message/byte budget", RoutingContexts: scope.RoutingContexts, NetworkAppearance: scope.NetworkAppearance, NetworkAppearanceSet: scope.NetworkAppearanceSet, ASKeys: keys, AffectedDestinations: managementAffectedDestinations(keys, d.AffectedPointCode)})
 	_, err := c.writeControl(messages.NewError(params.NewErrorCode(params.ErrDestinationStatusUnknown), routingContext, networkAppearance, d.AffectedPointCode.Copy(), nil))
 	return err

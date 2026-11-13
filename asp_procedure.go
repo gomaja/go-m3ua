@@ -150,7 +150,10 @@ func (c *Association) ASPDown(ctx context.Context) (err error) {
 
 // ASPActive initiates the RFC 4666 Section 4.3.4.3 ASP Active procedure for
 // the exact Application Servers and waits for every ASP Active Ack. With no
-// keys it requests every configured local AS.
+// keys it requests every configured local AS. A withdrawal may defer failure
+// reporting until its handler completes; ctx cancellation or association close
+// ends that wait. If the withdrawal already claimed the request when ctx ends,
+// the returned error wraps ErrASPProcedureSuperseded; otherwise it is ctx.Err().
 func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) {
 	defer func() { c.notifyASPProcedureFailure("ASP Active", keys, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
@@ -175,6 +178,11 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 	}
 	requests, err := c.beginASPActive(routingContext)
 	if err != nil {
+		if errors.Is(err, ErrASPProcedureSuperseded) && len(requests) > 0 {
+			// Only the waiting API joins the cancelling handler's reports.
+			// Earlier groups were cleaned up; the last request owns this error.
+			return c.waitTAck(ctx, requests[len(requests)-1])
+		}
 		return err
 	}
 	return c.waitASPProcedureRequests(ctx, requests)

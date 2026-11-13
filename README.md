@@ -1224,6 +1224,76 @@ See the [Endpoint management and SSNM design](./docs/design/endpoint-management-
 the [procedure coverage](./docs/procedure-coverage.md), and the
 [v1.2 migration guide](./docs/migration-v1.2.md).
 
+### Recovery after peer withdrawal
+
+An unsolicited ASP Inactive Ack withdraws only Application Servers active at
+the ASP. Known inactive scopes are ignored, including beside active scopes in
+the same Ack; they do not cancel a pending activation or consume startup.
+An omitted-RC Ack on a multi-AS association remains ambiguous while an explicit
+ASP Inactive is outstanding: it is rejected with ErrMissingRoutingContext,
+without changing traffic, pending procedures or management reports.
+Recovery belongs to the application, including when the last active scope is
+withdrawn and startup activation is configured as automatic. Subscribe to
+`Association.ManagementIndications()` in `AssociationConfig.Subscribe`, before
+the handshake, and drain the subscription throughout the association.
+
+`ManagementASPWithdrawal` (`ASP-WITHDRAWAL`) reports only the unsolicited
+scopes in `indication.ASKeys`; `RoutingContexts` contains their numeric
+labels. It excludes local deactivation confirmations and delayed solicited
+duplicates. Contextless membership is explicit in `ASKeys`. This is an
+implementation indication, not a new M- primitive (RFC 4666 §1.6.3, §4.3.4.4).
+
+After the application decides which reported scopes it wants back, it can wait
+for their activation:
+
+```go
+err := association.ASPActive(ctx, indication.ASKeys...)
+```
+
+For a known numeric scope, the nonblocking alternative is:
+
+```go
+err := association.ActivateRoutingContexts(1)
+```
+
+These start ordinary activation procedures with their own T(ack) protection;
+there is no hidden recovery procedure to reuse or supersede. An omitted Active
+covers the whole configured inventory (RFC 4666 §4.3.4.3). A contextless AS
+cannot be addressed independently beside numeric ASes: the application must
+decide whether whole-inventory activation through `ASPActive(ctx)` is
+appropriate. The configured automatic start after ASP Up Ack is unchanged. The
+peer-withdrawal policy applies to ASP and IPSP Single and Double Exchange; in
+Double Exchange only the affected traffic direction stops (§4.3.4.4.1).
+
+Cancelling a pending activation returns an error wrapping
+ErrASPProcedureSuperseded with its cause while the association remains open.
+Unaccepted control sends are cancelled, and the handler waits only for the
+cancelled request's transport call, before the withdrawal report. It does not
+join unrelated writers through shared mutexes.
+
+SCTP acceptance can win cancellation and cannot be retracted. In that case
+one ManagementError immediately names the ASKeys that the message carried and
+says the peer may consider them active. For an unsolicited withdrawal, this
+error follows ManagementASPWithdrawal. The application chooses whether to
+send ASPInactive to confirm inactivity or ASPActive to recover. Confirmed
+application Inactive and ASP Down cancellation use the same reporting rule. A
+waiting ASPActive call also publishes its ordinary failure ManagementError.
+While its context and association remain live, it waits for the cancelling
+handler's reports first. Context cancellation ends that wait immediately:
+it returns the supersession cause if withdrawal already claimed the request,
+or ctx.Err() otherwise. Its failure indication may then precede the handler's
+reports. Association close ends the wait using the existing terminal-reporting
+policy. ActivateRoutingContexts and initial procedure writes never wait for
+the handler's DATA drain; ActivateRoutingContexts returns its error without a
+generic procedure-failure indication, as before.
+
+No acknowledgement evidence is retained for a cancelled send. Later Active
+Acks use the ordinary duplicate and validation rules; M3UA has no request
+identifier that correlates one with the cancelled message. Delayed duplicate
+Active Ack handling remains a separate deferred behavior. The library changes
+no state and sends no replacement request because SCTP accepted the cancelled
+send.
+
 ## Supported Features
 
 ### Messages

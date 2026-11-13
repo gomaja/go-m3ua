@@ -81,6 +81,31 @@ This package uses github.com/gomaja/go-sctp for the underlying SCTP transport.
 
 Specification: https://www.rfc-editor.org/rfc/rfc4666.html
 
+# Peer withdrawal and application recovery
+
+After an unsolicited ASP Inactive Ack, the library marks the affected scopes
+inactive and leaves activation requests to the application. This also applies
+to the last active scope with automatic startup enabled, and to IPSP Single and
+Double
+Exchange (RFC 4666 §4.3.4.4, §4.3.4.4.1). Startup after ASP Up Ack is unchanged.
+
+Subscribe through AssociationConfig.Subscribe and consume ManagementIndications.
+ManagementASPWithdrawal reports active scopes withdrawn by an unsolicited Ack,
+excluding local deactivation confirmations and delayed solicited duplicates. It is an
+implementation indication named ASP-WITHDRAWAL, not an M- primitive from §1.6.3.
+Once application policy approves restoration, use:
+
+	err := association.ASPActive(ctx, indication.ASKeys...)
+
+or start a known numeric scope without waiting:
+
+	err := association.ActivateRoutingContexts(1)
+
+Both use the ordinary activation procedure. Contextless membership beside
+numeric ASes cannot be activated independently: omission represents the whole
+inventory (§4.3.4.3), so the application must choose whether ASPActive(ctx),
+with no ASKeys, is appropriate.
+
 # Ownership and shutdown
 
 Three scopes own resources, and each closes exactly its own.

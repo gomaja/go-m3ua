@@ -920,32 +920,35 @@ func TestTAckTracksConcurrentScopedASPTMRequests(t *testing.T) {
 	}
 }
 
-func TestInvalidAspInactiveAckDoesNotStopTAck(t *testing.T) {
+func TestInactiveAckKeepsUnconfirmedRequestsPending(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		ack  *params.Param
-		want error
+		name    string
+		ack     *params.Param
+		want    error
+		pending int
 	}{
-		{name: "different configured context", ack: params.NewRoutingContext(2), want: ErrInvalidRoutingContext},
-		{name: "missing context", ack: nil, want: ErrMissingRoutingContext},
+		{name: "inactive configured context", ack: params.NewRoutingContext(2), want: nil, pending: 1},
+		{name: "unknown context", ack: params.NewRoutingContext(999), want: ErrInvalidRoutingContext, pending: 1},
+		{name: "omitted ambiguous confirmation", ack: nil, want: ErrMissingRoutingContext, pending: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			conn, _ := newTestConn(t, StateASPActive, RoleASP)
+			conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 			conn.startTAck(messages.NewAspInactive(params.NewRoutingContext(1), nil), requestAspInactive)
 
 			err := conn.handleAspInactiveAck(messages.NewAspInactiveAck(tt.ack, nil))
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("error = %v, want %v", err, tt.want)
 			}
-			if got := conn.pendingTAck(); got != 1 {
-				t.Errorf("pending T(ack) after invalid Ack = %d, want 1", got)
+			if got := conn.pendingTAck(); got != tt.pending {
+				t.Errorf("pending T(ack) after Ack = %d, want %d", got, tt.pending)
 			}
 			conn.stopAllTAck()
 		})
 	}
 }
 
-func TestUnsolicitedAspInactiveAckReturnsToThePreviousActiveState(t *testing.T) {
+func TestUnsolicitedAspInactiveAckWaitsForApplicationActivation(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	conn.noteRoutingContextsAcked(asConfigRoutingContextParam(conn.cfg.ApplicationServers))
 
@@ -953,22 +956,28 @@ func TestUnsolicitedAspInactiveAckReturnsToThePreviousActiveState(t *testing.T) 
 	if got := conn.State(); got != StateASPInactive {
 		t.Fatalf("state after unsolicited ASP Inactive Ack = %v, want ASP-INACTIVE first", got)
 	}
-	if !conn.resumeAfterStrayAck() {
-		t.Fatal("unsolicited ASP Inactive Ack did not arm return to ASP-ACTIVE")
+	if conn.resumeAfterStrayAck() {
+		t.Fatal("unsolicited ASP Inactive Ack armed automatic return")
 	}
 
 	if err := conn.handleStateUpdate(StateASPInactive); err != nil {
 		t.Fatalf("ASP-INACTIVE entry action: %v", err)
 	}
+	if countType(*sent, "ASP Active") != 0 || conn.pendingTAck() != 0 {
+		t.Fatal("inactive entry initiated activation")
+	}
+	if err := conn.ActivateRoutingContexts(); err != nil {
+		t.Fatal(err)
+	}
 	if got := countType(*sent, "ASP Active"); got != 1 {
-		t.Errorf("return procedure sent %d ASP Active messages, want 1", got)
+		t.Errorf("application sent %d ASP Active messages, want 1", got)
 	}
 	if conn.pendingTAck() != 1 {
 		t.Error("return ASP Active was not protected by T(ack)")
 	}
 }
 
-func TestUnsolicitedScopedAspInactiveAckReactivatesOnlyThatScope(t *testing.T) {
+func TestApplicationReactivatesOnlyTheWithdrawnScope(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPActive, RoleASP)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 
@@ -980,6 +989,12 @@ func TestUnsolicitedScopedAspInactiveAckReactivatesOnlyThatScope(t *testing.T) {
 		t.Error("unsolicited Ack did not deactivate exactly RC 1")
 	}
 
+	if len(*sent) != 0 || conn.pendingTAck() != 0 {
+		t.Fatal("scoped withdrawal initiated activation")
+	}
+	if err := conn.ActivateRoutingContexts(1); err != nil {
+		t.Fatal(err)
+	}
 	var request *messages.AspActive
 	for _, signal := range *sent {
 		if active, ok := signal.(*messages.AspActive); ok {
@@ -997,13 +1012,13 @@ func TestUnsolicitedScopedAspInactiveAckReactivatesOnlyThatScope(t *testing.T) {
 	}
 }
 
-func TestUnsolicitedAspInactiveAckMovesDownOrInactiveASPToInactive(t *testing.T) {
+func TestUnsolicitedAspInactiveAckPreservesInactiveScopeState(t *testing.T) {
 	for _, state := range []State{StateASPDown, StateASPInactive} {
 		t.Run(state.String(), func(t *testing.T) {
 			conn, sent := newTestConn(t, state, RoleASP)
 			conn.handleSignals(context.Background(), messages.NewAspInactiveAck(nil, nil))
-			if got := conn.State(); got != StateASPInactive {
-				t.Errorf("state = %v, want ASP-INACTIVE", got)
+			if got := conn.State(); got != state {
+				t.Errorf("state = %v, want %v", got, state)
 			}
 			if conn.resumeAfterStrayAck() {
 				t.Error("an ASP that was not active armed an ASP-ACTIVE return")

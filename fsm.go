@@ -597,24 +597,31 @@ func (c *Association) publishState(s State) {
 // entry actions. stateUnchanged is only a publication token and changes no
 // state.
 func (c *Association) commitState(s State) bool {
-	return c.commitStateGuarded(s, false, false)
+	return c.commitStateGuarded(s, false, false, false)
 }
 
 // commitPeerDownState keeps the peer's withdrawal and its entry-action cause
 // indivisible under muState. RFC 4666 §4.3 and §5.6.1 make Single Exchange Down
 // effective for the whole communication; §5.6.2 retains the DE direction.
 func (c *Association) commitPeerDownState() bool {
-	return c.commitStateGuarded(StateASPDown, true, false)
+	return c.commitStateGuarded(StateASPDown, true, false, false)
 }
 
 // commitOverrideInactiveState rejects a displaced-peer snapshot overtaken by
 // ASP Down. RFC 4666 §4.3.4.3 makes previously active ASPs inactive on Override;
 // it does not reestablish an ASP removed from service under §4.3.4.2.
 func (c *Association) commitOverrideInactiveState() bool {
-	return c.commitStateGuarded(StateASPInactive, false, true)
+	return c.commitStateGuarded(StateASPInactive, false, true, false)
 }
 
-func (c *Association) commitStateGuarded(s State, peerDown, override bool) bool {
+// commitInactiveAckState completes the withdrawal's inactive entry now, so
+// an overtaken startup publication cannot activate every configured AS. Startup
+// after ASP Up Ack retains its own entry action (RFC 4666 §4.3.4.3, §4.3.4.4).
+func (c *Association) commitInactiveAckState(s State) bool {
+	return c.commitStateGuarded(s, false, false, true)
+}
+
+func (c *Association) commitStateGuarded(s State, peerDown, override, inactiveAck bool) bool {
 	if s == stateUnchanged {
 		return true
 	}
@@ -634,6 +641,10 @@ func (c *Association) commitStateGuarded(s State, peerDown, override bool) bool 
 	}
 	stateChanged := c.state != s
 	c.state = s
+	if inactiveAck && s == StateASPInactive {
+		c.appliedState = s
+		c.stateEntered = true
+	}
 	if stateChanged {
 		c.recordStateChange(s)
 	}
@@ -836,12 +847,10 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			c.sendState(stateUnchanged)
 		} else if c.isIPSPDoubleExchange() {
 			c.sendState(stateUnchanged)
-		} else if c.role == RoleIPSP {
-			c.sendState(c.stateForActiveRoutingContexts())
-		} else if c.stateForAcknowledgedRoutingContexts() == StateASPActive {
-			c.sendState(StateASPActive)
 		} else {
-			c.sendState(StateASPInactive)
+			// The handler commits only effective confirmations/withdrawals.
+			// A known inactive scope must not manufacture a transition here.
+			c.sendState(c.State())
 		}
 	case *messages.Heartbeat:
 		if err := c.handleHeartbeat(msg); err != nil {
