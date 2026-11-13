@@ -144,6 +144,7 @@ func TestIPSPSingleExchangeConfigIsDeepSnapshotted(t *testing.T) {
 func TestIPSPSingleExchangeSimultaneousASPSMAndASPTM(t *testing.T) {
 	first, firstSent := newSingleExchangeIPSPForTest(t, StateASPDown)
 	second, secondSent := newSingleExchangeIPSPForTest(t, StateASPDown)
+	first.cfg.TAck, second.cfg.TAck = time.Hour, time.Hour
 	first.cfg.ASPProcedures = ipspInitiationPolicy(true, true)
 	second.cfg.ASPProcedures = ipspInitiationPolicy(true, true)
 
@@ -161,10 +162,12 @@ func TestIPSPSingleExchangeSimultaneousASPSMAndASPTM(t *testing.T) {
 	if err := second.handleAspUp(firstUp); err != nil {
 		t.Fatalf("second receive simultaneous ASP Up: %v", err)
 	}
-	if err := first.handleAspUpAck((*secondSent)[1].(*messages.AspUpAck)); err != nil {
+	// Each peer Up already completed the shared exchange; these Acks answer
+	// the copies sent before that completion and must be absorbed.
+	if err := first.handleAspUpAck((*secondSent)[1].(*messages.AspUpAck)); !errors.Is(err, errDuplicateASPUpAck) {
 		t.Fatalf("first receive ASP Up Ack: %v", err)
 	}
-	if err := second.handleAspUpAck((*firstSent)[1].(*messages.AspUpAck)); err != nil {
+	if err := second.handleAspUpAck((*firstSent)[1].(*messages.AspUpAck)); !errors.Is(err, errDuplicateASPUpAck) {
 		t.Fatalf("second receive ASP Up Ack: %v", err)
 	}
 

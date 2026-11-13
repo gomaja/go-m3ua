@@ -2768,9 +2768,9 @@ func (c *Association) peerASPIdentifierParam() *params.Param {
 	return c.peerASPIdentifier.Copy()
 }
 
-// notePeerActivity records a successfully parsed M3UA message received with
-// PPID 0 or M3UAPPID. RFC 4666 Section 4.3.4.6 treats that as evidence the peer
-// is alive; callers must reject every other PPID and malformed octets first.
+// notePeerActivity records an M3UA message accepted for processing with PPID 0
+// or M3UAPPID. RFC 4666 Section 4.3.4.6 includes "any other M3UA message";
+// framed version/capability refusals count without interpreting their bodies.
 func (c *Association) notePeerActivity() {
 	c.lastRecv.Store(time.Now().UnixNano())
 }

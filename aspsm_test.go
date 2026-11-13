@@ -227,12 +227,19 @@ func TestHandleAspUpAckFromInactiveIsAccepted(t *testing.T) {
 func TestCompletedASPUpAckRetransmissionIsAbsorbed(t *testing.T) {
 	conn, _ := newTestConn(t, StateASPActive, RoleASP)
 	conn.cfg.TAck = time.Hour
-	conn.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
+	request, err := conn.beginASPSM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.writePendingControl(request, request.msg); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
 		t.Fatalf("first ASP Up Ack: %v", err)
 	}
-	if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
+	conn.setState(StateASPActive)
+	if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); !errors.Is(err, errDuplicateASPUpAck) {
 		t.Fatalf("delayed completed ASP Up Ack: %v", err)
 	}
 	if got := conn.State(); got != StateASPActive {
