@@ -445,7 +445,7 @@ func TestMTP3RestartForcesDAUDUnavailableUntilCompletion(t *testing.T) {
 	if err := asp.handleDestinationStateAudit(broadAudit); err != nil {
 		t.Fatalf("overlapping range audit during restart: %v", err)
 	}
-	assertOnlySSNMKind(t, sent.snapshot(), (*messages.DestinationUnavailable)(nil))
+	assertAuditRangeReplies(t, ssnmMessages(sent.snapshot()), DestinationAvailable, DestinationUnavailable)
 
 	sent.reset()
 	if err := restart.Complete(); err != nil {

@@ -237,6 +237,16 @@ that omitted scope from the immutable Association configuration. An explicit
 different value never matches another provisioned route, and an omitted scope
 is never guessed when the Association has several possible values.
 
+For dynamically registered Application Servers, both canonical SSNM ownership
+and aggregate route projection use the complete registered scope. An explicit
+Network Appearance different from that registration on an active AS resolves
+to standalone Association knowledge, as it does for a static scope, and does not
+alter that
+Application Server's route or transfer selection (RFC 4666 §§1.2, 3.4.1, 4.5.1).
+The ASP does not return Invalid Network Appearance: §3.8.1 assigns that error to
+an SGP receiving an ASP's invalid appearance. A Routing Key registered for all
+appearances still matches every appearance, as §3.6.1 permits.
+
 Mask is the number of wildcarded low-order bits and must not exceed 24. A route
 with mask 24 is an explicit all-destinations route. Omission never silently
 means all destinations.

@@ -156,6 +156,56 @@ mask. Congestion level is retained independently from reachability because
 RFC 4666 Sections 3.4.4 and 4.5.3 make an explicit level zero an abatement and
 permit the parameter to be omitted.
 
+A masked audit uses a snapshot of those records and partitions its requested
+union at narrower state boundaries, including active and completed restart
+ranges that survive forgetting destination records (§4.6). Replies carry
+aligned, non-overlapping
+Affected Point Code ranges (RFC 4666 §§3.4.1, 4.5.3), so a DAVA never includes a
+known unavailable exception and reply application order cannot change the
+availability result. Superseded records do not fragment a uniform reply.
+The planner copies state under the existing store/registry locks, then uses a
+scope-local boundary sweep with separate newest-record heaps for availability
+and congestion. Standard library sorts order events and boundaries; resolving
+R relevant retained records and B input request/state/restart boundaries
+(including restart ranges filtered out for that scope) costs
+O((R + B) log(R + B)) per Routing Context scope. Event and boundary slices,
+heaps, priority objects and counter arrays are reset and reused across scopes;
+returned plans retain separate storage. RFC 4666 §3.4.1 aligned
+ranges either nest or are disjoint. Restart isolation remains the union of each
+epoch's affected ranges minus its own completed recovery ranges. No planning
+lock is held during socket writes.
+
+Replies group equal message type, encoded state and Routing Context sets into
+Affected Point Code lists, split at the effective configured/default APC limit
+and the existing message/TLV size limits. RFC 4666 §4.5.3 permits DUNA/DAVA
+lists. Section 3.4.4 says the APC parameter can indicate congestion of multiple
+destinations or ranges; §3.4.6 gives DRST the DUNA parameter descriptions. All
+SCON lists precede the DAVA/DRST they qualify. Availability ranges remain
+disjoint, including across chunks, and explicit audit boundaries are preserved.
+
+Both total messages and encoded bytes are bounded before the first write.
+For store limit N and Q requested ranges, the planning envelope allows
+P = 48 × (3N + Q + 1) aligned pieces per scope: at most 24 dyadic cuts per
+input range, with a factor of two allowance, and three record budgets for
+retained records and affected/completed restart boundaries. Without forgetting
+records those distinct boundaries fit the store's limit. Complete identical
+scope plans share an RC list, so there are at most as many RC sets as scopes.
+For each RC list chunk, let H be its worst SCON header size and L its effective
+APC chunk capacity. The reply budget allows 2 × (ceil(P/L) + 48) messages and
+8P plus that message count times H bytes. This covers availability and congestion
+lists with more state-group headers than ordinary state needs. In particular,
+256 isolated known points across the full 24-bit space receive all 4352 ranges,
+in five messages at the default APC limit.
+
+Restart history surviving repeated `ForgetDestinations` can exceed this
+ordinary-state envelope. A refused plan sends no status prefix: the SGP sends
+Destination Status Unknown ERR with the requested APCs and associated NA/RC
+(including known scope inferred from configuration, RFC 4666 §3.8.1) and publishes a Layer Management error. The Association remains up.
+An ASP receiving that ERR publishes its scoped management error without changing
+traffic authorization or destination availability.
+Destinations without retained state still answer DUNA. A known congestion-only
+record keeps the initial available state; unavailable entries carry no SCON.
+
 ```go
 type DestinationStatusKey struct {
     NetworkAppearance    uint32
@@ -362,6 +412,9 @@ the SGP destination registry. `Endpoint.DestinationUserPartUnavailable` is
 SGP-to-concerned-ASPs and enforces DUPU's one unmasked destination and valid
 User/Cause tables (Section 3.4.5). The SG-ASP DUNA, DAVA, DAUD, DUPU, and DRST
 procedures are not extended to IPSP communication by Sections 1.4.3.4 or 1.4.6.
+DUPU's single unmasked destination rule also applies at shared send admission,
+including `Association.WriteSignal` and generic caller-built messages. The
+message codecs remain general serializers for capture decoding and re-encoding.
 
 Every operation validates role before constructing or writing a message. A
 present Routing Context list must be non-empty and unique. Every Routing

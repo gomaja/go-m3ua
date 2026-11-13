@@ -1180,6 +1180,19 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	if isPayloadData(buf) {
 		return c.writeRawData(m3, buf, n, enforceTrafficScope)
 	}
+	// RFC 4666 §3.4.5 permits exactly one unmasked DUPU destination.
+	// Check the encoded message so caller-built headers and serializers use
+	// the same send admission. Codecs remain able to retain captured lists.
+	if isSSNM(buf) && buf[3] == messages.MsgTypeDestinationUserPartUnavailable {
+		decoded, parseErr := messages.Parse(buf)
+		if parseErr != nil {
+			return 0, parseErr
+		}
+		d := decoded.(*messages.DestinationUserPartUnavailable)
+		if d.AffectedPointCode.AffectedPointCodeCount() != 1 || d.AffectedPointCode.AffectedPointCodeMasks()[0] != 0 {
+			return 0, ErrInvalidParameterValue
+		}
+	}
 	trafficScoped := isSSNM(buf)
 
 	if c.signalWriter != nil {
