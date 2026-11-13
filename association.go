@@ -903,19 +903,25 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 // WriteSignal or WriteData on the same association waits behind it for the
 // socket.
 func (c *Association) WriteSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, true, applicationWrite)
+	return c.writeSignal(m3, true, applicationWrite, nil)
 }
 
 // writeControl writes a message the library sends on its own behalf. It waits
 // for send-buffer space rather than failing on it; see writeControlFrame.
 func (c *Association) writeControl(m3 messages.M3UA) (n int, err error) {
+	return c.writeControlUntilStopped(m3, nil)
+}
+
+// writeControlUntilStopped carries a pending procedure's stop signal to the
+// serialized transport boundary (RFC 4666 §4.3.4.1–§4.3.4.4).
+func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan struct{}) (n int, err error) {
 	if _, isASPDown := m3.(*messages.AspDown); !isASPDown || c.tack == nil || !c.isIPSPDoubleExchange() {
-		return c.writeSignal(m3, true, libraryWrite)
+		return c.writeSignal(m3, true, libraryWrite, stopped)
 	}
 	c.tack.aspDownDeliveryMu.Lock()
 	defer c.tack.aspDownDeliveryMu.Unlock()
-	n, err = c.writeSignal(m3, true, libraryWrite)
-	if err == nil {
+	n, err = c.writeSignal(m3, true, libraryWrite, stopped)
+	if err == nil && n > 0 {
 		c.tack.mu.Lock()
 		c.tack.aspDownAcksOutstanding++
 		c.tack.mu.Unlock()
@@ -927,7 +933,7 @@ func (c *Association) writeControl(m3 messages.M3UA) (n int, err error) {
 // been selected and whose deliveryMu is already held by the distribution
 // engine. Re-entering the public scope barrier there would deadlock.
 func (c *Association) writeDistributedSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, false, applicationWrite)
+	return c.writeSignal(m3, false, applicationWrite, nil)
 }
 
 // writeOrigin records who decided a message should be sent, because that
@@ -986,7 +992,7 @@ const (
 // SendMsg first tries NoWait with the control SndInfo. A full buffer returns
 // EAGAIN with no message queued; only that refusal is retried through a
 // blocking SendMsg carrying the same stream 0 and M3UA PPID (RFC 6458
-// Sections 5.3.4 and 8.1.31; RFC 4666 Sections 1.4.7 and 7.1). Because
+// Sections 5.3.4 and 8.1.31; Errata 6111; RFC 4666 Sections 1.4.7 and 7.1). Because
 // both sends carry SndInfo, SCTP_DEFAULT_SNDINFO is unnecessary.
 //
 // The wait is bounded by ControlWriteTimeout. A waiting write holds the
@@ -995,15 +1001,26 @@ const (
 // When the bound expires the association is closed, and that also ends the
 // wait: closing the SCTP association releases any write parked in the poller
 // before the descriptor goes.
-func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo) error {
+func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}) (bool, error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
+	// A stopped retry may have waited here behind a different control write.
+	select {
+	case <-stopped:
+		return false, nil
+	default:
+	}
 	transport := c.controlSender()
 	_, err := transport.SendMsg(frame, sctp.SendOptions{Info: info, NoWait: true})
 	if !sendBufferFull(err) {
-		return err
+		return true, err
 	}
 
+	select {
+	case <-stopped:
+		return false, nil
+	default:
+	}
 	c.controlWriteWaits.Add(1)
 	c.controlWritesWaiting.Add(1)
 	defer c.controlWritesWaiting.Add(-1)
@@ -1019,10 +1036,10 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo) error 
 	if !state.CompareAndSwap(controlWriteWaiting, controlWriteFinished) {
 		// The watchdog decided first. The association is closing on its
 		// account, whatever this attempt returned, so report the cause.
-		return expired
+		return true, expired
 	}
 	watchdog.Stop()
-	return err
+	return true, err
 }
 
 // writeMandatoryControls writes one ordered control batch. The queue-backed
@@ -1119,7 +1136,7 @@ func (c *Association) writeMandatoryControl(control mandatoryControl, queued boo
 		if queued && c.notificationWriter != nil {
 			_, err = c.notificationWriter(message)
 		} else {
-			_, err = c.writeSignal(message, control.enforceTrafficScope, libraryWrite)
+			_, err = c.writeSignal(message, control.enforceTrafficScope, libraryWrite, nil)
 		}
 		if err != nil {
 			return err
@@ -1128,7 +1145,7 @@ func (c *Association) writeMandatoryControl(control mandatoryControl, queued boo
 	return nil
 }
 
-func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin) (n int, err error) {
+func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}) (n int, err error) {
 	if m3 == nil {
 		return 0, errors.New("cannot write a nil M3UA signal")
 	}
@@ -1160,6 +1177,11 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 			}
 			defer release()
 		}
+		select {
+		case <-stopped:
+			return 0, nil
+		default:
+		}
 		return c.signalWriter(m3)
 	}
 
@@ -1179,7 +1201,11 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	}
 
 	if origin == libraryWrite {
-		err = c.writeControlFrame(buf, &sctpInfo)
+		var submitted bool
+		submitted, err = c.writeControlFrame(buf, &sctpInfo, stopped)
+		if !submitted && err == nil {
+			return 0, nil
+		}
 	} else {
 		c.sendMu.Lock()
 		_, err = c.controlSender().SendMsg(buf, sctp.SendOptions{Info: &sctpInfo, NoWait: c.applicationWriteDeadline.Load() == nil})
@@ -1724,9 +1750,9 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		c.muStateEvent.Unlock()
 		// Retransmitters check done before each resend, and are cancelled here
 		// as well so none starts another. stopAllTAck does not take the retry
-		// lock, so a resend already past those checks can still reach the
-		// socket before the release below; one the release interrupts fails,
-		// and its request is dropped.
+		// lock. A retry waiting for sendMu rechecks its stop signal there;
+		// a transport call already entered can finish or be interrupted by
+		// the release below.
 		c.stopAllTAck()
 		if abortive {
 			err = c.abortTransport()

@@ -24,9 +24,10 @@ const DefaultTAck = 2 * time.Second
 type pendingRequest struct {
 	msg  messages.M3UA
 	kind requestKind
-	// routingContexts is the explicit RC set the ASPTM request named.
+	// routingContexts is the transmitted RC set, or the configured/registered
+	// membership an omitted-RC ASPTM request covers (RFC 4666 §4.3.4.3).
 	// remaining is reduced by each independently received Ack. Both are nil
-	// for ASPSM requests and for an ASPTM request that omitted RC.
+	// for ASPSM and for a contextless ASPTM scope without any RC labels.
 	routingContexts map[uint32]struct{}
 	remaining       map[uint32]struct{}
 	// routingContextOmitted distinguishes an unscoped wire request whose known
@@ -145,7 +146,11 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 	if routingContext == nil && (ackFor == requestAspActive || ackFor == requestAspInactive) {
 		req.routingContextOmitted = true
 		if c.cfg != nil {
-			routingContext = asConfigRoutingContextParam(c.cfg.ApplicationServers)
+			if c.role == RoleASP {
+				routingContext = c.configuredRoutingContextParam()
+			} else {
+				routingContext = asConfigRoutingContextParam(c.cfg.ApplicationServers)
+			}
 		}
 	}
 	if routingContext != nil {
@@ -223,7 +228,7 @@ func (c *Association) writePendingControl(request *pendingRequest, message messa
 	case <-request.stop:
 		return 0, nil
 	default:
-		return c.writeControl(message)
+		return c.writeControlUntilStopped(message, request.stop)
 	}
 }
 
@@ -270,7 +275,7 @@ func (c *Association) runTAck(req *pendingRequest, kind requestKind) {
 		default:
 		}
 
-		_, err := c.writeControl(req.msg)
+		_, err := c.writeControlUntilStopped(req.msg, req.stop)
 		c.tack.retryMu.Unlock()
 		if err != nil {
 			// The association is going away; monitor() will act on the write
@@ -435,7 +440,11 @@ func (c *Association) claimTAckAcknowledgementForScope(kind requestKind, acknowl
 			continue
 		}
 		result.solicited = true
-		if len(req.remaining) > 0 {
+		// An explicit partial Ack cannot acknowledge an omitted contextless AS.
+		// Its unkeyed Ack completes that scope along with any remaining RCs
+		// (RFC 4666 §4.3.4.3).
+		contextlessOutstanding := c.role == RoleASP && req.routingContextOmitted && acknowledged != nil && c.hasConfiguredLocalContextlessAS()
+		if len(req.remaining) > 0 || contextlessOutstanding {
 			continue
 		}
 		req.stopRetries()
@@ -469,9 +478,27 @@ func (c *Association) recordASPTMAcknowledgementLocked(kind requestKind, acknowl
 	}
 }
 
+// pendingTAckContextless reports an omitted-RC request covering a contextless AS,
+// including alongside dynamically registered RCs. RFC 4666 §3.4.1 permits
+// that scope; §4.5.1 and §4.6 allow early SSNM while its ASP Active is
+// outstanding, just as for explicit RCs.
+func (c *Association) pendingTAckContextless(kind requestKind) bool {
+	if c.tack == nil || !c.hasConfiguredLocalContextlessAS() {
+		return false
+	}
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	for _, req := range c.pendingRequestsLocked(kind) {
+		if req.routingContextOmitted {
+			return true
+		}
+	}
+	return false
+}
+
 // pendingTAckRoutingContexts returns the explicit RCs still awaiting an Ack.
-// It is also the activation-window scope in which an SGP may send DUNA, DRST,
-// and SCON before the corresponding ASP Active Ack.
+// It supplies the explicit-RC part of the RFC 4666 §4.5.1 / §4.6 window;
+// pendingTAckContextless supplies its omitted-RC counterpart.
 func (c *Association) pendingTAckRoutingContexts(kind requestKind) []uint32 {
 	if c.tack == nil {
 		return nil
@@ -737,6 +764,34 @@ func (c *Association) cancelTAckRequest(req *pendingRequest) {
 			pending.cancel()
 			delete(c.tack.pending, message)
 			return
+		}
+	}
+}
+
+// stopCompetingASPActive stops procedures whose transmitted ASPAC can reactivate
+// a withdrawn scope (RFC 4666 §4.3.4.3 and §4.3.4.4). Partial Acks reduce
+// remaining, but retries still carry the original message's full scope.
+func (c *Association) stopCompetingASPActive(scope *params.Param) {
+	if c.tack == nil {
+		return
+	}
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	for message, request := range c.tack.pending {
+		if request.kind != requestAspActive {
+			continue
+		}
+		overlaps := scope == nil || request.routingContextOmitted
+		if scope != nil {
+			for _, rc := range scope.RoutingContexts() {
+				if _, named := request.routingContexts[rc]; named {
+					overlaps = true
+				}
+			}
+		}
+		if overlaps {
+			request.cancel()
+			delete(c.tack.pending, message)
 		}
 	}
 }

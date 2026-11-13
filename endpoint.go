@@ -265,6 +265,7 @@ func (e *Endpoint) trackAssociationLocked(association *Association) bool {
 	e.nextAssociationID++
 	association.managementID.Store(uint64(e.nextAssociationID))
 	association.endpoint = e
+	e.ssnm.registerSource(e.nextAssociationID)
 	e.associations[association] = struct{}{}
 	e.associationsByID[e.nextAssociationID] = association
 	return true
