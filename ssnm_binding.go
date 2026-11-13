@@ -306,6 +306,9 @@ func (c *Association) syncSSNMBindings() {
 		}
 		store.retire(partition, c.ID())
 	}
+	if c.endpoint != nil {
+		c.endpoint.refreshIPSPDestinations()
+	}
 }
 
 // retireSSNMBindings withdraws every binding this Association holds. A
@@ -371,6 +374,12 @@ func (c *Association) publishSSNMReport(report SSNMReport) error {
 			firstErr = err
 		}
 	}
+	// The legacy route index is updated before this canonical store. Refresh
+	// transport eligibility only after the candidate's availability is current
+	// (RFC 4666 §4.5.2.2), including a store refusal that invalidates knowledge.
+	if c.endpoint != nil && c.endpoint.aspRoutes != nil && report.Source == SSNMPeerReport {
+		c.endpoint.aspRoutes.canonicalStateChanged(partitions)
+	}
 	return firstErr
 }
 
@@ -421,7 +430,12 @@ func (c *Association) refuseOversizedSSNM(scope WireScope, count, limit int) err
 	if store == nil {
 		return ErrSSNMOversizedReport
 	}
-	return store.oversized(c.ssnmPartitionsForScope(scope), count, limit, c.ID())
+	partitions := c.ssnmPartitionsForScope(scope)
+	err := store.oversized(partitions, count, limit, c.ID())
+	if c.endpoint != nil && c.endpoint.aspRoutes != nil {
+		c.endpoint.aspRoutes.canonicalStateChanged(partitions)
+	}
+	return err
 }
 
 // ssnmDestinationsFrom expands the Affected Point Code parameter into ranges.

@@ -99,7 +99,8 @@ func validRouteSelectionMode(mode RouteSelectionMode) bool {
 // reported congestion state for a Protocol Data Message Priority. A nil policy
 // permits every reachable route. The policy runs without Endpoint locks and
 // may be evaluated concurrently for candidate levels before route selection;
-// it must not depend on invocation count.
+// it must not depend on invocation count. An unknown transport observation
+// also consults the unknown-level decision; a nil policy permits it.
 type ASPCongestionPolicy func(messagePriority, congestionLevel uint8, levelSet bool) bool
 
 // MTPRouteConfig describes the MTP routing-label fields used to select one
@@ -197,6 +198,10 @@ type ASPRoutingConfig struct {
 	MTPRoutes []MTPRouteConfig
 	// CongestionPolicy filters candidate paths by reported congestion.
 	CongestionPolicy ASPCongestionPolicy
+	// PreferUncongestedTransport ranks outbound transport pressure after availability.
+	// It can reroute an established SLS flow and missequence traffic across
+	// associations (RFC 4666 §1.4.7); it is off by default.
+	PreferUncongestedTransport bool
 	// AllowUnknownDestinations lets a candidate whose destination state this
 	// Endpoint has never been told carry traffic.
 	//
@@ -328,6 +333,7 @@ type aspRoutingConfig struct {
 	signallingGateways                      []aspSignallingGatewayConfig
 	sgpByIdentity                           map[SGPIdentity]aspSGPConfig
 	congestionPolicy                        ASPCongestionPolicy
+	preferUncongestedTransport              bool
 	transferFlowCacheEntries                int
 	mtpIndicationQueueSize                  int
 	maxAffectedPointCodesPerSSNM            int
@@ -663,6 +669,7 @@ func compileRoutingInventory(routing *ASPRoutingConfig, snapshot *aspRoutingConf
 	snapshot.allowUnknownDestinations = routing.AllowUnknownDestinations
 	snapshot.signallingGatewaySelection = routing.SignallingGatewaySelection
 	snapshot.congestionPolicy = routing.CongestionPolicy
+	snapshot.preferUncongestedTransport = routing.PreferUncongestedTransport
 	snapshot.transferFlowCacheEntries = routing.TransferFlowCacheEntries
 	if snapshot.transferFlowCacheEntries == 0 {
 		snapshot.transferFlowCacheEntries = DefaultTransferFlowCacheEntries

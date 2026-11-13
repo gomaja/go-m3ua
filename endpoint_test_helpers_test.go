@@ -19,7 +19,19 @@ func dialASP(ctx context.Context, network string, local, remote *sctp.Addr, conf
 	if err != nil {
 		return nil, err
 	}
-	return endpoint.Dial(ctx, network, local, remote, config)
+	keep := false
+	defer func() {
+		if !keep {
+			_ = endpoint.Close()
+		}
+	}()
+	association, err := endpoint.Dial(ctx, network, local, remote, config)
+	if err != nil {
+		return nil, err
+	}
+	closePrivateEndpointAfter(association.Done(), endpoint)
+	keep = true
+	return association, nil
 }
 
 func listenSGP(network string, local *sctp.Addr, config *ListenerConfig) (*Listener, error) {
@@ -27,7 +39,19 @@ func listenSGP(network string, local *sctp.Addr, config *ListenerConfig) (*Liste
 	if err != nil {
 		return nil, err
 	}
-	return endpoint.Listen(network, local, config)
+	listener, err := endpoint.Listen(network, local, config)
+	if err != nil {
+		_ = endpoint.Close()
+		return nil, err
+	}
+	closePrivateEndpointAfter(listener.closeDone, endpoint)
+	return listener, nil
+}
+
+// These legacy test conveniences create private owners. Closing their only
+// resource must also stop the Endpoint-owned sampler and other shared workers.
+func closePrivateEndpointAfter(done <-chan struct{}, endpoint *Endpoint) {
+	go func() { <-done; _ = endpoint.Close() }()
 }
 
 func newSGPListener(config *ListenerConfig) *Listener {

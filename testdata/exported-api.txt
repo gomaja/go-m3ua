@@ -62,6 +62,7 @@ const ManagementNotify
 const ManagementSCTPRelease
 const ManagementSCTPRestart
 const ManagementSCTPStatus
+const ManagementTransportCongestion
 const ProtocolAccept
 const ProtocolDropParameter
 const ProtocolReject
@@ -136,6 +137,7 @@ field ASPRoutingConfig.AllowUnknownDestinations
 field ASPRoutingConfig.CongestionPolicy
 field ASPRoutingConfig.MTPRoutes
 field ASPRoutingConfig.Paths
+field ASPRoutingConfig.PreferUncongestedTransport
 field ASPRoutingConfig.SignallingGatewayProcessSelection
 field ASPRoutingConfig.SignallingGatewaySelection
 field ASPRoutingConfig.TransferFlowCacheEntries
@@ -206,6 +208,7 @@ field AssociationStatus.RTOInfo
 field AssociationStatus.ReceiverWindow
 field AssociationStatus.SendBacklog
 field AssociationStatus.State
+field AssociationStatus.TransportCongestion
 field AssociationStatus.UnackedDataChunks
 field CompatibilityPolicy.Tolerator
 field CongestionState.Congested
@@ -269,10 +272,12 @@ field DestinationUserPartUnavailableRequest.Scope
 field DestinationUserPartUnavailableRequest.User
 field EndpointConfig.ASP
 field EndpointConfig.ApplicationServers
+field EndpointConfig.IPSPDestinations
 field EndpointConfig.Role
 field EndpointConfig.RoutingKeyManagement
 field EndpointConfig.SGP
 field EndpointConfig.SSNMState
+field EndpointConfig.TransportCongestion
 field HeartbeatInfo.Enabled
 field HeartbeatInfo.Interval
 field HeartbeatInfo.Timer
@@ -280,6 +285,9 @@ field IPSPConfig.ASPSMExchange
 field IPSPConfig.ExchangeModel
 field IPSPConfig.TrafficToLocal
 field IPSPConfig.TrafficToPeer
+field IPSPDestinationConfig.AS
+field IPSPDestinationConfig.Destination
+field IPSPDestinationConfig.Selection
 field IPSPState.TrafficToLocal
 field IPSPState.TrafficToPeer
 field IPSPTrafficConfig.ApplicationServers
@@ -300,6 +308,8 @@ field MTPDestinationStatus.Congested
 field MTPDestinationStatus.CongestionLevel
 field MTPDestinationStatus.CongestionLevelSet
 field MTPDestinationStatus.Destination
+field MTPDestinationStatus.TransportCongestionLevel
+field MTPDestinationStatus.TransportCongestionUnknown
 field MTPIndication.Destination
 field MTPIndication.Kind
 field MTPIndication.ResyncRequired
@@ -349,6 +359,7 @@ field ManagementIndication.PeerAddrChange
 field ManagementIndication.RoutingContexts
 field ManagementIndication.StatusInfo
 field ManagementIndication.StatusType
+field ManagementIndication.TransportCongestion
 field NetworkAppearanceError.Appearance
 field ParameterFaultError.Cause
 field ParameterFaultError.Code
@@ -520,6 +531,38 @@ field SignallingGatewayProcessConfig.ApplicationServers
 field SignallingGatewayProcessConfig.ID
 field TrafficDistribution.Delivered
 field TrafficDistribution.Queued
+field TransportCongestionConfig.Abatement
+field TransportCongestionConfig.AbatementDwell
+field TransportCongestionConfig.AbsoluteAbatement
+field TransportCongestionConfig.AbsoluteOnset
+field TransportCongestionConfig.Disabled
+field TransportCongestionConfig.Interval
+field TransportCongestionConfig.Onset
+field TransportCongestionConfig.OnsetDwell
+field TransportCongestionConfig.StaleAfter
+field TransportCongestionConfig.Workers
+field TransportCongestionState.Association
+field TransportCongestionState.Charged
+field TransportCongestionState.DiagnosticAt
+field TransportCongestionState.DiagnosticError
+field TransportCongestionState.DiagnosticValid
+field TransportCongestionState.Epoch
+field TransportCongestionState.Error
+field TransportCongestionState.Errors
+field TransportCongestionState.Generation
+field TransportCongestionState.Known
+field TransportCongestionState.LastValidAt
+field TransportCongestionState.Level
+field TransportCongestionState.Limit
+field TransportCongestionState.LimitChanged
+field TransportCongestionState.MissedSamples
+field TransportCongestionState.PreviousLimit
+field TransportCongestionState.PrimaryCwnd
+field TransportCongestionState.ReceiverWindow
+field TransportCongestionState.SampleValid
+field TransportCongestionState.SampledAt
+field TransportCongestionState.Samples
+field TransportCongestionState.UnackedDataChunks
 field UnexpectedMessageError.Msg
 field UnexpectedMessageError.Raw
 field UnsupportedClassError.Msg
@@ -607,6 +650,7 @@ method Association.SocketSendBuffer
 method Association.State
 method Association.StateChanges
 method Association.StreamID
+method Association.TransportCongestion
 method Association.WriteData
 method Association.WriteDataContext
 method Association.WriteSignal
@@ -743,6 +787,7 @@ type EndpointConfig struct
 type HeartbeatInfo struct
 type IPSPASPSMExchangeModel
 type IPSPConfig struct
+type IPSPDestinationConfig struct
 type IPSPExchangeModel
 type IPSPState struct
 type IPSPTrafficConfig struct
@@ -827,6 +872,8 @@ type SignallingGatewayProcessID
 type State
 type ToleratorFunc
 type TrafficDistribution struct
+type TransportCongestionConfig struct
+type TransportCongestionState struct
 type UnexpectedMessageError struct
 type UnsupportedClassError struct
 type UnsupportedMessageError struct

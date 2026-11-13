@@ -680,6 +680,21 @@ Nothing calls it for you.
 The `ctx` given to `Dial` and `Accept` is the association's lifetime, not just
 its handshake. Cancelling it closes the associations it produced.
 
+`Endpoint.MTPIndications` now returns a bounded channel for IPSPs instead of
+nil, and `Endpoint.Close` closes that channel. Drain it until closure and fan
+out indications to local MTP3-Users. `EndpointConfig.IPSPDestinations` maps
+peer-directed AS scopes to destinations for IPSP indications and snapshots;
+without those mappings the application owns destination projection.
+
+Transport detection is enabled by default; set
+`EndpointConfig.TransportCongestion.Disabled` to opt out. `EndpointConfig`,
+`ASPRoutingConfig`, `MTPDestinationStatus`,
+`AssociationStatus`, and `ManagementIndication` gained fields. Replace positional
+composite literals for these exported structs with keyed literals.
+Handle `ManagementTransportCongestion` and `ManagementDataQueueCongestion` as
+independent implementation indications, named `TRANSPORT-CONGESTION` and
+`DATA-QUEUE-CONGESTION`; neither names a new RFC management primitive.
+
 ## Service Indicator values and Unknown cause
 
 Five Service Indicator constants now carry the SS7 values required by RFC 4666

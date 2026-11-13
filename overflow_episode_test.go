@@ -121,16 +121,25 @@ func TestOverflowAtSGPDoesNotReportSS7DestinationCongestion(t *testing.T) {
 
 func nextQueueCongestion(t *testing.T, c *Association) DataQueueCongestionIndication {
 	t.Helper()
-	select {
-	case m := <-c.ManagementIndications():
-		if m == nil || m.Kind != ManagementDataQueueCongestion || m.DataQueueCongestion == nil {
-			t.Fatalf("management indication = %+v, want queue transition", m)
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case m, open := <-c.ManagementIndications():
+			if !open || m == nil {
+				t.Fatal("management stream closed before queue transition")
+			}
+			if m.Kind != ManagementDataQueueCongestion {
+				continue
+			}
+			if m.DataQueueCongestion == nil {
+				t.Fatalf("management indication = %+v, want queue transition", m)
+			}
+			return *m.DataQueueCongestion
+		case <-deadline.C:
+			t.Fatal("missing management queue transition")
 		}
-		return *m.DataQueueCongestion
-	case <-time.After(2 * time.Second):
-		t.Fatal("missing management queue transition")
 	}
-	return DataQueueCongestionIndication{}
 }
 
 func TestOverflowManagementSurvivesFailedSCON(t *testing.T) {

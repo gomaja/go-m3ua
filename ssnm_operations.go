@@ -124,14 +124,14 @@ func (c *Association) DestinationStateAudit(request DestinationStateAuditRequest
 	return nil
 }
 
-// SignallingCongestion originates the optional ASP-to-SGP SCON described by
+// SignallingCongestion originates the optional local ASP or IPSP SCON described by
 // RFC 4666 Section 3.4.4.
 func (c *Association) SignallingCongestion(request SignallingCongestionRequest) error {
-	parameters, err := c.prepareASPSSNM(request.Scope, request.Destinations, request.Info)
+	parameters, err := c.prepareCongestionSSNM(request.Scope, request.Destinations, request.Info)
 	if err != nil {
 		return err
 	}
-	concernedDestination, congestion, err := buildSignallingCongestionParameters(request, true)
+	concernedDestination, congestion, err := buildSignallingCongestionParameters(request, c.role == RoleASP)
 	if err != nil {
 		return err
 	}
@@ -903,4 +903,20 @@ func validMTP3User(user uint16) bool {
 	default:
 		return false
 	}
+}
+
+// IPSP SCON follows the same local-directed flow validation and delivery
+// barrier as raw WriteSignal. DAUD remains ASP-only (RFC 4666 §§1.4.6, 3.4.4).
+func (c *Association) prepareCongestionSSNM(scope WireScope, destinations []PointCodeRange, info string) (ssnmParameters, error) {
+	if c == nil || c.role != RoleIPSP {
+		return c.prepareASPSSNM(scope, destinations, info)
+	}
+	if associationDone(c) {
+		return ssnmParameters{}, ErrAssociationClosed
+	}
+	parameters, err := buildSSNMParameters(scope, destinations, info)
+	if err != nil {
+		return ssnmParameters{}, err
+	}
+	return parameters, nil
 }

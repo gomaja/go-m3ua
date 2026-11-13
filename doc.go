@@ -288,6 +288,33 @@ RFC 4666 Section 6 carries one normative requirement, and it points elsewhere:
 	Implementations MUST follow the normative guidance of RFC3788 [11] on
 	the integration and usage of security mechanisms in SIGTRAN protocols.
 
+Transport congestion detection defaults to one periodic Endpoint scheduler with
+bounded workers, independent per-boundary dwell, and charged SCTP memory ratios.
+Pending dwell needs consecutive valid samples at most 1.5 sampling intervals
+apart and no missed slot. State-lock contention skips only the affected
+association's sample; a bounded coalescing publisher keeps AS state waits off
+the sampling path. Destination projection uses MTPTransfer's ordered AS and
+destination availability checks.
+EndpointConfig.TransportCongestion configures or disables it. Association.TransportCongestion
+reports unavailable/stale samples as unknown, retains raw evidence and sample age,
+and stays independent of received SCON and local inbound overload. Routed ASPs and
+explicit IPSPDestinations mappings project transport pressure to MTP-STATUS
+(RFC 4666 §§1.4.6, 4.5.2.1–2). The implementation indications
+ManagementTransportCongestion (TRANSPORT-CONGESTION) and ManagementDataQueueCongestion
+(DATA-QUEUE-CONGESTION) report outbound transport pressure and independent inbound
+queue onset, end and tracking loss to Layer Management.
+An SGP leaves SS7 actions to its NIF. Outbound pressure sends no automatic SCON.
+CongestionPolicy sees combined per-association pressure. Default selection remains
+unchanged; PreferUncongestedTransport may reroute an SLS flow and missequence it
+because there is no cross-association changeover barrier (RFC 4666 §1.4.7).
+The levels are engineering severity, not a national congestion-method profile;
+variant-specific repeated indications and Message Priority discard are application
+responsibilities. At the IPSP destination-record limit, refused SSNM updates
+leave the previous retained state in MTPIndications and destination snapshots.
+SubscribeSSNM reports SSNMResourceLossEvent; a new snapshot alone cannot recover
+an update that was not retained. MTPIndications is a single consumer channel
+with bounded overflow resynchronization; applications fan out to their MTP3-Users.
+
 RFC 3788 Section 7 states it plainly: "A SIGTRAN node MUST support IPsec and MAY
 support TLS." A library that only implements M3UA over SCTP cannot satisfy that
 node-level requirement by itself. IPsec ESP and IKE normally live in the host

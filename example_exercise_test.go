@@ -460,8 +460,8 @@ func TestExampleApplicationManagedRoutingNeedsNoRouteInventory(t *testing.T) {
 // been wrong twice: first as "nil for an ASP that left Routing nil", then as
 // "non-nil for an ASP with an ASPConfig".
 //
-// It is neither. Every ASP Endpoint has the channel, an ASPConfig or not; no
-// SGP or IPSP Endpoint has one. What varies is whether anything is ever put on
+// Every ASP and IPSP Endpoint has the channel; an SGP has none.
+// What varies is whether anything is ever put on
 // it, which is a different question and is covered above.
 func TestMTPIndicationsNilnessMatchesItsDocumentation(t *testing.T) {
 	for _, testCase := range []struct {
@@ -473,7 +473,7 @@ func TestMTPIndicationsNilnessMatchesItsDocumentation(t *testing.T) {
 		{"ASP without routes", EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(false)}, true},
 		{"ASP without an ASPConfig", EndpointConfig{Role: RoleASP}, true},
 		{"SGP", EndpointConfig{Role: RoleSGP}, false},
-		{"IPSP", EndpointConfig{Role: RoleIPSP}, false},
+		{"IPSP", EndpointConfig{Role: RoleIPSP}, true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			endpoint, err := NewEndpoint(testCase.config)

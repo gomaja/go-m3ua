@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"context"
 	"errors"
 	"runtime"
 	"testing"
@@ -441,6 +442,13 @@ func TestRefusedSSNMRecordIsStillReported(t *testing.T) {
 	}
 	if err := duna(conn, 2); !errors.Is(err, ErrSSNMDestinationRecordLimit) {
 		t.Fatalf("DUNA beyond the budget: error = %v, want ErrSSNMDestinationRecordLimit", err)
+	}
+	// Legacy destination retention loss is independent of the canonical report.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	event, err := observedSSNMSubscription(t, conn).Next(ctx)
+	if err != nil || event.Kind != SSNMResourceLossEvent || event.Reason == "" {
+		t.Fatalf("destination-view refusal event: %+v, %v", event, err)
 	}
 	status := nextSSNMReport(t, conn)
 	if status.Destinations[0].PointCode != 2 || reportedSSNMAvailability(t, status) != DestinationUnavailable {

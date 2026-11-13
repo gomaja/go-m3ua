@@ -39,6 +39,8 @@ type aspCongestionRecord struct {
 }
 
 type aspDestinationStatus struct {
+	transportLevel     uint8
+	transportUnknown   bool
 	availability       DestinationAvailability
 	congested          bool
 	congestionLevel    uint8
@@ -83,8 +85,10 @@ type aspRouteStateIndexNode struct {
 }
 
 type aspGatewayRouteSnapshot struct {
-	id      SignallingGatewayID
-	capable bool
+	id           SignallingGatewayID
+	capable      bool
+	hasTransport bool
+	config       aspSignallingGatewayConfig
 }
 
 type aspTransferFlowLock struct {
@@ -102,6 +106,7 @@ type aspRoutes struct {
 	mu sync.RWMutex
 
 	config aspRoutingConfig
+	ssnm   *ssnmState
 	// applyResolved, when set, runs in apply between resolving a report's
 	// route ranges and taking the routing write lock. Tests use it to detach
 	// the Association in that window; it is nil otherwise.
@@ -110,6 +115,7 @@ type aspRoutes struct {
 	associations              map[*Association]SGPIdentity
 	associationsBySGP         map[SGPIdentity]map[*Association]struct{}
 	associationEligibleRoutes map[*Association]map[MTPRouteID]struct{}
+	associationCapabilities   map[*Association]map[MTPRouteID][]aspRouteCapability
 	associationOrder          map[*Association]uint64
 	nextAssociationOrder      uint64
 	availability              map[aspRouteRangeKey]aspAvailabilityRecord
@@ -122,6 +128,7 @@ type aspRoutes struct {
 	stateRecordCount                 int
 	derived                          map[MTPRouteID]map[aspDerivedRangeKey]aspDestinationStatus
 	sequence                         uint64
+	transportRevision                uint64
 	transferFlows                    map[aspTransferFlowKey]*list.Element
 	transferFlowLRU                  *list.List
 	// transferSequences serializes concurrent MTP-TRANSFER requests sharing
@@ -154,6 +161,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 		associations:                     make(map[*Association]SGPIdentity),
 		associationsBySGP:                make(map[SGPIdentity]map[*Association]struct{}),
 		associationEligibleRoutes:        make(map[*Association]map[MTPRouteID]struct{}),
+		associationCapabilities:          make(map[*Association]map[MTPRouteID][]aspRouteCapability),
 		associationOrder:                 make(map[*Association]uint64),
 		availability:                     make(map[aspRouteRangeKey]aspAvailabilityRecord),
 		congestion:                       make(map[aspRouteRangeKey]aspCongestionRecord),
@@ -216,7 +224,9 @@ func (r *aspRoutes) attach(association *Association) bool {
 		r.associationsBySGP[identity] = make(map[*Association]struct{})
 	}
 	r.associationsBySGP[identity][association] = struct{}{}
-	eligibleRoutes := r.eligibleAssociationRoutesLocked(association, identity)
+	capabilities := r.eligibleAssociationCapabilitiesLocked(association, identity)
+	r.associationCapabilities[association] = capabilities
+	eligibleRoutes := aspCapabilityRouteSet(capabilities)
 	r.associationEligibleRoutes[association] = eligibleRoutes
 	indications := r.recomputeLocked(eligibleRoutes)
 	r.publish(indications)
@@ -234,6 +244,7 @@ func (r *aspRoutes) detach(association *Association) {
 	if exists {
 		delete(r.associations, association)
 		delete(r.associationEligibleRoutes, association)
+		delete(r.associationCapabilities, association)
 		delete(r.associationOrder, association)
 		r.invalidateAssociationTransferFlowsLocked(association)
 		delete(r.associationsBySGP[identity], association)
@@ -263,21 +274,39 @@ func (r *aspRoutes) detach(association *Association) {
 	r.mu.Unlock()
 }
 
-func (r *aspRoutes) eligibleAssociationRoutesLocked(
-	association *Association,
-	identity SGPIdentity,
-) map[MTPRouteID]struct{} {
-	eligible := make(map[MTPRouteID]struct{})
+type aspRouteCapability struct {
+	candidate aspRouteCandidate
+	as        ASKey
+}
+
+func (r *aspRoutes) eligibleAssociationCapabilitiesLocked(association *Association, identity SGPIdentity) map[MTPRouteID][]aspRouteCapability {
+	eligible := make(map[MTPRouteID][]aspRouteCapability)
 	sgp, exists := r.config.sgpByIdentity[identity]
 	if !exists {
 		return eligible
 	}
-	for _, mtpRoute := range sgp.routeOrder {
-		if _, _, carried := r.config.eligibleCandidate(association, identity, mtpRoute); carried {
-			eligible[mtpRoute] = struct{}{}
+	for _, route := range sgp.routeOrder {
+		// Every candidate matters: a destination may be unavailable through
+		// the first active AS and reachable only through a later one.
+		for _, candidate := range sgp.candidatesFor(route) {
+			r.config.visitASKeys(association, identity, candidate.applicationServer, func(key ASKey) bool {
+				if !aspAssociationEligibleForAS(association, key) {
+					return true
+				}
+				eligible[route] = append(eligible[route], aspRouteCapability{candidate, key})
+				return false
+			})
 		}
 	}
 	return eligible
+}
+
+func aspCapabilityRouteSet(capabilities map[MTPRouteID][]aspRouteCapability) map[MTPRouteID]struct{} {
+	routes := make(map[MTPRouteID]struct{}, len(capabilities))
+	for route := range capabilities {
+		routes[route] = struct{}{}
+	}
+	return routes
 }
 
 // eligibleCandidate reports the first candidate of one MTP Route that one
@@ -572,13 +601,26 @@ func (r *aspRoutes) associationStateChanged(association *Association) bool {
 		r.mu.Unlock()
 		return false
 	}
-	current := r.eligibleAssociationRoutesLocked(association, identity)
-	affectedMTPRoutes := changedASPAssociationRoutes(r.associationEligibleRoutes[association], current)
+	currentCapabilities := r.eligibleAssociationCapabilitiesLocked(association, identity)
+	previousCapabilities := r.associationCapabilities[association]
+	affectedMTPRoutes := make(map[MTPRouteID]struct{})
+	for route, capability := range previousCapabilities {
+		if current, ok := currentCapabilities[route]; !ok || !slices.Equal(current, capability) {
+			affectedMTPRoutes[route] = struct{}{}
+		}
+	}
+	for route, capability := range currentCapabilities {
+		if previous, ok := previousCapabilities[route]; !ok || !slices.Equal(previous, capability) {
+			affectedMTPRoutes[route] = struct{}{}
+		}
+	}
 	if len(affectedMTPRoutes) == 0 {
 		r.mu.Unlock()
 		return false
 	}
-	r.associationEligibleRoutes[association] = current
+	r.associationCapabilities[association] = currentCapabilities
+	r.associationEligibleRoutes[association] = aspCapabilityRouteSet(currentCapabilities)
+	r.transportRevision++
 	indications := r.recomputeLocked(affectedMTPRoutes)
 	r.publish(indications)
 	r.mu.Unlock()
@@ -844,7 +886,14 @@ func (r *aspRoutes) gatewayRouteSnapshotsLocked(
 		if !configured {
 			continue
 		}
-		snapshots = append(snapshots, aspGatewayRouteSnapshot{id: gateway.id, capable: capable})
+		hasTransport := false
+		for _, sgp := range gateway.sgps {
+			identity := SGPIdentity{SignallingGateway: gateway.id, SignallingGatewayProcess: sgp.id}
+			for a := range r.associationsBySGP[identity] {
+				hasTransport = hasTransport || a.transportSnapshot.Load() != nil
+			}
+		}
+		snapshots = append(snapshots, aspGatewayRouteSnapshot{id: gateway.id, capable: capable, hasTransport: hasTransport, config: gateway})
 	}
 	return snapshots
 }
@@ -905,17 +954,28 @@ func (r *aspRoutes) appendIndexedDerivedLeafLocked(
 	path []*aspRouteStateIndexNode,
 	updated map[aspDerivedRangeKey]aspDestinationStatus,
 ) {
-	current := aspDestinationStatusFromGatewayPath(gateways, path)
+	current := r.destinationStatusFromGatewayPath(mtpRoute.id, pointCode, gateways, path, r.config.signallingGatewaySelection == RouteSelectionBroadcast)
 	key := aspDerivedRangeKey{mtpRoute: mtpRoute.id, pointCode: pointCode, mask: mask}
 	updated[key] = current
 }
 
-func aspDestinationStatusFromGatewayPath(
+func (r *aspRoutes) destinationStatusFromGatewayPath(
+	mtpRoute MTPRouteID,
+	pointCode uint32,
 	gateways []aspGatewayRouteSnapshot,
 	path []*aspRouteStateIndexNode,
+	broadcast bool,
 ) aspDestinationStatus {
 	bestSet := false
+	required := aspDestinationStatus{}
 	best := aspDestinationStatus{availability: DestinationUnavailable}
+	hasTransport := false
+	for _, gateway := range gateways {
+		hasTransport = hasTransport || gateway.hasTransport
+	}
+	pressureSet := false
+	pressureRank := 0
+	pressureBest, pressureRequired := aspDestinationStatus{}, aspDestinationStatus{}
 	for _, gateway := range gateways {
 		status := aspDestinationStatus{availability: DestinationUnavailable}
 		if gateway.capable {
@@ -945,6 +1005,29 @@ func aspDestinationStatusFromGatewayPath(
 				status.congestionLevelSet = congestion.levelSet
 			}
 		}
+		if hasTransport && gateway.capable {
+			transport := r.gatewayTransportLocked(gateway.config, mtpRoute, pointCode)
+			if transport.usable {
+				// The selected AS's canonical received congestion and each
+				// member's transport pressure are already paired. Keep that
+				// pairing across gateways; legacy availability is independent.
+				combined := transport.pressure
+				if !pressureSet {
+					pressureBest, pressureRequired, pressureRank = combined, combined, transport.availabilityRank
+				} else {
+					pressureRequired = mostCongestedASPStatus(pressureRequired, combined)
+					if transport.availabilityRank < pressureRank {
+						pressureBest, pressureRank = combined, transport.availabilityRank
+					} else if transport.availabilityRank == pressureRank {
+						pressureBest = leastCongestedASPStatus(pressureBest, combined)
+					}
+				}
+				pressureSet = true
+			}
+		}
+		if broadcast && gateway.capable && status.availability != DestinationUnavailable {
+			required = mostCongestedASPStatus(required, status)
+		}
 		if !bestSet || aspAvailabilityRank(status.availability) < aspAvailabilityRank(best.availability) {
 			best = status
 			bestSet = true
@@ -953,6 +1036,22 @@ func aspDestinationStatusFromGatewayPath(
 		if status.availability == best.availability {
 			best = leastCongestedASPStatus(best, status)
 		}
+	}
+	if broadcast {
+		required.availability = best.availability
+		best = required
+	}
+	if hasTransport && pressureSet {
+		if broadcast {
+			pressureBest = pressureRequired
+		}
+		pressureBest.availability = best.availability
+		return pressureBest
+	}
+	if hasTransport && best.availability != DestinationUnavailable {
+		// Retained legacy DAVA cannot turn missing canonical eligibility into
+		// a measured transport clear when there is no usable candidate.
+		best.transportUnknown = true
 	}
 	return best
 }
@@ -1124,11 +1223,13 @@ func newMTPIndication(
 
 func newMTPDestinationStatus(destination MTPDestination, status aspDestinationStatus) MTPDestinationStatus {
 	return MTPDestinationStatus{
-		Destination:        destination,
-		Availability:       status.availability,
-		Congested:          status.congested,
-		CongestionLevel:    status.congestionLevel,
-		CongestionLevelSet: status.congestionLevelSet,
+		Destination:                destination,
+		Availability:               status.availability,
+		Congested:                  status.congested,
+		CongestionLevel:            status.congestionLevel,
+		CongestionLevelSet:         status.congestionLevelSet,
+		TransportCongestionLevel:   status.transportLevel,
+		TransportCongestionUnknown: status.transportUnknown,
 	}
 }
 
@@ -1547,6 +1648,9 @@ func leastCongestedASPStatus(first, second aspDestinationStatus) aspDestinationS
 }
 
 func aspCongestionRank(status aspDestinationStatus) int {
+	if status.transportUnknown {
+		return 4
+	}
 	if !status.congested {
 		return 0
 	}

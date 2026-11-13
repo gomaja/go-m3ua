@@ -65,11 +65,15 @@ type MTPDestination struct {
 // derived from the other: this one is the aggregate MTP3-User status of
 // Section 4.5.2.2, and that one is a decision about one candidate.
 type MTPDestinationStatus struct {
-	Destination        MTPDestination
-	Availability       DestinationAvailability
-	Congested          bool
-	CongestionLevel    uint8
-	CongestionLevelSet bool
+	// TransportCongestionLevel is the aggregate local pressure level; raw inputs are on Association.TransportCongestion.
+	TransportCongestionLevel uint8
+	// TransportCongestionUnknown marks unavailable or stale transport observations, not abatement.
+	TransportCongestionUnknown bool
+	Destination                MTPDestination
+	Availability               DestinationAvailability
+	Congested                  bool
+	CongestionLevel            uint8
+	CongestionLevelSet         bool
 }
 
 // MTPIndication carries an MTP-PAUSE, MTP-RESUME, or MTP-STATUS indication to
@@ -84,7 +88,7 @@ type MTPIndication struct {
 	ResyncRequired bool
 }
 
-// MTPIndications returns the ASP Endpoint's derived MTP3-User indication
+// MTPIndications returns the ASP or IPSP Endpoint's derived MTP3-User indication
 // stream. It is closed by Endpoint.Close, not by an individual Association.
 //
 // It reports changes in the derived status described by MTPDestinationStatus,
@@ -92,8 +96,13 @@ type MTPIndication struct {
 // not the per-candidate decision MTPTransfer makes. An MTP-RESUME is not a
 // promise that the next MTPTransfer will be admitted.
 //
-// Every ASP Endpoint has this channel, whatever its ASPConfig; an SGP or IPSP
-// Endpoint has none and receives nil, where a receive blocks forever.
+// Every ASP and IPSP Endpoint has this channel; an SGP receives nil. IPSP
+// destinations require explicit EndpointConfig.IPSPDestinations mappings.
+// At the IPSP destination-record limit, a refused SSNM update leaves the
+// previously retained state in this stream and its destination snapshots.
+// SubscribeSSNM reports the loss as SSNMResourceLossEvent; querying a snapshot
+// alone cannot recover an update that was not retained.
+// This is one consumer stream; applications fan out to their MTP3-Users.
 //
 // Having the channel is not the same as having something to put on it. These
 // indications are derived from provisioned MTP Routes, so an ASP that left
@@ -102,33 +111,49 @@ type MTPIndication struct {
 // Endpoint.Close. Such an application owns outbound selection itself and
 // consumes Endpoint.SubscribeSSNM instead of waiting here.
 func (e *Endpoint) MTPIndications() <-chan *MTPIndication {
-	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
+	if e == nil {
+		return nil
+	}
+	if e.role == RoleIPSP && e.ipspMTP != nil {
+		return e.ipspMTP.stream.indications
+	}
+	if e.role != RoleASP || e.aspRoutes == nil {
 		return nil
 	}
 	return e.aspRoutes.indications
 }
 
-// MTPDestinationStatus returns the ASP Endpoint's current derived status for a
+// MTPDestinationStatus returns the ASP or IPSP Endpoint's derived status for a
 // provisioned destination. The boolean is false for an invalid or unprovisioned
 // MTP Route or point-code range, or when the requested range contains mixed
 // statuses. Use MTPDestinationStatuses to enumerate canonical mixed ranges.
+// For IPSPs, a destination-record refusal preserves the previous retained
+// status; SubscribeSSNM reports the resource loss, as described by MTPIndications.
 func (e *Endpoint) MTPDestinationStatus(destination MTPDestination) (MTPDestinationStatus, bool) {
+	if e != nil && e.role == RoleIPSP && e.ipspMTP != nil {
+		return e.ipspMTP.stream.mtpDestinationStatus(destination)
+	}
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return MTPDestinationStatus{}, false
 	}
 	return e.aspRoutes.mtpDestinationStatus(destination)
 }
 
-// MTPDestinationStatuses returns a deterministic snapshot of the ASP
+// MTPDestinationStatuses returns a deterministic snapshot of the ASP or IPSP
 // Endpoint's canonical, non-overlapping destination ranges. It is the
 // authoritative resynchronization source after an MTPIndication reports
 // ResyncRequired. The returned slice is owned by the caller.
 //
 // Like MTPDestinationStatus, these are derived aggregate statuses.
+// For IPSPs, these snapshots retain the previous state of an SSNM update
+// refused at the destination-record limit; SubscribeSSNM reports that loss.
 // Endpoint.SSNMKnowledge is the other view: what each Signalling Gateway
 // actually reported, per canonical Application Server, with absence
 // distinguishable from a report.
 func (e *Endpoint) MTPDestinationStatuses() []MTPDestinationStatus {
+	if e != nil && e.role == RoleIPSP && e.ipspMTP != nil {
+		return e.ipspMTP.stream.mtpDestinationStatuses()
+	}
 	if e == nil || e.role != RoleASP || e.aspRoutes == nil {
 		return nil
 	}
