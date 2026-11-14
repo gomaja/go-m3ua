@@ -2,7 +2,6 @@ package m3ua
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,8 +23,15 @@ func TestIndicationSubscriptionsKeepNotifyTrafficAndDataAlive(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			var subscribe func(*Association)
+			var states <-chan State
+			var management <-chan *ManagementIndication
 			var calls atomic.Int32
-			if index == 2 {
+			if subscribed {
+				subscribe = func(association *Association) {
+					states = association.StateChanges()
+					management = association.ManagementIndications()
+				}
+			} else if index == 2 {
 				subscribe = func(*Association) { calls.Add(1) }
 			}
 			asp, sgp, err := setupConnHB(t, ctx, 27971+index,
@@ -35,17 +41,13 @@ func TestIndicationSubscriptionsKeepNotifyTrafficAndDataAlive(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = asp.Close(); _ = sgp.Close() })
 			if subscribed {
-				states, management := asp.StateChanges(), asp.ManagementIndications()
-				var readers sync.WaitGroup
-				readers.Go(func() {
-					for range states {
-					}
-				})
-				readers.Go(func() {
-					for range management {
-					}
-				})
-				t.Cleanup(func() { _ = asp.Close(); readers.Wait() })
+				assertHandshakeStates(t, handshakeSubscription{states: states})
+				// Each of the two ASes reports INACTIVE and ACTIVE. Consume all
+				// four before the test traffic: setup can return before these
+				// queued notifications have been written by the SGP.
+				for range 4 {
+					receiveNotifyIndication(t, ctx, management)
+				}
 			}
 			// RFC 4666 Section 3.8.2: AS-ACTIVE is status type 1, info 3.
 			for number := range 140 {
@@ -54,20 +56,20 @@ func TestIndicationSubscriptionsKeepNotifyTrafficAndDataAlive(t *testing.T) {
 				)); err != nil {
 					t.Fatalf("Notify %d: %v (ASP cause %v)", number+1, err, asp.Err())
 				}
+				if subscribed {
+					// A nonblocking publisher can fill its queue before a reader
+					// goroutine runs. Confirm consumption before sending again.
+					indication := receiveNotifyIndication(t, ctx, management)
+					if indication.StatusType != 1 || indication.StatusInfo != 3 ||
+						len(indication.RoutingContexts) != 1 || indication.RoutingContexts[0] != 1 {
+						t.Fatalf("Notify %d indication = %+v, want AS-ACTIVE for Routing Context 1", number+1, indication)
+					}
+				}
 			}
 			// BEAT shares ordered stream 0 with NTFY (RFC 4666 Section 1.4.7).
 			// Its matching Ack proves all earlier notifications were dispatched
 			// before checking DATA on a different stream.
-			barrier := []byte("after 140 notifications")
-			sgp.setBeatData(barrier)
-			if _, err := sgp.WriteSignal(messages.NewHeartbeat(params.NewHeartbeatData(barrier))); err != nil {
-				t.Fatalf("BEAT barrier: %v (ASP cause %v)", err, asp.Err())
-			}
-			select {
-			case <-sgp.beatAckChan:
-			case <-ctx.Done():
-				t.Fatalf("BEAT barrier was not acknowledged: %v (ASP cause %v)", ctx.Err(), asp.Err())
-			}
+			waitIndicationBarrier(t, ctx, asp, sgp, "after 140 notifications")
 			select {
 			case <-asp.Done():
 				t.Fatalf("ASP ended after Notify traffic: %v", asp.Err())
@@ -97,5 +99,41 @@ func TestIndicationSubscriptionsKeepNotifyTrafficAndDataAlive(t *testing.T) {
 				t.Errorf("DATA payload = %q, want %q", data.ProtocolData.Data, payload)
 			}
 		})
+	}
+}
+
+func waitIndicationBarrier(t *testing.T, ctx context.Context, asp, sgp *Association, label string) {
+	t.Helper()
+	barrier := []byte(label)
+	sgp.setBeatData(barrier)
+	if _, err := sgp.WriteSignal(messages.NewHeartbeat(params.NewHeartbeatData(barrier))); err != nil {
+		t.Fatalf("BEAT barrier: %v (ASP cause %v)", err, asp.Err())
+	}
+	select {
+	case <-sgp.beatAckChan:
+	case <-ctx.Done():
+		t.Fatalf("BEAT barrier was not acknowledged: %v (ASP cause %v)", ctx.Err(), asp.Err())
+	}
+}
+
+func receiveNotifyIndication(t *testing.T, ctx context.Context, management <-chan *ManagementIndication) *ManagementIndication {
+	t.Helper()
+	for {
+		select {
+		case indication, ok := <-management:
+			if !ok {
+				t.Fatal("management subscription closed before M-NOTIFY")
+			}
+			if indication.Kind == ManagementTransportCongestion || indication.Kind == ManagementDataQueueCongestion {
+				continue
+			}
+			if indication.Kind != ManagementNotify {
+				t.Fatalf("management indication = %+v, want M-NOTIFY", indication)
+			}
+			return indication
+		case <-ctx.Done():
+			t.Fatalf("M-NOTIFY was not delivered: %v", ctx.Err())
+			return nil
+		}
 	}
 }
