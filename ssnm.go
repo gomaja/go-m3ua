@@ -1145,8 +1145,22 @@ func (c *Association) reportSSNM(
 		return err
 	}
 	report.Destinations = ssnmDestinationsFrom(pcs, masks)
+	// RFC 4666 §3.4.4 allows congestion lists/ranges, while its TFC mapping
+	// uses "the single Affected DPC". Accept their congestion information;
+	// expose an ambiguous Concerned Destination only as a local management
+	// diagnostic on SubscribeSSNM, never as a trigger or a protocol Error.
+	if report.Kind == SSNMSignallingCongestionReport && report.ConcernedDestinationSet && !singleUnmaskedAffectedPointCode(apc) {
+		unmapped := report.ConcernedDestination
+		report.UnmappedConcernedDestination = &unmapped
+		report.ConcernedDestination = 0
+		report.ConcernedDestinationSet = false
+	}
 
 	return c.publishSSNMReport(report)
+}
+
+func singleUnmaskedAffectedPointCode(apc *params.Param) bool {
+	return apc != nil && apc.AffectedPointCodeCount() == 1 && apc.AffectedPointCodeMasks()[0] == 0
 }
 
 type destinationStatusScope struct {

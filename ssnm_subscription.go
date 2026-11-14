@@ -127,6 +127,7 @@ type SSNMEvent struct {
 // its own length so that appending to one reallocates instead of writing into
 // the next. A one-destination report therefore costs three allocations per
 // subscriber however many lists it carries.
+// An unmapped Concerned Destination diagnostic owns another scalar copy.
 func (e SSNMEvent) clone() SSNMEvent {
 	contexts := len(e.Report.Scope.RoutingContexts)
 	for _, update := range e.Updated {
@@ -137,6 +138,10 @@ func (e SSNMEvent) clone() SSNMEvent {
 		arena.free = make([]uint32, contexts)
 	}
 	e.Report.Scope.RoutingContexts = arena.own(e.Report.Scope.RoutingContexts)
+	if e.Report.UnmappedConcernedDestination != nil {
+		unmapped := *e.Report.UnmappedConcernedDestination
+		e.Report.UnmappedConcernedDestination = &unmapped
+	}
 	if e.Report.Destinations != nil {
 		e.Report.Destinations = append([]PointCodeRange(nil), e.Report.Destinations...)
 	}

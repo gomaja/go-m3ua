@@ -245,10 +245,18 @@ type SSNMReport struct {
 	// unavailability cause of a DUPU.
 	UserCause    uint32
 	UserCauseSet bool
-	// ConcernedDestination is the RFC 4666 Section 3.4.4 parameter that is
-	// valid only in the ASP-to-SGP direction.
+	// ConcernedDestination is the RFC 4666 Section 3.4.4 ASP-to-SGP TFC
+	// trigger, set only with exactly one unmasked affected destination.
 	ConcernedDestination    uint32
 	ConcernedDestinationSet bool
+	// UnmappedConcernedDestination is the raw received Concerned Destination
+	// when a congestion list or range prevents that single-DPC TFC mapping
+	// (RFC 4666 Section 3.4.4). SubscribeSSNM carries this diagnostic to Layer
+	// Management alongside all valid congestion information. It is not a TFC
+	// trigger; ConcernedDestinationSet is false. Nil means no mapping mismatch,
+	// while a pointer to zero preserves an explicitly received point code zero.
+	// Each subscription owns its scalar copy.
+	UnmappedConcernedDestination *uint32
 	// PeerReported marks a report that describes the peer rather than the SS7
 	// network: the SCON RFC 4666 Section 3.4.4 lets an ASP send "indicating
 	// that the congestion level of the M3UA layer or the ASP has changed". It

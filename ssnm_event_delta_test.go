@@ -1124,12 +1124,19 @@ func TestSSNMSubscriptionReleasesAnExactlyFilledBurstArray(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const burst = 2 * ssnmSpareQueueSlots
-	for index := range burst {
+	const initialBurst = 2 * ssnmSpareQueueSlots
+	for index := range initialBurst {
 		subscription.enqueue(SSNMEvent{Revision: uint64(1 + index)})
 	}
-	if cap(subscription.queue) != burst {
-		t.Fatalf("the burst grew a %d-slot array; the test needs one it exactly fills (%d)", cap(subscription.queue), burst)
+	// append growth depends on event size and the runtime's allocation classes.
+	// Fill the array actually allocated, without assuming a particular growth
+	// factor, so draining still exercises an exactly filled large backing array.
+	burst := cap(subscription.queue)
+	for index := initialBurst; index < burst; index++ {
+		subscription.enqueue(SSNMEvent{Revision: uint64(1 + index)})
+	}
+	if len(subscription.queue) != burst || cap(subscription.queue) != burst {
+		t.Fatalf("queue length/capacity = %d/%d, want an exactly filled %d-slot array", len(subscription.queue), cap(subscription.queue), burst)
 	}
 	for index := range burst {
 		if event, _, _ := subscription.take(); event.Revision != uint64(1+index) {
