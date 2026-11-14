@@ -14,23 +14,37 @@ import (
 // errDuplicateASPDownAck tells the dispatcher to publish no ASP-DOWN transition.
 var errDuplicateASPDownAck = errors.New("duplicate ASP Down Ack")
 
+// errDuplicateASPUpAck prevents a delayed response from publishing a transition.
+var errDuplicateASPUpAck = errors.New("duplicate ASP Up Ack")
+
 func (c *Association) initiateASPSM() error {
 	_, err := c.beginASPSM()
 	return err
 }
 
 func (c *Association) beginASPSM() (*pendingRequest, error) {
+	request, cancelled := c.startASPSM()
+	c.reportCancelledActivations(cancelled)
+	return c.writeASPSM(request)
+}
+
+func (c *Association) startASPSM() (*pendingRequest, []*pendingRequest) {
 	// RFC 4666 Section 4.3.4.1: "When the ASP sends an ASP Up message, it
 	// starts timer T(ack)", and resends until the Ack arrives. Without that, an
 	// ASP Up lost in transit strands the association: we wait for an Ack that
 	// will never come while the SGP waits for a request it never saw.
-	aspUp := messages.NewAspUp(c.cfg.ASPIdentifier.Copy(), nil)
-	request := c.startTAck(aspUp, requestAspUp)
-	if _, err := c.writePendingControl(request, aspUp); err != nil {
+	// A new Up cannot inherit an old Active retry across DOWN. RFC 4666
+	// §4.3.4.3 permits Active "after the ASP has received an ASP Up Ack";
+	// retire previous-cycle activations before starting this Up's timer.
+	cancelled := c.stopASPActivations(nil, "ASP Up")
+	return c.startTAck(messages.NewAspUp(c.cfg.ASPIdentifier.Copy(), nil), requestAspUp), cancelled
+}
+
+func (c *Association) writeASPSM(request *pendingRequest) (*pendingRequest, error) {
+	if _, err := c.writePendingControl(request, request.msg); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}
-
 	return request, nil
 }
 
@@ -96,6 +110,9 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 	// it from every relevant AS. Commit that state and halt traffic before the
 	// Ack: once the peer receives ASP Up Ack, both ends may act on the new
 	// state, so no DATA admitted under the previous state may follow it.
+	if c.role == RoleIPSP {
+		defer c.completeRestartASPSM().complete()
+	}
 	c.commitState(StateASPInactive)
 	c.noteRoutingContextsInactive(nil)
 	postAckNotify := func() {}
@@ -107,6 +124,10 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 		postAckNotify = combineNotificationReleases([]func(){postAckNotify, c.retirePeerRegistrations()})
 	}
 
+	if c.role == RoleIPSP {
+		c.completeRestartASPSM().complete()
+	}
+
 	ackErr := c.writeMandatoryControls([]messages.M3UA{
 		messages.NewAspUpAck(
 			c.cfg.ASPIdentifier.Copy(),
@@ -116,9 +137,6 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 	postAckNotify()
 	if ackErr != nil {
 		return ackErr
-	}
-	if c.role == RoleIPSP {
-		c.completeRestartASPSM()
 	}
 
 	// Only ASP-ACTIVE additionally warrants an Error ("Unexpected Message").
@@ -133,6 +151,7 @@ func (c *Association) handleAspUp(aspUp *messages.AspUp) error {
 func (c *Association) handleAspUpDoubleExchange(previousState State, aspUp *messages.AspUp) error {
 	startLocalASPTM := false
 	if c.usesSingleASPSMExchange() {
+		defer c.completeRestartASPSM().complete()
 		previousLocalState := c.localIPSPStateValue()
 		c.noteNoRoutingContextsAcked()
 		c.commitLocalIPSPState(StateASPInactive)
@@ -149,6 +168,10 @@ func (c *Association) handleAspUpDoubleExchange(previousState State, aspUp *mess
 	}
 	c.quiesceUnscopedTraffic()
 
+	if c.usesSingleASPSMExchange() {
+		c.completeRestartASPSM().complete()
+	}
+
 	ackErr := c.writeMandatoryControls([]messages.M3UA{
 		messages.NewAspUpAck(c.cfg.ASPIdentifier.Copy(), nil),
 	}, false, true)
@@ -157,7 +180,6 @@ func (c *Association) handleAspUpDoubleExchange(previousState State, aspUp *mess
 		return ackErr
 	}
 	if c.usesSingleASPSMExchange() {
-		c.completeRestartASPSM()
 		if startLocalASPTM {
 			return c.initiateASPTM()
 		}
@@ -193,19 +215,23 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 		(aspUpAck.AspIdentifier.Tag != params.AspIdentifier || len(aspUpAck.AspIdentifier.Data) != 4) {
 		return ErrInvalidParameterValue
 	}
-	if c.role == RoleIPSP {
-		if err := c.claimPeerASPIdentifier(aspUpAck.AspIdentifier); err != nil {
-			return err
-		}
-	}
-
-	// The request this answers is complete: stop resending it (T(ack)). Whether
-	// one was outstanding decides what follows.
-	solicited := c.stopTAck(requestAspUp)
-
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return NewUnexpectedMessageError(aspUpAck)
 	}
+	acknowledgement, duplicate, repeated, err := c.claimASPUpAcknowledgement(func() error {
+		if c.role == RoleIPSP {
+			return c.claimPeerASPIdentifier(aspUpAck.AspIdentifier)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	// RFC 4666 §4.2: "Upon successful completion, a corresponding confirm
+	// primitive is provided". Stop retries now; release the successful caller
+	// only after the ASP/IPSP state and traffic gates below are committed.
+	defer acknowledgement.complete()
+	solicited := acknowledgement.solicited
 	// RFC 4666 §4.3.4.1.2 permits an IPSP to become inactive on Up Ack.
 	// A shared withdrawal (§4.3, §4.3.4.2) has superseded this Up instead:
 	// report it as unsolicited through the existing IPSP error path, which
@@ -213,11 +239,15 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	if !solicited && c.isPeerDownSupersededASPUpAck() {
 		return NewUnexpectedMessageError(aspUpAck)
 	}
-	// RFC 4666 Section 4.3.4.1 permits ASP Up retransmission under T(ack), and
-	// the peer answers every copy. Once this SCTP epoch completed the procedure,
-	// a later Ack is that request's delayed duplicate rather than a new state
-	// transition.
-	if !solicited && c.isRepeatedASPUpAcknowledgement() {
+	if duplicate {
+		return errDuplicateASPUpAck
+	}
+	if repeated {
+		// Preserve main's completed-Up fallback for every other Ack: the
+		// dispatcher publishes INACTIVE, without Error or automatic recovery.
+		// The policy for truly unexpected Acks (RFC 4666 §4.3.4.1: "it SHOULD
+		// send an Error message and then initiate procedures to return itself
+		// to its previous state") remains a separate decision.
 		return nil
 	}
 	if c.role == RoleIPSP {
@@ -236,6 +266,7 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 			c.noteNoRoutingContextsAcked()
 			c.commitLocalIPSPState(StateASPInactive)
 			c.quiesceLocalIPSPSSNMTraffic()
+			c.claimASPUpCompletion().complete()
 			if previousLocalState == StateASPDown &&
 				c.aspProcedureMode(aspProcedureActive) == ASPProcedureAutomatic &&
 				!c.terminating.Load() {
@@ -273,6 +304,7 @@ func (c *Association) handleAspUpAck(aspUpAck *messages.AspUpAck) error {
 	// re-activated, the SGP dropped it again on the next retransmission, and so
 	// on. Absorb it instead: the request it answers is complete either way.
 	if solicited {
+		c.commitState(StateASPInactive)
 		return nil
 	}
 
@@ -449,8 +481,12 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 	}
 
 	c.stopCompetingASPActive(nil)
-	solicited := c.stopTAck(requestAspDown)
-	if solicited {
+	acknowledgement := c.claimTAckAcknowledgement(requestAspDown, nil)
+	if acknowledgement.solicited {
+		// RFC 4666 §4.2 confirms only "Upon successful completion";
+		// §4.3.4.2 informs Layer Management with M-ASP_DOWN confirm.
+		c.commitState(StateASPDown)
+		acknowledgement.complete()
 		return nil
 	}
 	// RFC 4666 Section 4.3.4.2: "If the ASP receives an ASP Down Ack without

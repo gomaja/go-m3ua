@@ -706,17 +706,30 @@ func TestAckDispatchStillPublishesOneState(t *testing.T) {
 func TestTAckIsArmedBeforeAnImmediateAck(t *testing.T) {
 	t.Run("ASP Up", func(t *testing.T) {
 		conn, _ := newTestConn(t, StateASPDown, RoleASP)
+		conn.cfg.TAck = time.Hour
+		acknowledged := make(chan error, 1)
 		conn.signalWriter = func(message messages.M3UA) (int, error) {
 			if _, ok := message.(*messages.AspUp); ok {
-				if err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
-					t.Fatalf("immediate ASP Up Ack: %v", err)
+				if conn.pendingTAck() != 1 {
+					t.Error("ASP Up reached the transport before T(ack) was armed")
 				}
+				// A real peer dispatches on another goroutine. An Ack may
+				// arrive before this transport call returns.
+				go func() { acknowledged <- conn.handleAspUpAck(messages.NewAspUpAck(nil, nil)) }()
 			}
 			return message.MarshalLen(), nil
 		}
 
 		if err := conn.initiateASPSM(); err != nil {
 			t.Fatal(err)
+		}
+		select {
+		case err := <-acknowledged:
+			if err != nil {
+				t.Fatalf("immediate ASP Up Ack: %v", err)
+			}
+		case <-time.After(aspTestWait):
+			t.Fatal("immediate ASP Up Ack blocked")
 		}
 		if got := conn.pendingTAck(); got != 0 {
 			t.Errorf("pending T(ack) after immediate ASP Up Ack = %d, want 0", got)
@@ -725,6 +738,7 @@ func TestTAckIsArmedBeforeAnImmediateAck(t *testing.T) {
 
 	t.Run("ASP Active", func(t *testing.T) {
 		conn, _ := newTestConn(t, StateASPInactive, RoleASP)
+		conn.cfg.TAck = time.Hour
 		conn.signalWriter = func(message messages.M3UA) (int, error) {
 			if _, ok := message.(*messages.AspActive); ok {
 				if err := conn.handleAspActiveAck(messages.NewAspActiveAck(

@@ -84,6 +84,17 @@ func (c *Association) stopInactiveAckActivations(affected []ASKey) []*pendingReq
 // cancelASPActivations stops overlapping requests, then waits only for their
 // transport calls. No shared writer mutex is acquired (RFC 4666 §4.3.4.4).
 func (c *Association) cancelASPActivations(affected []ASKey, reason string) []*pendingRequest {
+	cancelled := c.stopASPActivations(affected, reason)
+	for _, request := range cancelled {
+		request.joinControlWrite()
+	}
+	return cancelled
+}
+
+// stopASPActivations separates the existing nonblocking retirement from joining
+// write outcomes. A fresh Up can stop old retries under the state lock and
+// leave outcome reporting to the caller after releasing that lock.
+func (c *Association) stopASPActivations(affected []ASKey, reason string) []*pendingRequest {
 	if c.tack == nil {
 		return nil
 	}
@@ -110,9 +121,6 @@ func (c *Association) cancelASPActivations(affected []ASKey, reason string) []*p
 		}
 	}
 	c.tack.mu.Unlock()
-	for _, request := range cancelled {
-		request.joinControlWrite()
-	}
 	return cancelled
 }
 

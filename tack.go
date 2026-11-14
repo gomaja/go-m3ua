@@ -72,8 +72,9 @@ func (p *pendingRequest) joinControlWrite() *pendingControlWrite {
 
 // pendingRequest is an ASPSM/ASPTM request awaiting its acknowledgement.
 type pendingRequest struct {
-	msg  messages.M3UA
-	kind requestKind
+	msg        messages.M3UA
+	kind       requestKind
+	aspUpEpoch uint64
 	// routingContexts is the transmitted RC set, or the configured/registered
 	// membership an omitted-RC ASPTM request covers (RFC 4666 §4.3.4.3).
 	// remaining is reduced by each independently received Ack. Both are nil
@@ -125,11 +126,14 @@ type tackRetransmitter struct {
 	// configured RC set lets handlers distinguish that repeated Ack from an
 	// unsolicited state transition without accepting an unrequested scope.
 	acknowledgedASPTM map[requestKind]*acknowledgedASPTMScope
-	// aspUpAcknowledged records completion of the current ASP Up procedure.
-	// ASPSM has no request identifier, so a later Ack for a T(ack)
-	// retransmission is distinguishable from an unsolicited Ack only by this
-	// bounded current-epoch evidence.
-	aspUpAcknowledged bool
+	// RFC 4666 §4.3.4.1 permits the ASP to "restart T(ack) and resend ASP Up
+	// messages" and requires the SGP to answer repeated Ups. ASPSM has no
+	// request identifier: copies of the current library procedure, including
+	// in-flight writes, can justify absorbing a later Ack as a duplicate.
+	aspUpMessagesSent uint64
+	aspUpAcksReceived uint64
+	aspUpConfirmed    bool
+	aspUpEpoch        uint64
 	// RFC 4666 Section 4.3.4.2 requires one ASP Down Ack for every ASP Down,
 	// including retransmissions. This counts successfully sent messages still
 	// owed an Ack in the current SCTP association.
@@ -241,8 +245,12 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 		return req
 	}
 	if ackFor == requestAspUp {
-		c.tack.aspUpAcknowledged = false
 		c.tack.peerDownSuperseded = false
+		// A fresh procedure retires the previous completion and copy ledger.
+		// RFC 4666 §4.3.4.1: "the ASP MAY restart T(ack) and resend ASP Up
+		// messages" describes retries of this procedure, not an earlier one.
+		c.tack.resetASPUpDeliveryLocked()
+		req.aspUpEpoch = c.tack.aspUpEpoch
 	}
 	// Association-wide ASPSM procedures have one current epoch and a newer one
 	// supersedes it. ASPTM is per AS: RFC 4666 explicitly permits multiple Active
@@ -295,8 +303,30 @@ func (c *Association) writePendingControl(request *pendingRequest, message messa
 	return n, err
 }
 
-// writeTAckControl runs under retryMu, including the accepted-result record.
-func (c *Association) writeTAckControl(req *pendingRequest, message messages.M3UA) (int, error) {
+// writeTAckControl runs under retryMu. Only the library's Up procedure earns
+// duplicate credit. RFC 4666 §4.3.4.1 says that on Up while ACTIVE "the remote
+// ASP state is changed to ASP-INACTIVE in all relevant Application Servers,
+// and all registered Routing Keys are considered deregistered." An application
+// WriteSignal(ASP Up) can cause that withdrawal after activation; its Ack must
+// retain the ordinary handling rather than leave traffic falsely active.
+func (c *Association) writeTAckControl(req *pendingRequest, message messages.M3UA) (n int, err error) {
+	if req.kind == requestAspUp {
+		c.tack.mu.Lock()
+		current := req.aspUpEpoch == c.tack.aspUpEpoch
+		if current {
+			// Reserve before writing: an Ack can beat the send's return. The
+			// dispatcher must never wait for sendMu or a transport outcome.
+			c.tack.aspUpMessagesSent++
+		}
+		c.tack.mu.Unlock()
+		defer func() {
+			c.tack.mu.Lock()
+			if current && req.aspUpEpoch == c.tack.aspUpEpoch && (err != nil || n == 0) {
+				c.tack.aspUpMessagesSent--
+			}
+			c.tack.mu.Unlock()
+		}()
+	}
 	return c.writeControlUntilStopped(message, req.stop, req)
 }
 
@@ -531,6 +561,9 @@ func (c *Association) claimTAckAcknowledgementLocked(kind requestKind, acknowled
 		result.completed = append(result.completed, req)
 	}
 	if result.solicited {
+		if kind == requestAspUp {
+			c.tack.awaitingAspUp = false
+		}
 		c.recordASPTMAcknowledgementLocked(kind, acknowledged)
 		if wireRoutingContext == nil {
 			c.recordASPTMAcknowledgementLocked(kind, nil)
@@ -677,19 +710,39 @@ func (c *Association) forgetTAck(kind requestKind) bool {
 		}
 	}
 	if found && kind == requestAspUp {
-		c.tack.aspUpAcknowledged = true
 		c.tack.awaitingAspUp = false
 	}
 	return found
 }
 
-func (c *Association) isRepeatedASPUpAcknowledgement() bool {
+func (t *tackRetransmitter) resetASPUpDeliveryLocked() {
+	t.aspUpEpoch++
+	t.aspUpMessagesSent, t.aspUpAcksReceived = 0, 0
+	t.aspUpConfirmed = false
+}
+
+func (c *Association) claimASPUpAcknowledgement(validate func() error) (acknowledgement pendingTAckAcknowledgement, duplicate, repeated bool, err error) {
 	if c.tack == nil {
-		return false
+		return acknowledgement, false, false, validate()
 	}
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
-	return c.tack.aspUpAcknowledged
+	pending := len(c.pendingRequestsLocked(requestAspUp)) > 0
+	// Without completed history, retain main's first/late-Ack handling. Once
+	// all copies are answered, retain its completed-Up fallback as well.
+	repeated = !pending && c.tack.aspUpConfirmed
+	duplicate = repeated && c.tack.aspUpMessagesSent > c.tack.aspUpAcksReceived
+	if !duplicate {
+		if err := validate(); err != nil {
+			return acknowledgement, false, false, err
+		}
+	}
+	acknowledgement = c.claimTAckAcknowledgementLocked(requestAspUp, nil, nil)
+	if acknowledgement.solicited {
+		c.tack.aspUpConfirmed = true
+	}
+	c.tack.aspUpAcksReceived++
+	return acknowledgement, duplicate, repeated, nil
 }
 
 // supersedePeerDownProcedures retires the procedures invalidated by a shared
@@ -709,7 +762,7 @@ func (c *Association) supersedePeerDownProcedures() []*pendingRequest {
 	c.tack.peerDownSuperseded = true
 	c.tack.peerDownHandling = true
 	c.tack.awaitingAspUp = true
-	c.tack.aspUpAcknowledged = false
+	c.tack.resetASPUpDeliveryLocked()
 	clear(c.tack.acknowledgedASPTM)
 	var superseded []*pendingRequest
 	for message, request := range c.tack.pending {
@@ -914,7 +967,18 @@ func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 		if failed := req.failure.Load(); failed != nil {
 			return *failed
 		}
-		return err
+		// Teardown can win after the handler claims the Ack but before its
+		// state commit. A ready nil result cannot turn that failed commit into
+		// procedure success (RFC 4666 §4.2: "Upon successful completion").
+		select {
+		case <-c.done:
+			if terminal := c.Err(); terminal != nil {
+				return terminal
+			}
+			return ErrAssociationClosed
+		default:
+			return err
+		}
 	case <-ctx.Done():
 		c.cancelTAckRequest(req)
 		// A claimed withdrawal supplies the cause, but cannot extend ctx
@@ -957,7 +1021,7 @@ func (c *Association) resetTAckEpoch() {
 	c.tack.mu.Lock()
 	c.tack.awaitingAspUp = c.role == RoleASP || c.role == RoleIPSP
 	c.tack.peerDownSuperseded = false
-	c.tack.aspUpAcknowledged = false
+	c.tack.resetASPUpDeliveryLocked()
 	c.tack.aspDownAcksOutstanding = 0
 	c.cancelAllTAckLocked()
 	clear(c.tack.acknowledgedASPTM)
@@ -966,14 +1030,43 @@ func (c *Association) resetTAckEpoch() {
 	c.tack.retryMu.Unlock()
 }
 
-func (c *Association) completeRestartASPSM() {
+// completeRestartASPSM retires this side's Up when the shared exchange is
+// completed by the peer's Up. RFC 4666 §4.3.4.1.2: "An IPSP may be considered
+// in the ASP-INACTIVE state after an ASP Up or ASP Up Ack has been received
+// from it." Stop retries before exposing INACTIVE, so none can follow Active.
+// The handler releases the confirmation only after its state commit (§4.2:
+// "Upon successful completion, a corresponding confirm primitive is provided").
+func (c *Association) completeRestartASPSM() pendingTAckAcknowledgement {
 	if c.tack == nil {
-		return
+		return pendingTAckAcknowledgement{}
 	}
 	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	acknowledgement := c.claimASPUpCompletionLocked()
 	c.tack.awaitingAspUp = false
 	c.tack.peerDownSuperseded = false
-	c.tack.mu.Unlock()
+	return acknowledgement
+}
+
+// claimASPUpCompletion also catches an Up registered between the original
+// claim and the INACTIVE commit. It consumes no received-Ack credit: a peer Up
+// completes a shared exchange without acknowledging a particular sent copy
+// (RFC 4666 §4.3.4.1.2, "after an ASP Up or ASP Up Ack has been received").
+func (c *Association) claimASPUpCompletion() pendingTAckAcknowledgement {
+	if c.tack == nil {
+		return pendingTAckAcknowledgement{}
+	}
+	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	return c.claimASPUpCompletionLocked()
+}
+
+func (c *Association) claimASPUpCompletionLocked() pendingTAckAcknowledgement {
+	acknowledgement := c.claimTAckAcknowledgementLocked(requestAspUp, nil, nil)
+	if acknowledgement.solicited {
+		c.tack.aspUpConfirmed = true
+	}
+	return acknowledgement
 }
 
 func (c *Association) cancelAllTAckLocked() {

@@ -546,6 +546,11 @@ func (c *Association) sendErrForMessage(message messages.M3UA, raw []byte, err e
 	if err == nil {
 		return
 	}
+	// RFC 4666 §3.8.1: "Error messages MUST NOT be generated in response
+	// to other Error messages", including a handler's state rejection.
+	if message != nil && message.MessageClass() == messages.MsgClassManagement && message.MessageType() == messages.MsgTypeError {
+		return
+	}
 	var unexpected *UnexpectedMessageError
 	if errors.As(err, &unexpected) && len(unexpected.Raw) == 0 {
 		unexpected.Raw = bytes.Clone(raw)
@@ -686,6 +691,12 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			ErrorCode:   params.InvalidVersionError,
 			Description: errorCodeName(params.InvalidVersionError),
 		})
+		// RFC 4666 §3.8.1: "Error messages MUST NOT be generated in
+		// response to other Error messages." This also limits §4.8's version
+		// response, even when the peer's Error uses an unsupported version.
+		if m3.MessageClass() == messages.MsgClassManagement && m3.MessageType() == messages.MsgTypeError {
+			return
+		}
 		if len(raw) > 0 {
 			c.sendErr(newInvalidVersionErrorFor(m3.Version(), raw))
 		} else {
@@ -726,6 +737,10 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		// the same remote-IPSP transition. An SGP cannot legitimately receive
 		// ASP Up Ack and holds its state after reporting the Error.
 		if err := c.handleAspUpAck(msg); err != nil {
+			if errors.Is(err, errDuplicateASPUpAck) {
+				c.sendState(stateUnchanged)
+				return
+			}
 			c.sendErrForMessage(msg, raw, err)
 
 			var unexpected *UnexpectedMessageError
@@ -738,6 +753,7 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 			c.sendState(stateUnchanged)
 		} else {
 			c.sendState(StateASPInactive)
+			c.claimASPUpCompletion().complete()
 		}
 	case *messages.AspDown:
 		if err := c.handleAspDown(msg); err != nil {
@@ -809,6 +825,10 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		c.sendState(StateASPActive)
 	case *messages.AspActiveAck:
 		if err := c.handleAspActiveAck(msg); err != nil {
+			if errors.Is(err, errDuplicateASPActiveAck) {
+				c.sendState(stateUnchanged)
+				return
+			}
 			c.sendErrForMessage(msg, raw, err)
 			c.sendState(stateUnchanged)
 		} else if c.isIPSPDoubleExchange() {
@@ -1002,13 +1022,32 @@ func (c *Association) dispatchRaw(ctx context.Context, raw inbound) {
 	c.recvStream.Store(uint32(raw.stream))
 	c.recvReceived = raw.received
 
+	// RFC 4666 §4.8: an unsupported-version receiver "responds with an
+	// Error message indicating the version the receiving node supports and
+	// notifies Layer Management" (descriptive procedure text). Interpret only
+	// the common header before this decision: version-1 body diagnostics and
+	// capability checks cannot describe an unknown version's body. PPID
+	// admission (§7.1), a complete 8-octet header and Message Length framing
+	// (§3.1, §3.1.4) still come first; otherwise this is not a framed M3UA
+	// message. ParseHeader retains §3.1.4's final-padding length tolerance.
+	header, headerErr := messages.ParseHeader(raw.data)
+	if headerErr == nil && header.Version != 1 {
+		c.notePeerActivity()
+		c.handleReceivedSignals(ctx, &messages.Generic{Header: header}, raw.data)
+		return
+	}
+
 	// RFC 4666 Section 4.4.1 requires an SGP that does not support Routing Key
 	// registration to return Unsupported Message Class. That capability answer
 	// precedes validation of a REG REQ's nested parameters: without this guard,
 	// a structurally incomplete request is reported as Missing Parameter and
 	// falsely tells the ASP that this SGP implements the procedure. DEREG REQ is
 	// part of the same optional RKM procedure and follows the same boundary.
-	if c.rkmResponderUnsupported(raw.data) {
+	if headerErr == nil && c.rkmResponderUnsupported(raw.data) {
+		// RFC 4666 §4.3.4.6 counts "any other M3UA message" as activity.
+		// This capability boundary accepts the message for an Error without
+		// interpreting the unsupported procedure's parameters.
+		c.notePeerActivity()
 		c.sendErr(NewUnsupportedClassErrorFor(raw.data))
 		return
 	}
@@ -1035,6 +1074,8 @@ func (c *Association) dispatchRaw(ctx context.Context, raw inbound) {
 		}
 
 		switch {
+		case headerErr != nil:
+			c.sendErr(NewParameterFaultErrorFor(raw.data, headerErr))
 		case messages.IsSupported(rawClass(raw.data), rawType(raw.data)):
 			// The class and type name a message this package implements, so
 			// the complaint is about the parameters inside it, not about the
@@ -1050,11 +1091,9 @@ func (c *Association) dispatchRaw(ctx context.Context, raw inbound) {
 		return
 	}
 
-	// Only a successfully decoded M3UA message is evidence the peer M3UA layer
-	// is alive. Arbitrary or malformed octets on the association must not keep
-	// T(beat) from expiring; a valid Generic for an unsupported class or type
-	// does count, because Parse succeeded and handleReceivedSignals will issue
-	// the required ERR.
+	// For bodies this implementation interprets, successful decoding supplies
+	// activity. Framed version/capability refusals counted at their acceptance
+	// boundaries above; malformed input rejected here supplies no activity.
 	c.notePeerActivity()
 	c.handleReceivedSignals(ctx, msg, raw.data)
 }

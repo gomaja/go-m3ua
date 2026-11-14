@@ -7,11 +7,15 @@ package m3ua
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
 )
+
+// errDuplicateASPActiveAck leaves both confirmed state and traffic unchanged.
+var errDuplicateASPActiveAck = errors.New("duplicate ASP Active Ack")
 
 func (c *Association) initiateASPTM() error {
 	if c.isIPSPDoubleExchange() {
@@ -26,23 +30,57 @@ func (c *Association) initiateASPActive(routingContext *params.Param) error {
 }
 
 func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRequest, error) {
+	pending, err := c.startASPActive(routingContext)
+	if err != nil {
+		return nil, err
+	}
+	return c.writeASPActive(pending)
+}
+
+// startGuardedASPActive rechecks and registers public activation atomically
+// with state changes. Confirmation follows the state commit (RFC 4666 §4.2);
+// callers perform transport writes only after this read lock is released.
+func (c *Association) startGuardedASPActive(routingContext *params.Param) ([]*pendingRequest, error) {
+	c.muState.RLock()
+	defer c.muState.RUnlock()
+	state := c.state
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPState
+	}
+	if state != StateASPInactive && state != StateASPActive {
+		return nil, ErrInvalidState
+	}
+	return c.startASPActive(routingContext)
+}
+
+func (c *Association) startASPActive(routingContext *params.Param) ([]*pendingRequest, error) {
 	requests, err := c.aspActiveRequests(routingContext)
 	if err != nil {
 		return nil, err
 	}
+	// A public Active may observe INACTIVE before the Up handler's final
+	// reclaim. Retire that racing Up before entering the retryMu write fence.
+	// RFC 4666 §4.3.4.3 permits Active "after the ASP has received an ASP Up
+	// Ack"; §4.3.4.1.2 also permits peer Up to complete a shared IPSP exchange.
+	c.claimASPUpCompletion().complete()
 	pending := make([]*pendingRequest, 0, len(requests))
 	for _, activeRequest := range requests {
 		aspActive := messages.NewAspActive(
 			activeRequest.trafficMode.Copy(), activeRequest.routingContext.Copy(), nil,
 		)
-		request := c.startTAck(aspActive, requestAspActive)
-		pending = append(pending, request)
-		if _, err := c.writePendingControl(request, aspActive); err != nil {
+		pending = append(pending, c.startTAck(aspActive, requestAspActive))
+	}
+	return pending, nil
+}
+
+func (c *Association) writeASPActive(pending []*pendingRequest) ([]*pendingRequest, error) {
+	for index, request := range pending {
+		if _, err := c.writePendingControl(request, request.msg); err != nil {
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
 			// The waiting API retains the failed request's bounded result wait.
-			return pending, err
+			return pending[:index+1], err
 		}
 	}
 	return pending, nil
@@ -150,7 +188,12 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 	if err != nil {
 		return err
 	}
-	return c.initiateASPActive(routingContext)
+	pending, err := c.startGuardedASPActive(routingContext)
+	if err != nil {
+		return err
+	}
+	_, err = c.writeASPActive(pending)
+	return err
 }
 
 // DeactivateRoutingContexts starts the ASP Inactive procedure for the named
@@ -506,7 +549,12 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 		if err := c.validateAspActiveAckTrafficMode(aspAcAck); err != nil {
 			return err
 		}
-		return c.validateLocalRoutingContext(aspAcAck.RoutingContext)
+		if err := c.validateLocalRoutingContext(aspAcAck.RoutingContext); err != nil {
+			return err
+		}
+		// RFC 4666 §4.3.4.3: the Ack "is not acknowledged". This is an
+		// absorbed retransmission response, not a new activation or report.
+		return errDuplicateASPActiveAck
 	}
 	if c.rejectStaleASPTMAck(requestAspActive) {
 		return NewUnexpectedMessageError(aspAcAck)
@@ -553,8 +601,8 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 	if c.role == RoleIPSP {
 		if c.isIPSPDoubleExchange() {
 			acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
+			defer acknowledgement.complete()
 			c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
-			acknowledgement.complete()
 			return c.enterLocalIPSPState(StateASPActive)
 		}
 		routingContexts := c.configuredRoutingContexts()
@@ -573,8 +621,16 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 		c.overrideOtherASPs(routingContexts)
 		acknowledgement.complete()
 	} else {
+		// Keep the pending early-SSNM binding until the acknowledged scope is
+		// recorded; removing it first would discard retained destination state
+		// before the ASP-ACTIVE commit (RFC 4666 §4.5.1: these messages "MAY
+		// be sent before sending the ASP Active Ack").
 		c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
-		c.acknowledgeTAck(requestAspActive, aspAcAck.RoutingContext)
+		acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
+		defer acknowledgement.complete()
+		// RFC 4666 §4.2 confirms "Upon successful completion" and
+		// §4.3.4.3 informs Layer Management with M-ASP_ACTIVE confirm.
+		c.commitState(StateASPActive)
 	}
 
 	return nil

@@ -262,7 +262,13 @@ func TestIPSPDoubleExchangeAbsorbsDelayedCompletedASPUpAck(t *testing.T) {
 	})
 	association.noteRoutingContextsActive([]uint32{22})
 
-	association.startTAck(messages.NewAspUp(nil, nil), requestAspUp)
+	request, err := association.beginASPSM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := association.writePendingControl(request, request.msg); err != nil {
+		t.Fatal(err)
+	}
 	if err := association.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
 		t.Fatalf("first ASP Up Ack: %v", err)
 	}
@@ -278,7 +284,7 @@ func TestIPSPDoubleExchangeAbsorbsDelayedCompletedASPUpAck(t *testing.T) {
 	}
 	activeRequests := countType(*sent, "ASP Active")
 
-	if err := association.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
+	if err := association.handleAspUpAck(messages.NewAspUpAck(nil, nil)); !errors.Is(err, errDuplicateASPUpAck) {
 		t.Fatalf("delayed completed ASP Up Ack: %v", err)
 	}
 	if got := association.IPSPState().TrafficToLocal; got != StateASPActive {
@@ -534,7 +540,7 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateActiveAck(t *testing.T) {
 	if err := association.handleAspActiveAck(activeAck); err != nil {
 		t.Fatalf("first ASP Active Ack: %v", err)
 	}
-	if err := association.waitTAck(context.Background(), activeRequest); err != nil {
+	if err := waitASPTestAck(t, association, activeRequest); err != nil {
 		t.Fatalf("wait for ASP Active Ack: %v", err)
 	}
 
@@ -548,14 +554,14 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateActiveAck(t *testing.T) {
 	); err != nil {
 		t.Fatalf("ASP Inactive Ack: %v", err)
 	}
-	if err := association.waitTAck(context.Background(), inactiveRequest); err != nil {
+	if err := waitASPTestAck(t, association, inactiveRequest); err != nil {
 		t.Fatalf("wait for ASP Inactive Ack: %v", err)
 	}
 	if _, err := association.initiateASPDown(); err != nil {
 		t.Fatalf("initiate ASP Down: %v", err)
 	}
 
-	if err := association.handleAspActiveAck(activeAck); err != nil {
+	if err := association.handleAspActiveAck(activeAck); !errors.Is(err, errDuplicateASPActiveAck) {
 		t.Fatalf("duplicate ASP Active Ack during ASP Down: %v", err)
 	}
 	if got := association.IPSPState(); got != (IPSPState{

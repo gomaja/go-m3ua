@@ -96,8 +96,12 @@ func (c *Association) aspProcedureMode(procedure aspProcedure) ASPProcedureMode 
 }
 
 // ASPUp initiates the RFC 4666 Section 4.3.4.1 ASP Up procedure and waits for
-// ASP Up Ack. It is valid for an ASP and for the locally initiated direction of
-// an IPSP exchange.
+// confirmation. An ASP or independent IPSP Double Exchange requires ASP Up Ack;
+// a peer ASP Up also completes a shared IPSP ASPSM exchange (§4.3.4.1.2).
+// It is valid for an ASP and for the locally initiated direction of an IPSP
+// exchange.
+// Success follows the confirmed state commit, visible through State,
+// IPSPState and Endpoint.AssociationStatus before the next procedure starts.
 func (c *Association) ASPUp(ctx context.Context) (err error) {
 	defer func() { c.notifyASPProcedureFailure("ASP Up", nil, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
@@ -111,10 +115,22 @@ func (c *Association) ASPUp(ctx context.Context) (err error) {
 	if !c.localASPProcedureDirectionAvailable() {
 		return ErrNoConfiguredAS
 	}
-	if c.localASPProcedureState() != StateASPDown {
+	// Register under the state read lock: an Up/Up Ack completing this
+	// exchange must see the request before it can expose INACTIVE (§4.2,
+	// RFC 4666 §4.3.4.1.2). Keep transport writes outside that lock.
+	c.muState.RLock()
+	state := c.state
+	if c.isIPSPDoubleExchange() {
+		state = c.localIPSPState
+	}
+	if state != StateASPDown {
+		c.muState.RUnlock()
 		return ErrInvalidState
 	}
-	request, err := c.beginASPSM()
+	request, cancelled := c.startASPSM()
+	c.muState.RUnlock()
+	c.reportCancelledActivations(cancelled)
+	request, err = c.writeASPSM(request)
 	if err != nil {
 		return err
 	}
@@ -176,7 +192,10 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 	if err != nil {
 		return err
 	}
-	requests, err := c.beginASPActive(routingContext)
+	requests, err := c.startGuardedASPActive(routingContext)
+	if err == nil {
+		requests, err = c.writeASPActive(requests)
+	}
 	if err != nil {
 		if errors.Is(err, ErrASPProcedureSuperseded) && len(requests) > 0 {
 			// Only the waiting API joins the cancelling handler's reports.
