@@ -34,7 +34,7 @@ func TestDuplicateUpAckLeavesActiveTrafficUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := c.writePendingControl(request, request.msg); err != nil {
+			if _, err := c.writePendingControl(context.Background(), request, request.msg); err != nil {
 				t.Fatal(err)
 			}
 			c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
@@ -93,12 +93,12 @@ func TestDuplicateUpAckLeavesActiveTrafficUnchanged(t *testing.T) {
 	}
 }
 
-func TestUpAckWithoutRemainingTransmissionRetainsCompletedHandling(t *testing.T) {
+func TestUpAckWithoutRemainingTransmissionReportsWithdrawal(t *testing.T) {
 	c, _ := newTestConnWithContexts(t, StateASPDown, RoleASP, 1)
 	completeUpAndRCOne(t, c)
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	applyUpAckPublications(t, c)
-	assertMainCompletedUpFallback(t, c)
+	assertUnowedUpAckWithdrawal(t, c)
 }
 
 func TestUpAckDuplicateBudgetCountsAcceptedCopiesAndResetsOnRestart(t *testing.T) {
@@ -109,17 +109,23 @@ func TestUpAckDuplicateBudgetCountsAcceptedCopiesAndResetsOnRestart(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.signalWriter = func(messages.M3UA) (int, error) { return 0, errors.New("synthetic send failure") }
-	if _, err := c.writePendingControl(request, request.msg); err == nil {
+	accepted := c.signalWriter
+	c.signalWriter = func(m messages.M3UA) (int, error) {
+		if _, up := m.(*messages.AspUp); up {
+			return 0, errors.New("synthetic send failure")
+		}
+		return accepted(m)
+	}
+	if _, err := c.writePendingControl(context.Background(), request, request.msg); err == nil {
 		t.Fatal("failed write succeeded")
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	c.setState(StateASPActive)
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	if c.State() != StateASPInactive || firstErr(c) != nil {
-		t.Fatal("failed write created duplicate credit or changed main's fallback")
+		t.Fatal("failed write created duplicate credit or prevented withdrawal")
 	}
-	var unexpected *UnexpectedMessageError
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1)}, StateASPActive)
 
 	// A fresh fixture leaves an actual unanswered copy at the epoch boundary;
 	// earlier unsolicited Acks must not spend this test's reset credit.
@@ -130,16 +136,17 @@ func TestUpAckDuplicateBudgetCountsAcceptedCopiesAndResetsOnRestart(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.writePendingControl(request, request.msg); err != nil {
+	if _, err := c.writePendingControl(context.Background(), request, request.msg); err != nil {
 		t.Fatal(err)
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	c.resetTAckEpoch()
 	c.setState(StateASPActive)
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
-	if err := firstErr(c); !errors.As(err, &unexpected) {
-		t.Fatalf("old epoch duplicate credit survived: %v", err)
+	if c.State() != StateASPInactive || firstErr(c) != nil {
+		t.Fatal("old epoch duplicate credit survived")
 	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1)}, StateASPActive)
 }
 
 func TestUpAckDuplicateBudgetIsConsumedOncePerCopy(t *testing.T) {
@@ -152,7 +159,7 @@ func TestUpAckDuplicateBudgetIsConsumedOncePerCopy(t *testing.T) {
 	}
 	// Only copies of the library procedure earn duplicate credit.
 	for range 2 {
-		if _, err := c.writePendingControl(request, request.msg); err != nil {
+		if _, err := c.writePendingControl(context.Background(), request, request.msg); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -166,8 +173,9 @@ func TestUpAckDuplicateBudgetIsConsumedOncePerCopy(t *testing.T) {
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	if c.State() != StateASPInactive || firstErr(c) != nil {
-		t.Fatal("duplicate credit reused or changed main's fallback")
+		t.Fatal("duplicate credit reused or prevented withdrawal")
 	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1)}, StateASPActive)
 }
 
 func TestTAckRetransmissionAddsOneUpAckDuplicateCredit(t *testing.T) {
@@ -214,12 +222,13 @@ func TestTAckRetransmissionAddsOneUpAckDuplicateCredit(t *testing.T) {
 	if c.State() != StateASPActive || firstErr(c) != nil {
 		t.Fatal("T(ack) duplicate was not absorbed")
 	}
-	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
-	if c.State() != StateASPInactive || firstErr(c) != nil {
-		t.Fatal("T(ack) credit was not consumed or changed main's fallback")
-	}
 	open()
 	receiveASPTest(t, retryReturned, "retry write release")
+	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
+	if c.State() != StateASPInactive || firstErr(c) != nil {
+		t.Fatal("T(ack) credit was not consumed or prevented withdrawal")
+	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1)}, StateASPActive)
 }
 
 func TestUpAckBeforeSendReturnsLeavesNoDuplicateCredit(t *testing.T) {
@@ -228,9 +237,11 @@ func TestUpAckBeforeSendReturnsLeavesNoDuplicateCredit(t *testing.T) {
 	entered := make(chan struct{})
 	release, open := aspTestGate(t)
 	c.signalWriter = func(m messages.M3UA) (int, error) {
-		close(entered)
-		if err := awaitASPTestRelease(c, release); err != nil {
-			return 0, err
+		if _, up := m.(*messages.AspUp); up {
+			close(entered)
+			if err := awaitASPTestRelease(c, release); err != nil {
+				return 0, err
+			}
 		}
 		return m.MarshalLen(), nil
 	}
@@ -246,8 +257,9 @@ func TestUpAckBeforeSendReturnsLeavesNoDuplicateCredit(t *testing.T) {
 	}
 	c.setState(StateASPActive)
 	if err := c.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
-		t.Fatalf("racing Ack left stale duplicate credit or changed main's fallback: %v", err)
+		t.Fatalf("racing Ack left stale duplicate credit: %v", err)
 	}
+	assertUnowedLedgerAck(t, c)
 }
 
 func TestUpAckCancelsBlockedRetransmissionBeforeAccounting(t *testing.T) {
@@ -295,7 +307,7 @@ func TestFreshUpRetiresUnsolicitedAckHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.writePendingControl(req, req.msg); err != nil {
+	if _, err := c.writePendingControl(context.Background(), req, req.msg); err != nil {
 		t.Fatal(err)
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
@@ -323,6 +335,7 @@ func TestStoppedUpDoesNotCreateDuplicateCredit(t *testing.T) {
 	if err := c.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
 		t.Fatalf("stopped write earned duplicate credit: %v", err)
 	}
+	assertUnowedLedgerAck(t, c)
 }
 
 func TestOldUpSendOutcomeCannotCreditRestartedEpoch(t *testing.T) {
@@ -370,6 +383,7 @@ func TestOldUpSendOutcomeCannotCreditRestartedEpoch(t *testing.T) {
 			if err := c.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
 				t.Fatalf("old outcome credited fresh ledger: %v", err)
 			}
+			assertUnowedLedgerAck(t, c)
 		})
 	}
 }
@@ -385,7 +399,7 @@ func TestFreshUpDuplicateBudgetAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.writePendingControl(request, request.msg); err != nil {
+	if _, err := c.writePendingControl(context.Background(), request, request.msg); err != nil {
 		t.Fatal(err)
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
@@ -396,23 +410,24 @@ func TestFreshUpDuplicateBudgetAfterRestart(t *testing.T) {
 	}
 }
 
-func TestFirstUpAckWithoutCompletedProcedureRetainsMainHandling(t *testing.T) {
-	c, _ := newTestConn(t, StateASPActive, RoleASP)
+func TestFirstUnowedUpAckReportsApplicationRecovery(t *testing.T) {
+	c, sent := newTestConn(t, StateASPActive, RoleASP)
+	c.cfg.TAck = time.Hour
 	if _, err := c.WriteSignal(messages.NewAspUp(nil, nil)); err != nil {
 		t.Fatal(err)
 	}
-	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
-	var unexpected *UnexpectedMessageError
-	if err := firstErr(c); !errors.As(err, &unexpected) {
-		t.Fatalf("first raw Up Ack changed main's unexpected handling: %v", err)
+	*sent = nil
+	dispatchRecoveryAck(t, c, messages.NewAspUpAck(nil, nil))
+	if c.State() != StateASPInactive || countType(*sent, "Error") != 1 || countType(*sent, "ASP Active") != 0 {
+		t.Fatalf("first unowed Ack: state=%v sent=%v", c.State(), typeNames(*sent))
 	}
-	if c.State() != StateASPInactive || !c.resumeAfterStrayAck() {
-		t.Fatal("first raw Up Ack changed recovery policy")
-	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1), routingContextASKey(2)}, StateASPActive)
 }
 
-func TestFirstUpAckDoesNotWaitForUnconfirmedRawSend(t *testing.T) {
+func TestFirstUpAckClassificationDoesNotWaitForApplicationSend(t *testing.T) {
 	c, _ := newTestConn(t, StateASPActive, RoleASP)
+	c.cfg.TAck = time.Hour
+
 	entered := make(chan struct{})
 	release, open := aspTestGate(t)
 	c.signalWriter = func(m messages.M3UA) (int, error) {
@@ -423,20 +438,27 @@ func TestFirstUpAckDoesNotWaitForUnconfirmedRawSend(t *testing.T) {
 		return m.MarshalLen(), nil
 	}
 	sent := startASPTestCall(func() error { _, err := c.WriteSignal(messages.NewAspUp(nil, nil)); return err })
-	awaitASPTestSend(t, entered, sent, "raw Up")
-	acked := startASPTestCall(func() error { return c.handleAspUpAck(messages.NewAspUpAck(nil, nil)) })
-	err := finishASPTestAck(t, acked, "first raw Ack waited for a send that cannot make it a duplicate")
-	var unexpected *UnexpectedMessageError
-	if !errors.As(err, &unexpected) {
-		t.Fatalf("first raw Ack: %v", err)
+	awaitASPTestSend(t, entered, sent, "application Up")
+	acked := startASPTestCall(func() error {
+		ack, duplicate, repeated, err := c.claimASPUpAcknowledgement(func() error { return nil })
+		if err != nil {
+			return err
+		}
+		if ack.solicited || duplicate || repeated != false {
+			return errors.New("application copy changed Up Ack classification")
+		}
+		return nil
+	})
+	if err := finishASPTestAck(t, acked, "Ack classification waited for an application send"); err != nil {
+		t.Fatal(err)
 	}
 	open()
-	if err := sent.wait(t, "raw Up write release"); err != nil {
+	if err := sent.wait(t, "application Up release"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestCompletedUpAckDoesNotWaitForApplicationSend(t *testing.T) {
+func TestCompletedUpAckClassificationDoesNotWaitForApplicationSend(t *testing.T) {
 	c, _ := newTestConn(t, StateASPDown, RoleASP)
 	c.cfg.TAck = time.Hour
 	if _, err := c.beginASPSM(); err != nil {
@@ -457,12 +479,29 @@ func TestCompletedUpAckDoesNotWaitForApplicationSend(t *testing.T) {
 	}
 	sent := startASPTestCall(func() error { _, err := c.WriteSignal(messages.NewAspUp(nil, nil)); return err })
 	awaitASPTestSend(t, entered, sent, "application Up")
-	acked := startASPTestCall(func() error { return c.handleAspUpAck(messages.NewAspUpAck(nil, nil)) })
-	if err := finishASPTestAck(t, acked, "Ack waited for an application send"); err != nil {
-		t.Errorf("application Up changed main's completed-Up fallback: %v", err)
-	}
-	open()
-	if err := sent.wait(t, "application Up write release"); err != nil {
+	acked := startASPTestCall(func() error {
+		ack, duplicate, repeated, err := c.claimASPUpAcknowledgement(func() error { return nil })
+		if err != nil {
+			return err
+		}
+		if ack.solicited || duplicate || repeated != true {
+			return errors.New("application copy changed Up Ack classification")
+		}
+		return nil
+	})
+	if err := finishASPTestAck(t, acked, "Ack classification waited for an application send"); err != nil {
 		t.Fatal(err)
 	}
+	open()
+	if err := sent.wait(t, "application Up release"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertUnowedLedgerAck(t *testing.T, c *Association) {
+	t.Helper()
+	if c.State() != StateASPInactive || c.routingContextAcked(1) || c.routingContextAcked(2) {
+		t.Fatal("unowed ledger Ack did not commit inactive state and gates")
+	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1), routingContextASKey(2)}, StateASPActive)
 }

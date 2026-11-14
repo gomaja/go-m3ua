@@ -78,6 +78,11 @@ func awaitASPTestSend[T any](t *testing.T, sent <-chan T, call *aspTestCall, wha
 // All frames must belong to one goroutine; unrelated calls cannot satisfy it.
 func awaitASPTestStack(t *testing.T, call *aspTestCall, frames ...string) bool {
 	t.Helper()
+	return awaitASPTestAnyStack(t, call, frames) >= 0
+}
+
+func awaitASPTestAnyStack(t *testing.T, call *aspTestCall, alternatives ...[]string) int {
+	t.Helper()
 	timer := time.NewTimer(aspTestWait)
 	defer timer.Stop()
 	tick := time.NewTicker(10 * time.Millisecond)
@@ -93,20 +98,22 @@ func awaitASPTestStack(t *testing.T, call *aspTestCall, frames ...string) bool {
 			stack = make([]byte, 2*len(stack))
 		}
 		for _, goroutine := range strings.Split(string(stack), "\n\n") {
-			matches := true
-			for _, frame := range frames {
-				matches = matches && strings.Contains(goroutine, frame)
-			}
-			if matches {
-				return true
+			for index, frames := range alternatives {
+				matches := true
+				for _, frame := range frames {
+					matches = matches && strings.Contains(goroutine, frame)
+				}
+				if matches {
+					return index
+				}
 			}
 		}
 		select {
 		case <-call.done:
-			return false
+			return -1
 		case <-tick.C:
 		case <-timer.C:
-			t.Fatalf("fixture did not reach held-lock barrier %v within %v", frames, aspTestWait)
+			t.Fatalf("fixture did not reach held-lock barrier %v within %v", alternatives, aspTestWait)
 		}
 	}
 }

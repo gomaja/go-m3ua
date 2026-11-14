@@ -231,7 +231,7 @@ func TestCompletedASPUpAckRetransmissionIsAbsorbed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.writePendingControl(request, request.msg); err != nil {
+	if _, err := conn.writePendingControl(context.Background(), request, request.msg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1438,77 +1438,23 @@ func TestConcurrentSendsDoNotShareConfigParams(t *testing.T) {
 	wg.Wait()
 }
 
-// RFC 4666 Section 4.3.4.2:
-//
-//	"If the ASP receives an ASP Down Ack without having sent an ASP Down
-//	message, the ASP should now consider itself to be in the ASP-DOWN state.
-//
-//	If the ASP was previously in the ASP-ACTIVE or ASP-INACTIVE state, the ASP
-//	should then initiate procedures to return itself to its previous state."
-//
-// The ASP reported "Unexpected Message" from exactly those two states and held,
-// so it went on believing it was carrying traffic while the SGP had already put
-// it down — the two ends silently disagreeing about whether a link is live,
-// which is the worst state an SS7 link can be in. The Error is still owed; what
-// was missing is the state change and the climb back.
-func TestUnsolicitedAspDownAckReturnsTheASPToItsPreviousState(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		from     State
-		wantBack State
-	}{
-		{"from ASP-ACTIVE", StateASPActive, StateASPActive},
-		{"from ASP-INACTIVE", StateASPInactive, StateASPInactive},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			conn, sent := newTestConn(t, tt.from, RoleASP)
-
-			conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
-
-			// The Error is still owed.
-			select {
-			case err := <-conn.errChan:
-				var unexpected *UnexpectedMessageError
-				if !errors.As(err, &unexpected) {
-					t.Errorf("reported %v, want *UnexpectedMessageError", err)
-				}
-			default:
-				t.Error("an unsolicited ASP Down Ack was not reported at all")
+// RFC 4666 §4.3.4.2 says the ASP "should now consider itself to be in the
+// ASP-DOWN state". Its lowercase return recommendation is delegated to the
+// application; Unexpected Message Error is optional under §3.8.1.
+func TestUnsolicitedDownAckLeavesASPDownForApplication(t *testing.T) {
+	for _, prior := range []State{StateASPActive, StateASPInactive} {
+		t.Run(prior.String(), func(t *testing.T) {
+			c, sent := newTestConn(t, prior, RoleASP)
+			c.cfg.TAck = time.Hour
+			dispatchRecoveryAck(t, c, messages.NewAspDownAck(nil))
+			if c.State() != StateASPDown || len(*sent) != 0 {
+				t.Fatalf("unrequested Down Ack: state=%v sent=%v", c.State(), typeNames(*sent))
 			}
-
-			// And the ASP must now consider itself ASP-DOWN.
-			select {
-			case got := <-conn.stateChan:
-				if got != StateASPDown {
-					t.Fatalf("published %v, want %v after an unsolicited ASP Down Ack", got, StateASPDown)
-				}
-			default:
-				t.Fatal("no state was published")
+			var keys []ASKey
+			if prior == StateASPActive {
+				keys = []ASKey{routingContextASKey(1), routingContextASKey(2)}
 			}
-
-			// Applying it must start the climb back: ASP Up first.
-			if err := conn.handleStateUpdate(StateASPDown); err != nil {
-				t.Fatalf("handleStateUpdate(AspDown): %v", err)
-			}
-			if got := typeNames(*sent); len(got) != 1 || got[0] != "ASP Up" {
-				t.Fatalf("signals = %v, want [ASP Up] to begin returning to %v", got, tt.wantBack)
-			}
-
-			// The SGP acks, taking the ASP to ASP-INACTIVE.
-			if err := conn.handleStateUpdate(StateASPInactive); err != nil {
-				t.Fatalf("handleStateUpdate(AspInactive): %v", err)
-			}
-			got := typeNames(*sent)
-			switch tt.wantBack {
-			case StateASPActive:
-				if len(got) != 2 || got[1] != "ASP Active" {
-					t.Errorf("signals = %v, want [ASP Up, ASP Active] to return to ASP-ACTIVE", got)
-				}
-			case StateASPInactive:
-				if len(got) != 1 {
-					t.Errorf("signals = %v, want just [ASP Up]: the ASP was only ASP-INACTIVE and must not take traffic", got)
-				}
-			}
+			recoveryIndication(t, c, "ASP-WITHDRAWAL", keys, prior)
 		})
 	}
 }

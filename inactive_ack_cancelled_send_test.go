@@ -78,7 +78,7 @@ func TestInactiveAckJoinDoesNotWaitForCompetingWriters(t *testing.T) {
 	first := messages.NewAspActive(nil, params.NewRoutingContext(1), nil)
 	request := c.startTAck(first, requestAspActive)
 	firstDone := make(chan error, 1)
-	go func() { _, err := c.writePendingControl(request, first); firstDone <- err }()
+	go func() { _, err := c.writePendingControl(context.Background(), request, first); firstDone <- err }()
 	<-sender.first
 	deadline := time.Now().Add(time.Hour)
 	c.applicationWriteDeadline.Store(&deadline)
@@ -134,7 +134,10 @@ func TestInactiveAckJoinDoesNotWaitForCompetingWriters(t *testing.T) {
 	unblockSecond := func() { releaseSecond.Do(func() { close(second.proceed) }) }
 	defer unblockSecond()
 	secondDone := make(chan error, 1)
-	go func() { _, err := c.writePendingControl(secondRequest, second); secondDone <- err }()
+	go func() {
+		_, err := c.writePendingControl(context.Background(), secondRequest, second)
+		secondDone <- err
+	}()
 	select {
 	case <-second.entered:
 	case <-time.After(time.Second):
@@ -190,7 +193,7 @@ func TestCancelledOmittedActiveAckRetainsMainDuplicateHandling(t *testing.T) {
 	c.transportCloser = transport.close
 	request := c.startTAck(original, requestAspActive)
 	done := make(chan error, 1)
-	go func() { _, err := c.writePendingControl(request, original); done <- err }()
+	go func() { _, err := c.writePendingControl(context.Background(), request, original); done <- err }()
 	<-transport.waiting
 	if err := c.handleAspInactiveAck(messages.NewAspInactiveAck(params.NewRoutingContext(2), nil)); err != nil {
 		t.Fatal(err)
@@ -326,7 +329,7 @@ func TestCancelledAcceptedActiveReportsOriginalWireScope(t *testing.T) {
 			message := messages.NewAspActive(nil, scope, nil)
 			request := c.startTAck(message, requestAspActive)
 			done := make(chan error, 1)
-			go func() { _, err := c.writePendingControl(request, message); done <- err }()
+			go func() { _, err := c.writePendingControl(context.Background(), request, message); done <- err }()
 			<-sender.waiting
 			c.addDynamicASKey(*staticASKey(30, 3), RoutingKey{}, false)
 			management := c.ManagementIndications()
@@ -408,7 +411,7 @@ func TestCancelledActiveAckWithoutHistoryRetainsMainHandling(t *testing.T) {
 	message := messages.NewAspActive(nil, params.NewRoutingContext(2), nil)
 	request := c.startTAck(message, requestAspActive)
 	done := make(chan error, 1)
-	go func() { _, err := c.writePendingControl(request, message); done <- err }()
+	go func() { _, err := c.writePendingControl(context.Background(), request, message); done <- err }()
 	<-sender.waiting
 	if err := c.handleAspInactiveAck(messages.NewAspInactiveAck(params.NewRoutingContext(2), nil)); err != nil {
 		t.Fatal(err)
@@ -424,9 +427,5 @@ func TestCancelledActiveAckWithoutHistoryRetainsMainHandling(t *testing.T) {
 	if !c.routingContextAcked(2) {
 		t.Fatal("unrequested Active Ack handling diverged from main")
 	}
-	select {
-	case ind := <-management:
-		t.Fatalf("later Ack emitted cancellation correlation report: %+v", ind)
-	default:
-	}
+	recoveryIndication(t, c, "ASP-ACTIVATION", []ASKey{routingContextASKey(2)}, StateASPActive)
 }

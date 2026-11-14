@@ -39,7 +39,7 @@ func activationHeldAtWithdrawalDrain(t *testing.T, ctx context.Context, waiting,
 		}()
 		select {
 		case <-sender.waiting:
-		case <-time.After(time.Second):
+		case <-time.After(aspTestWait):
 			t.Fatal("initial activation did not enter transport")
 		}
 		request = applicationActiveRequest(t, c)
@@ -54,7 +54,7 @@ func activationHeldAtWithdrawalDrain(t *testing.T, ctx context.Context, waiting,
 	}()
 	select {
 	case <-request.stop:
-	case <-time.After(time.Second):
+	case <-time.After(aspTestWait):
 		t.Fatal("withdrawal did not claim activation")
 	}
 	request.joinControlWrite()
@@ -73,62 +73,52 @@ func TestASPActiveContextCancellationEscapesWithdrawalDrain(t *testing.T) {
 			defer cancel()
 			c, done, unblock, handled := activationHeldAtWithdrawalDrain(t, ctx, true, written)
 			cancel()
-			var result error
-			returned := false
-			select {
-			case result = <-done:
-				returned = true
-			case <-time.After(250 * time.Millisecond):
+			if result := receiveASPTest(t, done, "context cancellation before DATA drain"); !errors.Is(result, context.Canceled) {
+				t.Fatalf("independent cancellation exposed retirement result before publication: %v", result)
 			}
-			if returned {
-				if !errors.Is(result, ErrASPProcedureSuperseded) {
-					t.Errorf("claimed activation returned %v", result)
-				}
-				select {
-				case ind := <-c.ManagementIndications():
-					assertApplicationActivationFailure(t, ind, associationConfigASKey(c.cfg, 1))
-				default:
-					t.Error("context escape did not report the application failure")
-				}
+			ind := receiveASPTest(t, c.ManagementIndications(), "context cancellation report")
+			if ind.Kind != ManagementError || !errors.Is(ind.Cause, context.Canceled) {
+				t.Fatalf("cancellation indication = %+v", ind)
 			}
 			unblock()
-			if err := <-handled; err != nil {
+			if err := receiveASPTest(t, handled, "withdrawal after DATA drain"); err != nil {
 				t.Fatal(err)
 			}
-			if !returned {
-				err := <-done
-				t.Fatalf("ASPActive ignored its cancelled context while withdrawal waited for DATA drain; returned %v only after drain", err)
+			ind = receiveASPTest(t, c.ManagementIndications(), "withdrawal indication")
+			if ind.Kind != ManagementASPWithdrawal {
+				t.Fatalf("withdrawal report = %+v", ind)
 			}
 		})
 	}
 }
 
-func TestActivateRoutingContextsDoesNotWaitForWithdrawalDrain(t *testing.T) {
+func TestActivateRoutingContextsWaitsForRetiredResultPublication(t *testing.T) {
 	c, done, unblock, handled := activationHeldAtWithdrawalDrain(t, context.Background(), false, false)
-	var result error
-	returned := false
-	select {
-	case result = <-done:
-		returned = true
-	case <-time.After(250 * time.Millisecond):
-	}
-	if returned {
-		if !errors.Is(result, ErrASPProcedureSuperseded) {
-			t.Errorf("non-waiting activation returned %v", result)
-		}
+	call := startASPTestCall(func() error {
 		select {
-		case ind := <-c.ManagementIndications():
-			t.Errorf("non-waiting activation produced an early management indication: %+v", ind)
-		default:
+		case err := <-done:
+			return err
+		case <-time.After(aspTestWait):
+			return errors.New("activation did not complete")
 		}
+	})
+	if !awaitASPTestStack(t, call, "(*Association).waitTAck(") {
+		t.Fatalf("retired nonwaiting activation returned before withdrawal: %v", call.err)
+	}
+	select {
+	case ind := <-c.ManagementIndications():
+		t.Fatalf("early report: %+v", ind)
+	default:
 	}
 	unblock()
-	if err := <-handled; err != nil {
+	if err := receiveASPTest(t, handled, "withdrawal after DATA drain"); err != nil {
 		t.Fatal(err)
 	}
-	if !returned {
-		err := <-done
-		t.Fatalf("ActivateRoutingContexts waited for withdrawal DATA drain after its write completed: %v", err)
+	if err := call.wait(t, "retired activation"); !errors.Is(err, ErrASPProcedureSuperseded) {
+		t.Fatalf("retired activation = %v", err)
+	}
+	if ind := receiveASPTest(t, c.ManagementIndications(), "withdrawal report"); ind.Kind != ManagementASPWithdrawal {
+		t.Fatalf("report = %+v", ind)
 	}
 }
 
@@ -140,7 +130,7 @@ func TestAssociationCloseReleasesASPActiveDuringWithdrawalDrain(t *testing.T) {
 			go func() { closed <- c.Close() }()
 			select {
 			case <-c.done:
-			case <-time.After(time.Second):
+			case <-time.After(aspTestWait):
 				t.Fatal("association close did not signal Done")
 			}
 			var result error
@@ -148,17 +138,17 @@ func TestAssociationCloseReleasesASPActiveDuringWithdrawalDrain(t *testing.T) {
 			select {
 			case result = <-done:
 				returned = true
-			case <-time.After(250 * time.Millisecond):
+			case <-time.After(aspTestWait):
 			}
 			unblock()
-			if err := <-handled; err != nil {
+			if err := receiveASPTest(t, handled, "withdrawal"); err != nil {
 				t.Fatal(err)
 			}
-			if err := <-closed; err != nil {
+			if err := receiveASPTest(t, closed, "association close"); err != nil {
 				t.Fatal(err)
 			}
 			if !returned {
-				err := <-done
+				err := receiveASPTest(t, done, "procedure completion")
 				t.Fatalf("association close did not release ASPActive before withdrawal DATA drain: %v", err)
 			}
 			if !errors.Is(result, ErrAssociationClosed) {
@@ -180,7 +170,7 @@ func TestASPActiveContextCancellationBeforeWithdrawal(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("unclaimed activation returned %v", err)
 		}
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(aspTestWait):
 		t.Fatal("unclaimed activation ignored context cancellation")
 	}
 }
@@ -195,7 +185,7 @@ func TestTAckRetryDoesNotWaitForWithdrawalDrain(t *testing.T) {
 	c.controlTransport = sender
 	c.transportCloser = sender.close
 	request, _, done := startObservedRetry(t, c, messages.NewAspActive(nil, params.NewRoutingContext(2), nil), requestAspActive)
-	<-sender.waiting
+	receiveASPTest(t, sender.waiting, "retry transport entry")
 	c.aspTransferMu.RLock()
 	var release sync.Once
 	unblock := func() { release.Do(c.aspTransferMu.RUnlock) }
@@ -204,7 +194,7 @@ func TestTAckRetryDoesNotWaitForWithdrawalDrain(t *testing.T) {
 	go func() {
 		handled <- c.handleAspInactiveAck(messages.NewAspInactiveAck(params.NewRoutingContext(2), nil))
 	}()
-	<-request.stop
+	receiveASPTest(t, request.stop, "retry withdrawal claim")
 	if failed := request.failure.Load(); failed == nil || !errors.Is(*failed, ErrASPProcedureSuperseded) {
 		t.Fatal("fixture did not cancel the retry through withdrawal")
 	}
@@ -212,14 +202,14 @@ func TestTAckRetryDoesNotWaitForWithdrawalDrain(t *testing.T) {
 	select {
 	case <-done:
 		returned = true
-	case <-time.After(250 * time.Millisecond):
+	case <-time.After(aspTestWait):
 	}
 	unblock()
-	if err := <-handled; err != nil {
+	if err := receiveASPTest(t, handled, "withdrawal"); err != nil {
 		t.Fatal(err)
 	}
 	if !returned {
-		<-done
+		receiveASPTest(t, done, "retry completion")
 		t.Fatal("T(ack) retry waited for withdrawal DATA drain after its send returned")
 	}
 }

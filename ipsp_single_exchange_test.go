@@ -1270,7 +1270,7 @@ func TestIPSPSingleExchangeInactiveAckDefersCompletionUntilAdmittedDataDrains(t 
 		t.Fatal("outbound DATA did not enter the IPSP traffic path")
 	}
 
-	request, err := association.beginASPInactive(nil)
+	request, err := association.beginASPInactive(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("beginASPInactive(): %v", err)
 	}

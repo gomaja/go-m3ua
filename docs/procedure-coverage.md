@@ -51,10 +51,11 @@ availability is deliberately **not** checked — see
 | --- | --- | --- | --- |
 | ASP Up sent, acknowledgement awaited | ASP, SE, DE | local | `TestAssociationASPUpWaitsForAcknowledgement`, `TestASPAsksForTrafficAfterAspUpAck` |
 | ASP Up received, Ack sent | SGP, SE, DE | peer | `TestDuplicateAspUpIsAcked`, `TestSGPRecoversAfterDuplicateAspUp` |
-| ASP Up Ack received, including unsolicited | ASP, SE, DE | peer | `TestSGPHoldsStateOnUnsolicitedAspUpAck` |
+| Owed Up Ack duplicates preserve state and gates | ASP, SE, DE | peer | `TestDuplicateUpAckLeavesActiveTrafficUnchanged`, `TestOwedDuplicateUpAckStillAbsorbed` |
+| Unowed Up Ack: Error then withdrawal report, application recovery; inactive absorption (§4.3.4.1) | ASP, SE, DE | peer | `TestUnowedUpAckWhileActiveSendsErrorAndReportsExactScopes`, `TestErrorPrecedesWithdrawalIndication`, `TestUnowedUpAckWhileDownReportsInactiveWithoutAutomaticActive`, `TestUnowedUpAckWhileInactiveSendsNoError`, `TestIPSPUnowedUpAckReportsAffectedDirections` |
 | ASP Down sent and retransmitted | ASP, SE, DE | local | `TestShutdownRetransmitsAspDownUntilAcked` |
 | ASP Down received, Ack always sent | SGP, SE, DE | peer | `TestHandleAspDownAlwaysAcks` |
-| ASP Down Ack received, solicited and unsolicited | ASP, SE, DE | peer | `TestSolicitedAspDownAckIsAccepted`, `TestUnsolicitedAspDownAckReturnsTheASPToItsPreviousState` |
+| ASP Down Ack received, solicited and unsolicited | ASP, SE, DE | peer | `TestSolicitedAspDownAckIsAccepted`, `TestUnsolicitedDownAckCommitsDownWithoutErrorOrAutomaticUp`, `TestUnsolicitedDownAckReportsPriorActiveScopes`, `TestIPSPUnsolicitedDownAckReportsWithoutRecovery` |
 | BEAT sent on a live association | ASP, SGP, SE | local | `TestHeartbeatKeepsAssociationAlive` |
 | BEAT received, Ack unconditional | all | peer | `TestHeartbeatAckedInEveryState`, `TestHeartbeatAckPreservesExtensionParametersFromWire` |
 | T(ack) retransmission, budget and expiry | ASP, SE, DE | local | `TestAssociationASPUpReportsTAckExpiry` |
@@ -75,6 +76,7 @@ initiator of every ASPSM and ASPTM request.
 | Peer Single Exchange reactivation (§4.3.4.3.1, §5.6.1); independent active-scope withdrawal; pending first activation is not active (§4.3.4.4) | ASP, SE | local | `TestIPSPSingleExchangePeerReactivationRetiresInactiveAckHistory`, `TestASPWithdrawsWhileAnotherScopeAwaitsInactiveAck`, `TestASPPendingFirstActivationDoesNotAuthorizeInactiveAck`, `TestASPApplicationReactivatesAfterSGPWithdrawalSCTP` |
 | Override displaces the incumbent | SGP, SE, DE | peer | `TestFigure4TransitionsCellByCell`, `TestTrafficModeCanBeConfiguredPerApplicationServer` |
 | Loadshare and Broadcast add without displacing | SGP | peer, local | `TestBroadcastActivationDropsThePreviousFlowEpoch` |
+| Valid Active Ack without request or duplicate history: exact ASP-ACTIVATION report, retain DATA, application choice (§3.8.1, §4.3.4.3) | ASP, SE, DE | peer | `TestUnsolicitedActiveAckReportsExactScopes`, `TestUnsolicitedActiveAckSendsNoErrorAndDeliversDATA`, `TestASPInactiveAfterUnsolicitedActiveAckCloses`, `TestIPSPUnsolicitedActiveAckReportsLocalGrant` |
 | Traffic mode negotiation and rejection | all | both | `TestAspActiveWithIncompatibleTrafficModeIsRefused`, `TestAspActiveWithoutTrafficModeIsAccepted`, `TestTrafficModeTypeOutsideTheDefinedValuesIsRejected`, `TestASPRejectsActiveAckWithWrongRequestedTrafficMode`, `TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement` |
 | Application-owned recovery after unsolicited Inactive Ack (RFC 4666 §4.3.4.4, §4.3.4.4.1) | ASP, SE, DE | application policy | `TestInactiveAckLeavesReactivationToApplication`, `TestIPSPInactiveAckReportsWithdrawalWithoutReactivation`, `TestInactiveAckApplicationActivationUsesOrdinaryProcedure` |
 | Exact unsolicited withdrawal report, including mixed confirmations and contextless AS (RFC 4666 §1.6.3, §4.3.4.4) | ASP, SE, DE | implementation indication | `TestInactiveAckReportsOnlyUnsolicitedScopes`, `TestOmittedInactiveAckReportsContextlessAndDynamicScopes`, `TestInactiveAckReactivatedScopeIsNotSolicitedByOldPartialRequest`, `TestDelayedPartialInactiveAckDoesNotCancelApplicationReactivation`, `TestOmittedPartialInactiveAckPreservesIndependentApplicationActivation` |
@@ -309,11 +311,18 @@ await a congestion-method setting. This does not implement outbound backlog,
 host or application overload detection.
 
 After `ManagementASPWithdrawal`, application policy decides whether and when to
-restore `indication.ASKeys` with `association.ASPActive(ctx, indication.ASKeys...)`,
+restore a non-empty `indication.ASKeys` with `association.ASPActive(ctx, indication.ASKeys...)`,
 or a known numeric scope with `association.ActivateRoutingContexts(1)`. The report
 is named `ASP-WITHDRAWAL`, not an RFC M- primitive. No activation is sent until
 that application request, including after last-scope withdrawal with automatic
 startup configured. Automatic activation following ASP Up Ack remains unchanged.
+In IPSP Double Exchange, select the reported TrafficToLocal keys before calling
+ASPActive. TrafficToPeer recovery is a decision for the remote application;
+shared ASPSM does not make ASPTM shared (§4.3, §5.6.2).
+An empty Up/Down withdrawal has no active memberships to restore; use
+`PreviousState` to choose the next lifecycle procedure. Calling `ASPActive`
+without keys selects every configured AS, so an empty report is not a scoped
+activation request.
 A contextless AS beside numeric ASes requires a whole-inventory policy decision
 before `ASPActive(ctx)` without keys (RFC 4666 §4.3.4.3).
 
@@ -338,8 +347,31 @@ M-ERROR for unsuccessful application procedures (RFC 4666 §1.6.3).
 cancelling handler publishes its withdrawal and acceptance reports before
 releasing the procedure waiter while its context and association remain live.
 `TestASPActiveContextCancellationEscapesWithdrawalDrain`,
-`TestActivateRoutingContextsDoesNotWaitForWithdrawalDrain` and
+`TestActivateRoutingContextsWaitsForRetiredResultPublication` and
 `TestAssociationCloseReleasesASPActiveDuringWithdrawalDrain` check prompt
-context, non-waiting and close exits while admitted DATA holds the drain.
+independent context and close exits while admitted DATA holds the drain; a retired
+nonwaiting activation joins the withdrawal publication before exposing its result.
 A cancelled context may put the generic failure before the handler's reports.
 The T(ack) retry path continues without waiting for that drain.
+
+### Acknowledgement withdrawal publication
+
+`TestRetiredInitialWritesWaitForWithdrawalPublication` holds the state commit
+while public Up, Active and Inactive initial writers resume.
+`TestInternalSubmissionDoesNotJoinWithdrawalPublication` keeps internal
+submission independent while its request result waits for the commit and report.
+`TestShutdownInitialInactiveWaitsForWithdrawalPublication` covers orderly shutdown.
+`TestAutomaticEntrySerializesStateThroughSubmission` preserves automatic
+registration and submission under the state lock.
+`TestConcurrentASPUpDoesNotCloseOpeningAssociation` covers replacement during
+startup in all ASP/IPSP exchange models.
+`TestAutomaticActivationPrecedesConcurrentASPDown` checks automatic Active before
+concurrent Down. `TestAutomaticASPUpSupersedesExplicitCallerAccurately` and
+`TestShutdownSupersedesPendingProceduresAccurately` distinguish local replacement
+from association closure. `TestCloseRejectsLatePendingProcedureRegistration`
+prevents registration after teardown has swept pending requests. `TestSharedIPSPDownReportFollowsPerASDownCommit` checks shared
+IPSP DOWN memberships and T(r) before monitor publication.
+`TestAcknowledgementReportsFollowEveryStatusView` checks Up, Down, Active and
+Inactive reports against the association, both IPSP directions and per-AS status.
+`TestSingleExchangePartialWithdrawalStatusUsesTrafficLedger` preserves an
+unaffected active scope while checking the withdrawn scope's shared status.

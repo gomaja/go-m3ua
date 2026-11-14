@@ -970,7 +970,7 @@ func TestUnsolicitedAspInactiveAckWaitsForApplicationActivation(t *testing.T) {
 	if got := conn.State(); got != StateASPInactive {
 		t.Fatalf("state after unsolicited ASP Inactive Ack = %v, want ASP-INACTIVE first", got)
 	}
-	if conn.resumeAfterStrayAck() {
+	if len(conn.pendingTAckRoutingContexts(requestAspActive)) > 0 {
 		t.Fatal("unsolicited ASP Inactive Ack armed automatic return")
 	}
 
@@ -1034,7 +1034,7 @@ func TestUnsolicitedAspInactiveAckPreservesInactiveScopeState(t *testing.T) {
 			if got := conn.State(); got != state {
 				t.Errorf("state = %v, want %v", got, state)
 			}
-			if conn.resumeAfterStrayAck() {
+			if len(conn.pendingTAckRoutingContexts(requestAspActive)) > 0 {
 				t.Error("an ASP that was not active armed an ASP-ACTIVE return")
 			}
 			if got := countType(*sent, "ASP Active"); got != 0 {

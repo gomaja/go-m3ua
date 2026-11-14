@@ -154,7 +154,10 @@ func (c *Association) handleStateUpdateFrom(current State, published bool) error
 
 // applyStateUpdate records the transition and runs the entry action for it,
 // with the state lock held throughout so an entry action sees the state it was
-// entered for.
+// entered for. Entry actions submit bounded transport work only: they never
+// wait for an Ack or a retired result. Public procedures release their state
+// read lock before writing or waiting, so they cannot hold this boundary while
+// waiting for the dispatcher to deliver an Ack.
 func (c *Association) applyStateUpdate(current State) error {
 	c.muState.Lock()
 	stateChanged := c.state != current
@@ -317,13 +320,15 @@ func (c *Association) handleStateUpdateAsIPSPSingleExchange(current, previous St
 func (c *Association) handleStateUpdateAsASP(current, previous State, entering bool) error {
 	switch current {
 	case StateASPDown:
+		peerDown := c.peerDownAwaitingEntry
+		c.peerDownAwaitingEntry = false
 		// A fresh climb: nothing the peer acknowledged before survives the
 		// association going down, which matches Section 4.3.4.1's treatment of
 		// an ASP Up while ASP-ACTIVE, where "all registered Routing Keys are
 		// considered deregistered".
 		c.forgetAckedRoutingContextsWithoutTransferBarrier()
 		// RFC 4666 Section 4.3.4.1: the ASP is always the initiator of ASP Up.
-		if !entering || c.terminating.Load() ||
+		if !entering || peerDown || c.terminating.Load() ||
 			c.aspProcedureMode(aspProcedureUp) != ASPProcedureAutomatic {
 			return nil
 		}
@@ -344,22 +349,9 @@ func (c *Association) handleStateUpdateAsASP(current, previous State, entering b
 		// message to become active. The ASPs remain in control of what (and
 		// when) traffic action is taken." Coming back is the owner's call.
 		//
-		// The exception is a stray acknowledgement. Section 4.3.4.1 says of one:
-		// "If the ASP was not in the ASP-INACTIVE state, it SHOULD send an
-		// Error message and then initiate procedures to return itself to its
-		// previous state." Nothing was taken away deliberately there, so the
-		// return is owed and the ping-pong reasoning above does not apply.
-		if entering && c.resumeAfterStrayAck() {
-			c.clearResumeAfterStrayAck()
-			return c.initiateASPTM()
-		}
+		// RFC 4666 §4.3.4.1's SHOULD return is delegated to Layer Management.
+		// Only completion of a locally initiated Up runs startup activation.
 		if !entering || previous != StateASPDown {
-			return nil
-		}
-		// Section 4.3.4.2 has an ASP put down by a stray ASP Down Ack "return
-		// itself to its previous state" — which, if that state was only
-		// ASP-INACTIVE, stops here rather than taking traffic it never had.
-		if c.resumeTo == StateASPInactive {
 			return nil
 		}
 		if c.aspProcedureMode(aspProcedureActive) != ASPProcedureAutomatic {
@@ -731,28 +723,16 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		}
 		c.sendState(StateASPInactive)
 	case *messages.AspUpAck:
-		// RFC 4666 Section 4.3.4.1: "If the ASP receives an unexpected ASP Up
-		// Ack message, the ASP should consider itself in the ASP-INACTIVE
-		// state." That clause is scoped to the ASP. Section 4.3.4.1.2 permits
-		// the same remote-IPSP transition. An SGP cannot legitimately receive
-		// ASP Up Ack and holds its state after reporting the Error.
-		if err := c.handleAspUpAck(msg); err != nil {
-			if errors.Is(err, errDuplicateASPUpAck) {
-				c.sendState(stateUnchanged)
-				return
+		publication, err := c.handleASPUpAcknowledgement(msg, raw)
+		if err != nil {
+			if !errors.Is(err, errDuplicateASPUpAck) {
+				c.sendErrForMessage(msg, raw, err)
 			}
-			c.sendErrForMessage(msg, raw, err)
-
-			var unexpected *UnexpectedMessageError
-			if !errors.As(err, &unexpected) || c.role != RoleASP {
-				c.sendState(stateUnchanged)
-				return
-			}
-		}
-		if c.isIPSPDoubleExchange() && !c.usesSingleASPSMExchange() {
 			c.sendState(stateUnchanged)
-		} else {
-			c.sendState(StateASPInactive)
+			return
+		}
+		c.sendState(publication)
+		if publication == StateASPInactive {
 			c.claimASPUpCompletion().complete()
 		}
 	case *messages.AspDown:
@@ -764,10 +744,8 @@ func (c *Association) handleReceivedSignals(ctx context.Context, m3 messages.M3U
 		}
 	case *messages.AspDownAck:
 		// RFC 4666 Section 4.3.4.2 puts the ASP in ASP-DOWN on an ASP Down Ack
-		// whether or not it asked for one, so the Error accompanies the
-		// transition instead of replacing it. An ASP that reported the Error and
-		// held would go on believing it was carrying traffic the SGP had
-		// already taken away.
+		// whether or not it asked for one. An unsolicited withdrawal is
+		// reported to Layer Management without Error or automatic recovery.
 		if err := c.handleAspDownAck(msg); err != nil {
 			// An Ack still owed for a retransmission of an earlier ASP Down
 			// cannot undo a newer ASP Up (RFC 4666 Sections 4.3.4.1 and

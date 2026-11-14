@@ -83,28 +83,96 @@ Specification: https://www.rfc-editor.org/rfc/rfc4666.html
 
 # Peer withdrawal and application recovery
 
-After an unsolicited ASP Inactive Ack, the library marks the affected scopes
-inactive and leaves activation requests to the application. This also applies
-to the last active scope with automatic startup enabled, and to IPSP Single and
-Double
-Exchange (RFC 4666 §4.3.4.4, §4.3.4.4.1). Startup after ASP Up Ack is unchanged.
+ASPProcedureAutomatic controls startup and orderly-shutdown lifecycle points.
+It never initiates recovery from an unsolicited acknowledgement. The library
+adopts the peer's validated state assertion and reports the exact affected ASKeys
+and numeric RoutingContexts to Layer Management. Subscribe through
+AssociationConfig.Subscribe and drain ManagementIndications.
 
-Subscribe through AssociationConfig.Subscribe and consume ManagementIndications.
-ManagementASPWithdrawal reports active scopes withdrawn by an unsolicited Ack,
-excluding local deactivation confirmations and delayed solicited duplicates. It is an
-implementation indication named ASP-WITHDRAWAL, not an M- primitive from §1.6.3.
-Once application policy approves restoration, use:
+	Event                         Library action                         Application action
+	Unowed Up Ack, ACTIVE          Error, INACTIVE, ASP-WITHDRAWAL        Re-register dynamic keys, restore approved scopes
+	Unowed Up Ack, DOWN            Error, INACTIVE, ASP-WITHDRAWAL        Decide whether to ASPDown or remain inactive
+	Unowed Up Ack, INACTIVE        Absorb                                None
+	Unsolicited Down Ack           DOWN, ASP-WITHDRAWAL; no Error/Up      Decide whether to ASPUp; restore approved scopes
+	Unsolicited Inactive Ack       Withdraw named active scopes          Decide whether to ASPActive
+	Unsolicited Active Ack         Accept valid grant, ASP-ACTIVATION     Keep grant or ASPInactive
+	Owed duplicate Ack             Absorb                                None
 
-	err := association.ASPActive(ctx, indication.ASKeys...)
+For unexpected ASP Up Ack, RFC 4666 §4.3.4.1 says the ASP "SHOULD send an
+Error message and then initiate procedures to return itself to its previous
+state". This library deliberately takes an exception to that uppercase SHOULD:
+the Error is submitted before the withdrawal report, and the return is delegated
+to Layer Management. On receipt of Up while active the SGP considers "all
+registered Routing Keys ... deregistered" (§4.3.4.1); the library cannot restore
+registrations or application policy alone. Re-register affected dynamic Routing
+Keys before requesting activation for the reported Application Servers.
+§4.3.4.3 permits an "M-ASP_ACTIVE request primitive from Layer Management".
+
+RFC 4666 §4.3.4.2 uses lowercase "should" for return after unsolicited Down
+Ack. §3.8.1 says Unexpected Message Error "MAY be sent"; this implementation
+sends none and leaves Up/Active to the application. Solicited Down Ack handling
+is unchanged. After an unsolicited ASP Inactive Ack the affected scopes stay
+inactive even when the last scope is lost and startup policy is automatic
+(§4.3.4.4, §4.3.4.4.1). Startup after a solicited ASP Up Ack is unchanged.
+
+ManagementASPWithdrawal is an implementation indication named ASP-WITHDRAWAL,
+not an M- primitive from §1.6.3. It excludes local confirmations and owed
+duplicates. PreviousState records the prior local ASP procedure state;
+PreviousIPSPState preserves both IPSP directions. Shared ASPSM Up/Down withdrawal
+can remove active scopes in both directions, while independent Double Exchange
+keeps the peer direction. ASPTM remains directional in Double Exchange
+(§4.3.4.1.2, §4.3.4.3.1, §5.6).
+
+A procedure retired by withdrawal exposes ErrASPProcedureSuperseded only after
+state, per-AS membership and traffic gates have committed and ASP-WITHDRAWAL
+has been published. This also applies to public initial writes. Internal
+Up/Active entry, startup and restart actions only submit control work; they never
+wait for a retired result, whose publication still follows the commit and
+indication. Orderly shutdown retains its caller wait for the committed result.
+ActivateRoutingContexts and DeactivateRoutingContexts normally
+return after submission, but join a withdrawal that has retired their request.
+Context cancellation and association failure remain independent outcomes; they
+may end a caller's wait before withdrawal finishes draining earlier DATA.
+
+Automatic entry actions serialize their state decision through initial control
+submission, keeping ASP Up before ASP Active. Explicit procedures release the
+state lock before writing or waiting for an Ack. A pending ASP Up or ASP Down
+replaced by a newer local request of the same kind, and procedures cancelled by
+orderly shutdown, now return ErrASPProcedureSuperseded instead of
+ErrAssociationClosed on a live association. Local replacement leaves it open;
+shutdown still completes its withdrawal and closes it.
+
+ManagementASPActivation reports every scope in a validated Active Ack accepted
+without an outstanding request or duplicate history. It is ASP-ACTIVATION, not
+a new primitive from §1.6.3. A cancelled or timed-out ASPActive call can still
+take effect later: a local cancellation or timeout does not retract an ASP
+Active already received by the peer, and M3UA has no request identifier. A valid
+late Ack can activate the named scopes. The application decides whether to keep
+them or send ASPInactive. Existing validation and terminal-failure handling
+still apply; this does not keep a failed association alive.
+
+Use PreviousState to decide which lifecycle procedure, if any, to request.
+In IPSP Double Exchange, partition the reported keys by the configured traffic
+direction: ASPActive restores TrafficToLocal only. The peer's application decides
+recovery for TrafficToPeer; sharing ASPSM does not share ASPTM (§4.3, §5.6.2).
+
+For an ASP or Single Exchange IPSP, an empty withdrawal report has no active
+memberships to restore. Omitting
+ASPActive's scope selects every configured AS, so restoration of reported
+memberships requires a non-empty ASKeys slice:
+
+	if len(indication.ASKeys) > 0 {
+		err := association.ASPActive(ctx, indication.ASKeys...)
+		// Handle err.
+	}
 
 or start a known numeric scope without waiting:
 
 	err := association.ActivateRoutingContexts(1)
 
-Both use the ordinary activation procedure. Contextless membership beside
-numeric ASes cannot be activated independently: omission represents the whole
-inventory (§4.3.4.3), so the application must choose whether ASPActive(ctx),
-with no ASKeys, is appropriate.
+Contextless membership beside dynamically registered numeric ASes cannot be
+activated independently: omission represents the whole inventory (§4.3.4.3), so
+the application decides whether ASPActive(ctx), with no ASKeys, is appropriate.
 
 # Ownership and shutdown
 

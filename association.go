@@ -130,10 +130,6 @@ type Association struct {
 	// first update is treated as an entry rather than a restatement of the
 	// zero value. Guarded by muState, like state itself.
 	stateEntered bool
-	// resumeTo is how far an ASP climbs when it comes up: ASP-ACTIVE for an
-	// ordinary Dial, or ASP-INACTIVE when RFC 4666 Section 4.3.4.2 has it
-	// return to a previous state that was only ASP-INACTIVE. Guarded by muState.
-	resumeTo State
 	// stateChan is to update the state and handle it
 	stateChan chan State
 	// restartStateChan lets the dispatcher wait until the monitor has applied
@@ -207,25 +203,6 @@ type Association struct {
 	// beatData is the Heartbeat Data of the BEAT awaiting its Ack; empty
 	// when no BEAT is outstanding.
 	beatData []byte
-	// destinations tracks SS7 destination availability as reported by the peer
-	// through SSNM (RFC 4666 Section 4.5).
-	// resumeStray records that this Association was pushed out of ASP-ACTIVE by a
-	// stray acknowledgement rather than by the peer taking traffic away.
-	//
-	// RFC 4666 Section 4.3.4.1 asks for a return in that case: "If the ASP
-	// receives an unexpected ASP Up Ack message, the ASP should consider itself
-	// in the ASP-INACTIVE state.  If the ASP was not in the ASP-INACTIVE state,
-	// it SHOULD send an Error message and then initiate procedures to return
-	// itself to its previous state." The peer-driven routes into ASP-INACTIVE —
-	// an ASP Inactive, an ASP Inactive Ack, an "Alternate ASP Active" Notify —
-	// must not resume, or an Override-mode AS ping-pongs between two ASPs, so
-	// the two causes are distinguished here rather than by the previous state
-	// alone.
-	//
-	// Atomic rather than guarded by muState: the entry action that reads it
-	// runs inside handleStateUpdate, which already holds that lock, and
-	// sync.RWMutex is not reentrant.
-	resumeStray atomic.Bool
 	// terminating suppresses the automatic ASP Up climb while Shutdown is
 	// completing the ASP Inactive/ASP Down sequence.
 	terminating atomic.Bool
@@ -329,6 +306,8 @@ type Association struct {
 	// selectedRC is the Routing Context outbound DATA names, when the
 	// association carries more than one.
 	//
+	// destinations tracks SS7 destination availability as reported by the peer
+	// through SSNM (RFC 4666 Section 4.5).
 	destinations *destinations
 	// mtp3Restarts coordinates RFC 4666 Section 4.6 restart state for an SGP.
 	// It exists for both accepted and initiated SCTP associations so protocol
@@ -581,9 +560,6 @@ func newAssociationWithTrafficModePolicy(role Role, cfg *AssociationConfig, traf
 		dynamicPeerTrafficModes:   make(map[uint32]uint32),
 		dynamicLocalTrafficModes:  make(map[uint32]uint32),
 		rkmRequestGate:            make(chan struct{}, 1),
-		// A dialing ASP wants to carry traffic; Dial does not return until
-		// it does.
-		resumeTo: StateASPActive,
 	}
 	c.trafficModes.freeze(trafficModes)
 	c.freezeTrafficModePolicies()
@@ -2904,13 +2880,6 @@ func (c *Association) checkDataStream(streamID uint16) error {
 	return nil
 }
 
-// setResumeTo records how far an ASP should climb when it next comes up.
-func (c *Association) setResumeTo(s State) {
-	c.muState.Lock()
-	defer c.muState.Unlock()
-	c.resumeTo = s
-}
-
 // routingContextFor returns the Routing Context parameter naming one traffic
 // flow, for a caller that has said which flow this message belongs to.
 //
@@ -2989,23 +2958,6 @@ func (c *Association) setState(s State) {
 	c.muState.Unlock()
 	unlockTransfer()
 	c.notifyASPRouteStateChanged()
-}
-
-// resumeAfterStrayAck reports whether a return to ASP-ACTIVE is owed because a
-// stray acknowledgement pushed this Association out of it.
-func (c *Association) resumeAfterStrayAck() bool {
-	return c.resumeStray.Load()
-}
-
-// armResumeAfterStrayAck records that the next entry into ASP-INACTIVE was
-// caused by a stray acknowledgement, so the entry action re-initiates.
-func (c *Association) armResumeAfterStrayAck() {
-	c.resumeStray.Store(true)
-}
-
-// clearResumeAfterStrayAck cancels an armed return.
-func (c *Association) clearResumeAfterStrayAck() {
-	c.resumeStray.Store(false)
 }
 
 // noteRoutingContextsAcked records the Routing Contexts an ASP Active Ack
@@ -3446,7 +3398,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		if c.isIPSPDoubleExchange() {
 			routingContext = c.configuredLocalRoutingContextParam()
 		}
-		request, err := c.beginASPInactive(routingContext)
+		request, err := c.beginASPInactive(ctx, routingContext)
 		if err == nil {
 			err = c.waitTAck(ctx, request)
 		}
@@ -3873,12 +3825,17 @@ const (
 	// ManagementTransportCongestion is the implementation indication for local
 	// outbound transport pressure (RFC 4666 §§1.4.6, 4.5.2.1).
 	ManagementTransportCongestion
-	// ManagementASPWithdrawal reports scopes made inactive by an unsolicited
-	// ASP Inactive Ack (RFC 4666 §4.3.4.4 and §4.3.4.4.1). It is an
-	// implementation indication, not a primitive defined by §1.6.3. ASKeys
-	// names only the unsolicited withdrawal; local request confirmations and
-	// their delayed duplicates do not produce this indication.
+	// ManagementASPWithdrawal reports service withdrawn by an unsolicited
+	// ASP Up, Down or Inactive Ack (RFC 4666 §§4.3.4.1, 4.3.4.1.2,
+	// 4.3.4.2, 4.3.4.4 and 4.3.4.4.1). It is an implementation indication,
+	// not a primitive defined by §1.6.3. ASKeys names only affected active
+	// memberships; it may be empty when the prior state was inactive or down.
+	// Local confirmations and owed duplicates do not produce this report.
 	ManagementASPWithdrawal
+	// ManagementASPActivation reports a validated ASP Active Ack accepted without
+	// an outstanding activation request (RFC 4666 §§3.8.1, 4.3.4.3). The
+	// application decides whether to retain the grant or request ASP Inactive.
+	ManagementASPActivation
 )
 
 // String names the indication as RFC 4666 Section 1.6.3 does, or uses an
@@ -3901,6 +3858,8 @@ func (k ManagementIndicationKind) String() string {
 		return "DATA-QUEUE-CONGESTION"
 	case ManagementASPWithdrawal:
 		return "ASP-WITHDRAWAL"
+	case ManagementASPActivation:
+		return "ASP-ACTIVATION"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(k))
 	}
@@ -3920,6 +3879,15 @@ func causeDescription(cause error) string {
 // implementation names, so an indication can be logged without a lookup table.
 type ManagementIndication struct {
 	Kind ManagementIndicationKind
+	// PreviousState is the local ASP procedure state before an unsolicited
+	// ASP Up, Down, Active or Inactive acknowledgement report. For IPSP DE it
+	// is the TrafficToLocal state, not the independently controlled peer state.
+	// Set for ManagementASPWithdrawal and ManagementASPActivation.
+	PreviousState State
+	// PreviousIPSPState records both directions before those reports on an
+	// IPSP. Shared ASPSM withdrawals may affect scopes in both directions.
+	// Zero for an ASP.
+	PreviousIPSPState IPSPState
 	// DataQueueCongestion is set only for ManagementDataQueueCongestion.
 	// The indication owns this copy and its wire scope.
 	DataQueueCongestion *DataQueueCongestionIndication
@@ -3935,8 +3903,9 @@ type ManagementIndication struct {
 
 	// ASKeys is the complete exact Application Server scope, including Network
 	// Appearance and contextless-AS presence. The slice is owned by the
-	// indication. For ManagementASPWithdrawal these are the unsolicited scopes,
-	// excluding any portion confirming local deactivation.
+	// indication. For ManagementASPWithdrawal these are previously active scopes lost to the
+	// unsolicited assertion, excluding local deactivation confirmations. For
+	// ManagementASPActivation these are the accepted unsolicited grant scopes.
 	ASKeys []ASKey
 
 	// StatusType and StatusInfo are the two halves of the Status parameter of
@@ -3949,7 +3918,7 @@ type ManagementIndication struct {
 	ErrorCode uint32
 
 	// RoutingContexts is the complete Application Server scope of the
-	// indication. For ManagementASPWithdrawal it contains only numeric labels
+	// indication. For ManagementASPWithdrawal and ManagementASPActivation it contains only numeric labels
 	// from ASKeys; a contextless AS is represented only in ASKeys. For
 	// ManagementNotify it contains every explicitly named
 	// Routing Context, or the configured AS memberships inferred under RFC 4666

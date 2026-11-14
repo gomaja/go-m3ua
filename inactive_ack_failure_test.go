@@ -135,7 +135,7 @@ func TestWithdrawalReportsPrecedeSupersededApplicationFailure(t *testing.T) {
 					go func() { result <- c.ASPActive(ctx, associationConfigASKey(c.cfg, 1)) }()
 					select {
 					case <-sender.waiting:
-					case <-time.After(time.Second):
+					case <-time.After(aspTestWait):
 						t.Fatal("application write did not enter transport")
 					}
 					request = applicationActiveRequest(t, c)
@@ -150,46 +150,52 @@ func TestWithdrawalReportsPrecedeSupersededApplicationFailure(t *testing.T) {
 				}()
 				select {
 				case <-request.stop:
-				case <-time.After(time.Second):
+				case <-time.After(aspTestWait):
 					t.Fatal("withdrawal did not stop activation")
 				}
+				var waiting *aspTestCall
 				if cancelContext {
 					cancel()
 					select {
 					case err := <-done:
-						if !errors.Is(err, ErrASPProcedureSuperseded) {
-							t.Fatalf("claimed cancellation returned %v", err)
+						if !errors.Is(err, context.Canceled) {
+							t.Fatalf("independent cancellation exposed retirement before reports: %v", err)
 						}
-					case <-time.After(250 * time.Millisecond):
+					case <-time.After(aspTestWait):
 						t.Fatal("context cancellation waited for withdrawal reports")
 					}
-					assertApplicationActivationFailure(t, <-management, associationConfigASKey(c.cfg, 1))
+					ind := receiveASPTest(t, management, "context cancellation indication")
+					if ind.Kind != ManagementError || !errors.Is(ind.Cause, context.Canceled) ||
+						!strings.HasPrefix(ind.Description, "ASP Active failed:") || !reflect.DeepEqual(ind.ASKeys, []ASKey{associationConfigASKey(c.cfg, 1)}) {
+						t.Fatalf("independent cancellation indication = %+v", ind)
+					}
 				} else {
-					select {
-					case err := <-done:
-						t.Fatalf("application waiter released before withdrawal reports: %v", err)
-					case <-time.After(25 * time.Millisecond):
+					waiting = startASPTestCall(func() error {
+						select {
+						case err := <-done:
+							return err
+						case <-time.After(aspTestWait):
+							return errors.New("application waiter did not finish")
+						}
+					})
+					if !awaitASPTestStack(t, waiting, "(*Association).waitTAck(") {
+						t.Fatalf("application waiter released before withdrawal reports: %v", waiting.err)
 					}
 				}
 				unblock()
-				if err := <-handled; err != nil {
+				if err := receiveASPTest(t, handled, "withdrawal after drain"); err != nil {
 					t.Fatal(err)
 				}
 				if !cancelContext {
-					select {
-					case err := <-done:
-						if !errors.Is(err, ErrASPProcedureSuperseded) {
-							t.Fatalf("application activation returned %v", err)
-						}
-					case <-time.After(time.Second):
-						t.Fatal("application waiter was not released after reports")
+					if err := waiting.wait(t, "application result after reports"); !errors.Is(err, ErrASPProcedureSuperseded) {
+						t.Fatalf("application activation returned %v", err)
 					}
 				}
-				if ind := <-management; ind.Kind != ManagementASPWithdrawal {
+				if ind := receiveASPTest(t, management, "withdrawal or acceptance indication"); ind.Kind != ManagementASPWithdrawal {
 					t.Fatalf("first indication must be withdrawal: %+v", ind)
 				}
 				if state == "accepted" {
-					if ind := <-management; ind.Kind != ManagementError || !strings.Contains(ind.Cause.Error(), "already accepted by SCTP") {
+					if ind := receiveASPTest(t, management, "withdrawal or acceptance indication"); ind.Kind != ManagementError || !strings.Contains(ind.Cause.Error(), "already accepted by SCTP") {
 						t.Fatalf("second indication must report acceptance: %+v", ind)
 					}
 				}
@@ -223,7 +229,7 @@ func TestCancellationAcceptanceReportPrecedesWaiterCompletion(t *testing.T) {
 	management := c.ManagementIndications()
 	keys := []ASKey{associationConfigASKey(c.cfg, 1)}
 	cancelled := c.cancelASPActivations(keys, "ASP Inactive Ack")
-	c.reportInactiveAckWithdrawal(keys)
+	c.reportInactiveAckWithdrawal(keys, c.localASPProcedureState(), IPSPState{})
 	// Hold publication of the acceptance warning. Observe result directly:
 	// the public method's generic error report also takes muMgmt, so observing
 	// only the method's return would conceal premature waiter completion.

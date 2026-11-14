@@ -280,6 +280,14 @@ func (c *Association) localASPStateForStatus(key ASKey) State {
 	if state != StateASPActive {
 		return state
 	}
+	// RFC 4666 §4.3 and §5.6.1: Single Exchange has one traffic state;
+	// Active and Inactive commit activeRCs, not the independent DE Ack ledger.
+	if c.role == RoleIPSP && !c.isIPSPDoubleExchange() {
+		if c.activeForASKey(key) {
+			return StateASPActive
+		}
+		return StateASPInactive
+	}
 	if !key.RoutingContextSet {
 		if c.contextlessASAcked() {
 			return StateASPActive

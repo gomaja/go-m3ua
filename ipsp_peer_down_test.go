@@ -67,10 +67,10 @@ func TestIPSPPeerDownSuppressesAutomaticASPUp(t *testing.T) {
 	}
 }
 
-// RFC 4666 §4.3.4.2 distinguishes an unrequested ASP Down Ack from a peer
-// ASP Down request. The Ack still starts automatic recovery of shared ASPSM;
-// explicit Layer Management and orderly termination retain their own policy.
-func TestIPSPSharedASPSMDownAckRecovery(t *testing.T) {
+// RFC 4666 §4.3.4.2 distinguishes unrequested Down Ack from a local
+// confirmation. Unrequested withdrawal suppresses startup; solicited lifecycle
+// completion, explicit policy and orderly termination retain their behavior.
+func TestIPSPSharedASPSMDownAckHonorsRequestOwnership(t *testing.T) {
 	for _, model := range ipspDownModels {
 		if !model.sharedASPSM {
 			continue
@@ -83,7 +83,7 @@ func TestIPSPSharedASPSMDownAckRecovery(t *testing.T) {
 				terminating bool
 				wantUp      int
 			}{
-				{"unrequested Ack", false, false, false, 1},
+				{"unrequested Ack", false, false, false, 0},
 				{"local Down Ack", true, false, false, 1},
 				{"explicit unrequested Ack", false, true, false, 0},
 				{"explicit local Down Ack", true, true, false, 0},
@@ -222,7 +222,7 @@ func TestIPSPPeerDownAllowsNewASPSM(t *testing.T) {
 	}
 }
 
-func TestIPSPPeerUpSupersedesQueuedPeerDown(t *testing.T) {
+func TestIPSPPeerUpDoesNotTurnUnsolicitedDownAckIntoStartup(t *testing.T) {
 	for _, model := range ipspDownModels {
 		t.Run(model.name, func(t *testing.T) {
 			association, sent := newIPSPDownAssociationForTest(t, model.exchange, model.aspsm, StateASPActive)
@@ -237,7 +237,7 @@ func TestIPSPPeerUpSupersedesQueuedPeerDown(t *testing.T) {
 				t.Fatalf("superseded ASP-DOWN entry started %d ASP Up procedures", got)
 			}
 			association.handleReceivedSignals(context.Background(), messages.NewAspDownAck(nil), nil)
-			wantPublication, wantUp := StateASPDown, 1
+			wantPublication, wantUp := StateASPDown, 0
 			if !model.sharedASPSM {
 				wantPublication, wantUp = stateUnchanged, 0
 			}
