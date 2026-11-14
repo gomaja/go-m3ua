@@ -168,10 +168,7 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 		testContext.Run(row.name, func(testContext *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
-			clock, err := newMeasurementClock()
-			if err != nil {
-				testContext.Fatal(err)
-			}
+			clock := newCohortTestClock()
 			ssnm := row.ssnm
 			ssnm.QueueBytes = m3ua.DefaultSSNMSubscriptionQueueBytes
 			// The race detector slows every apply; the contract's 100 ms
@@ -180,7 +177,7 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 			ssnm.Budgets = ssnmBudgets{ApplyP99: time.Second, Resync: ssnmDefaultResyncBudget, Recovery: ssnmDefaultRecoveryBudget}
 			control := newReceiverControl(associations, maxOutstanding)
 			control.ssnm = newSSNMGenerator(ctx, commandConfig{Associations: associations, SSNM: ssnm}, clock)
-			sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+			sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP, TransportCongestion: &m3ua.TransportCongestionConfig{Disabled: true}})
 			if err != nil {
 				testContext.Fatal(err)
 			}
@@ -200,12 +197,14 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 			defer server.Close()
 
 			aspConfig := commandConfig{SCTPAddress: listener.Addr().String(), Associations: associations, SSNM: ssnm, PeerControl: server.URL, Drain: 200 * time.Millisecond, Duration: row.window}
-			asp, err := m3ua.NewEndpoint(senderEndpointConfig(aspConfig))
+			aspEndpointConfig := senderEndpointConfig(aspConfig)
+			aspEndpointConfig.TransportCongestion = &m3ua.TransportCongestionConfig{Disabled: true}
+			asp, err := m3ua.NewEndpoint(aspEndpointConfig)
 			if err != nil {
 				testContext.Fatal(err)
 			}
 			defer func() { _ = asp.Close() }()
-			aspAssociations, release, err := establishSenderAssociations(ctx, aspConfig, m3uaConnector{endpoint: asp})
+			aspAssociations, release, err := establishSenderAssociations(ctx, aspConfig, cohortConnector{m3uaConnector{endpoint: asp}})
 			if err != nil {
 				testContext.Fatal(err)
 			}
@@ -213,7 +212,8 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 			if err := waitForReady(ctx, server.URL, associations); err != nil {
 				testContext.Fatal(err)
 			}
-			run, err := startSSNMLoad(ctx, aspConfig, asp, aspAssociations)
+			clock.observe(aspAssociations)
+			run, err := startSSNMLoadWithClock(ctx, aspConfig, asp, aspAssociations, clock)
 			if err != nil {
 				testContext.Fatal(err)
 			}
@@ -242,7 +242,57 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 			if err := control.ssnm.acceptSpec(specification); err != nil {
 				testContext.Fatal(err)
 			}
+			if err := clock.boundary(ctx, start); err != nil {
+				testContext.Fatal(err)
+			}
 			control.ssnm.begin()
+			// Join each due report and every subscriber's receipt before the
+			// next clock step. The generator and all socket/store operations
+			// remain the production implementations.
+			offered := ssnm.TotalRate * uint64(row.window) / uint64(time.Second)
+			plan := newSSNMPlan(ssnm, associations)
+			for elapsed := 10 * time.Millisecond; elapsed <= row.window; elapsed += 10 * time.Millisecond {
+				instant := start + int64(elapsed) - 1
+				clock.advance(instant)
+				due := min(offered, uint64(instant-start)*ssnm.TotalRate/uint64(time.Second)+1)
+				expected := plan.expectedPositions(due)
+				waitCohortWork(testContext, ctx, clock, "SSNM reports and subscriber receipts", func() bool {
+					control.ssnm.mutex.Lock()
+					completed := uint64(len(control.ssnm.statuses))
+					control.ssnm.mutex.Unlock()
+					if completed < due {
+						return false
+					}
+					for _, subscriber := range run.subscribers {
+						if !subscriber.reachedAll(expected) {
+							return false
+						}
+					}
+					return true
+				})
+			}
+			// Do not let the mutating fence hide a partial withdrawal that
+			// leaves the association globally active. Check each AS on both sides.
+			assertActive := func() {
+				for _, status := range asp.ASPStatuses() {
+					if !status.LocalStateSet || status.LocalState != m3ua.StateASPActive {
+						testContext.Errorf("SSNM ASP scope inactive: %+v", status)
+					}
+				}
+				for _, status := range sgp.ApplicationServerStatuses() {
+					if status.State != m3ua.ASActive {
+						testContext.Errorf("SSNM AS inactive: %+v", status)
+					}
+				}
+			}
+			assertActive()
+			if err := clock.boundary(ctx, specification.Clock.End+int64(specification.Drain)+1); err != nil {
+				testContext.Fatal(err)
+			}
+			assertActive()
+			for _, event := range clock.observer.between(start, specification.Clock.End+int64(specification.Drain)) {
+				testContext.Errorf("association %d at %d: unexpected %s: %s", event.Association, event.At, event.Kind, event.Detail)
+			}
 			select {
 			case <-control.ssnm.done:
 			case <-ctx.Done():
@@ -255,13 +305,11 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 				testContext.Fatal("finish attached no ssnm record")
 			}
 			generator := record.Generator
-			plan := newSSNMPlan(ssnm, associations)
-			offered := ssnm.TotalRate * uint64(row.window/time.Millisecond) / 1000
 			testContext.Logf("verdict %s; offered %d (%v per association), sent %d, dispatch lag max %s, report duration p99 %s, send-buffer waits %d; delay p50 %s p99 %s max %s over %d receipts; store %d records",
 				record.Verdict, generator.Offered, generator.OfferedPerAssociation, generator.SentTotal, generator.DispatchLag.Max, generator.ReportDuration.P99, generator.SendBufferWaits,
 				record.Delay.Delay.P50, record.Delay.Delay.P99, record.Delay.Delay.Max, record.Delay.Delay.Count, record.Store.RecordsAtEnd)
 			if record.Verdict != ssnmVerdictPass {
-				testContext.Fatalf("verdict %s reasons %q", record.Verdict, record.Reasons)
+				testContext.Errorf("verdict %s reasons %q", record.Verdict, record.Reasons)
 			}
 			if generator.Offered != offered || generator.Associations != associations || len(generator.OfferedPerAssociation) != associations {
 				testContext.Fatalf("generator offered %d over %d associations, want %d over %d", generator.Offered, generator.Associations, offered, associations)

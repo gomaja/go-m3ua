@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -372,5 +373,46 @@ func TestRouteReferenceRecordsStayOutOfNominalRecords(testContext *testing.T) {
 	record, err := json.Marshal(runRecord{Spec: routedSpec(modeRoutedDirect)})
 	if err != nil || strings.Contains(string(record), "route_references") {
 		testContext.Fatalf("a nominal record serializes route references: %v", err)
+	}
+}
+
+// A controlled live fixture must not weaken the real-time acceptance rule.
+// These synthetic completion timestamps model a stalled churner catching up
+// in order, including the exact tolerance boundary, without needing sockets.
+func TestRouteReferenceLagAboveToleranceRemainsInconclusive(testContext *testing.T) {
+	for _, extra := range []int64{0, 1} {
+		testContext.Run(fmt.Sprintf("tolerance-plus-%dns", extra), func(testContext *testing.T) {
+			specification := routeReferenceSpecFixture(routeReferencesChurn)
+			start := int64(time.Hour)
+			specification.Clock.Start = start
+			specification.Clock.End = start + int64(specification.Duration)
+			tolerance := routeReferenceLagTolerance(1000)
+			churner := &routeReferenceChurner{anchor: start, rate: 1000, peak: routeReferencePeak, peakReached: routeReferencePeak, operation: newDurationHistogram()}
+			stalled := start + int64(500*time.Millisecond) + tolerance + extra
+			for operation := range 2000 {
+				completed := start + int64(operation)*int64(time.Millisecond)
+				if operation >= 500 {
+					completed = max(completed, stalled)
+				}
+				churner.completed = append(churner.completed, completed)
+			}
+			churner.cycleEnds = []int64{start + int64(1999*time.Millisecond)}
+			churner.transitions = []routeReferenceTransition{{at: start + 1, association: 1, first: true}, {at: churner.cycleEnds[0], association: 1}}
+			fixture := routeReferenceRecordFixture()
+			run := &routeReferenceRun{spec: *specification.RouteReferences, churner: churner, observer: &routeReferenceObserver{}}
+			record := run.evaluate(specification, fixture.Before, fixture.After)
+			wantOutcome, wantVerdict := failoverPass, failoverPass
+			if extra > 0 {
+				wantOutcome, wantVerdict = failoverNotMeasured, verdictInconclusive
+			}
+			if record.Verdict != wantVerdict || len(record.Criteria) != 5 || record.Criteria[0].Name != "churn_intensity" || record.Criteria[0].Outcome != wantOutcome {
+				testContext.Fatalf("lag %dns: verdict %s, criteria %+v", tolerance+extra, record.Verdict, record.Criteria)
+			}
+			for _, criterion := range record.Criteria[1:] {
+				if criterion.Outcome != failoverPass {
+					testContext.Errorf("correctness criterion %+v", criterion)
+				}
+			}
+		})
 	}
 }
