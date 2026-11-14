@@ -19,7 +19,8 @@ type DestinationStateAuditRequest struct {
 }
 
 // SignallingCongestionRequest is an RFC 4666 Section 3.4.4 SCON request.
-// Concerned Destination is valid only in the ASP-to-SGP direction.
+// Concerned Destination is valid only in the ASP-to-SGP direction with exactly
+// one affected destination whose mask is zero (RFC 4666 Section 3.4.4).
 type SignallingCongestionRequest struct {
 	Scope        WireScope
 	Destinations []PointCodeRange

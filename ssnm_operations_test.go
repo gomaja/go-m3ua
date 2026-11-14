@@ -241,7 +241,7 @@ func TestSSNMOperationAssociationWire(t *testing.T) {
 
 	if err := association.SignallingCongestion(SignallingCongestionRequest{
 		Scope:                   audit.Scope,
-		Destinations:            audit.Destinations,
+		Destinations:            audit.Destinations[:1],
 		ConcernedDestination:    0x010203,
 		ConcernedDestinationSet: true,
 	}); err != nil {
@@ -253,7 +253,7 @@ func TestSSNMOperationAssociationWire(t *testing.T) {
 	}
 	assertSSNMOperationScope(t,
 		omitted.NetworkAppearance, omitted.RoutingContext, omitted.AffectedPointCode,
-		audit.Scope, audit.Destinations,
+		audit.Scope, audit.Destinations[:1],
 	)
 	if omitted.CongestionIndications != nil {
 		t.Fatalf("omitted SCON congestion parameter = %v, want nil", omitted.CongestionIndications)

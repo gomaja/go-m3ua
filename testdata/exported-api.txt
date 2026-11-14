@@ -502,6 +502,7 @@ field SSNMReport.PeerReported
 field SSNMReport.Revision
 field SSNMReport.Scope
 field SSNMReport.Source
+field SSNMReport.UnmappedConcernedDestination
 field SSNMReport.UserCause
 field SSNMReport.UserCauseSet
 field SSNMSnapshot.LastResourceLoss

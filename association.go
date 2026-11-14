@@ -1235,6 +1235,18 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	if isPayloadData(buf) {
 		return c.writeRawData(m3, buf, n, enforceTrafficScope)
 	}
+	// RFC 4666 §3.4.4 maps Concerned Destination to a TFC using one
+	// unmasked affected DPC, only ASP -> SGP. Inspect the encoded message so
+	// typed operations and generic caller-built signals share admission.
+	// Parse framing first; check the mapping after existing scope admission.
+	var scon *messages.SignallingCongestion
+	if isSSNM(buf) && buf[3] == messages.MsgTypeSignallingCongestion {
+		decoded, parseErr := messages.Parse(buf)
+		if parseErr != nil {
+			return 0, parseErr
+		}
+		scon = decoded.(*messages.SignallingCongestion)
+	}
 	// RFC 4666 §3.4.5 permits exactly one unmasked DUPU destination.
 	// Check the encoded message so caller-built headers and serializers use
 	// the same send admission. Codecs remain able to retain captured lists.
@@ -1249,15 +1261,18 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 		}
 	}
 	trafficScoped := isSSNM(buf)
+	if enforceTrafficScope && trafficScoped {
+		release, err := c.lockOutboundTrafficScope(buf)
+		if err != nil {
+			return 0, err
+		}
+		defer release()
+	}
+	if scon != nil && scon.ConcernedDestination != nil && (c.role != RoleASP || !singleUnmaskedAffectedPointCode(scon.AffectedPointCode)) {
+		return 0, ErrInvalidParameterValue
+	}
 
 	if c.signalWriter != nil {
-		if enforceTrafficScope && trafficScoped {
-			release, err := c.lockOutboundTrafficScope(buf)
-			if err != nil {
-				return 0, err
-			}
-			defer release()
-		}
 		select {
 		case <-stopped:
 			return 0, nil
@@ -1273,13 +1288,6 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	// Ack and NTFY on any stream. DATA, which rule 1 forbids on stream 0, has
 	// already been handled above.
 	sctpInfo := *c.sctpInfo
-	if enforceTrafficScope && trafficScoped {
-		release, err := c.lockOutboundTrafficScope(buf)
-		if err != nil {
-			return 0, err
-		}
-		defer release()
-	}
 
 	if origin == libraryWrite {
 		var submitted bool

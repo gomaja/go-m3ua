@@ -20,6 +20,8 @@ delivers unknown values unchanged; applications can call `Valid()` to check them
 
 Contents:
 
+- [Concerned Destination admission and diagnostics](#concerned-destination-admission-and-diagnostics)
+
 - [Application-owned withdrawal recovery](#application-owned-withdrawal-recovery)
 - [Endpoint role](#endpoint-role)
 - [Application Server membership](#application-server-membership)
@@ -1026,3 +1028,27 @@ identifier that correlates one with the cancelled message. Delayed duplicate
 Active Ack handling remains a separate deferred behavior. The library changes
 no state and sends no replacement request because SCTP accepted the cancelled
 send.
+
+## Concerned Destination admission and diagnostics
+
+SCON sends with Concerned Destination now require ASP-to-SGP direction and
+exactly one unmasked Affected Point Code (RFC 4666 §3.4.4). Typed
+`SignallingCongestion` and raw `WriteSignal` refuse ambiguous lists/ranges before
+writing, with `ErrInvalidParameterValue`. Split the report into single-DPC
+messages with the correct triggering origin, or omit Concerned Destination when
+there is no single trigger. SCON lists and ranges without it remain supported.
+
+Receiving remains lenient about this mapping mismatch: congestion information
+for all destinations is delivered on `SubscribeSSNM`, without a protocol Error.
+For an ambiguous mapping, `SSNMReport.ConcernedDestinationSet` is false and
+`ConcernedDestination` is zero. The new optional
+`UnmappedConcernedDestination *uint32` holds the received value for diagnostics,
+including point code zero; it must never be used as a TFC trigger. A valid
+single-DPC trigger retains the existing fields and has a nil diagnostic.
+Layer Management consumes that diagnostic through the existing SSNM subscription;
+no additional M-ERROR primitive is generated for an accepted SCON. Existing
+framing, direction and scope checks remain in force.
+
+The added `SSNMReport` field breaks positional composite literals; use keyed
+literals. Each subscription owns its scalar diagnostic copy. SPMC assessment
+and SS7 TFC generation remain with the application/NIF.

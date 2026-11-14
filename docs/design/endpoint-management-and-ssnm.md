@@ -406,7 +406,10 @@ shared by every ASP it serves and was never a property of one association.
 
 `Association.DestinationStateAudit` is ASP-to-SGP (RFC 4666 Sections 3.4.3 and
 4.5.3). `Association.SignallingCongestion` is the optional ASP-to-SGP report;
-Concerned Destination is permitted only there (Section 3.4.4).
+Concerned Destination is permitted only there, with exactly one Affected Point
+Code whose mask is zero (Section 3.4.4). The same admission rule applies to
+`Association.WriteSignal`, including generic caller-built SCON. Without that
+parameter, SCON destination lists and ranges remain supported.
 `Endpoint.SignallingCongestion` is SGP-to-concerned-ASPs and atomically updates
 the SGP destination registry. `Endpoint.DestinationUserPartUnavailable` is
 SGP-to-concerned-ASPs and enforces DUPU's one unmasked destination and valid
@@ -426,6 +429,24 @@ SGP fan-out snapshots concerned active ASPs under the AS registry and writes to
 each association without holding Endpoint or AS locks. Partial failures are
 returned with the failed `AssociationID` values; successful peers are never
 replayed automatically.
+
+A received ASP-to-SGP SCON can retain congestion for a list or range even
+when its Concerned Destination cannot identify a single-DPC TFC trigger
+(RFC 4666 §3.4.4). `SubscribeSSNM` reports every destination, range and congestion
+level unchanged. `SSNMReport.ConcernedDestinationSet` is true only for a mappable
+trigger; otherwise its value is zero and `UnmappedConcernedDestination` owns the
+raw received value, including an explicit zero. That optional scalar is a Layer
+Management diagnostic, not permission to generate a TFC. Every subscriber owns
+its copy. The receive path sends no Error for this mapping mismatch and changes
+no DATA authorization. The existing direction, parameter framing, scope and
+resource checks still apply.
+
+The SSNM subscription is the management channel for this accepted report.
+`ManagementIndications` has no accepted-message warning primitive: M-ERROR would
+suggest a received peer Error or failed local operation. No additional management
+primitive is emitted; consumers must inspect the diagnostic in the SSNM report
+and honor that subscription's continuity-loss contract. TFC generation and
+SPMC-wide policy remain application/NIF responsibilities.
 
 ## Route-independent SSNM knowledge
 
