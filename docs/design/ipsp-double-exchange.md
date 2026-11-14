@@ -71,7 +71,12 @@ Incoming DATA is validated against `TrafficToLocal`. Outgoing DATA is selected
 from `TrafficToPeer`. SCON received from the peer is scoped to
 `TrafficToPeer`, while SCON originated for traffic arriving at this IPSP is
 scoped to `TrafficToLocal`. RFC 4666 Sections 1.4.3.4 and 1.4.6 do not extend
-the SG-ASP DUNA, DAVA, DAUD, DUPU, or DRST procedures to IPSP communication.
+the SG-ASP DUNA, DAVA, DAUD, DUPU, or DRST procedures to the library's
+endpoint-only IPSP model. The SS7-connected IPSP restart variant is not
+implemented: RFC 4666 §4.6 says, "In the IPSP case, MTP restart could be
+considered if the IPSP also has connection to an SS7 network." It continues,
+"In that case, the same behavior as described above for the SGP would apply
+to the restarting IPSP." Managed MTP3 restart is available only on `RoleSGP`.
 
 ## Ordering and recovery
 

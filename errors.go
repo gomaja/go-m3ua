@@ -922,8 +922,12 @@ func (c *Association) handleErrors(e error) error {
 	return nil
 }
 
-// first40 returns the octets to quote in Diagnostic Information: the message as
-// received, truncated to the 40 octets RFC 4666 Section 3.8.1 asks for.
+// first40 returns at most the first 40 received octets for Diagnostic Information.
+// RFC 4666 Section 3.8.1 says for Unsupported Message Class and Unsupported
+// Message Type: "the Diagnostic Information parameter MUST be included with the
+// first 40 octets of the offending message." Other uses of this bound are local
+// diagnostic policy; the general rule is "The Diagnostic Information SHOULD
+// contain the offending message."
 func first40(raw []byte) []byte {
 	b := diagnosticInformation(raw)
 	if len(b) > 40 {

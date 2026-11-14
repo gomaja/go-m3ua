@@ -383,8 +383,12 @@ Context "an index into a sending node's Message Distribution Table", so the same
 value on two Signalling Gateways names different Application Servers. What
 retained knowledge is owned by is `SSNMPartition`, below. Both presence bits are
 load bearing: zero is a legitimate explicit value for either parameter, and a
-Routing Context list may legitimately be empty, so neither value nor length
-substitutes for the flag.
+Routing Context slice may be empty in memory when `RoutingContextSet` is
+false, representing omission. A present wire list must be nonempty; RFC 4666
+§3.4.1 describes it as "Routing Context: n x 32 bits (unsigned integer)" and
+says, "The conditional Routing Context parameter contains the Routing Context
+values associated with the DUNA message." Neither value nor length substitutes
+for the presence flag.
 
 The operations are:
 
@@ -414,7 +418,12 @@ parameter, SCON destination lists and ranges remain supported.
 the SGP destination registry. `Endpoint.DestinationUserPartUnavailable` is
 SGP-to-concerned-ASPs and enforces DUPU's one unmasked destination and valid
 User/Cause tables (Section 3.4.5). The SG-ASP DUNA, DAVA, DAUD, DUPU, and DRST
-procedures are not extended to IPSP communication by Sections 1.4.3.4 or 1.4.6.
+procedures are not part of the library's endpoint-only IPSP model
+(Sections 1.4.3.4 and 1.4.6). The SS7-connected IPSP restart variant is not
+implemented. RFC 4666 §4.6 says, "In the IPSP case, MTP restart could be
+considered if the IPSP also has connection to an SS7 network." It continues,
+"In that case, the same behavior as described above for the SGP would apply
+to the restarting IPSP." Managed MTP3 restart is available only on `RoleSGP`.
 DUPU's single unmasked destination rule also applies at shared send admission,
 including `Association.WriteSignal` and generic caller-built messages. The
 message codecs remain general serializers for capture decoding and re-encoding.
