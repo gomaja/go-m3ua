@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -788,36 +787,22 @@ func TestSubscribeStreamsRemainIndependent(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := subscriptionContext(t)
-			var readers sync.WaitGroup
-			var received atomic.Int32
+			var states <-chan State
+			var management <-chan *ManagementIndication
 			var calls atomic.Int32
 			var subscribed *Association
 			t.Cleanup(func() {
 				if subscribed != nil {
 					_ = subscribed.Close()
 				}
-				readers.Wait()
 			})
 			callback := func(a *Association) {
 				calls.Add(1)
 				subscribed = a
 				if statesOnly {
-					stream := a.StateChanges()
-					readers.Go(func() {
-						for range stream {
-							received.Add(1)
-						}
-					})
+					states = a.StateChanges()
 				} else {
-					stream := a.ManagementIndications()
-					readers.Go(func() {
-						for indication := range stream {
-							if indication.Kind == ManagementTransportCongestion || indication.Kind == ManagementDataQueueCongestion {
-								continue
-							}
-							received.Add(1)
-						}
-					})
+					management = a.ManagementIndications()
 				}
 			}
 			asp, sgp, err := setupConnHB(t, ctx, 27984+index, &HeartbeatInfo{Enabled: false}, &HeartbeatInfo{Enabled: false}, callback)
@@ -828,27 +813,33 @@ func TestSubscribeStreamsRemainIndependent(t *testing.T) {
 			if calls.Load() != 1 || subscribed != asp {
 				t.Fatal("Subscribe did not install the selected reader")
 			}
+			if statesOnly {
+				assertHandshakeStates(t, handshakeSubscription{states: states})
+			} else {
+				// The two ASes each report INACTIVE and ACTIVE during setup.
+				for range 4 {
+					receiveNotifyIndication(t, ctx, management)
+				}
+			}
 			for range 140 {
 				if _, err := sgp.WriteSignal(messages.NewNotify(params.NewStatus(params.AsStateActive), nil, params.NewRoutingContext(1), nil)); err != nil {
 					t.Fatal(err)
 				}
+				if !statesOnly {
+					// Confirm draining before the next send instead of relying on
+					// an independently scheduled reader to keep up with the burst.
+					receiveNotifyIndication(t, ctx, management)
+				}
 			}
-			barrier := []byte("independent subscription")
-			sgp.setBeatData(barrier)
-			if _, err := sgp.WriteSignal(messages.NewHeartbeat(params.NewHeartbeatData(barrier))); err != nil {
-				t.Fatal(err)
+			waitIndicationBarrier(t, ctx, asp, sgp, "independent subscription")
+			if len(states) != 0 {
+				t.Fatal("selected state stream queued unexpected transitions")
 			}
-			select {
-			case <-sgp.beatAckChan:
-			case <-ctx.Done():
-				t.Fatal(ctx.Err())
-			}
-			want := int32(144)
-			if statesOnly {
-				want = 2
-			}
-			if !waitFor(func() bool { return received.Load() == want }, time.Second) {
-				t.Fatalf("selected stream delivered %d indications, want %d", received.Load(), want)
+			for len(management) > 0 {
+				indication := receiveSubscription(t, management)
+				if indication.Kind != ManagementTransportCongestion && indication.Kind != ManagementDataQueueCongestion {
+					t.Fatalf("selected management stream queued an extra indication: %+v", indication)
+				}
 			}
 			if statesOnly && len(asp.mgmtChan) != 0 {
 				t.Error("unsubscribed management stream queued indications")
