@@ -534,21 +534,30 @@ func TestMTPRouteStatusesScalesWithRouteCount(t *testing.T) {
 	defer debug.SetGCPercent(previousGCPercent)
 
 	// Pair nearby samples and alternate their order so changes in CPU speed,
-	// scheduling and GC pressure do not favor one inventory. Average five calls
-	// per sample to avoid comparing isolated sub-millisecond calls under -race.
+	// scheduling and GC pressure do not favor one inventory. Take the fastest of
+	// five calls per sample so occasional race/allocator bookkeeping does not
+	// dominate a whole batch, then take the median across the paired samples.
 	// Bound both the samples and the total sampling time: the historical cubic
 	// implementation should fail the gate rather than exhaust the test timeout.
 	measure := func(endpoint *Endpoint) time.Duration {
+		// Collect before each batch so discarded snapshots do not accumulate
+		// across rounds. Under -race, that allocation history can inflate the
+		// larger inventory's CPU cost even without a collection in the timer.
+		runtime.GC()
 		start := time.Now()
-		calls := 0
-		for calls < 5 {
+		var fastest time.Duration
+		for calls := 0; calls < 5; calls++ {
+			callStart := time.Now()
 			_ = endpoint.MTPRouteStatuses()
-			calls++
+			elapsed := time.Since(callStart)
+			if calls == 0 || elapsed < fastest {
+				fastest = elapsed
+			}
 			if time.Since(start) >= ceiling {
 				break
 			}
 		}
-		return time.Since(start) / time.Duration(calls)
+		return fastest
 	}
 	var smallSamples, largeSamples []time.Duration
 	var growths []float64
@@ -572,7 +581,7 @@ func TestMTPRouteStatusesScalesWithRouteCount(t *testing.T) {
 	sort.Float64s(growths)
 	middle := len(growths) / 2
 	smallElapsed, largeElapsed, growth := smallSamples[middle], largeSamples[middle], growths[middle]
-	t.Logf("MTPRouteStatuses median call: 250 routes %s, 1,000 routes %s; median paired growth %.2fx (%d rounds)",
+	t.Logf("MTPRouteStatuses median fastest call: 250 routes %s, 1,000 routes %s; median paired growth %.2fx (%d rounds)",
 		smallElapsed, largeElapsed, growth, len(growths))
 
 	if largeElapsed > ceiling {
@@ -582,7 +591,8 @@ func TestMTPRouteStatusesScalesWithRouteCount(t *testing.T) {
 	// 1,000 routes is 4x 250 routes: linear or n*log(n) growth is about 4-5x,
 	// quadratic about 16x and cubic (the historical defect) about 64x. The
 	// median of paired ratios tolerates isolated stalls without admitting
-	// quadratic growth, including when the race detector instruments each call.
+	// quadratic growth: sustained quadratic or cubic traversal work is present
+	// in every call, including the fastest, with or without race instrumentation.
 	const maxGrowth = 10.0
 	if growth > maxGrowth {
 		t.Fatalf("MTPRouteStatuses grew %.1fx from 250 to 1,000 routes (%s -> %s/call); want under %.1fx",
