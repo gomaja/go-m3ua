@@ -102,7 +102,7 @@ func testGenerator(testContext *testing.T, rate uint64, apcs, records, associati
 	testContext.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	testContext.Cleanup(cancel)
-	generator := newSSNMGenerator(ctx, commandConfig{Associations: associations, SSNM: ssnmConfig{TotalRate: rate, APCs: apcs, Records: records}}, clock)
+	generator := newSSNMGenerator(ctx, nationalCongestionCommandConfig(commandConfig{Associations: associations, SSNM: ssnmConfig{TotalRate: rate, APCs: apcs, Records: records}}), clock)
 	if manual, stepped := clock.(*manualClock); stepped {
 		generator.sleep = func(_ context.Context, duration time.Duration) { manual.advance(duration) }
 	}
@@ -176,7 +176,7 @@ func TestSSNMGeneratorPreloadStepsFillEachPartitionOnItsAssociation(testContext 
 }
 
 func TestSSNMGeneratorPreloadNeedsEveryAssociation(testContext *testing.T) {
-	generator := newSSNMGenerator(context.Background(), commandConfig{Associations: 2, SSNM: ssnmConfig{TotalRate: 10, APCs: 1, Records: 8}}, &manualClock{now: int64(time.Second)})
+	generator := newSSNMGenerator(context.Background(), nationalCongestionCommandConfig(commandConfig{Associations: 2, SSNM: ssnmConfig{TotalRate: 10, APCs: 1, Records: 8}}), &manualClock{now: int64(time.Second)})
 	generator.track(0, &recordingWriter{clock: &manualClock{now: int64(time.Second)}})
 	if err := generator.preloadStep(0); err == nil || !strings.Contains(err.Error(), "not ready") {
 		testContext.Fatalf("preload with one of two associations: %v", err)

@@ -82,19 +82,19 @@ func TestRoutedModesLiveOverLoopback(testContext *testing.T) {
 			base := routedLoopbackPortBase(testContext)
 			control := routedLoopbackControlAddress(testContext)
 			sctpAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(base))
-			receiverConfig, err := parseConfig([]string{
+			receiverConfig, err := parseConfig(nationalCongestionArguments([]string{
 				"-role=sgp", "-transport=listen", "-mode=" + mode, "-sctp-address=" + sctpAddress,
 				"-control-address=" + control, "-associations=8",
-			})
+			}))
 			if err != nil {
 				testContext.Fatal(err)
 			}
-			senderConfig, err := parseConfig([]string{
+			senderConfig, err := parseConfig(nationalCongestionArguments([]string{
 				"-role=asp", "-transport=dial", "-mode=" + mode, "-sctp-address=" + sctpAddress,
 				"-local-address=127.0.0.1:0", "-peer-control=http://" + control, "-associations=8",
 				"-payload=mix", "-rate=2000", "-warmup=1s", "-duration=2s", "-drain=2s",
 				"-cohort=routed-live-" + mode, "-seed=5",
-			})
+			}))
 			if err != nil {
 				testContext.Fatal(err)
 			}

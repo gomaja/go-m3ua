@@ -57,6 +57,7 @@ func TestAPerMessageContextIsStillValidated(t *testing.T) {
 	// inactive and naming one of those explicitly must not send traffic for it.
 	t.Run("a context the peer never acknowledged is refused", func(t *testing.T) {
 		asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
+		asp.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 		setInventoryNetworkAppearance(&asp.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 		capture := &dataFrameCapture{}
 		asp.dataWriter = capture.write

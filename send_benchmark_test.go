@@ -19,6 +19,7 @@ func benchmarkSendAssociation() *Association {
 	cfg := NewAssociationConfig().SetApplicationServers(ASConfig{
 		ASKey: allocationRequest(0).AS, TrafficMode: params.TrafficModeLoadshare,
 	})
+	cfg.CongestionProfiles = []NetworkCongestionProfile{{NetworkAppearance: 7, NetworkAppearanceSet: true, Profile: CongestionProfile{Method: CongestionNationalWithoutPriorities, MaxLevel: 3}}}
 	c := &Association{
 		cfg: cfg, role: RoleASP, state: StateASPActive, muState: new(sync.RWMutex),
 		sctpInfo: &sctp.SndInfo{PPID: M3UAPPID}, maxMessageStreamID: 4,
@@ -83,7 +84,7 @@ func benchmarkTransferEndpoint(b *testing.B) *Endpoint {
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	config.Routing.AllowUnknownDestinations = true
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		b.Fatal(err)
 	}

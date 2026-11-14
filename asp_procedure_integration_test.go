@@ -32,7 +32,7 @@ func TestExplicitASPProcedurePolicyControlsDialReadinessAndWireSequence(t *testi
 		}
 	})
 
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

@@ -248,7 +248,7 @@ func runASP(ctx context.Context, config commandConfig) (record aspRecord) {
 }
 
 func (asp *aspRun) start(record *aspRecord) error {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: aspInventory(asp.config.Routes), SSNMState: ssnmStateConfig()})
+	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: asp.config.CongestionMethod}}, ASP: aspInventory(asp.config.Routes), SSNMState: ssnmStateConfig()})
 	if err != nil {
 		return fmt.Errorf("ASP endpoint: %w", err)
 	}

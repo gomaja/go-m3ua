@@ -9,7 +9,7 @@ import (
 )
 
 func TestEndpointAssociationStatusUsesStableOwnedIDs(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestEndpointAssociationStatusUsesStableOwnedIDs(t *testing.T) {
 }
 
 func TestAssociationIDIsNotReusedAfterClose(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestEndpointApplicationServerStatusesSeparateNetworkAppearances(t *testing.
 		RoutingContext:       1,
 		RoutingContextSet:    true,
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		ApplicationServers: &ApplicationServerConfig{
 			ActivationPolicies: map[ASKey]ASActivationPolicy{
@@ -107,7 +107,7 @@ func TestEndpointApplicationServerStatusesSeparateNetworkAppearances(t *testing.
 				secondKey: {RequiredActiveASPs: 2},
 			},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestEndpointASPStatusesPreserveDirectionAndExactASKey(t *testing.T) {
 	}
 
 	t.Run("ASP reports local state and identifier", func(t *testing.T) {
-		endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint: %v", err)
 		}
@@ -185,7 +185,7 @@ func TestEndpointASPStatusesPreserveDirectionAndExactASKey(t *testing.T) {
 	})
 
 	t.Run("SGP reports peer state and identifier", func(t *testing.T) {
-		endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint: %v", err)
 		}
@@ -216,7 +216,7 @@ func TestEndpointASPStatusesPreserveDirectionAndExactASKey(t *testing.T) {
 }
 
 func TestEndpointASPStatusReportsPartialOverridePerApplicationServer(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestEndpointMTPRouteStatusIsKeyedAndCallerOwned(t *testing.T) {
 }
 
 func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestEndpointDestinationStatusPreservesExactScopeAndCongestion(t *testing.T)
 }
 
 func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestEndpointDestinationStatusesKeepNewestPerExpandedScope(t *testing.T) {
 }
 
 func TestEndpointRoleInvalidStatusQueriesReturnNoResult(t *testing.T) {
-	asp, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	asp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -451,7 +451,7 @@ func TestEndpointRoleInvalidStatusQueriesReturnNoResult(t *testing.T) {
 		t.Fatalf("ASP DestinationStatuses = %+v, want nil", statuses)
 	}
 
-	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}

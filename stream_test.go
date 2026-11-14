@@ -333,7 +333,7 @@ func TestWriteSignalUsesTheDatasOwnSLS(t *testing.T) {
 		inventoryNetworkAppearanceParam(aspAssociation.cfg.ApplicationServers),
 		params.NewRoutingContext(1),
 		params.NewProtocolData(
-			0x11111111, 0x22222222, params.ServiceIndSCCP, 2, 3,
+			0x11111111, 0x22222222, params.ServiceIndSCCP, 2, 0,
 			messageSLS, []byte("write-signal-sls"),
 		),
 		nil,

@@ -120,7 +120,7 @@ func stalledSCTPSenderWithEndpoint(t *testing.T, endpointConfig EndpointConfig) 
 		}
 		ready <- accepted{peer, e}
 	}()
-	endpoint, err := NewEndpoint(endpointConfig)
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(endpointConfig))
 	if err != nil {
 		t.Fatal(err)
 	}

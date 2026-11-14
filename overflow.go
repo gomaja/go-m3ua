@@ -51,6 +51,64 @@ type dataOverflowKey struct {
 	networkAppearanceSet, routingContextSet     bool
 }
 
+type queueCongestionBinding struct {
+	key     ASKey
+	version uint64
+	epoch   uint64
+	local   bool
+}
+
+type dataOverflowScope struct {
+	DataQueueCongestionIndication
+	binding queueCongestionBinding
+}
+
+func (c *Association) queueCongestionBinding(key ASKey, scope WireScope) queueCongestionBinding {
+	if !key.RoutingContextSet && scope.RoutingContextSet && len(scope.RoutingContexts) == 1 {
+		key.RoutingContext, key.RoutingContextSet = scope.RoutingContexts[0], true
+	}
+	local := c.isIPSPDoubleExchange()
+	key = normalizeOutboundASKey(key)
+	version := uint64(0)
+	c.muDynamicASKeys.RLock()
+	keys, versions := c.dynamicPeerASKeys, c.dynamicPeerASKeyVersions
+	if local {
+		keys, versions = c.dynamicLocalASKeys, c.dynamicLocalASKeyVersions
+	}
+	if key.RoutingContextSet {
+		if dynamic, ok := keys[key.RoutingContext]; ok {
+			key, version = dynamic, versions[key.RoutingContext]
+		}
+	}
+	c.muDynamicASKeys.RUnlock()
+	return queueCongestionBinding{key: key, version: version, epoch: c.Epoch(), local: local}
+}
+
+// Called with muDynamicASKeys held for this short check only.
+func (c *Association) queueCongestionBindingCurrent(binding queueCongestionBinding) bool {
+	if binding.epoch != c.Epoch() {
+		return false
+	}
+	keys, versions := c.dynamicPeerASKeys, c.dynamicPeerASKeyVersions
+	if binding.local {
+		keys, versions = c.dynamicLocalASKeys, c.dynamicLocalASKeyVersions
+	}
+	if !binding.key.RoutingContextSet {
+		return true // Contextless provisioned bindings are immutable.
+	}
+	return versions[binding.key.RoutingContext] == binding.version &&
+		(binding.version == 0 || keys[binding.key.RoutingContext] == binding.key)
+}
+
+func (c *Association) sconPublicationBindings(message *messages.SignallingCongestion) []queueCongestionBinding {
+	keys := c.congestionSCONKeys(message.NetworkAppearance, message.RoutingContext, c.isIPSPDoubleExchange())
+	bindings := make([]queueCongestionBinding, 0, len(keys))
+	for _, key := range keys {
+		bindings = append(bindings, c.queueCongestionBinding(key, WireScope{}))
+	}
+	return bindings
+}
+
 func overflowKey(s WireScope, dpc, opc uint32) dataOverflowKey {
 	key := dataOverflowKey{networkAppearance: s.NetworkAppearance, networkAppearanceSet: s.NetworkAppearanceSet,
 		routingContextSet: s.RoutingContextSet, dpc: dpc, opc: opc}
@@ -85,10 +143,12 @@ func (c *Association) recordDataOverflowLocked(msg *DataMessage) (*DataQueueOver
 	// consumer has drained the queue before this observation.
 	c.dataOverflowLowSince = time.Time{}
 	key := overflowKey(msg.Scope, msg.ProtocolData.DestinationPointCode, msg.ProtocolData.OriginatingPointCode)
-	if _, exists := c.dataOverflowScopes[key]; exists {
+	binding := c.queueCongestionBinding(msg.AS, msg.Scope)
+	previous, exists := c.dataOverflowScopes[key]
+	if exists && previous.binding == binding {
 		return nil, nil, false
 	}
-	if len(c.dataOverflowScopes) == dataOverflowScopeLimit {
+	if !exists && len(c.dataOverflowScopes) == dataOverflowScopeLimit {
 		c.dataScopeTrackingLosses.Add(1)
 		if !c.dataOverflowTrackingLost {
 			c.dataOverflowTrackingLost = true
@@ -99,13 +159,13 @@ func (c *Association) recordDataOverflowLocked(msg *DataMessage) (*DataQueueOver
 		return nil, nil, false
 	}
 	if c.dataOverflowScopes == nil {
-		c.dataOverflowScopes = make(map[dataOverflowKey]DataQueueCongestionIndication)
+		c.dataOverflowScopes = make(map[dataOverflowKey]dataOverflowScope)
 	}
 	ind := congestionFromData(msg)
-	c.dataOverflowScopes[key] = ind
+	c.dataOverflowScopes[key] = dataOverflowScope{DataQueueCongestionIndication: ind, binding: binding}
 	start := !c.dataOverflowWorker
 	c.dataOverflowWorker = true
-	return &DataQueueOverflowError{generation: c.dataOverflowGeneration, Scope: msg.Scope.clone(),
+	return &DataQueueOverflowError{generation: c.dataOverflowGeneration, binding: binding, Scope: msg.Scope.clone(),
 		DestinationPointCode: ind.DestinationPointCode, OriginatingPointCode: ind.OriginatingPointCode,
 		NetworkIndicator: ind.NetworkIndicator}, &ind, start
 }
@@ -160,13 +220,17 @@ func (c *Association) observeDataQueue() {
 	// Recheck occupancy and dwell after admission: another discard/refill may
 	// have cancelled the candidate while the ordering gate was unavailable.
 	ended := c.observeDataQueueLocked(time.Now(), len(c.dataChan))
+	generation := c.dataOverflowGeneration
 	c.muDataOverflow.Unlock()
 	for _, ind := range ended {
-		c.notifyDataQueueCongestion(ind)
+		c.notifyDataQueueCongestion(ind.DataQueueCongestionIndication)
+		if err := c.writeOverflowClear(ind, generation); err != nil {
+			logf("m3ua: failed to send SCON for local congestion end: %v", err)
+		}
 	}
 }
 
-func (c *Association) observeDataQueueLocked(now time.Time, queued int) []DataQueueCongestionIndication {
+func (c *Association) observeDataQueueLocked(now time.Time, queued int) []dataOverflowScope {
 	if !c.dataOverflow.Load() {
 		return nil
 	}
@@ -193,7 +257,7 @@ func (c *Association) observeDataQueueLocked(now time.Time, queued int) []DataQu
 		return nil
 	}
 	c.dataOverflow.Store(false)
-	ended := make([]DataQueueCongestionIndication, 0, len(c.dataOverflowScopes))
+	ended := make([]dataOverflowScope, 0, len(c.dataOverflowScopes))
 	for _, ind := range c.dataOverflowScopes {
 		ind.Congested = false
 		ended = append(ended, ind)
@@ -203,7 +267,8 @@ func (c *Association) observeDataQueueLocked(now time.Time, queued int) []DataQu
 	c.dataOverflowLowSince = time.Time{}
 	// RFC 4666 Section 3.4.4: the international method omits Congestion
 	// Indications, so it cannot encode a level-zero clear. Local recovery sends
-	// nothing; the peer needs its validity timer or audit/current MTP procedure.
+	// nothing in that method; national end publication runs outside this lock.
+	// The peer otherwise needs its validity timer or audit/current MTP procedure.
 	return ended
 }
 
@@ -235,7 +300,10 @@ func (c *Association) watchDataOverflow() {
 // the same as WriteSignal: delivery barrier, then sendMu. Recheck state after
 // waiting for the writer; withdrawal may already have marked the direction down.
 func (c *Association) writeOverflowSCON(overflow *DataQueueOverflowError) error {
-	message := c.overflowSCON(overflow)
+	return c.writeQueueCongestionSCON(c.overflowSCON(overflow), overflow.generation, true, overflow.binding)
+}
+
+func (c *Association) writeQueueCongestionSCON(message *messages.SignallingCongestion, generation uint64, onset bool, binding queueCongestionBinding) error {
 	raw, err := message.MarshalBinary()
 	if err != nil {
 		return err
@@ -249,12 +317,17 @@ func (c *Association) writeOverflowSCON(overflow *DataQueueOverflowError) error 
 	defer c.sendMu.Unlock()
 	c.muDataOverflow.Lock()
 	defer c.muDataOverflow.Unlock()
-	if !c.dataOverflow.Load() || overflow.generation != c.dataOverflowGeneration {
+	if c.dataOverflow.Load() != onset || generation != c.dataOverflowGeneration {
 		return nil
 	}
 	if err := c.outboundSCONScopeActive(message.RoutingContext); err != nil {
 		return err
 	}
+	submission, err := c.beginSCONSubmission([]queueCongestionBinding{binding})
+	if err != nil {
+		return nil
+	}
+	defer c.finishSCONSubmission(submission)
 	// The generation check and transport admission share the tracker lock with
 	// episode end. No writer wait holds that lock. Optional SCON never waits for
 	// socket space, so recovery cannot pass an admitted onset and then announce
@@ -264,7 +337,7 @@ func (c *Association) writeOverflowSCON(overflow *DataQueueOverflowError) error 
 		return err
 	}
 	info := *c.sctpInfo
-	_, err = c.controlSender().SendMsg(raw, sctp.SendOptions{Info: &info, NoWait: true})
+	_, err = c.controlSender().SendMsgContext(submission.ctx, raw, sctp.SendOptions{Info: &info, NoWait: true})
 	return err
 }
 
@@ -281,6 +354,33 @@ func (c *Association) overflowSCON(e *DataQueueOverflowError) *messages.Signalli
 	if c.role == RoleASP {
 		concerned = params.NewConcernedDestination(e.OriginatingPointCode)
 	}
+	var level *params.Param
+	profile := c.overflowCongestionProfile(e.Scope)
+	if profile.Method >= CongestionNationalWithPriorities {
+		level = params.NewCongestionIndications(profile.MaxLevel)
+	}
 	return messages.NewSignallingCongestion(na, rc,
-		params.NewAffectedPointCodeWithMask(0, e.DestinationPointCode), concerned, nil, nil)
+		params.NewAffectedPointCodeWithMask(0, e.DestinationPointCode), concerned, level, nil)
+}
+
+// Q.704 (07/96) §11.2.6 leaves local overload detection implementation dependent.
+// Mapping actual queue discard to MaxLevel is an engineering choice. This
+// contribution never changes received SS7 SCON or outbound transport pressure.
+func (c *Association) overflowCongestionProfile(scope WireScope) CongestionProfile {
+	keys := c.congestionSCONKeys(paramAppearance(scope), paramContexts(scope), c.isIPSPDoubleExchange())
+	return c.congestionProfile(keys[0])
+}
+
+func (c *Association) writeOverflowClear(ind dataOverflowScope, generation uint64) error {
+	if c.role != RoleASP && c.role != RoleIPSP {
+		return nil
+	}
+	if c.overflowCongestionProfile(ind.Scope).Method < CongestionNationalWithPriorities {
+		return nil
+	}
+	message := c.overflowSCON(&DataQueueOverflowError{Scope: ind.Scope, DestinationPointCode: ind.DestinationPointCode})
+	// Recovery is not a fresh DATA trigger and must not replay its old OPC.
+	message.ConcernedDestination = nil
+	message.CongestionIndications = params.NewCongestionIndications(0)
+	return c.writeQueueCongestionSCON(message, generation, false, ind.binding)
 }

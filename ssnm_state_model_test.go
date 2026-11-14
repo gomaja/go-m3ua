@@ -351,7 +351,7 @@ func boundedSSNMConn(t *testing.T, records int) *Association {
 	t.Helper()
 	config := validASPConfig()
 	config.MaxSSNMDestinationRecords = records
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

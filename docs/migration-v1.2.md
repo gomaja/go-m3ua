@@ -20,6 +20,8 @@ delivers unknown values unchanged; applications can call `Valid()` to check them
 
 Contents:
 
+- [Congestion method profiles and local-user priority](#congestion-method-profiles-and-local-user-priority)
+
 - [Concerned Destination admission and diagnostics](#concerned-destination-admission-and-diagnostics)
 
 - [Application-owned withdrawal recovery](#application-owned-withdrawal-recovery)
@@ -45,14 +47,15 @@ accepting SCTP associations; `Dial` therefore no longer implies ASP and `Accept`
 no longer implies SGP.
 
 ```go
-asp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP})
-sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+asp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}}, Role: m3ua.RoleASP})
+sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}}, Role: m3ua.RoleSGP})
 ```
 
 Shared state belongs to the Endpoint, not to any one Association or Listener:
 
 ```go
 sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}},
     Role: m3ua.RoleSGP,
     ApplicationServers: &m3ua.ApplicationServerConfig{
         RecoveryTimer: 2 * time.Second,
@@ -76,7 +79,7 @@ explicitly, and must state which procedures it initiates in
 either IPSP may initiate either exchange:
 
 ```go
-ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleIPSP})
+ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}}, Role: m3ua.RoleIPSP})
 
 associationConfig := m3ua.NewAssociationConfig()
 associationConfig.IPSP = &m3ua.IPSPConfig{ExchangeModel: m3ua.IPSPExchangeSingle}
@@ -484,6 +487,7 @@ The responder policy is Endpoint-wide, as `EndpointConfig.RoutingKeyManagement`:
 
 ```go
 endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}},
     Role: m3ua.RoleSGP,
     RoutingKeyManagement: &m3ua.RoutingKeyManagementConfig{
         AuthorizeRegistration: func(request m3ua.RoutingKeyRegistrationRequest) m3ua.RegistrationStatus {
@@ -513,6 +517,7 @@ first is required.
 
 ```go
 endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}},
     Role: m3ua.RoleASP,
     ASP: &m3ua.ASPConfig{
         SignallingGateways: []m3ua.SignallingGatewayConfig{{
@@ -985,7 +990,7 @@ report is an implementation indication: §1.6.3 defines no
 unsolicited-withdrawal primitive. A contextless AS beside numeric scopes
 cannot be activated separately on the wire; only call `ASPActive(ctx)` without
 keys when application policy chooses the whole inventory. Automatic activation
-after ASP Up Ack is unchanged. See [the recovery
+after a solicited ASP Up Ack is unchanged. See [the recovery
 example](../README.md#recovery-after-peer-withdrawal).
 
 Known inactive or pending-only scopes are ignored, including alongside an
@@ -1037,10 +1042,12 @@ local replacement; shutdown still closes it after its withdrawal sequence.
 
 No acknowledgement evidence is retained for a cancelled send. Later Active
 Acks use the ordinary duplicate and validation rules; M3UA has no request
-identifier that correlates one with the cancelled message. Delayed duplicate
-Active Ack handling remains a separate deferred behavior. The library changes
-no state and sends no replacement request because SCTP accepted the cancelled
-send.
+identifier that correlates one with the cancelled message. A later valid Active
+Ack without an outstanding request or duplicate history retains its grant and
+reports `ManagementASPActivation`, with `PreviousState` and `PreviousIPSPState`.
+The application decides whether to retain that grant or request inactivity
+(RFC 4666 §§3.8.1 and 4.3.4.3). The accepted-send report itself changes no state
+and sends no replacement request.
 
 ## Concerned Destination admission and diagnostics
 
@@ -1065,3 +1072,96 @@ framing, direction and scope checks remain in force.
 The added `SSNMReport` field breaks positional composite literals; use keyed
 literals. Each subscription owns its scalar diagnostic copy. SPMC assessment
 and SS7 TFC generation remain with the application/NIF.
+
+## Congestion method profiles and local-user priority
+
+Every role must configure `EndpointConfig.Congestion.Default.Method` explicitly.
+Nil Congestion, zero Default.Method and zero-method entries in Networks or
+AssociationConfig.CongestionProfiles are refused with ErrInvalidRoleConfiguration.
+There is no default or inference from NI, MP or SCON: the method belongs to the
+application's SS7 network. `CongestionNotConfigured` and the temporary resolver are
+removed; the retained method constants keep their existing values 1, 2 and 3.
+Use the required `-congestion-method` flag in examples, perftraffic and perfchurn.
+National MaxLevel zero still selects 3 as an engineering level-count default.
+
+ASP/IPSP local-user DATA and all SCON sends strictly validate the method, including
+serialized `WriteSignal` messages, with known-not-sent errors before a write.
+Existing framing, payload-size, stream, state and binding errors keep their
+precedence over method admission. An Endpoint SCON publication refused by one
+association's profile reports that target in `SSNMDeliveryError` and keeps the
+healthy association available for subsequent traffic.
+With national priorities, ASP/IPSP local-user offers below effective congestion are refused;
+equal priority is permitted. The effective level is capped at MaxLevel so the
+highest configured priority survives known excessive levels. Unknown present
+congestion conservatively refuses the candidate. SGP transit does not use this
+discard rule. SGP NIF transit with MP0..3 is relayed unchanged even when the
+method does not allow that MP. The same lifetime diagnostic counts and reports
+these accepted NIF inputs; raw precheck plus final admission counts only once.
+MP>3 is refused at the SGP under the selected two-bit fallback: the exact 1992
+TTC reference and ANSI width were not established, and no national-variant
+compliance claim is added. Custom ASP policy can tighten but cannot bypass it. Route alternatives
+must agree on method and maximum; incompatible configuration or resolved bindings
+report `ErrCongestionMethodMismatch` without changing ASP activation.
+
+Received well-formed mismatches remain accepted. SCON retains its original level
+and reports `SSNMReport.ProfileMismatches` through `SubscribeSSNM`. DATA keeps its
+original MP and is delivered. Its first mismatch emits
+`ManagementCongestionProfileMismatch`; `CongestionProfileDiagnostics()` provides
+the lifetime count and latest owned diagnostic without per-message primitive
+flooding. Consumers with exhaustive management-kind switches must handle the new
+kind. Added exported struct fields require positional literals to become keyed.
+
+National queue overflow now emits a numeric MaxLevel onset and a best-effort
+level-zero clear after drain; International retains omitted-level onset without a numeric clear.
+Deferred SCON, including queue onset and recovery, belongs to the binding that
+created it. Retirement or replacement completed before transport admission
+prevents its old publication even if the same Routing Context is active again.
+Once admitted, a SCON submission settles before a local registration replacement
+can commit. A change cancels only submissions carrying that Routing Context and
+registration direction, then joins their completion before changing the binding.
+An SCTP-accepted submission remains successful. Unrelated registration results,
+absent removals and removals for an old version leave a current submission alone.
+The binding update joins cancellation independently of peer send space or an
+application write deadline. Short dynamic-key locks are released before transport
+calls; Close, Abort and the control-write watchdog can also release a full-buffer
+sender. Association epoch is checked at
+admission; this does not guarantee peer receipt or exclude a remote restart
+during a waiting send.
+Clears never withdraw received SS7 congestion or transport pressure. Applications
+must not equate local drain with peer receipt of a clear. These profiles implement
+only the named Q.704 (07/96) procedures read; the covering-note erratum could not be
+retrieved, and no ANSI/TTC or corrected-text compliance is claimed.
+
+A congestion-refused required broadcast recipient is now an explicit per-target
+failure after available AS/SGP alternatives are exhausted; it is not silently
+removed from the recipient set. Accepted copies remain in SuccessfulPaths and are
+not retried. Consumers with exhaustive MTPSelectionReason switches must handle
+MTPCandidateCongestionMethodMismatch. Existing management-kind numeric values are
+preserved; the new mismatch kind is appended.
+
+### DAUD when a peer method cannot express retained congestion
+
+RFC 4666 §4.5.3 says:
+
+> The SGP SHOULD respond to a DAUD message with the MTP3 availability/congestion status of the routeset associated with each Destination Point Codes in the DAUD message.
+
+It also says:
+
+> Where the SGP does not maintain the congestion status of the SS7 destination, the response to a DAUD message should always only be a DAVA, DRST, or DUNA message, as appropriate.
+
+This implementation maintains the congestion status. If an association's
+configured method cannot express that status, its DAUD response omits only the
+profile-refused SCON, sends every remaining congestion and availability reply in
+the planned order, and reports the partial response once per audit through
+`ManagementError`, with the local refusal in `Cause` and the affected audit scope.
+It sends no peer Error for this local mismatch and keeps the association open.
+This is an engineering decision and a declared deviation from the congestion
+status SHOULD for the affected destinations; the exception for an SGP that does
+not maintain congestion does not apply. The authoritative congestion remains
+retained. An audit delivers what a publication could deliver to this association.
+Reply-budget refusal remains a separate whole-audit Destination Status Unknown
+response before any status prefix. A real transport failure still stops writing.
+
+Queued MTP3 restart/publication bursts likewise continue after a profile-refused
+SCON and return the existing per-target refusal after attempting the other
+messages. Successful messages are never replayed.

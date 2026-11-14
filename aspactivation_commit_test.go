@@ -109,7 +109,7 @@ func TestPeerActivationCommitNarrowsTheRegistryToTheActivatedApplicationServers(
 
 func TestIPSPPeerActivationAdmitsTrafficToPeerBeforeTheDispatcherRuns(t *testing.T) {
 	association, sent := newDoubleExchangeIPSPForTest(t)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}
@@ -155,7 +155,7 @@ func TestIPSPPeerActivationAdmitsContextlessTrafficBeforeTheDispatcherRuns(t *te
 	config := newDoubleExchangeAssociationConfigForTest()
 	config.IPSP.TrafficToPeer = &IPSPTrafficConfig{}
 	association, sent := newDoubleExchangeIPSPWithConfigForTest(t, config)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}

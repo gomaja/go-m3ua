@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-m3ua/internal/congestionmethod"
 	"github.com/gomaja/go-m3ua/messages/params"
 	"github.com/gomaja/go-pointcode"
 	"github.com/gomaja/go-sctp"
@@ -37,7 +38,12 @@ func main() {
 	)
 	var ni pointcode.NetworkIndicator
 	flag.TextVar(&ni, "network-indicator", pointcode.NIInternational, "SS7 network: international, international-spare, national, national-reserved.")
+	methodName := flag.String("congestion-method", "", "Required SS7 method: international, national-with-priorities or national-without-priorities.")
 	flag.Parse()
+	method, methodErr := congestionmethod.Parse(*methodName)
+	if methodErr != nil {
+		log.Fatal(methodErr)
+	}
 	if *network > math.MaxUint32 {
 		log.Fatalf("Network Appearance %d exceeds 32 bits", *network)
 	}
@@ -74,7 +80,8 @@ func main() {
 	associationConfig.PeerSGP = &peer
 
 	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
-		Role: m3ua.RoleASP,
+		Role:       m3ua.RoleASP,
+		Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: method}},
 		ASP: &m3ua.ASPConfig{
 			SignallingGateways: []m3ua.SignallingGatewayConfig{
 				{

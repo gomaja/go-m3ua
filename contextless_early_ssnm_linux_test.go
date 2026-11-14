@@ -209,7 +209,7 @@ func exerciseContextlessEarlySSNMOverSCTP(t *testing.T, indications bool) {
 		config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ASKey = &ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true}
 		config.Routing.MTPRoutes[0].DestinationPointCode, config.Routing.MTPRoutes[0].Mask = 100, 2
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatal(err)
 	}

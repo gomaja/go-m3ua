@@ -89,7 +89,7 @@ func TestIPSPCollectiveCongestionAbatementAtCapacity(t *testing.T) {
 
 func newMappedCongestionAssociation(t *testing.T) (*Endpoint, *Association) {
 	t.Helper()
-	e, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, SSNMState: &SSNMStateConfig{MaxRecords: 100000, MaxRecordsPerPartition: 100000, MaxRecordsPerPeer: 100000, MaxBytes: 64 << 20}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "mapped", PointCode: 100}, AS: *staticASKey(10, 9)}}})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, SSNMState: &SSNMStateConfig{MaxRecords: 100000, MaxRecordsPerPartition: 100000, MaxRecordsPerPeer: 100000, MaxBytes: 64 << 20}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "mapped", PointCode: 100}, AS: *staticASKey(10, 9)}}}))
 	if err != nil {
 		t.Fatal(err)
 	}

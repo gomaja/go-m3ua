@@ -210,7 +210,7 @@ func TestSGPEndpointASIsolationQuiescesEveryAffectedAssociation(t *testing.T) {
 
 func endpointAvailabilityFixture(t *testing.T) (*Endpoint, []*Listener, []*Association, []*distributionCapture) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}

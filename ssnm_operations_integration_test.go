@@ -15,7 +15,7 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 	defer cancel()
 	peer := integrationPeers()[0]
 
-	sgpEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgpEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint SGP: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestSSNMOperationLinuxRoundTrip(t *testing.T) {
 		accepted <- associationResult{association: association, err: acceptErr}
 	}()
 
-	aspEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: integrationASPConfig()})
+	aspEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: integrationASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint ASP: %v", err)
 	}

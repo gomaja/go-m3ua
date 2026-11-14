@@ -102,8 +102,8 @@ func (e *MTPTransferError) Error() string {
 }
 
 // MTPSelectionReason names why one provisioned candidate could not carry a
-// request. The reasons are evaluated in declaration order, so the first one
-// that applies is the one reported.
+// request. Binding and availability checks precede method and congestion
+// admission; the first applicable refusal is reported.
 type MTPSelectionReason uint8
 
 const (
@@ -121,8 +121,10 @@ const (
 	// reported the destination unavailable.
 	MTPCandidateUnavailable
 	// MTPCandidateCongested reports a candidate the application's congestion
-	// policy refused for this Message Priority.
+	// policy or built-in local-user method refused for this Message Priority.
 	MTPCandidateCongested
+	// MTPCandidateCongestionMethodMismatch reports a binding incompatible with its logical route.
+	MTPCandidateCongestionMethodMismatch
 )
 
 func (r MTPSelectionReason) String() string {
@@ -135,6 +137,8 @@ func (r MTPSelectionReason) String() string {
 		return "state-unknown"
 	case MTPCandidateUnavailable:
 		return "unavailable"
+	case MTPCandidateCongestionMethodMismatch:
+		return "congestion-method-mismatch"
 	case MTPCandidateCongested:
 		return "congested"
 	default:
@@ -175,6 +179,11 @@ func (e *MTPSelectionError) Error() string {
 func (e *MTPSelectionError) Unwrap() error {
 	if e == nil {
 		return nil
+	}
+	for _, rejection := range e.Rejections {
+		if rejection.Reason == MTPCandidateCongestionMethodMismatch {
+			return errors.Join(ErrNoMTPRoute, ErrCongestionMethodMismatch)
+		}
 	}
 	unknown := false
 	for _, rejection := range e.Rejections {
@@ -292,6 +301,8 @@ func (status aspSelectionStatus) sameRankAs(other aspSelectionStatus) bool {
 }
 
 type aspTransferTarget struct {
+	refusal           error
+	profile           CongestionProfile
 	identity          SGPIdentity
 	path              MTPRoutePathID
 	applicationServer RemoteASID
@@ -319,11 +330,13 @@ type aspTransferAssignment struct {
 // it carries the selected candidate in. The scope belongs to the Association
 // because an RFC 4666 Section 4.4.1 registration assigns it per Association.
 type aspTransferMember struct {
+	refusal     error
 	association *Association
 	as          ASKey
 }
 
 type aspTransferSGP struct {
+	refused           bool
 	identity          SGPIdentity
 	path              MTPRoutePathID
 	applicationServer RemoteASID
@@ -332,15 +345,20 @@ type aspTransferSGP struct {
 }
 
 type aspTransferGateway struct {
-	config aspSignallingGatewayConfig
-	status aspSelectionStatus
-	sgps   []aspTransferSGP
+	refused bool
+	config  aspSignallingGatewayConfig
+	status  aspSelectionStatus
+	sgps    []aspTransferSGP
 }
 
 type aspCongestionDecision struct {
-	enabled      bool
-	unknownLevel bool
-	levels       [4]bool
+	localUser      bool
+	priority       uint8
+	payloadInvalid bool
+	sls            uint8
+	enabled        bool
+	unknownLevel   bool
+	levels         [4]bool
 }
 
 // MTPTransfer selects the SGP, Association, and SCTP stream for one
@@ -404,6 +422,8 @@ func (e *Endpoint) MTPTransferContext(ctx context.Context, request MTPTransferRe
 		e.aspRoutes.config.congestionPolicy,
 		request.ProtocolData.MessagePriority,
 	)
+	congestionDecision.payloadInvalid = len(request.ProtocolData.Data) > maxProtocolDataOctets
+	congestionDecision.sls = request.ProtocolData.SignallingLinkSelection
 	sequence, err := e.aspRoutes.lockTransferSequenceContext(ctx, request)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -430,7 +450,13 @@ func (e *Endpoint) MTPTransferContext(ctx context.Context, request MTPTransferRe
 	failures := make([]MTPTransferFailure, 0)
 	for _, target := range targets {
 		description := target.describe()
-		written, writeErr := target.association.writeMTPTransferContext(ctx, request, target.as)
+		var written int
+		writeErr := target.refusal
+		if writeErr != nil {
+			writeErr = newDataNotSent(target.as, 0, writeErr)
+		} else {
+			written, writeErr = target.association.writeMTPTransferContext(ctx, request, target.as, target.profile)
+		}
 		if writeErr != nil {
 			failures = append(failures, MTPTransferFailure{Target: description, Err: writeErr})
 			continue
@@ -539,6 +565,11 @@ func (r *aspRoutes) selectTransfer(
 	if err != nil {
 		return nil, err
 	}
+	// Preserve the existing route, binding, payload and stream error order.
+	// An invalid MP is refused at final submission, after those checks, rather
+	// than hiding an already-invalid request or an unusable route at selection.
+	congestionDecision.localUser = congestionDecision.localUser && !congestionDecision.payloadInvalid &&
+		r.routeCongestionProfile(mtpRoute.id).allowsPriority(request.ProtocolData.MessagePriority)
 	storeRevision := store.currentRevision()
 	flowKey := newASPTransferFlowKey(mtpRoute.id, request.ProtocolData)
 	var previousTargets []aspTransferTarget
@@ -603,6 +634,8 @@ func (r *aspRoutes) selectTransfer(
 				applicationServer: sgp.applicationServer,
 				association:       member.association,
 				as:                member.as,
+				refusal:           member.refusal,
+				profile:           r.routeCongestionProfile(mtpRoute.id),
 				routeStatus:       sgp.status,
 			})
 		}
@@ -801,8 +834,17 @@ func (r *aspRoutes) transferCandidatesLocked(
 		if len(candidate.sgps) == 0 {
 			continue
 		}
-		candidate.status = candidate.sgps[0].status
-		for _, sgp := range candidate.sgps[1:] {
+		ranked := candidate.sgps
+		if gateway.sgpSelection == RouteSelectionBroadcast {
+			for _, sgp := range ranked {
+				candidate.refused = candidate.refused || sgp.refused
+			}
+		} else {
+			ranked = bestASPTransferSGPs(ranked)
+			candidate.refused = ranked[0].refused
+		}
+		candidate.status = ranked[0].status
+		for _, sgp := range ranked[1:] {
 			if candidate.config.sgpSelection == RouteSelectionBroadcast && r.config.preferUncongestedTransport {
 				candidate.status = requiredASPSelectionStatus(candidate.status, sgp.status)
 			} else if sgp.status.betterThan(candidate.status) {
@@ -842,6 +884,7 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 		return r.associationOrder[associations[first]] < r.associationOrder[associations[second]]
 	})
 	rejections := make([]MTPCandidateRejection, 0)
+	var fallback *aspTransferSGP
 	for _, candidate := range candidates {
 		rejection := MTPCandidateRejection{
 			Path:              candidate.path,
@@ -865,12 +908,27 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 			continue
 		}
 
-		if congestionDecision.enabled || r.config.preferUncongestedTransport {
+		if congestionDecision.enabled || r.config.preferUncongestedTransport || congestionDecision.localUser {
+			original := append([]aspTransferMember(nil), members...)
+			mismatchCount := 0
 			kept := members[:0]
 			best := status
 			bestSet := false
 			for _, member := range members {
+				observed := methodTransportStatus(member.association, status)
 				effective := r.transportSelectionStatus(member.association, status)
+				profile := member.association.congestionProfile(member.as)
+				methodAdmission := congestionDecision.localUser && member.association.checkDataStream(member.association.streamFor(congestionDecision.sls)) == nil
+				if methodAdmission && profile != r.routeCongestionProfile(mtpRoute) {
+					mismatchCount++
+					continue
+				}
+				if methodAdmission && (!profile.allowsPriority(congestionDecision.priority) || !methodPermits(profile, congestionDecision.priority, observed)) {
+					continue
+				}
+				if methodAdmission {
+					effective = adaptMethodStatus(profile, effective)
+				}
 				if !congestionDecision.permits(effective) {
 					continue
 				}
@@ -886,9 +944,24 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 				}
 				kept = append(kept, member)
 			}
+			if len(kept) == 0 && congestionDecision.localUser && r.requiredCongestionRecipient(identity) {
+				for i := range original {
+					original[i].refusal = ErrNoMTPRoute
+					if original[i].association.congestionProfile(original[i].as) != r.routeCongestionProfile(mtpRoute) {
+						original[i].refusal = ErrCongestionMethodMismatch
+					}
+				}
+				// Retain one explicit failed obligation only after trying every AS.
+				if fallback == nil {
+					fallback = &aspTransferSGP{refused: true, identity: identity, path: candidate.path, applicationServer: candidate.applicationServer, status: status, members: original}
+				}
+			}
 			members = kept
 			if len(members) == 0 {
 				rejection.Reason = MTPCandidateCongested
+				if mismatchCount == len(original) {
+					rejection.Reason = MTPCandidateCongestionMethodMismatch
+				}
 				rejections = append(rejections, rejection)
 				continue
 			}
@@ -904,6 +977,9 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 			status:            status,
 			members:           members,
 		}, true, rejections
+	}
+	if fallback != nil {
+		return *fallback, true, rejections
 	}
 	return aspTransferSGP{}, false, rejections
 }
@@ -945,15 +1021,23 @@ func bestASPTransferSGPs(candidates []aspTransferSGP) []aspTransferSGP {
 	if len(candidates) == 0 {
 		return candidates
 	}
-	best := candidates[0].status
-	for _, candidate := range candidates[1:] {
-		if candidate.status.betterThan(best) {
-			best = candidate.status
+	viable := false
+	for _, candidate := range candidates {
+		viable = viable || !candidate.refused
+	}
+	best := aspSelectionStatus{}
+	found := false
+	for _, candidate := range candidates {
+		if viable && candidate.refused {
+			continue
+		}
+		if !found || candidate.status.betterThan(best) {
+			best, found = candidate.status, true
 		}
 	}
 	kept := make([]aspTransferSGP, 0, len(candidates))
 	for _, candidate := range candidates {
-		if candidate.status.sameRankAs(best) {
+		if (!viable || !candidate.refused) && candidate.status.sameRankAs(best) {
 			kept = append(kept, candidate)
 		}
 	}
@@ -964,15 +1048,23 @@ func bestASPTransferGateways(candidates []aspTransferGateway) []aspTransferGatew
 	if len(candidates) == 0 {
 		return candidates
 	}
-	best := candidates[0].status
-	for _, candidate := range candidates[1:] {
-		if candidate.status.betterThan(best) {
-			best = candidate.status
+	viable := false
+	for _, candidate := range candidates {
+		viable = viable || !candidate.refused
+	}
+	best := aspSelectionStatus{}
+	found := false
+	for _, candidate := range candidates {
+		if viable && candidate.refused {
+			continue
+		}
+		if !found || candidate.status.betterThan(best) {
+			best, found = candidate.status, true
 		}
 	}
 	kept := make([]aspTransferGateway, 0, len(candidates))
 	for _, candidate := range candidates {
-		if candidate.status.sameRankAs(best) {
+		if (!viable || !candidate.refused) && candidate.status.sameRankAs(best) {
 			kept = append(kept, candidate)
 		}
 	}
@@ -1114,9 +1206,10 @@ func (r *aspRoutes) transferTargetsStillHeldLocked(targets []aspTransferTarget) 
 
 func evaluateASPCongestionPolicy(policy ASPCongestionPolicy, messagePriority uint8) aspCongestionDecision {
 	if policy == nil {
-		return aspCongestionDecision{}
+		return aspCongestionDecision{localUser: true, priority: messagePriority}
 	}
 	decision := aspCongestionDecision{
+		localUser: true, priority: messagePriority,
 		enabled:      true,
 		unknownLevel: policy(messagePriority, 0, false),
 	}
@@ -1200,7 +1293,7 @@ func (r *aspRoutes) invalidateAssociationTransferFlowsLocked(association *Associ
 	}
 }
 
-func (c *Association) writeMTPTransferContext(ctx context.Context, request MTPTransferRequest, key ASKey) (int, error) {
+func (c *Association) writeMTPTransferContext(ctx context.Context, request MTPTransferRequest, key ASKey, profile CongestionProfile) (int, error) {
 	if c == nil || c.role != RoleASP || request.ProtocolData == nil {
 		return 0, ErrInvalidMTPTransfer
 	}
@@ -1226,6 +1319,12 @@ func (c *Association) writeMTPTransferContext(ctx context.Context, request MTPTr
 	stream := c.streamFor(data.ProtocolData.SignallingLinkSelection)
 	if err := c.checkDataStream(stream); err != nil {
 		return 0, newDataNotSent(key, 0, err)
+	}
+	if !profile.allowsPriority(data.ProtocolData.MessagePriority) {
+		return 0, newDataNotSent(key, stream, ErrInvalidParameterValue)
+	}
+	if c.congestionProfile(key) != profile {
+		return 0, newDataNotSent(key, stream, ErrCongestionMethodMismatch)
 	}
 	if err := c.submitDataContext(ctx, c.encodeDataFrame(&data), key, stream); err != nil {
 		return 0, err

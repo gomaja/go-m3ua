@@ -15,6 +15,14 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
+// nationalCongestionEndpointConfig models numeric congestion levels with MP0.
+func nationalCongestionEndpointConfig(config m3ua.EndpointConfig) m3ua.EndpointConfig {
+	if config.Congestion == nil {
+		config.Congestion = &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionNationalWithoutPriorities, MaxLevel: 3}}
+	}
+	return config
+}
+
 // The examples below are the eight paths an application actually has to get
 // right: starting an endpoint, sending directly, classifying what arrives,
 // consuming SSNM, recovering from a subscription that fell behind, owning
@@ -76,13 +84,13 @@ func exampleRouting() *m3ua.ASPRoutingConfig {
 // either orientation, so nothing about M3UA follows from which end opened the
 // SCTP association.
 func ExampleNewEndpoint() {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
 		ASP: &m3ua.ASPConfig{
 			SignallingGateways: exampleSignallingGateways(),
 			Routing:            exampleRouting(),
 		},
-	})
+	}))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -238,10 +246,10 @@ func ExampleAssociation_ReadData() {
 // The snapshot and the subscription are atomic with respect to each other: no
 // report is both in the snapshot and in the stream, and none is in neither.
 func ExampleEndpoint_SubscribeSSNM() {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
 		ASP:  &m3ua.ASPConfig{SignallingGateways: exampleSignallingGateways()},
-	})
+	}))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -284,10 +292,10 @@ func ExampleEndpoint_SubscribeSSNM() {
 // ContinuityLost instead of being handed a stream with a silent hole in it. The
 // answer is to replace the view, not to patch it.
 func ExampleSSNMSubscription_Resync() {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
 		ASP:  &m3ua.ASPConfig{SignallingGateways: exampleSignallingGateways()},
-	})
+	}))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -344,13 +352,13 @@ func applyDelta(m3ua.SSNMEvent)     {}
 // selection to the application. Nothing has to be invented to get there: no
 // dummy MTP Route, and no adopting Endpoint.MTPTransfer.
 func ExampleASPConfig_applicationManagedRouting() {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
 		ASP: &m3ua.ASPConfig{
 			SignallingGateways: exampleSignallingGateways(),
 			// Routing is left nil.
 		},
-	})
+	}))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -407,13 +415,13 @@ func ExampleASPConfig_applicationManagedRouting() {
 // said the destination is unreachable, and from one that has said nothing at
 // all.
 func ExampleEndpoint_MTPTransfer() {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
 		ASP: &m3ua.ASPConfig{
 			SignallingGateways: exampleSignallingGateways(),
 			Routing:            exampleRouting(),
 		},
-	})
+	}))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -465,13 +473,13 @@ func ExampleEndpoint_MTPTransfer() {
 // ASP Inactive or ASP Down, which is RFC 4666 Section 4.9 option (b); option
 // (a) is Association.ShutdownContext, and nothing calls it for you.
 func ExampleEndpoint_Close() {
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role: m3ua.RoleASP,
 		ASP: &m3ua.ASPConfig{
 			SignallingGateways: exampleSignallingGateways(),
 			Routing:            exampleRouting(),
 		},
-	})
+	}))
 	if err != nil {
 		log.Fatal(err)
 	}

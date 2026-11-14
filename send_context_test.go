@@ -214,7 +214,10 @@ func TestSocketGateSerializesEverySubmission(t *testing.T) {
 			func() error { _, err := c.WriteData(allocationRequest(128)); return err },
 			func() error { _, err := c.WriteDataContext(t.Context(), allocationRequest(128)); return err },
 			func() error { _, err := c.WriteSignal(allocationDataMessage(128, nil)); return err },
-			func() error { _, err := c.writeDistributedSignal(allocationDataMessage(128, nil)); return err },
+			func() error {
+				_, err := c.writeDistributedSignal(allocationDataMessage(128, nil), writeScope(1))
+				return err
+			},
 			func() error { _, err := c.WriteSignal(heartbeatAckForTest()); return err },
 			func() error { _, err := c.writeControl(heartbeatAckForTest()); return err },
 		} {

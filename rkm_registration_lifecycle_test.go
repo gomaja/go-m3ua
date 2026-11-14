@@ -12,7 +12,7 @@ func TestDynamicRegistrationAfterASPUpWithoutConfiguredApplicationServer(t *test
 	for _, appearanceSet := range []bool{false, true} {
 		for _, cycle := range []bool{false, true} {
 			t.Run(fmt.Sprintf("appearance=%t/down-up=%t", appearanceSet, cycle), func(t *testing.T) {
-				endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{AllowDynamicRoutingKeys: true, AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus { return RegistrationSuccessfullyRegistered }}})
+				endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{AllowDynamicRoutingKeys: true, AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus { return RegistrationSuccessfullyRegistered }}}))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -77,7 +77,7 @@ func TestDynamicRegistrationAfterASPUpWithoutConfiguredApplicationServer(t *test
 func TestRegistrationAfterASPUpPreservesConfiguredAllAppearanceConflicts(t *testing.T) {
 	for _, scoped := range []bool{false, true} {
 		t.Run(fmt.Sprintf("routing-context=%t", scoped), func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{AllowDynamicRoutingKeys: true, AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus { return RegistrationSuccessfullyRegistered }}})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{AllowDynamicRoutingKeys: true, AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus { return RegistrationSuccessfullyRegistered }}}))
 			if err != nil {
 				t.Fatal(err)
 			}

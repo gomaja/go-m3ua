@@ -214,12 +214,12 @@ func requireRoutingResourcesClosed(testContext *testing.T, factory *fakeRoutingF
 
 func TestRoutingSetupKeepsLifetimeAndExportsPairableOwnedInventory(testContext *testing.T) {
 	topology, addresses, peerFactory, senderFactory := routingSetupFixture(testContext)
-	peers, err := startRoutingPeerSet(context.Background(), topology, addresses, peerFactory.create)
+	peers, err := startRoutingPeerSet(context.Background(), topology, addresses, peerFactory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
 	testContext.Cleanup(func() { _ = peers.Close() })
-	senders, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, senderFactory.create)
+	senders, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, senderFactory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestRoutingSetupPartialBindFailureClosesEarlierResources(testContext *testi
 	cleanup := errors.New("first endpoint cleanup failed")
 	factory.endpoints[2].listenErr = original
 	factory.endpoints[0].closeErr = cleanup
-	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create)
+	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 	if owner != nil || !errors.Is(err, original) || !errors.Is(err, cleanup) {
 		testContext.Fatalf("failure lost original or cleanup error: owner=%v error=%v", owner, err)
 	}
@@ -312,7 +312,7 @@ func TestRoutingSetupPartialDialFailureClosesAndJoins(testContext *testing.T) {
 	factory.endpoints[0].failDial = 4
 	factory.endpoints[0].dialErr = original
 	factory.endpoints[0].closeErr = cleanup
-	owner, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, factory.create)
+	owner, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestRoutingSetupCancellationUnblocksAcceptAndDial(testContext *testing.T) {
 					<-endpoint.listener.incoming
 					<-endpoint.listener.incoming
 				}
-				owner, err := startRoutingPeerSet(context.Background(), topology, addresses, peerFactory.create)
+				owner, err := startRoutingPeerSet(context.Background(), topology, addresses, peerFactory.create, m3ua.CongestionNationalWithPriorities)
 				if err != nil {
 					testContext.Fatal(err)
 				}
@@ -345,7 +345,7 @@ func TestRoutingSetupCancellationUnblocksAcceptAndDial(testContext *testing.T) {
 				requireRoutingResourcesClosed(testContext, peerFactory, 4)
 			} else {
 				senderFactory.endpoints[0].blockDial = true
-				owner, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, senderFactory.create)
+				owner, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, senderFactory.create, m3ua.CongestionNationalWithPriorities)
 				if err != nil {
 					testContext.Fatal(err)
 				}
@@ -364,7 +364,7 @@ func TestRoutingSetupExpiredDeadlineClosesAndJoins(testContext *testing.T) {
 		<-endpoint.listener.incoming
 		<-endpoint.listener.incoming
 	}
-	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create)
+	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestRoutingSetupLifetimeCancellationClosesReadyOwners(testContext *testing.
 	topology, addresses, factory, _ := routingSetupFixture(testContext)
 	lifetimeContext, cancelLifetime := context.WithCancel(context.Background())
 	defer cancelLifetime()
-	owner, err := startRoutingPeerSet(lifetimeContext, topology, addresses, factory.create)
+	owner, err := startRoutingPeerSet(lifetimeContext, topology, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestRoutingSetupLifetimeCancellationClosesReadyOwners(testContext *testing.
 
 func TestRoutingSetupUnexpectedThirdAssociationInvalidatesOwner(testContext *testing.T) {
 	topology, addresses, factory, _ := routingSetupFixture(testContext)
-	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create)
+	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestRoutingSetupUnexpectedThirdAssociationInvalidatesOwner(testContext *tes
 
 func TestRoutingSetupConcurrentCloseJoinsAllAcceptors(testContext *testing.T) {
 	topology, addresses, factory, _ := routingSetupFixture(testContext)
-	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create)
+	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestRoutingSetupConcurrentCloseJoinsAllAcceptors(testContext *testing.T) {
 func TestRoutingSetupRejectsImplicitOrAmbiguousBindsBeforeOpeningResources(testContext *testing.T) {
 	for _, address := range []*sctp.Addr{nil, routingTestAddress("0.0.0.0", 0), routingTestAddress("::", 0), routingTestAddress("192.0.2.1", 40000), {IPs: []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.3")}}} {
 		topology, addresses, _, factory := routingSetupFixture(testContext)
-		owner, err := startRoutingSenderSet(context.Background(), topology, address, addresses, factory.create)
+		owner, err := startRoutingSenderSet(context.Background(), topology, address, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 		if owner != nil || err == nil || len(factory.configs) != 0 {
 			testContext.Fatalf("unsupported sender bind opened resources: %+v %v", address, err)
 		}
@@ -454,7 +454,7 @@ func TestRoutingSetupRejectsImplicitOrAmbiguousBindsBeforeOpeningResources(testC
 	for _, address := range []*sctp.Addr{nil, routingTestAddress("0.0.0.0", 2905), routingTestAddress("::", 2905), routingTestAddress("192.0.2.2", 0)} {
 		topology, addresses, factory, _ := routingSetupFixture(testContext)
 		addresses[0] = address
-		owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create)
+		owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 		if owner != nil || err == nil || len(factory.configs) != 0 {
 			testContext.Fatalf("unsupported listener bind opened resources: %+v %v", address, err)
 		}
@@ -463,7 +463,7 @@ func TestRoutingSetupRejectsImplicitOrAmbiguousBindsBeforeOpeningResources(testC
 
 func TestRoutingSetupCloseWaitsForWorkerExit(testContext *testing.T) {
 	topology, addresses, factory, _ := routingSetupFixture(testContext)
-	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create)
+	owner, err := startRoutingPeerSet(context.Background(), topology, addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestRoutingSetupRejectsUnexpectedActualLocalAddressAndPort(testContext *tes
 			snapshot := factory.endpoints[0].snapshots[101]
 			snapshot.LocalAddr = testCase.address
 			factory.endpoints[0].snapshots[101] = snapshot
-			owner, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, factory.create)
+			owner, err := startRoutingSenderSet(context.Background(), topology, routingTestAddress("192.0.2.1", 0), addresses, factory.create, m3ua.CongestionNationalWithPriorities)
 			if err != nil {
 				testContext.Fatal(err)
 			}

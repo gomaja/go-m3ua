@@ -16,12 +16,12 @@ func TestIPSPPeerDownAcrossExchangeModels(t *testing.T) {
 		t.Run(model.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			endpointA, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+			endpointA, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = endpointA.Close() })
-			endpointB, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+			endpointB, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 			if err != nil {
 				t.Fatal(err)
 			}

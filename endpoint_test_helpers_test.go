@@ -15,7 +15,7 @@ import (
 )
 
 func dialASP(ctx context.Context, network string, local, remote *sctp.Addr, config *AssociationConfig) (*Association, error) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		return nil, err
 	}
@@ -35,7 +35,7 @@ func dialASP(ctx context.Context, network string, local, remote *sctp.Addr, conf
 }
 
 func listenSGP(network string, local *sctp.Addr, config *ListenerConfig) (*Listener, error) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func closePrivateEndpointAfter(done <-chan struct{}, endpoint *Endpoint) {
 }
 
 func newSGPListener(config *ListenerConfig) *Listener {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		panic(err)
 	}

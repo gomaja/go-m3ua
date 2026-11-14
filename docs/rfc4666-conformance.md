@@ -101,7 +101,7 @@ on valid received results. Other unsuccessful results still require zero.
 | [4.4 RKM procedures](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.4) | Optional | Implemented | ASP, SGP, IPSP Single Exchange, and IPSP Double Exchange cover registration, deregistration, authorization, deterministic allocation/replay, static/dynamic coexistence, requested changes, collisions, permissions, bounded unresolved outcomes, partial/split results, active-AS rejection, cancellation, and Association loss. RFC 4666 defines no RKM T(ack), so local waits use caller contexts and responder retransmissions are idempotent. |
 | [4.5.1 SSNM at an SGP](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.1) | Mandatory | Implemented | SS7-side state, scoped distribution, DUNA/DAVA/SCON/DRST/DUPU, DAUD answers, typed SCON and DUPU operations, concerned-ASP fan-out, and partial-delivery reporting are implemented. |
 | [4.5.2 SSNM at an ASP](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.2) | Mandatory | Implemented | Single- and multiple-SG route derivation, loss, restriction, congestion, and MTP3-User indications are implemented. Canonical dynamic bindings match the complete registered NA/RC scope, including all-appearance registrations (§3.6.1). Once active, foreign appearances retain the static path's standalone knowledge outcome; §3.8.1 defines Invalid Network Appearance origination at an SGP, not an ASP. Outstanding explicit-RC and contextless ASP Active requests admit early DUNA/DRST/SCON under §4.5.1 and restart DAVA under §4.6; omitted-RC activation includes registered flows. Pending knowledge supplies no traffic authorization before Ack. Admitted reports remain latest knowledge after request cancellation or expiry; refusal ERR remains a Layer Management indication without transaction correlation. Pre-Ack NA-mismatch discard is local policy, not an explicit §3.8.1 requirement. |
-| [4.5.3 ASP auditing](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.3) | Recommended | Implemented | An active ASP can originate typed DAUD on an Association; the SGP answers available, restricted, congested, unavailable, and unknown destination state with retained congestion level. Masked audits use a snapshot and scope-local sweep to preserve narrower exceptions and restart isolation/recovery boundaries in aligned, disjoint ranges. Lists group equal message state and Routing Context sets within configured APC and encoded-size limits (§§3.4.1, 3.4.4, 3.4.6). Reply message/byte budgets derive from the retained-record limit; an excess receives a scoped Destination Status Unknown ERR (§3.8.1) before any status reply, plus a Layer Management indication. Unknown destinations remain unavailable; congestion precedes available/restricted replies only. |
+| [4.5.3 ASP auditing](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.5.3) | Recommended | Implemented with declared deviation | An active ASP can originate typed DAUD on an Association; the SGP answers available, restricted, congested, unavailable, and unknown destination state with retained congestion level. Masked audits use a snapshot and scope-local sweep to preserve narrower exceptions and restart isolation/recovery boundaries in aligned, disjoint ranges. Lists group equal message state and Routing Context sets within configured APC and encoded-size limits (§§3.4.1, 3.4.4, 3.4.6). Reply message/byte budgets derive from the retained-record limit; an excess receives a scoped Destination Status Unknown ERR (§3.8.1) before any status reply, plus a Layer Management indication. Unknown destinations remain unavailable; congestion precedes available/restricted replies only. A profile-refused SCON is omitted while all remaining replies continue, with one local management indication and no peer Error; see the [declared deviation](#daud-congestion-profile-deviation). |
 | [4.6 MTP3 restart](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.6) | Mandatory | Implemented | Local and peer restart, SCTP_RESTART, state reset, ordered recovery, and affected destination behavior are covered. |
 | [4.7 NIF not available](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.7) | Mandatory | Implemented | Endpoint-wide and per-AS NIF availability, ASP Inactive, Notify, partial failure, and recovery are covered. |
 | [4.8 Version control](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.8) | Mandatory | Implemented | Version `1`, ASP Up negotiation, unsupported version Error, and state preservation are covered. |
@@ -198,11 +198,39 @@ only after occupancy stays at or below 50% of capacity for 1 s, including a drai
 with no subsequent DATA. These are implementation defaults, not RFC thresholds.
 A refill above 50% or another discard cancels the drain dwell.
 
-Overflow SCON uses the international form, omitting Congestion Indications as
-RFC 4666 Section 3.4.4 requires for methods without multiple levels. Local end
-clears local state and reports to management, sending nothing on the wire.
-The peer relies on its congestion-notification validity timer or audit/current
-MTP procedure; this library does not promise complete automatic peer recovery.
-A later congestion-method setting can add national-method level-zero wire
-clears. This detector covers inbound queue loss only, not SCTP send backlog,
-host overload or application-reported overload.
+Overflow SCON follows the explicitly configured congestion method (RFC 4666
+Section 3.4.4). International onset omits Congestion Indications, and local end
+clears local state and reports to management without a wire clear. A national
+profile uses its configured maximum level at onset and level zero on recovery.
+These are best-effort publications, fenced against a retired or replaced binding
+and a superseded queue episode; recovery does not promise complete automatic
+peer recovery. The peer also relies on its congestion-notification validity
+timer or audit/current MTP procedure. This detector covers inbound queue loss
+only, not SCTP send backlog, host overload or application-reported overload.
+
+## DAUD congestion profile deviation
+
+RFC 4666 §4.5.3 says:
+
+> The SGP SHOULD respond to a DAUD message with the MTP3 availability/congestion status of the routeset associated with each Destination Point Codes in the DAUD message.
+
+It also says:
+
+> Where the SGP does not maintain the congestion status of the SS7 destination, the response to a DAUD message should always only be a DAVA, DRST, or DUNA message, as appropriate.
+
+This implementation maintains the congestion status. If an association's
+configured method cannot express that status, its DAUD response omits only the
+profile-refused SCON, sends every remaining congestion and availability reply in
+the planned order, and reports the partial response once per audit through
+`ManagementError`, with the local refusal in `Cause` and the affected audit scope.
+It sends no peer Error for this local mismatch and keeps the association open.
+This is an engineering decision and a declared deviation from the congestion
+status SHOULD for the affected destinations; the exception for an SGP that does
+not maintain congestion does not apply. The authoritative congestion remains
+retained. An audit delivers what a publication could deliver to this association.
+Reply-budget refusal remains a separate whole-audit Destination Status Unknown
+response before any status prefix. A real transport failure still stops writing.
+
+`TestDAUDProfileRefusalPreservesAvailabilityAndOtherReplies` covers repeated
+audits, permitted congestion, every availability class, exact scope, management
+reporting and continued service.

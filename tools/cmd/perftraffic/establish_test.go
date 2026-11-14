@@ -82,7 +82,7 @@ func (fake *fakeConnector) Dial(context.Context, string, *sctp.Addr, *sctp.Addr,
 }
 
 func listenConfig() commandConfig {
-	return commandConfig{Role: "asp", Transport: "listen", SCTPAddress: "127.0.0.1:2905", Associations: 3}
+	return nationalCongestionCommandConfig(commandConfig{Role: "asp", Transport: "listen", SCTPAddress: "127.0.0.1:2905", Associations: 3})
 }
 
 // The ASP-listen acquisition must not close the listener when acquisition

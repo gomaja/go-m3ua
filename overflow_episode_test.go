@@ -18,6 +18,7 @@ import (
 func overflowAssociation(t *testing.T) (*Association, *[]messages.M3UA) {
 	t.Helper()
 	c, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+	c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionInternational), 0)
 	c.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 	c.dataChan = make(chan *DataMessage, 2)
 	deliver(t, c, 1, inboundData(1, "queued"))
@@ -177,6 +178,7 @@ func TestOverflowManagementSurvivesFailedSCON(t *testing.T) {
 
 func TestOverflowScopesRetainPresenceAndOriginator(t *testing.T) {
 	c, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 0)
+	c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionInternational), 0)
 	c.noteRoutingContextsAcked(params.NewRoutingContext(0))
 	c.dataChan = make(chan *DataMessage, 1)
 	deliver(t, c, 1, messages.NewData(nil, nil, params.NewProtocolData(1, 2, 3, 0, 0, 1, nil), nil))

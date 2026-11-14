@@ -132,6 +132,7 @@ func (c *Association) handleData(ctx context.Context, data *messages.Data, raw [
 		Association:  c.ID(),
 		Epoch:        c.Epoch(),
 	}
+	c.observeDataProfile(msg)
 	if data.CorrelationID != nil {
 		msg.CorrelationID = data.CorrelationID.CorrelationID()
 		msg.CorrelationIDSet = true

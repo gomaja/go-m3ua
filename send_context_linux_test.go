@@ -73,7 +73,7 @@ func testCancelledDATAAfterTransportResumes(t *testing.T, phase int, observeWait
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 	config.ControlWriteTimeout = 30 * time.Second
 	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(3316 + phase)}
-	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}

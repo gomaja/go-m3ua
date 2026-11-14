@@ -6,6 +6,7 @@ package m3ua
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -1011,6 +1012,7 @@ func (c *Association) applySSNM(
 		return err
 	}
 	report.Destinations = ssnmDestinationsFrom(pcs, masks)
+	c.reportCongestionProfileMismatch(&report)
 	if report.Kind == SSNMDestinationUserPartUnavailableReport || report.PeerReported {
 		return c.publishSSNMReport(report)
 	}
@@ -1145,6 +1147,7 @@ func (c *Association) reportSSNM(
 		return err
 	}
 	report.Destinations = ssnmDestinationsFrom(pcs, masks)
+	c.reportCongestionProfileMismatch(&report)
 	// RFC 4666 §3.4.4 allows congestion lists/ranges, while its TFC mapping
 	// uses "the single Affected DPC". Accept their congestion information;
 	// expose an ambiguous Concerned Destination only as a local management
@@ -1642,8 +1645,21 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 	if err != nil {
 		return err
 	}
+	var refused []error
+	defer func() {
+		if len(refused) > 0 {
+			c.reportDestinationAuditProfileRefusal(d, errors.Join(refused...))
+		}
+	}()
 	for _, reply := range replies {
 		if _, err := c.writeControl(reply); err != nil {
+			// RFC 4666 §4.5.3 recommends congestion before availability.
+			// Declared local policy: omit only congestion this association's
+			// method cannot express, retaining every other planned reply.
+			if sconProfileRefusal(err) {
+				refused = append(refused, err)
+				continue
+			}
 			return err
 		}
 	}

@@ -57,7 +57,7 @@ func TestDUPUSendRequiresSingleUnmaskedDestination(t *testing.T) {
 						case "control":
 							_, err = c.writeControl(msg)
 						case "distributed":
-							_, err = c.writeDistributedSignal(msg)
+							_, err = c.writeDistributedSignal(msg, ASKey{})
 						}
 						switch {
 						case test.valid:

@@ -14,7 +14,7 @@ func TestRoutingTimedSchedulerTrackerCapSkipsReservationAndQueue(testContext *te
 	counters := newSenderCounters(int(expected))
 	tracker := newEchoTracker("tracker-cap", 7, 1, workload128, 0, echoRequestDeadline)
 
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128, Mode: modeEcho}, "tracker-cap", duration, time.Now().Add(-duration), expected, []chan sendJob{queue}, counters, tracker, nil)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128, Mode: modeEcho}), "tracker-cap", duration, time.Now().Add(-duration), expected, []chan sendJob{queue}, counters, tracker, nil)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	result := tracker.result(expected)
@@ -31,7 +31,7 @@ func TestRoutingTimedSchedulerFullQueueRemovesTrackerAdmission(testContext *test
 	counters := newSenderCounters(int(expected))
 	tracker := newEchoTracker("tracker-queue", 7, 1, workload128, int(expected), echoRequestDeadline)
 
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128, Mode: modeEcho}, "tracker-queue", duration, time.Now().Add(-duration), expected, []chan sendJob{queue}, counters, tracker, nil)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128, Mode: modeEcho}), "tracker-queue", duration, time.Now().Add(-duration), expected, []chan sendJob{queue}, counters, tracker, nil)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	result := tracker.result(expected)

@@ -65,6 +65,7 @@ func (p *heldActivationMarshal) MarshalTo(dst []byte) error {
 
 func TestInactiveAckJoinDoesNotWaitForCompetingWriters(t *testing.T) {
 	c, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+	c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 	c.cfg.TAck = time.Hour
 	c.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
 	sender := &competingActivationSender{first: make(chan struct{}), cancelled: make(chan struct{}), releaseFirst: make(chan struct{}), data: make(chan struct{}), releaseData: make(chan struct{})}

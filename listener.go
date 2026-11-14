@@ -280,6 +280,11 @@ func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig)
 		return nil, err
 	}
 	l := newListener(e, cfg)
+	// A profile table must be valid even when a selector replaces the default.
+	// Method zero never denotes an inherited or permissive profile.
+	if err := validateCongestionProfiles(l.AssociationConfig.CongestionProfiles, role, nil, true); err != nil {
+		return nil, err
+	}
 	// The default sizes the listening socket even when a selector chooses every
 	// accepted association's configuration, so its socket sizes are validated
 	// either way; see ListenerConfig.
@@ -289,7 +294,8 @@ func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig)
 	// With a selector, the default's association policy is never used for an
 	// accepted association: the selected snapshot is validated in Accept,
 	// before any socket setup or M3UA parsing. Validate the default's policy
-	// here only when it can actually be used.
+	// here only when it can actually be used; congestion table validity above
+	// is required independently of selection.
 	if !l.selectsAssociationConfig() {
 		if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
 			return nil, err

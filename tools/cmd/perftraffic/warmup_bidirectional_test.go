@@ -41,7 +41,7 @@ func bidirectionalRunner(testContext *testing.T, forwardOverloaded bool, forward
 	return func(_ commandConfig, phase, _ string, _ time.Duration) (cohortResult, error) {
 		sender, receiver := directionRecords(forwardOverloaded)
 		result := newCohortResult(phase, sender, receiver, forwardErr)
-		collectReverse(context.Background(), commandConfig{PeerControl: server.URL, Drain: time.Second}, &result)
+		collectReverse(context.Background(), nationalCongestionCommandConfig(commandConfig{PeerControl: server.URL, Drain: time.Second}), &result)
 		return result, forwardErr
 	}
 }
@@ -82,7 +82,7 @@ func TestFailedBidirectionalWarmupKeepsBothDirections(testContext *testing.T) {
 			peer: reversePeer(true, cohortValidityError), wantFault: "warmup did not drain cleanly: stop receiver: connection refused"},
 	} {
 		testContext.Run(scenario.name, func(testContext *testing.T) {
-			config := commandConfig{Warmup: time.Second, Duration: time.Second, Cohort: "bidi"}
+			config := nationalCongestionCommandConfig(commandConfig{Warmup: time.Second, Duration: time.Second, Cohort: "bidi"})
 			result, err := runWarmupAndMeasurement(config, bidirectionalRunner(testContext, scenario.forwardOverloaded, scenario.forwardErr, scenario.peer), nil)
 			if err == nil || result.Phase != "warmup" || result.Measurement != nil || result.Warmup == nil || result.Verdict != verdictInvalid {
 				testContext.Fatalf("result phase %q verdict %q warmup %v measurement %v err %v", result.Phase, result.Verdict, result.Warmup != nil, result.Measurement != nil, err)
@@ -117,7 +117,7 @@ func TestFailedUnidirectionalWarmupIsUnchanged(testContext *testing.T) {
 				sender, receiver := directionRecords(true)
 				return newCohortResult(phase, sender, receiver, forwardErr), forwardErr
 			}
-			result, err := runWarmupAndMeasurement(commandConfig{Warmup: time.Second, Duration: time.Second}, runner, nil)
+			result, err := runWarmupAndMeasurement(nationalCongestionCommandConfig(commandConfig{Warmup: time.Second, Duration: time.Second}), runner, nil)
 			if !errors.Is(err, forwardErr) || result.Error != "warmup did not drain cleanly: "+forwardErr.Error() || result.Warmup == nil ||
 				result.Warmup.ReverseSender != nil || result.Warmup.Error != result.Error || result.Sender.Capped != 7 {
 				testContext.Fatalf("result %+v err %v", result, err)

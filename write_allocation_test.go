@@ -38,6 +38,7 @@ func newSendAllocationAssociation(t *testing.T) *Association {
 	t.Helper()
 
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+	conn.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	conn.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {

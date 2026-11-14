@@ -61,7 +61,7 @@ func TestSharedClockSchedulerRejectsRegressionAcrossStart(testContext *testing.T
 			clock := &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: int64(time.Second), End: int64(time.Second + 20*time.Millisecond)}}
 			queues := []chan sendJob{make(chan sendJob, 2)}
 			counters := newSenderCounters(2)
-			dispatchScheduled(context.Background(), commandConfig{Rate: 100, Workload: workload128}, "regression", 20*time.Millisecond, time.Now(), 2, queues, counters, nil, clock)
+			dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 100, Workload: workload128}), "regression", 20*time.Millisecond, time.Now(), 2, queues, counters, nil, clock)
 			if strings.Contains(counters.fatal, "regressed") != scenario.regressed || len(queues[0]) != scenario.queued || counters.scheduled != 2 || counters.capped != uint64(2-scenario.queued) {
 				testContext.Fatalf("regression=%t, fatal=%q, queued=%d, scheduled=%d, capped=%d", scenario.regressed, counters.fatal, len(queues[0]), counters.scheduled, counters.capped)
 			}
@@ -81,7 +81,7 @@ func FuzzSharedClockSchedulerPreStartRegression(fuzzContext *testing.F) {
 		clock := &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: int64(time.Second), End: int64(time.Second + 20*time.Millisecond)}}
 		queues := []chan sendJob{make(chan sendJob, 2)}
 		counters := newSenderCounters(2)
-		dispatchScheduled(context.Background(), commandConfig{Rate: 100, Workload: workload128}, "regression", 20*time.Millisecond, time.Now(), 2, queues, counters, nil, clock)
+		dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 100, Workload: workload128}), "regression", 20*time.Millisecond, time.Now(), 2, queues, counters, nil, clock)
 		regressed := after < before
 		if strings.Contains(counters.fatal, "regressed") != regressed || (len(queues[0]) == 0) != regressed || counters.scheduled != 2 {
 			testContext.Fatalf("before=%v after=%v fatal=%q queued=%d scheduled=%d", before, after, counters.fatal, len(queues[0]), counters.scheduled)
@@ -95,7 +95,7 @@ func TestSharedClockSchedulerIgnoresGoOrigin(testContext *testing.T) {
 	clock := &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: int64(1040 * time.Millisecond), End: int64(1080 * time.Millisecond)}}
 	queues := []chan sendJob{make(chan sendJob, 1)}
 	counters := newSenderCounters(1)
-	dispatchScheduled(context.Background(), commandConfig{Rate: 25, Workload: workload128}, "timing", 40*time.Millisecond, source.origin.Add(-time.Hour), 1, queues, counters, nil, clock)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 25, Workload: workload128}), "timing", 40*time.Millisecond, source.origin.Add(-time.Hour), 1, queues, counters, nil, clock)
 	now, _ := source.Now()
 	if now < clock.window.End {
 		testContext.Fatalf("scheduler returned %v before shared end", time.Duration(clock.window.End-now))

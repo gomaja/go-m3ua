@@ -28,7 +28,7 @@ type withholdingReceiver struct {
 
 func startWithholdingReceiver(testContext *testing.T, ctx context.Context, sharedClock bool, allow int, failResultsBeforeStop bool) *withholdingReceiver {
 	testContext.Helper()
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP}))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -86,12 +86,12 @@ func startWithholdingReceiver(testContext *testing.T, ctx context.Context, share
 }
 
 func withholdingSenderConfig(receiver *withholdingReceiver, sharedClock bool) commandConfig {
-	return commandConfig{
+	return nationalCongestionCommandConfig(commandConfig{
 		Role: "asp", Mode: modeThroughput, Direction: directionASPToSGP, Initiation: initiationASPDial,
 		SCTPAddress: receiver.address, Associations: 1, PeerControl: receiver.server.URL, Cohort: "drain-live", Seed: 7,
 		Rate: 1_000, Workload: workload128, Warmup: time.Second, Duration: time.Second, Drain: 500 * time.Millisecond,
 		Outstanding: maxOutstanding, SameHostClock: sharedClock,
-	}
+	})
 }
 
 // An overloaded warm-up whose receiver leaves 100 of 1,000 submitted messages
@@ -109,7 +109,7 @@ func TestOverloadedWarmupDrainTimeoutIsAFailedProbeOverLoopbackSCTP(testContext 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			receiver := startWithholdingReceiver(testContext, ctx, sharedClock, 900, false)
-			result, err := runSender(ctx, withholdingSenderConfig(receiver, sharedClock))
+			result, err := runSenderWithoutTransportCongestion(testContext, ctx, withholdingSenderConfig(receiver, sharedClock))
 			if err == nil || result.Phase != "warmup" || result.Verdict != verdictInvalid ||
 				result.Error != "warmup did not drain cleanly: cohort is invalid; inspect machine-readable reasons" {
 				testContext.Fatalf("combined result phase %q verdict %q error %q (%v)", result.Phase, result.Verdict, result.Error, err)
@@ -146,7 +146,7 @@ func TestDrainWaitControlFailureStaysFatalOverLoopbackSCTP(testContext *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	receiver := startWithholdingReceiver(testContext, ctx, true, 900, true)
-	result, err := runSender(ctx, withholdingSenderConfig(receiver, true))
+	result, err := runSenderWithoutTransportCongestion(testContext, ctx, withholdingSenderConfig(receiver, true))
 	if err == nil || result.Phase != "warmup" || result.Error == "warmup did not drain cleanly: cohort is invalid; inspect machine-readable reasons" {
 		testContext.Fatalf("combined result phase %q error %q (%v)", result.Phase, result.Error, err)
 	}

@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseConfigAcceptsCoreSender(testContext *testing.T) {
-	config, err := parseConfig([]string{
+	config, err := parseConfig(nationalCongestionArguments([]string{
 		"-role=asp",
 		"-transport=dial",
 		"-sctp-address=10.0.0.2:2905",
@@ -19,7 +19,7 @@ func TestParseConfigAcceptsCoreSender(testContext *testing.T) {
 		"-duration=2m",
 		"-drain=2s",
 		"-cohort=baseline-mix-01",
-	})
+	}))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -35,13 +35,13 @@ func TestParseConfigAcceptsCoreSender(testContext *testing.T) {
 }
 
 func TestParseConfigAcceptsCoreReceiver(testContext *testing.T) {
-	config, err := parseConfig([]string{
+	config, err := parseConfig(nationalCongestionArguments([]string{
 		"-role=sgp",
 		"-transport=listen",
 		"-sctp-address=0.0.0.0:2905",
 		"-control-address=0.0.0.0:8080",
 		"-associations=1",
-	})
+	}))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -51,11 +51,11 @@ func TestParseConfigAcceptsCoreReceiver(testContext *testing.T) {
 }
 
 func TestParseConfigAcceptsEchoModeWithSameBounds(testContext *testing.T) {
-	config, err := parseConfig([]string{
+	config, err := parseConfig(nationalCongestionArguments([]string{
 		"-role=asp", "-transport=dial", "-mode=echo",
 		"-sctp-address=10.0.0.2:2905", "-peer-control=http://10.0.0.2:8080",
 		"-cohort=latency-echo-01", "-rate=17500",
-	})
+	}))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestParseConfigAcceptsEchoModeWithSameBounds(testContext *testing.T) {
 		{"-mode=echo", "-outstanding=8193"},
 		{"-mode=echo", "-duration=11m"},
 	} {
-		if _, err := parseConfig(args); err == nil {
+		if _, err := parseConfig(nationalCongestionArguments(args)); err == nil {
 			testContext.Fatalf("parseConfig(%v) unexpectedly succeeded", args)
 		}
 	}
@@ -95,7 +95,7 @@ func TestParseConfigDerivesInitiationDirection(testContext *testing.T) {
 			if test.role == "asp" {
 				args = append(args, "-peer-control=http://10.0.0.2:8080", "-cohort=cohort-01")
 			}
-			config, err := parseConfig(args)
+			config, err := parseConfig(nationalCongestionArguments(args))
 			if err != nil {
 				testContext.Fatalf("parseConfig: %v", err)
 			}
@@ -107,12 +107,12 @@ func TestParseConfigDerivesInitiationDirection(testContext *testing.T) {
 }
 
 func TestParseConfigAcceptsBidirectionalWithAdvertisedControlURL(testContext *testing.T) {
-	config, err := parseConfig([]string{
+	config, err := parseConfig(nationalCongestionArguments([]string{
 		"-role=asp", "-transport=dial", "-mode=bidirectional",
 		"-sctp-address=10.0.0.2:2905", "-peer-control=http://10.0.0.2:8080",
 		"-control-address=0.0.0.0:8080", "-control-url=http://10.0.0.3:8080",
 		"-associations=8", "-rate=20000", "-cohort=bidi-8-01",
-	})
+	}))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestParseConfigRejectsUnsupportedAndUnboundedInputs(testContext *testing.T)
 	}
 	for _, testCase := range testCases {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
-			if _, err := parseConfig(testCase.args); err == nil {
+			if _, err := parseConfig(nationalCongestionArguments(testCase.args)); err == nil {
 				testContext.Fatal("parseConfig unexpectedly succeeded")
 			}
 		})
@@ -170,7 +170,7 @@ func TestParseConfigDoesNotWriteUsageToProcessOutput(testContext *testing.T) {
 			originalStdout, originalStderr := os.Stdout, os.Stderr
 			defer func() { os.Stdout, os.Stderr = originalStdout, originalStderr }()
 			os.Stdout, os.Stderr = stdout, stderr
-			_, parseErr := parseConfig([]string{argument})
+			_, parseErr := parseConfig(nationalCongestionArguments([]string{argument}))
 			os.Stdout, os.Stderr = originalStdout, originalStderr
 			if parseErr == nil {
 				testContext.Fatal("parseConfig unexpectedly succeeded")

@@ -30,7 +30,7 @@ func TestRegisterReverseAssociationWithoutDriverIsANoOp(testContext *testing.T) 
 // fail with a named error before touching the network, not panic on the nil
 // registry deep in the cohort.
 func TestRunSenderCohortEchoModeWithoutRegistryIsANamedError(testContext *testing.T) {
-	config := commandConfig{Mode: modeEcho, Rate: 1, Workload: workload128, Outstanding: 8}
+	config := nationalCongestionCommandConfig(commandConfig{Mode: modeEcho, Rate: 1, Workload: workload128, Outstanding: 8})
 	_, _, err := runSenderCohort(context.Background(), config, nil, nil, "echo-no-registry", time.Second)
 	if err == nil || !strings.Contains(err.Error(), "echo reply registry") {
 		testContext.Fatalf("runSenderCohort error = %v, want the named missing-registry error", err)

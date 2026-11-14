@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-m3ua/internal/congestionmethod"
 )
 
 const mebibyte = uint64(1) << 20
@@ -60,6 +63,7 @@ const (
 )
 
 type commandConfig struct {
+	CongestionMethod  m3ua.CongestionMethod
 	Role              string
 	SCTPAddress       string
 	LocalIP           string
@@ -89,6 +93,8 @@ func parseConfig(arguments []string) (commandConfig, error) {
 	flagSet := flag.NewFlagSet("perfchurn", flag.ContinueOnError)
 	flagSet.SetOutput(io.Discard)
 	config := commandConfig{}
+	var methodName string
+	flagSet.StringVar(&methodName, "congestion-method", "", "required SS7 method: international, national-with-priorities or national-without-priorities")
 	flagSet.StringVar(&config.Role, "role", "", "process role: asp (library process under measurement) or peer (SGP side)")
 	flagSet.StringVar(&config.SCTPAddress, "sctp-address", "0.0.0.0:2905", "ASP: SCTP listen address; peer: the ASP address to dial")
 	flagSet.StringVar(&config.LocalIP, "local-ip", "", "peer: the local IP every dial binds, with the port chosen per SGP and cycle")
@@ -113,6 +119,11 @@ func parseConfig(arguments []string) (commandConfig, error) {
 	if err := flagSet.Parse(arguments); err != nil {
 		return commandConfig{}, err
 	}
+	method, methodErr := congestionmethod.Parse(methodName)
+	if methodErr != nil {
+		return commandConfig{}, methodErr
+	}
+	config.CongestionMethod = method
 	if flagSet.NArg() != 0 {
 		return commandConfig{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flagSet.Args(), " "))
 	}

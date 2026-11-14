@@ -307,7 +307,7 @@ func TestEndpointValidatesRoutingKeyManagementRoleAndPolicy(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(test.config)
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(test.config))
 			if endpoint != nil {
 				_ = endpoint.Close()
 			}
@@ -318,7 +318,7 @@ func TestEndpointValidatesRoutingKeyManagementRoleAndPolicy(t *testing.T) {
 	}
 
 	for _, role := range []Role{RoleSGP, RoleIPSP} {
-		endpoint, err := NewEndpoint(EndpointConfig{Role: role, RoutingKeyManagement: valid})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: role, RoutingKeyManagement: valid}))
 		if err != nil {
 			t.Fatalf("NewEndpoint(%s): %v", role, err)
 		}

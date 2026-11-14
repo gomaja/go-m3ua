@@ -74,6 +74,7 @@ func TestDirectSGPTrafficRequiresActiveApplicationServer(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			registry := applicationServerRegistryForActivationTest(t, ASActivationPolicy{RequiredActiveASPs: 2})
 			active, sent := asTestConn(t, registry, StateASPActive, test.routingContexts...)
+			active.cfg.CongestionProfiles = []NetworkCongestionProfile{{Profile: CongestionProfile{Method: CongestionNationalWithoutPriorities, MaxLevel: 3}}}
 			waiting, _ := asTestConn(t, registry, StateASPInactive, test.routingContexts...)
 			active.noteRoutingContextsActive(test.routingContexts)
 			active.maxMessageStreamID = 4
@@ -497,6 +498,7 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 
 func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
+	asp.cfg.CongestionProfiles = []NetworkCongestionProfile{{Profile: CongestionProfile{Method: CongestionNationalWithoutPriorities, MaxLevel: 3}}}
 	asp.as = newApplicationServers(time.Hour)
 	asp.as.aspStateChanged(asp, StateASPActive)
 	asp.maxMessageStreamID = 4
@@ -616,6 +618,7 @@ func TestASPDownAckWaitsForUnscopedSSNM(t *testing.T) {
 
 func TestASPInactiveAckWaitsForUnscopedDirectData(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
+	asp.cfg.CongestionProfiles = []NetworkCongestionProfile{{Profile: CongestionProfile{Method: CongestionNationalWithoutPriorities, MaxLevel: 3}}}
 	asp.maxMessageStreamID = 4
 	writeStarted := make(chan struct{})
 	releaseWrite := make(chan struct{})

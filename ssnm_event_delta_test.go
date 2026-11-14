@@ -783,13 +783,13 @@ type ssnmPublicationFixture struct {
 
 func newSSNMPublicationFixture(tb testing.TB, records, subscribers int) *ssnmPublicationFixture {
 	tb.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, SSNMState: &SSNMStateConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, SSNMState: &SSNMStateConfig{
 		MaxRecords: 16384, MaxRecordsPerPeer: 16384, MaxRecordsPerPartition: 16384, MaxBytes: 16 << 20,
 		MaxSubscribers: subscribers,
 		// Large enough to queue the whole-partition events of a store that
 		// published them, so such a store is measured rather than dropped.
 		SubscriptionQueueBytes: 64 << 20,
-	}})
+	}}))
 	if err != nil {
 		tb.Fatal(err)
 	}

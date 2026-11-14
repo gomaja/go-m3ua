@@ -12,7 +12,7 @@ func TestContractedCongestionRecordsRemainBoundedAcrossRegistrations(t *testing.
 	for _, budget := range []int{0, 1, 4} {
 		t.Run(fmt.Sprintf("budget=%d", budget), func(t *testing.T) {
 			key, other := *staticASKey(10, 7), *staticASKey(10, 8)
-			e, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "other", PointCode: 100}, AS: other}}})
+			e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "other", PointCode: 100}, AS: other}}}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -392,7 +392,7 @@ func TestDestinationAuditPreservesIndependentDimensionChronology(t *testing.T) {
 }
 
 func TestDestinationStatusesPreserveIndependentDimensionChronology(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestDestinationAuditPreservesCongestionChronology(t *testing.T) {
 }
 
 func TestDestinationStatusesPreserveCongestionChronology(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}

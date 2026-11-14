@@ -18,7 +18,7 @@ import (
 )
 
 func TestNewEndpointRejectsInvalidRole(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: Role(0xff)})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: Role(0xff)}))
 	if endpoint != nil {
 		t.Fatalf("NewEndpoint returned endpoint %v for an invalid role", endpoint)
 	}
@@ -37,11 +37,11 @@ func TestNewEndpointSnapshotsSGPPolicy(t *testing.T) {
 		BroadcastFlowIdentifierBytes: 23,
 	}
 	applicationServers := &ApplicationServerConfig{RecoveryTimer: 3 * time.Second}
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role:               RoleSGP,
 		SGP:                policy,
 		ApplicationServers: applicationServers,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestNewEndpointSnapshotsSGPPolicy(t *testing.T) {
 }
 
 func TestNewEndpointRejectsSGPPolicyForASPRole(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, SGP: &SGPConfig{}})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, SGP: &SGPConfig{}}))
 	if endpoint != nil {
 		t.Fatalf("NewEndpoint returned Endpoint %v for ASP with SGP policy", endpoint)
 	}
@@ -110,7 +110,7 @@ func TestASPListenerDoesNotRunSGPAvailabilityProcedures(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 			if err != nil {
 				t.Fatalf("NewEndpoint(RoleASP): %v", err)
 			}
@@ -140,7 +140,7 @@ func TestASPListenerDoesNotRunSGPAvailabilityProcedures(t *testing.T) {
 }
 
 func TestSGPEndpointTracksMultipleListeners(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -162,7 +162,7 @@ func TestSGPEndpointTracksMultipleListeners(t *testing.T) {
 }
 
 func TestSGPEndpointListenersShareNodeState(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -184,7 +184,7 @@ func TestSGPEndpointListenersShareNodeState(t *testing.T) {
 }
 
 func TestSGPEndpointDistributionUsesExactNetworkAppearance(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -225,7 +225,7 @@ func TestSGPEndpointDistributionUsesExactNetworkAppearance(t *testing.T) {
 }
 
 func TestSGPEndpointDistributionRejectsAmbiguousNetworkAppearance(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -262,7 +262,7 @@ func TestSGPEndpointDistributionRejectsAmbiguousNetworkAppearance(t *testing.T) 
 }
 
 func TestSGPEndpointRegistersAcceptedAssociationScopesBeforeActivation(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -294,7 +294,7 @@ func TestSGPEndpointRegistersAcceptedAssociationScopesBeforeActivation(t *testin
 }
 
 func TestSGPEndpointContextlessDistributionUsesExplicitNetworkAppearance(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -338,7 +338,7 @@ func TestSGPEndpointContextlessDistributionUsesExplicitNetworkAppearance(t *test
 }
 
 func TestSGPEndpointRejectsAmbiguousContextlessDistribution(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -378,7 +378,7 @@ func TestSGPEndpointRejectsAmbiguousContextlessDistribution(t *testing.T) {
 }
 
 func TestSGPEndpointSharesStateAcrossAcceptedAndInitiatedAssociations(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -488,7 +488,7 @@ func attachActiveInitiatedEndpointAssociation(t *testing.T, endpoint *Endpoint, 
 }
 
 func TestClosingOneSGPAssociationKeepsEndpointAndSiblingAlive(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -526,7 +526,7 @@ func TestClosingOneSGPAssociationKeepsEndpointAndSiblingAlive(t *testing.T) {
 }
 
 func TestClosingOneSGPListenerKeepsSharedStateAndSiblingAlive(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -567,7 +567,7 @@ func TestClosingOneSGPListenerKeepsSharedStateAndSiblingAlive(t *testing.T) {
 }
 
 func TestConcurrentEndpointCloseWaitsForShutdownCompletion(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -613,7 +613,7 @@ func TestConcurrentEndpointCloseWaitsForShutdownCompletion(t *testing.T) {
 }
 
 func TestEndpointCloseWaitsForConcurrentListenerClose(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -675,7 +675,7 @@ func TestEndpointCloseWaitsForConcurrentListenerClose(t *testing.T) {
 }
 
 func TestSGPEndpointQuiescesApplicationServersBeforeClosingAssociations(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -726,7 +726,7 @@ func TestSGPEndpointQuiescesApplicationServersBeforeClosingAssociations(t *testi
 }
 
 func TestSGPEndpointCloseClosesEveryListenerAndAssociation(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -770,7 +770,7 @@ func TestSGPEndpointCloseClosesEveryListenerAndAssociation(t *testing.T) {
 }
 
 func TestSGPEndpointConcurrentAttachmentQueriesAndShutdown(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -857,7 +857,7 @@ func TestSGPEndpointCanInitiateMultipleAssociations(t *testing.T) {
 	accepted := make(chan acceptResult, 2)
 	listeners := make([]*Listener, 0, 2)
 	for index, identifier := range []uint32{0xABCD0001, 0xABCD0002} {
-		aspEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+		aspEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint(RoleASP) %d: %v", index, err)
 		}
@@ -878,7 +878,7 @@ func TestSGPEndpointCanInitiateMultipleAssociations(t *testing.T) {
 		}()
 	}
 
-	sgpEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgpEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -930,7 +930,7 @@ func TestSGPListenerCloseRejectsAssociationSelectedAfterShutdown(t *testing.T) {
 		return mcSGPConfig(), nil
 	}
 
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -984,7 +984,7 @@ func TestSGPListenerCloseStopsAssociationDuringM3UAEstablishment(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -1042,7 +1042,7 @@ func TestSGPListenerCloseStopsAssociationDuringM3UAEstablishment(t *testing.T) {
 }
 
 func TestIPSPDialAndListenRejectMissingExchangeModel(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}
@@ -1057,7 +1057,7 @@ func TestIPSPDialAndListenRejectMissingExchangeModel(t *testing.T) {
 
 func TestIPSPAssociationRejectsSGPDestinationProcedures(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleIPSP, 1)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}
@@ -1093,7 +1093,7 @@ func TestIPSPAssociationRejectsSGPDestinationProcedures(t *testing.T) {
 
 func TestASPAssociationRejectsSGPDestinationReports(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -1130,7 +1130,7 @@ func TestASPAssociationRejectsSGPDestinationReports(t *testing.T) {
 }
 
 func TestASPListenerRejectsSGPDestinationProcedures(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestASPListenerRejectsSGPDestinationProcedures(t *testing.T) {
 }
 
 func TestDialNormalizesAZeroAssociationConfigBeforeTransport(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -1170,7 +1170,7 @@ func TestDialNormalizesAZeroAssociationConfigBeforeTransport(t *testing.T) {
 }
 
 func TestDialRejectsNilAssociationConfigBeforeTransport(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -1180,7 +1180,7 @@ func TestDialRejectsNilAssociationConfigBeforeTransport(t *testing.T) {
 }
 
 func TestCancelledSGPDialDoesNotRegisterApplicationServer(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -1223,7 +1223,7 @@ func TestFailedDialDoesNotRetainApplicationServer(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{Role: test.role})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: test.role}))
 			if err != nil {
 				t.Fatalf("NewEndpoint(%s): %v", test.role, err)
 			}
@@ -1255,7 +1255,7 @@ func TestFailedDialDoesNotRetainApplicationServer(t *testing.T) {
 }
 
 func TestRejectedIPSPPromotionDoesNotRetainApplicationServer(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}
@@ -1286,7 +1286,7 @@ func TestRejectedIPSPPromotionDoesNotRetainApplicationServer(t *testing.T) {
 func TestFailedAcceptedAssociationsDoNotRetainApplicationServers(t *testing.T) {
 	for _, role := range []Role{RoleSGP, RoleIPSP} {
 		t.Run(role.String(), func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{Role: role})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: role}))
 			if err != nil {
 				t.Fatalf("NewEndpoint(%s): %v", role, err)
 			}
@@ -1385,11 +1385,11 @@ func TestEndpointRoleIsIndependentOfSCTPOrientation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 
-			acceptEndpoint, err := NewEndpoint(EndpointConfig{Role: test.acceptRole})
+			acceptEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: test.acceptRole}))
 			if err != nil {
 				t.Fatalf("NewEndpoint(%v): %v", test.acceptRole, err)
 			}
-			dialEndpoint, err := NewEndpoint(EndpointConfig{Role: test.dialRole})
+			dialEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: test.dialRole}))
 			if err != nil {
 				t.Fatalf("NewEndpoint(%v): %v", test.dialRole, err)
 			}

@@ -468,7 +468,7 @@ func TestDialHandshakeError(t *testing.T) {
 		{"unspecified failure", false, nil, nil, ErrFailedToEstablish},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -92,7 +92,10 @@ func TestRetiredInitialWritesWaitForWithdrawalPublication(t *testing.T) {
 
 func acknowledgementStatusEndpoint(t *testing.T, c *Association) *Endpoint {
 	t.Helper()
-	e := newSSNMStateEndpoint(t, nil, nil)
+	e := c.endpoint
+	if e == nil {
+		e = newSSNMStateEndpoint(t, nil, nil)
+	}
 	e.as = c.as
 	if !e.trackAssociation(c) {
 		t.Fatal("track association")

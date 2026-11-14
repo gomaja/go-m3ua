@@ -65,6 +65,7 @@ func TestAssociationConfigHasNoUntypedMembershipSetters(t *testing.T) {
 func twoNetworkASPAssociation(t *testing.T) (*Association, *dataFrameCapture) {
 	t.Helper()
 	conn, _ := newTestConn(t, StateASPActive, RoleASP)
+	conn.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 	conn.cfg.ApplicationServers = []ASConfig{
 		{ASKey: ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}},
 		{ASKey: ASKey{NetworkAppearance: 8, NetworkAppearanceSet: true, RoutingContext: 2, RoutingContextSet: true}},
@@ -222,6 +223,7 @@ func TestDeclaredTrafficModeGroupsASPActive(t *testing.T) {
 // any other, and carries its own Network Appearance and Traffic Mode.
 func TestContextlessDeclarationCarriesItsAppearanceAndMode(t *testing.T) {
 	conn, _ := newTestConn(t, StateASPActive, RoleASP)
+	conn.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 	conn.cfg.ApplicationServers = []ASConfig{{
 		ASKey:       ASKey{NetworkAppearance: 9, NetworkAppearanceSet: true},
 		TrafficMode: params.TrafficModeBroadcast,

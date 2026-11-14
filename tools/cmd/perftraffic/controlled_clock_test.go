@@ -226,6 +226,7 @@ func TestCohortClockRejectsEveryManagementIndicationKind(testContext *testing.T)
 		m3ua.ManagementNotify, m3ua.ManagementError, m3ua.ManagementSCTPRestart,
 		m3ua.ManagementSCTPRelease, m3ua.ManagementSCTPStatus,
 		m3ua.ManagementDataQueueCongestion, m3ua.ManagementTransportCongestion, m3ua.ManagementASPWithdrawal,
+		m3ua.ManagementASPActivation, m3ua.ManagementCongestionProfileMismatch,
 	} {
 		testContext.Run(kind.String(), func(testContext *testing.T) {
 			clock := newCohortTestClock()

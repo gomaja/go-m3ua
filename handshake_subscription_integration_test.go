@@ -276,7 +276,7 @@ func TestDialSubscribeHandshakeFailureClosesStreams(t *testing.T) {
 				}
 				return nil
 			})
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,7 +327,7 @@ func TestSubscribePanicReleasesAssociation(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx := subscriptionContext(t)
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -518,7 +518,7 @@ func TestAcceptSubscribeHandshakeFailureClosesStreams(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(subscriptionContext(t))
 			defer cancel()
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -716,7 +716,7 @@ func TestSubscribeOverlapsEndpointTeardown(t *testing.T) {
 				cfg = mcASPConfig(1)
 				cfg.ASPProcedures = ipspInitiationPolicy(false, false)
 			}
-			endpoint, err := NewEndpoint(EndpointConfig{Role: role})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: role}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -865,7 +865,7 @@ func TestCanceledContextInSubscribeFailsEstablishment(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(subscriptionContext(t))
 			defer cancel()
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -915,7 +915,7 @@ func TestCanceledMonitorStartupDoesNotPublishReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		_ = transport.Close()
 		t.Fatal(err)

@@ -33,12 +33,12 @@ func dialLoopbackSGP(t *testing.T, port int) (*Association, ASKey) {
 	}
 	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(port)}
 
-	asp, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	asp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = asp.Close() })
-	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestRefusedDataNeverReachesThePeer(t *testing.T) {
 			config := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
 			config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 			address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(variant.port)}
-			sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+			sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 			if err != nil {
 				t.Fatal(err)
 			}

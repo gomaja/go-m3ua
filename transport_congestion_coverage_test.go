@@ -84,7 +84,7 @@ func TestTransportCongestionCoverageBoundFollowsInterval(t *testing.T) {
 func TestTransportCongestionMissedSlotRestartsPendingDwell(t *testing.T) {
 	for _, initial := range []uint8{0, 3} {
 		t.Run(string(rune('0'+initial)), func(t *testing.T) {
-			e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+			e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,7 +129,7 @@ func TestTransportCongestionMissedSlotRestartsPendingDwell(t *testing.T) {
 }
 
 func TestTransportCongestionSnapshotDoesNotWaitForState(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestTransportCongestionSnapshotDoesNotWaitForState(t *testing.T) {
 }
 
 func TestTransportCongestionProjectionUsesDestinationAvailability(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestTransportCongestionProjectionUsesDestinationAvailability(t *testing.T) 
 }
 
 func TestTransportCongestionProjectionTracksSecondaryASState(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestTransportCongestionProjectionTracksCanonicalInvalidation(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			cfg := twoApplicationServerASPConfig()
 			cfg.MaxAffectedPointCodesPerSSNM = 1
-			e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: cfg})
+			e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: cfg}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -309,7 +309,7 @@ func TestTransportCongestionProjectionTracksCanonicalInvalidation(t *testing.T) 
 }
 
 func TestTransportCongestionProjectionAcceptsPendingSiblingReports(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +407,7 @@ func TestTransportCongestionKeepsReceivedAndTransportSourcesOnTheirAS(t *testing
 	sgp := cfg.SignallingGateways[0].SGPs[0]
 	sgp.ID = "sgp-a2"
 	cfg.SignallingGateways[0].SGPs = append(cfg.SignallingGateways[0].SGPs, sgp)
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: cfg})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: cfg}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestTransportCongestionKeepsReceivedAndTransportSourcesOnTheirAS(t *testing
 
 func TestTransportCongestionSamplingContinuesDuringStateAndProjectionStall(t *testing.T) {
 	key := *staticASKey(7, 1)
-	e, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "peer", PointCode: 0x123456}, AS: key}}})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "peer", PointCode: 0x123456}, AS: key}}}))
 	if err != nil {
 		t.Fatal(err)
 	}

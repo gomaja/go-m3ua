@@ -37,7 +37,7 @@ func TestParseConfigAcceptsRoutedModesWithTheFixedTopology(testContext *testing.
 			routedReceiverArguments(mode),
 			routedReceiverArguments(mode, "-same-host-clock"),
 		} {
-			config, err := parseConfig(arguments)
+			config, err := parseConfig(nationalCongestionArguments(arguments))
 			if err != nil {
 				testContext.Fatalf("parseConfig(%v): %v", arguments, err)
 			}
@@ -71,7 +71,7 @@ func TestParseConfigRejectsRoutedModesOutsideTheFixedTopology(testContext *testi
 			{name: "sender multihomed peer", arguments: routedSenderArguments(mode, "-sctp-address=10.0.0.2/10.0.0.4:2905"), wantError: "one address"},
 		} {
 			testContext.Run(mode+"/"+test.name, func(testContext *testing.T) {
-				_, err := parseConfig(test.arguments)
+				_, err := parseConfig(nationalCongestionArguments(test.arguments))
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
 					testContext.Fatalf("parseConfig error = %v, want it to mention %q", err, test.wantError)
 				}
@@ -81,7 +81,7 @@ func TestParseConfigRejectsRoutedModesOutsideTheFixedTopology(testContext *testi
 }
 
 func TestParseConfigStillRejectsUnknownModes(testContext *testing.T) {
-	_, err := parseConfig([]string{"-role=sgp", "-mode=routing"})
+	_, err := parseConfig(nationalCongestionArguments([]string{"-role=sgp", "-mode=routing"}))
 	if err == nil || !strings.Contains(err.Error(), "routed-direct") {
 		testContext.Fatalf("unknown mode error = %v, want the implemented modes listed", err)
 	}
@@ -379,7 +379,7 @@ func TestDispatchRoutedOffersUniformRouteHitsOnFrozenQueues(testContext *testing
 		queues[index] = make(chan routingTimedJob, expected)
 	}
 	counters := newSenderCounters(int(expected))
-	config := commandConfig{Rate: 1000, Seed: 9, Workload: workloadMix}
+	config := nationalCongestionCommandConfig(commandConfig{Rate: 1000, Seed: 9, Workload: workloadMix})
 	dispatchRouted(context.Background(), config, fixture.direct, "routed-dispatch", duration, time.Now().Add(-duration), expected, queues, counters, nil)
 	if snapshot := routingTimedCountersSnapshot(counters); snapshot != (routingTimedCounterSnapshot{scheduled: expected, outstanding: expected}) {
 		testContext.Fatalf("dispatch counters = %+v", snapshot)
@@ -420,7 +420,7 @@ func TestDispatchRoutedAccountsCapAndFullQueues(testContext *testing.T) {
 	fixture := newRoutingTimedWorkerFixture(testContext)
 	const expected = uint64(16)
 	duration := 16 * time.Millisecond
-	config := commandConfig{Rate: 1000, Seed: 9, Workload: workloadMix}
+	config := nationalCongestionCommandConfig(commandConfig{Rate: 1000, Seed: 9, Workload: workloadMix})
 
 	capped := make([]chan routingTimedJob, 8)
 	for index := range capped {
@@ -447,7 +447,7 @@ func TestRoutedWorkersSubmitEveryJobInRouteOrder(testContext *testing.T) {
 	fixture := newRoutingTimedWorkerFixture(testContext)
 	const expected = uint64(3 * routingRouteCount)
 	duration := 3 * time.Second
-	config := commandConfig{Rate: 1000, Seed: 9, Workload: workloadMix, Outstanding: maxOutstanding}
+	config := nationalCongestionCommandConfig(commandConfig{Rate: 1000, Seed: 9, Workload: workloadMix, Outstanding: maxOutstanding})
 	counters := newSenderCounters(config.Outstanding)
 	queues, done := startRoutedSendWorkers(context.Background(), fixture.direct, config, counters)
 	dispatchRouted(context.Background(), config, fixture.direct, "routed-workers", duration, time.Now().Add(-duration), expected, queues, counters, nil)

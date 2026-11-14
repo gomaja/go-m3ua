@@ -271,7 +271,7 @@ func TestVisitASKeysVisitsDynamicScopesInOrderAndStops(testContext *testing.T) {
 			}},
 		}}}},
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		testContext.Fatal(err)
 	}

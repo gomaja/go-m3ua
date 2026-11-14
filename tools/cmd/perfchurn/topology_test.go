@@ -98,7 +98,7 @@ func TestPopulationCoversTheReferenceStoreExactlyOnce(t *testing.T) {
 func TestInventoryIsAcceptedByTheLibrary(t *testing.T) {
 	for _, routes := range []int{0, referenceRouteCount} {
 		inventory := aspInventory(routes)
-		endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: inventory, SSNMState: ssnmStateConfig()})
+		endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: inventory, SSNMState: ssnmStateConfig()}))
 		if err != nil {
 			t.Fatalf("routes %d: %v", routes, err)
 		}
@@ -112,7 +112,7 @@ func TestInventoryIsAcceptedByTheLibrary(t *testing.T) {
 		}
 		_ = endpoint.Close()
 	}
-	peer, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP, SGP: sgpEndpointConfig()})
+	peer, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP, SGP: sgpEndpointConfig()}))
 	if err != nil {
 		t.Fatalf("peer endpoint: %v", err)
 	}

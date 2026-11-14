@@ -19,15 +19,15 @@ func routeReferenceArguments(extra ...string) []string {
 }
 
 func TestRouteReferenceFlagsAreOptInAndBounded(testContext *testing.T) {
-	churn, err := parseConfig(routeReferenceArguments("-route-references=churn"))
+	churn, err := parseConfig(nationalCongestionArguments(routeReferenceArguments("-route-references=churn")))
 	if err != nil || churn.RouteReferences != (routeReferenceConfig{Mode: routeReferencesChurn, Rate: routeReferenceDefaultRate}) {
 		testContext.Fatalf("churn: %+v %v", churn.RouteReferences, err)
 	}
-	static, err := parseConfig(routeReferenceArguments("-route-references=static"))
+	static, err := parseConfig(nationalCongestionArguments(routeReferenceArguments("-route-references=static")))
 	if err != nil || static.RouteReferences != (routeReferenceConfig{Mode: routeReferencesStatic}) {
 		testContext.Fatalf("static: %+v %v", static.RouteReferences, err)
 	}
-	plain, err := parseConfig(routeReferenceArguments())
+	plain, err := parseConfig(nationalCongestionArguments(routeReferenceArguments()))
 	if err != nil || plain.RouteReferences.enabled() {
 		testContext.Fatalf("routed-direct without the flag changed: %+v %v", plain.RouteReferences, err)
 	}
@@ -46,7 +46,7 @@ func TestRouteReferenceFlagsAreOptInAndBounded(testContext *testing.T) {
 		"rate without mode":   routeReferenceArguments("-route-reference-rate=1000"),
 		"with SSNM load":      routeReferenceArguments("-route-references=churn", "-ssnm-rate=10"),
 	} {
-		if _, err := parseConfig(arguments); err == nil {
+		if _, err := parseConfig(nationalCongestionArguments(arguments)); err == nil {
 			testContext.Errorf("%s: accepted", name)
 		}
 	}

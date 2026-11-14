@@ -15,7 +15,7 @@ import (
 func TestSenderCohortPreservesBoundaryCrossingProgress(testContext *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP}))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -52,13 +52,13 @@ func TestSenderCohortPreservesBoundaryCrossingProgress(testContext *testing.T) {
 		handler.ServeHTTP(writer, request)
 	}))
 	defer server.Close()
-	config := commandConfig{
+	config := nationalCongestionCommandConfig(commandConfig{
 		SCTPAddress: listener.Addr().String(), Associations: 1,
 		PeerControl: server.URL, Cohort: "crossing-progress", Seed: 7,
 		Rate: 100, Workload: workload128, Duration: progressSampleInterval + 500*time.Millisecond,
 		Drain: 2 * time.Second, Outstanding: maxOutstanding,
-	}
-	result, err := runSender(ctx, config)
+	})
+	result, err := runSenderWithoutTransportCongestion(testContext, ctx, config)
 	if err != nil {
 		testContext.Fatal(err)
 	}

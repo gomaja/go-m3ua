@@ -13,7 +13,7 @@ import (
 func BenchmarkTransportCongestionSampler(b *testing.B) {
 	for _, count := range []int{1, 100, 1000} {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
-			e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+			e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 			if err != nil {
 				b.Fatal(err)
 			}

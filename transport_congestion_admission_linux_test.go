@@ -12,12 +12,12 @@ import (
 func TestIPSPTypedCongestionWithdrawalOverSCTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	aEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}})
+	aEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = aEndpoint.Close() })
-	bEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}})
+	bEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}}))
 	if err != nil {
 		t.Fatal(err)
 	}

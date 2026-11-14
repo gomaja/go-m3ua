@@ -117,7 +117,7 @@ func TestCollectReverseFoldsReverseVerdicts(testContext *testing.T) {
 			}))
 			defer server.Close()
 			result := cohortResult{Verdict: verdictPass}
-			collectReverse(context.Background(), commandConfig{PeerControl: server.URL, Drain: time.Second}, &result)
+			collectReverse(context.Background(), nationalCongestionCommandConfig(commandConfig{PeerControl: server.URL, Drain: time.Second}), &result)
 			if result.Verdict != test.wantVerdict {
 				testContext.Fatalf("verdict = %q, want %q", result.Verdict, test.wantVerdict)
 			}
@@ -133,7 +133,7 @@ func TestCollectReverseMissingCohortNeverPassesSilently(testContext *testing.T) 
 		writeJSON(writer, http.StatusOK, runRecord{Verdict: verdictPass})
 	}))
 	defer server.Close()
-	config := commandConfig{PeerControl: server.URL, Drain: time.Millisecond}
+	config := nationalCongestionCommandConfig(commandConfig{PeerControl: server.URL, Drain: time.Millisecond})
 	result := cohortResult{Verdict: verdictPass}
 	started := time.Now()
 	collectReverse(context.Background(), config, &result)
@@ -157,7 +157,7 @@ func TestCollectReverseWaitsForTheReverseCohort(testContext *testing.T) {
 	}))
 	defer server.Close()
 	result := cohortResult{Verdict: verdictInconclusive}
-	collectReverse(context.Background(), commandConfig{PeerControl: server.URL, Drain: 5 * time.Second}, &result)
+	collectReverse(context.Background(), nationalCongestionCommandConfig(commandConfig{PeerControl: server.URL, Drain: 5 * time.Second}), &result)
 	if result.ReverseSender == nil || result.ReverseReceiver == nil {
 		testContext.Fatal("collectReverse returned before the reverse cohort completed")
 	}
@@ -384,7 +384,7 @@ func TestResetRefusesAnyReverseDestinationButTheConfiguredOne(testContext *testi
 
 // The SGP receiver's reverse destination comes from its own configuration.
 func TestRunReceiverControlTakesItsReverseDestinationFromConfiguration(testContext *testing.T) {
-	config := commandConfig{Associations: 2, PeerControl: "http://asp.example:8080", CPUStatPath: "/fixture/cpu.stat"}
+	config := nationalCongestionCommandConfig(commandConfig{Associations: 2, PeerControl: "http://asp.example:8080", CPUStatPath: "/fixture/cpu.stat"})
 	control := newRunReceiverControl(context.Background(), config)
 	if control.reverseControl != config.PeerControl {
 		testContext.Fatalf("reverseControl = %q, want the configured %q", control.reverseControl, config.PeerControl)

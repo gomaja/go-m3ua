@@ -39,7 +39,7 @@ var ssnmControlClient = &http.Client{Timeout: ssnmPreloadWait}
 // senderEndpointConfig is the ASP Endpoint configuration. Without SSNM load
 // it is exactly the standalone configuration the fixture always used.
 func senderEndpointConfig(config commandConfig) m3ua.EndpointConfig {
-	endpoint := m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: nil}
+	endpoint := m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: nil, Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: config.CongestionMethod}}}
 	if config.SSNM.enabled() {
 		limits := ssnmStoreLimits(config.SSNM, config.Associations)
 		endpoint.SSNMState = &limits

@@ -20,6 +20,7 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 
 	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-m3ua/internal/congestionmethod"
 	"github.com/gomaja/go-sctp"
 )
 
@@ -76,7 +77,12 @@ func main() {
 		hbTimer           = flag.Duration("hb-timer", 5*time.Second, "M3UA BEAT acknowledgement deadline; ignored when hb-interval is zero")
 		acceptConcurrency = flag.Int("accept-concurrency", 4, "Concurrent Listener.Accept workers")
 	)
+	methodName := flag.String("congestion-method", "", "Required SS7 method: international, national-with-priorities or national-without-priorities.")
 	flag.Parse()
+	method, methodErr := congestionmethod.Parse(*methodName)
+	if methodErr != nil {
+		log.Fatal(methodErr)
+	}
 	if *acceptConcurrency <= 0 {
 		log.Fatal("accept-concurrency must be greater than zero")
 	}
@@ -103,7 +109,7 @@ func main() {
 		log.Fatalf("Failed to resolve SCTP address: %s", err)
 	}
 
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP, Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: method}}})
 	if err != nil {
 		log.Fatalf("Failed to create M3UA SGP endpoint: %s", err)
 	}

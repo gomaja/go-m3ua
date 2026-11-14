@@ -206,3 +206,26 @@ go-sctp release then passed:
 The TEST-NET-1 timeout target was routed through an isolated Linux test
 interface so Docker transport translation could not reject SCTP before the
 kernel exercised the intended silent-peer timeout path.
+
+## Declared DAUD congestion profile deviation
+
+RFC 4666 §4.5.3 says:
+
+> The SGP SHOULD respond to a DAUD message with the MTP3 availability/congestion status of the routeset associated with each Destination Point Codes in the DAUD message.
+
+It also says:
+
+> Where the SGP does not maintain the congestion status of the SS7 destination, the response to a DAUD message should always only be a DAVA, DRST, or DUNA message, as appropriate.
+
+This implementation maintains the congestion status. If an association's
+configured method cannot express that status, its DAUD response omits only the
+profile-refused SCON, sends every remaining congestion and availability reply in
+the planned order, and reports the partial response once per audit through
+`ManagementError`, with the local refusal in `Cause` and the affected audit scope.
+It sends no peer Error for this local mismatch and keeps the association open.
+This is an engineering decision and a declared deviation from the congestion
+status SHOULD for the affected destinations; the exception for an SGP that does
+not maintain congestion does not apply. The authoritative congestion remains
+retained. An audit delivers what a publication could deliver to this association.
+Reply-budget refusal remains a separate whole-audit Destination Status Unknown
+response before any status prefix. A real transport failure still stops writing.

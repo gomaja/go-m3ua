@@ -1292,6 +1292,7 @@ func TestIPSPDoubleExchangeSSNMUsesItsTrafficDirection(t *testing.T) {
 	})
 	association.noteRoutingContextsAcked(params.NewRoutingContext(11))
 	association.noteRoutingContextsActive([]uint32{22})
+	observeSSNM(t, association)
 
 	fromPeer := messages.NewSignallingCongestion(
 		params.NewNetworkAppearance(20),
@@ -1347,6 +1348,7 @@ func TestIPSPDoubleExchangeSSNMOmissionUsesThePeerTrafficNetworkAppearance(t *te
 	})
 	association.noteRoutingContextsAcked(params.NewRoutingContext(11))
 	association.noteRoutingContextsActive([]uint32{22})
+	observeSSNM(t, association)
 
 	const pointCode = uint32(0x222222)
 	if err := association.handleSignallingCongestion(messages.NewSignallingCongestion(
@@ -2100,6 +2102,7 @@ func newDoubleExchangeIPSPWithConfigForTest(
 	t.Helper()
 	association, sent := newTestConn(t, StateASPDown, RoleIPSP)
 	association.cfg = snapshotAssociationConfig(config)
+	association.endpoint = methodEndpointForTest(t, RoleIPSP, uint8(CongestionNationalWithoutPriorities), 3)
 	association.trafficModes = trafficModeSnapshot{}
 	association.freezeTrafficModePolicies()
 	association.dataWriter = func(data []byte, _ *sctp.SndInfo) (int, error) {

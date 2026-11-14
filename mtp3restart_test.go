@@ -195,7 +195,7 @@ func TestDialingSGPAssociationRunsMTP3RestartProcedure(t *testing.T) {
 
 func TestASPAssociationRejectsMTP3RestartProcedure(t *testing.T) {
 	association, _ := newTestConn(t, StateASPActive, RoleASP)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -211,7 +211,7 @@ func TestASPAssociationRejectsMTP3RestartProcedure(t *testing.T) {
 }
 
 func TestASPListenerRejectsMTP3RestartProcedure(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -381,7 +381,7 @@ func TestAcceptedSGPAssociationUsesListenerMTP3RestartState(t *testing.T) {
 // the Endpoint. An Association that never established no longer carries a
 // procedure of its own that could be refused.
 func TestSGPEndpointMTP3RestartRequiresAnOpenEndpoint(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}

@@ -51,7 +51,7 @@ func TestMTPTransferValidatesEndpointAndRequest(t *testing.T) {
 	if _, err := nilEndpoint.MTPTransfer(MTPTransferRequest{}); !errors.Is(err, ErrUnsupportedRole) {
 		t.Fatalf("nil Endpoint error = %v, want ErrUnsupportedRole", err)
 	}
-	sgpEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgpEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint SGP: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestMTPTransferBroadcastIncludesEveryPermittedSignallingGateway(t *testing.
 func TestMTPTransferSerializesSameBroadcastFlowAcrossSignallingGateways(t *testing.T) {
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionBroadcast
-	endpoint, associations, _ := newASPTransferFixture(t, config)
+	endpoint, associations, _ := newASPTransferFixtureReporting(t, config, true, &CongestionConfig{Default: CongestionProfile{Method: CongestionNationalWithPriorities, MaxLevel: 3}})
 	firstWriteStarted := make(chan struct{})
 	releaseFirstWrite := make(chan struct{})
 	secondWriteStarted := make(chan struct{})
@@ -560,30 +560,31 @@ func TestMTPTransferLoadshareReevaluatesMessagePriorityCongestionPolicy(t *testi
 		if !levelSet {
 			return false
 		}
-		return messagePriority != 0 || congestionLevel == 2
+		return messagePriority != 2 || congestionLevel == 2
 	}
-	endpoint, associations, captures := newASPTransferFixture(t, config)
+	endpoint, associations, captures := newASPTransferFixtureReporting(t, config, true, &CongestionConfig{Default: CongestionProfile{Method: CongestionNationalWithPriorities, MaxLevel: 3}})
 	applyASPSCON(t, associations["sg-a/sgp-a1"], 7, 1, 0x123456, 0,
 		params.NewCongestionIndications(1))
 	applyASPSCON(t, associations["sg-b/sgp-b1"], 9, 42, 0x123456, 0,
 		params.NewCongestionIndications(2))
 
 	protocolData := transferProtocolData(0x123456, 20, nil)
+	protocolData.MessagePriority = 2
 	if _, err := endpoint.MTPTransfer(MTPTransferRequest{ProtocolData: protocolData}); err != nil {
-		t.Fatalf("priority-zero MTPTransfer: %v", err)
+		t.Fatalf("priority-two MTPTransfer: %v", err)
 	}
 	if captures["sg-b/sgp-b1"].count() != 1 || captures["sg-a/sgp-a1"].count() != 0 {
-		t.Fatalf("priority-zero counts = sg-a:%d sg-b:%d, want 0/1",
+		t.Fatalf("priority-two counts = sg-a:%d sg-b:%d, want 0/1",
 			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
 	}
 
 	protocolData = transferProtocolData(0x123456, 20, nil)
-	protocolData.MessagePriority = 1
+	protocolData.MessagePriority = 3
 	if _, err := endpoint.MTPTransfer(MTPTransferRequest{ProtocolData: protocolData}); err != nil {
-		t.Fatalf("priority-one MTPTransfer: %v", err)
+		t.Fatalf("priority-three MTPTransfer: %v", err)
 	}
 	if captures["sg-a/sgp-a1"].count() != 1 || captures["sg-b/sgp-b1"].count() != 1 {
-		t.Fatalf("priority-one counts = sg-a:%d sg-b:%d, want 1/1",
+		t.Fatalf("priority-three counts = sg-a:%d sg-b:%d, want 1/1",
 			captures["sg-a/sgp-a1"].count(), captures["sg-b/sgp-b1"].count())
 	}
 }
@@ -802,7 +803,7 @@ func TestMTPTransferSupportsContextlessApplicationServer(t *testing.T) {
 	config.SignallingGateways[0].SGPs[0].ApplicationServers[0].ASKey = &ASKey{
 		NetworkAppearance: 7, NetworkAppearanceSet: true,
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1072,9 +1073,14 @@ func newASPTransferFixtureReporting(
 	t *testing.T,
 	config *ASPConfig,
 	reportAvailable bool,
+	profiles ...*CongestionConfig,
 ) (*Endpoint, map[string]*Association, map[string]*mtpTransferCapture) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	var congestion *CongestionConfig
+	if len(profiles) > 0 {
+		congestion = profiles[0]
+	}
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config, Congestion: congestion}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

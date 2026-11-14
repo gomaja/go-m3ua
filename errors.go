@@ -647,6 +647,13 @@ func (e *RoutingContextError) Is(target error) bool {
 }
 
 func (c *Association) handleErrors(e error) error {
+	var refusal *controlAdmissionError
+	if errors.As(e, &refusal) {
+		// This is our own unsent control, not an invalid peer message. Sending
+		// Error would blame the peer for a local publication's admission rule.
+		logf("m3ua: local control publication not sent: %v", refusal)
+		return nil
+	}
 	var res messages.M3UA
 	errorRoutingContext := c.configuredRoutingContextParam()
 	errorNetworkAppearance := networkAppearanceParam(c.outboundNetworkAppearance())

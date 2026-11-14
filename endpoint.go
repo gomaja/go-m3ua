@@ -44,9 +44,10 @@ func (r Role) String() string {
 // Endpoint owns an immutable M3UA protocol role independently of SCTP
 // association initiation.
 type Endpoint struct {
-	role      Role
-	transport *transportCongestionMonitor
-	ipspMTP   *ipspMTPState
+	congestion *congestionMethodConfig
+	role       Role
+	transport  *transportCongestionMonitor
+	ipspMTP    *ipspMTPState
 
 	mu                sync.Mutex
 	closed            bool
@@ -78,7 +79,9 @@ type Endpoint struct {
 }
 
 // NewEndpoint creates an M3UA endpoint with an immutable protocol role and
-// role-specific node policy.
+// role-specific node policy. Congestion.Default.Method is required: RFC 4666
+// §§3.3.1 and 3.4.4 leave the SS7 network method to the application. Nil
+// Congestion or a zero method returns ErrInvalidRoleConfiguration.
 func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 	transportConfig, err := newTransportCongestionConfig(config.TransportCongestion)
 	if err != nil {
@@ -121,6 +124,16 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 				return nil, err
 			}
 		}
+		congestion, err := newCongestionMethodConfig(config.Role, config.Congestion, routes)
+		if err != nil {
+			return nil, err
+		}
+		if err := congestion.validateRoutes(routes); err != nil {
+			return nil, err
+		}
+		if routes != nil {
+			routes.methods = congestion
+		}
 		var routingKeys *routingKeyRegistry
 		if config.Role == RoleSGP || config.Role == RoleIPSP {
 			var err error
@@ -152,6 +165,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		ctx, cancel := context.WithCancelCause(context.Background())
 		endpoint := &Endpoint{
 			role:             config.Role,
+			congestion:       congestion,
 			transport:        &transportCongestionMonitor{config: transportConfig, read: (*Association).SCTPSendBacklog, readStatus: readTransportSCTPStatus, now: time.Now},
 			ipspMTP:          ipspMTP,
 			listeners:        make(map[*Listener]struct{}),

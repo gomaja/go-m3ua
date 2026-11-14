@@ -29,10 +29,10 @@ func TestAcceptedSGPDestinationReportsStopAtTheRecordBudget(t *testing.T) {
 }
 
 func TestSGPConfigBoundsRetainedDestinationRecords(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		SGP:  &SGPConfig{MaxSSNMDestinationRecords: 1},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -47,10 +47,10 @@ func TestSGPConfigBoundsRetainedDestinationRecords(t *testing.T) {
 }
 
 func TestListenerInheritsTheSGPDestinationRecordBudget(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		SGP:  &SGPConfig{MaxSSNMDestinationRecords: 3},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

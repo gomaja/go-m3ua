@@ -577,7 +577,13 @@ func (as *applicationServer) deliverAttemptLocked(
 	var deliveryErrors []error
 	for _, target := range targets {
 		message := copyData(data)
-		if _, err := target.writeDistributedSignal(message); err != nil {
+		resolvedAS := as.key
+		// A registered all-NA binding uses the validated message network; static
+		// bindings retain their resolved NA even when the wire omitted it.
+		if !resolvedAS.NetworkAppearanceSet && data.NetworkAppearance != nil {
+			resolvedAS.NetworkAppearance, resolvedAS.NetworkAppearanceSet = data.NetworkAppearance.NetworkAppearance(), true
+		}
+		if _, err := target.writeDistributedSignal(message, resolvedAS); err != nil {
 			failed = append(failed, target)
 			deliveryErrors = append(deliveryErrors, err)
 			continue

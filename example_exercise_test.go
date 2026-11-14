@@ -72,7 +72,7 @@ func exampleASPConfig(withRouting bool) *ASPConfig {
 // configuration it shows is accepted, and the role it prints is the Endpoint's
 // own rather than anything about the transport.
 func TestExampleStartupBuildsTheDocumentedEndpoint(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(true)})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(true)}))
 	if err != nil {
 		t.Fatalf("NewEndpoint() error = %v", err)
 	}
@@ -289,7 +289,7 @@ func TestExampleInboundClassificationSeparatesWireScopeFromIdentity(t *testing.T
 // reports the same view, and a cancelled Next ends that one call rather than
 // the subscription.
 func TestExampleSSNMSubscriptionIsAtomicWithItsSnapshot(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(false)})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(false)}))
 	if err != nil {
 		t.Fatalf("NewEndpoint() error = %v", err)
 	}
@@ -415,7 +415,7 @@ func TestExampleSSNMOverflowIsReportedAndRecoveredByResync(t *testing.T) {
 // transfer says plainly that it is not configured, and no dummy route has to be
 // invented to reach that state.
 func TestExampleApplicationManagedRoutingNeedsNoRouteInventory(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(false)})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(false)}))
 	if err != nil {
 		t.Fatalf("NewEndpoint() error = %v", err)
 	}
@@ -476,7 +476,7 @@ func TestMTPIndicationsNilnessMatchesItsDocumentation(t *testing.T) {
 		{"IPSP", EndpointConfig{Role: RoleIPSP}, true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(testCase.config)
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(testCase.config))
 			if err != nil {
 				t.Fatalf("NewEndpoint() error = %v", err)
 			}
@@ -587,7 +587,7 @@ func TestGracefulWithdrawalNeedsALiveAssociationContext(t *testing.T) {
 // candidate order, and Unwrap separates "nothing is known about the
 // destination" from "this route cannot be used".
 func TestExampleAlternatePathRecoveryReportsEveryRefusal(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(true)})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(true)}))
 	if err != nil {
 		t.Fatalf("NewEndpoint() error = %v", err)
 	}
@@ -647,7 +647,7 @@ func TestExampleAlternatePathRecoveryReportsEveryRefusal(t *testing.T) {
 // and the Endpoint closes everything it owns, idempotently, after which the
 // operations that would start work say so.
 func TestExampleShutdownClosesOnlyItsOwnScope(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(true)})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: exampleASPConfig(true)}))
 	if err != nil {
 		t.Fatalf("NewEndpoint() error = %v", err)
 	}

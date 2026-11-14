@@ -124,7 +124,7 @@ func TestListenerConfigSelectorOnlyUsesDefaultAssociationConfigFallback(t *testi
 }
 
 func TestIPSPListenerSelectorOnlyDefersAssociationConfigValidation(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleIPSP): %v", err)
 	}

@@ -64,7 +64,7 @@ func acceptInfoForPeer(port int, ip string) AcceptInfo {
 // decides which SGP an accepted peer is and the inventory decides whether that
 // answer is one this ASP provisioned.
 func TestListenerSelectorRunsBeforePeerProvisioningAndAuthorization(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestListenerSelectorRunsBeforePeerProvisioningAndAuthorization(t *testing.T
 // selector may hand back configuration it keeps and reuses. Accept builds the
 // Association from the snapshot, not from the caller's object.
 func TestAcceptedAssociationConfigIsOwnedBeforeTheInventoryJudgesIt(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestAcceptedAssociationConfigIsOwnedBeforeTheInventoryJudgesIt(t *testing.T
 // Run under -race. TestConcurrentAcceptResolutionRaceControl is the control
 // that the detector does fire on this shape of work.
 func TestConcurrentAcceptResolutionMatchesProvisionedInventory(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestConcurrentAcceptResolutionRaceControl(t *testing.T) {
 	if os.Getenv("M3UA_RACE_DETECTOR_CONTROL") != "1" {
 		t.Skip("opt-in: set M3UA_RACE_DETECTOR_CONTROL=1 to prove the race detector fires on this pattern")
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoGatewayInventory()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -437,7 +437,7 @@ func twoGatewayRoutedInventory() *ASPConfig {
 // Run under -race. TestConcurrentAcceptResolutionRaceControl is the control
 // that the detector does fire on this shape of work.
 func TestConcurrentAcceptAttachAndDetachShareRouteStateSafely(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoGatewayRoutedInventory()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoGatewayRoutedInventory()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

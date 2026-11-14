@@ -30,7 +30,9 @@ func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testConte
 			defer cancel()
 			receiver := startWithholdingReceiver(testContext, ctx, sharedClock, -1, false)
 			config := withholdingSenderConfig(receiver, sharedClock)
-			endpoint, err := m3ua.NewEndpoint(senderEndpointConfig(config))
+			endpointConfig := senderEndpointConfig(config)
+			endpointConfig.TransportCongestion = &m3ua.TransportCongestionConfig{Disabled: true}
+			endpoint, err := m3ua.NewEndpoint(endpointConfig)
 			if err != nil {
 				testContext.Fatal(err)
 			}

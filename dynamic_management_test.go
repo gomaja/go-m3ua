@@ -286,7 +286,7 @@ func newDynamicallyRegisteredASPManagementFixture(
 	state State,
 ) (*Endpoint, *Association, ASKey, <-chan messages.M3UA) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: role})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: role}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

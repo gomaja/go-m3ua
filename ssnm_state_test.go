@@ -48,7 +48,7 @@ func ssnmPeerInventoryConfig() *ASPConfig {
 
 func newSSNMStateEndpoint(t *testing.T, config *ASPConfig, limits *SSNMStateConfig) *Endpoint {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config, SSNMState: limits})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config, SSNMState: limits}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -710,11 +710,11 @@ func TestSSNMStateConfigRejectsImpossibleReservations(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			limits := tt.limits
-			_, err := NewEndpoint(EndpointConfig{
+			_, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 				Role:      RoleASP,
 				ASP:       ssnmPeerInventoryConfig(),
 				SSNMState: &limits,
-			})
+			}))
 			if !errors.Is(err, ErrInvalidSSNMStateConfig) {
 				t.Fatalf("NewEndpoint error = %v, want ErrInvalidSSNMStateConfig", err)
 			}
@@ -726,15 +726,15 @@ func TestSSNMStateConfigRejectsImpossibleReservations(t *testing.T) {
 // is about impossibility rather than about the boundary itself.
 func TestSSNMStateConfigAcceptsExactReservations(t *testing.T) {
 	limits := SSNMStateConfig{MaxRecords: 4, MaxRecordsPerPartition: 4, MaxRecordsPerPeer: 4}
-	if _, err := NewEndpoint(EndpointConfig{
+	if _, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleASP, ASP: ssnmPeerInventoryConfig(), SSNMState: &limits,
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("exact reservation refused: %v", err)
 	}
 	minimum := SSNMStateConfig{MaxBytes: ssnmPartitionBaseBytes + ssnmRecordBaseBytes}
-	if _, err := NewEndpoint(EndpointConfig{
+	if _, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleASP, ASP: ssnmPeerInventoryConfig(), SSNMState: &minimum,
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("smallest usable byte budget refused: %v", err)
 	}
 }

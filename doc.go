@@ -11,6 +11,22 @@ RFC 4666 Section 1.4.8 recommends that both ASPs and SGPs support either SCTP
 orientation, so protocol behavior never follows from whether Dial or Accept was
 used.
 
+Every NewEndpoint call must provide EndpointConfig.Congestion with an explicit
+Default.Method: CongestionInternational, CongestionNationalWithPriorities or
+CongestionNationalWithoutPriorities. Nil and zero methods are invalid for every
+role, including network and association overrides. There is no library default:
+the application knows the SS7 network's method, which cannot be inferred from NI,
+MP or received SCON parameters (RFC 4666 Sections 3.3.1 and 3.4.4; Q.704 (07/96)
+Sections 11.2.3.1, 11.2.4 and 14.2.2). Default is the application's explicitly
+chosen fallback for networks without a selector, not an automatically chosen
+method. National MaxLevel zero still selects 3 as an engineering level default.
+
+ASP/IPSP local-user DATA and all SCON sends must suit the selected method. An
+SGP preserves original MP0..3 on NIF transit, reporting a method mismatch through
+the same bounded diagnostic as received DATA; MP above the supported ceiling is
+refused before writing. The two-bit ceiling is the selected fallback, not full
+ANSI/TTC certification. A diagnostic is not a protocol Error or a discard request.
+
 An IPSP Association must select the RFC 4666 Section 4.3 exchange model in
 AssociationConfig.IPSP and state which procedures it initiates in
 AssociationConfig.ASPProcedures. Single Exchange and Double Exchange are

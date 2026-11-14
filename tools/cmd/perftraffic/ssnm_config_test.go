@@ -21,7 +21,7 @@ func ssnmReceiverArguments(extra ...string) []string {
 }
 
 func TestSSNMFlagsDefaultOffLeaveConfigurationUnchanged(testContext *testing.T) {
-	config, err := parseConfig(ssnmSenderArguments())
+	config, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments()))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestSSNMFlagsDefaultOffLeaveConfigurationUnchanged(testContext *testing.T) 
 }
 
 func TestSSNMFlagsApplyDefaults(testContext *testing.T) {
-	config, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000"))
+	config, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments("-ssnm-total-rate=1000")))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestSSNMFlagsApplyDefaults(testContext *testing.T) {
 	if config.SSNM != want {
 		testContext.Fatalf("SSNM config = %+v, want %+v", config.SSNM, want)
 	}
-	receiver, err := parseConfig(ssnmReceiverArguments("-ssnm-total-rate=10", "-ssnm-apcs=1024"))
+	receiver, err := parseConfig(nationalCongestionArguments(ssnmReceiverArguments("-ssnm-total-rate=10", "-ssnm-apcs=1024")))
 	if err != nil {
 		testContext.Fatalf("parse receiver: %v", err)
 	}
@@ -50,8 +50,8 @@ func TestSSNMFlagsApplyDefaults(testContext *testing.T) {
 }
 
 func TestSSNMBudgetFlagsParseAndReachTheManifest(testContext *testing.T) {
-	config, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-apcs=1024", "-ssnm-records=1024",
-		"-ssnm-apply-p99-budget=250ms", "-ssnm-resync-budget=50ms", "-ssnm-recovery-budget=2s"))
+	config, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-apcs=1024", "-ssnm-records=1024",
+		"-ssnm-apply-p99-budget=250ms", "-ssnm-resync-budget=50ms", "-ssnm-recovery-budget=2s")))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSSNMBudgetFlagsParseAndReachTheManifest(testContext *testing.T) {
 	if err != nil || !strings.Contains(string(encoded), `"ssnm_budgets":{"apply_p99_ns":250000000,"resync_ns":50000000,"recovery_ns":2000000000`) {
 		testContext.Fatalf("manifest encoding %s, %v", encoded, err)
 	}
-	off, err := parseConfig(ssnmSenderArguments())
+	off, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments()))
 	if err != nil || off.SSNM.budgetsRecord() != nil {
 		testContext.Fatalf("budgets recorded without SSNM load: %+v, %v", off.SSNM, err)
 	}
@@ -78,7 +78,7 @@ func TestSSNMBudgetFlagsParseAndReachTheManifest(testContext *testing.T) {
 }
 
 func TestSSNMPauseFlagParses(testContext *testing.T) {
-	config, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000", "-pause-subscriber=5s/10s"))
+	config, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments("-ssnm-total-rate=1000", "-pause-subscriber=5s/10s")))
 	if err != nil {
 		testContext.Fatalf("parseConfig: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestSSNMFlagsRejectInvalidCombinations(testContext *testing.T) {
 	}
 	for name, testCase := range cases {
 		testContext.Run(name, func(testContext *testing.T) {
-			_, err := parseConfig(testCase.arguments)
+			_, err := parseConfig(nationalCongestionArguments(testCase.arguments))
 			if err == nil || !strings.Contains(err.Error(), testCase.want) {
 				testContext.Fatalf("parseConfig error = %v, want containing %q", err, testCase.want)
 			}
@@ -186,7 +186,7 @@ func TestSSNMSubscriptionQueueBytesReachStoreAndSpec(testContext *testing.T) {
 		{"exactly one preload message", ssnmSenderArguments("-ssnm-total-rate=1000", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69124"), 69_124},
 	} {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
-			config, err := parseConfig(testCase.arguments)
+			config, err := parseConfig(nationalCongestionArguments(testCase.arguments))
 			if err != nil {
 				testContext.Fatalf("parseConfig: %v", err)
 			}
@@ -202,7 +202,7 @@ func TestSSNMSubscriptionQueueBytesReachStoreAndSpec(testContext *testing.T) {
 			}
 		})
 	}
-	receiver, err := parseConfig(ssnmReceiverArguments("-ssnm-total-rate=1000"))
+	receiver, err := parseConfig(nationalCongestionArguments(ssnmReceiverArguments("-ssnm-total-rate=1000")))
 	if err != nil || receiver.SSNM.QueueBytes != 0 {
 		testContext.Fatalf("receiver queue bytes %d, %v", receiver.SSNM.QueueBytes, err)
 	}
@@ -224,7 +224,7 @@ func TestSSNMStoreLimitsFitTheWorkload(testContext *testing.T) {
 	if need := 2 * (ssnmAccountedPartitionBytes + 16384*ssnmAccountedRecordBytes); limits.MaxBytes < need {
 		testContext.Fatalf("MaxBytes %d cannot hold %d accounted bytes", limits.MaxBytes, need)
 	}
-	if config := senderEndpointConfig(commandConfig{Associations: 1}); config.SSNMState != nil || config.ASP != nil {
+	if config := senderEndpointConfig(nationalCongestionCommandConfig(commandConfig{Associations: 1})); config.SSNMState != nil || config.ASP != nil {
 		testContext.Fatalf("endpoint configuration without SSNM load changed: %+v", config)
 	}
 }
@@ -239,7 +239,7 @@ func workloadRef(workload ssnmWorkload) *ssnmWorkload { return &workload }
 func TestSSNMReceiptStorageDoesNotScaleWithAssociations(testContext *testing.T) {
 	for _, associations := range []string{"-associations=1", "-associations=32"} {
 		arguments := append(ssnmSenderArguments("-ssnm-total-rate=10000"), associations, "-duration=180s", "-warmup=0s")
-		if _, err := parseConfig(arguments); err != nil {
+		if _, err := parseConfig(nationalCongestionArguments(arguments)); err != nil {
 			testContext.Fatalf("%s: %v", associations, err)
 		}
 	}

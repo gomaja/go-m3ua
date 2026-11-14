@@ -85,7 +85,11 @@ const (
 // constraints of Section 1.4.7, and the Application Server binding with its
 // activation. Destination availability is deliberately not among them: an
 // application that owns outbound selection has already made that decision, and
-// SSNM state is published to it separately.
+// SSNM state is published to it separately. Configured methods additionally
+// validate MP, and ASP/IPSP national-priority local-user offers below effective
+// congestion return DataNotSent with ErrNoMTPRoute. SGP transit is not subject
+// to that discard rule (Q.704 (07/96) §11.2.4): it preserves MP0..3 from
+// its NIF and reports method mismatches without refusing them (RFC 4666 §3.3.1).
 func (c *Association) WriteData(request DataRequest) (int, error) {
 	return c.WriteDataContext(context.Background(), request)
 }
@@ -166,6 +170,13 @@ func (c *Association) submitDataContext(ctx context.Context, frame []byte, key A
 		return newDataNotSent(key, stream, err)
 	}
 	defer c.sendMu.Unlock()
+	mismatch, err := c.validateMethodDataFrame(key, frame)
+	if err != nil {
+		return newDataNotSent(key, stream, err)
+	}
+	if mismatch != nil {
+		c.recordDataProfileMismatch(*mismatch)
+	}
 	// Copied by value: the template is shared by every send on this
 	// association, and only the stream varies per message.
 	info := *c.sctpInfo
@@ -328,6 +339,7 @@ func (c *Association) writeRawData(
 	frame []byte,
 	encoded int,
 	enforceTrafficScope bool,
+	resolvedDataScope *ASKey,
 ) (int, error) {
 	if enforceTrafficScope && !c.outboundDataActive() {
 		return 0, newDataNotSent(ASKey{}, 0, ErrNotEstablished)
@@ -363,10 +375,23 @@ func (c *Association) writeRawData(
 		}
 	}
 	defer release()
+	if !enforceTrafficScope {
+		if resolvedDataScope == nil {
+			return 0, newDataNotSent(scope, stream, ErrUnknownApplicationServerScope)
+		}
+		scope = normalizeOutboundASKey(*resolvedDataScope)
+	}
+	mismatch, err := c.validateMethodDataFrame(scope, frame)
+	if err != nil {
+		return 0, newDataNotSent(scope, stream, err)
+	}
 
 	// The signal seam belongs to the tests that observe decoded messages; in
 	// production both write paths end at the same transport call.
 	if c.signalWriter != nil {
+		if mismatch != nil {
+			c.recordDataProfileMismatch(*mismatch)
+		}
 		written, err := c.signalWriter(message)
 		if err != nil {
 			return 0, newDataSubmissionError(scope, stream, err)

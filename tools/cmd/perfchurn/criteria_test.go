@@ -120,8 +120,8 @@ func epochLedgers(forward, reverse uint64) []ledgerResult {
 
 // passingRecord is a synthetic full-contract run: every criterion holds.
 func passingRecord() *aspRecord {
-	record := &aspRecord{Config: commandConfig{Blocks: 5, BlockCycles: 200, ChurnRate: 4, ChurnGroup: 2, AcceptConcurrency: 4,
-		DataRate: contractDataRate, ReverseRate: defaultReverseRate, Payload: string(workloadMix)}}
+	record := &aspRecord{Config: nationalCongestionCommandConfig(commandConfig{Blocks: 5, BlockCycles: 200, ChurnRate: 4, ChurnGroup: 2, AcceptConcurrency: 4,
+		DataRate: contractDataRate, ReverseRate: defaultReverseRate, Payload: string(workloadMix)})}
 	for index, phase := range []string{phaseWarm, phaseSteady, phaseOverload, phaseOverloadDrain, "churn-1", "retain-5"} {
 		value := uint64(100+index) * mebibyte
 		if overloadPhase(phase) {

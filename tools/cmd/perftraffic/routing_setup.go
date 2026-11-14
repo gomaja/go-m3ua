@@ -223,7 +223,7 @@ func routingSetupAssociationConfig(peer routingPeer, identifier uint32, sender b
 	return config
 }
 
-func startRoutingPeerSet(ctx context.Context, topology routingTopology, addresses []*sctp.Addr, factory routingSetupFactory) (*routingPeerSet, error) {
+func startRoutingPeerSet(ctx context.Context, topology routingTopology, addresses []*sctp.Addr, factory routingSetupFactory, method m3ua.CongestionMethod) (*routingPeerSet, error) {
 	owned, concrete, err := routingSetupInputs(topology, addresses)
 	if err != nil {
 		return nil, err
@@ -237,7 +237,7 @@ func startRoutingPeerSet(ctx context.Context, topology routingTopology, addresse
 		if err := ctx.Err(); err != nil {
 			return nil, errors.Join(err, closeRoutingSetupResources(endpoints, listeners))
 		}
-		endpoint, err := factory(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+		endpoint, err := factory(m3ua.EndpointConfig{Role: m3ua.RoleSGP, Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: method}}})
 		if err != nil {
 			return nil, errors.Join(err, closeRoutingSetupResources(endpoints, listeners))
 		}
@@ -275,7 +275,7 @@ func startRoutingPeerSet(ctx context.Context, topology routingTopology, addresse
 	return &routingPeerSet{owner}, nil
 }
 
-func startRoutingSenderSet(ctx context.Context, topology routingTopology, local *sctp.Addr, addresses []*sctp.Addr, factory routingSetupFactory) (*routingSenderSet, error) {
+func startRoutingSenderSet(ctx context.Context, topology routingTopology, local *sctp.Addr, addresses []*sctp.Addr, factory routingSetupFactory, method m3ua.CongestionMethod) (*routingSenderSet, error) {
 	owned, concrete, err := routingSetupInputs(topology, addresses)
 	if err != nil {
 		return nil, err
@@ -296,7 +296,7 @@ func startRoutingSenderSet(ctx context.Context, topology routingTopology, local 
 	if factory == nil {
 		factory = newRoutingSetupEndpoint
 	}
-	endpoint, err := factory(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: owned.ASP})
+	endpoint, err := factory(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: owned.ASP, Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: method}}})
 	if err != nil {
 		return nil, err
 	}

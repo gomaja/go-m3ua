@@ -14,10 +14,10 @@ import (
 func TestRegistrationSemanticFaultSCTPBatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{
+	sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{
 		AuthorizeRegistration:   func(RoutingKeyRegistrationRequest) RegistrationStatus { return RegistrationSuccessfullyRegistered },
 		AllowDynamicRoutingKeys: true,
-	}})
+	}}))
 	if err != nil {
 		t.Fatal(err)
 	}

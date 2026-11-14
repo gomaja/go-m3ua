@@ -20,7 +20,7 @@ import (
 func TestASPMultiSGTransferWhenASPInitiatesSCTPAssociations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	aspEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: integrationASPConfig()})
+	aspEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: integrationASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint ASP: %v", err)
 	}
@@ -28,7 +28,7 @@ func TestASPMultiSGTransferWhenASPInitiatesSCTPAssociations(t *testing.T) {
 
 	sgpAssociations := make(map[SignallingGatewayID]*Association)
 	for _, peer := range integrationPeers() {
-		sgpEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+		sgpEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint SGP %s: %v", peer.gateway, err)
 		}
@@ -72,7 +72,7 @@ func TestASPMultiSGTransferWhenASPInitiatesSCTPAssociations(t *testing.T) {
 func TestASPMultiSGTransferWhenSGPsInitiateSCTPAssociations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	aspEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: integrationASPConfig()})
+	aspEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: integrationASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint ASP: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestASPMultiSGTransferWhenSGPsInitiateSCTPAssociations(t *testing.T) {
 	}
 	sgpAssociations := make(map[SignallingGatewayID]*Association)
 	for _, peer := range peers {
-		sgpEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+		sgpEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint SGP %s: %v", peer.gateway, err)
 		}

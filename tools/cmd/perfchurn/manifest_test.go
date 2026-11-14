@@ -21,7 +21,7 @@ func TestReadValuesRecordsWhatItCannotRead(t *testing.T) {
 }
 
 func TestManifestPinsTheEnvironment(t *testing.T) {
-	record := currentManifest(roleASP, commandConfig{Routes: referenceRouteCount})
+	record := currentManifest(roleASP, nationalCongestionCommandConfig(commandConfig{Routes: referenceRouteCount}))
 	if len(record.TransparentHugePages) != 6 || len(record.Kernel) == 0 || len(record.Cgroup) == 0 {
 		t.Fatalf("environment maps %v %v %v", record.TransparentHugePages, record.Kernel, record.Cgroup)
 	}

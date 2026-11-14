@@ -41,6 +41,7 @@ func TestOverflowSCONSocketScopesAndSustainedDrain(t *testing.T) {
 	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	cfg.DataQueueSize = 2
 	cfg.Subscribe = func(c *Association) { c.ManagementIndications() }
+	cfg.CongestionProfiles = []NetworkCongestionProfile{{NetworkAppearanceSet: true, Profile: CongestionProfile{Method: CongestionInternational}}}
 	c, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.1"), peer.ln.Addr().(*sctp.Addr), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +138,7 @@ func TestOverflowSCONSocketDropsRecoveredOnset(t *testing.T) {
 	cfg := newASPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	cfg.DataQueueSize = 2
 	cfg.Subscribe = func(c *Association) { c.ManagementIndications() }
+	cfg.CongestionProfiles = []NetworkCongestionProfile{{NetworkAppearanceSet: true, Profile: CongestionProfile{Method: CongestionInternational}}}
 	c, err := dialASP(ctx, "m3ua", mcAddr(0, "127.0.0.1"), peer.ln.Addr().(*sctp.Addr), cfg)
 	if err != nil {
 		t.Fatal(err)

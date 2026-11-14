@@ -271,6 +271,7 @@ func TestUnsolicitedActiveAckReportsExactScopes(t *testing.T) {
 
 func TestUnsolicitedActiveAckSendsNoErrorAndDeliversDATA(t *testing.T) {
 	c, sent := recoveryASP(t, StateASPInactive, true)
+	c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 	dispatchRecoveryAck(t, c, messages.NewAspActiveAck(nil, params.NewRoutingContext(2), nil))
 	if len(errorCodes(*sent)) != 0 {
 		t.Errorf("unsolicited Active Ack sent Error: %v", typeNames(*sent))

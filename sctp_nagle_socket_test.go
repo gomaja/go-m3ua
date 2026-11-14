@@ -21,7 +21,7 @@ func TestSCTPNoDelayConfiguration(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/%s/nagle=%t", role, direction, nagle), func(t *testing.T) {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					endpoint, err := NewEndpoint(EndpointConfig{Role: role})
+					endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: role}))
 					if err != nil {
 						t.Fatal(err)
 					}

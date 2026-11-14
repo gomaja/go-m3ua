@@ -19,11 +19,11 @@ import (
 // dialed Associations share.
 func newSGPOwnerEndpoint(t *testing.T) *Endpoint {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role:               RoleSGP,
 		SGP:                &SGPConfig{},
 		ApplicationServers: &ApplicationServerConfig{RecoveryTimer: time.Hour},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -256,7 +256,7 @@ func TestEndpointAvailabilityPublicationRejectsInvalidRequests(t *testing.T) {
 	listener := addOwnedListener(t, endpoint, 7, 1)
 	addActiveASP(t, listener, 7, 1)
 
-	aspEndpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	aspEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
