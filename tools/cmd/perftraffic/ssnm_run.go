@@ -117,6 +117,12 @@ func startSSNMLoad(ctx context.Context, config commandConfig, endpoint *m3ua.End
 	if err != nil {
 		return nil, fmt.Errorf("SSNM load clock: %w", err)
 	}
+	return startSSNMLoadWithClock(ctx, config, endpoint, associations, clock)
+}
+
+// startSSNMLoadWithClock shares the injected clock with every subscriber.
+// The command entry point above always supplies its real measurement clock.
+func startSSNMLoadWithClock(ctx context.Context, config commandConfig, endpoint *m3ua.Endpoint, associations []*m3ua.Association, clock measurementClock) (*ssnmSenderRun, error) {
 	runContext, cancel := context.WithCancel(ctx)
 	run := &ssnmSenderRun{
 		config:       config.SSNM,
