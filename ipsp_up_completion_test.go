@@ -82,7 +82,7 @@ func TestSimultaneousIPSPUpCannotRetryAfterActive(t *testing.T) {
 				}
 				// Force the same initial/retry write fence used by runTAck, without a
 				// scheduler-dependent timer race. A completed request must submit nothing.
-				if _, err := a.writePendingControl(up, up.msg); err != nil {
+				if _, err := a.writePendingControl(context.Background(), up, up.msg); err != nil {
 					t.Fatal(err)
 				}
 				drain()
@@ -194,7 +194,7 @@ func TestPeerUpCompletionRetainsSentCopyAckCredit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := c.writePendingControl(up, up.msg); err != nil {
+			if _, err := c.writePendingControl(context.Background(), up, up.msg); err != nil {
 				t.Fatal(err)
 			}
 			dispatchSharedUpControl(t, c, messages.NewAspUp(nil, nil))
@@ -355,7 +355,7 @@ func TestActiveStartRetiresUpRegisteredDuringCompletion(t *testing.T) {
 			if _, err := c.beginASPActive(params.NewRoutingContext(1)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := c.writePendingControl(fresh, fresh.msg); err != nil {
+			if _, err := c.writePendingControl(context.Background(), fresh, fresh.msg); err != nil {
 				t.Fatal(err)
 			}
 			active := false
@@ -411,11 +411,17 @@ func TestStaleASPActiveCannotCompleteFreshAutomaticUp(t *testing.T) {
 			if !awaitASPTestStack(t, call, "(*Association)."+method+"(", "(*Association).dynamicRoutingContexts(") {
 				t.Fatalf("Active returned before scope resolution: %v", call.err)
 			}
+			// A solicited nonterminating Down retains the automatic startup entry.
+			c.startTAck(messages.NewAspDown(nil), requestAspDown)
 			c.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 			applyUpAckPublications(t, c)
 			c.tack.mu.Lock()
-			up := c.pendingRequestsLocked(requestAspUp)[0]
+			ups := c.pendingRequestsLocked(requestAspUp)
 			c.tack.mu.Unlock()
+			if len(ups) != 1 {
+				t.Fatalf("solicited Down left %d automatic Up requests, want 1", len(ups))
+			}
+			up := ups[0]
 			for len(sent) > 0 {
 				if _, ok := (receiveASPTest(t, sent, "automatic Up")).(*messages.AspActive); ok {
 					t.Error("stale Active was sent before scope resolution")
@@ -585,7 +591,7 @@ func TestFreshUpStopsActivationsFromPreviousCycle(t *testing.T) {
 				default:
 					t.Error("previous-cycle activation waiter was not completed")
 				}
-				if _, err := c.writePendingControl(old, old.msg); err != nil && !errors.Is(err, ErrASPProcedureSuperseded) {
+				if _, err := c.writePendingControl(context.Background(), old, old.msg); err != nil && !errors.Is(err, ErrASPProcedureSuperseded) {
 					t.Error(err)
 				}
 				if len(writes) > 0 {

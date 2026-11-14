@@ -99,39 +99,19 @@ func TestAspActiveFromAspInactiveStillActivates(t *testing.T) {
 	}
 }
 
-// TestUnexpectedAspUpAckReturnsToThePreviousState covers RFC 4666 Section
-// 4.3.4.1:
-//
-//	If the ASP receives an unexpected ASP Up Ack message, the ASP should
-//	consider itself in the ASP-INACTIVE state.  If the ASP was not in the
-//	ASP-INACTIVE state, it SHOULD send an Error message and then initiate
-//	procedures to return itself to its previous state.
-//
-// The Error was sent and the drop to ASP-INACTIVE happened, but the third
-// clause did not: the ASP sat in ASP-INACTIVE indefinitely, carrying no traffic,
-// because the entry action only re-activates when arriving from ASP-DOWN.
-//
-// That guard exists for a real reason — coming back from ASP-ACTIVE because the
-// peer deliberately took traffic away, with an ASP Inactive or an "Alternate
-// ASP Active" Notify, must not fight the peer's decision. A stray ASP Up Ack is
-// not the peer taking traffic away, so the two causes have to be told apart.
-func TestUnexpectedAspUpAckReturnsToThePreviousState(t *testing.T) {
-	asp, _ := newTestConn(t, StateASPActive, RoleASP)
-
-	if err := asp.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err == nil {
-		t.Fatal("an ASP Up Ack while ASP-ACTIVE was accepted silently")
+// RFC 4666 §4.3.4.1 says the ASP "SHOULD send an Error message and then
+// initiate procedures to return itself to its previous state". The declared
+// library exception delegates the return to Layer Management after reporting.
+func TestUnexpectedUpAckLeavesRecoveryToApplication(t *testing.T) {
+	c, sent := newTestConn(t, StateASPActive, RoleASP)
+	c.cfg.TAck = time.Hour
+	dispatchRecoveryAck(t, c, messages.NewAspUpAck(nil, nil))
+	if c.State() != StateASPInactive || countType(*sent, "Error") != 1 || countType(*sent, "ASP Active") != 0 {
+		t.Fatalf("unexpected Up Ack: state=%v sent=%v", c.State(), typeNames(*sent))
 	}
-
-	// Entering ASP-INACTIVE from ASP-ACTIVE because of that stray Ack must
-	// re-initiate, unlike the peer-driven route into the same state.
-	if !asp.resumeAfterStrayAck() {
-		t.Error("the ASP did not arm the return to its previous state")
-	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1), routingContextASKey(2)}, StateASPActive)
 }
 
-// An Ack answering an ASP Inactive this node actually sent is the deliberate
-// deactivation path. Unlike an unsolicited Ack, it must not fight the request
-// by immediately activating again.
 func TestSolicitedAspInactiveAckDoesNotReactivate(t *testing.T) {
 	asp, _ := newTestConn(t, StateASPActive, RoleASP)
 	asp.startTAck(messages.NewAspInactive(asConfigRoutingContextParam(asp.cfg.ApplicationServers), nil), requestAspInactive)
@@ -139,7 +119,7 @@ func TestSolicitedAspInactiveAckDoesNotReactivate(t *testing.T) {
 	if err := asp.handleAspInactiveAck(messages.NewAspInactiveAck(asConfigRoutingContextParam(asp.cfg.ApplicationServers), nil)); err != nil {
 		t.Fatalf("handleAspInactiveAck: %v", err)
 	}
-	if asp.resumeAfterStrayAck() {
+	if len(asp.pendingTAckRoutingContexts(requestAspActive)) > 0 {
 		t.Error("a solicited ASP Inactive Ack armed an unwanted re-activation")
 	}
 }
@@ -341,7 +321,7 @@ func TestSolicitedAspUpAckIsAbsorbed(t *testing.T) {
 		t.Errorf("an ASP Up Ack answering our own ASP Up was reported as an "+
 			"error: %v", err)
 	}
-	if conn.resumeAfterStrayAck() {
+	if len(conn.pendingTAckRoutingContexts(requestAspActive)) > 0 {
 		t.Error("a solicited ASP Up Ack armed the stray-acknowledgement return")
 	}
 	if got := typeNames(*sent); len(got) != 0 {
@@ -349,40 +329,18 @@ func TestSolicitedAspUpAckIsAbsorbed(t *testing.T) {
 	}
 }
 
-// With nothing outstanding the Ack really is unexpected, and Section 4.3.4.1
-// applies in full.
-func TestUnsolicitedAspUpAckStillDropsToInactive(t *testing.T) {
-	conn, _ := newTestConn(t, StateASPActive, RoleASP)
-
-	err := conn.handleAspUpAck(messages.NewAspUpAck(nil, nil))
-	if err == nil {
-		t.Fatal("an ASP Up Ack nothing asked for was accepted silently")
+// With nothing outstanding, RFC 4666 §4.3.4.1 supplies the Error and
+// inactive state; the application owns return to service.
+func TestUnsolicitedAspUpAckReportsInactiveWithoutReturn(t *testing.T) {
+	c, sent := newTestConn(t, StateASPActive, RoleASP)
+	c.cfg.TAck = time.Hour
+	dispatchRecoveryAck(t, c, messages.NewAspUpAck(nil, nil))
+	if c.State() != StateASPInactive || countType(*sent, "Error") != 1 || countType(*sent, "ASP Active") != 0 {
+		t.Fatalf("unowed Up Ack: state=%v sent=%v", c.State(), typeNames(*sent))
 	}
-	var unexpected *UnexpectedMessageError
-	if !errors.As(err, &unexpected) {
-		t.Errorf("error = %T, want *UnexpectedMessageError", err)
-	}
-	if !conn.resumeAfterStrayAck() {
-		t.Error("the return to the previous state was not armed")
-	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1), routingContextASKey(2)}, StateASPActive)
 }
 
-// The SGP must not refuse an ASP Active that arrives in the window between its
-// own ASP Up Ack going out and its state transition being applied.
-//
-// handleSignals writes the Ack from inside handleAspUp and only afterwards
-// publishes ASP-INACTIVE, which a separate goroutine applies. On loopback the
-// ASP receives the Ack and sends ASP Active inside that window; the dispatcher
-// then reads a state that is still ASP-DOWN and refuses ASPTM with "Unexpected
-// Message" (Section 4.3.1 allows an ASP-DOWN peer only Heartbeat, ASP Down Ack
-// and Error). The ASP resends on T(ack), is refused each time, and both ends
-// give up at their establish budget -- observed as roughly one failed
-// establishment in twelve when three ASPs come up at once.
-//
-// The window is reproduced here exactly, and without timing: newTestConn's
-// stateChan is buffered and nothing drains it, so after the first handleSignals
-// the transition is published but unapplied, which is the same situation the
-// dispatcher is in when it picks up the next message.
 func TestAspActiveInTheAckWindowIsNotRefused(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPDown, RoleSGP)
 	ctx := context.Background()

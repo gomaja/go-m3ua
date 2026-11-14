@@ -9,6 +9,7 @@ import (
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
+	"github.com/gomaja/go-sctp"
 )
 
 func applyUpAckPublications(t *testing.T, c *Association) {
@@ -35,20 +36,16 @@ func completeUpAndRCOne(t *testing.T, c *Association) {
 	applyUpAckPublications(t, c)
 }
 
-func assertMainCompletedUpFallback(t *testing.T, c *Association) {
+func assertUnowedUpAckWithdrawal(t *testing.T, c *Association) {
 	t.Helper()
-	if c.State() != StateASPInactive {
-		t.Errorf("Up Ack state %v, want main's ASP-INACTIVE", c.State())
+	c.dataWriter = func(b []byte, _ *sctp.SndInfo) (int, error) { return len(b), nil }
+	if c.State() != StateASPInactive || c.routingContextAcked(1) {
+		t.Errorf("unowed Up Ack did not close state and gates: %v", c.State())
 	}
 	if _, err := c.WriteData(DataRequest{AS: associationConfigASKey(c.cfg, 1), Stream: 1, ProtocolData: simpleProtocolData("after-up")}); !errors.Is(err, ErrNotEstablished) {
-		t.Errorf("Up Ack DATA gate: %v, want main's ErrNotEstablished", err)
+		t.Errorf("unowed Up Ack DATA gate: %v", err)
 	}
-	if err := firstErr(c); err != nil {
-		t.Errorf("Up Ack reported %v, want main's silent fallback", err)
-	}
-	if c.resumeAfterStrayAck() {
-		t.Error("Up Ack armed automatic recovery")
-	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1)}, StateASPActive)
 }
 
 func TestApplicationUpDoesNotEarnDuplicateCredit(t *testing.T) {
@@ -59,7 +56,7 @@ func TestApplicationUpDoesNotEarnDuplicateCredit(t *testing.T) {
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	applyUpAckPublications(t, c)
-	assertMainCompletedUpFallback(t, c)
+	assertUnowedUpAckWithdrawal(t, c)
 }
 
 func TestNonDuplicateUpAckKeepsExplicitScopesInactive(t *testing.T) {
@@ -71,7 +68,7 @@ func TestNonDuplicateUpAckKeepsExplicitScopesInactive(t *testing.T) {
 	before := len(*sent)
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	applyUpAckPublications(t, c)
-	assertMainCompletedUpFallback(t, c)
+	assertUnowedUpAckWithdrawal(t, c)
 	if c.routingContextAcked(2) {
 		t.Error("Up Ack activated RC2")
 	}
@@ -80,8 +77,8 @@ func TestNonDuplicateUpAckKeepsExplicitScopesInactive(t *testing.T) {
 			t.Errorf("Up Ack sent ASP Active: %v", m)
 		}
 	}
-	if len(*sent) != before {
-		t.Error("main's completed-Up fallback sent a control message")
+	if len(*sent) != before+1 || countType((*sent)[before:], "Error") != 1 {
+		t.Error("unowed Up Ack did not send exactly one Error")
 	}
 }
 
@@ -108,17 +105,25 @@ func TestInFlightLibraryUpAckDoesNotBlockInboundProcessing(t *testing.T) {
 		}
 		return m.MarshalLen(), nil
 	}
-	written := startASPTestCall(func() error { _, err := c.writePendingControl(req, req.msg); return err })
+	written := startASPTestCall(func() error { _, err := c.writePendingControl(context.Background(), req, req.msg); return err })
 	awaitASPTestSend(t, entered, written, "in-flight library copy")
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	applyUpAckPublications(t, c)
+	c.setState(StateASPActive)
+	c.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	handled := startASPTestCall(func() error {
 		c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 		c.handleSignals(context.Background(), messages.NewHeartbeat(params.NewHeartbeatData([]byte("after-up"))))
 		return nil
 	})
-	if err := finishASPTestAck(t, handled, "Ack classification blocked inbound processing behind the library write"); err != nil {
+	if awaitASPTestStack(t, handled, "(*Association).handleASPUpAcknowledgement(", "lockSlow(") {
+		t.Fatal("in-flight duplicate processing waited for the held retry fence")
+	}
+	if err := handled.wait(t, "in-flight duplicate processing"); err != nil {
 		t.Fatal(err)
+	}
+	if c.State() != StateASPActive || !c.routingContextAcked(1) {
+		t.Fatal("in-flight owed duplicate withdrew active traffic")
 	}
 	if publication := receiveASPTest(t, c.stateChan, "in-flight duplicate publication"); publication != stateUnchanged {
 		t.Errorf("in-flight duplicate published %v", publication)
@@ -132,37 +137,54 @@ func TestInFlightLibraryUpAckDoesNotBlockInboundProcessing(t *testing.T) {
 	}
 }
 
-func TestCancelledFreshUpFirstAckRetainsMainHandling(t *testing.T) {
+func TestCancelledFreshUpAckLeavesActivationToApplication(t *testing.T) {
 	c, _ := newTestConnWithContexts(t, StateASPDown, RoleASP, 1)
 	completeUpAndRCOne(t, c)
 	c.startTAck(messages.NewAspDown(nil), requestAspDown)
 	c.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 	applyUpAckPublications(t, c)
-	submitted := make(chan struct{}, 2)
-	c.signalWriter = func(m messages.M3UA) (int, error) { submitted <- struct{}{}; return m.MarshalLen(), nil }
+	submitted := make(chan messages.M3UA, 4)
+	c.signalWriter = func(m messages.M3UA) (int, error) { submitted <- m; return m.MarshalLen(), nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	call := startASPTestCall(func() error { return c.ASPUp(ctx) })
-	awaitASPTestSend(t, submitted, call, "fresh ASPUp")
+	if _, up := awaitASPTestSend(t, submitted, call, "fresh ASPUp").(*messages.AspUp); !up {
+		t.Fatal("fresh ASPUp did not submit Up")
+	}
 	cancel()
 	if err := call.wait(t, "fresh Up cancellation"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("fresh Up cancellation: %v", err)
+	}
+	failure := receiveASPTest(t, c.ManagementIndications(), "cancelled Up procedure report")
+	if failure.Kind != ManagementError || !errors.Is(failure.Cause, context.Canceled) {
+		t.Fatalf("cancelled Up report: %+v", failure)
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))
 	applyUpAckPublications(t, c)
 	if c.State() != StateASPInactive {
 		t.Errorf("fresh first Ack left state %v, want main's ASP-INACTIVE", c.State())
 	}
+	select {
+	case m := <-submitted:
+		if _, ok := m.(*messages.Error); !ok {
+			t.Fatal("fresh cancelled Up Ack did not send Error")
+		}
+	default:
+		t.Fatal("fresh cancelled Up Ack did not send Error")
+	}
+	recoveryIndication(t, c, "ASP-WITHDRAWAL", nil, StateASPDown)
 	activeCtx := aspTestContext(t)
 	active := startASPTestCall(func() error { return c.ASPActive(activeCtx) })
-	awaitASPTestSend(t, submitted, active, "ASPActive following fresh Up Ack")
+	if _, ok := awaitASPTestSend(t, submitted, active, "ASPActive following fresh Up Ack").(*messages.AspActive); !ok {
+		t.Fatal("application recovery did not send Active")
+	}
 	c.handleSignals(context.Background(), messages.NewAspActiveAck(nil, params.NewRoutingContext(1), nil))
 	if err := active.wait(t, "following ASPActive confirmation"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestCompletedUpFallbackPreservesMainIPSPDirections(t *testing.T) {
+func TestUnowedUpAckUsesIPSPProcedureDirection(t *testing.T) {
 	for _, model := range []string{"SE", "DE", "shared ASPSM"} {
 		t.Run(model, func(t *testing.T) {
 			exchange, aspsm := IPSPExchangeDouble, IPSPASPSMExchangeDouble
@@ -188,21 +210,24 @@ func TestCompletedUpFallbackPreservesMainIPSPDirections(t *testing.T) {
 			if model != "DE" {
 				want.TrafficToPeer = StateASPInactive
 			}
-			if model == "SE" {
-				want.TrafficToLocal = StateASPInactive
-			}
+			want.TrafficToLocal = StateASPInactive
 			before := len(*sent)
 			c.handleSignals(context.Background(), messages.NewAspUpAck(params.NewAspIdentifier(99), nil))
 			applyUpAckPublications(t, c)
 			if got := c.IPSPState(); got != want {
-				t.Errorf("completed Up fallback %+v, want main's %+v", got, want)
+				t.Errorf("unowed Up Ack %+v, want %+v", got, want)
 			}
 			if id, set := c.PeerASPIdentifier(); !set || id != 99 {
 				t.Errorf("non-duplicate identifier %d/%v, want main's updated 99", id, set)
 			}
-			if firstErr(c) != nil || len(*sent) != before {
-				t.Error("completed Up fallback reported an error or wrote control")
+			if firstErr(c) != nil || len(*sent) != before+1 || countType((*sent)[before:], "Error") != 1 {
+				t.Error("unowed Up Ack did not submit one Error")
 			}
+			key := routingContextASKey(1)
+			if model != "SE" {
+				key = ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 11, RoutingContextSet: true}
+			}
+			recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{key}, StateASPActive)
 		})
 	}
 }

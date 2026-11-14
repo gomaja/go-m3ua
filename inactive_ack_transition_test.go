@@ -41,7 +41,7 @@ func TestASPWithdrawsOnUnsolicitedInactiveAckAfterReactivation(t *testing.T) {
 				if conn.State() != StateASPInactive || conn.stateForAcknowledgedRoutingContexts() != StateASPInactive {
 					t.Fatalf("fresh withdrawal retained active scope: state=%v traffic=%v", conn.State(), conn.stateForAcknowledgedRoutingContexts())
 				}
-				if conn.resumeAfterStrayAck() {
+				if len(conn.pendingTAckRoutingContexts(requestAspActive)) > 0 {
 					t.Fatal("fresh withdrawal armed automatic recovery")
 				}
 				if err := conn.handleStateUpdate(StateASPInactive); err != nil {
@@ -101,7 +101,7 @@ func TestRejectedActiveAckPreservesInactiveAckHistory(t *testing.T) {
 		t.Fatal("rejected Active Ack erased duplicate recognition")
 	}
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(rc, nil))
-	if len(*sent) != 0 || conn.resumeAfterStrayAck() {
+	if len(*sent) != 0 {
 		t.Fatal("rejected Active Ack ended the duplicate window")
 	}
 }
@@ -120,7 +120,7 @@ func TestUnsolicitedActiveAckEndsInactiveAckDuplicateWindow(t *testing.T) {
 		t.Fatal("unsolicited Active Ack was not accepted")
 	}
 	conn.handleSignals(context.Background(), messages.NewAspInactiveAck(rc, nil))
-	if conn.State() != StateASPInactive || conn.routingContextAcked(1) || conn.resumeAfterStrayAck() {
+	if conn.State() != StateASPInactive || conn.routingContextAcked(1) {
 		t.Fatal("accepted unsolicited Active Ack did not end old Inactive Ack history")
 	}
 }
@@ -176,7 +176,7 @@ func TestASPIgnoresDelayedDuplicateInactiveAck(t *testing.T) {
 	if conn.routingContextAcked(1) || !conn.routingContextAcked(2) || conn.State() != StateASPActive {
 		t.Fatal("duplicate changed scope state")
 	}
-	if countType(*sent, "ASP Active") != 0 || conn.resumeAfterStrayAck() || conn.pendingTAck() != 1 {
+	if countType(*sent, "ASP Active") != 0 || conn.pendingTAck() != 1 {
 		t.Fatal("delayed duplicate initiated a second withdrawal recovery")
 	}
 }
@@ -202,11 +202,11 @@ func TestInactiveAckHistoryRetiresOnlyReactivatedScopes(t *testing.T) {
 				t.Fatal("reactivation retained RC 1 duplicate recognition")
 			}
 			conn.handleSignals(context.Background(), messages.NewAspInactiveAck(params.NewRoutingContext(2), nil))
-			if countType(*sent, "ASP Active") != 0 || conn.resumeAfterStrayAck() {
+			if countType(*sent, "ASP Active") != 0 {
 				t.Fatal("reactivating RC 1 forgot duplicate history for RC 2")
 			}
 			conn.handleSignals(context.Background(), messages.NewAspInactiveAck(params.NewRoutingContext(1), nil))
-			if conn.routingContextAcked(1) || conn.resumeAfterStrayAck() {
+			if conn.routingContextAcked(1) {
 				t.Fatal("reactivated RC 1 ignored a fresh withdrawal")
 			}
 		})

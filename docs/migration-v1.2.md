@@ -1014,13 +1014,26 @@ send ASPInactive to confirm inactivity or ASPActive to recover. Confirmed
 application Inactive and ASP Down cancellation use the same reporting rule. A
 waiting ASPActive call also publishes its ordinary failure ManagementError.
 While its context and association remain live, it waits for the cancelling
-handler's reports first. Context cancellation ends that wait immediately:
-it returns the supersession cause if withdrawal already claimed the request,
-or ctx.Err() otherwise. Its failure indication may then precede the handler's
-reports. Association close ends the wait using the existing terminal-reporting
-policy. ActivateRoutingContexts and initial procedure writes never wait for
-the handler's DATA drain; ActivateRoutingContexts returns its error without a
-generic procedure-failure indication, as before.
+handler's reports first. Context cancellation independently returns ctx.Err();
+its failure indication may then precede the handler's reports. Association close
+ends the wait with the terminal association error. Public initial procedure
+writes, ActivateRoutingContexts and DeactivateRoutingContexts join any withdrawal
+that has retired their request before exposing its result. Internal Up/Active
+entry, startup and restart actions submit control messages without waiting for a
+procedure result; the result itself remains unpublished until the withdrawal
+commits and reports. Orderly shutdown still waits for its committed result.
+Nonwaiting activation and deactivation otherwise return after submission without
+waiting for an Ack; they add no generic procedure-failure indication. Failure to
+submit the required Up-Ack Error returns that independent write failure instead
+of a retirement cause whose withdrawal was not reported.
+
+Automatic entry actions serialize state changes through their initial control
+submission, preserving ASP Up before ASP Active. Explicit calls release the
+state lock before writing or waiting for an Ack. If a newer local ASP Up or ASP
+Down replaces the same pending procedure, or orderly shutdown cancels pending
+procedures, callers now receive `ErrASPProcedureSuperseded` instead of
+`ErrAssociationClosed` on a live association. The association stays open for
+local replacement; shutdown still closes it after its withdrawal sequence.
 
 No acknowledgement evidence is retained for a cancelled send. Later Active
 Acks use the ordinary duplicate and validation rules; M3UA has no request

@@ -31,7 +31,7 @@ func TestInactiveAckLeavesReactivationToApplication(t *testing.T) {
 				if err := c.handleStateUpdate(c.State()); err != nil {
 					t.Fatal(err)
 				}
-				if countType(*sent, "ASP Active") != 0 || c.pendingTAck() != 0 || c.resumeAfterStrayAck() {
+				if countType(*sent, "ASP Active") != 0 || c.pendingTAck() != 0 {
 					t.Fatal("unsolicited withdrawal automatically reactivated traffic")
 				}
 				if c.routingContextAcked(1) || c.routingContextAcked(2) == last {
@@ -220,7 +220,7 @@ func TestInactiveAckDoesNotSuppressAutomaticStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if countType(*sent, "ASP Active") != 1 || c.pendingTAck() != 1 {
-		t.Fatalf("automatic activation after ASP Up Ack: sent=%v pending=%d state=%v resume=%v error=%v", typeNames(*sent), c.pendingTAck(), c.State(), c.resumeTo, firstErr(c))
+		t.Fatalf("automatic activation after ASP Up Ack: sent=%v pending=%d state=%v error=%v", typeNames(*sent), c.pendingTAck(), c.State(), firstErr(c))
 	}
 }
 

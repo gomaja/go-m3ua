@@ -34,7 +34,15 @@ func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRe
 	if err != nil {
 		return nil, err
 	}
-	return c.writeASPActive(pending)
+	for _, request := range pending {
+		if _, err := c.submitPendingControl(request, request.msg); err != nil {
+			for _, started := range pending {
+				c.cancelTAckRequest(started)
+			}
+			return pending, err
+		}
+	}
+	return pending, nil
 }
 
 // startGuardedASPActive rechecks and registers public activation atomically
@@ -73,14 +81,13 @@ func (c *Association) startASPActive(routingContext *params.Param) ([]*pendingRe
 	return pending, nil
 }
 
-func (c *Association) writeASPActive(pending []*pendingRequest) ([]*pendingRequest, error) {
-	for index, request := range pending {
-		if _, err := c.writePendingControl(request, request.msg); err != nil {
+func (c *Association) writeASPActive(ctx context.Context, pending []*pendingRequest) ([]*pendingRequest, error) {
+	for _, request := range pending {
+		if _, err := c.writePendingControl(ctx, request, request.msg); err != nil {
 			for _, started := range pending {
 				c.cancelTAckRequest(started)
 			}
-			// The waiting API retains the failed request's bounded result wait.
-			return pending[:index+1], err
+			return pending, err
 		}
 	}
 	return pending, nil
@@ -153,14 +160,14 @@ func (c *Association) aspActiveRequests(routingContext *params.Param) ([]aspActi
 }
 
 func (c *Association) initiateASPInactive(routingContext *params.Param) error {
-	_, err := c.beginASPInactive(routingContext)
+	_, err := c.beginASPInactive(context.Background(), routingContext)
 	return err
 }
 
-func (c *Association) beginASPInactive(routingContext *params.Param) (*pendingRequest, error) {
+func (c *Association) beginASPInactive(ctx context.Context, routingContext *params.Param) (*pendingRequest, error) {
 	aspInactive := messages.NewAspInactive(routingContext.Copy(), nil)
 	request := c.startTAck(aspInactive, requestAspInactive)
-	if _, err := c.writePendingControl(request, aspInactive); err != nil {
+	if _, err := c.writePendingControl(ctx, request, aspInactive); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}
@@ -192,7 +199,7 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.writeASPActive(pending)
+	_, err = c.writeASPActive(context.Background(), pending)
 	return err
 }
 
@@ -595,6 +602,7 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 		return err
 	}
 
+	before := c.acknowledgementState(false)
 	// Only what this Ack named is active. A partial Ack used to take the whole
 	// association active, so DATA went out for contexts the SGP had never
 	// agreed to carry.
@@ -602,6 +610,7 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 		if c.isIPSPDoubleExchange() {
 			acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
 			defer acknowledgement.complete()
+			defer c.reportUnsolicitedASPActivation(acknowledgement, before, aspAcAck.RoutingContext)
 			c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
 			return c.enterLocalIPSPState(StateASPActive)
 		}
@@ -620,6 +629,14 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 		c.commitPeerRoutingContextsActive(routingContexts)
 		c.overrideOtherASPs(routingContexts)
 		acknowledgement.complete()
+		// Preserve the existing SE resolution of an omitted Routing Context.
+		// Registered contexts may coexist with a contextless AS that this
+		// grant did not activate; the indication must not invent that grant.
+		reportedScope := aspAcAck.RoutingContext
+		if reportedScope == nil && len(routingContexts) > 0 {
+			reportedScope = params.NewRoutingContext(routingContexts...)
+		}
+		c.reportUnsolicitedASPActivation(acknowledgement, before, reportedScope)
 	} else {
 		// Keep the pending early-SSNM binding until the acknowledged scope is
 		// recorded; removing it first would discard retained destination state
@@ -628,6 +645,7 @@ func (c *Association) handleAspActiveAck(aspAcAck *messages.AspActiveAck) error 
 		c.noteRoutingContextsAcked(aspAcAck.RoutingContext)
 		acknowledgement := c.claimTAckAcknowledgement(requestAspActive, aspAcAck.RoutingContext)
 		defer acknowledgement.complete()
+		defer c.reportUnsolicitedASPActivation(acknowledgement, before, aspAcAck.RoutingContext)
 		// RFC 4666 §4.2 confirms "Upon successful completion" and
 		// §4.3.4.3 informs Layer Management with M-ASP_ACTIVE confirm.
 		c.commitState(StateASPActive)
@@ -987,6 +1005,10 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	if c.rejectStaleASPTMAck(requestAspInactive) {
 		return NewUnexpectedMessageError(aspAcAck)
 	}
+	previousIPSPState := IPSPState{}
+	if c.role == RoleIPSP {
+		previousIPSPState = c.IPSPState()
+	}
 	previousState := c.State()
 	if c.isIPSPDoubleExchange() {
 		previousState = c.localIPSPStateValue()
@@ -1027,7 +1049,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 			c.commitLocalIPSPState(c.stateForAcknowledgedRoutingContexts())
 			c.quiesceLocalIPSPSSNMTraffic()
 			acknowledgement.complete()
-			c.reportInactiveAckWithdrawal(withdrawn)
+			c.reportInactiveAckWithdrawal(withdrawn, previousState, previousIPSPState)
 			c.reportCancelledActivations(cancelled)
 			return nil
 		}
@@ -1035,7 +1057,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 		if acknowledgedContext != nil {
 			routingContexts = acknowledgedContext.RoutingContexts()
 		}
-		quiescedRoutingContexts := routingContexts
+		quiescedKeys := affected
 		if previousState == StateASPActive {
 			c.noteRoutingContextsInactive(routingContexts)
 		} else {
@@ -1045,17 +1067,17 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 			// materializing an association-wide active set and subtracting only
 			// the named contexts.
 			c.noteRoutingContextsInactive(nil)
-			quiescedRoutingContexts = c.configuredRoutingContexts()
+			quiescedKeys = c.configuredASKeys()
 		}
 		c.commitInactiveAckState(c.stateForActiveRoutingContexts())
 		postTransitionNotify := func() {}
 		if c.as != nil {
-			postTransitionNotify = c.as.quiesceASPFor(c, quiescedRoutingContexts)
+			postTransitionNotify = c.as.quiesceASPKeysInactive(c, quiescedKeys)
 		}
 		c.quiesceUnscopedTraffic()
 		postTransitionNotify()
 		acknowledgement.complete()
-		c.reportInactiveAckWithdrawal(withdrawn)
+		c.reportInactiveAckWithdrawal(withdrawn, previousState, previousIPSPState)
 		c.reportCancelledActivations(cancelled)
 		return nil
 	}
@@ -1070,7 +1092,7 @@ func (c *Association) handleAspInactiveAck(aspAcAck *messages.AspInactiveAck) er
 	}
 	c.commitInactiveAckState(c.stateForAcknowledgedRoutingContexts())
 	acknowledgement.complete()
-	c.reportInactiveAckWithdrawal(withdrawn)
+	c.reportInactiveAckWithdrawal(withdrawn, previousState, previousIPSPState)
 	c.reportCancelledActivations(cancelled)
 	return nil
 }

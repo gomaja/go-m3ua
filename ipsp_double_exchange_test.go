@@ -266,7 +266,7 @@ func TestIPSPDoubleExchangeAbsorbsDelayedCompletedASPUpAck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := association.writePendingControl(request, request.msg); err != nil {
+	if _, err := association.writePendingControl(context.Background(), request, request.msg); err != nil {
 		t.Fatal(err)
 	}
 	if err := association.handleAspUpAck(messages.NewAspUpAck(nil, nil)); err != nil {
@@ -495,7 +495,7 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateInactiveAck(t *testing.T) {
 	association.noteRoutingContextsAcked(params.NewRoutingContext(11))
 	association.terminating.Store(true)
 
-	request, err := association.beginASPInactive(params.NewRoutingContext(11))
+	request, err := association.beginASPInactive(context.Background(), params.NewRoutingContext(11))
 	if err != nil {
 		t.Fatalf("begin ASP Inactive: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateActiveAck(t *testing.T) {
 	}
 
 	association.terminating.Store(true)
-	inactiveRequest, err := association.beginASPInactive(params.NewRoutingContext(11))
+	inactiveRequest, err := association.beginASPInactive(context.Background(), params.NewRoutingContext(11))
 	if err != nil {
 		t.Fatalf("begin ASP Inactive: %v", err)
 	}

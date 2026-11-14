@@ -54,11 +54,13 @@ func (e *AssociationEstablishmentError) Unwrap() error {
 
 // Error definitions.
 var (
-	// ErrASPProcedureSuperseded reports that a newer procedure ended an
-	// outstanding ASP procedure before it completed: a peer ASP Down, an ASP
-	// Inactive Ack for the same scopes (a confirmation or an unsolicited
-	// withdrawal), or the ASP Down Ack confirming this ASP's own ASP Down.
-	// The wrapped error names the cause.
+	// ErrASPProcedureSuperseded reports that a local replacement or peer
+	// withdrawal ended an outstanding ASP procedure before it completed. Causes
+	// include a newer ASP Up/Down, orderly shutdown, a peer ASP Down, an unowed
+	// Up/Down Ack, an ASP Inactive Ack for the same scopes (a confirmation or
+	// unsolicited withdrawal), and the Ack confirming this ASP's own ASP Down.
+	// The wrapped error names the cause; local replacement does not close a
+	// live association.
 	ErrASPProcedureSuperseded = errors.New("ASP procedure superseded")
 
 	ErrSCTPNotAlive      = errors.New("SCTP is no longer alive")

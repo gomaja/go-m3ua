@@ -6,7 +6,6 @@ package m3ua
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -149,8 +148,9 @@ type tackRetransmitter struct {
 	// peerDownSuperseded distinguishes an Up Ack following the peer's shared
 	// withdrawal from an ordinary unsolicited Ack. A fresh Up procedure clears it.
 	peerDownSuperseded bool
-	// peerDownHandling refuses a new shared procedure until Down Ack is written.
-	peerDownHandling bool
+	// aspWithdrawalHandling refuses new procedures while a peer withdrawal
+	// is being committed; the fence ends before its management report.
+	aspWithdrawalHandling bool
 }
 
 type acknowledgedASPTMScope struct {
@@ -232,16 +232,26 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 		c.tack.retryMu.Lock()
 	}
 	c.tack.mu.Lock()
-	if terminationBoundary {
-		c.cancelAllTAckLocked()
+	select {
+	case <-c.done:
+		c.tack.mu.Unlock()
+		if terminationBoundary {
+			c.tack.retryMu.Unlock()
+		}
+		req.finish(ErrAssociationClosed)
+		return req
+	default:
 	}
-	if c.tack.peerDownHandling && ackFor != requestAspDown ||
+	if terminationBoundary {
+		c.cancelAllTAckLocked(fmt.Errorf("%w by orderly shutdown", ErrASPProcedureSuperseded))
+	}
+	if c.tack.aspWithdrawalHandling && ackFor != requestAspDown ||
 		c.tack.peerDownSuperseded && (ackFor == requestAspActive || ackFor == requestAspInactive) {
 		c.tack.mu.Unlock()
 		if terminationBoundary {
 			c.tack.retryMu.Unlock()
 		}
-		req.finish(fmt.Errorf("%w by peer ASP Down", ErrASPProcedureSuperseded))
+		req.finish(fmt.Errorf("%w by peer ASP withdrawal", ErrASPProcedureSuperseded))
 		return req
 	}
 	if ackFor == requestAspUp {
@@ -259,7 +269,7 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 	if ackFor == requestAspUp || ackFor == requestAspDown {
 		for message, pending := range c.tack.pending {
 			if pending.kind == ackFor {
-				pending.cancel()
+				pending.finish(fmt.Errorf("%w by newer %s", ErrASPProcedureSuperseded, msg.MessageTypeName()))
 				delete(c.tack.pending, message)
 			}
 		}
@@ -282,7 +292,23 @@ func (p *pendingRequest) cancel() {
 // Registration remains independent so a newer request can supersede a blocked
 // timer. A superseded request returns its result through waitTAck; it must not
 // put its initial message on the wire after the peer's Down Ack (§4.3.4.2).
-func (c *Association) writePendingControl(request *pendingRequest, message messages.M3UA) (int, error) {
+func (c *Association) writePendingControl(ctx context.Context, request *pendingRequest, message messages.M3UA) (int, error) {
+	if c.tack == nil || request == nil {
+		return c.writeControl(message)
+	}
+	n, err := c.submitPendingControl(request, message)
+	// failure is private until the retiring handler completes publication.
+	// Join outside retryMu: the handler needs that fence before committing.
+	if err == nil && request.failure.Load() != nil {
+		return 0, c.waitTAck(ctx, request)
+	}
+	return n, err
+}
+
+// submitPendingControl only submits transport work. Internal entry actions may
+// hold muState, and the dispatcher may be committing a withdrawal; neither may
+// join its publication. The request's result remains private until completion.
+func (c *Association) submitPendingControl(request *pendingRequest, message messages.M3UA) (int, error) {
 	if c.tack == nil || request == nil {
 		return c.writeControl(message)
 	}
@@ -295,11 +321,6 @@ func (c *Association) writePendingControl(request *pendingRequest, message messa
 		n, err = c.writeTAckControl(request, message)
 	}
 	c.tack.retryMu.Unlock()
-	if err == nil {
-		if failed := request.failure.Load(); failed != nil {
-			return 0, *failed
-		}
-	}
 	return n, err
 }
 
@@ -728,8 +749,9 @@ func (c *Association) claimASPUpAcknowledgement(validate func() error) (acknowle
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
 	pending := len(c.pendingRequestsLocked(requestAspUp)) > 0
-	// Without completed history, retain main's first/late-Ack handling. Once
-	// all copies are answered, retain its completed-Up fallback as well.
+	// Completed history alone does not make an Ack owed. Only unanswered
+	// library copies establish a duplicate; the caller applies the unsolicited
+	// acknowledgement policy after this classification.
 	repeated = !pending && c.tack.aspUpConfirmed
 	duplicate = repeated && c.tack.aspUpMessagesSent > c.tack.aspUpAcksReceived
 	if !duplicate {
@@ -760,7 +782,7 @@ func (c *Association) supersedePeerDownProcedures() []*pendingRequest {
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
 	c.tack.peerDownSuperseded = true
-	c.tack.peerDownHandling = true
+	c.tack.aspWithdrawalHandling = true
 	c.tack.awaitingAspUp = true
 	c.tack.resetASPUpDeliveryLocked()
 	clear(c.tack.acknowledgedASPTM)
@@ -778,7 +800,7 @@ func (c *Association) supersedePeerDownProcedures() []*pendingRequest {
 func (c *Association) finishPeerDownProcedures(requests []*pendingRequest) {
 	if c.tack != nil {
 		c.tack.mu.Lock()
-		c.tack.peerDownHandling = false
+		c.tack.aspWithdrawalHandling = false
 		c.tack.mu.Unlock()
 	}
 	for _, request := range requests {
@@ -964,9 +986,6 @@ func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 	}
 	select {
 	case err := <-req.result:
-		if failed := req.failure.Load(); failed != nil {
-			return *failed
-		}
 		// Teardown can win after the handler claims the Ack but before its
 		// state commit. A ready nil result cannot turn that failed commit into
 		// procedure success (RFC 4666 §4.2: "Upon successful completion").
@@ -977,15 +996,15 @@ func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 			}
 			return ErrAssociationClosed
 		default:
+			if failed := req.failure.Load(); failed != nil {
+				return *failed
+			}
 			return err
 		}
 	case <-ctx.Done():
 		c.cancelTAckRequest(req)
-		// A claimed withdrawal supplies the cause, but cannot extend ctx
-		// while its handler waits for admitted DATA to drain.
-		if failed := req.failure.Load(); failed != nil && errors.Is(*failed, ErrASPProcedureSuperseded) {
-			return *failed
-		}
+		// Cancellation is an independent caller outcome. A stored retirement
+		// cause is not observable until result publishes the committed state.
 		return ctx.Err()
 	case <-c.done:
 		if err := c.Err(); err != nil {
@@ -1005,7 +1024,7 @@ func (c *Association) stopAllTAck() {
 	c.tack.mu.Lock()
 	defer c.tack.mu.Unlock()
 
-	c.cancelAllTAckLocked()
+	c.cancelAllTAckLocked(ErrAssociationClosed)
 }
 
 // resetTAckEpoch retires every request from the prior SCTP association epoch.
@@ -1023,7 +1042,7 @@ func (c *Association) resetTAckEpoch() {
 	c.tack.peerDownSuperseded = false
 	c.tack.resetASPUpDeliveryLocked()
 	c.tack.aspDownAcksOutstanding = 0
-	c.cancelAllTAckLocked()
+	c.cancelAllTAckLocked(ErrAssociationClosed)
 	clear(c.tack.acknowledgedASPTM)
 	c.tack.mu.Unlock()
 	c.tack.aspDownDeliveryMu.Unlock()
@@ -1069,9 +1088,9 @@ func (c *Association) claimASPUpCompletionLocked() pendingTAckAcknowledgement {
 	return acknowledgement
 }
 
-func (c *Association) cancelAllTAckLocked() {
+func (c *Association) cancelAllTAckLocked(cause error) {
 	for message, request := range c.tack.pending {
-		request.cancel()
+		request.finish(cause)
 		delete(c.tack.pending, message)
 	}
 }

@@ -9,7 +9,9 @@ import (
 )
 
 // ASPProcedureMode selects whether the M3UA layer initiates an ASP procedure
-// automatically or only after an explicit Layer Management request.
+// automatically at startup and orderly-shutdown lifecycle points, or only
+// after an explicit Layer Management request. Automatic mode never restores
+// service after an unsolicited acknowledgement; recovery belongs to the application.
 type ASPProcedureMode uint8
 
 const (
@@ -130,7 +132,7 @@ func (c *Association) ASPUp(ctx context.Context) (err error) {
 	request, cancelled := c.startASPSM()
 	c.muState.RUnlock()
 	c.reportCancelledActivations(cancelled)
-	request, err = c.writeASPSM(request)
+	request, err = c.writeASPSM(ctx, request)
 	if err != nil {
 		return err
 	}
@@ -167,9 +169,13 @@ func (c *Association) ASPDown(ctx context.Context) (err error) {
 // ASPActive initiates the RFC 4666 Section 4.3.4.3 ASP Active procedure for
 // the exact Application Servers and waits for every ASP Active Ack. With no
 // keys it requests every configured local AS. A withdrawal may defer failure
-// reporting until its handler completes; ctx cancellation or association close
-// ends that wait. If the withdrawal already claimed the request when ctx ends,
-// the returned error wraps ErrASPProcedureSuperseded; otherwise it is ctx.Err().
+// reporting until its handler commits state and publishes the withdrawal.
+// Context cancellation independently returns ctx.Err(); association close
+// independently returns the terminal association error.
+// A cancelled or timed-out waiting context cannot retract a request already
+// received by the peer (RFC 4666 §4.3.4.3). A later accepted ASP Active Ack can
+// activate its scopes and produces ManagementASPActivation when no request is
+// outstanding. The application may retain the grant or call ASPInactive.
 func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) {
 	defer func() { c.notifyASPProcedureFailure("ASP Active", keys, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
@@ -194,14 +200,9 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 	}
 	requests, err := c.startGuardedASPActive(routingContext)
 	if err == nil {
-		requests, err = c.writeASPActive(requests)
+		requests, err = c.writeASPActive(ctx, requests)
 	}
 	if err != nil {
-		if errors.Is(err, ErrASPProcedureSuperseded) && len(requests) > 0 {
-			// Only the waiting API joins the cancelling handler's reports.
-			// Earlier groups were cleaned up; the last request owns this error.
-			return c.waitTAck(ctx, requests[len(requests)-1])
-		}
 		return err
 	}
 	return c.waitASPProcedureRequests(ctx, requests)
@@ -230,7 +231,7 @@ func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error
 	if err != nil {
 		return err
 	}
-	request, err := c.beginASPInactive(routingContext)
+	request, err := c.beginASPInactive(ctx, routingContext)
 	if err != nil {
 		return err
 	}

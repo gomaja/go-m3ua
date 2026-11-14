@@ -138,7 +138,7 @@ func TestIPSPPeerDownRejectsLateInactiveAck(t *testing.T) {
 		}
 		t.Run(model.name, func(t *testing.T) {
 			association, _ := newIPSPDownAssociationForTest(t, model.exchange, model.aspsm, StateASPActive)
-			if _, err := association.beginASPInactive(association.configuredLocalRoutingContextParam()); err != nil {
+			if _, err := association.beginASPInactive(context.Background(), association.configuredLocalRoutingContextParam()); err != nil {
 				t.Fatal(err)
 			}
 			association.handleReceivedSignals(context.Background(), messages.NewAspDown(nil), nil)
@@ -155,13 +155,13 @@ func TestIPSPPeerDownRejectsLateInactiveAck(t *testing.T) {
 	}
 }
 
-func TestIPSPPeerDownRejectsSupersededASPUpAck(t *testing.T) {
+func TestIPSPPeerDownReportsSupersededASPUpAck(t *testing.T) {
 	for _, model := range ipspDownModels {
 		if !model.sharedASPSM {
 			continue
 		}
 		t.Run(model.name, func(t *testing.T) {
-			association, _ := newIPSPDownAssociationForTest(t, model.exchange, model.aspsm, StateASPDown)
+			association, sent := newIPSPDownAssociationForTest(t, model.exchange, model.aspsm, StateASPDown)
 			association.cfg.ASPProcedures.ASPActive = ASPProcedureAutomatic
 			if err := association.initiateASPSM(); err != nil {
 				t.Fatal(err)
@@ -170,15 +170,14 @@ func TestIPSPPeerDownRejectsSupersededASPUpAck(t *testing.T) {
 			applyIPSPDownPublicationForTest(t, association, StateASPDown)
 			for i := 0; i < 2; i++ {
 				association.handleReceivedSignals(context.Background(), messages.NewAspUpAck(nil, nil), nil)
-				select {
-				case err := <-association.errChan:
-					var unexpected *UnexpectedMessageError
-					if !errors.As(err, &unexpected) {
-						t.Fatalf("superseded Up Ack error = %v", err)
-					}
-				default:
-					t.Fatal("superseded Up Ack was accepted as solicited")
+				if got := countType(*sent, "Error"); got != i+1 {
+					t.Fatalf("superseded Up Ack submitted %d Errors, want %d", got, i+1)
 				}
+				if len(association.errChan) != 0 {
+					t.Fatal("superseded Up Ack queued Error instead of submitting before its report")
+				}
+				ind := recoveryIndication(t, association, "ASP-WITHDRAWAL", nil, StateASPDown)
+				assertPreviousIPSPState(t, ind, IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPDown})
 				applyIPSPDownPublicationForTest(t, association, stateUnchanged)
 				if got := association.IPSPState(); got != (IPSPState{TrafficToLocal: StateASPDown, TrafficToPeer: StateASPDown}) {
 					t.Fatalf("superseded Up Ack resurrected %+v", got)
@@ -356,7 +355,7 @@ func TestIPSPPeerDownRejectsASPTMAcksUntilFreshUp(t *testing.T) {
 							}
 							ack = messages.NewAspActiveAck(params.NewTrafficModeType(params.TrafficModeLoadshare), rc, nil)
 						} else {
-							if _, err := association.beginASPInactive(rc); err != nil {
+							if _, err := association.beginASPInactive(context.Background(), rc); err != nil {
 								t.Fatal(err)
 							}
 							ack = messages.NewAspInactiveAck(rc, nil)
@@ -370,7 +369,7 @@ func TestIPSPPeerDownRejectsASPTMAcksUntilFreshUp(t *testing.T) {
 								t.Fatal(err)
 							}
 						} else {
-							if _, err := association.beginASPInactive(rc); err != nil {
+							if _, err := association.beginASPInactive(context.Background(), rc); err != nil {
 								t.Fatal(err)
 							}
 						}
@@ -483,7 +482,10 @@ func TestIPSPPeerDownNewPeerUpClearsSupersededAcknowledgements(t *testing.T) {
 			// Ordinary unsolicited-Up policy applies again after the peer establishes
 			// a fresh shared ASPSM exchange (RFC 4666 §4.3.4.1.2).
 			association.handleReceivedSignals(context.Background(), messages.NewAspUpAck(nil, nil), nil)
-			applyIPSPDownPublicationForTest(t, association, StateASPInactive)
+			applyIPSPDownPublicationForTest(t, association, stateUnchanged)
+			if len(association.errChan) != 0 || len(association.mgmtChan) != 0 {
+				t.Fatal("inactive Up Ack retained superseded-Down policy")
+			}
 			rc := association.configuredLocalRoutingContextParam()
 			pending, err := association.beginASPActive(rc)
 			if err != nil {
@@ -542,7 +544,7 @@ func TestIPSPPeerDownStopsRetriesBeforeAcknowledgementCompletes(t *testing.T) {
 					request = requests[0]
 				}
 			case requestAspInactive:
-				request, err = association.beginASPInactive(params.NewRoutingContext(1))
+				request, err = association.beginASPInactive(context.Background(), params.NewRoutingContext(1))
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -596,7 +598,14 @@ func TestIPSPPeerDownFreshLocalUpRestoresAcknowledgementPolicy(t *testing.T) {
 			}
 			for i := 0; i < 2; i++ {
 				association.handleReceivedSignals(context.Background(), messages.NewAspUpAck(nil, nil), nil)
-				applyIPSPDownPublicationForTest(t, association, StateASPInactive)
+				publication := StateASPInactive
+				if i > 0 {
+					publication = stateUnchanged
+				}
+				applyIPSPDownPublicationForTest(t, association, publication)
+				if len(association.errChan) != 0 || len(association.mgmtChan) != 0 {
+					t.Fatal("fresh Up retained superseded-Down policy")
+				}
 			}
 		})
 	}
@@ -634,7 +643,7 @@ func TestIPSPPeerDownSupersedesEveryRoutingContextRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, err := association.beginASPInactive(nil)
+	third, err := association.beginASPInactive(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

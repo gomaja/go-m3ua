@@ -1186,6 +1186,16 @@ func (r *applicationServers) quiesceASPFor(c *Association, rtCtxs []uint32) func
 	if r == nil || c == nil || (len(rtCtxs) == 0 && c.hasExplicitlyEmptyASPAuthorization()) {
 		return func() {}
 	}
+	return r.quiesceASPKeysInactive(c, c.asKeysForRoutingContexts(rtCtxs))
+}
+
+// quiesceASPKeysInactive retains exact AS identity when a withdrawal includes
+// both a contextless AS and registered Routing Contexts (RFC 4666 §§4.4.1,
+// 4.3.4.4). Mark every affected membership before draining any selected DATA.
+func (r *applicationServers) quiesceASPKeysInactive(c *Association, keys []ASKey) func() {
+	if r == nil || c == nil || len(keys) == 0 {
+		return func() {}
+	}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -1198,7 +1208,6 @@ func (r *applicationServers) quiesceASPFor(c *Association, rtCtxs []uint32) func
 		applicationServer *applicationServer
 		notify            func()
 	}
-	keys := c.asKeysForRoutingContexts(rtCtxs)
 	seen := make(map[ASKey]struct{}, len(keys))
 	transitions := make([]transition, 0, len(keys))
 	for _, key := range keys {

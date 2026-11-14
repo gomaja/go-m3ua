@@ -165,11 +165,11 @@ func inactiveAckRoutingContexts(keys []ASKey) []uint32 {
 // "should" for returning to the previous state; §4.3.4.3 permits Layer
 // Management to initiate ASP Active. §1.6.3 defines no unsolicited-withdrawal
 // primitive, so this report uses an implementation name.
-func (c *Association) reportInactiveAckWithdrawal(keys []ASKey) {
+func (c *Association) reportInactiveAckWithdrawal(keys []ASKey, previous State, ipsp IPSPState) {
 	if len(keys) == 0 {
 		return
 	}
-	c.notifyManagement(&ManagementIndication{Kind: ManagementASPWithdrawal, ASKeys: keys, RoutingContexts: inactiveAckRoutingContexts(keys), Description: "peer reported Application Servers inactive with an unsolicited ASP Inactive Ack; reactivation is an application decision"})
+	c.notifyManagement(&ManagementIndication{Kind: ManagementASPWithdrawal, PreviousState: previous, PreviousIPSPState: ipsp, ASKeys: keys, RoutingContexts: inactiveAckRoutingContexts(keys), Description: "peer reported Application Servers inactive with an unsolicited ASP Inactive Ack; reactivation is an application decision"})
 }
 
 // The parameter is a local traffic-gate selection, not a new wire request.
