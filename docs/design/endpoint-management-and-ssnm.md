@@ -154,7 +154,16 @@ An SGP Endpoint exposes the exact destination record used to answer DAUD. The
 key retains Network Appearance and Routing Context presence, point code, and
 mask. Congestion level is retained independently from reachability because
 RFC 4666 Sections 3.4.4 and 4.5.3 make an explicit level zero an abatement and
-permit the parameter to be omitted.
+permit the parameter to be omitted. Audit congestion knowledge is a separate
+presence bit from the authoritative congestion record, carried through sweep
+equality, complete-plan RC grouping and message construction. A zero-valued state,
+LevelSet, availability, peer report, transport sample or configured method cannot
+supply presence. National known clear sends explicit SCON(0) before DAVA or DRST
+(RFC 4666 §§4.5.3, 5.4.1). Absent congestion sends availability alone (§5.4.3).
+International known clear sends availability alone without a partial-response
+management error; retained congestion that its method cannot express keeps the
+[declared refusal policy](../rfc4666-conformance.md#daud-congestion-profile-deviation).
+Bare DAVA still leaves an ASP's congestion dimension unchanged.
 
 A masked audit uses a snapshot of those records and partitions its requested
 union at narrower state boundaries, including active and completed restart
@@ -183,7 +192,8 @@ destinations or ranges; §3.4.6 gives DRST the DUNA parameter descriptions. All
 SCON lists precede the DAVA/DRST they qualify. Availability ranges remain
 disjoint, including across chunks, and explicit audit boundaries are preserved.
 
-Both total messages and encoded bytes are bounded before the first write.
+Both total messages and encoded bytes, including national SCON(0), are bounded
+before the first write; known-clear replies do not widen the limits.
 For store limit N and Q requested ranges, the planning envelope allows
 P = 48 × (3N + Q + 1) aligned pieces per scope: at most 24 dyadic cuts per
 input range, with a factor of two allowance, and three record budgets for

@@ -1673,6 +1673,7 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 
 type destinationAuditGroup struct {
 	state           DestinationNetworkState
+	congestionKnown bool
 	routingContexts []uint32
 }
 

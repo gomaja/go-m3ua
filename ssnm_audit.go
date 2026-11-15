@@ -167,6 +167,9 @@ func (c *Association) planDestinationAudit(d *messages.DestinationStateAudit, pc
 			if r.state.Congestion.LevelSet {
 				b[8] = 1
 			}
+			if r.congestionKnown {
+				b[9] = 1
+			}
 		}
 		if index, ok := seen[string(key)]; ok {
 			if contextSet {
@@ -191,7 +194,7 @@ func (c *Association) planDestinationAudit(d *messages.DestinationStateAudit, pc
 	return replies, nil
 }
 
-func appendDestinationAuditReplies(replies []destinationAuditReply, state DestinationNetworkState, start, end uint32, maxBytes uint64) ([]destinationAuditReply, error) {
+func appendDestinationAuditReplies(replies []destinationAuditReply, state DestinationNetworkState, congestionKnown bool, start, end uint32, maxBytes uint64) ([]destinationAuditReply, error) {
 	for start < end {
 		mask := min(min(bits.TrailingZeros32(start), bits.Len32(end-start)-1), 24)
 		// Every range needs at least four APC bytes on the wire, even after
@@ -199,7 +202,7 @@ func appendDestinationAuditReplies(replies []destinationAuditReply, state Destin
 		if uint64(len(replies)) >= maxBytes/4 {
 			return nil, ErrSSNMResourceLoss
 		}
-		replies = append(replies, destinationAuditReply{destinationAuditGroup: destinationAuditGroup{state: state}, pointCode: start, mask: uint8(mask)})
+		replies = append(replies, destinationAuditReply{destinationAuditGroup: destinationAuditGroup{state: state, congestionKnown: congestionKnown}, pointCode: start, mask: uint8(mask)})
 		start += uint32(1) << mask
 	}
 	return replies, nil

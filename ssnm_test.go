@@ -366,8 +366,10 @@ func TestDAUDIsAnsweredFromDestinationState(t *testing.T) {
 		want  []string
 	}{
 		{"unavailable", availabilityState(DestinationUnavailable), []string{"Destination Unavailable"}},
-		{"restricted", availabilityState(DestinationRestricted), []string{"Destination Restricted"}},
-		{"available", availabilityState(DestinationAvailable), []string{"Destination Available"}},
+		// This fixture installs both dimensions, including known clear
+		// congestion: the national audit includes SCON(0) (RFC 4666 §5.4.1).
+		{"restricted", availabilityState(DestinationRestricted), []string{"Signalling Congestion", "Destination Restricted"}},
+		{"available", availabilityState(DestinationAvailable), []string{"Signalling Congestion", "Destination Available"}},
 		// Congestion is a status of its own, so a congested destination is
 		// still available and the audit answers both dimensions: RFC 4666
 		// Section 4.5.3 has the SCON go first — "For national networks, the SGP
@@ -1046,8 +1048,10 @@ func TestDAUDResponsesKeepTheRequestedRoutingContext(t *testing.T) {
 		want  int
 	}{
 		{name: "unavailable", state: availabilityState(DestinationUnavailable), want: 1},
-		{name: "restricted", state: availabilityState(DestinationRestricted), want: 1},
-		{name: "available", state: availabilityState(DestinationAvailable), want: 1},
+		// Both dimensions are seeded; known clear also carries SCON(0)
+		// before availability (RFC 4666 §§4.5.3, 5.4.1).
+		{name: "restricted", state: availabilityState(DestinationRestricted), want: 2},
+		{name: "available", state: availabilityState(DestinationAvailable), want: 2},
 		// A congested destination is answered in both dimensions: the SCON
 		// that reports the congestion, then the DAVA that says it is still
 		// reachable (RFC 4666 Section 4.5.3).

@@ -259,7 +259,7 @@ only as a codec.
 | Optional capability | Section | Notes |
 | --- | --- | --- |
 | Routing Key Management | 1.4.2.3, 3.6, 4.4 | Both sides, all four messages, static and dynamic keys in one collision-checked registry |
-| ASP destination auditing with DAUD | 4.5.3 | The ASP originates it; the SGP answers available, restricted, congested, unavailable and unknown from retained state. A profile-refused SCON is omitted with one local management indication; every other reply continues (`TestDAUDProfileRefusalPreservesAvailabilityAndOtherReplies`). This is a [declared §4.5.3 deviation](rfc4666-conformance.md#daud-congestion-profile-deviation). |
+| ASP destination auditing with DAUD | 4.5.3 | The ASP originates it; the SGP answers available, restricted, congested, unavailable and unknown from retained state. National authoritative known clear sends SCON(0) before DAVA/DRST (§5.4.1; `TestNationalDAUDKnownClearSendsSCONZeroBeforeAvailability`); absent congestion (§5.4.3) and international known clear send availability alone, without a local refusal. Unavailable/restart-isolated/unknown destinations send only DUNA. A profile-refused SCON is omitted with one local management indication; every other reply continues (`TestDAUDProfileRefusalPreservesAvailabilityAndOtherReplies`). This is a [declared §4.5.3 deviation](rfc4666-conformance.md#daud-congestion-profile-deviation). |
 | M3UA heartbeat, BEAT and BEAT Ack | 4.3.4.6 | Either role, independent of SCTP HEARTBEAT path management |
 | Local SCON from an ASP or IPSP | 3.4.4 | Including Concerned Destination, and deliberately kept out of the SG's own destination state |
 | Correlation Id | 3.3.1 | Per message, on every DATA path, with presence distinguished from zero |

@@ -1167,6 +1167,29 @@ Queued MTP3 restart/publication bursts likewise continue after a profile-refused
 SCON and return the existing per-target refusal after attempting the other
 messages. Successful messages are never replayed.
 
+### Known-clear congestion in national DAUD replies
+
+An SGP now records whether it knows a destination's congestion separately from
+the level. Under `CongestionNationalWithPriorities` or
+`CongestionNationalWithoutPriorities`, a DAUD for an available or restricted
+destination whose congestion is known to be clear is answered with SCON(0)
+before the DAVA or DRST, following the RFC 4666 §5.4.1 example ("SG State:
+Uncongested/Available") and the §4.5.3 order of SCON before the availability
+reply. Previously the reply was the DAVA or DRST alone, and an ASP that still
+held an earlier congestion level kept it, because a bare DAVA leaves congestion
+unchanged.
+
+Upgrade consequences:
+
+- National audit replies can carry additional SCON messages whose Congestion
+  Indications value is 0.
+- Those messages count against the same reply message and byte budgets. An
+  audit that only just fitted before can now exceed them and receive the
+  whole-audit Destination Status Unknown response, still with no status prefix.
+- A destination whose congestion is unknown is answered with availability alone,
+  as before (RFC 4666 §5.4.3). Under `CongestionInternational` a known-clear
+  destination is also answered with availability alone; that is not a method
+  refusal and produces no `ManagementError`.
 
 ## Peer explanations, DUPU bounds and ASPAC errors
 

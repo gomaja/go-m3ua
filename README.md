@@ -879,7 +879,12 @@ permits deliberate local ASP/IPSP reports; double exchange uses its local-direct
 SCON scope. An SGP exposes detector status to its application/NIF, which owns
 SPMC aggregation and SS7 actions. This detector supplies local pressure events;
 the configured method adapts those observations for local-user priority admission.
-Repeated User Part notifications, SCON validity timers, DAUD level-zero policy
+National audits send SCON(0) before DAVA/DRST for authoritative known-clear
+congestion (RFC 4666 §§4.5.3, 5.4.1). Absent congestion knowledge (§5.4.3) and
+international known clear receive availability only. Peer congestion and transport
+pressure do not supply audit knowledge; bare DAVA does not clear congestion.
+
+Repeated User Part notifications, SCON validity timers
 and SS7 TFC procedures remain outside this detector.
 
 Select the default peer path with `SetSCTPPrimaryAddr(netip.Addr)`. Read and
