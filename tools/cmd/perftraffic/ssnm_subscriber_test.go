@@ -92,7 +92,7 @@ func TestSSNMSubscriberCountsLifecycleEventsAndPartitionCap(testContext *testing
 	subscriber := newSSNMSubscriber(0, false, plan, 1000, 256, 1<<20)
 	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMContinuityLostEvent, ContinuityLost: true}, 0)
 	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMResourceLossEvent}, 0)
-	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMPartitionInvalidatedEvent}, 0)
+	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMDestinationsInvalidatedEvent}, 0)
 	subscriber.observe(m3ua.SSNMEvent{Kind: m3ua.SSNMBindingAdmittedEvent}, 0)
 	subscriber.observe(planEvent(plan, testPartition, 0), 0)
 	// A second partition carrying association 0's destinations is

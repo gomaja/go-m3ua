@@ -395,6 +395,24 @@ ASPRoutingConfig.AllowUnknownDestinations opts back into the Appendix A.2.2
 reading. They disagree only for an established, activated, silent Signalling
 Gateway.
 
+# Scoped SSNM loss
+
+Oversized received reports discard only destination dimensions in the resolved
+AS and Network Appearance scope, even when several ASes share a standalone
+partition. An unresolved scope discards the selected partition's destination
+knowledge. Records keep their admission-time resolved scope through source
+reconfiguration. SSNMDestinationsInvalidatedEvent replaces the removed
+SSNMPartitionInvalidatedEvent identifier. It identifies its partition by Epoch,
+leaves Partition empty, and carries exact destination keys/removal flags in
+SSNMEvent.Invalidated. Use SSNMEvent.ApplyInvalidation on a matching snapshot
+partition. Each publication has at most 2048 entries and costs at most 33440
+accounted bytes, including the bounded reason. No RC lists or configured names
+are replayed. PartitionsInvalidated counts these publications, including chunks
+for large custom partitions, plus last-binding retirement as before. Total
+queued bursts and smaller custom queues can still require Resync. Destination
+retention charges 128 bytes, 4 per wire RC and 16 per resolved AS entry. Resync returns the surviving knowledge. Oversized DAUD
+removes nothing because it is a query (RFC 4666 §4.5.3).
+
 # SGP peer congestion
 
 An SGP retains ASP-reported congestion independently from authoritative SS7

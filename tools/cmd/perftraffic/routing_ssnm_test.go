@@ -377,7 +377,7 @@ func TestRoutingSSNMOracleRejectsLifecycleResourceAndContinuityEvents(t *testing
 		m3ua.SSNMBindingActivatedEvent,
 		m3ua.SSNMBindingRetiredEvent,
 		m3ua.SSNMPartitionRetiredEvent,
-		m3ua.SSNMPartitionInvalidatedEvent,
+		m3ua.SSNMDestinationsInvalidatedEvent,
 		m3ua.SSNMResourceLossEvent,
 		m3ua.SSNMContinuityLostEvent,
 		m3ua.SSNMEventKind(255),

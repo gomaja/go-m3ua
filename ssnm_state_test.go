@@ -664,7 +664,7 @@ func TestSSNMStatePartitionLimitRefusesANewPartition(t *testing.T) {
 
 func TestSSNMStateByteLimitRefusesBeyondTheBudget(t *testing.T) {
 	// One partition and one record fit exactly; the second record does not.
-	limits := &SSNMStateConfig{MaxBytes: ssnmPartitionBaseBytes + ssnmRecordBaseBytes + 4}
+	limits := &SSNMStateConfig{MaxBytes: ssnmPartitionBaseBytes + ssnmRecordBaseBytes + 4 + ssnmResolvedASBytes}
 	endpoint := newSSNMStateEndpoint(t, ssnmPeerInventoryConfig(), limits)
 	association := attachSSNMAssociation(t, endpoint, SGPIdentity{
 		SignallingGateway:        "sg-a",
@@ -731,7 +731,7 @@ func TestSSNMStateConfigAcceptsExactReservations(t *testing.T) {
 	})); err != nil {
 		t.Fatalf("exact reservation refused: %v", err)
 	}
-	minimum := SSNMStateConfig{MaxBytes: ssnmPartitionBaseBytes + ssnmRecordBaseBytes}
+	minimum := SSNMStateConfig{MaxBytes: ssnmPartitionBaseBytes + ssnmMinimumRecordBytes}
 	if _, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleASP, ASP: ssnmPeerInventoryConfig(), SSNMState: &minimum,
 	})); err != nil {
@@ -987,7 +987,7 @@ func TestSSNMNamesAreStable(t *testing.T) {
 		{SSNMBindingActivatedEvent.String(), "binding-activated"},
 		{SSNMBindingRetiredEvent.String(), "binding-retired"},
 		{SSNMPartitionRetiredEvent.String(), "partition-retired"},
-		{SSNMPartitionInvalidatedEvent.String(), "partition-invalidated"},
+		{SSNMDestinationsInvalidatedEvent.String(), "destinations-invalidated"},
 		{SSNMResourceLossEvent.String(), "resource-loss"},
 		{SSNMContinuityLostEvent.String(), "continuity-lost"},
 		{SSNMEventKind(0).String(), "unknown"},

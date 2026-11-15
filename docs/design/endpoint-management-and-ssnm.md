@@ -493,8 +493,10 @@ An oversized peer SCON retires records only for its resolved AS bindings and
 overlapping wire network. Unresolved peer scope can retire the association
 view; a resolved empty or stale admission cannot remove newer knowledge.
 DAUD and non-peer reports preserve peer records. Individual removal deltas
-precede destination-partition invalidation in one store transaction. Existing
-authoritative SS7 invalidation keeps its partition scope.
+precede scoped destination invalidation in one store transaction. Oversized
+DAUD preserves destination knowledge too: it is a query (RFC 4666 §4.5.3).
+Authoritative reports invalidate only overlapping AS/network dimensions;
+unresolved scope can invalidate the selected partition whole.
 
 Peer records consume the existing global, per-peer and per-partition record
 and accounted-byte budgets. Expanded AS/range records and copied wire scope are
@@ -616,6 +618,24 @@ it closed. A standalone partition covers an Association with no provisioned peer
 identity, which is how an Endpoint without peer inventory still retains what it
 is told.
 
+Oversized received reports invalidate only dimensions overlapping the resolved
+AS and Network Appearance. Standalone partitions can contain several ASes;
+canonical partitions already identify an AS, so sibling RC labels are ignored
+while network scope still matters. Admission captures immutable resolved AS
+keys, charged with each dimension, so source deregistration and RC reuse cannot
+change a retained statement's effective network. Omitted parameters inherit
+configuration at admission;
+an all-appearance AS with omitted NA overlaps every appearance of that AS.
+A retained statement spanning several ASes/appearances is removed whole when
+it overlaps, because the refused APC list is never expanded or partially applied.
+If the report's AS cannot be resolved, the selected partition is invalidated
+whole. DAUD is a query and invalidates nothing (RFC 4666 §4.5.3).
+On oversized refusal, `PartitionsInvalidated` increments per nonempty removal
+publication, including chunks for custom record limits. Last-binding retirement
+still increments it as before.
+The exact removal payload is owned and charged to subscription byte budgets;
+queue overflow still requires Resync, which returns all surviving records.
+
 **The snapshot and the subscription are atomic with respect to each other.**
 `SubscribeSSNM` takes the snapshot and registers the subscription in one
 critical section, so no report is both in the snapshot and in the stream, and
@@ -638,8 +658,22 @@ is peer-controlled misinformation.
 **Events are deltas; only the snapshot is whole.** A report event carries, in
 `SSNMEvent.Updated`, the destinations that report wrote, each with both
 dimensions as retained after it, and nothing else of its partition. Binding
-lifecycle events carry no destinations, and a retired or invalidated partition
-is discarded whole by its event kind. No report removes a single destination:
+lifecycle events carry no destinations. Retirement discards the partition.
+`SSNMDestinationsInvalidatedEvent` replaces the removed whole-partition event
+identifier. It carries `SSNMEvent.Invalidated`: exact destination keys and
+AvailabilityRemoved/CongestionRemoved flags, in point-code then mask order.
+The event routes by the Endpoint-unique partition `Epoch`, leaving `Partition`
+empty so configured names cannot inflate it. `ApplyInvalidation` patches a
+matching caller-owned snapshot partition. Provenance and RC lists remain only
+in the replica; they are not replayed in a removal. Each publication has at most
+2,048 entries at 16 accounted bytes each: 512 base + 160 bounded reason +
+32,768 entries = 33,440 bytes, below the default 1,048,576-byte queue regardless
+of scope-list or configured-name length. Larger custom partitions emit ordered
+chunks under the same store transaction; each chunk receives one revision and
+increments `PartitionsInvalidated`. Aggregate queued bursts can still exceed
+count/byte capacity and require Resync. Destination retention accounts 128
+fixed bytes, 4 per wire RC and 16 per resolved AS entry.
+A successfully retained report never removes a destination:
 DAVA and a level-zero SCON are retained as statements, and bounds refuse
 rather than evict. Applying the events in order to the snapshot the
 subscription started from reproduces the partition knowledge `SSNMKnowledge`

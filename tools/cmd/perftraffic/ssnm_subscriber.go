@@ -131,7 +131,7 @@ func (subscriber *ssnmSubscriber) observeLocked(event m3ua.SSNMEvent, received i
 		subscriber.counts.ContinuityLost++
 	case m3ua.SSNMResourceLossEvent:
 		subscriber.counts.ResourceLoss++
-	case m3ua.SSNMPartitionInvalidatedEvent:
+	case m3ua.SSNMDestinationsInvalidatedEvent:
 		subscriber.counts.Invalidated++
 	default:
 		subscriber.counts.OtherEvents++

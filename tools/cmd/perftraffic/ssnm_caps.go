@@ -8,7 +8,7 @@ import (
 
 // Accounted bytes of one queued SSNM event, from the documented contract of
 // SSNMStateConfig.SubscriptionQueueBytes: "Accounting charges 512 bytes per
-// event, 8 per report destination, 256 per updated destination, 4 per
+// event, 8 per report destination, 256 per updated destination, 16 per invalidation entry, 4 per
 // Routing Context in the report and both dimensions of each update, and the
 // byte lengths of Reason and the event/report partition identity strings."
 // Each peer congestion delta additionally costs 256 bytes and 4 bytes per RC.
@@ -32,12 +32,13 @@ func ssnmEventBytes(event m3ua.SSNMEvent) int {
 	for _, update := range event.Updated {
 		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
 	}
+
 	identities := len(event.Partition.SignallingGateway) + len(event.Partition.ApplicationServer) +
 		len(event.Report.Partition.SignallingGateway) + len(event.Report.Partition.ApplicationServer)
 	return ssnmEventBaseBytes +
 		peerBytes +
 		ssnmEventDestinationBytes*len(event.Report.Destinations) +
-		ssnmEventUpdateBytes*len(event.Updated) +
+		ssnmEventUpdateBytes*len(event.Updated) + 16*len(event.Invalidated) +
 		ssnmEventRoutingContextBytes*contexts +
 		len(event.Reason) + identities
 }

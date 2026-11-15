@@ -864,7 +864,8 @@ event changed:
 | `SSNMReportEvent`, retained | every destination of the partition | `Updated`: the destinations the report wrote, each with both dimensions as retained after it, in point-code then mask order |
 | `SSNMReportEvent`, retained by nobody (unbound partition, DUPU, DAUD, peer SCON) | empty | empty |
 | `SSNMBindingAdmittedEvent`, `SSNMBindingActivatedEvent`, `SSNMBindingRetiredEvent` | every destination of the partition | empty: bindings change no destination knowledge |
-| `SSNMPartitionRetiredEvent`, `SSNMPartitionInvalidatedEvent` | empty | empty: the kind discards the partition's destinations |
+| `SSNMPartitionRetiredEvent` | empty | empty: the kind discards the partition |
+| `SSNMDestinationsInvalidatedEvent` | empty | `Invalidated`: exact destination keys/removal flags, routed by `Epoch` |
 
 The field is renamed rather than redefined so that code relying on the old
 meaning stops compiling instead of silently dropping destinations. A consumer
@@ -882,8 +883,10 @@ patches it instead, starting from the snapshot's `Destinations` keyed by
 
 ```go
 // view map[m3ua.SSNMPartition]map[m3ua.PointCodeRange]m3ua.SSNMDestinationKnowledge
+// epochs map[uint64]m3ua.SSNMPartition, initialized from snapshot.Partitions.
 switch event.Kind {
 case m3ua.SSNMBindingAdmittedEvent:
+    epochs[event.Epoch] = event.Partition
     if view[event.Partition] == nil {
         view[event.Partition] = make(map[m3ua.PointCodeRange]m3ua.SSNMDestinationKnowledge)
     }
@@ -891,15 +894,30 @@ case m3ua.SSNMReportEvent:
     for _, update := range event.Updated {
         view[event.Partition][update.Destination] = update
     }
-case m3ua.SSNMPartitionInvalidatedEvent:
-    clear(view[event.Partition])
+case m3ua.SSNMDestinationsInvalidatedEvent:
+    partition := epochs[event.Epoch] // event.Partition is empty
+    for _, removed := range event.Invalidated {
+        entry := view[partition][removed.Destination]
+        if removed.AvailabilityRemoved {
+            entry.Availability, entry.AvailabilitySet = m3ua.SSNMAvailability{}, false
+        }
+        if removed.CongestionRemoved {
+            entry.Congestion, entry.CongestionSet = m3ua.SSNMCongestion{}, false
+        }
+        if !entry.AvailabilitySet && !entry.CongestionSet {
+            delete(view[partition], removed.Destination)
+        } else {
+            view[partition][removed.Destination] = entry
+        }
+    }
 case m3ua.SSNMPartitionRetiredEvent:
     delete(view, event.Partition)
+    delete(epochs, event.Epoch)
 }
 ```
 
-No event removes a single destination: DAVA and a level-zero SCON are retained
-as knowledge, and bounds refuse a report rather than evict. The whole retained
+Successfully retained DAVA and level-zero SCON reports remain knowledge.
+Oversized reports can remove individual dimensions through `Invalidated`. The whole retained
 state still comes only from `SubscribeSSNM`, `Resync` and `SSNMKnowledge`,
 unchanged. `SubscriptionQueueBytes` accounting charges 256 bytes per `Updated`
 entry, as it charged per `States` entry, so the same byte budget now queues far
@@ -1211,8 +1229,8 @@ configured budgets and loss handling; a fresh snapshot cannot recover refused
 state. Explicit level zero is retained as clear; absent peer state is unknown.
 Oversized peer SCON removes only records for its resolved AS and overlapping
 network scope; unresolved scope alone permits association-wide peer removal.
-Oversized DAUD and non-peer reports preserve peer records. Existing SS7
-destination-partition invalidation is unchanged. Apply peer removal deltas
+Oversized DAUD preserves all knowledge; non-peer reports preserve peer records.
+SS7 destination invalidation is scoped as described below. Apply peer removal deltas
 independently of the destination-only partition-invalidated event.
 
 Use `Endpoint.CongestionInputs(as)` for copied AS membership, peer state and
@@ -1285,3 +1303,55 @@ codecs remain strict. Other invalid parameters, malformed lengths, and earlier
 faults retain their previous error selection. REG REQ keeps its existing
 per-key Unsupported/Invalid Traffic Handling Mode registration result under
 §4.4.1; this change does not alter that receive path.
+
+
+## Scoped SSNM invalidation
+
+`SSNMPartitionInvalidatedEvent` is removed without an alias. Its replacement,
+`SSNMDestinationsInvalidatedEvent`, cannot silently compile into an old
+whole-partition handler. Its `Partition` is empty: use `Epoch` to identify the
+snapshot partition. `SSNMEvent.Invalidated` now contains
+`SSNMDestinationInvalidation` entries with `Destination`, `AvailabilityRemoved`
+and `CongestionRemoved`, rather than full retained records. Update positional
+event literals and consumers of the previous removal payload.
+
+For a replica holding `SSNMPartitionKnowledge` values, the library method avoids
+writing a second patch implementation:
+
+```go
+for i := range snapshot.Partitions {
+    if event.ApplyInvalidation(&snapshot.Partitions[i]) {
+        break
+    }
+}
+```
+
+It applies only the matching event kind/epoch, preserves unrelated dimensions,
+provenance and bindings, and is idempotent. The explicit map example above shows
+how to patch a destination-only replica independently.
+
+An oversized report invalidates only overlapping resolved AS/network knowledge.
+Admission-time resolution is retained independently of current source
+configuration, including after deregistration and RC reuse. Canonical owners
+still identify the AS across sibling labels. Only unresolved report scope permits
+whole-partition invalidation. Oversized DAUD removes no knowledge because it
+requests current state (RFC 4666 §4.5.3); it still emits resource loss and
+increments `ReportsRefused`. Resync returns survivors, not discarded history.
+
+A default partition has at most 2,048 dimension records, hence at most 2,048
+removal keys. At 16 accounted bytes per key, 512 base bytes and at most 160 bytes
+of reason, a publication costs at most **33,440 bytes**, below the default
+**1,048,576-byte** queue. No RC lists, report values or configured partition-name
+strings are repeated. Custom retention limits use chunks of at most 2,048 keys,
+with the same single-publication bound. Each chunk has a contiguous event
+revision and increments `PartitionsInvalidated`; peer-only removals do not.
+Last-binding retirement retains its counter semantics. Aggregate queued bursts,
+smaller custom byte limits and slow readers can still lose continuity and need
+Resync; no receive-side wait was added.
+
+Destination retention now charges **128 fixed bytes + 4 per wire RC + 16 per
+resolved admission AS entry**. This includes the private resolution and can
+refuse a write sooner under a fixed `MaxBytes` limit. The minimum accepted
+`MaxBytes` is now 400 (256 for a partition plus 144 for one resolved contextless
+dimension); smaller nonzero budgets are rejected during configuration. Peer record and queued
+report accounting are unchanged. Invalidation accounting is 16 bytes per entry.

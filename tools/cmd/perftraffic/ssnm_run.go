@@ -15,12 +15,12 @@ import (
 )
 
 // Accounted retention the library charges per SSNM partition and per record
-// carrying one Routing Context (ssnm_state.go: 256 and 96 + 4 bytes). The
+// carrying one Routing Context (ssnm_state.go: 256 and 128 + 4 + 16 bytes). The
 // fixture sizes the store from them and records the limits it chose; a
 // mismatch shows up as refused records, never as silent eviction.
 const (
 	ssnmAccountedPartitionBytes = 256
-	ssnmAccountedRecordBytes    = 96 + 4
+	ssnmAccountedRecordBytes    = 128 + 4 + 16
 )
 
 const (

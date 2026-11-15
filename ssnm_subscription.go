@@ -30,10 +30,11 @@ const (
 	// SSNMPartitionRetiredEvent reports the last binding of a partition
 	// withdrawn. The partition and its knowledge were discarded atomically.
 	SSNMPartitionRetiredEvent
-	// SSNMPartitionInvalidatedEvent reports one partition's destination
-	// knowledge discarded while its bindings remain. Peer records are removed
-	// independently through SSNMPeerCongestionEvent.
-	SSNMPartitionInvalidatedEvent
+	// SSNMDestinationsInvalidatedEvent removes exactly the dimensions in
+	// Invalidated from the partition identified by Epoch. Partition is empty.
+	// ApplyInvalidation applies the delta to a matching snapshot partition.
+	// Peer records are removed independently through SSNMPeerCongestionEvent.
+	SSNMDestinationsInvalidatedEvent
 	// SSNMResourceLossEvent reports a local resource bound refusing otherwise
 	// valid work. The association it arrived on is unaffected.
 	SSNMResourceLossEvent
@@ -58,8 +59,8 @@ func (k SSNMEventKind) String() string {
 		return "binding-retired"
 	case SSNMPartitionRetiredEvent:
 		return "partition-retired"
-	case SSNMPartitionInvalidatedEvent:
-		return "partition-invalidated"
+	case SSNMDestinationsInvalidatedEvent:
+		return "destinations-invalidated"
 	case SSNMResourceLossEvent:
 		return "resource-loss"
 	case SSNMContinuityLostEvent:
@@ -67,6 +68,15 @@ func (k SSNMEventKind) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// SSNMDestinationInvalidation identifies exactly which retained dimensions
+// to remove at one destination. Provenance remains in the consumer's replica;
+// invalidation does not replay scope lists or retained report values.
+type SSNMDestinationInvalidation struct {
+	Destination         PointCodeRange
+	AvailabilityRemoved bool
+	CongestionRemoved   bool
 }
 
 // SSNMEvent is one owned delta from an SSNM subscription.
@@ -88,8 +98,11 @@ func (k SSNMEventKind) String() string {
 //   - SSNMBindingRetiredEvent: remove Binding. Destinations are unchanged.
 //   - SSNMPartitionRetiredEvent: remove Partition with its bindings and
 //     destinations.
-//   - SSNMPartitionInvalidatedEvent: remove every destination of Partition.
-//     Its bindings are unchanged.
+//   - SSNMDestinationsInvalidatedEvent: for each entry of Invalidated, remove
+//     the dimensions marked AvailabilityRemoved or CongestionRemoved from the
+//     partition with this Epoch. Partition is empty. ApplyInvalidation performs
+//     this patch. Delete a destination if neither dimension remains; preserve
+//     other dimensions, destinations and bindings.
 //   - SSNMPeerCongestionEvent: replace PeerCongestion by association, epoch,
 //     AS, wire scope and destination; remove it when PeerCongestionRemoved.
 //     Compare RC lists as sets, preserving both wire presence flags.
@@ -97,17 +110,22 @@ func (k SSNMEventKind) String() string {
 //   - SSNMContinuityLostEvent: the view can no longer be patched; replace it
 //     with the snapshot Resync returns.
 //
-// A report never removes one destination's knowledge: DAVA and a level-zero
+// A retained report never removes one destination's knowledge: DAVA and a level-zero
 // SCON are retained as statements about the destination, and a resource bound
-// refuses a report rather than evicting what is held. Knowledge leaves the
-// destination store only a whole partition at a time, which the event kind
-// signals. Peer-local records also leave individually when their AS binding
+// refuses a report rather than evicting what is held. Oversized reports remove
+// only overlapping AS/network dimensions, identified by Invalidated; unresolved
+// scope can remove all destination knowledge. Peer-local records also leave
+// individually when their AS binding
 // or association epoch retires, through SSNMPeerCongestionEvent.
 type SSNMEvent struct {
-	Kind      SSNMEventKind
-	Revision  uint64
+	Kind     SSNMEventKind
+	Revision uint64
+	// Partition identifies the affected partition except on
+	// SSNMDestinationsInvalidatedEvent, which uses Epoch alone.
 	Partition SSNMPartition
-	Epoch     uint64
+	// Epoch is the Endpoint-unique partition generation. On destination
+	// invalidation it identifies the snapshot partition to patch.
+	Epoch uint64
 	// Report is set for SSNMReportEvent only; ReportSet says so explicitly
 	// because the zero report is indistinguishable from an absent one.
 	Report    SSNMReport
@@ -122,9 +140,17 @@ type SSNMEvent struct {
 	// entry replaces the consumer's entry for its Destination whole. It is
 	// empty for a report retained by nobody -- an unbound partition, DUPU,
 	// DAUD, or a peer-reported SCON -- and for every other kind: binding
-	// lifecycle changes no destination knowledge, and a retired or
-	// invalidated partition is discarded whole. Owned by the caller.
+	// lifecycle changes no destination knowledge, and retirement discards the
+	// partition. Invalidation removes only the dimensions in Invalidated.
+	// Owned by the caller.
 	Updated []SSNMDestinationKnowledge
+	// Invalidated identifies exact removed dimensions for
+	// SSNMDestinationsInvalidatedEvent, in point-code then mask order. It has
+	// at most 2048 entries, each charged 16 bytes, and contains no scope lists
+	// or report values. Epoch identifies the partition; Partition is empty.
+	// Use ApplyInvalidation with a matching snapshot partition. Other
+	// dimensions and all bindings survive. Owned by the caller.
+	Invalidated []SSNMDestinationInvalidation
 	// Reason is a bounded diagnostic for invalidation and resource loss.
 	Reason string
 	// ContinuityLost is true on SSNMContinuityLostEvent, and on nothing else.
@@ -136,6 +162,46 @@ type SSNMEvent struct {
 	// PeerCongestionRemoved removes the identified record rather than
 	// replacing it. It is set only for SSNMPeerCongestionEvent.
 	PeerCongestionRemoved bool
+}
+
+// ApplyInvalidation applies this destination-removal delta to a matching
+// partition snapshot owned by the caller. It returns false, without mutation,
+// for another event kind, a nil target, or a different partition epoch.
+// Invalidation events identify their partition by Epoch; Partition is empty.
+// Snapshot epochs are unique within one Endpoint. Destinations and Invalidated
+// must retain the sorted order supplied by the library. Other dimensions,
+// bindings and scope provenance are unchanged. The operation is idempotent.
+func (e SSNMEvent) ApplyInvalidation(partition *SSNMPartitionKnowledge) bool {
+	if e.Kind != SSNMDestinationsInvalidatedEvent || partition == nil || e.Epoch == 0 || e.Epoch != partition.Epoch {
+		return false
+	}
+	kept := partition.Destinations[:0]
+	index := 0
+	for _, value := range partition.Destinations {
+		key := ssnmDestinationKeyFor(value.Destination)
+		for index < len(e.Invalidated) && compareSSNMDestinationKeys(ssnmDestinationKeyFor(e.Invalidated[index].Destination), key) < 0 {
+			index++
+		}
+		if index < len(e.Invalidated) && ssnmDestinationKeyFor(e.Invalidated[index].Destination) == key {
+			removed := e.Invalidated[index]
+			if removed.AvailabilityRemoved {
+				value.Availability, value.AvailabilitySet = SSNMAvailability{}, false
+			}
+			if removed.CongestionRemoved {
+				value.Congestion, value.CongestionSet = SSNMCongestion{}, false
+			}
+		}
+		if value.AvailabilitySet || value.CongestionSet {
+			kept = append(kept, value)
+		}
+	}
+	clear(partition.Destinations[len(kept):])
+	if len(kept) == 0 {
+		partition.Destinations = nil
+	} else {
+		partition.Destinations = kept
+	}
+	return true
 }
 
 // clone returns an event that shares no storage with the receiver.
@@ -180,6 +246,10 @@ func (e SSNMEvent) clone() SSNMEvent {
 		}
 		e.Updated = updated
 	}
+	if e.Invalidated != nil {
+		e.Invalidated = append([]SSNMDestinationInvalidation(nil), e.Invalidated...)
+	}
+
 	return e
 }
 
@@ -201,6 +271,8 @@ func (a *ssnmRoutingContextArena) own(values []uint32) []uint32 {
 }
 
 const (
+	ssnmInvalidationBatchSize     = 2048
+	ssnmEventInvalidationBytes    = 16
 	ssnmEventBaseBytes            = 512
 	ssnmEventProfileMismatchBytes = 32
 	ssnmEventDestinationBytes     = 8
@@ -213,6 +285,7 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Destinations), ssnmEventDestinationBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.ProfileMismatches), ssnmEventProfileMismatchBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Updated), ssnmEventStateBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.Invalidated), ssnmEventInvalidationBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 		return 0, false
 	}
@@ -234,11 +307,11 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 		}
 	}
 	for _, update := range event.Updated {
-		if !reserveSSNMEventBytes(&remaining, len(update.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) ||
-			!reserveSSNMEventBytes(&remaining, len(update.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+		if !reserveSSNMEventBytes(&remaining, len(update.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) || !reserveSSNMEventBytes(&remaining, len(update.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 			return 0, false
 		}
 	}
+
 	return limit - remaining, true
 }
 
