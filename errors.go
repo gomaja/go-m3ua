@@ -499,6 +499,12 @@ func NewParameterFaultErrorFor(raw []byte, cause error) *ParameterFaultError {
 	switch {
 	case errors.Is(cause, messages.ErrMissingParameter):
 		code = params.ErrMissingParameter
+	case rawClass(raw) == messages.MsgClassASPTM && rawType(raw) == messages.MsgTypeAspActive &&
+		errors.Is(cause, params.ErrInvalidTrafficMode):
+		// RFC 4666 §3.8.1 assigns unsupported ASP Active modes Error 0x05.
+		// Keep the parser strict and classify only this precise fault; all
+		// other values, message types and earlier decode faults retain their codes.
+		code = params.ErrUnsupportedTrafficModeType
 	case errors.Is(cause, params.ErrInvalidValue):
 		code = params.ErrInvalidParameterValue
 	case errors.Is(cause, messages.ErrInvalidMessageLength):

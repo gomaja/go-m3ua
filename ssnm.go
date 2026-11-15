@@ -1580,6 +1580,10 @@ func (c *Association) handleDestinationUserPartUnavailable(d *messages.Destinati
 		}
 	}
 
+	if !validDUPUUserCause(d.UserCause.UserIdentity(), d.UserCause.UnavailabilityCause()) {
+		return ErrInvalidParameterValue
+	}
+
 	return c.reportSSNM(SSNMReport{
 		Kind:         SSNMDestinationUserPartUnavailableReport,
 		UserCause:    d.UserCause.UserCause(),

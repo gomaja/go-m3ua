@@ -374,7 +374,9 @@ field ManagementIndication.Cause
 field ManagementIndication.CongestionProfileMismatch
 field ManagementIndication.DataQueueCongestion
 field ManagementIndication.Description
+field ManagementIndication.DiagnosticInformation
 field ManagementIndication.ErrorCode
+field ManagementIndication.InfoString
 field ManagementIndication.Kind
 field ManagementIndication.NetworkAppearance
 field ManagementIndication.NetworkAppearanceSet

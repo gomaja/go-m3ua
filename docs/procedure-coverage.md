@@ -111,7 +111,7 @@ the wire.
 | 0x01 | Invalid Version | yes | version negotiation suite in `errorgen_test.go` |
 | 0x03 | Unsupported Message Class | yes | `conformance_test.go` |
 | 0x04 | Unsupported Message Type | yes | `conformance_test.go` |
-| 0x05 | Unsupported Traffic Handling Mode | yes | `aspsm_test.go` |
+| 0x05 | Unsupported Traffic Mode Type | yes | `aspsm_test.go`, `TestUndefinedASPActiveModeDrawsUnsupportedMode`, `TestASPActiveModeErrorKeepsParameterPrecedence` |
 | 0x06 | Unexpected Message | yes | `errorgen_test.go` |
 | 0x07 | Protocol Error | yes | `errorgen_test.go` |
 | 0x09 | Invalid Stream Identifier | yes | `recvstream_test.go` |
@@ -375,3 +375,13 @@ IPSP DOWN memberships and T(r) before monitor publication.
 Inactive reports against the association, both IPSP directions and per-AS status.
 `TestSingleExchangePartialWithdrawalStatusUsesTrafficLedger` preserves an
 unaffected active scope while checking the withdrawn scope's shared status.
+
+
+`TestPeerManagementExplanationsAreOwned` and
+`TestManagementPublicationCopiesPeerExplanations` cover owned peer ERR diagnostics
+and NTFY INFO String delivery, including absent and present-empty values
+(RFC 4666 §4.2). `TestDUPUStructuralBoundsAcrossAdmissionPaths` covers typed,
+raw and inbound User ≤255/Cause ≤15 admission (§3.4.5; Q.704 (07/96) §15.17;
+Q.Imp704 (12/00) §§2.2.3–2.2.4). Reserved-value cases test structural bounds,
+not assignments in any MTP3 variant. DUPU destination, mask, role and scope
+restrictions continue to apply.

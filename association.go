@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1292,6 +1293,9 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 			return 0, parseErr
 		}
 		d := decoded.(*messages.DestinationUserPartUnavailable)
+		if !validDUPUUserCause(d.UserCause.UserIdentity(), d.UserCause.UnavailabilityCause()) {
+			return 0, ErrInvalidParameterValue
+		}
 		if d.AffectedPointCode.AffectedPointCodeCount() != 1 || d.AffectedPointCode.AffectedPointCodeMasks()[0] != 0 {
 			return 0, ErrInvalidParameterValue
 		}
@@ -4038,6 +4042,16 @@ type ManagementIndication struct {
 	// Set for ManagementError.
 	ErrorCode uint32
 
+	// DiagnosticInformation is the received ERR explanation (RFC 4666 §§3.8.1,
+	// 4.2), set only for ManagementError. Nil means absent; a non-nil empty
+	// slice means present and empty. The indication owns the bytes.
+	DiagnosticInformation []byte
+
+	// InfoString is the received NTFY explanation (RFC 4666 §§3.8.2, 4.2),
+	// set only for ManagementNotify. Nil means absent; a non-nil empty slice
+	// means present and empty. The indication owns the bytes.
+	InfoString []byte
+
 	// RoutingContexts is the complete Application Server scope of the
 	// indication. For ManagementASPWithdrawal and ManagementASPActivation it contains only numeric labels
 	// from ASKeys; a contextless AS is represented only in ASKeys. For
@@ -4170,6 +4184,8 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 		return
 	}
 	snapshot := *ind
+	snapshot.DiagnosticInformation = bytes.Clone(ind.DiagnosticInformation)
+	snapshot.InfoString = bytes.Clone(ind.InfoString)
 	if ind.CongestionProfileMismatch != nil {
 		mismatch := *ind.CongestionProfileMismatch
 		mismatch.Scope = mismatch.Scope.clone()

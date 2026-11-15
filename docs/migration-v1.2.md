@@ -20,6 +20,7 @@ delivers unknown values unchanged; applications can call `Valid()` to check them
 
 Contents:
 
+- [Peer explanations, DUPU bounds and ASPAC errors](#peer-explanations-dupu-bounds-and-aspac-errors)
 - [Congestion method profiles and local-user priority](#congestion-method-profiles-and-local-user-priority)
 
 - [Concerned Destination admission and diagnostics](#concerned-destination-admission-and-diagnostics)
@@ -1165,3 +1166,33 @@ response before any status prefix. A real transport failure still stops writing.
 Queued MTP3 restart/publication bursts likewise continue after a profile-refused
 SCON and return the existing per-target refusal after attempting the other
 messages. Successful messages are never replayed.
+
+
+## Peer explanations, DUPU bounds and ASPAC errors
+
+`ManagementIndication` adds `DiagnosticInformation []byte` for received ERR and
+`InfoString []byte` for received NTFY (RFC 4666 §§3.8.1, 3.8.2, 4.2). Update
+positional struct literals to named fields. Each delivered indication owns its
+bytes; nil means absent, while a non-nil empty slice means present and empty.
+`Description` continues to describe the error code or status, rather than
+containing the peer's explanation. Local errors leave these peer fields nil.
+
+DUPU typed origination replaces the eight-identity whitelist and Cause 0–2
+limit with structural bounds: User ≤255 and Cause ≤15. Raw `WriteSignal` and
+inbound DUPU now enforce the same bounds; those paths previously admitted the
+full 16-bit fields. Callers passing User >255 or Cause >15 through those paths
+must change their inputs. RFC 4666 §3.4.5 makes the MTP3 variant definitive;
+Q.704 (07/96) §15.17 and Q.Imp704 (12/00) §§2.2.3–2.2.4 supply this envelope.
+The caller remains responsible for assigned values in its variant. Structural
+acceptance does not assign reserved values. Codec fields remain 16 bits, and
+single-destination, zero-mask, role and scope restrictions remain in force.
+
+An ASPAC with undefined Traffic Mode Type (including 0, 4 and 0xffffffff) now
+receives Unsupported Traffic Mode Type (`0x05`) rather than Invalid Parameter
+Value (`0x11`), without activation or ASPAC ACK (RFC 4666 §3.8.1).
+`params.ErrInvalidTrafficMode` identifies this top-level decode fault and also matches
+`params.ErrInvalidValue` through `errors.Is`. Standalone parameter and message
+codecs remain strict. Other invalid parameters, malformed lengths, and earlier
+faults retain their previous error selection. REG REQ keeps its existing
+per-key Unsupported/Invalid Traffic Handling Mode registration result under
+§4.4.1; this change does not alter that receive path.

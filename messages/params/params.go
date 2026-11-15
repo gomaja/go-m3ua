@@ -69,6 +69,11 @@ const (
 	DeregistrationStatus
 )
 
+// ErrInvalidTrafficMode identifies an undefined top-level Traffic Mode Type. It is
+// reported together with ErrInvalidValue, preserving strict parameter validation
+// while allowing ASPAC error selection under RFC 4666 §3.8.1.
+var ErrInvalidTrafficMode = errors.New("undefined Traffic Mode Type")
+
 // Error definitions.
 var (
 	ErrInvalidType             = errors.New("got invalid type in parameter")
@@ -368,7 +373,12 @@ func validateValueAtDepth(tag uint16, value []byte, depth int) error {
 	case TrafficModeType:
 		trafficMode := binary.BigEndian.Uint32(value)
 		if trafficMode < TrafficModeOverride || trafficMode > TrafficModeBroadcast {
-			return fmt.Errorf("%w: Traffic Mode Type %d is not defined", ErrInvalidValue, trafficMode)
+			// Nested container faults keep their own message-level error selection.
+			// Only a top-level ASPAC mode can select RFC 4666 §3.8.1 Error 0x05.
+			if depth > 0 {
+				return fmt.Errorf("%w: Traffic Mode Type %d is not defined", ErrInvalidValue, trafficMode)
+			}
+			return fmt.Errorf("%w: Traffic Mode Type %d is not defined: %w", ErrInvalidValue, trafficMode, ErrInvalidTrafficMode)
 		}
 	case ErrorCode:
 		errorCode := binary.BigEndian.Uint32(value)
