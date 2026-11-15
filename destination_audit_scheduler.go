@@ -431,10 +431,10 @@ func (e *Endpoint) runCongestionAutomation(now time.Time) {
 		return
 	}
 	if e.aspRoutes != nil && len(changed) > 0 {
-		e.aspRoutes.canonicalStateChanged(changed)
+		e.aspRoutes.canonicalStateChanged(changed, MTPStatusValidityExpired)
 	}
 	if e.role == RoleIPSP && len(changed) > 0 {
-		e.refreshIPSPDestinations()
+		e.refreshIPSPDestinations(MTPStatusValidityExpired)
 	}
 	s.mu.Lock()
 	if s.closed || s.auditing == nil {

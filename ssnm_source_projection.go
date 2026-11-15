@@ -2,12 +2,11 @@ package m3ua
 
 import "math/bits"
 
-// ssnmSourceProjection is an immutable derived index. Source mutations discard
+// ssnmSourceProjection is an immutable derived index. Congestion mutations discard
 // it under ssnmState.mu; reads build it under that same lock. It owns no wire
 // scopes, identities, timestamps, or additional authoritative history.
 type ssnmSourceProjection struct {
-	trees                    map[ssnmSourceProjectionGroup]ssnmSourceProjectionTree
-	availability, congestion bool
+	trees map[ssnmSourceProjectionGroup]ssnmSourceProjectionTree
 }
 
 type ssnmSourceProjectionGroup struct {
@@ -25,9 +24,8 @@ type ssnmSourceProjectionNode struct {
 }
 
 type ssnmSourceProjectionStatus struct {
-	availability                                                 DestinationAvailability
-	level                                                        uint8
-	availabilitySet, congestionSet, congested, levelSet, unknown bool
+	level                                       uint8
+	congestionSet, congested, levelSet, unknown bool
 }
 
 // Unscoped queries include every source. A canonical query without an NA is
@@ -60,25 +58,26 @@ func sourceProjectionGroupAS(standalone bool, as ASKey) ASKey {
 }
 
 func (p *ssnmPartitionState) sourceStatus(pointCode uint32, status aspSelectionStatus, query ...ASKey) aspSelectionStatus {
+	// History replaces the whole dimension even if this query has no source;
+	// an unmatched scope must not uncover a displaced scalar value.
+	if len(p.receivedAvailability) > 0 {
+		record, found := p.availabilityInput(pointCode, query...)
+		status.availability, status.availabilitySet = record.State, found
+	}
+	if len(p.receivedCongestion) == 0 {
+		return status
+	}
 	if p.sourceProjection == nil {
 		p.sourceProjection = p.buildSourceProjection()
 	}
-	projection := p.sourceProjection
 	group := sourceProjectionQueryGroup(p.partition.Kind == SSNMStandalonePartition, query)
 	var value ssnmSourceProjectionStatus
-	if tree, held := projection.trees[group]; held {
+	if tree, held := p.sourceProjection.trees[group]; held {
 		value = tree.lookup(pointCode, p.work)
 	}
-	// History replaces a whole dimension even when this query has no matching
-	// group or covering source. It must not uncover a displaced scalar value.
-	if projection.availability {
-		status.availability, status.availabilitySet = value.availability, value.availabilitySet
-	}
-	if projection.congestion {
-		status.congestionSet, status.congested = value.congestionSet, value.congested
-		status.congestionLevel, status.congestionLevelSet = value.level, value.levelSet
-		status.receivedUnknown = status.receivedUnknown || value.unknown
-	}
+	status.congestionSet, status.congested = value.congestionSet, value.congested
+	status.congestionLevel, status.congestionLevelSet = value.level, value.levelSet
+	status.receivedUnknown = status.receivedUnknown || value.unknown
 	return status
 }
 
@@ -112,13 +111,6 @@ func (p *ssnmPartitionState) buildSourceProjection() *ssnmSourceProjection {
 	}
 	standalone := p.partition.Kind == SSNMStandalonePartition
 	all := ssnmSourceProjectionGroup{all: true}
-	for key, record := range p.receivedAvailability {
-		p.work.visitSource()
-		builder(all).addAvailability(key.destination, record.Revision, record.State, p.work)
-		if group, scoped := sourceProjectionRecordGroup(standalone, record.AS, record.Scope); scoped {
-			builder(group).addAvailability(key.destination, record.Revision, record.State, p.work)
-		}
-	}
 	for key, record := range p.receivedCongestion {
 		p.work.visitSource()
 		value := ssnmSourceProjectionCongestion{revision: record.Revision, level: record.Level, levelSet: record.LevelSet, congested: record.Congested, expired: record.Freshness == CongestionExpired}
@@ -127,7 +119,7 @@ func (p *ssnmPartitionState) buildSourceProjection() *ssnmSourceProjection {
 			builder(group).addCongestion(key.destination, key.association, value, p.work)
 		}
 	}
-	projection := &ssnmSourceProjection{trees: make(map[ssnmSourceProjectionGroup]ssnmSourceProjectionTree, len(builders)), availability: len(p.receivedAvailability) != 0, congestion: len(p.receivedCongestion) != 0}
+	projection := &ssnmSourceProjection{trees: make(map[ssnmSourceProjectionGroup]ssnmSourceProjectionTree, len(builders))}
 	state := ssnmSourceProjectionWalk{latest: make(map[AssociationID]ssnmSourceProjectionCongestion)}
 	for group, b := range builders {
 		projection.trees[group] = b.finish(&state, p.work)
@@ -136,10 +128,8 @@ func (p *ssnmPartitionState) buildSourceProjection() *ssnmSourceProjection {
 }
 
 type ssnmSourceProjectionBuildNode struct {
-	children             [2]int
-	head                 int // One-based congestion entry index.
-	availabilityRevision uint64
-	availability         DestinationAvailability
+	children [2]int
+	head     int // One-based congestion entry index.
 }
 
 type ssnmSourceProjectionCongestion struct {
@@ -177,14 +167,6 @@ func (b *ssnmSourceProjectionBuilder) nodeFor(destination ssnmDestinationKey, wo
 	}
 }
 
-func (b *ssnmSourceProjectionBuilder) addAvailability(destination ssnmDestinationKey, revision uint64, state DestinationAvailability, work *ssnmWorkCount) {
-	index := b.nodeFor(destination, work)
-	node := &b.nodes[index-1]
-	if revision > node.availabilityRevision {
-		node.availabilityRevision, node.availability = revision, state
-	}
-}
-
 func (b *ssnmSourceProjectionBuilder) addCongestion(destination ssnmDestinationKey, association AssociationID, value ssnmSourceProjectionCongestion, work *ssnmWorkCount) {
 	index := b.nodeFor(destination, work)
 	node := &b.nodes[index-1]
@@ -194,7 +176,7 @@ func (b *ssnmSourceProjectionBuilder) addCongestion(destination ssnmDestinationK
 
 func (b *ssnmSourceProjectionBuilder) finish(state *ssnmSourceProjectionWalk, work *ssnmWorkCount) ssnmSourceProjectionTree {
 	tree := ssnmSourceProjectionTree{nodes: make([]ssnmSourceProjectionNode, len(b.nodes))}
-	b.project(1, 0, 0, state, tree.nodes, work)
+	b.project(1, state, tree.nodes, work)
 	return tree
 }
 
@@ -213,12 +195,9 @@ type ssnmSourceProjectionWalk struct {
 
 // Roll back just the reporters changed by this node. Copying the whole latest
 // map at each branch would multiply broad-source work by the number of leaves.
-func (b *ssnmSourceProjectionBuilder) project(index int, availabilityRevision uint64, availability DestinationAvailability, state *ssnmSourceProjectionWalk, nodes []ssnmSourceProjectionNode, work *ssnmWorkCount) {
+func (b *ssnmSourceProjectionBuilder) project(index int, state *ssnmSourceProjectionWalk, nodes []ssnmSourceProjectionNode, work *ssnmWorkCount) {
 	work.visitPrefix()
 	node := b.nodes[index-1]
-	if node.availabilityRevision > availabilityRevision {
-		availabilityRevision, availability = node.availabilityRevision, node.availability
-	}
 	mark := len(state.undo)
 	for entryIndex := node.head; entryIndex != 0; {
 		work.visitSource()
@@ -236,11 +215,10 @@ func (b *ssnmSourceProjectionBuilder) project(index int, availabilityRevision ui
 		state.adjust(entry.value, 1)
 	}
 	value := state.status()
-	value.availability, value.availabilitySet = availability, availabilityRevision != 0
 	nodes[index-1] = ssnmSourceProjectionNode{children: node.children, status: value}
 	for _, child := range node.children {
 		if child != 0 {
-			b.project(child, availabilityRevision, availability, state, nodes, work)
+			b.project(child, state, nodes, work)
 		}
 	}
 	for len(state.undo) > mark {

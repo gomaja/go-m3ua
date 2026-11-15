@@ -56,7 +56,7 @@ func newIPSPMTPState(role Role, config []IPSPDestinationConfig) (*ipspMTPState, 
 	return state, nil
 }
 
-func (e *Endpoint) refreshIPSPDestinations() {
+func (e *Endpoint) refreshIPSPDestinations(reason ...MTPStatusReason) {
 	if e == nil || e.ipspMTP == nil {
 		return
 	}
@@ -142,7 +142,7 @@ func (e *Endpoint) refreshIPSPDestinations() {
 			updated[aspDerivedRangeKey{mtpRoute: route.id, pointCode: pc, mask: mask}] = best
 		}
 		visit(1, route.destinationPointCode, route.mask)
-		r.publish(r.derivedStatusIndicationsLocked(route, updated))
+		r.publish(r.derivedStatusIndicationsLocked(route, updated, reason...))
 		r.derived[route.id] = updated
 	}
 }

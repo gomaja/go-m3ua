@@ -14,7 +14,8 @@ const (
 	// MTPResumeIndication reports that a previously unavailable destination
 	// became available or restricted.
 	MTPResumeIndication
-	// MTPStatusIndication reports a restriction or congestion change without a
+	// MTPStatusIndication reports restriction/congestion changes or continued
+	// offered-traffic congestion without a
 	// transition into or out of destination unavailability.
 	MTPStatusIndication
 )
@@ -31,6 +32,31 @@ func (kind MTPIndicationKind) String() string {
 		return "UNKNOWN"
 	}
 }
+
+// MTPStatusCause identifies the cause parameter of an MTP indication.
+type MTPStatusCause uint8
+
+const (
+	// MTPStatusCauseNone leaves the cause unspecified, including PAUSE/RESUME.
+	MTPStatusCauseNone MTPStatusCause = iota
+	// MTPStatusSignallingNetworkCongested identifies congestion onset, repeat or clear.
+	MTPStatusSignallingNetworkCongested
+)
+
+// MTPStatusReason distinguishes a status transition from an offered-traffic
+// reminder or loss of received-congestion validity. Reason names the
+// notification trigger; Destination is a coalesced current aggregate, not
+// causal history for every field.
+type MTPStatusReason uint8
+
+const (
+	// MTPStatusTransition is the zero-value reason for a derived status change.
+	MTPStatusTransition MTPStatusReason = iota
+	// MTPStatusOfferedTraffic identifies the initial/every-eight local-user offer.
+	MTPStatusOfferedTraffic
+	// MTPStatusValidityExpired identifies expiry, which is not measured abatement.
+	MTPStatusValidityExpired
+)
 
 // MTPDestination identifies a provisioned ASP destination or destination
 // range. Mask is the number of wildcarded low-order point-code bits.
@@ -85,6 +111,11 @@ type MTPDestinationStatus struct {
 // the marker is read, and the receiver must query the Endpoint's current
 // destination state.
 type MTPIndication struct {
+	// Cause identifies congestion for onset, offered traffic and measured clear.
+	// PAUSE, RESUME and received-validity expiry leave it unspecified.
+	Cause MTPStatusCause
+	// Reason identifies the notification trigger; Destination is current state.
+	Reason         MTPStatusReason
 	Kind           MTPIndicationKind
 	Destination    MTPDestinationStatus
 	ResyncRequired bool
@@ -93,7 +124,8 @@ type MTPIndication struct {
 // MTPIndications returns the ASP or IPSP Endpoint's derived MTP3-User indication
 // stream. It is closed by Endpoint.Close, not by an individual Association.
 //
-// It reports changes in the derived status described by MTPDestinationStatus,
+// It reports changes and continued offered-traffic congestion in the derived
+// status described by MTPDestinationStatus,
 // which is the aggregate over every provisioned Signalling Gateway route and
 // not the per-candidate decision MTPTransfer makes. An MTP-RESUME is not a
 // promise that the next MTPTransfer will be admitted.
@@ -104,7 +136,11 @@ type MTPIndication struct {
 // previously retained state in this stream and its destination snapshots.
 // SubscribeSSNM reports the loss as SSNMResourceLossEvent; querying a snapshot
 // alone cannot recover an update that was not retained.
-// This is one consumer stream; applications fan out to their MTP3-Users.
+// This is one bounded consumer stream; the application fans every primitive
+// out to each registered MTP3-User. Concurrent readers do not multicast.
+// Routed ASP MTPTransfer counts original offers automatically for the
+// international and national-without-priorities methods. IPSP/application-owned
+// routing uses NewMTPStatusProcedure explicitly; raw writes never count offers.
 //
 // Having the channel is not the same as having something to put on it. These
 // indications are derived from provisioned MTP Routes, so an ASP that left

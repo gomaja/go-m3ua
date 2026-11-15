@@ -145,8 +145,13 @@ func (s *ssnmState) applyReceivedCongestionLocked(state *ssnmPartitionState, rep
 	for _, d := range keys {
 		for _, as := range resolved {
 			record.AS = as
-			state.setReceivedCongestion(receivedCongestionKey{association: report.Association, as: as, scope: scopeKey, destination: d}, record)
-
+			key := receivedCongestionKey{association: report.Association, as: as, scope: scopeKey, destination: d}
+			finishStatus := s.beginReceivedStatusChangeLocked(state, key, record)
+			state.setReceivedCongestion(key, record)
+			if s.statusMarks != nil && state.partition.Kind == SSNMCanonicalPartition {
+				state.replaceStatusSource(key, record)
+			}
+			finishStatus()
 		}
 		state.congestion[d] = ssnmCongestionRecord{SSNMCongestion: record, resolved: resolved}
 	}
@@ -257,10 +262,15 @@ func (s *ssnmState) expireCongestionLocked(expiry congestionExpiry, now time.Tim
 		return SSNMCongestionExpiry{}, false
 	}
 	record.Freshness = CongestionExpired
+	destination := expiry.received.destination.pointCodeRange()
+	scope := statusRecordScope(record)
+	finishStatus := s.statusMarks.beginChange(state.partition, &destination, &scope)
 	state.setReceivedCongestion(expiry.received, record)
+	state.expireStatusSource(expiry.received, record)
 	if current := state.congestion[expiry.received.destination]; current.Revision == record.Revision && current.AS == record.AS {
 		state.congestion[expiry.received.destination] = ssnmCongestionRecord{SSNMCongestion: record, resolved: current.resolved}
 	}
+	finishStatus()
 	return SSNMCongestionExpiry{Epoch: state.epoch, Destination: expiry.received.destination.pointCodeRange(), AS: record.AS, Revision: record.Revision}, true
 }
 

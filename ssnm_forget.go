@@ -27,19 +27,25 @@ func (c *Association) forgetReceivedDestinations() []SSNMPartition {
 	}
 	var changed []SSNMPartition
 	for partition, state := range s.partitions {
-		sources, dimensions := s.retireReceivedSourcesLocked(state, func(key receivedCongestionKey, _ SSNMCongestion) bool { return key.association == c.ID() }, &outcomes)
+		sources, dimensions := s.retireReceivedSourcesLocked(state, func(key receivedCongestionKey, _ SSNMCongestion) bool { return key.association == c.ID() }, false, &outcomes)
 		available, availableDimensions := s.retireReceivedAvailabilityLocked(state, func(key receivedCongestionKey, _ SSNMAvailability) bool { return key.association == c.ID() }, &outcomes)
 		dimensions = append(dimensions, availableDimensions...)
 		for key, record := range state.availability {
 			if record.Association == c.ID() {
+				destination := key.pointCodeRange()
+				finishStatus := s.statusMarks.beginChange(partition, &destination, nil)
 				delete(state.availability, key)
+				finishStatus()
 				s.releaseDestinationRecordLocked(state, ssnmScopeBytes(record.Scope, record.resolved))
 				dimensions = append(dimensions, SSNMDestinationInvalidation{Destination: key.pointCodeRange(), AvailabilityRemoved: true})
 			}
 		}
 		for key, record := range state.congestion {
 			if record.Association == c.ID() {
+				destination := key.pointCodeRange()
+				finishStatus := s.statusMarks.beginChange(partition, &destination, nil)
 				delete(state.congestion, key)
+				finishStatus()
 				s.releaseDestinationRecordLocked(state, ssnmScopeBytes(record.Scope, record.resolved))
 				dimensions = append(dimensions, SSNMDestinationInvalidation{Destination: key.pointCodeRange(), CongestionRemoved: true})
 			}

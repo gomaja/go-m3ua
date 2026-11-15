@@ -492,7 +492,7 @@ func TestSourceRetirementPreservesCapturedIsolationJobFence(t *testing.T) {
 	job.origins[0].congestion, job.origins[0].availability = false, false
 	job.summarizeOrigins()
 	var outcomes auditOutcomeBatch
-	s.retireReceivedSourcesLocked(s.partitions[p], func(receivedCongestionKey, SSNMCongestion) bool { return true }, &outcomes)
+	s.retireReceivedSourcesLocked(s.partitions[p], func(receivedCongestionKey, SSNMCongestion) bool { return true }, false, &outcomes)
 	if job.live.Load() {
 		s.mu.Unlock()
 		t.Fatal("source retirement delayed captured isolation fence until outcome publication")
@@ -519,7 +519,7 @@ func TestSourceRetirementKeepsUnmatchedIsolationJobLive(t *testing.T) {
 	job.origins[0].congestion, job.origins[0].availability = false, false
 	job.summarizeOrigins()
 	var outcomes auditOutcomeBatch
-	s.retireReceivedSourcesLocked(s.partitions[p], func(receivedCongestionKey, SSNMCongestion) bool { return true }, &outcomes)
+	s.retireReceivedSourcesLocked(s.partitions[p], func(receivedCongestionKey, SSNMCongestion) bool { return true }, false, &outcomes)
 	outcomes.publishLocked(s)
 	current := s.audits[job.key]
 	s.mu.Unlock()

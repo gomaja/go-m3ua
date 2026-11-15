@@ -1152,6 +1152,7 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 		}
 		c.ackedContextlessAS = contextlessConfigured
 	}
+	finishStatusChange := c.beginMTPStatusScopeChangeLocked()
 	c.ackedRCsScoped = true
 	if contextlessInactive {
 		c.ackedContextlessAS = false
@@ -1159,6 +1160,7 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 	for _, rc := range rcs {
 		delete(c.ackedRCs, rc)
 	}
+	finishStatusChange()
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
 	c.notifyASPRouteStateChanged()
@@ -1167,9 +1169,11 @@ func (c *Association) noteRoutingContextsUnacked(inactive *params.Param) {
 func (c *Association) noteNoRoutingContextsAcked() {
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
+	finishStatusChange := c.beginMTPStatusScopeChangeLocked()
 	c.ackedRCs = make(map[uint32]struct{})
 	c.ackedRCsScoped = true
 	c.ackedContextlessAS = false
+	finishStatusChange()
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
 	c.notifyASPRouteStateChanged()

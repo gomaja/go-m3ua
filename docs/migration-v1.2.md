@@ -20,6 +20,7 @@ delivers unknown values unchanged; applications can call `Valid()` to check them
 
 Contents:
 
+- [Continued MTP status](#continued-mtp-status)
 - [Received congestion validity and audits](#received-congestion-validity-and-audits)
 - [Peer explanations, DUPU bounds and ASPAC errors](#peer-explanations-dupu-bounds-and-aspac-errors)
 - [Congestion method profiles and local-user priority](#congestion-method-profiles-and-local-user-priority)
@@ -1565,9 +1566,13 @@ for scope, budget, event and lifetime details.
 ### Derived SSNM indexes and work bounds
 
 Received-source deltas now use exact destination buckets and are not built when
-there are no registered subscriptions. Snapshots visit source rows once; source
+there are no registered subscriptions. Snapshots visit source rows once; congestion
 projections share an invalidated prefix aggregate instead of reducing broad
-sources separately for each destination. Coverage, scope matching and retirement
+sources separately for each destination. Availability uses the same incremental
+all/scoped input index as offered-status marking, with at most two links per
+source and 25 prefix probes per query. Availability changes retain a warm
+congestion aggregate; combined history reads cost at most 50 probes/nodes.
+Coverage, scope matching and retirement
 share operation-wide indexes. Received-report and snapshot values/order, logical
 charges and overflow barriers are preserved. Lifecycle retirement aggregates
 removed-job diagnostics once per event, with monotonically increasing stream
@@ -1580,10 +1585,157 @@ set once. Registration gates still settle tracked submissions before publishing
 replacement versions. SGP peer changes additionally serialize the short retirement/
 map-publication span with peer admission, outside transport and subscriber waits.
 
-The retained source aggregate has at most 50 nodes per received source and at
-most two insertions per source. Other derived indexes follow retained source,
+The retained congestion aggregate has at most 50 nodes per congestion source
+and at most two insertions per source. Other derived indexes follow retained source,
 job and origin counts. These allocations are outside `SSNMStateConfig.MaxBytes`
 logical accounting; the limit is not a total heap/RSS bound. Binding/configured
 inventory counts and output/sorting costs keep their separate bounds. See the
 [retained-state work design](design/endpoint-management-and-ssnm.md#retained-state-work-and-derived-indexes)
 for cold-build, mutation-interval, fixed-prefix and per-operation bounds.
+
+## Continued MTP status
+
+`MTPIndication` gains `Cause MTPStatusCause` and `Reason MTPStatusReason`;
+`CongestionConfig` gains `MaxStatusDestinations int`. Replace unkeyed composite
+literals for these exported structs with keyed literals. The new fields and
+types have no compatibility aliases.
+
+The cause zero value is `MTPStatusCauseNone`, including PAUSE/RESUME. Known congestion
+onset, repeat and clear use `MTPStatusSignallingNetworkCongested`; inspect
+`Destination.Congested` and the level fields to distinguish them. The reason
+zero value is `MTPStatusTransition`; repeated/initial offered-message status
+uses `MTPStatusOfferedTraffic`. Only explicit received-validity expiration uses
+`MTPStatusCauseNone` and `MTPStatusValidityExpired`, not a measured clear or
+continued known congestion. Existing Kind, Destination, ResyncRequired and
+stream lifetime semantics remain in force. `Reason` identifies the trigger of
+a notification carrying a coalesced current aggregate snapshot; it provides no
+per-field causal history. Transport uncertainty uses the normal transition
+reason, never received-validity expiry. Availability, transport or lifecycle
+operations exposing already-expired knowledge also keep `MTPStatusTransition`;
+an uncertain noncongested result uses `MTPStatusCauseNone` and never claims measured congestion
+clear. These trigger values are engineering policy; RFC 4666 §3.4.4 permits a
+validity timer without defining them.
+
+As a conservative engineering policy, either `ReceivedCongestionUnknown` or
+`TransportCongestionUnknown` suppresses repeats and retires the automatic
+interval, even if `Congested` stays true from a surviving contribution.
+
+Each live exact-DPC LRU entry owns one restart mark in a single Endpoint
+registry. Matching uses shared immutable routing configuration and the changed
+input's scope; entries retain no association or source snapshots. Actual
+availability, congestion or freshness changes, including changes selected by
+the newest covering input, uncertainty, expiry and renewal after expiry,
+commit marks before route projection. Binding admission/retirement, association
+attachment, Active/Done/close and traffic-permission changes also mark affected
+entries at commit. An eligible routed offer consumes its mark and resets the interval.
+A later onset marks it again even if an offer already consumed the preceding
+clear, so coalesced projection cannot hide that restart.
+
+Equal renewals preserve the interval when all relevant newest inputs,
+including ties, remain unchanged and fresh. Timestamp/revision-only changes
+and changes outside the entry's point-code or configured SG/AS route scope
+also preserve it. Canonical mark matching uses that configured owner, just like
+canonical transfer and observation; peer-local NA/RC labels do not narrow it
+(RFC 4666 §§1.2, 1.4.2.1, 3.3.1). Standalone reads and source-specific
+invalidation keep their independent applicability rules. Association and lifecycle changes may conservatively mark
+all provisioned routes, including initially inactive or
+later-attached alternatives; per-AS permission changes mark the routes whose
+permission changed. Relevant changes can therefore cause extra initial
+reminders even while another contribution sustains congestion. The indication
+still carries the current coalesced route projection, without recomputing a
+fresh canonical aggregate for the offer. Marks retire with their LRU entries
+and Endpoint close and retain no event history.
+
+Mark matching is bounded by the entry budget, the change's own scope, the
+24-bit point-code width and configured candidates. It does not scan retained
+source history or recompute an aggregate per entry. A shared input index
+resolves a received source's newest covering input with at most 25 prefix
+checks per query. This also detects an equal broad reassertion replacing a
+newer narrow clear, including equivalent wire-scope aliases. An expired input
+tied for newest revision conservatively makes renewal restart the interval;
+it does not change the canonical projection, status payload or Cause/Reason.
+Removing that input lets unchanged fresh renewals preserve cadence again.
+Shared per-prefix/per-revision counts track retained records and expirations.
+For H retained received-source records, the index owns at most 2H links and
+2H revision groups, released with their source keys. It retains no additional
+statements, destination aggregate or interval-by-association table. These
+structural bounds are engineering contracts, not portable heap-byte or RSS
+measurements.
+
+Availability history uses one shared incremental prefix index for ordinary
+projection and offered-status marks. Each retained source has at most two links
+(all-source and normalized scoped inputs); a query checks at most 25 prefixes.
+Availability changes do not rebuild the separate congestion aggregate. Admission,
+withdrawal and forget fence their actual availability and scalar removals with
+marks, including when a remaining source supplies the same value after the
+scalar copy disappears. Equal current-input renewals preserve cadence. Restart
+settles optional DAUD before its existing epoch-reset fence; compact expiry
+identities leave the final validity notification as the only expiry origin.
+These operations add no wait to offered transfer beyond short bookkeeping locks.
+
+Bounded atomic flags per association preserve semantic transport Known/Level
+changes, including clear, later onset and positive-level changes, across
+coalesced projection. A commit fence begins before snapshot publication and
+stays visible until a pending reset has been posted. Consumers preserve the
+Endpoint dirty hint while a commit is in progress, so an offer consuming a
+clear cannot absorb a later onset or erase an in-flight snapshot change.
+Storage is four booleans per association plus the Endpoint hint, with no event
+history, additional sampler locks or user callbacks.
+
+The next routed offer or projection conservatively retires counters for the
+association's configured routes, covering activation before projection.
+Ordinary observations reset only while the association is Active at
+consumption; ordinary samples consumed while inactive preserve cadence.
+Forced epoch retirement is independent of Active. Sampling is fenced even
+when it starts inactive because activation can cross snapshot publication.
+Another contribution may sustain congestion, so a reset can produce an extra
+initial reminder without a false clear; the limit is no later than eight
+offers, not exactly eight. Equal Known/Level observations, including changes
+to diagnostic fields or timestamps alone, and unrelated peer timers preserve
+the interval. Sampling never waits for route or AS locks.
+
+Routed ASP `MTPTransfer` now publishes offered-traffic status under international
+and national-without-priorities profiles: offer 1, then no later than eight
+offers after each indication while the destination remains known congested
+(Q.704 (07/96) §§11.2.3.1/11.2.5). An uninterrupted interval reports at 1/9/17; resets can
+report earlier. Consumers must accept repeats without a state transition.
+These are validated offers before transport, including failed sends; invalid
+requests, broadcast copies, gateway choices, policy reevaluation and recovery
+retries do not add offers. Raw `WriteData` and `WriteSignal` never count.
+National-with-priorities remains transition-driven (§11.2.4).
+
+`MaxStatusDestinations` is the Endpoint-wide LRU limit for exact-DPC intervals,
+including DPCs inside masked routes, with route/method generation identity.
+Zero selects 4096 as an engineering default; negative values are rejected.
+Eviction restarts initial notification on the next known-congested offer.
+Effective clear, either uncertainty, lifecycle retirement and route/method
+generation changes reset intervals. Equal renewal preserves cadence when all
+relevant newest inputs, including ties, remain unchanged and fresh. `Endpoint.Close` ends this state. The existing overflow/resync mechanism applies without making
+`MTPTransfer` wait for the stream consumer.
+
+For IPSP or application-owned routing, use `NewMTPStatusProcedure(profile)`
+once per destination and local MTP3 boundary. It is safe for concurrent calls,
+has no hidden destination map and must not be copied after use. Call
+`Offered(status)` once per original validated offer with your effective
+aggregate status; a non-nil return is the primitive to distribute. It returns
+nil when nothing is due, including under national-with-priorities. A changed
+`Destination` resets automatically; supplying clear or uncertain status to
+`Offered` also resets the interval. The helper sees snapshots only. Call
+`Reset()` on known clear, uncertainty, expiry or local lifecycle/method
+retirement between offers, including a source ending masked by a surviving
+contribution. The application must order source updates and resets with its
+offers at its own routing boundary. `Endpoint.SubscribeSSNM` can supply ordered
+source updates; handle subscription loss by resetting and resynchronizing.
+The coalesced `Endpoint.MTPIndications` stream alone cannot reconstruct hidden
+source endings. IPSP and SGP peer-input procedures have the same application-owned
+ordering responsibility. Reset keeps the configured profile; construct a new
+procedure for a changed method. Routed ASP `MTPTransfer` maintains restart marks
+and fenced transport reset flags internally, so do not also call the helper
+for those offers.
+
+`MTPIndications` is one bounded consumer stream; fan each primitive out to
+**each** registered MTP3-User. Concurrent readers compete for messages rather
+than multicast them. Level-4 users still decide when to resume transmission
+(Q.704 (07/96) §11.2.3.3). RFC 4666 §1.4.6 describes this current-MTP3-procedure
+service without an uppercase MUST; it does not turn optional SCON/TFC into a
+mandatory report.

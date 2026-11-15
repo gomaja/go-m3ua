@@ -180,7 +180,9 @@ func (c *Association) noteCanonicalRemoteASChanged(routingContext uint32, id Rem
 	if c.canonicalRemoteAS == nil {
 		c.canonicalRemoteAS = make(map[uint32]RemoteASID)
 	}
+	finishStatus := c.beginMTPStatusBindingChangeLocked(c.canonicalRemoteAS[routingContext], id)
 	c.canonicalRemoteAS[routingContext] = id
+	finishStatus()
 }
 func (c *Association) forgetCanonicalRemoteAS(routingContext uint32) {
 	if c == nil {
@@ -208,7 +210,9 @@ func (c *Association) forgetCanonicalRemoteASChanged(routingContext uint32) {
 	if _, held := c.dynamicPeerASKeys[routingContext]; held {
 		c.dynamicPeerASKeyVersions[routingContext] = c.nextDynamicASKeyVersionLocked()
 	}
+	finishStatus := c.beginMTPStatusBindingChangeLocked(c.canonicalRemoteAS[routingContext])
 	delete(c.canonicalRemoteAS, routingContext)
+	finishStatus()
 }
 
 // ssnmPartitionsForScope resolves the partitions one wire scope concerns, in a
@@ -357,6 +361,12 @@ func (c *Association) syncSSNMBindings() {
 	store.retirePartitions(withdrawn, c.ID())
 	c.reconcileDestinationAudits()
 	if c.endpoint != nil {
+		// A pending reporter can affect active siblings without ever gaining
+		// a traffic capability (RFC 4666 §4.5.1). Project its source removal
+		// independently of capability changes, after store locks are released.
+		if c.endpoint.aspRoutes != nil && len(withdrawn) > 0 {
+			c.endpoint.aspRoutes.canonicalStateChanged(withdrawn)
+		}
 		c.endpoint.refreshIPSPDestinations()
 	}
 }

@@ -26,7 +26,7 @@ func (s *ssnmState) releaseDestinationRecordLocked(state *ssnmPartitionState, by
 // retireReceivedSourcesLocked removes only selected source statements. The
 // scalar copy is removed if it is the same statement; other AS/source history
 // remains authoritative even when no scalar copy remains.
-func (s *ssnmState) retireReceivedSourcesLocked(state *ssnmPartitionState, matches func(receivedCongestionKey, SSNMCongestion) bool, retirement ...*auditOutcomeBatch) ([]SSNMCongestionSourceInvalidation, []SSNMDestinationInvalidation) {
+func (s *ssnmState) retireReceivedSourcesLocked(state *ssnmPartitionState, matches func(receivedCongestionKey, SSNMCongestion) bool, completeSource bool, retirement ...*auditOutcomeBatch) ([]SSNMCongestionSourceInvalidation, []SSNMDestinationInvalidation) {
 	var local auditOutcomeBatch
 	batch := &local
 	if len(retirement) > 0 {
@@ -42,6 +42,18 @@ func (s *ssnmState) retireReceivedSourcesLocked(state *ssnmPartitionState, match
 			continue
 		}
 		sources = append(sources, SSNMCongestionSourceInvalidation{Destination: key.destination.pointCodeRange(), AS: record.AS, Revision: record.Revision})
+		destination := key.destination.pointCodeRange()
+		scope := statusRecordScope(record)
+		// Removing a whole source cannot uncover an older statement of it.
+		// A fresh clear contributes no positive or expired input; preserve a
+		// surviving sibling's interval. Partial removals must still mark a
+		// clear because an older covering positive can remain. If all received
+		// history disappears, the scalar-fallback change marks the partition.
+		finishStatus := func() {}
+		if !completeSource || record.Congested || record.Freshness == CongestionExpired {
+			finishStatus = s.statusMarks.beginChange(state.partition, &destination, &scope)
+		}
+		state.removeStatusSource(key)
 		state.deleteReceivedCongestion(key)
 		batch.retireSourceLocked(s, state.partition, key, true)
 		s.releaseDestinationRecordLocked(state, receivedCongestionBytes(record))
@@ -50,6 +62,10 @@ func (s *ssnmState) retireReceivedSourcesLocked(state *ssnmPartitionState, match
 			s.releaseDestinationRecordLocked(state, ssnmScopeBytes(scalar.Scope, scalar.resolved))
 			dimensions = append(dimensions, SSNMDestinationInvalidation{Destination: key.destination.pointCodeRange(), CongestionRemoved: true})
 		}
+		finishStatus()
+	}
+	if len(sources) > 0 && completeSource && len(state.receivedCongestion) == 0 {
+		s.statusMarks.change(state.partition, nil, nil)
 	}
 	return sources, dimensions
 }
@@ -121,7 +137,7 @@ func (s *ssnmState) retireReceivedAssociationLocked(association AssociationID, p
 	}
 	for key, state := range states {
 		s.work.visitPartition()
-		sources, dimensions := s.retireReceivedSourcesLocked(state, func(key receivedCongestionKey, _ SSNMCongestion) bool { return key.association == association }, outcomes)
+		sources, dimensions := s.retireReceivedSourcesLocked(state, func(key receivedCongestionKey, _ SSNMCongestion) bool { return key.association == association }, true, outcomes)
 		available, availableDimensions := s.retireReceivedAvailabilityLocked(state, func(key receivedCongestionKey, _ SSNMAvailability) bool { return key.association == association }, outcomes)
 		dimensions = append(dimensions, availableDimensions...)
 		s.publishDestinationRemovalsLocked(state, dimensions, sources, "received source retired", available)
@@ -178,7 +194,7 @@ func (c *Association) retireReceivedRegistrations(routingContexts map[uint32]str
 		sources, dimensions := s.retireReceivedSourcesLocked(state, func(key receivedCongestionKey, record SSNMCongestion) bool {
 			_, selected := routingContexts[record.AS.RoutingContext]
 			return key.association == c.ID() && record.AS.RoutingContextSet && selected && !receivedStaticASPresent(static, record.AS, s.work)
-		}, &outcomes)
+		}, false, &outcomes)
 		available, availableDimensions := s.retireReceivedAvailabilityLocked(state, func(key receivedCongestionKey, record SSNMAvailability) bool {
 			_, selected := routingContexts[record.AS.RoutingContext]
 			return key.association == c.ID() && record.AS.RoutingContextSet && selected && !receivedStaticASPresent(static, record.AS, s.work)

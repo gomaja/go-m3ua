@@ -45,6 +45,9 @@ type NetworkCongestionProfile struct {
 // CongestionConfig selects immutable method profiles. Default.Method is required
 // for every role; there is no inferred method. Duplicate selectors are invalid.
 type CongestionConfig struct {
+	// MaxStatusDestinations bounds the Endpoint-wide exact-DPC offered-status LRU.
+	// Zero selects 4096 as an engineering default; negative values are invalid.
+	MaxStatusDestinations int
 	// Validity enables local expiry of received congestion; nil disables it.
 	Validity *CongestionValidityConfig
 	// Auditing enables optional ASP audits; nil disables them.
@@ -58,11 +61,12 @@ type CongestionConfig struct {
 var ErrCongestionMethodMismatch = errors.New("congestion methods differ across route alternatives")
 
 type congestionMethodConfig struct {
-	validity       time.Duration
-	auditing       *DestinationAuditConfig
-	defaultProfile CongestionProfile
-	networks       []NetworkCongestionProfile
-	routeProfiles  map[MTPRouteID]CongestionProfile
+	maxStatusDestinations int
+	validity              time.Duration
+	auditing              *DestinationAuditConfig
+	defaultProfile        CongestionProfile
+	networks              []NetworkCongestionProfile
+	routeProfiles         map[MTPRouteID]CongestionProfile
 }
 
 func normalizeCongestionProfile(profile CongestionProfile) (CongestionProfile, error) {
@@ -127,6 +131,13 @@ func newCongestionMethodConfig(role Role, input *CongestionConfig, routes *aspRo
 	if input == nil {
 		return nil, fmt.Errorf("%w: an explicit congestion method is required", ErrInvalidRoleConfiguration)
 	}
+	limit := input.MaxStatusDestinations
+	if limit < 0 {
+		return nil, fmt.Errorf("%w: negative status destination limit", ErrInvalidRoleConfiguration)
+	}
+	if limit == 0 {
+		limit = 4096
+	}
 	profile, err := normalizeCongestionProfile(input.Default)
 	if err != nil {
 		return nil, err
@@ -138,7 +149,7 @@ func newCongestionMethodConfig(role Role, input *CongestionConfig, routes *aspRo
 	if err != nil {
 		return nil, err
 	}
-	return &congestionMethodConfig{validity: after, auditing: audits, defaultProfile: profile, networks: snapshotCongestionProfiles(input.Networks)}, nil
+	return &congestionMethodConfig{maxStatusDestinations: limit, validity: after, auditing: audits, defaultProfile: profile, networks: snapshotCongestionProfiles(input.Networks)}, nil
 }
 
 func lookupCongestionProfile(table []NetworkCongestionProfile, peer *SGPIdentity, key ASKey) (CongestionProfile, bool) {
