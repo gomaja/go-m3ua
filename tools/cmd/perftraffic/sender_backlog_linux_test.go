@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -20,6 +21,9 @@ import (
 // passes. Before, the fixture reported the backlog as a fatal error and closed
 // every association.
 func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testContext *testing.T) {
+	const overloadedRate = 1_000_000
+	const overloadedDuration = 200 * time.Millisecond
+	const overloadedMessages = int(overloadedRate * overloadedDuration / time.Second)
 	for _, sharedClock := range []bool{false, true} {
 		name := "http-interval"
 		if sharedClock {
@@ -28,7 +32,18 @@ func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testConte
 		testContext.Run(name, func(testContext *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			receiver := startWithholdingReceiver(testContext, ctx, sharedClock, -1, false)
+			// Observe markers only after the receiver has accounted for them.
+			var recordedFlows atomic.Uint32
+			strayHash := cohortHash("after-backlog-stray")
+			// Reserve room for the entire overloaded offer and its markers.
+			// Receiver queue loss must not discard this sender-backlog test's
+			// synchronization markers while its reader catches up.
+			receiver := startWithholdingReceiverWithQueue(testContext, ctx, sharedClock, -1, false, overloadedMessages+flowCount, func(message receivedMessage) {
+				identity, err := parsePayload(message.ProtocolData.Data)
+				if err == nil && identity.CohortHash == strayHash {
+					recordedFlows.Or(1 << identity.Flow)
+				}
+			})
 			config := withholdingSenderConfig(receiver, sharedClock)
 			endpointConfig := senderEndpointConfig(config)
 			endpointConfig.TransportCongestion = &m3ua.TransportCongestionConfig{Disabled: true}
@@ -47,8 +62,8 @@ func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testConte
 			}
 
 			overloaded := config
-			overloaded.Rate, overloaded.Drain = 1_000_000, time.Millisecond
-			sender, peer, err := runSenderCohort(ctx, overloaded, associations, nil, "backlog", 200*time.Millisecond)
+			overloaded.Rate, overloaded.Drain = overloadedRate, time.Millisecond
+			sender, peer, err := runSenderCohort(ctx, overloaded, associations, nil, "backlog", overloadedDuration)
 			if err == nil || err.Error() != cohortValidityError {
 				testContext.Fatalf("overloaded cohort error %v, want only the validity error", err)
 			}
@@ -69,6 +84,8 @@ func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testConte
 			testContext.Logf("backlog: %d outstanding at the deadline, %d unsubmitted, %d capped, %d submitted, %d delivered",
 				timeout.OutstandingAtDeadline, timeout.Unsubmitted, sender.Capped, sender.Submitted, peer.Delivery.Unique)
 
+			drainContext, cancelDrain := context.WithTimeout(ctx, 10*time.Second)
+			defer cancelDrain()
 			for index, association := range associations {
 				if state := association.State(); state != m3ua.StateASPActive {
 					testContext.Fatalf("association state after the failed probe = %v, want ASP-ACTIVE", state)
@@ -79,22 +96,46 @@ func TestSenderBacklogAtTheDrainDeadlineIsAFailedProbeOverLoopbackSCTP(testConte
 				// close the association. The backlog may still fill the send
 				// buffer, so a refusal for that is waited out; a deadline
 				// error is the defect.
-				identity := planMessage("after-backlog-stray", 1, 0, 1)
-				request := tupleFor(identity.Flow, identity.Association).dataRequest(buildPayload(identity, 128))
-				var writeErr error
-				for attempt := 0; attempt < 1000; attempt++ {
-					if _, writeErr = association.WriteData(request); writeErr == nil || !errors.Is(writeErr, syscall.EAGAIN) {
-						break
+				for flow := range flowCount {
+					identity := planMessage("after-backlog-stray", 1, uint64(flow), len(associations))
+					if int(identity.Association) != index {
+						continue
 					}
-					time.Sleep(10 * time.Millisecond)
-				}
-				if writeErr != nil {
-					testContext.Fatalf("association %d write after the failed probe: %v", index, writeErr)
+					request := tupleFor(identity.Flow, identity.Association).dataRequest(buildPayload(identity, 128))
+					var writeErr error
+					for attempt := 0; attempt < 1000; attempt++ {
+						if _, writeErr = association.WriteDataContext(drainContext, request); writeErr == nil || !errors.Is(writeErr, syscall.EAGAIN) {
+							break
+						}
+						timer := time.NewTimer(10 * time.Millisecond)
+						select {
+						case <-timer.C:
+						case <-drainContext.Done():
+							timer.Stop()
+						}
+					}
+					if writeErr != nil {
+						testContext.Fatalf("association %d flow %d write after the failed probe: %v; recorded flow mask %#x; submitted %d; delivery %+v",
+							index, flow, writeErr, recordedFlows.Load(), sender.Submitted, receiver.control.result().Delivery)
+					}
 				}
 			}
-			// Messages submitted just before the deadline may still be in
-			// flight; let them land on the stopped cohort before the next one.
-			time.Sleep(300 * time.Millisecond)
+			// Each marker follows that flow's earlier DATA on the same ordered
+			// stream (RFC 4666 Section 1.4.7). Wait for every flow to be recorded
+			// before resetting the receiver for the nominal cohort. This also
+			// covers writes submitted but completed after the shared deadline,
+			// which the failed probe counts as unsubmitted.
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			const allFlows = uint32(1<<flowCount - 1)
+			for recordedFlows.Load() != allFlows {
+				select {
+				case <-ticker.C:
+				case <-drainContext.Done():
+					testContext.Fatalf("receiver drain after the failed probe: %v; recorded flow mask %#x, want %#x; submitted %d; delivery %+v",
+						drainContext.Err(), recordedFlows.Load(), allFlows, sender.Submitted, receiver.control.result().Delivery)
+				}
+			}
 			nominal := config
 			nominal.Rate, nominal.Drain = 1_000, 500*time.Millisecond
 			sender, peer, err = runSenderCohort(ctx, nominal, associations, nil, "after-backlog", 300*time.Millisecond)

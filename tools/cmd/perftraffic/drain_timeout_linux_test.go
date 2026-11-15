@@ -28,6 +28,11 @@ type withholdingReceiver struct {
 
 func startWithholdingReceiver(testContext *testing.T, ctx context.Context, sharedClock bool, allow int, failResultsBeforeStop bool) *withholdingReceiver {
 	testContext.Helper()
+	return startWithholdingReceiverWithQueue(testContext, ctx, sharedClock, allow, failResultsBeforeStop, dataQueueSize, nil)
+}
+
+func startWithholdingReceiverWithQueue(testContext *testing.T, ctx context.Context, sharedClock bool, allow int, failResultsBeforeStop bool, queueSize int, recorded func(receivedMessage)) *withholdingReceiver {
+	testContext.Helper()
 	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP}))
 	if err != nil {
 		testContext.Fatal(err)
@@ -37,7 +42,9 @@ func startWithholdingReceiver(testContext *testing.T, ctx context.Context, share
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	listener, err := endpoint.Listen("m3ua", address, m3ua.NewListenerConfig(associationConfig("sgp")))
+	config := associationConfig("sgp")
+	config.DataQueueSize = queueSize
+	listener, err := endpoint.Listen("m3ua", address, m3ua.NewListenerConfig(config))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -73,13 +80,17 @@ func startWithholdingReceiver(testContext *testing.T, ctx context.Context, share
 				<-ctx.Done()
 				return
 			}
-			receiver.control.record(0, receivedMessage{
+			received := receivedMessage{
 				ProtocolData:         protocolDataFromM3UA(message.ProtocolData),
 				NetworkAppearance:    message.Scope.NetworkAppearance,
 				NetworkAppearanceSet: message.Scope.NetworkAppearanceSet,
 				RoutingContext:       firstRoutingContext(message.Scope),
 				RoutingContextSet:    message.Scope.RoutingContextSet,
-			})
+			}
+			receiver.control.record(0, received)
+			if recorded != nil {
+				recorded(received)
+			}
 		}
 	}()
 	return receiver
