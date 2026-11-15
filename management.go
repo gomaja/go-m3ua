@@ -177,9 +177,11 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 		return ErrInvalidParameterValue
 	}
 
-	// RFC 4666 Errata ID 2065 makes Routing Context Conditional in NTFY: the
-	// sender must include it when a notification concerns only a subset of the
-	// Application Servers this ASP serves. Omission still has the meaning
+	// RFC 4666 Section 3.8.2 lists "Routing Context            Optional".
+	// The project adopts the interpretation proposed by Held for Document
+	// Update erratum 2065: include Routing Context when a notification concerns
+	// only a subset of the Application Servers this ASP serves. The Held
+	// erratum does not correct the published RFC. Omission still has the meaning
 	// Section 4.3.4.5 gives it: configuration identifies the ASP's AS
 	// memberships and the notification applies in each one.
 	//

@@ -63,13 +63,17 @@ type SCTPSACKInfo struct {
 	SackFrequency uint32
 }
 
-// DefaultReadBufferSize is the read buffer size used when SCTPConfig
-// leaves ReadBufferSize unset.
+// DefaultReadBufferSize is the maximum reassembled SCTP message size used
+// when SCTPConfig leaves ReadBufferSize unset.
 //
-// 64 KiB accommodates any M3UA message in practical use — SS7 traffic
-// interworked at an SG is capped at a 272-octet SIF, and even the larger blocks
-// M3UA permits natively stay far below this — while costing one allocation per
-// association rather than per read.
+// This is an implementation default, not a protocol message-size limit.
+// RFC 4666 Section 1.3.2.1: "The M3UA layer does not impose a 272-octet signalling
+// information field (SIF) length limit". The same section limits SG interworking
+// "when interworking to a SS7 network that does not support the transfer of
+// larger information blocks to the final destination." The deployment's NIF
+// and SS7 network boundary own that restriction; this buffer does not enforce it.
+// ReadBufferSize must accommodate the complete encoded messages expected by
+// the deployment.
 const DefaultReadBufferSize = 65535
 
 // SCTPConfig holds all SCTP-related configuration parameters.
@@ -336,10 +340,11 @@ const DefaultBroadcastFlowIdentifierBytes = 256
 // DefaultTAckRetries is how many times an unacknowledged ASPSM/ASPTM request is
 // resent before the attempt is reported as failed.
 //
-// RFC 4666 says to resend "until it receives an ASP Up Ack message", and the
-// same for ASP Down, ASP Active and ASP Inactive, which is unbounded; a bound
-// turns a peer that will never answer into a reportable error instead of an
-// indefinite silent retry against a network already in trouble.
+// RFC 4666 Section 4.3.4.1: "the ASP MAY restart T(ack) and resend ASP Up
+// messages until it receives an ASP Up Ack message." Retransmission is optional;
+// Sections 4.3.4.2, 4.3.4.3 and 4.3.4.4 likewise permit it for ASP Down, ASP
+// Active and ASP Inactive. This retry bound is implementation policy: a peer
+// that never answers produces a reportable error after a finite attempt.
 const DefaultTAckRetries = 5
 
 // BroadcastFlowIdentifier adds application semantics to the default Broadcast

@@ -70,7 +70,7 @@ Until the blacklist entry is removed, opening an SCTP socket fails with
 ```sh
 sudo dnf install kernel-modules-extra-$(uname -r)
 sudo sed -i 's/^blacklist sctp$/# blacklist sctp/' /etc/modprobe.d/sctp-blacklist.conf
-# optional: load it at boot rather than on the first SCTP socket
+# optional for socket use; required for persistent sysctls unless using the udev rule below
 echo sctp | sudo tee /etc/modules-load.d/sctp.conf
 ```
 
@@ -78,6 +78,26 @@ The package marks the blacklist file as configuration that updates do not
 replace, so the edit persists. With the entry commented out, the kernel loads
 the module when the first SCTP socket is opened. Install the
 `kernel-modules-extra` that matches each kernel you boot.
+
+Persistent `net.sctp.*` settings in `/etc/sysctl.d/` need module-load ordering.
+As [systemd's sysctl.d(5)](https://www.freedesktop.org/software/systemd/man/latest/sysctl.d.html)
+explains, early boot processing cannot apply settings whose kernel module is
+loaded later. Keep `sctp` in `/etc/modules-load.d/sctp.conf` to load it before
+that processing; [modules-load.d(5)](https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html)
+defines this static boot list. Alternatively, leave loading on demand and
+install `/etc/udev/rules.d/99-sctp-sysctl.rules`, following the module-load example
+in sysctl.d(5):
+
+```udev
+ACTION=="add", SUBSYSTEM=="module", KERNEL=="sctp", RUN+="/usr/lib/systemd/systemd-sysctl --prefix=/net/sctp"
+```
+
+Reload udev rules after installation (`udevadm control --reload`); the rule
+applies on subsequent module loads. For an already loaded module, apply the
+settings with `/usr/lib/systemd/systemd-sysctl --prefix=/net/sctp`.
+Verify `sysctl net.sctp.prsctp_enable` in the Listener's network namespace
+before starting it; boot configuration in the host namespace does not configure
+separately created network namespaces.
 
 ### SCTP reliability
 
@@ -97,7 +117,8 @@ messages. go-m3ua's side rejects each FORWARD TSN, later messages on that stream
 are not delivered, and nothing reports it. On hosts that run Listeners, set the
 sysctl in the Listener's network namespace to match `PartialReliability`:
 `sysctl -w net.sctp.prsctp_enable=0` for the default, persisted under
-`/etc/sysctl.d/`. Dial's associations are not affected.
+`/etc/sysctl.d/` with the [module-load ordering above](#enabling-sctp-on-rocky-linux--rhel-9).
+Dial's associations are not affected.
 
 A peer that requires PR-SCTP may decline the association. Set
 `config.SCTPConfig.PartialReliability = true` before Dial or Listen to offer it.

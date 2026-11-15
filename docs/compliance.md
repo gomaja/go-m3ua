@@ -27,7 +27,10 @@ negotiated support. A Listener fixes the value at Listen and refuses a
 selector mismatch with `ErrInvalidSCTPConfig` while continuing to serve. On
 Linux, a Listener's association answers an SCTP restart from
 `net.sctp.prsctp_enable` instead (sctp/lksctp-tools#81), so hosts that run
-Listeners need that sysctl to match `PartialReliability`.
+Listeners need that sysctl to match `PartialReliability`. Persistent settings
+also need the [module-load ordering](../README.md#enabling-sctp-on-rocky-linux--rhel-9)
+described in systemd's [sysctl.d(5)](https://www.freedesktop.org/software/systemd/man/latest/sysctl.d.html)
+and [modules-load.d(5)](https://www.freedesktop.org/software/systemd/man/latest/modules-load.d.html).
 See [message boundaries and reliability](standards.md#sctp-message-boundaries-and-reliability)
 for Linux behavior and the standards recheck.
 
@@ -131,7 +134,7 @@ SGP, and IPSP Endpoints:
 | Original upstream | Reusable Go M3UA library ancestor | 18 issues, including 5 open, and 44 pull requests inspected | Every behaviorally relevant issue and proposal has the disposition below. Counts and repository metadata were refreshed through the GitHub API on the audit date. |
 | [`github.com/vazir/m3ua-go`](https://github.com/vazir/m3ua-go) | Stale reusable library | No issues or pull requests | No behavior absent here was found. Its last repository update predates the current parser, lifecycle, routing, and role work in this project. |
 | [`github.com/wspdev-go/m3ua-client`](https://github.com/wspdev-go/m3ua-client) | Application scaffold | No issues or pull requests | Not a reusable M3UA stack and therefore not an implementation baseline. |
-| [`github.com/rumalg123/telco-signalling-lab`](https://github.com/rumalg123/telco-signalling-lab) | Application-specific signalling lab | No issues or pull requests | Its narrow in-application implementation is not adopted as a library design. In particular, go-m3ua permits pre-ASP-Active-Ack DUNA, DRST, and SCON only in the RFC 4666 Section 4.5.1 activation window; it does not generalize that exception to DAVA. |
+| [`github.com/rumalg123/telco-signalling-lab`](https://github.com/rumalg123/telco-signalling-lab) | Application-specific signalling lab | No issues or pull requests | Its narrow in-application implementation is not adopted as a library design. In particular, go-m3ua permits pre-ASP-Active-Ack DUNA, DRST, and SCON only in the RFC 4666 Section 4.5.1 activation window; restart DAVA is also admitted in that activation window under §4.6: "In addition to DUNA messages, SCON, DRST, and DAVA can also be sent." |
 
 Other application and probe hits from GitHub code search were not treated as
 competing libraries because they import a stack or embed task-specific protocol

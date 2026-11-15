@@ -277,8 +277,11 @@ The remaining transport assignments are:
   [Service Name and Transport Protocol Port Number Registry](https://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml?search=2905).
   RFC 4666 [Section 7.2](https://www.rfc-editor.org/rfc/rfc4666.html#section-7.2)
   recommends that SGPs listen on that SCTP port and permits statically
-  configured SCTP ports. The registry's TCP entry does not make TCP an M3UA
-  transport; RFC 4666 defines M3UA over SCTP.
+  configured SCTP ports. go-m3ua supports SCTP only. RFC 4666 §1.3.1 also
+  permits TCP in limited scenarios: "Under certain scenarios, such as
+  back-to-back connections without redundancy requirements, the SCTP functions
+  above might not be a requirement, and TCP MAY be used as the underlying
+  common transport protocol."
 
 ### RFC 3788 Security Message discrepancy
 
