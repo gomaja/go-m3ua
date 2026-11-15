@@ -220,7 +220,14 @@ It also says:
 
 > Where the SGP does not maintain the congestion status of the SS7 destination, the response to a DAUD message should always only be a DAVA, DRST, or DUNA message, as appropriate.
 
-This implementation maintains the congestion status. If an association's
+Authoritative SS7 congestion knowledge is independent of its level and of
+availability. National known clear emits SCON(0) before DAVA or DRST
+(RFC 4666 §§4.5.3, 5.4.1); absent congestion knowledge emits availability only
+(§5.4.3). International known clear also emits availability only, without a
+partial-response management error. Neither peer reports nor transport pressure
+supply this knowledge, and bare DAVA does not clear an ASP's retained congestion.
+
+For known congestion that requires an SCON, if an association's
 configured method cannot express that status, its DAUD response omits only the
 profile-refused SCON, sends every remaining congestion and availability reply in
 the planned order, and reports the partial response once per audit through

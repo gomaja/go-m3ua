@@ -193,7 +193,7 @@ func TestDAUDMessageAndByteBudgetsAreInclusiveAndAtomic(t *testing.T) {
 		{destinationAuditGroup: destinationAuditGroup{state: availabilityState(DestinationAvailable), routingContexts: []uint32{1}}, pointCode: 1},
 		{destinationAuditGroup: destinationAuditGroup{state: availabilityState(DestinationUnavailable), routingContexts: []uint32{1}}, pointCode: 2},
 	}
-	replies, err := buildDestinationAuditMessages(d, entries, 2, auditReplyBudget{100, 10000})
+	replies, err := buildDestinationAuditMessages(d, entries, 2, auditReplyBudget{100, 10000}, CongestionNationalWithoutPriorities)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestDAUDMessageAndByteBudgetsAreInclusiveAndAtomic(t *testing.T) {
 		{"one byte over", auditReplyBudget{uint64(len(replies)), bytes - 1}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := buildDestinationAuditMessages(d, entries, 2, tc.budget)
+			got, err := buildDestinationAuditMessages(d, entries, 2, tc.budget, CongestionNationalWithoutPriorities)
 			if tc.accepted {
 				if err != nil || len(got) != len(replies) {
 					t.Fatalf("inclusive bound: %d %v", len(got), err)

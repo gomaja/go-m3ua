@@ -32,7 +32,9 @@ func (c *Association) destinationAuditResponse(d *messages.DestinationStateAudit
 		return nil, err
 	}
 	budget := destinationAuditMessageBudget(d, entries, limit, len(pcs), c.auditAffectedPointCodeLimit())
-	return buildDestinationAuditMessages(d, entries, c.auditAffectedPointCodeLimit(), budget)
+	// Method selection follows the same resolved NA/binding as SCON send admission.
+	key := c.congestionSCONKeys(d.NetworkAppearance, d.RoutingContext, false)[0]
+	return buildDestinationAuditMessages(d, entries, c.auditAffectedPointCodeLimit(), budget, c.congestionProfile(key).Method)
 }
 
 const auditMaxMessage = DefaultReadBufferSize &^ 3
@@ -97,7 +99,7 @@ func auditContextKey(contexts []uint32) string {
 // destinations/ranges; §3.4.6 gives DRST DUNA's APC format and description.
 // Group SCON by congestion alone and availability by its message type. Sending
 // all SCON groups first preserves the required order even across list chunks.
-func buildDestinationAuditMessages(d *messages.DestinationStateAudit, entries []destinationAuditReply, limit int, budget auditReplyBudget) ([]messages.M3UA, error) {
+func buildDestinationAuditMessages(d *messages.DestinationStateAudit, entries []destinationAuditReply, limit int, budget auditReplyBudget, method CongestionMethod) ([]messages.M3UA, error) {
 	var groups []auditMessageGroup
 	indices := make(map[auditMessageKey]int)
 	add := func(key auditMessageKey, contexts []uint32, pc uint32) {
@@ -119,12 +121,19 @@ func buildDestinationAuditMessages(d *messages.DestinationStateAudit, entries []
 			kind = messages.MsgTypeDestinationRestricted
 		}
 		add(auditMessageKey{kind: kind, contexts: scope}, r.routingContexts, pc)
-		if r.state.Availability != DestinationUnavailable && r.state.Congestion.Congested {
+		// RFC 4666 §§4.5.3, 5.4.1: national known clear qualifies availability
+		// with explicit SCON(0). Unknown congestion has availability alone (§5.4.3).
+		// International clear has no SCON representation and is not a refusal.
+		clear := r.congestionKnown && !r.state.Congestion.Congested && (method == CongestionNationalWithPriorities || method == CongestionNationalWithoutPriorities)
+		if r.state.Availability != DestinationUnavailable && r.congestionKnown && (r.state.Congestion.Congested || clear) {
 			level := r.state.Congestion.Level
-			if !r.state.Congestion.LevelSet {
+			levelSet := r.state.Congestion.LevelSet
+			if clear {
+				level, levelSet = 0, true
+			} else if !levelSet {
 				level = 0
 			}
-			add(auditMessageKey{messages.MsgTypeSignallingCongestion, level, r.state.Congestion.LevelSet, scope}, r.routingContexts, pc)
+			add(auditMessageKey{messages.MsgTypeSignallingCongestion, level, levelSet, scope}, r.routingContexts, pc)
 		}
 	}
 	var replies []messages.M3UA

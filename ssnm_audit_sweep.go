@@ -115,6 +115,7 @@ func (scratch *destinationAuditScratch) sweepDestinationAudit(records []destinat
 	clear(completed)
 	known, isolated, event, query := 0, 0, 0, 0
 	var previous DestinationNetworkState
+	var previousCongestionKnown bool
 	var groupStart, groupEnd uint32
 	pending := false
 	var replies []destinationAuditReply
@@ -123,7 +124,7 @@ func (scratch *destinationAuditScratch) sweepDestinationAudit(records []destinat
 			return nil
 		}
 		var err error
-		replies, err = appendDestinationAuditReplies(replies, previous, groupStart, groupEnd, maxBytes)
+		replies, err = appendDestinationAuditReplies(replies, previous, previousCongestionKnown, groupStart, groupEnd, maxBytes)
 		return err
 	}
 	for b := 0; b+1 < len(boundaries); b++ {
@@ -169,6 +170,7 @@ func (scratch *destinationAuditScratch) sweepDestinationAudit(records []destinat
 			continue
 		}
 		state := DestinationNetworkState{Availability: DestinationUnavailable}
+		congestionKnown := false
 		if known > 0 {
 			state = DestinationNetworkState{}
 			availability.prune(active)
@@ -178,12 +180,15 @@ func (scratch *destinationAuditScratch) sweepDestinationAudit(records []destinat
 			}
 			if len(*congestion) > 0 {
 				state.Congestion = records[indices[(*congestion)[0].index]].rangeValue.State.Congestion
+				// RFC 4666 §§4.5.3, 5.4.1, 5.4.3: presence comes from the
+				// authoritative congestion record, independently of its value.
+				congestionKnown = true
 			}
 		}
 		if isolated > 0 {
 			state = DestinationNetworkState{Availability: DestinationUnavailable}
 		}
-		if pending && groupEnd == start && !explicit[start] && previous == state {
+		if pending && groupEnd == start && !explicit[start] && previous == state && previousCongestionKnown == congestionKnown {
 			groupEnd = end
 			continue
 		}
@@ -192,6 +197,7 @@ func (scratch *destinationAuditScratch) sweepDestinationAudit(records []destinat
 		}
 		pending = true
 		previous, groupStart, groupEnd = state, start, end
+		previousCongestionKnown = congestionKnown
 	}
 	if err := flush(); err != nil {
 		return nil, err
