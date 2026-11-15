@@ -96,27 +96,25 @@ func TestDialSubscribeReceivesHandshakeIndications(t *testing.T) {
 		t.Fatal("Subscribe did not run exactly once for Dial's association")
 	}
 	assertHandshakeStates(t, sub)
-	// An ordered-stream barrier proves every earlier NTFY was dispatched.
-	barrier := []byte("handshake notifications delivered")
-	sgp.setBeatData(barrier)
-	if _, err = sgp.WriteSignal(messages.NewHeartbeat(params.NewHeartbeatData(barrier))); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-sgp.beatAckChan:
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
+	// RFC 4666 Section 4.3.4.5 puts each NTFY after its related Ack.
+	// ASP-ACTIVE therefore does not prove the SGP has written AS-ACTIVE:
+	// a BEAT sent here could overtake those notifications at the sender.
 	got := map[uint32][]uint16{}
-	for len(sub.management) > 0 {
-		ind := receiveSubscription(t, sub.management)
-		if ind.Kind == ManagementTransportCongestion || ind.Kind == ManagementDataQueueCongestion {
-			continue
-		}
-		if ind.Kind != ManagementNotify || ind.Association != asp.ID() || len(ind.RoutingContexts) != 1 {
+	for range 4 {
+		ind := receiveNotifyIndication(t, ctx, sub.management)
+		if ind.Association != asp.ID() || len(ind.RoutingContexts) != 1 {
 			t.Fatalf("unexpected handshake indication: %+v", ind)
 		}
 		got[ind.RoutingContexts[0]] = append(got[ind.RoutingContexts[0]], ind.StatusInfo)
+	}
+	// All expected notifications have reached the subscriber. The barrier
+	// now covers their writes and makes any extra queued NTFY observable.
+	waitIndicationBarrier(t, ctx, asp, sgp, "handshake notifications delivered")
+	for len(sub.management) > 0 {
+		ind := receiveSubscription(t, sub.management)
+		if ind.Kind != ManagementTransportCongestion && ind.Kind != ManagementDataQueueCongestion {
+			t.Fatalf("unexpected extra handshake indication: %+v", ind)
+		}
 	}
 	want := map[uint32][]uint16{1: {2, 3}, 2: {2, 3}}
 	if !reflect.DeepEqual(got, want) {
