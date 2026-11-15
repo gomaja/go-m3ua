@@ -167,9 +167,8 @@ func TestSSNMOperationValidation(t *testing.T) {
 		}{
 			{name: "masked destination", request: withDUPUDestination(valid, PointCodeRange{PointCode: 1, Mask: 1})},
 			{name: "oversized destination", request: withDUPUDestination(valid, PointCodeRange{PointCode: 0x1000000})},
-			{name: "reserved user", request: withDUPUUser(valid, 6)},
-			{name: "unknown user", request: withDUPUUser(valid, 16)},
-			{name: "unknown cause", request: withDUPUCause(valid, 3)},
+			{name: "structural user overflow", request: withDUPUUser(valid, 256)},
+			{name: "structural cause overflow", request: withDUPUCause(valid, 16)},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				if err := endpoint.DestinationUserPartUnavailable(test.request); !errors.Is(err, ErrInvalidParameterValue) {

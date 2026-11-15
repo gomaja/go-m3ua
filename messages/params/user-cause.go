@@ -11,7 +11,8 @@ package params
 //	2         Inaccessible Remote User
 //
 // "The values agree with those provided in the SS7 MTP3 User Part Unavailable
-// message", so these travel to the peer as they are.
+// message", so these travel to the peer as they are. RFC 4666 §3.4.5 also
+// permits additional variant values; this table does not close the set.
 const (
 	UnknownCause uint16 = iota
 	Unequipped
@@ -35,6 +36,11 @@ const (
 //
 // "The values align with those provided in the SS7 MTP3 User Part Unavailable
 // message and Service Indicator."
+//
+// RFC 4666 §3.4.5 makes the MTP3 variant definitive and labels its table
+// illustrative. Q.Imp704 (12/00) §§2.1, 2.2.3–2.2.4 includes further
+// assignments and extended identities. These constants are not an admission
+// whitelist; callers own their variant's assignments.
 //
 // These constants previously started at 1 rather than 3, so every one of them
 // was wrong by the width of the reserved ranges — a DUPU built with ISUP named

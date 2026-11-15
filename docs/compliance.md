@@ -232,3 +232,13 @@ not maintain congestion does not apply. The authoritative congestion remains
 retained. An audit delivers what a publication could deliver to this association.
 Reply-budget refusal remains a separate whole-audit Destination Status Unknown
 response before any status prefix. A real transport failure still stops writing.
+
+
+Peer management explanations are delivered as owned `DiagnosticInformation`
+(ERR) and `InfoString` (NTFY) bytes, with absent and present-empty distinguished
+(RFC 4666 §4.2). Undefined ASPAC Traffic Mode Type selects Error 0x05 without
+activation or Ack (§3.8.1); strict parsing and other fault precedence remain.
+DUPU uses structural User ≤255/Cause ≤15 admission on typed origination, raw
+`WriteSignal`, and reception (§3.4.5; Q.704 (07/96) §15.17;
+Q.Imp704 (12/00) §§2.2.3–2.2.4). The caller owns variant assignments; the
+16-bit codecs and one-unmasked-destination, role and scope restrictions remain.

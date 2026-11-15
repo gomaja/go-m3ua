@@ -237,3 +237,15 @@ response before any status prefix. A real transport failure still stops writing.
 `TestDAUDProfileRefusalPreservesAvailabilityAndOtherReplies` covers repeated
 audits, permitted congestion, every availability class, exact scope, management
 reporting and continued service.
+
+
+RFC 4666 §4.2 peer explanations are delivered through owned
+`ManagementIndication.DiagnosticInformation` (ERR) and `InfoString` (NTFY)
+bytes. Nil denotes absence; a non-nil empty slice denotes a present empty
+parameter. `Description` remains the code/status description. Undefined ASPAC
+Traffic Mode Type selects Error 0x05 without activation or Ack (§3.8.1), while
+other parameter checks and error precedence remain strict. DUPU admission uses
+User ≤255/Cause ≤15 on typed, raw and inbound paths (§3.4.5; Q.704 (07/96)
+§15.17; Q.Imp704 (12/00) §§2.2.3–2.2.4). These are structural bounds, not a
+claim that every value is assigned; the caller owns its MTP3 variant's
+assignments. Both codec fields remain 16 bits.

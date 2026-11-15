@@ -45,7 +45,10 @@ type DestinationAvailabilityRequest struct {
 }
 
 // DestinationUserPartUnavailableRequest is an RFC 4666 Section 3.4.5 DUPU
-// request from an SGP to its concerned active ASPs.
+// request from an SGP to its concerned active ASPs. User must fit 8 bits and
+// Cause 4 bits (Q.704 (07/96) §15.17; Q.Imp704 (12/00) §§2.2.3–2.2.4).
+// Callers own assignments in their MTP3 variant; structural admission does not
+// assign reserved values. Both fields retain the RFC's 16-bit codec format.
 type DestinationUserPartUnavailableRequest struct {
 	Scope       WireScope
 	Destination PointCodeRange
@@ -474,7 +477,7 @@ func (e *Endpoint) DestinationUserPartUnavailable(request DestinationUserPartUna
 	if request.Destination.Mask != 0 {
 		return fmt.Errorf("%w: DUPU does not permit an Affected Point Code mask", ErrInvalidParameterValue)
 	}
-	if !validMTP3User(request.User) || request.Cause > params.Inaccessible {
+	if !validDUPUUserCause(request.User, request.Cause) {
 		return fmt.Errorf("%w: invalid DUPU User/Cause", ErrInvalidParameterValue)
 	}
 	parameters, err := prepareEndpointSSNM(
@@ -900,20 +903,13 @@ func endpointActiveSSNMTargets(endpoint *Endpoint, scope WireScope) []activeSSNM
 	return targets
 }
 
-func validMTP3User(user uint16) bool {
-	switch user {
-	case params.SCCP,
-		params.TUP,
-		params.ISUP,
-		params.BroadbandISUP,
-		params.SatelliteISUP,
-		params.AAL2Signalling,
-		params.BICC,
-		params.GatewayControlProtocol:
-		return true
-	default:
-		return false
-	}
+// validDUPUUserCause enforces the structural envelope of Q.704 (07/96)
+// §15.17 and Q.Imp704 (12/00) §§2.2.3–2.2.4: an extended 8-bit user identity
+// and a 4-bit cause. RFC 4666 §3.4.5 defers assignments to the MTP3 variant;
+// its illustrative tables are not closed sets. Callers own variant assignments.
+// The codecs retain both 16-bit fields even outside this admission envelope.
+func validDUPUUserCause(user, cause uint16) bool {
+	return user <= 255 && cause <= 15
 }
 
 // IPSP SCON follows the same local-directed flow validation and delivery

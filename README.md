@@ -1175,6 +1175,17 @@ a later RFC 4666 Section 4.5.3 audit is answered from and fans out to the
 concerned active ASPs. Partial fan-out returns `*SSNMDeliveryError` with stable
 successful and failed Association IDs.
 
+DUPU admission accepts User identities through 255 and Causes through 15 on
+typed origination, raw `WriteSignal`, and reception. These are structural
+bounds from Q.704 (07/96) §15.17 and Q.Imp704 (12/00) §§2.2.3–2.2.4;
+RFC 4666 §3.4.5 defers assignments to the caller's MTP3 variant. Acceptance
+does not assign reserved values. DUPU still requires one unmasked destination.
+
+An ASP Active with an undefined Traffic Mode Type receives Error `0x05`
+(Unsupported Traffic Mode Type), without activation or ASP Active Ack
+(RFC 4666 §3.8.1). Parameter parsing stays strict; malformed lengths and other
+parameter faults retain their existing error precedence.
+
 ### Consuming SSNM knowledge
 
 `Endpoint.SubscribeSSNM` returns what the Endpoint currently knows together with
@@ -1240,6 +1251,11 @@ silent hole in it. `Endpoint.SSNMKnowledge` returns the same snapshot without
 opening a subscription.
 
 ### Management indications
+
+Received M-ERROR carries the peer's `DiagnosticInformation` bytes; M-NOTIFY
+carries the peer's `InfoString` bytes (RFC 4666 §4.2). Each indication owns its
+copy. Nil means the parameter was absent; a non-nil empty slice means it was
+present and empty. `Description` remains the error-code or status description.
 
 `Association.ManagementIndications` reports M-NOTIFY, M-ERROR,
 M-SCTP_RELEASE, M-SCTP_RESTART, and M-SCTP_STATUS. `ManagementSCTPStatus`

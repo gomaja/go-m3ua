@@ -416,8 +416,12 @@ Code whose mask is zero (Section 3.4.4). The same admission rule applies to
 parameter, SCON destination lists and ranges remain supported.
 `Endpoint.SignallingCongestion` is SGP-to-concerned-ASPs and atomically updates
 the SGP destination registry. `Endpoint.DestinationUserPartUnavailable` is
-SGP-to-concerned-ASPs and enforces DUPU's one unmasked destination and valid
-User/Cause tables (Section 3.4.5). The SG-ASP DUNA, DAVA, DAUD, DUPU, and DRST
+SGP-to-concerned-ASPs and enforces DUPU's one unmasked destination. User/Cause
+admission uses the same structural envelope on typed origination, raw
+`WriteSignal`, and reception: User ≤255 and Cause ≤15 (Q.704 (07/96) §15.17;
+Q.Imp704 (12/00) §§2.2.3–2.2.4). RFC 4666 §3.4.5 defers assignments to the
+applicable MTP3 variant; callers own those assignments. The codecs retain both
+16-bit fields. The SG-ASP DUNA, DAVA, DAUD, DUPU, and DRST
 procedures are not part of the library's endpoint-only IPSP model
 (Sections 1.4.3.4 and 1.4.6). The SS7-connected IPSP restart variant is not
 implemented. RFC 4666 §4.6 says, "In the IPSP case, MTP restart could be
@@ -752,3 +756,11 @@ unobserved member below a measured clear member; that ranking signal alone is
 not present congestion for the mandatory priority gate. Required broadcast copies
 try later AS and SGP alternatives before reporting an explicit unsent obligation;
 a successful copy is never replayed when another required recipient is refused.
+
+
+Received ERR and NTFY explanations reach Layer Management under RFC 4666 §4.2
+as `ManagementIndication.DiagnosticInformation` and `InfoString`, respectively.
+The publication boundary copies the bytes; nil means absent and a non-nil empty
+slice means present and empty. `Description` keeps the code/status description.
+Undefined Traffic Mode Type in ASPAC selects Error 0x05 under §3.8.1 without
+activation or Ack. Other parameter validation and error precedence stay strict.

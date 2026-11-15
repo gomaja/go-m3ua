@@ -44,6 +44,12 @@ func (c *Association) handleError(e *messages.Error) error {
 		ErrorCode:   code,
 		Description: name,
 	}
+	if e.DiagnosticInformation != nil {
+		ind.DiagnosticInformation = e.DiagnosticInformation.Data
+		if ind.DiagnosticInformation == nil {
+			ind.DiagnosticInformation = []byte{}
+		}
+	}
 	// Section 3.8.1 lists Routing Context, Network Appearance and Affected
 	// Point Code as "Mandatory*" — mandatory for specific Error Codes — because
 	// they are what makes the refusal actionable: the "Invalid Routing Context"
@@ -211,6 +217,12 @@ func (c *Association) handleNotify(n *messages.Notify) error {
 		StatusType:  n.Status.StatusType(),
 		StatusInfo:  n.Status.StatusInfo(),
 		Description: name,
+	}
+	if n.InfoString != nil {
+		ind.InfoString = n.InfoString.Data
+		if ind.InfoString == nil {
+			ind.InfoString = []byte{}
+		}
 	}
 	// Which Application Server the notification is about, and which ASP it
 	// concerns. Both were parsed and dropped, so an ASP serving several Routing
