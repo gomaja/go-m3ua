@@ -19,6 +19,8 @@ const (
 	maximumRecoveryDrainRetry = time.Second
 )
 
+var errRecoveryDataExpired = errors.New("recovery DATA expired before submission")
+
 // TrafficDistribution reports what DistributeData did with one MTP3 message.
 // Queued and Delivered are mutually exclusive for a successful call.
 type TrafficDistribution struct {
@@ -27,6 +29,8 @@ type TrafficDistribution struct {
 }
 
 type distributionPolicy struct {
+	congestionPolicy             SGPCongestionPolicy
+	preferUncongestedPeers       bool
 	messageLimit                 int
 	byteLimit                    int
 	broadcastFlowCacheEntries    int
@@ -360,6 +364,8 @@ func newSGPDistributionPolicy(config *SGPConfig) distributionPolicy {
 	if config == nil {
 		return policy
 	}
+	policy.congestionPolicy = config.CongestionPolicy
+	policy.preferUncongestedPeers = config.PreferUncongestedPeers
 	if config.RecoveryQueueMessages > 0 {
 		policy.messageLimit = config.RecoveryQueueMessages
 	}
@@ -400,7 +406,7 @@ func (as *applicationServer) distribute(data *messages.Data, protocolData *param
 		as.mu.Unlock()
 		return TrafficDistribution{}, ErrAssociationClosed
 	}
-	if as.state == ASPending || as.draining || as.activeSending || (as.state == ASActive && len(as.recoveryQueue) > 0) {
+	if as.state == ASPending || as.draining || as.activeSending || as.deliveryInFlightBytes > 0 || (as.state == ASActive && len(as.recoveryQueue) > 0) {
 		startDrain, err := as.enqueueRecoveryLocked(data, flow, encodedSize, messageLimit, byteLimit)
 		as.mu.Unlock()
 		if err != nil {
@@ -423,6 +429,7 @@ func (as *applicationServer) distribute(data *messages.Data, protocolData *param
 	as.deliveryInFlightBytes = encodedSize
 	as.recoveryQueueBytes += encodedSize
 	as.mu.Unlock()
+	decision := as.prepareSGPCongestion(protocolData, distributionWireAS(as.key, data))
 
 	// This caller owns the active-send slot before waiting for deliveryMu, so every
 	// later caller either joins the bounded FIFO or is refused immediately.
@@ -464,7 +471,7 @@ func (as *applicationServer) distribute(data *messages.Data, protocolData *param
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
 	as.mu.Unlock()
-	result, err := as.deliverLocked(data, protocolData, flow)
+	result, err := as.deliverLocked(data, protocolData, flow, decision)
 	as.mu.Lock()
 	as.finishDeliveryItemLocked(encodedSize)
 	as.activeSending = false
@@ -501,7 +508,7 @@ func (as *applicationServer) enqueueRecoveryLocked(data *messages.Data, flow bro
 		recoveryGen: as.queuedDataRecoveryGenerationLocked(),
 	})
 	as.recoveryQueueBytes += encodedSize
-	startDrain := as.state == ASActive && !as.draining && !as.activeSending
+	startDrain := as.state == ASActive && !as.draining && !as.activeSending && as.deliveryInFlightBytes == 0
 	if startDrain {
 		as.stopDrainRetryLocked()
 		as.draining = true
@@ -525,8 +532,8 @@ func (as *applicationServer) queuedDataRecoveryGenerationLocked() uint64 {
 // under mu, performs no socket writes under mu, then commits the flow marker
 // only if every selected copy was accepted for delivery. ASP state may change
 // during a write; the next message observes the new membership and epoch.
-func (as *applicationServer) deliverLocked(data *messages.Data, protocolData *params.ProtocolDataPayload, flow broadcastFlowKey) (TrafficDistribution, error) {
-	result, _, _, _, _, err := as.deliverAttemptLocked(data, protocolData, flow, nil, false, 0, false)
+func (as *applicationServer) deliverLocked(data *messages.Data, protocolData *params.ProtocolDataPayload, flow broadcastFlowKey, decision *sgpCongestionDecision) (TrafficDistribution, error) {
+	result, _, _, _, _, err := as.deliverAttemptLocked(data, protocolData, flow, nil, false, 0, false, decision)
 	return result, err
 }
 
@@ -542,7 +549,48 @@ func (as *applicationServer) deliverAttemptLocked(
 	broadcastTargetsSet bool,
 	epoch uint64,
 	tagged bool,
+	decision *sgpCongestionDecision,
 ) (TrafficDistribution, []*Association, bool, uint64, bool, error) {
+	reevaluated := false
+	recoveryGeneration := uint64(0)
+	if decision != nil {
+		recoveryGeneration = decision.recoveryGeneration
+	}
+	refresh := func() error {
+		if decision.current() {
+			return nil
+		}
+		if reevaluated {
+			return newDataNotSent(as.key, 0, ErrCongestionDecisionStale)
+		}
+		reevaluated = true
+		as.deliveryMu.Unlock()
+		decision = as.prepareSGPCongestion(protocolData, distributionWireAS(as.key, data))
+		decision = as.fenceRecoveryDecision(decision, recoveryGeneration)
+		as.deliveryMu.Lock()
+		if !decision.current() {
+			return newDataNotSent(as.key, 0, ErrCongestionDecisionStale)
+		}
+		return nil
+	}
+	if err := refresh(); err != nil {
+		as.mu.Lock()
+		broadcast := as.trafficMode == params.TrafficModeBroadcast
+		if broadcast && !broadcastTargetsSet {
+			broadcastTargets = as.activeASPsLocked()
+		}
+		as.mu.Unlock()
+		if broadcast && len(broadcastTargets) > 0 {
+			failures := make([]error, 0, len(broadcastTargets))
+			for _, target := range broadcastTargets {
+				failures = append(failures, fmt.Errorf("association %d: %w", target.ID(), err))
+			}
+			// No copy or synchronization marker has been selected on a first
+			// attempt. Its retry must still establish that Broadcast boundary.
+			return TrafficDistribution{}, broadcastTargets, broadcastTargetsSet, epoch, tagged, errors.Join(failures...)
+		}
+		return TrafficDistribution{}, broadcastTargets, broadcastTargetsSet, epoch, tagged, err
+	}
 	as.mu.Lock()
 	broadcast := as.trafficMode == params.TrafficModeBroadcast
 	var (
@@ -557,7 +605,7 @@ func (as *applicationServer) deliverAttemptLocked(
 			}
 		}
 	} else {
-		targets, err = as.targetsLocked(protocolData.SignallingLinkSelection)
+		targets, err = as.congestionTargetsLocked(protocolData.SignallingLinkSelection, decision)
 		if err == nil {
 			epoch = as.broadcastEpoch
 			if broadcast && epoch != 0 && as.broadcastTagged[flow] != epoch {
@@ -577,15 +625,38 @@ func (as *applicationServer) deliverAttemptLocked(
 	var deliveryErrors []error
 	for _, target := range targets {
 		message := copyData(data)
-		resolvedAS := as.key
+		resolvedAS := distributionWireAS(as.key, data)
 		// A registered all-NA binding uses the validated message network; static
 		// bindings retain their resolved NA even when the wire omitted it.
-		if !resolvedAS.NetworkAppearanceSet && data.NetworkAppearance != nil {
-			resolvedAS.NetworkAppearance, resolvedAS.NetworkAppearanceSet = data.NetworkAppearance.NetworkAppearance(), true
+		_, writeErr := target.writeDistributedSignal(message, resolvedAS, decision)
+		if errors.Is(writeErr, ErrCongestionDecisionStale) && !reevaluated {
+			if refreshErr := refresh(); refreshErr != nil {
+				writeErr = refreshErr
+			} else {
+				// An unsent Loadshare copy can follow the newly ranked member.
+				if !broadcast && !broadcastTargetsSet {
+					as.mu.Lock()
+					reselected, selectErr := as.congestionTargetsLocked(protocolData.SignallingLinkSelection, decision)
+					as.mu.Unlock()
+					if selectErr != nil {
+						writeErr = newDataNotSent(resolvedAS, 0, selectErr)
+					} else {
+						target = reselected[0]
+						writeErr = nil
+					}
+				}
+				if writeErr == nil || errors.Is(writeErr, ErrCongestionDecisionStale) {
+					_, writeErr = target.writeDistributedSignal(message, resolvedAS, decision)
+				}
+			}
 		}
-		if _, err := target.writeDistributedSignal(message, resolvedAS); err != nil {
-			failed = append(failed, target)
-			deliveryErrors = append(deliveryErrors, err)
+		if writeErr != nil {
+			if indeterminateDataError(writeErr) {
+				tagged = false
+			} else {
+				failed = append(failed, target)
+			}
+			deliveryErrors = append(deliveryErrors, fmt.Errorf("association %d: %w", target.ID(), writeErr))
 			continue
 		}
 		delivered++
@@ -609,6 +680,44 @@ func (as *applicationServer) deliverAttemptLocked(
 		as.mu.Unlock()
 	}
 	return TrafficDistribution{Delivered: delivered}, failed, broadcast || broadcastTargetsSet, epoch, tagged, errors.Join(deliveryErrors...)
+}
+
+func distributionWireAS(key ASKey, data *messages.Data) ASKey {
+	if !key.NetworkAppearanceSet && data.NetworkAppearance != nil {
+		key.NetworkAppearance, key.NetworkAppearanceSet = data.NetworkAppearance.NetworkAppearance(), true
+	}
+	return key
+}
+
+func (as *applicationServer) congestionTargetsLocked(sls uint8, decision *sgpCongestionDecision) ([]*Association, error) {
+	if as.closed || as.state != ASActive {
+		return nil, ErrNoActiveASP
+	}
+	if decision == nil || decision.unrestricted || as.trafficMode != 0 && as.trafficMode != params.TrafficModeLoadshare {
+		return as.targetsLocked(sls)
+	}
+	admitted := make([]*Association, 0, len(as.active))
+	best := int(^uint(0) >> 1)
+	for _, a := range as.active {
+		if !decision.members[a] {
+			continue
+		}
+		rank := 0
+		if as.distribution.preferUncongestedPeers {
+			rank = decision.ranks[a]
+		}
+		if rank < best {
+			admitted = admitted[:0]
+			best = rank
+		}
+		if rank == best {
+			admitted = append(admitted, a)
+		}
+	}
+	if len(admitted) == 0 {
+		return nil, newDataNotSent(as.key, 0, ErrNoMTPRoute)
+	}
+	return []*Association{admitted[int(sls)%len(admitted)]}, nil
 }
 
 func dataBroadcastFlowKey(data *messages.Data, protocolData *params.ProtocolDataPayload) broadcastFlowKey {
@@ -735,6 +844,15 @@ func (as *applicationServer) drainRecoveryQueue() {
 			as.deliveryMu.Unlock()
 			continue
 		}
+		// The drain owns this item and its FIFO slot, but application code must
+		// run before taking the delivery barrier for its actual send.
+		var decision *sgpCongestionDecision
+		if as.distribution.congestionPolicy != nil || as.distribution.preferUncongestedPeers {
+			as.deliveryMu.Unlock()
+			decision = as.prepareSGPCongestion(protocolData, distributionWireAS(as.key, item.data))
+			as.deliveryMu.Lock()
+		}
+		decision = as.fenceRecoveryDecision(decision, item.recoveryGen)
 		_, failedTargets, broadcastTargetsSet, epoch, marker, err := as.deliverAttemptLocked(
 			item.data,
 			protocolData,
@@ -743,6 +861,7 @@ func (as *applicationServer) drainRecoveryQueue() {
 			item.broadcastTargetsSet,
 			item.broadcastEpoch,
 			item.broadcastMarker,
+			decision,
 		)
 		item.broadcastTargets = failedTargets
 		item.broadcastTargetsSet = broadcastTargetsSet
@@ -758,7 +877,8 @@ func (as *applicationServer) drainRecoveryQueue() {
 		}
 
 		as.mu.Lock()
-		restored := !as.closed &&
+		retryable := broadcastTargetsSet && len(failedTargets) > 0 || !broadcastTargetsSet && !indeterminateDataError(err)
+		restored := retryable && !as.closed &&
 			(as.state == ASPending || as.state == ASActive) &&
 			item.recoveryGen > as.recoveryExpiredGen
 		if restored {
@@ -770,12 +890,16 @@ func (as *applicationServer) drainRecoveryQueue() {
 		} else {
 			as.finishRecoveryItemLocked(item)
 		}
-		as.draining = false
+		resume := !restored && !as.closed && as.state == ASActive && len(as.recoveryQueue) > 0
+		as.draining = resume
 		if restored && as.state == ASActive {
 			as.scheduleDrainRetryLocked()
 		}
 		as.mu.Unlock()
 		as.deliveryMu.Unlock()
+		if resume {
+			continue
+		}
 		if restored {
 			logf("m3ua: retained recovery DATA for AS %v after delivery failed: %v", as.key, err)
 		}
@@ -783,8 +907,13 @@ func (as *applicationServer) drainRecoveryQueue() {
 	}
 }
 
+func indeterminateDataError(err error) bool {
+	var writeError *DataWriteError
+	return errors.As(err, &writeError) && writeError.Outcome == DataSendIndeterminate
+}
+
 func (as *applicationServer) scheduleDrainRetryLocked() {
-	if as.drainRetry != nil || as.closed || as.state != ASActive || as.activeSending || len(as.recoveryQueue) == 0 {
+	if as.drainRetry != nil || as.closed || as.state != ASActive || as.activeSending || as.deliveryInFlightBytes > 0 || len(as.recoveryQueue) == 0 {
 		return
 	}
 	delay := as.drainRetryDelay
@@ -800,7 +929,7 @@ func (as *applicationServer) scheduleDrainRetryLocked() {
 	as.drainRetry = time.AfterFunc(delay, func() {
 		as.mu.Lock()
 		as.drainRetry = nil
-		if as.closed || as.state != ASActive || as.draining || as.activeSending || len(as.recoveryQueue) == 0 {
+		if as.closed || as.state != ASActive || as.draining || as.activeSending || as.deliveryInFlightBytes > 0 || len(as.recoveryQueue) == 0 {
 			as.mu.Unlock()
 			return
 		}

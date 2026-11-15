@@ -19,6 +19,11 @@ import (
 // Match with errors.Is; send refusals wrap it in a *DataWriteError with DataNotSent.
 var ErrMTPManagementData = errors.New("MTP3 management SI 0 cannot be carried as DATA")
 
+// ErrCongestionDecisionStale means the inputs changed again after one policy
+// reevaluation. DATA errors wrap it with DataNotSent; no copy was submitted on
+// the refused association. Match with errors.Is.
+var ErrCongestionDecisionStale = errors.New("congestion decision changed during admission")
+
 // mtpManagementDataError owns the received bytes for RFC 4666 §3.8.1
 // Diagnostic Information without re-encoding received DATA.
 type mtpManagementDataError struct{ raw []byte }
@@ -320,6 +325,7 @@ var (
 	// has not been previously defined [...] the peer MUST respond with an ERROR
 	// message with the Error Code 'No configured AS for ASP'."
 	// RoutingContextError matches it through errors.Is.
+	// CongestionInputs also returns it for an absent ASKey.
 	ErrNoConfiguredAS = errors.New("no configured AS for ASP")
 
 	// ErrTAckExpired is used when an ASPSM/ASPTM request went unacknowledged

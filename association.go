@@ -356,6 +356,11 @@ type Association struct {
 	// a one-based generation, so a hand-built Association still reports its
 	// first epoch rather than a zero that means nothing.
 	epoch atomic.Uint64
+	// peerRetentionMu serializes short peer-input admission snapshots, never
+	// callbacks, traffic barriers or transport progress.
+	peerRetentionMu       sync.Mutex
+	peerRetentionBindings map[ASKey]peerRetentionBinding
+	peerRetentionVersion  uint64
 	// malformedLogs bounds peer-triggered diagnostic logging per association.
 	malformedLogs malformedLogLimiter
 	// stateEventChan delivers ASP state transitions after StateChanges subscribes.
@@ -936,7 +941,14 @@ func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan 
 // writeDistributedSignal writes a message whose Application Server has already
 // been selected and whose deliveryMu is already held by the distribution
 // engine. Re-entering the public scope barrier there would deadlock.
-func (c *Association) writeDistributedSignal(m3 messages.M3UA, resolvedAS ASKey) (n int, err error) {
+func (c *Association) writeDistributedSignal(m3 messages.M3UA, resolvedAS ASKey, decisions ...*sgpCongestionDecision) (n int, err error) {
+	if len(decisions) != 0 && decisions[0] != nil {
+		frame, err := m3.MarshalBinary()
+		if err != nil {
+			return 0, err
+		}
+		return c.writeRawData(m3, frame, len(frame), false, &resolvedAS, decisions[0])
+	}
 	return c.writeSignal(m3, false, applicationWrite, nil, nil, &resolvedAS)
 }
 
@@ -2533,6 +2545,11 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 			}
 			c.inactiveDynamicRCs[key.RoutingContext] = struct{}{}
 		}
+		if c.role == RoleSGP {
+			if store := c.ssnmStore(); store != nil {
+				store.retirePeerCongestionContext(c.ID(), key.RoutingContext)
+			}
+		}
 		c.dynamicPeerASKeys[key.RoutingContext] = key
 		c.dynamicPeerASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
 		if routingKey.TrafficModeSet {
@@ -2550,6 +2567,11 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 			c.dynamicLocalTrafficModes[key.RoutingContext] = routingKey.TrafficMode
 		}
 	} else {
+		if c.role == RoleSGP {
+			if store := c.ssnmStore(); store != nil {
+				store.retirePeerCongestionContext(c.ID(), key.RoutingContext)
+			}
+		}
 		c.dynamicPeerASKeys[key.RoutingContext] = key
 		c.dynamicPeerASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
 		if routingKey.TrafficModeSet {
@@ -2571,6 +2593,11 @@ func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
 		c.muAckedRCs.Lock()
 		c.muDynamicASKeys.Lock()
+		if c.role == RoleSGP {
+			if store := c.ssnmStore(); store != nil {
+				store.retirePeerCongestionContext(c.ID(), routingContext)
+			}
+		}
 		delete(c.dynamicPeerASKeys, routingContext)
 		delete(c.dynamicPeerASKeyVersions, routingContext)
 		delete(c.dynamicPeerTrafficModes, routingContext)
@@ -2585,6 +2612,11 @@ func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 		delete(c.dynamicLocalASKeyVersions, routingContext)
 		delete(c.dynamicLocalTrafficModes, routingContext)
 	} else {
+		if c.role == RoleSGP {
+			if store := c.ssnmStore(); store != nil {
+				store.retirePeerCongestionContext(c.ID(), routingContext)
+			}
+		}
 		delete(c.dynamicPeerASKeys, routingContext)
 		delete(c.dynamicPeerASKeyVersions, routingContext)
 		delete(c.dynamicPeerTrafficModes, routingContext)
@@ -2647,6 +2679,11 @@ func (c *Association) removeDynamicASKeyVersion(
 	key, exists := keys[routingContext]
 	if !exists {
 		return ASKey{}, false
+	}
+	if !local && c.role == RoleSGP {
+		if store := c.ssnmStore(); store != nil {
+			store.retirePeerCongestionContext(c.ID(), routingContext)
+		}
 	}
 	delete(keys, routingContext)
 	delete(versions, routingContext)

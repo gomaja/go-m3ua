@@ -567,6 +567,10 @@ retry decision. `errors.Is` and `errors.As` still reach the cause.
 An SCTP send refused because the association is shutting down or closed also
 reports `DataNotSent`; this describes that message's submission, not the fate of
 messages accepted earlier.
+An `ENOMEM` refusal with no accepted bytes also reports `DataNotSent`, so
+pending AS recovery retains and retries that copy. Positive counts with errors
+remain `DataSendIndeterminate`; ordinary sends also leave unclassified causes
+indeterminate.
 
 Use `WriteDataContext(ctx, request)` or `MTPTransferContext(ctx, request)` to
 cancel one send while it waits for admission or send-buffer space. Without an
@@ -1254,6 +1258,61 @@ it **refuses** rather than evicting. `SSNMSnapshot.RecordsRefused`,
 behind is told so with `ContinuityLost` instead of being handed a stream with a
 silent hole in it. `Endpoint.SSNMKnowledge` returns the same snapshot without
 opening a subscription.
+
+### SGP peer congestion and NIF policy
+
+At an SGP, `SSNMSnapshot.PeerCongestion` retains ASP-reported congestion apart
+from authoritative SS7 destination knowledge (RFC 4666 §§1.3.2.4, 1.4.2.4).
+Records identify association, epoch, resolved AS, exact wire scope and destination
+range. Explicit SCON(0) is known peer clear; absence is unknown. DAVA, transport
+recovery and another peer's report do not clear these records. Association reset,
+withdrawal and binding retirement remove only the affected peer records.
+An oversized peer SCON retires only its resolved AS and overlapping network
+scope; only unresolved scope permits association-wide peer retirement.
+Oversized DAUD and non-peer reports preserve peer congestion. Authoritative
+SS7 destination invalidation keeps its existing partition scope.
+
+Apply `SSNMPeerCongestionEvent` using `event.PeerCongestion` and
+`event.PeerCongestionRemoved`, and replace this part of the view on `Resync`.
+Peer records share SSNM record and byte budgets; an over-budget report is refused
+atomically and appears in existing resource-loss counters/events. Resync restores
+current retained state, including known clear, but cannot recover a refused report
+or replay the history of Concerned Destination triggers.
+
+`Endpoint.CongestionInputs(as)` returns AS membership, retained peer records and
+independent outbound transport observations as caller-owned copies. It retries
+collection once when its component version vector changes. `Consistent` says
+whether that bounded collection was stable; `Revision` covers SSNM only. Inspect
+`VersionsBefore` and `VersionsAfter` (`CongestionInputVersion`), including
+`MembershipGeneration` and each `PeerCongestionVersion` binding generation,
+transport observation and `TransportPresent` flag. There is no `Local`
+contribution field in this snapshot. Queue overload remains available through
+its independent management stream.
+
+`SGPConfig.CongestionPolicy` (`SGPCongestionPolicy`) can veto an SGP DATA
+candidate using separate peer and transport inputs. It runs outside Endpoint,
+AS and delivery locks before the
+write barrier. Its decision is revalidated once; a decision that remains stale
+returns known-not-sent `ErrCongestionDecisionStale`. No accepted or indeterminate
+DATA copy is replayed on another association.
+
+`SGPConfig.PreferUncongestedPeers` defaults to false. When enabled, loadshare
+uses each member's latest matching peer record by `Revision`, then ranks admitted
+members by maximum peer/transport pressure. A newer matching clear supersedes
+an older matching range. As an engineering preference, a present omitted level
+or observed unknown/stale transport ranks above level 3. An absent peer record
+or absent detector state adds no pressure to this preference; both remain
+unknown in returned inputs. Equal ranks preserve original active-member order and
+SLS modulo selection; rank, admission or membership changes can move a flow.
+Override retains its active selected member. Broadcast retains every required recipient and reports each veto as an
+explicit unsent member failure. Preference can move an SLS flow and missequence
+it: no cross-association changeover barrier exists (RFC 4666 §1.4.7).
+
+These inputs are not an SPMC congestion verdict or proof of alternate capacity.
+The application/NIF maps represented destinations and decides whether to send
+SS7 TFC; RFC 4666 §1.4.6 makes that triggering implementation dependent. The
+library has no automatic TFC operation. Peer reports do not change authoritative
+DAUD replies.
 
 ### Management indications
 

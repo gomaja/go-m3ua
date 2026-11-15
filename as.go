@@ -5,6 +5,7 @@
 package m3ua
 
 import (
+	"maps"
 	"sort"
 	"sync"
 	"time"
@@ -123,6 +124,11 @@ type applicationServer struct {
 	// active is the stable distribution order derived only when membership
 	// changes, rather than rebuilt and sorted for every DATA message.
 	active               []*Association
+	membershipGeneration uint64
+	membershipStates     map[*Association]State
+	memberGenerations    map[*Association]uint64
+	membershipMode       uint32
+	distribution         distributionPolicy
 	associationOrder     map[*Association]uint64
 	nextAssociationOrder uint64
 	// state is the AS state last computed from asps.
@@ -578,6 +584,7 @@ func (r *applicationServers) getOrCreateLocked(key ASKey) (*applicationServer, b
 	}
 	asEntry = &applicationServer{
 		key:                key,
+		distribution:       r.distribution,
 		activationPolicy:   r.activationPolicyFor(key),
 		asps:               make(map[*Association]State),
 		broadcastFlowLimit: r.distribution.broadcastFlowCacheEntries,
@@ -1341,6 +1348,7 @@ func (as *applicationServer) close() {
 		return
 	}
 	as.closed = true
+	as.membershipGeneration++
 	as.state = ASDown
 	as.stopRecoveryLocked()
 	as.stopDrainRetryLocked()
@@ -1391,7 +1399,7 @@ func (as *applicationServer) activateOverride(challenger *Association, recovery 
 	if changed {
 		notify = as.recomputeLocked(recovery, nil)
 	}
-	startDrain := as.state == ASActive && len(as.recoveryQueue) > 0 && !as.draining && !as.activeSending
+	startDrain := as.state == ASActive && len(as.recoveryQueue) > 0 && !as.draining && !as.activeSending && as.deliveryInFlightBytes == 0
 	if startDrain {
 		as.stopDrainRetryLocked()
 		as.draining = true
@@ -1518,7 +1526,7 @@ func (as *applicationServer) recordASPState(
 	// path after REG RSP. Recompute the RFC 4666 Sections 3.8.2 and 5.2.3
 	// insufficient-resource condition in both cases without changing membership.
 	notify := as.recomputeLocked(recovery, nil)
-	startDrain := as.state == ASActive && len(as.recoveryQueue) > 0 && !as.draining && !as.activeSending
+	startDrain := as.state == ASActive && len(as.recoveryQueue) > 0 && !as.draining && !as.activeSending && as.deliveryInFlightBytes == 0
 	if startDrain {
 		as.stopDrainRetryLocked()
 		as.draining = true
@@ -1957,6 +1965,30 @@ func (as *applicationServer) activeASPs() []*Association {
 // change. A registry-local sequence is the allocation-free tiebreak when peers
 // omit or duplicate ASP Identifier.
 func (as *applicationServer) rebuildActiveLocked() {
+	if !maps.Equal(as.membershipStates, as.asps) || as.membershipMode != as.trafficMode {
+		as.membershipGeneration++
+		if as.memberGenerations == nil {
+			as.memberGenerations = make(map[*Association]uint64, len(as.asps))
+		}
+		for association, previous := range as.membershipStates {
+			current, exists := as.asps[association]
+			if previous == StateASPActive && (!exists || current != StateASPActive) {
+				if store := association.ssnmStore(); association.role == RoleSGP && store != nil {
+					store.retirePeerCongestionAS(association.ID(), as.key)
+				}
+			}
+			if !exists {
+				delete(as.memberGenerations, association)
+			}
+		}
+		for association, current := range as.asps {
+			if previous, exists := as.membershipStates[association]; !exists || previous != current {
+				as.memberGenerations[association] = as.membershipGeneration
+			}
+		}
+		as.membershipStates = maps.Clone(as.asps)
+		as.membershipMode = as.trafficMode
+	}
 	if as.associationOrder == nil {
 		as.associationOrder = make(map[*Association]uint64, len(as.asps))
 	}

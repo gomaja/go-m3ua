@@ -1095,7 +1095,7 @@ func (c *Association) applySSNM(
 // claimed. Exceeding the bound is a local resource condition rather than a
 // fault in the message: it is reported as loss, the partitions it concerned
 // are invalidated, and no prefix of it is applied.
-func (c *Association) ssnmAffectedPointCodes(apc *params.Param, scope WireScope) ([]uint32, []uint8, error) {
+func (c *Association) ssnmAffectedPointCodes(apc *params.Param, scope WireScope, peerRefusal ...peerCongestionRefusal) ([]uint32, []uint8, error) {
 	if apc == nil {
 		return nil, nil, ErrMissingAffectedPointCode
 	}
@@ -1104,7 +1104,7 @@ func (c *Association) ssnmAffectedPointCodes(apc *params.Param, scope WireScope)
 		return nil, nil, ErrMissingAffectedPointCode
 	}
 	if limit := c.ssnmAffectedPointCodeLimit(); count > limit {
-		return nil, nil, c.refuseOversizedSSNM(scope, count, limit)
+		return nil, nil, c.refuseOversizedSSNM(scope, count, limit, peerRefusal...)
 	}
 	pcs := apc.AffectedPointCodes()
 	if len(pcs) == 0 {
@@ -1142,7 +1142,18 @@ func (c *Association) reportSSNM(
 ) error {
 	report.Scope = c.ssnmWireScope(networkAppearance, routingContext)
 	report.Source = SSNMPeerReport
-	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope)
+	var peerAdmission peerCongestionAdmission
+	var peerRefusal []peerCongestionRefusal
+	if report.PeerReported && c.role == RoleSGP {
+		peerAdmission.epoch = c.Epoch()
+		if c.as != nil {
+			peerAdmission = c.capturePeerCongestionAdmission(report.Scope)
+			peerRefusal = []peerCongestionRefusal{{scope: report.Scope, admission: peerAdmission}}
+		} else {
+			peerRefusal = []peerCongestionRefusal{c.ssnmStore().captureUnresolvedPeerCongestionRefusal(c.ID(), peerAdmission.epoch, report.Scope)}
+		}
+	}
+	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope, peerRefusal...)
 	if err != nil {
 		return err
 	}
@@ -1159,6 +1170,9 @@ func (c *Association) reportSSNM(
 		report.ConcernedDestinationSet = false
 	}
 
+	if report.PeerReported && c.role == RoleSGP && c.as != nil {
+		return c.publishPeerCongestionReport(report, peerAdmission)
+	}
 	return c.publishSSNMReport(report)
 }
 

@@ -4,6 +4,8 @@ const ASInactive
 const ASPProcedureAutomatic
 const ASPProcedureExplicit
 const ASPending
+const CongestionExpired
+const CongestionFresh
 const CongestionInternational
 const CongestionNationalWithPriorities
 const CongestionNationalWithoutPriorities
@@ -106,6 +108,7 @@ const SSNMDestinationUserPartUnavailableReport
 const SSNMLocalReport
 const SSNMPartitionInvalidatedEvent
 const SSNMPartitionRetiredEvent
+const SSNMPeerCongestionEvent
 const SSNMPeerReport
 const SSNMReportEvent
 const SSNMResourceLossEvent
@@ -221,6 +224,17 @@ field AssociationStatus.UnackedDataChunks
 field CompatibilityPolicy.Tolerator
 field CongestionConfig.Default
 field CongestionConfig.Networks
+field CongestionInputSnapshot.AS
+field CongestionInputSnapshot.Consistent
+field CongestionInputSnapshot.MembershipGeneration
+field CongestionInputSnapshot.Peers
+field CongestionInputSnapshot.Revision
+field CongestionInputSnapshot.TrafficMode
+field CongestionInputSnapshot.VersionsAfter
+field CongestionInputSnapshot.VersionsBefore
+field CongestionInputVersion.MembershipGeneration
+field CongestionInputVersion.Peers
+field CongestionInputVersion.Revision
 field CongestionProfile.MaxLevel
 field CongestionProfile.Method
 field CongestionProfileDiagnostics.LastDataMismatch
@@ -395,6 +409,26 @@ field NetworkCongestionProfile.Profile
 field ParameterFaultError.Cause
 field ParameterFaultError.Code
 field ParameterFaultError.Raw
+field PeerCongestionInput.Active
+field PeerCongestionInput.Association
+field PeerCongestionInput.Epoch
+field PeerCongestionInput.PeerCongestion
+field PeerCongestionInput.Transport
+field PeerCongestionState.AS
+field PeerCongestionState.Association
+field PeerCongestionState.Congestion
+field PeerCongestionState.Destination
+field PeerCongestionState.Epoch
+field PeerCongestionState.Freshness
+field PeerCongestionState.ReceivedAt
+field PeerCongestionState.Revision
+field PeerCongestionState.Scope
+field PeerCongestionVersion.Active
+field PeerCongestionVersion.Association
+field PeerCongestionVersion.BindingGeneration
+field PeerCongestionVersion.Epoch
+field PeerCongestionVersion.Transport
+field PeerCongestionVersion.TransportPresent
 field PointCodeRange.Mask
 field PointCodeRange.PointCode
 field ProvisionedRoutingKey.RoutingContext
@@ -467,11 +501,20 @@ field SGASKey.SignallingGateway
 field SGPConfig.BroadcastFlowCacheEntries
 field SGPConfig.BroadcastFlowIdentifier
 field SGPConfig.BroadcastFlowIdentifierBytes
+field SGPConfig.CongestionPolicy
 field SGPConfig.MaxSSNMDestinationRecords
+field SGPConfig.PreferUncongestedPeers
 field SGPConfig.RecoveryQueueBytes
 field SGPConfig.RecoveryQueueMessages
 field SGPConfig.RecoveryQueueTotalBytes
 field SGPConfig.RecoveryQueueTotalMessages
+field SGPCongestionCandidate.AS
+field SGPCongestionCandidate.Association
+field SGPCongestionCandidate.Destination
+field SGPCongestionCandidate.Epoch
+field SGPCongestionCandidate.MessagePriority
+field SGPCongestionCandidate.PeerCongestion
+field SGPCongestionCandidate.Transport
 field SGPIdentity.SignallingGateway
 field SGPIdentity.SignallingGatewayProcess
 field SSNMAvailability.Association
@@ -505,6 +548,8 @@ field SSNMEvent.ContinuityLost
 field SSNMEvent.Epoch
 field SSNMEvent.Kind
 field SSNMEvent.Partition
+field SSNMEvent.PeerCongestion
+field SSNMEvent.PeerCongestionRemoved
 field SSNMEvent.Reason
 field SSNMEvent.Report
 field SSNMEvent.ReportSet
@@ -539,6 +584,7 @@ field SSNMReport.UserCauseSet
 field SSNMSnapshot.LastResourceLoss
 field SSNMSnapshot.Partitions
 field SSNMSnapshot.PartitionsInvalidated
+field SSNMSnapshot.PeerCongestion
 field SSNMSnapshot.RecordsRefused
 field SSNMSnapshot.ReportsRefused
 field SSNMSnapshot.Revision
@@ -709,6 +755,7 @@ method Endpoint.AssociationStatus
 method Endpoint.AssociationStatuses
 method Endpoint.BeginMTP3Restart
 method Endpoint.Close
+method Endpoint.CongestionInputs
 method Endpoint.DestinationStatus
 method Endpoint.DestinationStatuses
 method Endpoint.DestinationUserPartUnavailable
@@ -801,6 +848,9 @@ type AssociationStatus struct
 type BroadcastFlowIdentifier
 type CompatibilityPolicy struct
 type CongestionConfig struct
+type CongestionFreshness
+type CongestionInputSnapshot struct
+type CongestionInputVersion struct
 type CongestionMethod
 type CongestionProfile struct
 type CongestionProfileDiagnostics struct
@@ -858,6 +908,9 @@ type ManagementIndicationKind
 type NetworkAppearanceError struct
 type NetworkCongestionProfile struct
 type ParameterFaultError struct
+type PeerCongestionInput struct
+type PeerCongestionState struct
+type PeerCongestionVersion struct
 type PointCodeRange struct
 type ProtocolDecision
 type ProtocolTolerator
@@ -887,6 +940,8 @@ type SCTPConfig struct
 type SCTPSACKInfo struct
 type SGASKey struct
 type SGPConfig struct
+type SGPCongestionCandidate struct
+type SGPCongestionPolicy
 type SGPIdentity struct
 type SSNMAvailability struct
 type SSNMBinding struct
@@ -926,6 +981,7 @@ var ErrAmbiguousMTPRoute
 var ErrAssociationAborted
 var ErrAssociationClosed
 var ErrBroadcastFlowIdentifierTooLong
+var ErrCongestionDecisionStale
 var ErrCongestionMethodMismatch
 var ErrContextlessApplicationServer
 var ErrControlWriteTimeout

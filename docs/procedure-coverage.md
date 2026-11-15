@@ -272,6 +272,52 @@ only as a codec.
 | Multiple SGPs and SGs at an ASP | 1.3.2.5, 4.5.2.2 | Per-SG route state and a derived MTP3-User view |
 | Either SCTP initiation orientation | 1.4.8 | The M3UA role never follows `Dial` or `Accept` |
 
+### SGP peer congestion inputs
+
+RFC 4666 §§1.3.2.4 and 1.4.2.4 supply the remote-ASP state and distribution
+model. Peer SCON is retained separately from authoritative SS7 destination
+knowledge, with shared SSNM budgets, snapshot/delta/resync support and
+association epoch/AS lifecycle cleanup. Retention cases are named in
+`TestPeerSCONSurvivesSubscriptionResync`,
+`TestPeerSCONNeverChangesAuthoritativeDAUDState`,
+`TestPeerRetentionRejectsAWholeOverBudgetReport` and
+`TestPeerWithdrawalRetiresOnlyItsScopes`. `CongestionInputs` exposes copied
+membership, peer and transport components with version vectors and bounded
+retry; `Consistent` is Endpoint-local and `Revision` covers SSNM only. There
+is no Local contribution field.
+
+`SGPCongestionPolicy` vetoes candidates outside Endpoint, AS and delivery locks;
+a decision still stale after one revalidation returns known-not-sent
+`ErrCongestionDecisionStale`. `SGPConfig.PreferUncongestedPeers` defaults false
+and ranks loadshare members by maximum peer/transport pressure after choosing
+the latest matching peer record by `Revision`. Newer matching clears supersede
+older ranges; equal ranks retain active-member order and SLS modulo selection.
+Override retains its member and broadcast exposes every required recipient's
+veto explicitly. `TestDistributionConsultsSeparatePeerAndTransportInputs` and
+`TestSGPTransitVetoAppliesWithoutPeerPreference` cover those separate selection
+inputs and the default-disabled preference. Rerouting can missequence SLS
+traffic (§1.4.7).
+
+`TestPeerPreferenceUsesLatestMatchingRangeAndWireScope` covers overlapping
+range/RC-scope precedence. Lock ordering is exercised by
+`TestPeerRetentionDoesNotHoldBindingLockWhileWaitingForSampler`; recovery slot,
+expiry and indeterminate-copy cases are named in
+`TestRecoveryPolicyWaitCannotReviveExpiredDataOrLoseTheDeliverySlot` and
+`TestRecoveryBroadcastNeverRetriesAnIndeterminateCopy`.
+
+`TestOversizedPeerSCONRetiresOnlyResolvedAS` covers scoped peer refusal,
+subscription replay and preserved sibling inputs;
+`TestOversizedDAUDPreservesPeerCongestion` covers the audit boundary.
+`TestRecoveryRetriesOnlyWholeAllocationRefusals` covers zero-byte `ENOMEM`
+retry and positive/unknown no-replay controls in all three traffic modes.
+`TestPositiveAllocationFailureRemainsIndeterminateOnEveryDataPath` covers
+typed, cancellable and raw DATA submission counts.
+
+These mechanisms do not claim SPMC-wide congestion or alternate capacity.
+RFC 4666 §1.4.6 permits implementation-dependent SS7 TFC triggering; the
+application/NIF owns that decision and its SS7 wire evidence. Resync supplies
+current retained knowledge, never historical Concerned Destination triggers.
+
 ## Optional procedures: concrete exclusions
 
 These are the places where the codec exists and the procedure does not, or where

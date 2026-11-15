@@ -61,12 +61,13 @@ const (
 // Endpoint. A field less than or equal to zero selects its default; a negative
 // field is a configuration error.
 type SSNMStateConfig struct {
-	// MaxRecords bounds retained availability and congestion records across
-	// every partition. The two dimensions are independent and each destination
-	// therefore costs up to two records.
+	// MaxRecords bounds retained availability, destination congestion, and
+	// peer congestion records across every partition. Each peer AS/range and
+	// wire scope costs one record independently of destination knowledge.
 	MaxRecords int
 	// MaxBytes bounds the accounted retention of those records and of the
-	// partitions holding them.
+	// partitions holding them. Peer congestion charges 256 bytes plus 8 per
+	// Routing Context for its retained scope and normalized scope key.
 	MaxBytes int
 	// MaxRecordsPerPartition bounds the records of one canonical Signalling
 	// Gateway and Application Server, or of one standalone Association.
@@ -84,9 +85,11 @@ type SSNMStateConfig struct {
 	// SubscriptionQueueBytes bounds the portable accounted payload of queued
 	// events. Zero selects DefaultSSNMSubscriptionQueueBytes; a positive limit
 	// must be at least 512 bytes. Accounting charges 512 bytes per event,
-	// 8 per report destination, 32 per profile mismatch, 256 per updated destination, 4 per Routing
-	// Context in the report and both dimensions of each update, and the byte
-	// lengths of Reason and the event/report partition identity strings.
+	// 8 per report destination, 32 per profile mismatch, 256 per updated
+	// destination or peer record, and 4 per Routing Context in the report,
+	// both dimensions of each destination update, and each peer record.
+	// It also charges the byte lengths of Reason and the event/report
+	// partition identity strings.
 	// Snapshot results, the fixed continuity-loss marker, queue backing-array
 	// capacity, and allocator overhead are outside this accounting. It is not
 	// a Go heap or RSS limit. Either queue limit losing continuity requires
@@ -264,7 +267,7 @@ type SSNMReport struct {
 	// network: the SCON RFC 4666 Section 3.4.4 lets an ASP send "indicating
 	// that the congestion level of the M3UA layer or the ASP has changed". It
 	// says nothing about destination reachability, so it is delivered as an
-	// event and retained as no one's destination knowledge.
+	// event and retained separately from destination knowledge.
 	PeerReported bool
 }
 
@@ -377,7 +380,11 @@ type SSNMSnapshot struct {
 	// subscription delivers afterwards carries a strictly greater revision.
 	Revision   uint64
 	Partitions []SSNMPartitionKnowledge
-	// RecordsRefused counts dimension records a resource bound refused since
+	// PeerCongestion is peer-local state, separate from authoritative SS7
+	// destination knowledge. It contains no replayable Concerned Destination
+	// triggers. Every scope is owned by the caller.
+	PeerCongestion []PeerCongestionState
+	// RecordsRefused counts dimension and peer records a resource bound refused since
 	// the store was created.
 	RecordsRefused uint64
 	// ReportsRefused counts whole reports a resource bound refused.
@@ -429,16 +436,17 @@ func (k ssnmDestinationKey) pointCodeRange() PointCodeRange {
 }
 
 type ssnmPartitionState struct {
-	partition    SSNMPartition
-	epoch        uint64
-	bindings     map[AssociationID]bool // value reports a pending binding
-	availability map[ssnmDestinationKey]SSNMAvailability
-	congestion   map[ssnmDestinationKey]SSNMCongestion
-	bytes        int
+	partition      SSNMPartition
+	epoch          uint64
+	bindings       map[AssociationID]bool // value reports a pending binding
+	availability   map[ssnmDestinationKey]SSNMAvailability
+	congestion     map[ssnmDestinationKey]SSNMCongestion
+	peerCongestion map[peerCongestionKey]PeerCongestionState
+	bytes          int
 }
 
 func (p *ssnmPartitionState) records() int {
-	return len(p.availability) + len(p.congestion)
+	return len(p.availability) + len(p.congestion) + len(p.peerCongestion)
 }
 
 func (p *ssnmPartitionState) trafficAuthorized() bool {
@@ -474,6 +482,7 @@ type ssnmState struct {
 	closed      bool
 	// liveSources admits work only from Associations currently owned by the Endpoint.
 	liveSources map[AssociationID]struct{}
+	peerSources map[AssociationID]peerCongestionSource
 
 	recordsRefused        uint64
 	reportsRefused        uint64
@@ -613,6 +622,11 @@ func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pen
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.bindLocked(partition, association, pending)
+}
+
+// bindLocked retains bind's admission and lifecycle behavior under s.mu.
+func (s *ssnmState) bindLocked(partition SSNMPartition, association AssociationID, pending bool) error {
 	if s.closed {
 		return ErrEndpointClosed
 	}
@@ -694,6 +708,7 @@ func (s *ssnmState) retireLocked(partition SSNMPartition, association Associatio
 	if _, bound := state.bindings[association]; !bound {
 		return
 	}
+	s.retirePeerRecordsLocked(state, func(record PeerCongestionState) bool { return record.Association == association })
 	delete(state.bindings, association)
 	epoch := state.epoch
 	if len(state.bindings) > 0 {
@@ -707,7 +722,7 @@ func (s *ssnmState) retireLocked(partition SSNMPartition, association Associatio
 		})
 		return
 	}
-	s.dropPartitionRecordsLocked(state)
+	s.dropDestinationRecordsLocked(state)
 	delete(s.partitions, partition)
 	s.bytes -= ssnmPartitionBaseBytes
 	s.partitionsInvalidated++
@@ -748,6 +763,7 @@ func (s *ssnmState) retireAssociation(association AssociationID) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	delete(s.peerSources, association)
 	delete(s.liveSources, association)
 	if len(s.liveSources) == 0 {
 		s.liveSources = nil
@@ -764,16 +780,25 @@ func (s *ssnmState) retireAssociation(association AssociationID) {
 	}
 }
 
-func (s *ssnmState) dropPartitionRecordsLocked(state *ssnmPartitionState) {
+// dropDestinationRecordsLocked leaves independently scoped peer congestion
+// intact. Callers retiring its owner remove peer records separately.
+func (s *ssnmState) dropDestinationRecordsLocked(state *ssnmPartitionState) {
 	peer := state.partition.peerKey()
-	released := state.records()
+	released := len(state.availability) + len(state.congestion)
+	releasedBytes := 0
+	for _, record := range state.availability {
+		releasedBytes += ssnmScopeBytes(record.Scope)
+	}
+	for _, record := range state.congestion {
+		releasedBytes += ssnmScopeBytes(record.Scope)
+	}
 	s.records -= released
 	s.peerRecords[peer] -= released
 	if s.peerRecords[peer] <= 0 {
 		delete(s.peerRecords, peer)
 	}
-	s.bytes -= state.bytes - ssnmPartitionBaseBytes
-	state.bytes = ssnmPartitionBaseBytes
+	s.bytes -= releasedBytes
+	state.bytes -= releasedBytes
 	state.availability = make(map[ssnmDestinationKey]SSNMAvailability)
 	state.congestion = make(map[ssnmDestinationKey]SSNMCongestion)
 }
@@ -790,13 +815,20 @@ func (s *ssnmState) invalidateLocked(partition SSNMPartition, reason string) {
 	if state.records() == 0 {
 		return
 	}
-	s.dropPartitionRecordsLocked(state)
+	s.retirePeerRecordsLocked(state, func(PeerCongestionState) bool { return true })
+	s.invalidateDestinationKnowledgeLocked(state, reason)
+}
+
+// invalidateDestinationKnowledgeLocked preserves peer congestion: RFC 4666
+// Sections 1.3.2.4 and 3.4.4 distinguish ASP state from SS7 destination state.
+func (s *ssnmState) invalidateDestinationKnowledgeLocked(state *ssnmPartitionState, reason string) {
+	s.dropDestinationRecordsLocked(state)
 	s.partitionsInvalidated++
 	revision := s.nextRevisionLocked()
 	s.publishLocked(SSNMEvent{
 		Kind:      SSNMPartitionInvalidatedEvent,
 		Revision:  revision,
-		Partition: partition,
+		Partition: state.partition,
 		Epoch:     state.epoch,
 		Reason:    boundSSNMReason(reason),
 	})
@@ -1022,7 +1054,9 @@ func (s *ssnmState) refuseLocked(records int, reason string) {
 // invalidated because their retained state may now contradict a report this
 // node refused to read; unrelated partitions are untouched, the association
 // stays up, and no truncated prefix of the message is applied.
-func (s *ssnmState) oversized(partitions []SSNMPartition, count, limit int, association AssociationID) error {
+// Peer congestion is retired separately, only for an ASP SCON with captured
+// source ownership; other SSNM messages cannot contradict that peer state.
+func (s *ssnmState) oversized(partitions []SSNMPartition, count, limit int, association AssociationID, peerRefusal ...peerCongestionRefusal) error {
 	if s == nil {
 		return nil
 	}
@@ -1031,8 +1065,19 @@ func (s *ssnmState) oversized(partitions []SSNMPartition, count, limit int, asso
 	s.mu.Lock()
 	s.reportsRefused++
 	s.refuseLocked(0, reason)
+	// Preserve the existing authoritative invalidation scope and event counts,
+	// including partitions whose only retained records were peer reports.
+	invalidated := make([]*ssnmPartitionState, 0, len(partitions))
 	for _, partition := range partitions {
-		s.invalidateLocked(partition, reason)
+		if state := s.partitions[partition]; state != nil && state.records() != 0 {
+			invalidated = append(invalidated, state)
+		}
+	}
+	if len(peerRefusal) != 0 {
+		s.retireRefusedPeerCongestionLocked(association, peerRefusal[0])
+	}
+	for _, state := range invalidated {
+		s.invalidateDestinationKnowledgeLocked(state, reason)
 	}
 	s.mu.Unlock()
 	return fmt.Errorf("%w: %s", ErrSSNMOversizedReport, reason)
@@ -1095,7 +1140,7 @@ func compareSSNMDestinationKeys(first, second ssnmDestinationKey) int {
 // partitionDestinationsLocked returns an owned copy of every destination one
 // partition retains, in point-code then mask order.
 func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSNMDestinationKnowledge {
-	if state == nil || state.records() == 0 {
+	if state == nil || len(state.availability)+len(state.congestion) == 0 {
 		return nil
 	}
 	keys := make([]ssnmDestinationKey, 0, len(state.availability)+len(state.congestion))
@@ -1165,6 +1210,7 @@ func (s *ssnmState) snapshotLocked() SSNMSnapshot {
 	return SSNMSnapshot{
 		Revision:              s.revision,
 		Partitions:            knowledge,
+		PeerCongestion:        s.peerCongestionSnapshotLocked(),
 		RecordsRefused:        s.recordsRefused,
 		ReportsRefused:        s.reportsRefused,
 		PartitionsInvalidated: s.partitionsInvalidated,
@@ -1194,6 +1240,10 @@ func (s *ssnmState) close() {
 	}
 	s.closed = true
 	s.liveSources = nil
+	s.peerSources = nil
+	s.partitions = make(map[SSNMPartition]*ssnmPartitionState)
+	s.peerRecords = make(map[ssnmPeerKey]int)
+	s.records, s.bytes = 0, 0
 	subscriptions := make([]*SSNMSubscription, 0, len(s.subscribers))
 	for subscription := range s.subscribers {
 		subscriptions = append(subscriptions, subscription)

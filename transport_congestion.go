@@ -283,6 +283,11 @@ func (c *Association) resetTransportCongestionEpoch() {
 	c.transportMu.Lock()
 	before := c.transportSnapshot.Load()
 	c.epoch.Add(1)
+	if c.role == RoleSGP {
+		if store := c.ssnmStore(); store != nil {
+			store.syncPeerCongestion(c.ID(), c.Epoch(), nil)
+		}
+	}
 	if before == nil {
 		// Absence means this association has no detector contribution. Restart
 		// must not invent one for disabled or otherwise unsampled associations

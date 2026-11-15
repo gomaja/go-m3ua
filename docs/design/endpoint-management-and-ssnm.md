@@ -471,6 +471,109 @@ primitive is emitted; consumers must inspect the diagnostic in the SSNM report
 and honor that subscription's continuity-loss contract. TFC generation and
 SPMC-wide policy remain application/NIF responsibilities.
 
+## Retained peer congestion and SGP selection
+
+RFC 4666 §1.3.2.4 describes maintaining remote ASP congestion;
+§1.4.2.4 includes it among SGP distribution inputs. At an SGP, peer records
+are keyed by association and epoch, resolved AS, exact wire scope and affected
+range. Concerned Destination is a raw-report diagnostic and never part of a
+persistent record key. Explicit zero remains known clear; absence remains
+unknown. This is separate from canonical SS7 destination authority: peer SCON
+cannot change DAUD replies, and DAVA cannot clear peer congestion.
+
+`SSNMSnapshot.PeerCongestion` and `SSNMPeerCongestionEvent` participate in the
+same store revision and snapshot/subscription barrier as destination knowledge.
+An event's `PeerCongestion` supplies its record and `PeerCongestionRemoved`
+selects removal. Retained deltas commit before the raw report event; snapshots
+see the completed transaction. Association restart/teardown, AS withdrawal and
+binding retirement remove the affected records without clearing unrelated peers.
+Late old-epoch work cannot recreate retired state.
+
+An oversized peer SCON retires records only for its resolved AS bindings and
+overlapping wire network. Unresolved peer scope can retire the association
+view; a resolved empty or stale admission cannot remove newer knowledge.
+DAUD and non-peer reports preserve peer records. Individual removal deltas
+precede destination-partition invalidation in one store transaction. Existing
+authoritative SS7 invalidation keeps its partition scope.
+
+Peer records consume the existing global, per-peer and per-partition record
+and accounted-byte budgets. Expanded AS/range records and copied wire scope are
+charged; varying Concerned Destination cannot multiply retention. Refusal is
+atomic for the report, increments existing refusal totals and publishes the
+existing resource-loss signal. Subscription queue accounting includes peer
+event payloads. `Resync` restores current retained peer records, including clear,
+but cannot restore refused information or the history of raw CD triggers.
+
+`Endpoint.CongestionInputs(as)` returns copies of AS membership, matching peer
+records and outbound transport observations; absent AS returns
+`ErrNoConfiguredAS`. The membership generation, SSNM revision and each transport
+component's epoch/configuration generation/sample timestamp are checked around
+collection. One retry bounds collection work; `Consistent=false` exposes a
+second change with component versions intact. `VersionsBefore` and
+`VersionsAfter` are `CongestionInputVersion` vectors containing `Revision`,
+`MembershipGeneration` and `Peers []PeerCongestionVersion`. Each peer version
+identifies association, epoch, active binding and binding generation, and carries the complete
+comparable `TransportCongestionState` plus `TransportPresent`. Transport epoch,
+configuration generation, sample timestamp, known status and missed samples
+therefore remain observable independently. An in-progress epoch reset with an
+old transport sample returns `Consistent=false`, even if both vectors observe
+that same mismatch. `Revision` describes only the SSNM
+component. This is an Endpoint observation, not an atomic cluster snapshot.
+There is no `Local` contribution field; queue overload uses its independent
+management stream. Consumers must honor loss signals on both streams.
+
+`SGPConfig.CongestionPolicy` has type `SGPCongestionPolicy` and receives
+copied peer and transport inputs as a boolean application veto. It runs before
+the write barrier, outside Endpoint, AS and delivery locks. Final delivery takes
+`deliveryMu`, then `sendMu`, and checks the input versions briefly. A changed
+version releases the barriers before reevaluating the callback once; a second
+stale decision produces known-not-sent `ErrCongestionDecisionStale`.
+New DATA queues behind the reserved in-flight delivery slot while recovery waits
+for policy. Expired unsent recovery DATA is dropped, and indeterminate broadcast
+recipients are never retried. Accepted DATA is never replayed through another
+association because congestion changed.
+A zero-byte `ENOMEM` is a proven whole-message transport refusal and retains
+its recovery copy for retry. Positive error counts remain indeterminate, as do
+unclassified causes on the ordinary send path; the no-replay rule applies to
+those copies. The Linux
+source and pinned transport boundaries are cited in `transportRefusedWhole`.
+
+The receive retention lock order is `peerRetentionMu` → ordered `AS.mu` locks
+→ `transportMu` → `muDynamicASKeys.RLock` → SSNM store `mu`. Registry lookups
+finish before AS locks are acquired. The transport sampler uses `Endpoint.mu`
+→ `transportMu` → dynamic-key reads, followed by nonblocking management
+publication. Transport therefore always precedes the dynamic-key lock; a queued
+dynamic-key writer cannot trap retention while it waits for the sampler.
+AS, dynamic-binding and epoch lifecycle retirement takes the SSNM store lock
+last. The store publishes to bounded nonblocking subscriber queues under its
+lock; `Next` waits outside that lock and invokes no application callback.
+Input collection takes separate AS, SSNM and dynamic-binding snapshots plus
+atomic transport observations, without nesting their state locks.
+
+`SGPConfig.PreferUncongestedPeers` is an opt-in engineering policy, default
+false. For each member, the latest matching peer record by `Revision` supplies
+its peer input, then loadshare ranks admitted alternatives by the maximum of
+that input and transport severity. A newer matching exact/range or RC-subset
+clear supersedes an older matching range. Present omitted-level peer reports
+and observed unknown/stale transport rank above level 3; absent reports and
+absent detector state add no pressure, while remaining unknown in the inputs.
+These ranks are an engineering preference. Equal-rank alternatives retain their
+original active-member order and SLS modulo selection, without a new SLS cache;
+assignments change only with strict rank, admission or membership changes. The
+existing ASP/IPSP route and SLS caches stay under `aspRoutes.mu`; transport
+projection reaches them only after releasing Endpoint and sampler locks. SGP
+peer retention never acquires that routing lock.
+Override keeps its selected active member rather than promoting standby on congestion.
+Broadcast preserves all required copies; each application veto is an explicit
+unsent member result. Rank changes can move SLS flows and missequence traffic
+without a cross-association changeover barrier (RFC 4666 §1.4.7).
+
+The application/NIF owns SPMC mapping, alternate capacity assessment and any
+SS7 TFC trigger/encoding/transmission. RFC 4666 §1.4.6 permits such triggering
+and makes it implementation dependent; it does not require an embedded SS7
+stack. No automatic TFC operation or SPMC boolean is provided, and resync must
+never trigger historical TFC replay.
+
 ## Route-independent SSNM knowledge
 
 The SSNM operations above are how a node *originates* a report. What a node

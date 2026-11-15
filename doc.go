@@ -56,6 +56,10 @@ sends are preserved.
 Local SCTP shutdown or close wakes a send waiting for buffer space; a peer's
 SHUTDOWN alone does not wake it. Shutdown and closed-transport refusals report
 DataNotSent without changing the outcome of earlier accepted messages.
+An ENOMEM refusal with no accepted bytes also reports DataNotSent and remains
+eligible for pending AS recovery. Positive error counts remain
+DataSendIndeterminate; ordinary sends also leave unclassified causes
+indeterminate.
 
 Admission and send locks use github.com/gomaja/go-ctxsync. Cancellable and
 ordinary senders share its queue and starvation handoff; transfer readers
@@ -243,7 +247,8 @@ after ShutdownContext has returned.
 # Callbacks and snapshots
 
 Application callbacks — ListenerConfig.SelectAssociationConfig,
-AssociationConfig.AuthorizeASP, ASPRoutingConfig.CongestionPolicy and the
+AssociationConfig.AuthorizeASP, ASPRoutingConfig.CongestionPolicy,
+SGPCongestionPolicy and the
 RoutingKeyManagementConfig authorizers and allocator — run without any Endpoint,
 Listener, Association or registry lock held, and may run concurrently for
 independent associations. A callback that blocks delays only the work that is
@@ -390,6 +395,41 @@ ASPRoutingConfig.AllowUnknownDestinations opts back into the Appendix A.2.2
 reading. They disagree only for an established, activated, silent Signalling
 Gateway.
 
+# SGP peer congestion
+
+An SGP retains ASP-reported congestion independently from authoritative SS7
+knowledge (RFC 4666 §§1.3.2.4, 1.4.2.4). SSNMSnapshot.PeerCongestion and
+SSNMPeerCongestionEvent expose current records and removal deltas through the
+existing SubscribeSSNM/Resync continuity barrier. Records share SSNM record and
+byte limits. Explicit zero is known peer clear; an absent record is unknown.
+Lifecycle retirement removes the affected association epoch and AS scopes.
+Neither peer reports nor outbound transport samples change authoritative DAUD.
+
+Endpoint.CongestionInputs returns copied AS membership, peer records and transport
+observations. A changing component version vector triggers one retry; Consistent
+reports stability of the returned collection, and Revision covers SSNM only.
+VersionsBefore and VersionsAfter expose membership and SSNM versions plus each
+peer binding generation, transport observation and TransportPresent flag.
+The snapshot has no Local contribution field. Queue overload has its own
+management indication stream. Neither stream's loss contract is replaced by a
+fresh input snapshot.
+
+SGPConfig.CongestionPolicy is an SGPCongestionPolicy application veto evaluated
+outside Endpoint, AS and delivery locks before the write barrier. The decision
+is revalidated once;
+ErrCongestionDecisionStale is a known-not-sent result if it remains stale.
+SGPConfig.PreferUncongestedPeers defaults to false and, when enabled, ranks only
+loadshare alternatives by the maximum of the latest matching peer record by
+Revision and transport pressure. A newer matching clear supersedes an older
+range. Equal ranks preserve active-member order and SLS modulo selection.
+Override retains its selected active member; broadcast reports a veto separately
+for each required unsent member. Rerouting may missequence SLS traffic because
+there is no cross-association changeover barrier (RFC 4666 §1.4.7).
+
+The application/NIF determines represented SPMC capacity and whether SS7 TFC is
+appropriate (RFC 4666 §1.4.6). No automatic TFC API or cluster congestion verdict
+is supplied, and resync is never a replay of Concerned Destination triggers.
+
 # Security
 
 RFC 4666 Section 6 carries one normative requirement, and it points elsewhere:
@@ -457,8 +497,8 @@ Two related choices this package does make are documented where they are
 implemented, and a security review will want to know about them: an ASP's SCON
 is recorded apart from the SGP's own destination state, so a peer cannot inject
 SS7 congestion into what other ASPs are told when they audit (it is delivered by
-Endpoint.SubscribeSSNM as an SSNMReport with PeerReported set, without changing
-retained destination state); and an ASP Active from a peer in ASP-DOWN is
+Endpoint.SubscribeSSNM as an SSNMReport with PeerReported set and as separate
+retained peer records, without changing authoritative destination state); and an ASP Active from a peer in ASP-DOWN is
 refused rather than acknowledged, so an association that has not completed
 ASPSM cannot be driven into carrying traffic.
 */

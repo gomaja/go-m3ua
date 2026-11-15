@@ -344,7 +344,7 @@ Gateway that reported it rather than to one association.
 | `SetDestinationState`, `SetDestinationStateForNetwork`, `SetDestinationStateForNetworkAndRoutingContext`, `SetDestinationRange` and its two scoped forms | `Endpoint.ReportDestinationAvailability(DestinationAvailabilityRequest)` |
 | `ReportDestinationState`, `ReportDestinationRange` and their scoped forms | `Endpoint.ReportDestinationAvailability`, `Endpoint.SignallingCongestion`, `Endpoint.DestinationUserPartUnavailable` |
 | `DestinationState`, `DestinationStates`, `DestinationRanges` and their scoped forms | `Endpoint.DestinationStatus`, `Endpoint.DestinationStatuses` at an SGP; `Endpoint.SSNMKnowledge` and `Endpoint.SubscribeSSNM` at an ASP |
-| `Conn.PeerCongestionLevel` | `Endpoint.SubscribeSSNM`; peer SCON reports carry `SSNMReport.PeerReported` |
+| `Conn.PeerCongestionLevel` | `Endpoint.SubscribeSSNM`; raw peer SCON carries `SSNMReport.PeerReported`, and `SSNMSnapshot.PeerCongestion` retains current SGP peer state |
 | `Association.SignallingStatus`, `Conn.SignallingStatus` | `Endpoint.SubscribeSSNM`; identify the association through `SSNMReport.Association` |
 | `Association.BeginMTP3Restart`, `Listener.BeginMTP3Restart` | `Endpoint.BeginMTP3Restart` |
 
@@ -357,9 +357,11 @@ and wire scope. Use `Endpoint.SSNMKnowledge` for retained peer knowledge and
 not an association-level cache as an application routing contract.
 
 A report describes the message received, not a combined availability/congestion
-snapshot. Read the report kind before interpreting its fields. DUPU and peer
-SCON are event-only: a snapshot does not reconstruct lost user-part or peer
-congestion indications. Events are deltas applied to that snapshot: a report
+snapshot. Read the report kind before interpreting its fields. DUPU and raw
+peer SCON trigger details are event-only: a snapshot does not reconstruct lost
+user-part indications or Concerned Destination history. Current SGP peer
+congestion is retained separately in `SSNMSnapshot.PeerCongestion`. Events are
+deltas applied to that snapshot: a report
 event's `Updated` names only the destinations it wrote. Handle
 `SSNMContinuityLostEvent` with `SSNMSubscription.Resync` and account for
 event-only information that remains unknown. Closing one
@@ -788,7 +790,7 @@ Every incompatible declaration and public field across the module.
 | `Conn.AssociationStatus`, `Close`, `Done`, `Err`, `LocalAddr`, `RemoteAddr`, `Shutdown`, `ShutdownContext`, `State`, `StateChanges` | Same operations on `Association`. Endpoint-wide status is additionally available from `Endpoint`. |
 | `Conn.ManagementIndications`, `MaxMessageStreamID`, `PeerASPIdentifier`, `StreamID` | Same operations on `Association`. |
 | `Conn.SignallingStatus`, `Association.SignallingStatus` | Removed. Use `Endpoint.SubscribeSSNM` and report association identity. |
-| `Conn.PeerCongestionLevel` | Removed. `Endpoint.SubscribeSSNM` delivers the peer's report with `SSNMReport.PeerReported` set. |
+| `Conn.PeerCongestionLevel` | Removed. `Endpoint.SubscribeSSNM` delivers raw `PeerReported` reports and separate retained peer-state deltas; snapshots include `PeerCongestion`. |
 | `Conn.SetDeadline`, `SetReadDeadline`, `SetWriteDeadline` | Same operations on `Association`, now applying to `ReadData` and `WriteData`. |
 | `Conn.DestinationRanges*`, `DestinationState*`, `DestinationStates*` | Removed. Use `Endpoint.DestinationStatuses` at an SGP, or `Endpoint.SSNMKnowledge` and `SubscribeSSNM` at an ASP. |
 | `Conn.SetDestinationRange*`, `SetDestinationState*` | Replaced by `Endpoint.ReportDestinationAvailability`. |
@@ -1190,6 +1192,70 @@ Upgrade consequences:
   as before (RFC 4666 §5.4.3). Under `CongestionInternational` a known-clear
   destination is also answered with availability alone; that is not a method
   refusal and produces no `ManagementError`.
+
+## Retained SGP peer congestion and policy inputs
+
+SGP peer SCON now survives snapshot/resync independently of authoritative SS7
+knowledge (RFC 4666 §§1.3.2.4, 1.4.2.4). Update exhaustive `SSNMEvent.Kind`
+switches for `SSNMPeerCongestionEvent`; apply `PeerCongestion` as an upsert or
+remove it when `PeerCongestionRemoved` is true. Replace the peer view from
+`SSNMSnapshot.PeerCongestion` on resync. Raw `PeerReported` reports remain
+available. They are observations, not a replayable log of TFC triggers.
+
+New fields in `SSNMSnapshot`, `SSNMEvent` and `SGPConfig` break positional
+composite literals; use named fields. Peer retention shares existing SSNM
+record and byte budgets, including expanded AS/range records and scope copies.
+A workload that previously produced only raw reports can now exhaust retention
+and increment `RecordsRefused`/`ReportsRefused` with a resource-loss event. Review
+configured budgets and loss handling; a fresh snapshot cannot recover refused
+state. Explicit level zero is retained as clear; absent peer state is unknown.
+Oversized peer SCON removes only records for its resolved AS and overlapping
+network scope; unresolved scope alone permits association-wide peer removal.
+Oversized DAUD and non-peer reports preserve peer records. Existing SS7
+destination-partition invalidation is unchanged. Apply peer removal deltas
+independently of the destination-only partition-invalidated event.
+
+Use `Endpoint.CongestionInputs(as)` for copied AS membership, peer state and
+independent transport inputs. Honor `Consistent` and component versions: one
+retry bounds collection, and `Revision` covers SSNM only. Inspect
+`VersionsBefore` and `VersionsAfter` for membership/SSNM versions and each peer
+binding generation, transport observation and `TransportPresent`. No `Local` contribution
+field exists in this batch; queue overload keeps its independent management
+stream. Missing AS returns `ErrNoConfiguredAS`.
+
+An optional `SGPConfig.CongestionPolicy` (`SGPCongestionPolicy`) veto runs
+outside Endpoint, AS and delivery
+locks before the write barrier. A decision still stale after one revalidation
+returns known-not-sent `ErrCongestionDecisionStale`; handle it using the existing
+unsent delivery contract. Accepted/indeterminate copies must not be replayed.
+`SGPConfig.PreferUncongestedPeers` defaults to false; opt-in loadshare ranking
+uses the latest matching peer record by `Revision`, then maximum peer/transport
+severity; a newer matching clear supersedes an older range. Equal ranks retain
+original active order and SLS modulo selection. Override retains its active
+member, and broadcast reports each refused required member explicitly. Enabling
+ranking can change SLS assignments and missequence traffic (RFC 4666 §1.4.7).
+
+Peer state never changes authoritative DAUD replies. The application/NIF still
+determines SPMC congestion, alternate capacity and SS7 TFC actions under
+RFC 4666 §1.4.6; there is no automatic TFC API or SPMC verdict.
+
+### Whole-message allocation refusals
+
+A transport refusal matching `syscall.ENOMEM` with no accepted bytes now
+reports `DataNotSent`, including typed, raw and Endpoint-selected DATA paths.
+Previously ordinary sends reported `DataSendIndeterminate` for this error,
+which also caused pending AS recovery to discard a never-queued copy.
+Applications inspecting `DataWriteError.Outcome` can now retry that copy;
+`errors.Is` still reaches `ENOMEM`. Recovery keeps the copy and its FIFO
+reservation until retry or expiry.
+
+This classification is bounded to the supported single-association send path
+of the pinned transport and the inspected Linux implementations. Positive
+counts with an error and short successes remain indeterminate and must not be
+automatically replayed. Ordinary sends also leave unknown causes indeterminate;
+the cancellable transport path retains its documented zero-byte guarantee.
+No explicit-EOR continuation or multi-association `SCTP_SENDALL` send is
+introduced.
 
 ## Peer explanations, DUPU bounds and ASPAC errors
 

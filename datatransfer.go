@@ -151,13 +151,9 @@ func (c *Association) WriteDataContext(ctx context.Context, request DataRequest)
 	// only across the transport write, not across marshalling.
 	frame := c.encodeDataFrame(&request)
 
-	release, err := c.admitDataWriteContext(ctx, request.AS)
-	if err != nil {
-		return 0, newDataNotSent(request.AS, stream, err)
-	}
-	defer release()
-
-	if err := c.submitDataContext(ctx, frame, request.AS, stream); err != nil {
+	if err := c.withSGPCongestionAdmission(ctx, request.AS, &request.ProtocolData, stream, func(decision *sgpCongestionDecision) error {
+		return c.submitDataContext(ctx, frame, request.AS, stream, decision)
+	}); err != nil {
 		return 0, err
 	}
 	return len(request.ProtocolData.Data), nil
@@ -165,11 +161,16 @@ func (c *Association) WriteDataContext(ctx context.Context, request DataRequest)
 
 // submitDataContext owns the socket gate across submission, so DATA cannot
 // overtake a control frame between its NoWait attempt and blocking retry.
-func (c *Association) submitDataContext(ctx context.Context, frame []byte, key ASKey, stream uint16) error {
+func (c *Association) submitDataContext(ctx context.Context, frame []byte, key ASKey, stream uint16, decisions ...*sgpCongestionDecision) error {
 	if err := c.sendMu.LockContext(ctx); err != nil {
 		return newDataNotSent(key, stream, err)
 	}
 	defer c.sendMu.Unlock()
+	if len(decisions) != 0 {
+		if err := c.checkSGPCongestionDecision(key, stream, decisions[0]); err != nil {
+			return err
+		}
+	}
 	mismatch, err := c.validateMethodDataFrame(key, frame)
 	if err != nil {
 		return newDataNotSent(key, stream, err)
@@ -340,6 +341,7 @@ func (c *Association) writeRawData(
 	encoded int,
 	enforceTrafficScope bool,
 	resolvedDataScope *ASKey,
+	decisions ...*sgpCongestionDecision,
 ) (int, error) {
 	if enforceTrafficScope && !c.outboundDataActive() {
 		return 0, newDataNotSent(ASKey{}, 0, ErrNotEstablished)
@@ -363,45 +365,58 @@ func (c *Association) writeRawData(
 	// would judge its message against this association's own configuration and
 	// re-entering the barrier would deadlock against itself.
 	var scope ASKey
-	release := noDeliveryBarrier
 	if enforceTrafficScope {
 		scope, err = c.outboundDataScopeForMessage(data)
 		if err != nil {
 			return 0, newDataNotSent(scope, stream, err)
 		}
-		release, err = c.admitDataWrite(scope)
-		if err != nil {
-			return 0, newDataNotSent(scope, stream, err)
-		}
 	}
-	defer release()
 	if !enforceTrafficScope {
 		if resolvedDataScope == nil {
 			return 0, newDataNotSent(scope, stream, ErrUnknownApplicationServerScope)
 		}
 		scope = normalizeOutboundASKey(*resolvedDataScope)
 	}
-	mismatch, err := c.validateMethodDataFrame(scope, frame)
+	written := encoded
+	submit := func(decision *sgpCongestionDecision) error {
+		mismatch, validationErr := c.validateMethodDataFrame(scope, frame)
+		if validationErr != nil {
+			return newDataNotSent(scope, stream, validationErr)
+		}
+		// The decoded-message seam preserves the same final decision fence.
+		if c.signalWriter != nil {
+			if err := c.checkSGPCongestionDecision(scope, stream, decision); err != nil {
+				return err
+			}
+			if mismatch != nil {
+				c.recordDataProfileMismatch(*mismatch)
+			}
+			var writeErr error
+			written, writeErr = c.signalWriter(message)
+			if result := dataSubmissionResult(scope, stream, len(frame), written, writeErr); result != nil {
+				return result
+			}
+			return nil
+		}
+		return c.submitDataContext(context.Background(), frame, scope, stream, decision)
+	}
+	if enforceTrafficScope {
+		payload, decodeErr := data.ProtocolData.ProtocolData()
+		if decodeErr != nil {
+			return 0, newDataNotSent(scope, stream, decodeErr)
+		}
+		err = c.withSGPCongestionAdmission(context.Background(), scope, payload, stream, submit)
+	} else {
+		var decision *sgpCongestionDecision
+		if len(decisions) != 0 {
+			decision = decisions[0]
+		}
+		err = submit(decision)
+	}
 	if err != nil {
-		return 0, newDataNotSent(scope, stream, err)
-	}
-
-	// The signal seam belongs to the tests that observe decoded messages; in
-	// production both write paths end at the same transport call.
-	if c.signalWriter != nil {
-		if mismatch != nil {
-			c.recordDataProfileMismatch(*mismatch)
-		}
-		written, err := c.signalWriter(message)
-		if err != nil {
-			return 0, newDataSubmissionError(scope, stream, err)
-		}
-		return written, nil
-	}
-	if err := c.submitDataContext(context.Background(), frame, scope, stream); err != nil {
 		return 0, err
 	}
-	return encoded, nil
+	return written, nil
 }
 
 // decodeOutboundData decodes a caller-built DATA so its scope and stream can be

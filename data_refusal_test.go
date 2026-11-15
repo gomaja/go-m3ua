@@ -31,6 +31,8 @@ var transportRefusals = []struct {
 	{"completed peer shutdown wrapped", &net.OpError{Op: "write", Net: "sctp", Err: syscall.EPIPE}, syscall.EPIPE},
 	{"a full send buffer", syscall.EAGAIN, syscall.EAGAIN},
 	{"a full send buffer reported as EWOULDBLOCK", syscall.EWOULDBLOCK, syscall.EWOULDBLOCK},
+	{"message allocation refused", syscall.ENOMEM, syscall.ENOMEM},
+	{"message allocation refused, wrapped", &net.OpError{Op: "write", Net: "sctp", Err: syscall.ENOMEM}, syscall.ENOMEM},
 	// A write deadline the send waited out: the last attempt was refused
 	// before the wait began. SendMsg returns the poller's error unwrapped;
 	// both shapes are covered so a wrapped one is classified the same way.
