@@ -1151,7 +1151,7 @@ func TestSSNMDeltaEventsAreChargedForWhatTheyCarry(t *testing.T) {
 			// The destination carries availability and congestion, each with
 			// the fixture's one Routing Context, as does the report scope.
 			partitionBytes := 2 * (len(report.Partition.SignallingGateway) + len(report.Partition.ApplicationServer))
-			if want := 512 + 8 + 256 + 4*3 + partitionBytes; subscription.queuedBytes != want {
+			if want := 512 + 8 + 320 + 4*3 + partitionBytes; subscription.queuedBytes != want {
 				t.Fatalf("one-APC delta charged %d bytes, want %d", subscription.queuedBytes, want)
 			}
 			event, err := subscription.Next(context.Background())

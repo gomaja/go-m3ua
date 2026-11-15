@@ -52,6 +52,8 @@ func (r ssnmScopeResolution) resolve(scope WireScope) ([]ASKey, bool) {
 // ssnmDestinationRefusal holds only the incoming report's resolved scopes.
 // Retained records carry their own immutable admission-time resolution.
 type ssnmDestinationRefusal struct {
+	work        *ssnmWorkCount
+	forget      receivedForgetFence
 	query       bool
 	keys        []ASKey
 	byPartition map[SSNMPartition][]ASKey
@@ -95,6 +97,7 @@ func (r ssnmDestinationRefusal) matches(partition SSNMPartition, scope WireScope
 	}
 	for _, key := range affected {
 		for _, held := range retained {
+			r.work.visitAS()
 			if partition.Kind == SSNMStandalonePartition && (key.RoutingContextSet != held.RoutingContextSet || key.RoutingContext != held.RoutingContext) {
 				continue
 			}

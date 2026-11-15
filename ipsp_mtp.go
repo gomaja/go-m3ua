@@ -117,6 +117,13 @@ func (e *Endpoint) refreshIPSPDestinations() {
 					s.congestionLevel = received.Congestion.Level
 					s.congestionLevelSet = received.Congestion.LevelSet
 				}
+				if e.ssnm.validity > 0 {
+					received := e.ssnm.destinationKnowledge(a.ssnmPartitionFor(c.AS), pc, c.AS)
+					s.congested = received.congested
+					s.congestionLevel = received.congestionLevel
+					s.congestionLevelSet = received.congestionLevelSet
+					s.receivedUnknown = received.receivedUnknown
+				}
 				s = combineASPTransport(s, transportASPStatus(a))
 				s = adaptMethodDestination(a.congestionProfile(c.AS), s)
 				if !found || aspAvailabilityRank(s.availability) < aspAvailabilityRank(best.availability) {

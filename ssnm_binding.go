@@ -146,25 +146,69 @@ func (c *Association) canonicalRemoteASBinding(routingContext uint32) (RemoteASI
 	return id, bound
 }
 
+// Mapping changes are registration-lifetime changes too. Acquire the change
+// gate before either map mutex; never hold canonical while joining a send.
 func (c *Association) noteCanonicalRemoteAS(routingContext uint32, id RemoteASID) {
 	if c == nil || id == "" {
 		return
 	}
+	c.muCanonicalAS.RLock()
+	previous := c.canonicalRemoteAS[routingContext]
+	c.muCanonicalAS.RUnlock()
+	if previous == id {
+		return
+	}
+	release, _ := c.beginSCONBindingChange(routingContext, false, false, nil)
+	defer release()
+	c.noteCanonicalRemoteASChanged(routingContext, id)
+}
+
+func (c *Association) noteCanonicalRemoteASChanged(routingContext uint32, id RemoteASID) {
+	if id == "" {
+		return
+	}
+	c.muDynamicASKeys.Lock()
+	defer c.muDynamicASKeys.Unlock()
 	c.muCanonicalAS.Lock()
+	defer c.muCanonicalAS.Unlock()
+	if c.canonicalRemoteAS[routingContext] == id {
+		return
+	}
+	if _, held := c.dynamicPeerASKeys[routingContext]; held {
+		c.dynamicPeerASKeyVersions[routingContext] = c.nextDynamicASKeyVersionLocked()
+	}
 	if c.canonicalRemoteAS == nil {
 		c.canonicalRemoteAS = make(map[uint32]RemoteASID)
 	}
 	c.canonicalRemoteAS[routingContext] = id
-	c.muCanonicalAS.Unlock()
 }
-
 func (c *Association) forgetCanonicalRemoteAS(routingContext uint32) {
 	if c == nil {
 		return
 	}
+	c.muCanonicalAS.RLock()
+	_, held := c.canonicalRemoteAS[routingContext]
+	c.muCanonicalAS.RUnlock()
+	if !held {
+		return
+	}
+	release, _ := c.beginSCONBindingChange(routingContext, false, false, nil)
+	defer release()
+	c.forgetCanonicalRemoteASChanged(routingContext)
+}
+
+func (c *Association) forgetCanonicalRemoteASChanged(routingContext uint32) {
+	c.muDynamicASKeys.Lock()
+	defer c.muDynamicASKeys.Unlock()
 	c.muCanonicalAS.Lock()
+	defer c.muCanonicalAS.Unlock()
+	if _, held := c.canonicalRemoteAS[routingContext]; !held {
+		return
+	}
+	if _, held := c.dynamicPeerASKeys[routingContext]; held {
+		c.dynamicPeerASKeyVersions[routingContext] = c.nextDynamicASKeyVersionLocked()
+	}
 	delete(c.canonicalRemoteAS, routingContext)
-	c.muCanonicalAS.Unlock()
 }
 
 // ssnmPartitionsForScope resolves the partitions one wire scope concerns, in a
@@ -303,12 +347,15 @@ func (c *Association) syncSSNMBindings() {
 		held[scope.partition] = struct{}{}
 		_ = store.bind(scope.partition, c.ID(), scope.pending)
 	}
+	var withdrawn []SSNMPartition
 	for _, partition := range store.partitionsBoundTo(c.ID()) {
 		if _, retained := held[partition]; retained {
 			continue
 		}
-		store.retire(partition, c.ID())
+		withdrawn = append(withdrawn, partition)
 	}
+	store.retirePartitions(withdrawn, c.ID())
+	c.reconcileDestinationAudits()
 	if c.endpoint != nil {
 		c.endpoint.refreshIPSPDestinations()
 	}
@@ -319,7 +366,9 @@ func (c *Association) syncSSNMBindings() {
 // critical section.
 func (c *Association) retireSSNMBindings() {
 	if store := c.ssnmStore(); store != nil {
+		partitions := store.partitionsBoundTo(c.ID())
 		store.retireAssociation(c.ID())
+		c.projectReceivedChanges(partitions)
 	}
 }
 
@@ -346,45 +395,96 @@ func (s *ssnmState) partitionsBoundTo(association AssociationID) []SSNMPartition
 // The report is applied per canonical partition, not per Routing Context: the
 // label is preserved in Scope, while the knowledge is owned by the identity it
 // resolved to.
-func (c *Association) publishSSNMReport(report SSNMReport) error {
+func (c *Association) publishSSNMReport(report SSNMReport, captured ...receivedSSNMAdmission) error {
 	store := c.ssnmStore()
 	if store == nil {
 		return nil
 	}
 	report.Association = c.ID()
-	resolution := c.captureSSNMDestinationRefusal(report.Scope, false)
-	partitions := c.ssnmPartitionsForResolution(report.Scope, resolution)
+	fenced := c.role != RoleSGP && report.Source == SSNMPeerReport && (report.retainsAvailability() || report.retainsCongestion()) && (store.validity > 0 || store.auditing != nil)
+	var admission receivedSSNMAdmission
+	var resolution ssnmDestinationRefusal
+	var partitions []SSNMPartition
+	if fenced {
+		if len(captured) != 0 {
+			admission = captured[0]
+		} else {
+			admission = c.captureReceivedSSNMAdmission(report.Scope)
+		}
+		if !admission.valid {
+			return nil
+		}
+		resolution, partitions = admission.resolution, admission.partitions
+	} else {
+		if c.role != RoleSGP && report.Source == SSNMPeerReport && (report.retainsAvailability() || report.retainsCongestion()) {
+			if len(captured) > 0 && captured[0].active {
+				admission = captured[0]
+			} else {
+				admission = c.receivedReportAdmission(report)
+			}
+		}
+		resolution = c.captureSSNMDestinationRefusal(report.Scope, false)
+		partitions = c.ssnmPartitionsForResolution(report.Scope, resolution)
+	}
 	bindings := make(map[SSNMPartition]bool)
 	for _, binding := range c.ssnmBindingScopes() {
 		bindings[binding.partition] = binding.pending
 	}
-	var firstErr error
-	for _, partition := range partitions {
-		// Admission may have preceded cancellation. Retain that report as
-		// knowledge without inferring authorization from a now-absent request.
-		admittedPending := c.role == RoleASP
-		if pending, classified := bindings[partition]; classified {
-			admittedPending = pending
-		}
-		if err := store.bind(partition, c.ID(), admittedPending); err != nil {
-			if firstErr == nil {
+	committed := false
+	commit := func() error {
+		committed = true
+		var firstErr error
+		for _, partition := range partitions {
+			pending := c.role == RoleASP
+			if captured, held := bindings[partition]; held {
+				pending = captured
+			}
+			var err error
+			if fenced {
+				err = store.bind(partition, c.ID(), pending, admission.epoch)
+			} else {
+				err = store.bind(partition, c.ID(), pending)
+			}
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			scoped := report
+			scoped.Partition = partition
+			if fenced {
+				err = store.applyPrepared(scoped, resolution.byPartition[partition], admission.epoch)
+			} else {
+				err = store.apply(scoped, resolution.byPartition[partition])
+			}
+			if err != nil && firstErr == nil {
 				firstErr = err
 			}
-			continue
 		}
-		scoped := report
-		scoped.Partition = partition
-		if err := store.apply(scoped, resolution.byPartition[partition]); err != nil && firstErr == nil {
-			firstErr = err
+		if firstErr == nil && fenced {
+			c.scheduleDestinationAuditPrepared(report, false, "", admission)
 		}
+		return firstErr
 	}
-	// The legacy route index is updated before this canonical store. Refresh
-	// transport eligibility only after the candidate's availability is current
-	// (RFC 4666 §4.5.2.2), including a store refusal that invalidates knowledge.
-	if c.endpoint != nil && c.endpoint.aspRoutes != nil && report.Source == SSNMPeerReport {
+	var err error
+	if fenced {
+		err = c.withReceivedSSNMAdmission(admission, commit)
+	} else if admission.forgetOnly {
+		committed, err = store.commitReceivedForgetFenced(report, resolution, partitions, bindings, c.role == RoleASP, admission.forget)
+	} else {
+		err = commit()
+	}
+	if !committed {
+		return err
+	}
+	if c.endpoint.aspRoutes != nil && report.Source == SSNMPeerReport {
 		c.endpoint.aspRoutes.canonicalStateChanged(partitions)
 	}
-	return firstErr
+	if store.validity > 0 && report.Source == SSNMPeerReport {
+		c.endpoint.refreshIPSPDestinations()
+	}
+	return err
 }
 
 // ssnmEarlyNetworkAppearanceMatches checks the activating AS's network before

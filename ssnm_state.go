@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Bounds for the route-independent SSNM state store.
@@ -65,6 +66,9 @@ type SSNMStateConfig struct {
 	// MaxRecords bounds retained availability, destination congestion, and
 	// peer congestion records across every partition. Each peer AS/range and
 	// wire scope costs one record independently of destination knowledge.
+	// Validity or auditing retains congestion source history; auditing also retains
+	// availability sources. Each exact association, resolved AS, scope and range
+	// consumes one extra source record alongside the scalar dimension.
 	MaxRecords int
 	// MaxBytes bounds the accounted retention of those records and of the
 	// partitions holding them. A destination dimension costs 128 bytes plus
@@ -72,6 +76,13 @@ type SSNMStateConfig struct {
 	// resolution survives source reconfiguration; wire Scope stays unchanged.
 	// Peer congestion charges 256 bytes plus 8 per
 	// Routing Context for its retained scope and normalized scope key.
+	// Availability/congestion source rows charge 144 bytes plus 4 per wire RC,
+	// including their one captured AS.
+	// Audit jobs charge 256 bytes plus Info String bytes, 8 per wire RC,
+	// 144 per binding (64 for its token, 80 for its origin), and 64 per partition.
+	// Derived source/job indexes and projection caches have cardinality bounds
+	// from those records and origins; their Go allocation sizes are outside
+	// this portable accounting, which is not a total heap or RSS limit.
 	MaxBytes int
 	// MaxRecordsPerPartition bounds the records of one canonical Signalling
 	// Gateway and Application Server, or of one standalone Association.
@@ -89,12 +100,16 @@ type SSNMStateConfig struct {
 	// SubscriptionQueueBytes bounds the portable accounted payload of queued
 	// events. Zero selects DefaultSSNMSubscriptionQueueBytes; a positive limit
 	// must be at least 512 bytes. Accounting charges 512 bytes per event,
-	// 8 per report destination, 32 per profile mismatch, 256 per updated
-	// destination or peer record, 16 per invalidation entry, and 4 per Routing
-	// Context in the report, both dimensions of each update, and each peer record.
+	// 8 per report destination, 32 per profile mismatch, 320 per updated
+	// destination, 256 per peer or scoped-source record, 16 per invalidation entry,
+	// 48 per source-removal identity, 56 per compact expiry identity, and 4 per Routing
+	// Context in the report, both dimensions and scoped sources of each update, and each peer record.
 	// Destination invalidations carry only Epoch, bounded Reason and at most
-	// 2048 entries: at most 512 + 160 + 2048*16 = 33440 bytes, including for
-	// custom retention limits. Configured partition names are not replayed.
+	// 2048 dimension IDs and 2048 IDs for each availability/congestion source
+	// array: at most230048 accounted bytes.
+	// Expiry chunks contain at most256 compact IDs with no names or scopes.
+	// The default record ceiling bounds an expiry-only pass to64 events and
+	// 950272 bytes. Configured partition names are not replayed.
 	// Total queued events/bytes can still overflow; such loss requires Resync.
 	// It also charges the byte lengths of Reason and the event/report
 	// partition identity strings.
@@ -321,6 +336,8 @@ func (r SSNMReport) availabilityState() DestinationAvailability {
 // SSNMAvailability is the retained availability and restriction dimension of
 // one destination, with the provenance of the report that installed it.
 type SSNMAvailability struct {
+	// AS preserves resolved applicability in auditing source history.
+	AS          ASKey
 	State       DestinationAvailability
 	Kind        SSNMReportKind
 	Source      SSNMReportSource
@@ -332,6 +349,14 @@ type SSNMAvailability struct {
 
 // SSNMCongestion is the retained congestion dimension of one destination.
 type SSNMCongestion struct {
+	// AS preserves resolved applicability, including omitted Routing Contexts,
+	// in retained validity/auditing source history. Partition remains the canonical owner.
+	AS ASKey
+	// ReceivedAt and ExpiresAt describe local validity, never a negotiated TTL.
+	ReceivedAt time.Time
+	ExpiresAt  time.Time
+	// Freshness preserves expired severity as history, not current congestion.
+	Freshness   CongestionFreshness
 	Congested   bool
 	Level       uint8
 	LevelSet    bool
@@ -345,11 +370,16 @@ type SSNMCongestion struct {
 // SSNMDestinationKnowledge is both dimensions of one destination range within
 // one partition. Either dimension may be absent; neither implies the other.
 type SSNMDestinationKnowledge struct {
-	Destination     PointCodeRange
-	Availability    SSNMAvailability
-	AvailabilitySet bool
-	Congestion      SSNMCongestion
-	CongestionSet   bool
+	// AvailabilitySources holds independent scoped statements when auditing is enabled.
+	AvailabilitySources []SSNMAvailability
+	// CongestionSources holds independent source history when validity or auditing is enabled.
+	// Each source uses its newest covering statement before testing freshness.
+	CongestionSources []SSNMCongestion
+	Destination       PointCodeRange
+	Availability      SSNMAvailability
+	AvailabilitySet   bool
+	Congestion        SSNMCongestion
+	CongestionSet     bool
 }
 
 // SSNMBinding is one Association admitted to a partition.
@@ -392,7 +422,7 @@ type SSNMSnapshot struct {
 	// destination knowledge. It contains no replayable Concerned Destination
 	// triggers. Every scope is owned by the caller.
 	PeerCongestion []PeerCongestionState
-	// RecordsRefused counts dimension and peer records a resource bound refused since
+	// RecordsRefused counts dimension, validity-source and peer records a resource bound refused since
 	// the store was created.
 	RecordsRefused uint64
 	// ReportsRefused counts whole reports a resource bound refused.
@@ -456,17 +486,22 @@ type ssnmCongestionRecord struct {
 }
 
 type ssnmPartitionState struct {
-	partition      SSNMPartition
-	epoch          uint64
-	bindings       map[AssociationID]bool // value reports a pending binding
-	availability   map[ssnmDestinationKey]ssnmAvailabilityRecord
-	congestion     map[ssnmDestinationKey]ssnmCongestionRecord
-	peerCongestion map[peerCongestionKey]PeerCongestionState
-	bytes          int
+	sourceProjection                       *ssnmSourceProjection
+	congestionSources, availabilitySources map[ssnmDestinationKey]ssnmSourceBucket
+	work                                   *ssnmWorkCount
+	partition                              SSNMPartition
+	epoch                                  uint64
+	bindings                               map[AssociationID]bool // value reports a pending binding
+	availability                           map[ssnmDestinationKey]ssnmAvailabilityRecord
+	congestion                             map[ssnmDestinationKey]ssnmCongestionRecord
+	peerCongestion                         map[peerCongestionKey]PeerCongestionState
+	receivedCongestion                     map[receivedCongestionKey]SSNMCongestion
+	receivedAvailability                   map[receivedCongestionKey]SSNMAvailability
+	bytes                                  int
 }
 
 func (p *ssnmPartitionState) records() int {
-	return len(p.availability) + len(p.congestion) + len(p.peerCongestion)
+	return len(p.availability) + len(p.congestion) + len(p.peerCongestion) + len(p.receivedCongestion) + len(p.receivedAvailability)
 }
 
 func (p *ssnmPartitionState) trafficAuthorized() bool {
@@ -485,13 +520,23 @@ func (p *ssnmPartitionState) trafficAuthorized() bool {
 // other: the snapshot is taken and the subscriber registered in the same
 // critical section, so no report can slip between them.
 type ssnmState struct {
-	mu          sync.Mutex
-	limits      SSNMStateConfig
-	partitions  map[SSNMPartition]*ssnmPartitionState
-	peerRecords map[ssnmPeerKey]int
-	records     int
-	bytes       int
-	revision    uint64
+	auditByAssociation map[AssociationID]map[destinationAuditKey]struct{}
+	auditBySource      map[destinationAuditSourceKey]map[destinationAuditKey]struct{}
+	work               *ssnmWorkCount
+	validity           time.Duration
+	auditing           *DestinationAuditConfig
+	now                func() time.Time
+	audits             map[destinationAuditKey]*destinationAuditJob
+	auditNext          time.Time
+	auditGeneration    uint64
+	auditActivated     map[AssociationID]map[ASKey]queueCongestionBinding
+	mu                 sync.Mutex
+	limits             SSNMStateConfig
+	partitions         map[SSNMPartition]*ssnmPartitionState
+	peerRecords        map[ssnmPeerKey]int
+	records            int
+	bytes              int
+	revision           uint64
 	// epochs numbers binding generations across the whole store rather than
 	// per partition. A partition that loses its last binding is deleted, so a
 	// per-partition counter would restart at the same value the retired
@@ -501,7 +546,7 @@ type ssnmState struct {
 	subscribers map[*SSNMSubscription]struct{}
 	closed      bool
 	// liveSources admits work only from Associations currently owned by the Endpoint.
-	liveSources map[AssociationID]struct{}
+	liveSources map[AssociationID]uint64
 	peerSources map[AssociationID]peerCongestionSource
 
 	recordsRefused        uint64
@@ -640,12 +685,15 @@ func (s *ssnmState) nextRevisionLocked() uint64 {
 // is not a continuation of it. Numbering those generations is a library
 // choice, not an RFC procedure; it exists so a report validated under one
 // binding is recognisable after a reactivation replaced it.
-func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pending bool) error {
+func (s *ssnmState) bind(partition SSNMPartition, association AssociationID, pending bool, sourceEpoch ...uint64) error {
 	if s == nil || partition.Kind == 0 {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(sourceEpoch) > 0 && s.liveSources[association] != sourceEpoch[0] {
+		return nil
+	}
 	return s.bindLocked(partition, association, pending)
 }
 
@@ -675,6 +723,7 @@ func (s *ssnmState) bindLocked(partition SSNMPartition, association AssociationI
 		// is exactly where a binding generation begins.
 		s.epochs++
 		state = &ssnmPartitionState{
+			work:         s.work,
 			partition:    partition,
 			epoch:        s.epochs,
 			bindings:     make(map[AssociationID]bool),
@@ -716,15 +765,38 @@ func (s *ssnmState) bindLocked(partition SSNMPartition, association AssociationI
 // Server preserves that knowledge; an unrelated Application Server is a
 // different partition and cannot.
 func (s *ssnmState) retire(partition SSNMPartition, association AssociationID) {
-	if s == nil {
+	s.retirePartitions([]SSNMPartition{partition}, association)
+}
+
+func (s *ssnmState) retirePartitions(partitions []SSNMPartition, association AssociationID) {
+	if s == nil || len(partitions) == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.retireLocked(partition, association)
+	s.retirePartitionsLocked(partitions, association)
 }
 
-func (s *ssnmState) retireLocked(partition SSNMPartition, association AssociationID) {
+func (s *ssnmState) retirePartitionsLocked(partitions []SSNMPartition, association AssociationID) {
+	selected := make(map[SSNMPartition]struct{}, len(partitions))
+	for _, partition := range partitions {
+		if s.partitions[partition] != nil {
+			selected[partition] = struct{}{}
+		}
+	}
+	s.retireDestinationAuditPartitionsLocked(association, selected)
+	var outcomes auditOutcomeBatch
+	for _, partition := range partitions {
+		if _, held := selected[partition]; !held {
+			continue
+		}
+		delete(selected, partition)
+		s.retirePartitionRecordsLocked(partition, association, &outcomes)
+	}
+	outcomes.publishLocked(s)
+}
+
+func (s *ssnmState) retirePartitionRecordsLocked(partition SSNMPartition, association AssociationID, outcomes *auditOutcomeBatch) {
 	state, exists := s.partitions[partition]
 	if !exists {
 		return
@@ -733,6 +805,9 @@ func (s *ssnmState) retireLocked(partition SSNMPartition, association Associatio
 		return
 	}
 	s.retirePeerRecordsLocked(state, func(record PeerCongestionState) bool { return record.Association == association })
+	if len(state.bindings) > 1 {
+		s.retireReceivedAssociationLocked(association, &partition, outcomes)
+	}
 	delete(state.bindings, association)
 	epoch := state.epoch
 	if len(state.bindings) > 0 {
@@ -763,7 +838,7 @@ func (s *ssnmState) retireLocked(partition SSNMPartition, association Associatio
 // registerSource runs when the Endpoint first owns an Association, before it
 // exposes the Association or reconciles bindings. Report processing must never
 // register a source: late work cannot restore a permanently departed owner.
-func (s *ssnmState) registerSource(association AssociationID) {
+func (s *ssnmState) registerSource(association AssociationID, epochs ...uint64) {
 	if s == nil {
 		return
 	}
@@ -773,9 +848,15 @@ func (s *ssnmState) registerSource(association AssociationID) {
 		return
 	}
 	if s.liveSources == nil {
-		s.liveSources = make(map[AssociationID]struct{})
+		s.liveSources = make(map[AssociationID]uint64)
 	}
-	s.liveSources[association] = struct{}{}
+	epoch := uint64(0)
+	if len(epochs) > 0 {
+		epoch = epochs[0]
+	}
+	if _, live := s.liveSources[association]; !live {
+		s.liveSources[association] = epoch
+	}
 }
 
 // retireAssociation withdraws every binding one Association holds and removes
@@ -787,6 +868,7 @@ func (s *ssnmState) retireAssociation(association AssociationID) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.retireDestinationAuditsLocked(association, nil)
 	delete(s.peerSources, association)
 	delete(s.liveSources, association)
 	if len(s.liveSources) == 0 {
@@ -799,16 +881,18 @@ func (s *ssnmState) retireAssociation(association AssociationID) {
 		}
 	}
 	sortSSNMPartitions(partitions)
+	var outcomes auditOutcomeBatch
 	for _, partition := range partitions {
-		s.retireLocked(partition, association)
+		s.retirePartitionRecordsLocked(partition, association, &outcomes)
 	}
+	outcomes.publishLocked(s)
 }
 
 // dropDestinationRecordsLocked leaves independently scoped peer congestion
 // intact. Callers retiring its owner remove peer records separately.
 func (s *ssnmState) dropDestinationRecordsLocked(state *ssnmPartitionState) {
 	peer := state.partition.peerKey()
-	released := len(state.availability) + len(state.congestion)
+	released := len(state.availability) + len(state.congestion) + len(state.receivedCongestion) + len(state.receivedAvailability)
 	releasedBytes := 0
 	for _, record := range state.availability {
 		releasedBytes += ssnmScopeBytes(record.Scope, record.resolved)
@@ -816,6 +900,17 @@ func (s *ssnmState) dropDestinationRecordsLocked(state *ssnmPartitionState) {
 	for _, record := range state.congestion {
 		releasedBytes += ssnmScopeBytes(record.Scope, record.resolved)
 	}
+	for _, record := range state.receivedCongestion {
+		releasedBytes += receivedCongestionBytes(record)
+	}
+	for _, record := range state.receivedAvailability {
+		releasedBytes += receivedAvailabilityBytes(record)
+	}
+	state.receivedAvailability = nil
+	state.receivedCongestion = nil
+	state.sourceProjection = nil
+	state.availabilitySources = nil
+	state.congestionSources = nil
 	s.records -= released
 	s.peerRecords[peer] -= released
 	if s.peerRecords[peer] <= 0 {
@@ -851,15 +946,26 @@ func (s *ssnmState) invalidateDestinationKnowledgeLocked(state *ssnmPartitionSta
 
 // invalidateScopedDestinationKnowledgeLocked removes whole dimensions whose
 // retained scopes overlap the refused report. APCs are never expanded here.
-func (s *ssnmState) invalidateScopedDestinationKnowledgeLocked(state *ssnmPartitionState, reason string, refusal ssnmDestinationRefusal) {
+func (s *ssnmState) invalidateScopedDestinationKnowledgeLocked(state *ssnmPartitionState, reason string, refusal ssnmDestinationRefusal, retirement ...*auditOutcomeBatch) {
+	var local auditOutcomeBatch
+	outcomes := &local
+	if len(retirement) > 0 {
+		outcomes = retirement[0]
+	} else {
+		defer local.publishLocked(s)
+	}
+	matchers := s.invalidateAuditScopesLocked([]SSNMPartition{state.partition}, refusal, outcomes)
+	s.invalidateScopedDestinationKnowledgePreparedLocked(state, reason, matchers[state.partition], outcomes)
+}
+func (s *ssnmState) invalidateScopedDestinationKnowledgePreparedLocked(state *ssnmPartitionState, reason string, matcher ssnmScopeMatcher, outcomes *auditOutcomeBatch) {
 	var keys []ssnmDestinationKey
 	for key, record := range state.availability {
-		if refusal.matches(state.partition, record.Scope, record.resolved) {
+		if matcher.matches(record.Scope, record.resolved) {
 			keys = append(keys, key)
 		}
 	}
 	for key, record := range state.congestion {
-		if refusal.matches(state.partition, record.Scope, record.resolved) {
+		if matcher.matches(record.Scope, record.resolved) {
 			keys = append(keys, key)
 		}
 	}
@@ -867,25 +973,23 @@ func (s *ssnmState) invalidateScopedDestinationKnowledgeLocked(state *ssnmPartit
 	keys = slices.Compact(keys)
 	removed := make([]SSNMDestinationInvalidation, 0, len(keys))
 	release := func(scope WireScope, resolved []ASKey) {
-		s.records--
-		peer := state.partition.peerKey()
-		s.peerRecords[peer]--
-		if s.peerRecords[peer] == 0 {
-			delete(s.peerRecords, peer)
-		}
-		bytes := ssnmScopeBytes(scope, resolved)
-		s.bytes -= bytes
-		state.bytes -= bytes
+		s.releaseDestinationRecordLocked(state, ssnmScopeBytes(scope, resolved))
 	}
 	for _, key := range keys {
 		delta := SSNMDestinationInvalidation{Destination: key.pointCodeRange()}
-		if record, held := state.availability[key]; held && refusal.matches(state.partition, record.Scope, record.resolved) {
+		if record, held := state.availability[key]; held && matcher.matches(record.Scope, record.resolved) {
 			delta.AvailabilityRemoved = true
+			if s.auditing == nil {
+				s.retireAuditDimensionLocked(state.partition, key, false, true, record.Scope, record.resolved, outcomes)
+			}
 			delete(state.availability, key)
 			release(record.Scope, record.resolved)
 		}
-		if record, held := state.congestion[key]; held && refusal.matches(state.partition, record.Scope, record.resolved) {
+		if record, held := state.congestion[key]; held && matcher.matches(record.Scope, record.resolved) {
 			delta.CongestionRemoved = true
+			if s.validity == 0 && s.auditing == nil {
+				s.retireAuditDimensionLocked(state.partition, key, true, false, record.Scope, record.resolved, outcomes)
+			}
 			delete(state.congestion, key)
 			release(record.Scope, record.resolved)
 		}
@@ -893,17 +997,15 @@ func (s *ssnmState) invalidateScopedDestinationKnowledgeLocked(state *ssnmPartit
 			removed = append(removed, delta)
 		}
 	}
-	// Epochs uniquely identify partitions across this store's lifetime. Leaving
-	// Partition empty avoids replaying unbounded configured identity strings.
-	// Each publication is bounded independently of custom retention limits.
-	for len(removed) > 0 {
-		count := min(len(removed), ssnmInvalidationBatchSize)
-		s.partitionsInvalidated++
-		revision := s.nextRevisionLocked()
-		s.publishLocked(SSNMEvent{Kind: SSNMDestinationsInvalidatedEvent, Revision: revision,
-			Epoch: state.epoch, Invalidated: removed[:count:count], Reason: boundSSNMReason(reason)})
-		removed = removed[count:]
-	}
+	sources, sourceDimensions := s.retireReceivedSourcesLocked(state, func(_ receivedCongestionKey, record SSNMCongestion) bool {
+		return matcher.matches(record.Scope, []ASKey{record.AS})
+	}, outcomes)
+	removed = append(removed, sourceDimensions...)
+	availabilitySources, availabilityDimensions := s.retireReceivedAvailabilityLocked(state, func(_ receivedCongestionKey, record SSNMAvailability) bool {
+		return matcher.matches(record.Scope, []ASKey{record.AS})
+	}, outcomes)
+	removed = append(removed, availabilityDimensions...)
+	s.publishDestinationRemovalsLocked(state, removed, sources, reason, availabilitySources)
 }
 
 // ssnmDimensionWrite is one prepared record write, resolved before anything is
@@ -927,16 +1029,31 @@ type ssnmDimensionWrite struct {
 // nothing about order between the SGPs of one Signalling Gateway, so there is
 // no remote causal order to reconstruct.
 func (s *ssnmState) apply(report SSNMReport, resolution ...[]ASKey) error {
+	var resolved []ASKey
+	if len(resolution) > 0 {
+		resolved = resolution[0]
+	}
+	return s.applyPrepared(report, resolved)
+}
+func (s *ssnmState) applyPrepared(report SSNMReport, resolved []ASKey, sourceEpoch ...uint64) error {
 	if s == nil || report.Partition.Kind == 0 {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.applyPreparedLocked(report, resolved, sourceEpoch...)
+}
+
+// applyPreparedLocked commits a report while the caller owns s.mu.
+func (s *ssnmState) applyPreparedLocked(report SSNMReport, resolved []ASKey, sourceEpoch ...uint64) error {
 	if s.closed {
 		return ErrEndpointClosed
 	}
 	if _, live := s.liveSources[report.Association]; !live {
 		return ErrAssociationClosed
+	}
+	if len(sourceEpoch) > 0 && s.liveSources[report.Association] != sourceEpoch[0] {
+		return nil
 	}
 	state, exists := s.partitions[report.Partition]
 	if !exists {
@@ -945,14 +1062,16 @@ func (s *ssnmState) apply(report SSNMReport, resolution ...[]ASKey) error {
 		return s.publishEventOnlyLocked(report)
 	}
 	report.Epoch = state.epoch
+	if (s.validity > 0 || s.auditing != nil) && report.Source == SSNMPeerReport && report.retainsCongestion() {
+		return s.applyReceivedCongestionLocked(state, report, resolved)
+	}
+	if s.auditing != nil && report.Source == SSNMPeerReport && report.retainsAvailability() {
+		return s.applyReceivedAvailabilityLocked(state, report, resolved)
+	}
 	if !report.retainsAvailability() && !report.retainsCongestion() {
 		return s.publishEventOnlyLocked(report)
 	}
 
-	var resolved []ASKey
-	if len(resolution) > 0 {
-		resolved = resolution[0]
-	}
 	scopeBytes := ssnmScopeBytes(report.Scope, resolved)
 	availability := report.retainsAvailability()
 	// The written keys are deduplicated by sorting rather than through a set,
@@ -1135,24 +1254,48 @@ func (s *ssnmState) refuseLocked(records int, reason string) {
 // source ownership; other SSNM messages cannot contradict that peer state.
 // DAUD is a query, not a statement, and invalidates nothing (RFC 4666 §4.5.3).
 func (s *ssnmState) oversized(partitions []SSNMPartition, count, limit int, association AssociationID, refusal ssnmDestinationRefusal, peerRefusal ...peerCongestionRefusal) error {
+	return s.oversizedPrepared(partitions, count, limit, association, refusal, nil, peerRefusal...)
+}
+
+func (s *ssnmState) oversizedPrepared(partitions []SSNMPartition, count, limit int, association AssociationID, refusal ssnmDestinationRefusal, sourceEpoch *uint64, peerRefusal ...peerCongestionRefusal) error {
 	if s == nil {
 		return nil
 	}
 	reason := fmt.Sprintf("SSNM on Association %d named %d Affected Point Codes, limit %d",
 		association, count, limit)
 	s.mu.Lock()
+	if !refusal.forget.current() {
+		s.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSSNMOversizedReport, reason)
+	}
+	if sourceEpoch != nil {
+		epoch, live := s.liveSources[association]
+		if !live || epoch != *sourceEpoch {
+			s.mu.Unlock()
+			return fmt.Errorf("%w: %s", ErrSSNMOversizedReport, reason)
+		}
+	}
+	var outcomes auditOutcomeBatch
 	s.reportsRefused++
 	s.refuseLocked(0, reason)
 	if !refusal.query {
 		if len(peerRefusal) != 0 {
 			s.retireRefusedPeerCongestionLocked(association, peerRefusal[0])
 		}
+		var activePartitions []SSNMPartition
+		for _, partition := range partitions {
+			if s.partitions[partition] != nil {
+				activePartitions = append(activePartitions, partition)
+			}
+		}
+		matchers := s.invalidateAuditScopesLocked(activePartitions, refusal, &outcomes)
 		for _, partition := range partitions {
 			if state := s.partitions[partition]; state != nil {
-				s.invalidateScopedDestinationKnowledgeLocked(state, reason, refusal)
+				s.invalidateScopedDestinationKnowledgePreparedLocked(state, reason, matchers[partition], &outcomes)
 			}
 		}
 	}
+	outcomes.publishLocked(s)
 	s.mu.Unlock()
 	return fmt.Errorf("%w: %s", ErrSSNMOversizedReport, reason)
 }
@@ -1193,6 +1336,39 @@ func describeSSNMPartition(partition SSNMPartition) string {
 // The scopes are the store's own and must be copied before they leave it.
 func (p *ssnmPartitionState) retainedKnowledge(key ssnmDestinationKey) SSNMDestinationKnowledge {
 	entry := SSNMDestinationKnowledge{Destination: key.pointCodeRange()}
+	p.work.visitKnowledge()
+	for source := range p.availabilitySources[key] {
+		record := p.receivedAvailability[source]
+		p.work.visitSource()
+		if source.destination == key {
+			entry.AvailabilitySources = append(entry.AvailabilitySources, record)
+		}
+	}
+	slices.SortFunc(entry.AvailabilitySources, func(a, b SSNMAvailability) int {
+		if order := cmp.Compare(a.Revision, b.Revision); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.Association, b.Association); order != 0 {
+			return order
+		}
+		return compareASKey(a.AS, b.AS)
+	})
+	for source := range p.congestionSources[key] {
+		record := p.receivedCongestion[source]
+		p.work.visitSource()
+		if source.destination == key {
+			entry.CongestionSources = append(entry.CongestionSources, record)
+		}
+	}
+	slices.SortFunc(entry.CongestionSources, func(a, b SSNMCongestion) int {
+		if order := cmp.Compare(a.Revision, b.Revision); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.Association, b.Association); order != 0 {
+			return order
+		}
+		return compareASKey(a.AS, b.AS)
+	})
 	if availability, held := p.availability[key]; held {
 		entry.Availability = availability.SSNMAvailability
 		entry.AvailabilitySet = true
@@ -1214,10 +1390,10 @@ func compareSSNMDestinationKeys(first, second ssnmDestinationKey) int {
 // partitionDestinationsLocked returns an owned copy of every destination one
 // partition retains, in point-code then mask order.
 func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSNMDestinationKnowledge {
-	if state == nil || len(state.availability)+len(state.congestion) == 0 {
+	if state == nil || len(state.availability)+len(state.congestion)+len(state.receivedCongestion)+len(state.receivedAvailability) == 0 {
 		return nil
 	}
-	keys := make([]ssnmDestinationKey, 0, len(state.availability)+len(state.congestion))
+	keys := make([]ssnmDestinationKey, 0, len(state.availability)+len(state.congestion)+len(state.receivedCongestion)+len(state.receivedAvailability))
 	for key := range state.availability {
 		keys = append(keys, key)
 	}
@@ -1226,12 +1402,25 @@ func (s *ssnmState) partitionDestinationsLocked(state *ssnmPartitionState) []SSN
 			keys = append(keys, key)
 		}
 	}
+	for key := range state.congestionSources {
+		keys = append(keys, key)
+	}
+	for key := range state.availabilitySources {
+		keys = append(keys, key)
+	}
 	slices.SortFunc(keys, compareSSNMDestinationKeys)
+	keys = slices.Compact(keys)
 	knowledge := make([]SSNMDestinationKnowledge, len(keys))
 	for index, key := range keys {
 		entry := state.retainedKnowledge(key)
 		entry.Availability.Scope = entry.Availability.Scope.clone()
 		entry.Congestion.Scope = entry.Congestion.Scope.clone()
+		for i := range entry.AvailabilitySources {
+			entry.AvailabilitySources[i].Scope = entry.AvailabilitySources[i].Scope.clone()
+		}
+		for i := range entry.CongestionSources {
+			entry.CongestionSources[i].Scope = entry.CongestionSources[i].Scope.clone()
+		}
 		knowledge[index] = entry
 	}
 	return knowledge
@@ -1313,6 +1502,13 @@ func (s *ssnmState) close() {
 		return
 	}
 	s.closed = true
+	for _, job := range s.audits {
+		job.live.Store(false)
+	}
+	s.audits = nil
+	s.auditByAssociation = nil
+	s.auditBySource = nil
+	s.auditActivated = nil
 	s.liveSources = nil
 	s.peerSources = nil
 	s.partitions = make(map[SSNMPartition]*ssnmPartitionState)

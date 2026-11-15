@@ -74,6 +74,14 @@ func assertSSNMScopeAccounting(t *testing.T, endpoint *Endpoint) {
 	}
 	for _, partition := range snapshot.Partitions {
 		for _, record := range partition.Destinations {
+			for _, source := range record.AvailabilitySources {
+				records++
+				bytes += 144 + 4*len(source.Scope.RoutingContexts)
+			}
+			for _, source := range record.CongestionSources {
+				records++
+				bytes += 144 + 4*len(source.Scope.RoutingContexts)
+			}
 			if record.AvailabilitySet {
 				records++
 				bytes += ssnmScopeBytes(record.Availability.Scope)
@@ -93,6 +101,9 @@ func assertSSNMScopeAccounting(t *testing.T, endpoint *Endpoint) {
 		for _, r := range state.congestion {
 			bytes += ssnmResolvedASBytes * len(r.resolved)
 		}
+	}
+	for _, job := range endpoint.ssnm.audits {
+		bytes += 256 + len(job.info) + 8*len(job.scope.RoutingContexts) + 144*len(job.bindings) + 64*len(job.partitions)
 	}
 	if endpoint.ssnm.records != records || endpoint.ssnm.bytes != bytes {
 		t.Fatalf("retained accounting: got %d/%d, want %d/%d", endpoint.ssnm.records, endpoint.ssnm.bytes, records, bytes)
@@ -114,6 +125,12 @@ func assertSSNMScopeAccounting(t *testing.T, endpoint *Endpoint) {
 		}
 		for _, r := range state.congestion {
 			charged += ssnmScopeBytes(r.Scope, r.resolved)
+		}
+		for _, source := range state.receivedAvailability {
+			charged += 144 + 4*len(source.Scope.RoutingContexts)
+		}
+		for _, source := range state.receivedCongestion {
+			charged += 144 + 4*len(source.Scope.RoutingContexts)
 		}
 		for _, r := range state.peerCongestion {
 			charged += peerCongestionRecordBytes(r)

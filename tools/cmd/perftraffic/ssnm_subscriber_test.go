@@ -187,11 +187,11 @@ func TestSSNMSubscriberLocksOnAfterResync(testContext *testing.T) {
 
 // cleanPause is the F3 evidence of a one-APC pause that overflowed at the
 // count cap under the default byte limit and validated its one
-// resynchronized partition: 256 events of 784 accounted bytes each.
+// resynchronized partition: 256 events of 848 accounted bytes each.
 func cleanPause() *ssnmPauseRecord {
 	return &ssnmPauseRecord{
 		ContinuityLossObserved: true, QueueLimit: 256, QueuedAtLoss: 256, CountCapEnforced: true,
-		QueueByteLimit: 1 << 20, QueuedBytesAtLoss: 256 * 784, SmallestEventBytes: 784, SmallestQueuedEventBytes: 784,
+		QueueByteLimit: 1 << 20, QueuedBytesAtLoss: 256 * 848, SmallestEventBytes: 848, SmallestQueuedEventBytes: 848,
 		BindingCap: ssnmBindingCount, SnapshotValidated: 1,
 	}
 }

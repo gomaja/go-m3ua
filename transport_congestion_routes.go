@@ -93,6 +93,9 @@ func (r *aspRoutes) gatewayTransportLocked(gateway aspSignallingGatewayConfig, r
 		// availability checks. A DUNA through an earlier AS must not hide the
 		// usable AS's transport contribution (RFC 4666 §4.5.2.2).
 		selected, usable, _ := r.transferSGPCandidateLocked(sgp, identity, route, pointCode, aspCongestionDecision{}, r.ssnm)
+		if r.ssnm != nil && r.ssnm.validity > 0 {
+			selected, usable = r.observedSGPCandidateLocked(sgp, identity, route, pointCode)
+		}
 		if !usable {
 			continue
 		}
@@ -101,6 +104,7 @@ func (r *aspRoutes) gatewayTransportLocked(gateway aspSignallingGatewayConfig, r
 		// Canonical received congestion belongs to this selected AS. Combine
 		// it with each member before comparing alternatives (RFC 4666 §1.4.6).
 		received := aspDestinationStatus{
+			receivedUnknown:    selected.status.receivedUnknown,
 			congested:          selected.status.congested,
 			congestionLevel:    selected.status.congestionLevel,
 			congestionLevelSet: selected.status.congestionLevelSet,
@@ -156,6 +160,7 @@ func (r *aspRoutes) transportSelectionStatus(a *Association, status aspSelection
 func mostCongestedASPStatus(first, second aspDestinationStatus) aspDestinationStatus {
 	first.transportLevel = max(first.transportLevel, second.transportLevel)
 	first.transportUnknown = first.transportUnknown || second.transportUnknown
+	first.receivedUnknown = first.receivedUnknown || second.receivedUnknown
 	if second.congested && (!first.congested || first.congestionLevelSet && (!second.congestionLevelSet || second.congestionLevel > first.congestionLevel)) {
 		first.congested = true
 		first.congestionLevel = second.congestionLevel
@@ -170,6 +175,7 @@ func requiredASPSelectionStatus(first, second aspSelectionStatus) aspSelectionSt
 		first.availabilitySet = second.availabilitySet
 	}
 	first.transportUnknown = first.transportUnknown || second.transportUnknown
+	first.receivedUnknown = first.receivedUnknown || second.receivedUnknown
 	if second.congested && (!first.congested || first.congestionLevelSet && (!second.congestionLevelSet || second.congestionLevel > first.congestionLevel)) {
 		first.congested = true
 		first.congestionSet = true
@@ -177,4 +183,29 @@ func requiredASPSelectionStatus(first, second aspSelectionStatus) aspSelectionSt
 		first.congestionLevelSet = second.congestionLevelSet
 	}
 	return first
+}
+
+// Observation does not grant transfer admission. In particular, an active
+// reporter's SCON and its expiry remain visible without an accompanying DAVA.
+func (r *aspRoutes) observedSGPCandidateLocked(sgp aspSGPConfig, identity SGPIdentity, route MTPRouteID, pc uint32) (aspTransferSGP, bool) {
+	associations := make([]*Association, 0, len(r.associationsBySGP[identity]))
+	for a := range r.associationsBySGP[identity] {
+		associations = append(associations, a)
+	}
+	var best aspTransferSGP
+	found := false
+	for _, candidate := range sgp.candidatesFor(route) {
+		members, _ := r.transferMembersLocked(associations, identity, candidate.applicationServer)
+		if len(members) == 0 {
+			continue
+		}
+		// The configured SG/AS owner unifies SGP-local NA/RC labels
+		// (RFC 4666 §§1.2, 1.4.2.1, 3.3.1), including for observations without DAVA.
+		status := r.ssnm.destinationKnowledge(SSNMPartition{Kind: SSNMCanonicalPartition, SignallingGateway: identity.SignallingGateway, ApplicationServer: candidate.applicationServer}, pc)
+		if !found || status.availabilityRank() < best.status.availabilityRank() {
+			best = aspTransferSGP{members: members, status: status}
+			found = true
+		}
+	}
+	return best, found
 }

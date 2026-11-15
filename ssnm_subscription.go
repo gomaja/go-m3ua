@@ -25,13 +25,15 @@ const (
 	// activation acknowledgment.
 	SSNMBindingActivatedEvent
 	// SSNMBindingRetiredEvent reports one binding withdrawn from a partition
-	// that still has others; its knowledge is preserved by the siblings.
+	// that still has others. Source-history removals precede this event;
+	// knowledge from unaffected bindings survives.
 	SSNMBindingRetiredEvent
 	// SSNMPartitionRetiredEvent reports the last binding of a partition
 	// withdrawn. The partition and its knowledge were discarded atomically.
 	SSNMPartitionRetiredEvent
 	// SSNMDestinationsInvalidatedEvent removes exactly the dimensions in
-	// Invalidated from the partition identified by Epoch. Partition is empty.
+	// Invalidated and source statements in CongestionSourcesInvalidated from
+	// the partition identified by Epoch. Partition is empty.
 	// ApplyInvalidation applies the delta to a matching snapshot partition.
 	// Peer records are removed independently through SSNMPeerCongestionEvent.
 	SSNMDestinationsInvalidatedEvent
@@ -43,10 +45,18 @@ const (
 	SSNMContinuityLostEvent
 	// SSNMPeerCongestionEvent replaces or removes one peer-local record.
 	SSNMPeerCongestionEvent
+	// SSNMCongestionExpiredEvent marks local uncertainty, never measured abatement.
+	SSNMCongestionExpiredEvent
+	// SSNMAuditOutcomeEvent reports bounded optional audit submission outcomes.
+	SSNMAuditOutcomeEvent
 )
 
 func (k SSNMEventKind) String() string {
 	switch k {
+	case SSNMCongestionExpiredEvent:
+		return "congestion-expired"
+	case SSNMAuditOutcomeEvent:
+		return "audit-outcome"
 	case SSNMPeerCongestionEvent:
 		return "peer-congestion"
 	case SSNMReportEvent:
@@ -92,17 +102,25 @@ type SSNMDestinationInvalidation struct {
 //
 //   - SSNMReportEvent: for each entry of Updated, replace the partition's
 //     entry for that Destination. No other destination changed.
+//   - SSNMCongestionExpiredEvent: ApplyExpiry marks only the exact original
+//     records named by Expired as expired. Values and provenance stay intact;
+//     Partition and Epoch are empty because one chunk can cross partitions.
+//   - SSNMAuditOutcomeEvent: knowledge is unchanged. Reason gives the local
+//     outcome and AuditCount counts job transitions. Report attributes only a
+//     homogeneous source/scope; AuditScopeOmitted identifies omitted scope.
 //   - SSNMBindingAdmittedEvent: set Binding in Partition, creating the
 //     partition with this Epoch and no destinations if it is not held.
 //   - SSNMBindingActivatedEvent: mark Binding no longer pending.
-//   - SSNMBindingRetiredEvent: remove Binding. Destinations are unchanged.
+//   - SSNMBindingRetiredEvent: remove Binding after applying any preceding
+//     source-history removal deltas. This event itself carries no destinations.
 //   - SSNMPartitionRetiredEvent: remove Partition with its bindings and
 //     destinations.
 //   - SSNMDestinationsInvalidatedEvent: for each entry of Invalidated, remove
 //     the dimensions marked AvailabilityRemoved or CongestionRemoved from the
 //     partition with this Epoch. Partition is empty. ApplyInvalidation performs
-//     this patch. Delete a destination if neither dimension remains; preserve
-//     other dimensions, destinations and bindings.
+//     this patch and independently removes source statements named by
+//     CongestionSourcesInvalidated and AvailabilitySourcesInvalidated. Delete a destination only if neither
+//     dimension nor source history remains; preserve other knowledge/bindings.
 //   - SSNMPeerCongestionEvent: replace PeerCongestion by association, epoch,
 //     AS, wire scope and destination; remove it when PeerCongestionRemoved.
 //     Compare RC lists as sets, preserving both wire presence flags.
@@ -113,7 +131,8 @@ type SSNMDestinationInvalidation struct {
 // A retained report never removes one destination's knowledge: DAVA and a level-zero
 // SCON are retained as statements about the destination, and a resource bound
 // refuses a report rather than evicting what is held. Oversized reports remove
-// only overlapping AS/network dimensions, identified by Invalidated; unresolved
+// only overlapping AS/network dimensions and source histories, identified by
+// Invalidated, CongestionSourcesInvalidated and AvailabilitySourcesInvalidated; unresolved
 // scope can remove all destination knowledge. Peer-local records also leave
 // individually when their AS binding
 // or association epoch retires, through SSNMPeerCongestionEvent.
@@ -121,18 +140,20 @@ type SSNMEvent struct {
 	Kind     SSNMEventKind
 	Revision uint64
 	// Partition identifies the affected partition except on
-	// SSNMDestinationsInvalidatedEvent, which uses Epoch alone.
+	// SSNMDestinationsInvalidatedEvent, which uses Epoch alone, and
+	// SSNMCongestionExpiredEvent, whose identities each carry their own epoch.
 	Partition SSNMPartition
 	// Epoch is the Endpoint-unique partition generation. On destination
 	// invalidation it identifies the snapshot partition to patch.
 	Epoch uint64
-	// Report is set for SSNMReportEvent only; ReportSet says so explicitly
+	// ReportSet identifies validated reports; audit outcomes also attribute
+	// association/scope through Report, with ReportSet false
 	// because the zero report is indistinguishable from an absent one.
 	Report    SSNMReport
 	ReportSet bool
 	// Binding is set for the binding lifecycle events.
 	Binding SSNMBinding
-	// Updated is set for SSNMReportEvent only, and only when the report was
+	// Updated is set for SSNMReportEvent only when the report was
 	// retained: the destinations the report wrote, each once, in point-code
 	// then mask order and keyed exactly as SSNMPartitionKnowledge.Destinations.
 	// Each entry carries both dimensions as retained after this event: the one
@@ -151,7 +172,30 @@ type SSNMEvent struct {
 	// Use ApplyInvalidation with a matching snapshot partition. Other
 	// dimensions and all bindings survive. Owned by the caller.
 	Invalidated []SSNMDestinationInvalidation
-	// Reason is a bounded diagnostic for invalidation and resource loss.
+	// CongestionSourcesInvalidated removes exact congestion source identities from
+	// the same Epoch, independently of scalar dimensions. At most 2048 entries
+	// are published per chunk, charged 48 bytes each; no scopes are replayed.
+	CongestionSourcesInvalidated []SSNMCongestionSourceInvalidation
+	// AvailabilitySourcesInvalidated removes exact auditing availability source
+	// identities. At most 2048 entries, charged 48 bytes each, are owned by
+	// each event. ApplyInvalidation preserves all other statements.
+	AvailabilitySourcesInvalidated []SSNMAvailabilitySourceInvalidation
+	// Expired names records whose local validity ended, without replaying their
+	// values, wire scope or provenance. Expiry events contain at most 256 owned
+	// identities, charged 56 bytes each. Use ApplyExpiry on the owned snapshot.
+	Expired []SSNMCongestionExpiry
+	// AuditCount counts completed transport job outcomes and other job outcome
+	// transitions coalesced into one diagnostic. Each completed attempt counts,
+	// including repeated equal results, EAGAIN and a same-key refresh.
+	// Report attributes a homogeneous association/scope only; no APCs are replayed.
+	AuditCount uint64
+	// AuditScopeOmitted marks mixed scopes or scopes exceeding 64 wire RCs.
+	// A zero Report.Association marks mixed sources. ReportSet remains false.
+	AuditScopeOmitted bool
+	// Reason identifies invalidation, resource loss or local audit outcomes:
+	// queue-full, rate-deferred, reporter-retired, send-deferred, contended,
+	// send-failed and submitted. Repeated contention and rate deferrals are
+	// suppressed; completed transport attempts are counted independently.
 	Reason string
 	// ContinuityLost is true on SSNMContinuityLostEvent, and on nothing else.
 	ContinuityLost bool
@@ -177,6 +221,8 @@ func (e SSNMEvent) ApplyInvalidation(partition *SSNMPartitionKnowledge) bool {
 	}
 	kept := partition.Destinations[:0]
 	index := 0
+	sourceIndex := 0
+	availabilityIndex := 0
 	for _, value := range partition.Destinations {
 		key := ssnmDestinationKeyFor(value.Destination)
 		for index < len(e.Invalidated) && compareSSNMDestinationKeys(ssnmDestinationKeyFor(e.Invalidated[index].Destination), key) < 0 {
@@ -191,7 +237,55 @@ func (e SSNMEvent) ApplyInvalidation(partition *SSNMPartitionKnowledge) bool {
 				value.Congestion, value.CongestionSet = SSNMCongestion{}, false
 			}
 		}
-		if value.AvailabilitySet || value.CongestionSet {
+		for sourceIndex < len(e.CongestionSourcesInvalidated) && compareSSNMDestinationKeys(ssnmDestinationKeyFor(e.CongestionSourcesInvalidated[sourceIndex].Destination), key) < 0 {
+			sourceIndex++
+		}
+		end := sourceIndex
+		for end < len(e.CongestionSourcesInvalidated) && ssnmDestinationKeyFor(e.CongestionSourcesInvalidated[end].Destination) == key {
+			end++
+		}
+		if end > sourceIndex {
+			keptSources := value.CongestionSources[:0]
+			for _, source := range value.CongestionSources {
+				remove := false
+				for _, id := range e.CongestionSourcesInvalidated[sourceIndex:end] {
+					remove = remove || (id.Revision == source.Revision && id.AS == source.AS)
+				}
+				if !remove {
+					keptSources = append(keptSources, source)
+				}
+			}
+			clear(value.CongestionSources[len(keptSources):])
+			value.CongestionSources = keptSources
+			if len(keptSources) == 0 {
+				value.CongestionSources = nil
+			}
+		}
+		for availabilityIndex < len(e.AvailabilitySourcesInvalidated) && compareSSNMDestinationKeys(ssnmDestinationKeyFor(e.AvailabilitySourcesInvalidated[availabilityIndex].Destination), key) < 0 {
+			availabilityIndex++
+		}
+		availabilityEnd := availabilityIndex
+		for availabilityEnd < len(e.AvailabilitySourcesInvalidated) && ssnmDestinationKeyFor(e.AvailabilitySourcesInvalidated[availabilityEnd].Destination) == key {
+			availabilityEnd++
+		}
+		if availabilityEnd > availabilityIndex {
+			keptSources := value.AvailabilitySources[:0]
+			for _, source := range value.AvailabilitySources {
+				remove := false
+				for _, id := range e.AvailabilitySourcesInvalidated[availabilityIndex:availabilityEnd] {
+					remove = remove || (id.Revision == source.Revision && id.AS == source.AS)
+				}
+				if !remove {
+					keptSources = append(keptSources, source)
+				}
+			}
+			clear(value.AvailabilitySources[len(keptSources):])
+			value.AvailabilitySources = keptSources
+			if len(keptSources) == 0 {
+				value.AvailabilitySources = nil
+			}
+		}
+		if value.AvailabilitySet || value.CongestionSet || len(value.CongestionSources) > 0 || len(value.AvailabilitySources) > 0 {
 			kept = append(kept, value)
 		}
 	}
@@ -218,6 +312,12 @@ func (e SSNMEvent) clone() SSNMEvent {
 	}
 	for _, update := range e.Updated {
 		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
+		for _, source := range update.AvailabilitySources {
+			contexts += len(source.Scope.RoutingContexts)
+		}
+		for _, source := range update.CongestionSources {
+			contexts += len(source.Scope.RoutingContexts)
+		}
 	}
 	var arena ssnmRoutingContextArena
 	if contexts > 0 {
@@ -242,12 +342,29 @@ func (e SSNMEvent) clone() SSNMEvent {
 		for index, update := range e.Updated {
 			update.Availability.Scope.RoutingContexts = arena.own(update.Availability.Scope.RoutingContexts)
 			update.Congestion.Scope.RoutingContexts = arena.own(update.Congestion.Scope.RoutingContexts)
+			update.AvailabilitySources = append([]SSNMAvailability(nil), update.AvailabilitySources...)
+			for i := range update.AvailabilitySources {
+				update.AvailabilitySources[i].Scope.RoutingContexts = arena.own(update.AvailabilitySources[i].Scope.RoutingContexts)
+			}
+			update.CongestionSources = append([]SSNMCongestion(nil), update.CongestionSources...)
+			for i := range update.CongestionSources {
+				update.CongestionSources[i].Scope.RoutingContexts = arena.own(update.CongestionSources[i].Scope.RoutingContexts)
+			}
 			updated[index] = update
 		}
 		e.Updated = updated
 	}
+	if e.AvailabilitySourcesInvalidated != nil {
+		e.AvailabilitySourcesInvalidated = append([]SSNMAvailabilitySourceInvalidation(nil), e.AvailabilitySourcesInvalidated...)
+	}
+	if e.CongestionSourcesInvalidated != nil {
+		e.CongestionSourcesInvalidated = append([]SSNMCongestionSourceInvalidation(nil), e.CongestionSourcesInvalidated...)
+	}
 	if e.Invalidated != nil {
 		e.Invalidated = append([]SSNMDestinationInvalidation(nil), e.Invalidated...)
+	}
+	if e.Expired != nil {
+		e.Expired = append([]SSNMCongestionExpiry(nil), e.Expired...)
 	}
 
 	return e
@@ -271,12 +388,19 @@ func (a *ssnmRoutingContextArena) own(values []uint32) []uint32 {
 }
 
 const (
-	ssnmInvalidationBatchSize     = 2048
-	ssnmEventInvalidationBytes    = 16
+	ssnmInvalidationBatchSize        = 2048
+	ssnmEventInvalidationBytes       = 16
+	ssnmEventSourceInvalidationBytes = 48
+	// At the default 16384-record ceiling, a whole expiry pass emits at most
+	// 64 events and 64*512+16384*56 = 950272 accounted bytes. Expiry events
+	// carry no partition strings, report values or wire lists.
+	ssnmExpiryBatchSize           = 256
+	ssnmEventExpiryBytes          = 56
 	ssnmEventBaseBytes            = 512
 	ssnmEventProfileMismatchBytes = 32
 	ssnmEventDestinationBytes     = 8
 	ssnmEventStateBytes           = 256
+	ssnmEventUpdateBytes          = 320
 )
 
 func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
@@ -284,8 +408,11 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 	if !reserveSSNMEventBytes(&remaining, 1, ssnmEventBaseBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Destinations), ssnmEventDestinationBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.ProfileMismatches), ssnmEventProfileMismatchBytes) ||
-		!reserveSSNMEventBytes(&remaining, len(event.Updated), ssnmEventStateBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.Updated), ssnmEventUpdateBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Invalidated), ssnmEventInvalidationBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.CongestionSourcesInvalidated), ssnmEventSourceInvalidationBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.AvailabilitySourcesInvalidated), ssnmEventSourceInvalidationBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.Expired), ssnmEventExpiryBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 		return 0, false
 	}
@@ -307,7 +434,18 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 		}
 	}
 	for _, update := range event.Updated {
-		if !reserveSSNMEventBytes(&remaining, len(update.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) || !reserveSSNMEventBytes(&remaining, len(update.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+		for _, source := range update.AvailabilitySources {
+			if !reserveSSNMEventBytes(&remaining, 1, ssnmEventStateBytes) || !reserveSSNMEventBytes(&remaining, len(source.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+				return 0, false
+			}
+		}
+		for _, source := range update.CongestionSources {
+			if !reserveSSNMEventBytes(&remaining, 1, ssnmEventStateBytes) || !reserveSSNMEventBytes(&remaining, len(source.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+				return 0, false
+			}
+		}
+		if !reserveSSNMEventBytes(&remaining, len(update.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) ||
+			!reserveSSNMEventBytes(&remaining, len(update.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 			return 0, false
 		}
 	}

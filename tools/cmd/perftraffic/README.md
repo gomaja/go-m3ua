@@ -257,12 +257,12 @@ validate.
 `SSNMStateConfig.SubscriptionQueueBytes`). The paused subscriber recomputes the
 bytes of every event it drains from its retained queue from the delivered event
 alone, by the library's documented accounting and without its internals: 512
-per event, 8 per report destination, 256 per updated destination, 4 per Routing
+per event, 8 per report destination, 320 per updated destination, 4 per Routing
 Context in the report and in both dimensions of each update, plus the byte
 lengths of `Reason` and of the event's and the report's partition identity
 strings. The continuity-loss marker is not charged. A generated report of `a`
 Affected Point Codes in a fixture (standalone) partition is therefore
-516 + 268a bytes: 784 for one APC, 274,948 for 1,024. A queue holds the events
+516 + 332a bytes: 848 for one APC, 340,484 for 1,024. A queue holds the events
 of every partition, so under the total rate a paused queue grows by
 `-ssnm-total-rate` events per second whatever the association count.
 
@@ -288,26 +288,27 @@ respect.
 
 The indication-overflow row pauses one of 8 subscribers for 10 s under 1,000
 updates/s: one-APC messages at `-ssnm-total-rate=1000`. With the default limit
-it retains 256 events of 784 bytes, 200,704 bytes, 256 ms into the pause, so
-the count cap binds. The byte cap binds below 256 x 784 bytes, but the limit
+it retains 256 events of 848 bytes, 217,088 bytes, 256 ms into the pause, so
+the count cap binds. The byte cap binds below 256 x 848 bytes, but the limit
 must also hold the workload's largest message, the preload's
 min(`-ssnm-records`, 1,024) destinations, or every subscriber would lose
 continuity before traffic starts; the ASP refuses such a limit. The preload is
 requested one message at a time, so a limit that holds that message also
-completes the preload. At 2,048 records per partition that message is 274,948
+completes the preload. At 2,048 records per partition that message is 340,484
 bytes, more than 256 one-APC events, so the one-APC byte-binding run uses 256
 records per partition, 2,048 in the store over eight associations, whose
-preload messages are 69,124 bytes each, and a 96 KiB limit. It retains 125
-events, 98,000 bytes, which another 784-byte event would take past 98,304.
+preload messages are 85,508 bytes each, and a 96 KiB limit. It retains 115
+events, 97,520 bytes; the next 848-byte event would require 98,368 bytes,
+exceeding 98,304.
 Both overflow runs carry the mixed DATA at 50% of its eight-association
 target, as section 4 prescribes:
 
 ```sh
-# F3 with the count cap binding: 256 events of 784 bytes at loss
+# F3 with the count cap binding: 256 events of 848 bytes at loss
 perftraffic -congestion-method=national-with-priorities -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048
 perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=20000 -same-host-clock \
   -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048 -pause-subscriber=5s/10s
-# F3 with the byte cap binding: 125 events of 784 bytes at loss
+# F3 with the byte cap binding: 115 events of 848 bytes at loss
 perftraffic -congestion-method=national-with-priorities -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=256
 perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=20000 -same-host-clock \
   -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=256 -pause-subscriber=5s/10s \
@@ -315,11 +316,11 @@ perftraffic -congestion-method=national-with-priorities -role=asp ... -associati
 ```
 
 Every subscriber shares the limit, so in the byte-binding run the healthy ones
-keep 125 ms of slack at 1,000 messages/s instead of 256 ms, and its
+keep 115 ms of slack at 1,000 messages/s instead of 256 ms, and its
 `resync_ns` is taken at a 2,048-record store: the full-fixture Resync budget
 stays with the count-binding run. The approved 1 MiB limit itself binds at the
 full store with larger messages: `-ssnm-total-rate=32 -ssnm-apcs=32` (1,024
-updates/s) retains 115 events of 9,092 bytes, 1,045,580 bytes.
+updates/s) retains 94 events of 11,140 bytes, 1,047,160 bytes.
 
 **Records.** The SGP record's `ssnm.generator` covers the cohort window:
 `associations`, `offered` (scheduled in the window, over every association),

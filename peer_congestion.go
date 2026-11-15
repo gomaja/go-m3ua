@@ -39,8 +39,10 @@ type PeerCongestionState struct {
 	Destination PointCodeRange
 	Congestion  CongestionState
 	ReceivedAt  time.Time
-	Freshness   CongestionFreshness
-	Revision    uint64
+	// ExpiresAt is the local validity deadline; zero disables expiry.
+	ExpiresAt time.Time
+	Freshness CongestionFreshness
+	Revision  uint64
 }
 
 func (p PeerCongestionState) clone() PeerCongestionState {
@@ -57,8 +59,44 @@ type peerCongestionKey struct {
 }
 
 type peerCongestionSource struct {
-	epoch  uint64
-	active map[ASKey]uint64
+	epoch   uint64
+	active  map[ASKey]uint64
+	records map[ASKey]map[peerCongestionRecordIdentity]struct{}
+}
+
+// Each admitted peer record occurs in exactly one AS bucket. The authoritative
+// record remains in its partition; the index borrows its immutable identity.
+type peerCongestionRecordIdentity struct {
+	partition SSNMPartition
+	key       peerCongestionKey
+}
+
+func (s *ssnmState) indexPeerRecordLocked(partition SSNMPartition, key peerCongestionKey) {
+	source := s.peerSources[key.association]
+	if source.records == nil {
+		source.records = make(map[ASKey]map[peerCongestionRecordIdentity]struct{})
+	}
+	if source.records[key.as] == nil {
+		source.records[key.as] = make(map[peerCongestionRecordIdentity]struct{})
+	}
+	source.records[key.as][peerCongestionRecordIdentity{partition, key}] = struct{}{}
+	s.peerSources[key.association] = source
+}
+
+func (s *ssnmState) forgetPeerRecordIndexLocked(partition SSNMPartition, key peerCongestionKey) {
+	source, live := s.peerSources[key.association]
+	if !live {
+		return
+	}
+	bucket := source.records[key.as]
+	delete(bucket, peerCongestionRecordIdentity{partition, key})
+	if len(bucket) == 0 {
+		delete(source.records, key.as)
+	}
+	if len(source.records) == 0 {
+		source.records = nil
+	}
+	s.peerSources[key.association] = source
 }
 
 // Resolved but empty admission cannot authorize removal of any AS's knowledge.
@@ -187,7 +225,7 @@ func (s *ssnmState) syncPeerCongestion(association AssociationID, epoch uint64, 
 	if s.peerSources == nil {
 		s.peerSources = make(map[AssociationID]peerCongestionSource)
 	}
-	s.peerSources[association] = peerCongestionSource{epoch: epoch, active: owned}
+	s.peerSources[association] = peerCongestionSource{epoch: epoch, active: owned, records: s.peerSources[association].records}
 }
 
 // applyPeerReport commits all expanded AS/range records and then the raw
@@ -261,7 +299,7 @@ func (s *ssnmState) applyPeerReport(report SSNMReport, epoch uint64, bindings ma
 	if len(keys) == 0 {
 		return s.publishEventOnlyLocked(report)
 	}
-	received := time.Now()
+	received := s.automationNow()
 	scope := report.Scope.clone()
 	record := PeerCongestionState{Association: report.Association, Epoch: epoch, Scope: scope, ReceivedAt: received, Freshness: CongestionFresh, Congestion: CongestionState{Congested: !report.CongestionLevelSet || report.CongestionLevel != 0, Level: report.CongestionLevel, LevelSet: report.CongestionLevelSet}}
 	newRecords, newBytes := 0, 0
@@ -299,8 +337,12 @@ func (s *ssnmState) applyPeerReport(report SSNMReport, epoch uint64, bindings ma
 	for _, key := range keys {
 		record.AS = key.as
 		record.Destination = key.destination.pointCodeRange()
+		if s.validity > 0 && record.Congestion.Congested {
+			record.ExpiresAt = record.ReceivedAt.Add(s.validity)
+		}
 		record.Revision = s.nextRevisionLocked()
 		state.peerCongestion[key] = record
+		s.indexPeerRecordLocked(state.partition, key)
 		changed := record
 		s.publishLocked(SSNMEvent{Kind: SSNMPeerCongestionEvent, Revision: record.Revision, Partition: report.Partition, Epoch: state.epoch, PeerCongestion: &changed})
 	}
@@ -337,26 +379,34 @@ func (s *ssnmState) sortedPeerPartitionsLocked() []SSNMPartition {
 func (s *ssnmState) retirePeerRecordsLocked(state *ssnmPartitionState, remove func(PeerCongestionState) bool) {
 	keys := make([]peerCongestionKey, 0)
 	for key, record := range state.peerCongestion {
+		if s.work != nil {
+			s.work.peerRows++
+		}
 		if remove(record) {
 			keys = append(keys, key)
 		}
 	}
 	slices.SortFunc(keys, comparePeerCongestionKeys)
 	for _, key := range keys {
-		record := state.peerCongestion[key]
-		delete(state.peerCongestion, key)
-		cost := peerCongestionRecordBytes(record)
-		state.bytes -= cost
-		s.bytes -= cost
-		s.records--
-		peer := state.partition.peerKey()
-		s.peerRecords[peer]--
-		if s.peerRecords[peer] <= 0 {
-			delete(s.peerRecords, peer)
-		}
-		record.Revision = s.nextRevisionLocked()
-		s.publishLocked(SSNMEvent{Kind: SSNMPeerCongestionEvent, Revision: record.Revision, Partition: state.partition, Epoch: state.epoch, PeerCongestion: &record, PeerCongestionRemoved: true})
+		s.retirePeerRecordLocked(state, key)
 	}
+}
+
+func (s *ssnmState) retirePeerRecordLocked(state *ssnmPartitionState, key peerCongestionKey) {
+	record := state.peerCongestion[key]
+	delete(state.peerCongestion, key)
+	s.forgetPeerRecordIndexLocked(state.partition, key)
+	cost := peerCongestionRecordBytes(record)
+	state.bytes -= cost
+	s.bytes -= cost
+	s.records--
+	peer := state.partition.peerKey()
+	s.peerRecords[peer]--
+	if s.peerRecords[peer] <= 0 {
+		delete(s.peerRecords, peer)
+	}
+	record.Revision = s.nextRevisionLocked()
+	s.publishLocked(SSNMEvent{Kind: SSNMPeerCongestionEvent, Revision: record.Revision, Partition: state.partition, Epoch: state.epoch, PeerCongestion: &record, PeerCongestionRemoved: true})
 }
 
 func (s *ssnmState) peerCongestionSnapshotLocked() []PeerCongestionState {
@@ -379,13 +429,40 @@ func (s *ssnmState) peerCongestionSnapshotLocked() []PeerCongestionState {
 // congestion before an AS withdrawal commits. Other AS inputs and transport
 // observations are independent. The source epoch remains as a stale-work fence.
 func (s *ssnmState) retirePeerCongestionAS(association AssociationID, key ASKey) {
-	s.retirePeerCongestionScopes(association, func(candidate ASKey) bool { return candidate == key })
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	source := s.peerSources[association]
+	if s.work != nil {
+		s.work.peerASRows++
+	}
+	delete(source.active, key)
+	selected := make(map[SSNMPartition][]peerCongestionKey)
+	s.selectPeerRecordsLocked(source.records[key], selected)
+	s.retireSelectedPeerRecordsLocked(selected)
 }
 
 // retirePeerCongestionContext withdraws all appearances of a retired dynamic
 // RC. Its replacement is admitted only with a newly captured binding token.
 func (s *ssnmState) retirePeerCongestionContext(association AssociationID, routingContext uint32) {
-	s.retirePeerCongestionScopes(association, func(key ASKey) bool { return key.RoutingContextSet && key.RoutingContext == routingContext })
+	s.retirePeerCongestionContexts(association, map[uint32]struct{}{routingContext: {}})
+}
+
+// retirePeerCongestionContexts removes one registration event's contexts in a
+// single pass. Its caller fences the selected registrations through replacement.
+func (s *ssnmState) retirePeerCongestionContexts(association AssociationID, contexts map[uint32]struct{}) {
+	if len(contexts) == 0 {
+		return
+	}
+	s.retirePeerCongestionScopes(association, func(key ASKey) bool {
+		_, selected := contexts[key.RoutingContext]
+		return key.RoutingContextSet && selected
+	})
 }
 
 func (s *ssnmState) retirePeerCongestionScopes(association AssociationID, matches func(ASKey) bool) {
@@ -398,13 +475,42 @@ func (s *ssnmState) retirePeerCongestionScopes(association AssociationID, matche
 		return
 	}
 	source := s.peerSources[association]
+	selected := make(map[SSNMPartition][]peerCongestionKey)
 	for key := range source.active {
+		if s.work != nil {
+			s.work.peerASRows++
+		}
 		if matches(key) {
 			delete(source.active, key)
+			s.selectPeerRecordsLocked(source.records[key], selected)
 		}
 	}
-	for _, partition := range s.sortedPeerPartitionsLocked() {
-		s.retirePeerRecordsLocked(s.partitions[partition], func(record PeerCongestionState) bool { return record.Association == association && matches(record.AS) })
+	s.retireSelectedPeerRecordsLocked(selected)
+}
+
+func (s *ssnmState) selectPeerRecordsLocked(bucket map[peerCongestionRecordIdentity]struct{}, selected map[SSNMPartition][]peerCongestionKey) {
+	for identity := range bucket {
+		if s.work != nil {
+			s.work.peerRows++
+		}
+		selected[identity.partition] = append(selected[identity.partition], identity.key)
+	}
+}
+
+// Preserve the former partition/key event order while visiting only records
+// owned by the selected ASes. No index survives its authoritative record.
+func (s *ssnmState) retireSelectedPeerRecordsLocked(selected map[SSNMPartition][]peerCongestionKey) {
+	partitions := make([]SSNMPartition, 0, len(selected))
+	for partition := range selected {
+		partitions = append(partitions, partition)
+	}
+	sortSSNMPartitions(partitions)
+	for _, partition := range partitions {
+		keys := selected[partition]
+		slices.SortFunc(keys, comparePeerCongestionKeys)
+		for _, key := range keys {
+			s.retirePeerRecordLocked(s.partitions[partition], key)
+		}
 	}
 }
 

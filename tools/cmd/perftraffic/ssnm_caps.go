@@ -8,16 +8,20 @@ import (
 
 // Accounted bytes of one queued SSNM event, from the documented contract of
 // SSNMStateConfig.SubscriptionQueueBytes: "Accounting charges 512 bytes per
-// event, 8 per report destination, 256 per updated destination, 16 per invalidation entry, 4 per
+// event, 8 per report destination, 320 per updated destination, 16 per invalidation entry, 4 per
 // Routing Context in the report and both dimensions of each update, and the
 // byte lengths of Reason and the event/report partition identity strings."
-// Each peer congestion delta additionally costs 256 bytes and 4 bytes per RC.
+// Each peer congestion delta and each validity-source record additionally
+// costs 256 bytes and 4 bytes per RC. Each source-removal identity costs 48
+// bytes, independently of the 16-byte destination dimension identity.
+// Each compact expiry identity costs 56 bytes, with no retained value replay.
 // The fixture recomputes them from delivered events as an independent
 // observer; the continuity-loss marker is outside the accounting.
 const (
 	ssnmEventBaseBytes           = 512
 	ssnmEventDestinationBytes    = 8
-	ssnmEventUpdateBytes         = 256
+	ssnmEventUpdateBytes         = 320
+	ssnmEventSourceBytes         = 256
 	ssnmEventRoutingContextBytes = 4
 )
 
@@ -25,20 +29,29 @@ const (
 func ssnmEventBytes(event m3ua.SSNMEvent) int {
 	contexts := len(event.Report.Scope.RoutingContexts)
 	peerBytes := 0
+	sourceBytes := 0
 	if event.PeerCongestion != nil {
-		peerBytes = ssnmEventUpdateBytes
+		peerBytes = ssnmEventSourceBytes
 		contexts += len(event.PeerCongestion.Scope.RoutingContexts)
 	}
 	for _, update := range event.Updated {
 		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
+		sourceBytes += ssnmEventSourceBytes * (len(update.CongestionSources) + len(update.AvailabilitySources))
+		for _, source := range update.AvailabilitySources {
+			contexts += len(source.Scope.RoutingContexts)
+		}
+		for _, source := range update.CongestionSources {
+			contexts += len(source.Scope.RoutingContexts)
+		}
 	}
 
 	identities := len(event.Partition.SignallingGateway) + len(event.Partition.ApplicationServer) +
 		len(event.Report.Partition.SignallingGateway) + len(event.Report.Partition.ApplicationServer)
 	return ssnmEventBaseBytes +
-		peerBytes +
+		peerBytes + sourceBytes +
 		ssnmEventDestinationBytes*len(event.Report.Destinations) +
-		ssnmEventUpdateBytes*len(event.Updated) + 16*len(event.Invalidated) +
+		ssnmEventUpdateBytes*len(event.Updated) + 16*len(event.Invalidated) + 48*(len(event.CongestionSourcesInvalidated)+len(event.AvailabilitySourcesInvalidated)) +
+		56*len(event.Expired) +
 		ssnmEventRoutingContextBytes*contexts +
 		len(event.Reason) + identities
 }

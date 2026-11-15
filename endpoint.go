@@ -49,21 +49,22 @@ type Endpoint struct {
 	transport  *transportCongestionMonitor
 	ipspMTP    *ipspMTPState
 
-	mu                sync.Mutex
-	closed            bool
-	closeErr          error
-	listeners         map[*Listener]struct{}
-	associations      map[*Association]struct{}
-	associationsByID  map[AssociationID]*Association
-	nextAssociationID AssociationID
-	done              chan struct{}
-	ctx               context.Context
-	cancel            context.CancelCauseFunc
-	operations        sync.WaitGroup
-	as                *applicationServers
-	aspRoutes         *aspRoutes
-	nif               *nifAvailability
-	destinations      *destinations
+	mu                       sync.Mutex
+	closed                   bool
+	closeErr                 error
+	listeners                map[*Listener]struct{}
+	associations             map[*Association]struct{}
+	associationsByID         map[AssociationID]*Association
+	nextAssociationID        AssociationID
+	done                     chan struct{}
+	ctx                      context.Context
+	cancel                   context.CancelCauseFunc
+	operations               sync.WaitGroup
+	congestionAutomationDone <-chan struct{}
+	as                       *applicationServers
+	aspRoutes                *aspRoutes
+	nif                      *nifAvailability
+	destinations             *destinations
 	// destinationRecords is the SGP record budget, applied to this Endpoint's
 	// store and to every Listener store it owns. Zero selects the default.
 	destinationRecords int
@@ -159,6 +160,8 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		if err != nil {
 			return nil, err
 		}
+		ssnm.validity = congestion.validity
+		ssnm.auditing = congestion.auditing
 		if routes != nil {
 			routes.ssnm = ssnm
 		}
@@ -198,6 +201,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 				snapshotApplicationServerConfig(config.ApplicationServers),
 			)
 		}
+		endpoint.startCongestionAutomation()
 		return endpoint, nil
 	default:
 		return nil, ErrUnsupportedRole
@@ -298,7 +302,7 @@ func (e *Endpoint) trackAssociationLocked(association *Association) bool {
 	e.nextAssociationID++
 	association.managementID.Store(uint64(e.nextAssociationID))
 	association.endpoint = e
-	e.ssnm.registerSource(e.nextAssociationID)
+	e.ssnm.registerSource(e.nextAssociationID, association.Epoch())
 	e.associations[association] = struct{}{}
 	e.associationsByID[e.nextAssociationID] = association
 	if association.sctpConn != nil {

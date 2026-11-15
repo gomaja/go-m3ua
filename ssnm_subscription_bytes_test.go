@@ -13,7 +13,7 @@ import (
 
 var (
 	_ [ssnmEventBaseBytes - int(unsafe.Sizeof(queuedSSNMEvent{}))]byte
-	_ [ssnmEventStateBytes - int(unsafe.Sizeof(SSNMDestinationKnowledge{}))]byte
+	_ [ssnmEventUpdateBytes - int(unsafe.Sizeof(SSNMDestinationKnowledge{}))]byte
 	_ [ssnmEventDestinationBytes - int(unsafe.Sizeof(PointCodeRange{}))]byte
 )
 
@@ -77,10 +77,10 @@ func TestSSNMEventAccountedBytesIncludesVariableData(testContext *testing.T) {
 	}{
 		{"base", SSNMEvent{}, 0},
 		{"destinations", SSNMEvent{Report: SSNMReport{Destinations: make([]PointCodeRange, 2)}}, 16},
-		{"states", SSNMEvent{Updated: make([]SSNMDestinationKnowledge, 2)}, 512},
+		{"states", SSNMEvent{Updated: make([]SSNMDestinationKnowledge, 2)}, 640},
 		{"report scope", SSNMEvent{Report: SSNMReport{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}, 8},
-		{"availability scope", SSNMEvent{Updated: []SSNMDestinationKnowledge{{Availability: SSNMAvailability{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 264},
-		{"congestion scope", SSNMEvent{Updated: []SSNMDestinationKnowledge{{Congestion: SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 264},
+		{"availability scope", SSNMEvent{Updated: []SSNMDestinationKnowledge{{Availability: SSNMAvailability{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 328},
+		{"congestion scope", SSNMEvent{Updated: []SSNMDestinationKnowledge{{Congestion: SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{1, 2}}}}}}, 328},
 		{"reason", SSNMEvent{Reason: "reason"}, 6},
 		{"partition SG", SSNMEvent{Partition: SSNMPartition{SignallingGateway: "gateway"}}, 7},
 		{"partition AS", SSNMEvent{Partition: SSNMPartition{ApplicationServer: "server"}}, 6},
@@ -301,7 +301,7 @@ func TestSSNMSubscriptionOwnedPayloadAndByteRelease(testContext *testing.T) {
 	event.Report.Destinations[0].PointCode = 99
 	event.Updated[0].Availability.Scope.RoutingContexts[0] = 99
 	event.Updated[0].Congestion.Scope.RoutingContexts[0] = 99
-	if subscription.queuedBytes != 512+8+256+12 {
+	if subscription.queuedBytes != 512+8+320+12 {
 		testContext.Fatalf("retained byte cost = %d", subscription.queuedBytes)
 	}
 	owned, ready, err := subscription.take()
@@ -360,7 +360,7 @@ func FuzzSSNMEventByteAccounting(fuzzContext *testing.F) {
 			Report:  SSNMReport{Destinations: make([]PointCodeRange, int(input[0])%32), Scope: WireScope{RoutingContexts: make([]uint32, int(input[1])%16)}},
 			Updated: make([]SSNMDestinationKnowledge, int(input[2])%8),
 		}
-		want := 512 + len(input) + 8*len(event.Report.Destinations) + 4*len(event.Report.Scope.RoutingContexts) + 256*len(event.Updated)
+		want := 512 + len(input) + 8*len(event.Report.Destinations) + 4*len(event.Report.Scope.RoutingContexts) + 320*len(event.Updated)
 		for index := range event.Updated {
 			event.Updated[index].Availability.Scope.RoutingContexts = make([]uint32, index%4)
 			event.Updated[index].Congestion.Scope.RoutingContexts = make([]uint32, index%3)

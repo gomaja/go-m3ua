@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
 	"github.com/gomaja/go-m3ua/messages/params"
@@ -44,6 +45,10 @@ type NetworkCongestionProfile struct {
 // CongestionConfig selects immutable method profiles. Default.Method is required
 // for every role; there is no inferred method. Duplicate selectors are invalid.
 type CongestionConfig struct {
+	// Validity enables local expiry of received congestion; nil disables it.
+	Validity *CongestionValidityConfig
+	// Auditing enables optional ASP audits; nil disables them.
+	Auditing *DestinationAuditConfig
 	Default  CongestionProfile
 	Networks []NetworkCongestionProfile
 }
@@ -53,6 +58,8 @@ type CongestionConfig struct {
 var ErrCongestionMethodMismatch = errors.New("congestion methods differ across route alternatives")
 
 type congestionMethodConfig struct {
+	validity       time.Duration
+	auditing       *DestinationAuditConfig
 	defaultProfile CongestionProfile
 	networks       []NetworkCongestionProfile
 	routeProfiles  map[MTPRouteID]CongestionProfile
@@ -127,7 +134,11 @@ func newCongestionMethodConfig(role Role, input *CongestionConfig, routes *aspRo
 	if err = validateCongestionProfiles(input.Networks, role, routes, false); err != nil {
 		return nil, err
 	}
-	return &congestionMethodConfig{defaultProfile: profile, networks: snapshotCongestionProfiles(input.Networks)}, nil
+	after, audits, err := resolveCongestionAutomation(role, input)
+	if err != nil {
+		return nil, err
+	}
+	return &congestionMethodConfig{validity: after, auditing: audits, defaultProfile: profile, networks: snapshotCongestionProfiles(input.Networks)}, nil
 }
 
 func lookupCongestionProfile(table []NetworkCongestionProfile, peer *SGPIdentity, key ASKey) (CongestionProfile, bool) {
@@ -349,7 +360,7 @@ func methodPermits(profile CongestionProfile, mp uint8, status aspSelectionStatu
 	if profile.Method != CongestionNationalWithPriorities {
 		return true
 	}
-	if status.transportUnknown || status.congested && !status.congestionLevelSet {
+	if status.transportUnknown || status.receivedUnknown || status.congested && !status.congestionLevelSet {
 		return false
 	}
 	return !status.congested || mp >= minCongestionLevel(status.congestionLevel, profile.MaxLevel)
@@ -397,8 +408,14 @@ func (c *Association) validateMethodData(key ASKey, payload *params.ProtocolData
 		status.congestionLevel = received.Congestion.Level
 		status.congestionLevelSet = received.Congestion.LevelSet
 	}
-	if _, canonical := c.canonicalRemoteASFor(key); canonical && c.ssnmStore() != nil {
-		status = c.ssnmStore().destinationKnowledge(c.ssnmPartitionFor(key), payload.DestinationPointCode)
+	if _, canonical := c.canonicalRemoteASFor(key); c.ssnmStore() != nil && (canonical || c.ssnmStore().validity > 0) {
+		if canonical {
+			// Direct DATA shares its configured SG/AS view across peer-local
+			// labels, just as route selection does (RFC 4666 §§1.2, 3.3.1).
+			status = c.ssnmStore().destinationKnowledge(c.ssnmPartitionFor(key), payload.DestinationPointCode)
+		} else {
+			status = c.ssnmStore().destinationKnowledge(c.ssnmPartitionFor(key), payload.DestinationPointCode, key)
+		}
 	}
 	status = methodTransportStatus(c, status)
 	if !methodPermits(profile, payload.MessagePriority, status) {

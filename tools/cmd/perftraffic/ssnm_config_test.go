@@ -122,9 +122,9 @@ func TestSSNMFlagsRejectInvalidCombinations(testContext *testing.T) {
 		"negative queue bytes":      {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=-1"), "must not be negative"},
 		"queue bytes below library": {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=511"), "at least 512"},
 		// The full store's preload message names 1,024 destinations:
-		// 516 + 1,024 x 268 accounted bytes.
-		"queue bytes below preload": {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=274947"), "cannot hold the 1024-destination preload message, 274948 accounted bytes"},
-		"small store preload":       {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69123"), "cannot hold the 256-destination preload message, 69124"},
+		// 516 + 1,024 x 332 accounted bytes.
+		"queue bytes below preload": {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-subscription-queue-bytes=340483"), "cannot hold the 1024-destination preload message, 340484 accounted bytes"},
+		"small store preload":       {ssnmSenderArguments("-ssnm-total-rate=10", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=85507"), "cannot hold the 256-destination preload message, 85508"},
 	}
 	for name, testCase := range cases {
 		testContext.Run(name, func(testContext *testing.T) {
@@ -183,7 +183,7 @@ func TestSSNMSubscriptionQueueBytesReachStoreAndSpec(testContext *testing.T) {
 	}{
 		{"library default", ssnmSenderArguments("-ssnm-total-rate=1000"), 1 << 20},
 		{"byte-binding F3", ssnmSenderArguments("-ssnm-total-rate=1000", "-ssnm-records=256", "-pause-subscriber=5s/10s", "-ssnm-subscription-queue-bytes=98304"), 98_304},
-		{"exactly one preload message", ssnmSenderArguments("-ssnm-total-rate=1000", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=69124"), 69_124},
+		{"exactly one preload message", ssnmSenderArguments("-ssnm-total-rate=1000", "-ssnm-records=256", "-ssnm-subscription-queue-bytes=85508"), 85_508},
 	} {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
 			config, err := parseConfig(nationalCongestionArguments(testCase.arguments))
