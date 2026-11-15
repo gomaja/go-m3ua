@@ -1007,7 +1007,7 @@ func (c *Association) applySSNM(
 		return nil
 	}
 
-	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope)
+	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope, report.Kind)
 	if err != nil {
 		return err
 	}
@@ -1093,9 +1093,10 @@ func (c *Association) applySSNM(
 // The count comes from the encoded parameter, so a message naming more point
 // codes than this node accepts costs nothing proportional to what the peer
 // claimed. Exceeding the bound is a local resource condition rather than a
-// fault in the message: it is reported as loss, the partitions it concerned
-// are invalidated, and no prefix of it is applied.
-func (c *Association) ssnmAffectedPointCodes(apc *params.Param, scope WireScope, peerRefusal ...peerCongestionRefusal) ([]uint32, []uint8, error) {
+// fault in the message: it is reported as loss, overlapping destination
+// knowledge is invalidated for reports, and no prefix is applied. DAUD removes
+// no knowledge (RFC 4666 §4.5.3).
+func (c *Association) ssnmAffectedPointCodes(apc *params.Param, scope WireScope, kind SSNMReportKind, peerRefusal ...peerCongestionRefusal) ([]uint32, []uint8, error) {
 	if apc == nil {
 		return nil, nil, ErrMissingAffectedPointCode
 	}
@@ -1104,7 +1105,7 @@ func (c *Association) ssnmAffectedPointCodes(apc *params.Param, scope WireScope,
 		return nil, nil, ErrMissingAffectedPointCode
 	}
 	if limit := c.ssnmAffectedPointCodeLimit(); count > limit {
-		return nil, nil, c.refuseOversizedSSNM(scope, count, limit, peerRefusal...)
+		return nil, nil, c.refuseOversizedSSNM(scope, count, limit, kind, peerRefusal...)
 	}
 	pcs := apc.AffectedPointCodes()
 	if len(pcs) == 0 {
@@ -1153,7 +1154,7 @@ func (c *Association) reportSSNM(
 			peerRefusal = []peerCongestionRefusal{c.ssnmStore().captureUnresolvedPeerCongestionRefusal(c.ID(), peerAdmission.epoch, report.Scope)}
 		}
 	}
-	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope, peerRefusal...)
+	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope, report.Kind, peerRefusal...)
 	if err != nil {
 		return err
 	}
@@ -1640,7 +1641,7 @@ func (c *Association) handleDestinationStateAudit(d *messages.DestinationStateAu
 	}
 
 	scope := c.ssnmWireScope(d.NetworkAppearance, d.RoutingContext)
-	pcs, masks, err := c.ssnmAffectedPointCodes(d.AffectedPointCode, scope)
+	pcs, masks, err := c.ssnmAffectedPointCodes(d.AffectedPointCode, scope, SSNMDestinationStateAuditReport)
 	if err != nil {
 		return err
 	}

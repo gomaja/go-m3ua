@@ -352,7 +352,8 @@ func (c *Association) publishSSNMReport(report SSNMReport) error {
 		return nil
 	}
 	report.Association = c.ID()
-	partitions := c.ssnmPartitionsForScope(report.Scope)
+	resolution := c.captureSSNMDestinationRefusal(report.Scope, false)
+	partitions := c.ssnmPartitionsForResolution(report.Scope, resolution)
 	bindings := make(map[SSNMPartition]bool)
 	for _, binding := range c.ssnmBindingScopes() {
 		bindings[binding.partition] = binding.pending
@@ -373,7 +374,7 @@ func (c *Association) publishSSNMReport(report SSNMReport) error {
 		}
 		scoped := report
 		scoped.Partition = partition
-		if err := store.apply(scoped); err != nil && firstErr == nil {
+		if err := store.apply(scoped, resolution.byPartition[partition]); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -425,17 +426,19 @@ func (c *Association) ssnmAffectedPointCodeLimit() int {
 //
 // Nothing is sent to the peer: the message is well formed, and RFC 4666
 // Section 3.8.1 has no Error condition for a receiver unwilling to expand it.
-// The partitions it concerned are invalidated because their retained state may
-// now contradict a report this node declined to read; every other partition is
-// left alone. Peer congestion is independent: only an ASP SCON refusal carrying
-// its captured admission can retire the affected peer inputs.
-func (c *Association) refuseOversizedSSNM(scope WireScope, count, limit int, peerRefusal ...peerCongestionRefusal) error {
+// Retained dimensions in its resolved AS/network scope are invalidated because
+// they may contradict a report this node declined to read. Unresolved scope
+// invalidates the selected partitions whole. DAUD is a query and removes no
+// knowledge (RFC 4666 §4.5.3). Peer congestion is independent: only an ASP SCON
+// refusal carrying its captured admission can retire the affected peer inputs.
+func (c *Association) refuseOversizedSSNM(scope WireScope, count, limit int, kind SSNMReportKind, peerRefusal ...peerCongestionRefusal) error {
 	store := c.ssnmStore()
 	if store == nil {
 		return ErrSSNMOversizedReport
 	}
-	partitions := c.ssnmPartitionsForScope(scope)
-	err := store.oversized(partitions, count, limit, c.ID(), peerRefusal...)
+	resolution := c.captureSSNMDestinationRefusal(scope, kind == SSNMDestinationStateAuditReport)
+	partitions := c.ssnmPartitionsForResolution(scope, resolution)
+	err := store.oversized(partitions, count, limit, c.ID(), resolution, peerRefusal...)
 	if c.endpoint != nil && c.endpoint.aspRoutes != nil {
 		c.endpoint.aspRoutes.canonicalStateChanged(partitions)
 	}

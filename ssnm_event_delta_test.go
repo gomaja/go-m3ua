@@ -183,11 +183,30 @@ func (r *ssnmReplica) apply(event SSNMEvent) error {
 		}
 		delete(r.partitions, event.Partition)
 		r.partitionsInvalidated++
-	case SSNMPartitionInvalidatedEvent:
+	case SSNMDestinationsInvalidatedEvent:
+		for _, candidate := range r.partitions {
+			if candidate.epoch == event.Epoch {
+				partition = candidate
+				break
+			}
+		}
 		if partition == nil {
 			return errors.New("invalidated an unknown partition")
 		}
-		clear(partition.destinations)
+		for _, removed := range event.Invalidated {
+			value := partition.destinations[removed.Destination]
+			if removed.AvailabilityRemoved {
+				value.Availability, value.AvailabilitySet = SSNMAvailability{}, false
+			}
+			if removed.CongestionRemoved {
+				value.Congestion, value.CongestionSet = SSNMCongestion{}, false
+			}
+			if !value.AvailabilitySet && !value.CongestionSet {
+				delete(partition.destinations, removed.Destination)
+			} else {
+				partition.destinations[removed.Destination] = value
+			}
+		}
 		r.partitionsInvalidated++
 	case SSNMResourceLossEvent:
 		r.lastResourceLoss = event.Reason
@@ -633,7 +652,7 @@ func (w *ssnmDeltaWorld) step() string {
 			}
 		}
 		association := w.sources[w.random.IntN(len(w.sources))]
-		if err := w.store.oversized(partitions, 2000, 1024, association); !errors.Is(err, ErrSSNMOversizedReport) {
+		if err := w.store.oversized(partitions, 2000, 1024, association, ssnmDestinationRefusal{}); !errors.Is(err, ErrSSNMOversizedReport) {
 			panic(err)
 		}
 		return fmt.Sprintf("oversized SSNM for %d partitions", len(partitions))
@@ -706,7 +725,7 @@ func TestSSNMEventDeltasReplayToKnowledge(t *testing.T) {
 				}
 				for _, kind := range []SSNMEventKind{
 					SSNMReportEvent, SSNMBindingAdmittedEvent, SSNMBindingActivatedEvent, SSNMBindingRetiredEvent,
-					SSNMPartitionRetiredEvent, SSNMPartitionInvalidatedEvent, SSNMResourceLossEvent,
+					SSNMPartitionRetiredEvent, SSNMDestinationsInvalidatedEvent, SSNMResourceLossEvent,
 				} {
 					if healthy.kinds[kind] == 0 {
 						t.Errorf("the run never exercised a %v event", kind)

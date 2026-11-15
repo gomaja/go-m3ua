@@ -310,7 +310,7 @@ func TestDelayedOversizedPeerSCONCannotEraseReplacementKnowledge(t *testing.T) {
 				endpoint.ssnm.retireAssociation(peer.ID())
 			}
 			before := endpoint.SSNMKnowledge()
-			if err := peer.refuseOversizedSSNM(scope, 2, 1, refusal); !errors.Is(err, ErrSSNMOversizedReport) {
+			if err := peer.refuseOversizedSSNM(scope, 2, 1, SSNMSignallingCongestionReport, refusal); !errors.Is(err, ErrSSNMOversizedReport) {
 				t.Fatal(err)
 			}
 			if after := endpoint.SSNMKnowledge(); !reflect.DeepEqual(before.PeerCongestion, after.PeerCongestion) {
@@ -344,8 +344,12 @@ func TestOversizedRefusalKeepsPeerAndDestinationAccountingSeparate(t *testing.T)
 				t.Fatal(err)
 			}
 			after := endpoint.SSNMKnowledge()
-			if len(ssnmPartitionKnowledge(t, after, partition).Destinations) != 0 || after.PartitionsInvalidated != before.PartitionsInvalidated+1 {
-				t.Fatalf("existing authoritative invalidation changed: %+v", after)
+			if peerSCON {
+				if len(ssnmPartitionKnowledge(t, after, partition).Destinations) != 0 || after.PartitionsInvalidated != before.PartitionsInvalidated+1 {
+					t.Fatalf("scoped report did not invalidate destination authority: %+v", after)
+				}
+			} else if !reflect.DeepEqual(before.Partitions, after.Partitions) || after.PartitionsInvalidated != before.PartitionsInvalidated {
+				t.Fatal("DAUD discarded authoritative knowledge")
 			}
 			if !peerRetentionHasRecord(after, peer.ID(), second) {
 				t.Fatal("destination invalidation erased independent RC2 peer record")
@@ -353,15 +357,7 @@ func TestOversizedRefusalKeepsPeerAndDestinationAccountingSeparate(t *testing.T)
 			if !peerSCON && !reflect.DeepEqual(before.PeerCongestion, after.PeerCongestion) {
 				t.Fatal("DAUD destination invalidation erased peer state")
 			}
-			retainedBytes := 0
-			for _, record := range after.PeerCongestion {
-				retainedBytes += peerCongestionRecordBytes(record)
-			}
-			endpoint.ssnm.mu.Lock()
-			if endpoint.ssnm.records != len(after.PeerCongestion) || endpoint.ssnm.bytes != len(after.Partitions)*ssnmPartitionBaseBytes+retainedBytes {
-				t.Errorf("mixed invalidation accounting: records %d bytes %d", endpoint.ssnm.records, endpoint.ssnm.bytes)
-			}
-			endpoint.ssnm.mu.Unlock()
+			assertSSNMScopeAccounting(t, endpoint)
 		})
 	}
 }

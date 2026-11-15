@@ -57,7 +57,9 @@ func TestSSNMEventBytesFollowsTheDocumentedFormula(testContext *testing.T) {
 		// 512 + len("record budget exhausted") = 512 + 23.
 		{"resource loss reason", m3ua.SSNMEvent{Kind: m3ua.SSNMResourceLossEvent, Reason: "record budget exhausted"}, 535},
 		// 512 + len("stale") + len("sg-a") + len("as-core") = 512 + 5 + 4 + 7.
-		{"invalidation reason and partition", m3ua.SSNMEvent{Kind: m3ua.SSNMPartitionInvalidatedEvent, Partition: canonical, Reason: "stale"}, 528},
+		{"invalidation reason and partition", m3ua.SSNMEvent{Kind: m3ua.SSNMDestinationsInvalidatedEvent, Partition: canonical, Reason: "stale"}, 528},
+		{"scoped invalidation dimensions", m3ua.SSNMEvent{Kind: m3ua.SSNMDestinationsInvalidatedEvent,
+			Invalidated: []m3ua.SSNMDestinationInvalidation{{AvailabilityRemoved: true, CongestionRemoved: true}}}, 512 + 16},
 		// Byte lengths, not runes: "état" is five bytes.
 		{"reason counted in bytes", m3ua.SSNMEvent{Kind: m3ua.SSNMResourceLossEvent, Reason: "état"}, 517},
 		// 512 + 1024*(8 + 256 + 4) + 4.

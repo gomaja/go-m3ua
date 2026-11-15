@@ -179,7 +179,7 @@ func (input ssnmOperationInput) validate(association *Association) error {
 	if !allowed || !association.ssnmAllowedDuringActivation() {
 		return errors.New("fixture report is not admitted")
 	}
-	_, _, err = association.ssnmAffectedPointCodes(input.affected, association.ssnmWireScope(input.appearance, input.routingContext))
+	_, _, err = association.ssnmAffectedPointCodes(input.affected, association.ssnmWireScope(input.appearance, input.routingContext), SSNMDestinationUnavailableReport)
 	return err
 }
 

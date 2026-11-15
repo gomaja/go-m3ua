@@ -105,8 +105,8 @@ const SSNMDestinationRestrictedReport
 const SSNMDestinationStateAuditReport
 const SSNMDestinationUnavailableReport
 const SSNMDestinationUserPartUnavailableReport
+const SSNMDestinationsInvalidatedEvent
 const SSNMLocalReport
-const SSNMPartitionInvalidatedEvent
 const SSNMPartitionRetiredEvent
 const SSNMPeerCongestionEvent
 const SSNMPeerReport
@@ -538,6 +538,9 @@ field SSNMDeliveryError.Failed
 field SSNMDeliveryError.Successful
 field SSNMDeliveryFailure.Association
 field SSNMDeliveryFailure.Cause
+field SSNMDestinationInvalidation.AvailabilityRemoved
+field SSNMDestinationInvalidation.CongestionRemoved
+field SSNMDestinationInvalidation.Destination
 field SSNMDestinationKnowledge.Availability
 field SSNMDestinationKnowledge.AvailabilitySet
 field SSNMDestinationKnowledge.Congestion
@@ -546,6 +549,7 @@ field SSNMDestinationKnowledge.Destination
 field SSNMEvent.Binding
 field SSNMEvent.ContinuityLost
 field SSNMEvent.Epoch
+field SSNMEvent.Invalidated
 field SSNMEvent.Kind
 field SSNMEvent.Partition
 field SSNMEvent.PeerCongestion
@@ -810,6 +814,7 @@ method RoutingContextError.Error
 method RoutingContextError.Is
 method SSNMDeliveryError.Error
 method SSNMDeliveryError.Unwrap
+method SSNMEvent.ApplyInvalidation
 method SSNMEventKind.String
 method SSNMPartitionKind.String
 method SSNMReportKind.String
@@ -948,6 +953,7 @@ type SSNMBinding struct
 type SSNMCongestion struct
 type SSNMDeliveryError struct
 type SSNMDeliveryFailure struct
+type SSNMDestinationInvalidation struct
 type SSNMDestinationKnowledge struct
 type SSNMEvent struct
 type SSNMEventKind

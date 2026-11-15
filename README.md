@@ -1235,7 +1235,12 @@ report event's `Updated` holds only the destinations that report wrote, each
 with both dimensions as retained afterwards, so it replaces those entries of
 `event.Partition` and leaves every other destination alone. Binding events set
 or remove `event.Binding`; `SSNMPartitionRetiredEvent` drops the partition and
-`SSNMPartitionInvalidatedEvent` drops its destinations. A one-destination report
+`SSNMDestinationsInvalidatedEvent` identifies the partition by `Epoch`, with
+`Partition` empty. Its `Invalidated` entries contain destination keys and removal
+flags. Call `event.ApplyInvalidation(&snapshot.Partitions[i])` on the partition
+whose epoch matches; the method preserves other dimensions and bindings.
+`SSNMPartitionInvalidatedEvent` is removed, so old whole-partition consumers
+must migrate. A one-destination report
 therefore costs the same however much the partition holds. The whole view comes
 only from the snapshot, which `Resync` replaces.
 
@@ -1269,8 +1274,21 @@ recovery and another peer's report do not clear these records. Association reset
 withdrawal and binding retirement remove only the affected peer records.
 An oversized peer SCON retires only its resolved AS and overlapping network
 scope; only unresolved scope permits association-wide peer retirement.
-Oversized DAUD and non-peer reports preserve peer congestion. Authoritative
-SS7 destination invalidation keeps its existing partition scope.
+Oversized DAUD preserves all retained knowledge: it is a query (RFC 4666
+§4.5.3). Non-peer reports preserve peer congestion. An oversized report drops
+only destination dimensions overlapping its resolved AS and Network Appearance,
+including on a shared standalone partition. Only unresolved scope invalidates
+the selected partition whole. `PartitionsInvalidated` counts destination invalidation publications, with
+large custom partitions split into batches of at most 2,048 entries; peer-only
+loss uses peer removal deltas.
+Last-binding retirement keeps its existing counter semantics.
+Records retain the scope resolved at admission, so deregistration or RC reuse
+cannot reinterpret historical omitted NA. Resync returns the survivors; it
+cannot recover knowledge discarded on refusal. An invalidation publication is
+at most `512 + 160 + 2048*16 = 33,440` accounted bytes, below the default 1 MiB
+queue. It repeats neither RC lists nor configured identity strings. Total queued
+bursts and smaller custom queues can still lose continuity. Destination record
+accounting is 128 fixed bytes, 4 per wire RC, and 16 per resolved AS entry.
 
 Apply `SSNMPeerCongestionEvent` using `event.PeerCongestion` and
 `event.PeerCongestionRemoved`, and replace this part of the view on `Resync`.
