@@ -5,10 +5,10 @@
 package m3ua
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -42,7 +42,7 @@ func TestActiveFIFOTransientFailureRetriesAndRetainsGlobalBudget(t *testing.T) {
 		retryReleaseOnce.Do(func() { close(retryRelease) })
 	})
 	var secondAttempts atomic.Int32
-	want := errors.New("transient active FIFO write failure")
+	want := fmt.Errorf("transient active FIFO write failure: %w", syscall.EAGAIN)
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		data, ok := message.(*messages.Data)
 		if !ok {
@@ -163,7 +163,7 @@ func TestActiveFIFOFailureEnteringPendingIsRetainedBeforeRecoveryExpiry(t *testi
 		}
 	})
 	var secondAttempts atomic.Int32
-	want := errors.New("active FIFO write failed while AS-PENDING")
+	want := fmt.Errorf("active FIFO write failed while AS-PENDING: %w", syscall.EAGAIN)
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		data, ok := message.(*messages.Data)
 		if !ok {
@@ -280,7 +280,7 @@ func TestActiveFIFOFailureAfterRecoveryExpiryIsDiscardedAndReleasesGlobalBudget(
 		}
 	})
 	var secondAttempts atomic.Int32
-	want := errors.New("active FIFO write failed after T(r)")
+	want := fmt.Errorf("active FIFO write failed after T(r): %w", syscall.EAGAIN)
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		data, ok := message.(*messages.Data)
 		if !ok {

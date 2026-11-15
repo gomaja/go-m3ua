@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -659,7 +660,7 @@ func TestExpiredInFlightRecoveryDataIsNeverResurrected(t *testing.T) {
 	writeEntered := make(chan struct{})
 	writeRelease := make(chan struct{})
 	var once sync.Once
-	want := errors.New("blocked recovery write failed")
+	want := fmt.Errorf("blocked recovery write failed: %w", syscall.EAGAIN)
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		if _, ok := message.(*messages.Data); ok {
 			once.Do(func() { close(writeEntered) })
@@ -703,7 +704,7 @@ func TestRecoveryDrainRetriesWithoutNewTraffic(t *testing.T) {
 
 	firstAttempt := make(chan struct{})
 	var attempts atomic.Int32
-	want := errors.New("transient recovery write failure")
+	want := fmt.Errorf("transient recovery write failure: %w", syscall.EAGAIN)
 	asp.signalWriter = func(message messages.M3UA) (int, error) {
 		if _, ok := message.(*messages.Data); ok && attempts.Add(1) == 1 {
 			close(firstAttempt)
@@ -738,7 +739,7 @@ func TestBroadcastRecoveryRetriesOnlyFailedRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := errors.New("transient second-recipient failure")
+	want := fmt.Errorf("transient second-recipient failure: %w", syscall.EAGAIN)
 	var secondAttempts atomic.Int32
 	second.signalWriter = func(message messages.M3UA) (int, error) {
 		if _, ok := message.(*messages.Data); ok && secondAttempts.Add(1) == 1 {

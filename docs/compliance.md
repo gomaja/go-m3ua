@@ -210,6 +210,34 @@ The TEST-NET-1 timeout target was routed through an isolated Linux test
 interface so Docker transport translation could not reject SCTP before the
 kernel exercised the intended silent-peer timeout path.
 
+## SGP peer congestion boundary
+
+RFC 4666 §§1.3.2.4 and 1.4.2.4 describe retaining remote ASP congestion and
+considering it in distribution. The SGP provides bounded independent peer
+retention, `SSNMSnapshot.PeerCongestion`, peer upsert/removal deltas and
+`Resync` through the existing SSNM continuity barrier. Existing record and byte
+budgets include these records; over-budget reports are refused atomically with
+visible resource-loss accounting. Peer clear is distinct from unknown, and
+lifecycle retirement removes only the affected association epoch/AS scopes.
+Peer reports never replace authoritative SS7 state or change DAUD replies.
+
+`Endpoint.CongestionInputs` exposes copied membership, peer and transport
+components with their versions and a bounded-retry `Consistent` result;
+`Revision` is SSNM-only. It has no Local contribution field or cluster-wide
+atomicity claim. `SGPCongestionPolicy` is an application veto outside Endpoint,
+AS and delivery locks, revalidated once before delivery; a still-stale decision
+is known-not-sent `ErrCongestionDecisionStale`.
+
+Optional `SGPConfig.PreferUncongestedPeers` ranks admitted loadshare members by
+maximum peer/transport severity after choosing the latest matching peer record
+by `Revision`; newer matching clears supersede older ranges. Equal-rank SLS
+selection retains the original active-member order. The default is false;
+override retains its active member and broadcast exposes each required member's veto explicitly.
+Rerouting can missequence SLS traffic (RFC 4666 §1.4.7). RFC 4666 §1.4.6 makes
+TFC triggering implementation dependent: SPMC assessment, alternate capacity,
+SS7 encoding/transmission and inter-SGP coordination remain application/NIF
+responsibilities. No automatic TFC API or SPMC verdict is claimed.
+
 ## Declared DAUD congestion profile deviation
 
 RFC 4666 §4.5.3 says:

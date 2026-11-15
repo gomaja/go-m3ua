@@ -294,6 +294,9 @@ func (c *Association) syncSSNMBindings() {
 	if store == nil {
 		return
 	}
+	if c.role == RoleSGP {
+		c.syncPeerCongestionBindings()
+	}
 	scopes := c.ssnmBindingScopes()
 	held := make(map[SSNMPartition]struct{}, len(scopes))
 	for _, scope := range scopes {
@@ -424,14 +427,15 @@ func (c *Association) ssnmAffectedPointCodeLimit() int {
 // Section 3.8.1 has no Error condition for a receiver unwilling to expand it.
 // The partitions it concerned are invalidated because their retained state may
 // now contradict a report this node declined to read; every other partition is
-// left alone.
-func (c *Association) refuseOversizedSSNM(scope WireScope, count, limit int) error {
+// left alone. Peer congestion is independent: only an ASP SCON refusal carrying
+// its captured admission can retire the affected peer inputs.
+func (c *Association) refuseOversizedSSNM(scope WireScope, count, limit int, peerRefusal ...peerCongestionRefusal) error {
 	store := c.ssnmStore()
 	if store == nil {
 		return ErrSSNMOversizedReport
 	}
 	partitions := c.ssnmPartitionsForScope(scope)
-	err := store.oversized(partitions, count, limit, c.ID())
+	err := store.oversized(partitions, count, limit, c.ID(), peerRefusal...)
 	if c.endpoint != nil && c.endpoint.aspRoutes != nil {
 		c.endpoint.aspRoutes.canonicalStateChanged(partitions)
 	}

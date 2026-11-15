@@ -11,6 +11,7 @@ import (
 // event, 8 per report destination, 256 per updated destination, 4 per
 // Routing Context in the report and both dimensions of each update, and the
 // byte lengths of Reason and the event/report partition identity strings."
+// Each peer congestion delta additionally costs 256 bytes and 4 bytes per RC.
 // The fixture recomputes them from delivered events as an independent
 // observer; the continuity-loss marker is outside the accounting.
 const (
@@ -23,12 +24,18 @@ const (
 // ssnmEventBytes is the accounted size of one delivered event.
 func ssnmEventBytes(event m3ua.SSNMEvent) int {
 	contexts := len(event.Report.Scope.RoutingContexts)
+	peerBytes := 0
+	if event.PeerCongestion != nil {
+		peerBytes = ssnmEventUpdateBytes
+		contexts += len(event.PeerCongestion.Scope.RoutingContexts)
+	}
 	for _, update := range event.Updated {
 		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
 	}
 	identities := len(event.Partition.SignallingGateway) + len(event.Partition.ApplicationServer) +
 		len(event.Report.Partition.SignallingGateway) + len(event.Report.Partition.ApplicationServer)
 	return ssnmEventBaseBytes +
+		peerBytes +
 		ssnmEventDestinationBytes*len(event.Report.Destinations) +
 		ssnmEventUpdateBytes*len(event.Updated) +
 		ssnmEventRoutingContextBytes*contexts +

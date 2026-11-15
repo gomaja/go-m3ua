@@ -30,6 +30,8 @@ func TestSSNMEventBytesFollowsTheDocumentedFormula(testContext *testing.T) {
 		event m3ua.SSNMEvent
 		want  int
 	}{
+		{"retained peer delta", m3ua.SSNMEvent{Kind: m3ua.SSNMPeerCongestionEvent,
+			PeerCongestion: &m3ua.PeerCongestionState{Scope: scope(100, 101)}}, 512 + 256 + 8},
 		// 512 + 8.
 		{"report naming one destination and updating none", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
 			Report: m3ua.SSNMReport{Destinations: make([]m3ua.PointCodeRange, 1)}}, 520},

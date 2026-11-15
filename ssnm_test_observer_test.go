@@ -194,7 +194,7 @@ func receiveSSNMReport(testContext *testing.T, ctx context.Context, association 
 			}
 			return event.Report
 		}
-		if event.Kind != SSNMBindingAdmittedEvent && event.Kind != SSNMBindingActivatedEvent {
+		if event.Kind != SSNMBindingAdmittedEvent && event.Kind != SSNMBindingActivatedEvent && event.Kind != SSNMPeerCongestionEvent {
 			testContext.Fatalf("unexpected SSNM event: %+v", event)
 		}
 	}

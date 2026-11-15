@@ -394,6 +394,16 @@ type ApplicationServerConfig struct {
 // distribution, and restart procedures in terms of an SGP and its Application
 // Servers, not in terms of one SCTP association or the peer that initiated it.
 type SGPConfig struct {
+	// CongestionPolicy is an optional additional transit veto. It receives
+	// copied peer and transport inputs outside Endpoint, AS and delivery locks;
+	// it may run concurrently and must not depend on invocation count. Nil
+	// preserves transit admission. It cannot authorize an inactive member.
+	CongestionPolicy SGPCongestionPolicy
+	// PreferUncongestedPeers ranks admitted Loadshare alternatives by the
+	// higher matching peer-reported and outbound transport pressure. The default
+	// false preserves SLS distribution. Enabling it can missequence an SLS flow;
+	// Override and Broadcast keep their existing membership obligations.
+	PreferUncongestedPeers bool
 	// RecoveryQueueMessages and RecoveryQueueBytes bound DATA retained for one
 	// AS while T(r) runs. Values less than or equal to zero select defaults.
 	RecoveryQueueMessages int

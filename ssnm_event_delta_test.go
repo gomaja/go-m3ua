@@ -76,9 +76,17 @@ type ssnmReplicaPartition struct {
 	destinations map[PointCodeRange]SSNMDestinationKnowledge
 }
 
+func ssnmReplicaPeerIdentity(record PeerCongestionState) string {
+	contexts := slices.Clone(record.Scope.RoutingContexts)
+	slices.Sort(contexts)
+	contexts = slices.Compact(contexts)
+	return fmt.Sprintf("%d/%d/%#v/%t/%d/%t/%v/%#v", record.Association, record.Epoch, record.AS, record.Scope.NetworkAppearanceSet, record.Scope.NetworkAppearance, record.Scope.RoutingContextSet, contexts, record.Destination)
+}
+
 // ssnmReplica is what a consumer holds: a starting snapshot with every
 // delivered event applied in order.
 type ssnmReplica struct {
+	peerCongestion        map[string]PeerCongestionState
 	revision              uint64
 	partitions            map[SSNMPartition]*ssnmReplicaPartition
 	partitionsInvalidated uint64
@@ -87,10 +95,14 @@ type ssnmReplica struct {
 
 func newSSNMReplica(snapshot SSNMSnapshot) *ssnmReplica {
 	replica := &ssnmReplica{
+		peerCongestion:        make(map[string]PeerCongestionState),
 		revision:              snapshot.Revision,
 		partitions:            make(map[SSNMPartition]*ssnmReplicaPartition, len(snapshot.Partitions)),
 		partitionsInvalidated: snapshot.PartitionsInvalidated,
 		lastResourceLoss:      snapshot.LastResourceLoss,
+	}
+	for _, record := range snapshot.PeerCongestion {
+		replica.peerCongestion[ssnmReplicaPeerIdentity(record)] = record.clone()
 	}
 	for _, knowledge := range snapshot.Partitions {
 		partition := &ssnmReplicaPartition{
@@ -123,6 +135,16 @@ func (r *ssnmReplica) apply(event SSNMEvent) error {
 	}
 	partition := r.partitions[event.Partition]
 	switch event.Kind {
+	case SSNMPeerCongestionEvent:
+		if event.PeerCongestion == nil || event.PeerCongestion.Revision != event.Revision {
+			return errors.New("peer delta missing record or revision")
+		}
+		identity := ssnmReplicaPeerIdentity(*event.PeerCongestion)
+		if event.PeerCongestionRemoved {
+			delete(r.peerCongestion, identity)
+		} else {
+			r.peerCongestion[identity] = event.PeerCongestion.clone()
+		}
 	case SSNMReportEvent:
 		if err := checkSSNMReportDelta(event, partition); err != nil {
 			return err
@@ -255,6 +277,7 @@ func normalizedSSNMCongestion(congestion SSNMCongestion) SSNMCongestion {
 // in records and in reports; a resource-loss event reports the loss and its
 // reason, not those tallies, so neither is compared.
 type ssnmTestKnowledge struct {
+	PeerCongestion        []PeerCongestionState
 	Revision              uint64
 	Partitions            []SSNMPartitionKnowledge
 	PartitionsInvalidated uint64
@@ -267,6 +290,12 @@ func canonicalSSNMTestKnowledge(snapshot SSNMSnapshot) ssnmTestKnowledge {
 		PartitionsInvalidated: snapshot.PartitionsInvalidated,
 		LastResourceLoss:      snapshot.LastResourceLoss,
 	}
+	for _, record := range snapshot.PeerCongestion {
+		knowledge.PeerCongestion = append(knowledge.PeerCongestion, record.clone())
+	}
+	slices.SortFunc(knowledge.PeerCongestion, func(a, b PeerCongestionState) int {
+		return cmp.Compare(ssnmReplicaPeerIdentity(a), ssnmReplicaPeerIdentity(b))
+	})
 	for _, partition := range snapshot.Partitions {
 		partition.Bindings = slices.Clone(partition.Bindings)
 		sort.Slice(partition.Bindings, func(i, j int) bool {
@@ -302,6 +331,9 @@ func (r *ssnmReplica) knowledge() ssnmTestKnowledge {
 		PartitionsInvalidated: r.partitionsInvalidated,
 		LastResourceLoss:      r.lastResourceLoss,
 	}
+	for _, record := range r.peerCongestion {
+		snapshot.PeerCongestion = append(snapshot.PeerCongestion, record.clone())
+	}
 	for key, partition := range r.partitions {
 		knowledge := SSNMPartitionKnowledge{Partition: key, Epoch: partition.epoch}
 		for association, pending := range partition.bindings {
@@ -319,6 +351,9 @@ func (r *ssnmReplica) knowledge() ssnmTestKnowledge {
 // describeSSNMKnowledgeDifference names the first difference instead of
 // printing two whole stores.
 func describeSSNMKnowledgeDifference(got, want ssnmTestKnowledge) string {
+	if !reflect.DeepEqual(got.PeerCongestion, want.PeerCongestion) {
+		return fmt.Sprintf("peer congestion differs: got %+v want %+v", got.PeerCongestion, want.PeerCongestion)
+	}
 	if got.Revision != want.Revision {
 		return fmt.Sprintf("revision %d, store %d", got.Revision, want.Revision)
 	}

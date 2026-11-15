@@ -30,8 +30,9 @@ const (
 	// SSNMPartitionRetiredEvent reports the last binding of a partition
 	// withdrawn. The partition and its knowledge were discarded atomically.
 	SSNMPartitionRetiredEvent
-	// SSNMPartitionInvalidatedEvent reports one partition's knowledge
-	// conservatively discarded while its bindings remain.
+	// SSNMPartitionInvalidatedEvent reports one partition's destination
+	// knowledge discarded while its bindings remain. Peer records are removed
+	// independently through SSNMPeerCongestionEvent.
 	SSNMPartitionInvalidatedEvent
 	// SSNMResourceLossEvent reports a local resource bound refusing otherwise
 	// valid work. The association it arrived on is unaffected.
@@ -39,10 +40,14 @@ const (
 	// SSNMContinuityLostEvent reports that this subscription's queue
 	// overflowed. Deltas are suppressed until Resync succeeds.
 	SSNMContinuityLostEvent
+	// SSNMPeerCongestionEvent replaces or removes one peer-local record.
+	SSNMPeerCongestionEvent
 )
 
 func (k SSNMEventKind) String() string {
 	switch k {
+	case SSNMPeerCongestionEvent:
+		return "peer-congestion"
 	case SSNMReportEvent:
 		return "report"
 	case SSNMBindingAdmittedEvent:
@@ -85,6 +90,9 @@ func (k SSNMEventKind) String() string {
 //     destinations.
 //   - SSNMPartitionInvalidatedEvent: remove every destination of Partition.
 //     Its bindings are unchanged.
+//   - SSNMPeerCongestionEvent: replace PeerCongestion by association, epoch,
+//     AS, wire scope and destination; remove it when PeerCongestionRemoved.
+//     Compare RC lists as sets, preserving both wire presence flags.
 //   - SSNMResourceLossEvent: no knowledge changed.
 //   - SSNMContinuityLostEvent: the view can no longer be patched; replace it
 //     with the snapshot Resync returns.
@@ -92,7 +100,9 @@ func (k SSNMEventKind) String() string {
 // A report never removes one destination's knowledge: DAVA and a level-zero
 // SCON are retained as statements about the destination, and a resource bound
 // refuses a report rather than evicting what is held. Knowledge leaves the
-// store only a whole partition at a time, which the event kind signals.
+// destination store only a whole partition at a time, which the event kind
+// signals. Peer-local records also leave individually when their AS binding
+// or association epoch retires, through SSNMPeerCongestionEvent.
 type SSNMEvent struct {
 	Kind      SSNMEventKind
 	Revision  uint64
@@ -119,6 +129,13 @@ type SSNMEvent struct {
 	Reason string
 	// ContinuityLost is true on SSNMContinuityLostEvent, and on nothing else.
 	ContinuityLost bool
+	// PeerCongestion is the changed peer-local record, owned by the caller.
+	// Its identity excludes Concerned Destination; raw reports alone carry
+	// that optional application trigger.
+	PeerCongestion *PeerCongestionState
+	// PeerCongestionRemoved removes the identified record rather than
+	// replacing it. It is set only for SSNMPeerCongestionEvent.
+	PeerCongestionRemoved bool
 }
 
 // clone returns an event that shares no storage with the receiver.
@@ -130,12 +147,20 @@ type SSNMEvent struct {
 // An unmapped Concerned Destination diagnostic owns another scalar copy.
 func (e SSNMEvent) clone() SSNMEvent {
 	contexts := len(e.Report.Scope.RoutingContexts)
+	if e.PeerCongestion != nil {
+		contexts += len(e.PeerCongestion.Scope.RoutingContexts)
+	}
 	for _, update := range e.Updated {
 		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
 	}
 	var arena ssnmRoutingContextArena
 	if contexts > 0 {
 		arena.free = make([]uint32, contexts)
+	}
+	if e.PeerCongestion != nil {
+		peer := *e.PeerCongestion
+		peer.Scope.RoutingContexts = arena.own(peer.Scope.RoutingContexts)
+		e.PeerCongestion = &peer
 	}
 	e.Report.ProfileMismatches = append([]CongestionProfileMismatch(nil), e.Report.ProfileMismatches...)
 	e.Report.Scope.RoutingContexts = arena.own(e.Report.Scope.RoutingContexts)
@@ -199,6 +224,12 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 		string(event.Report.Partition.ApplicationServer),
 	} {
 		if !reserveSSNMEventBytes(&remaining, len(value), 1) {
+			return 0, false
+		}
+	}
+	if event.PeerCongestion != nil {
+		if !reserveSSNMEventBytes(&remaining, 1, ssnmEventStateBytes) ||
+			!reserveSSNMEventBytes(&remaining, len(event.PeerCongestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 			return 0, false
 		}
 	}
