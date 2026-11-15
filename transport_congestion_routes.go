@@ -107,6 +107,7 @@ func (r *aspRoutes) gatewayTransportLocked(gateway aspSignallingGatewayConfig, r
 		}
 		for _, member := range selected.members {
 			status := combineASPTransport(received, transportASPStatus(member.association))
+			status = adaptMethodDestination(member.association.congestionProfile(member.as), status)
 			if !memberFound || aspCongestionRank(status) < aspCongestionRank(memberBest) {
 				memberBest = status
 				memberFound = true

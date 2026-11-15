@@ -25,7 +25,7 @@ func shutdownDATAAssociation(t *testing.T) (*Association, *stalledASP, DataReque
 	key := allocationRequest(0).AS
 	cfg := NewAssociationConfig().SetApplicationServers(ASConfig{ASKey: key, TrafficMode: params.TrafficModeLoadshare})
 	cfg.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestSCTPAddressValidationCause(t *testing.T) {
 		{"mapped duplicate local addresses", &sctp.Addr{IPs: []netip.Addr{loopback, mapped}}, &sctp.Addr{IPs: []netip.Addr{loopback}, Port: 2905}},
 	} {
 		t.Run(variant.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -235,7 +235,7 @@ func TestSCTPAddressValidationCause(t *testing.T) {
 		})
 	}
 	for _, ips := range [][]netip.Addr{{loopback, loopback}, {loopback, mapped}} {
-		endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 		if err != nil {
 			t.Fatal(err)
 		}

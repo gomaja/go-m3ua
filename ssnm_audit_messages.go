@@ -213,3 +213,19 @@ func (c *Association) refuseDestinationAudit(d *messages.DestinationStateAudit) 
 }
 
 func auditResourceError(err error) bool { return errors.Is(err, ErrSSNMResourceLoss) }
+
+// This is a local partial-response outcome, not a malformed peer request.
+// Use the existing M-ERROR channel, once per audit, without sending peer Error.
+// RFC 4666 §4.5.3's congestion-status SHOULD is a declared deviation when the
+// association's configured method cannot express the retained congestion.
+func (c *Association) reportDestinationAuditProfileRefusal(d *messages.DestinationStateAudit, cause error) {
+	scope := c.ssnmWireScope(d.NetworkAppearance, d.RoutingContext)
+	keys := c.managementASKeys(d.NetworkAppearance, d.RoutingContext)
+	c.notifyManagement(&ManagementIndication{
+		Kind: ManagementError, Cause: cause,
+		Description:     "local congestion profile omitted SCON from destination audit; remaining replies preserved",
+		RoutingContexts: scope.RoutingContexts, NetworkAppearance: scope.NetworkAppearance,
+		NetworkAppearanceSet: scope.NetworkAppearanceSet, ASKeys: keys,
+		AffectedDestinations: managementAffectedDestinations(keys, d.AffectedPointCode),
+	})
+}

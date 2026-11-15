@@ -478,6 +478,9 @@ type IPSPConfig struct {
 // EndpointConfig gives one M3UA Endpoint its immutable RFC 4666 role and any
 // role-specific node policy.
 type EndpointConfig struct {
+	// Congestion is required for every role. Default.Method must explicitly select
+	// the SS7 network method; nil and zero methods are invalid.
+	Congestion *CongestionConfig
 	// TransportCongestion configures periodic outbound pressure detection. Nil enables the defaults.
 	TransportCongestion *TransportCongestionConfig
 	// IPSPDestinations maps peer-directed IPSP AS scopes to destinations for MTP indications.
@@ -629,6 +632,9 @@ type ASConfig struct {
 // association uses an immutable AssociationConfig snapshot selected by
 // ListenerConfig before any M3UA message is parsed.
 type AssociationConfig struct {
+	// CongestionProfiles overrides Endpoint profiles for resolved networks on this peer.
+	// Entries must choose a nonzero Method and omit PeerSGP; duplicate selectors are invalid.
+	CongestionProfiles []NetworkCongestionProfile
 	// Subscribe, when non-nil, is called once by Dial or Accept on its calling
 	// goroutine, after SCTP establishment, Endpoint tracking and socket setup. ID,
 	// LocalAddr and RemoteAddr are valid. Accept uses the Listener's config
@@ -743,6 +749,8 @@ type AssociationConfigSelector func(AcceptInfo) (*AssociationConfig, error)
 // DefaultAssociationConfig is the fallback per-association configuration. If
 // SelectAssociationConfig is set, it runs after SCTP accept and before socket
 // options, monitor goroutines, ASP Up parsing, or compatibility handling.
+// Every CongestionProfiles entry must specify a nonzero method, including entries
+// in an unused default when a selector is installed.
 //
 // DefaultAssociationConfig also sizes the listening socket, whether or not
 // SelectAssociationConfig is set: its SCTPConfig.SocketReceiveBuffer and
@@ -845,6 +853,7 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 		return nil
 	}
 	snapshot := *config
+	snapshot.CongestionProfiles = snapshotCongestionProfiles(config.CongestionProfiles)
 	if config.HeartbeatInfo != nil {
 		heartbeat := *config.HeartbeatInfo
 		snapshot.HeartbeatInfo = &heartbeat
@@ -894,6 +903,9 @@ func snapshotApplicationServers(servers []ASConfig) []ASConfig {
 func validateAssociationConfigForRole(role Role, config *AssociationConfig) error {
 	if config == nil {
 		return ErrNilAssociationConfig
+	}
+	if err := validateCongestionProfiles(config.CongestionProfiles, role, nil, true); err != nil {
+		return err
 	}
 	if err := validateSCTPConfig(config.SCTPConfig); err != nil {
 		return err

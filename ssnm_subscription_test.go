@@ -24,7 +24,7 @@ func drainSSNMEvent(t *testing.T, subscription *SSNMSubscription) (SSNMEvent, er
 // is what an ASP-originated SCON or DAUD arrives on.
 func newSGPSSNMFixture(t *testing.T) (*Endpoint, *Association) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

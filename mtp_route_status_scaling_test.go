@@ -237,7 +237,7 @@ func randomMTPRouteStatusInventory(t *testing.T, rng *rand.Rand) (*Endpoint, []M
 		},
 	}
 
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -443,7 +443,7 @@ func buildMTPRouteStatusPerfFixture(tb testing.TB, routeCount int) (*Endpoint, [
 		})
 	}
 
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		tb.Fatalf("NewEndpoint: %v", err)
 	}

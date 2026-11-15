@@ -143,9 +143,12 @@ type DataQueueStats struct {
 // DataQueueStats reports the inbound DATA queue's occupancy and its cumulative
 // loss, so an application can see overload rather than infer it.
 //
-// ASP/IPSP overflow onset sends international-form SCON without Congestion
-// Indications (RFC 4666 Sections 1.4.6 and 3.4.4). Local end sends no wire
-// clear: the peer relies on its validity timer or audit/current MTP procedure.
+// ASP/IPSP overflow onset follows the configured method (RFC 4666 Sections
+// 1.4.6 and 3.4.4). International onset omits Congestion
+// Indications and sends no clear. National onset sends MaxLevel (engineering
+// mapping), and local end attempts level zero. Both are best effort; local
+// drain does not prove peer receipt. The peer otherwise relies on its validity
+// timer or audit/current MTP procedure.
 // SGP receive-queue exhaustion does not establish SS7 destination congestion.
 func (c *Association) DataQueueStats() DataQueueStats {
 	if c == nil {
@@ -185,6 +188,7 @@ func (c *Association) Epoch() uint64 {
 type DataQueueOverflowError struct {
 	// generation binds optional wire publication to the detected episode.
 	generation uint64
+	binding    queueCongestionBinding
 	// Scope is the discarded DATA's exact received Network Appearance and RC.
 	Scope WireScope
 	// OriginatingPointCode identifies the triggering originator for ASP SCON.

@@ -152,7 +152,7 @@ func runRoutingLivePeer(testContext *testing.T, config routingLiveConfig) {
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	peers, err := startRoutingPeerSet(ctx, topology, routingLivePeerAddresses(config.PeerIP), nil)
+	peers, err := startRoutingPeerSet(ctx, topology, routingLivePeerAddresses(config.PeerIP), nil, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func runRoutingLiveSender(testContext *testing.T, config routingLiveConfig) {
 		testContext.Fatal(err)
 	}
 	local := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr(config.SenderIP.String())}, Port: 0}
-	set, err := startRoutingSenderSet(ctx, topology, local, routingLivePeerAddresses(config.PeerIP), nil)
+	set, err := startRoutingSenderSet(ctx, topology, local, routingLivePeerAddresses(config.PeerIP), nil, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}

@@ -141,7 +141,7 @@ func observeSSNM(testContext *testing.T, association *Association) *SSNMSubscrip
 	endpoint := association.endpoint
 	if endpoint == nil {
 		var err error
-		endpoint, err = NewEndpoint(EndpointConfig{Role: association.role})
+		endpoint, err = NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: association.role}))
 		if err != nil {
 			testContext.Fatal(err)
 		}
@@ -149,6 +149,11 @@ func observeSSNM(testContext *testing.T, association *Association) *SSNMSubscrip
 		if !endpoint.trackAssociation(association) {
 			testContext.Fatal("attach observed association")
 		}
+	}
+	// Sending fixtures can have a configured owner before they need SSNM.
+	// Register their source before subscribing to endpoint-owned knowledge.
+	if association.ID() == 0 && !endpoint.trackAssociation(association) {
+		testContext.Fatal("attach configured observed association")
 	}
 	_, subscription, err := endpoint.SubscribeSSNM()
 	if err != nil {

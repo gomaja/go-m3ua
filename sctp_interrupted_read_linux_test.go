@@ -98,7 +98,7 @@ func testSCTPPartialDelivery(t *testing.T, partialReliability bool) {
 		interruptedReadPeer(t, ctx, local, remote, dir, partialReliability)
 		return
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -45,6 +45,7 @@ func FuzzConcernedSCONAdmission(f *testing.F) {
 		}
 		single := len(encoded) == 1 && words[0] == 0
 		sender, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+		sender.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 		sender.noteRoutingContextsAcked(params.NewRoutingContext(1))
 		n, err := sender.WriteSignal(msg)
 		if cdSet && !single {

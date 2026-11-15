@@ -29,7 +29,7 @@ func TestSCTPPartialReliabilityNegotiation(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/local=%t/peer=%t", direction, offered, peerOffers), func(t *testing.T) {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()
-					endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+					endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -105,7 +105,7 @@ func TestSCTPPartialReliabilitySelectionKeepsListenerServing(t *testing.T) {
 		t.Run(fmt.Sprint(offered), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 			if err != nil {
 				t.Fatal(err)
 			}

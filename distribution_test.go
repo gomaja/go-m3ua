@@ -382,7 +382,7 @@ func TestASPAssociationCannotRunSGPDistribution(t *testing.T) {
 }
 
 func TestASPListenerCannotRunSGPDistribution(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleASP): %v", err)
 	}
@@ -1152,6 +1152,7 @@ func distributionFixtureConfigured(t *testing.T, trafficMode uint32, configure f
 }
 
 type distributionFixtureConfig struct {
+	Congestion *CongestionConfig
 	*AssociationConfig
 	*SGPConfig
 	*ApplicationServerConfig
@@ -1162,21 +1163,20 @@ func distributionFixtureForContexts(t *testing.T, trafficMode uint32, routingCon
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 0, trafficMode, 0, routingContexts)
 	sgpConfig := &SGPConfig{}
 	applicationServerConfig := &ApplicationServerConfig{RecoveryTimer: time.Hour}
+	options := &distributionFixtureConfig{AssociationConfig: config, SGPConfig: sgpConfig, ApplicationServerConfig: applicationServerConfig}
 	if configure != nil {
-		configure(&distributionFixtureConfig{
-			AssociationConfig:       config,
-			SGPConfig:               sgpConfig,
-			ApplicationServerConfig: applicationServerConfig,
-		})
+		configure(options)
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role:               RoleSGP,
+		Congestion:         options.Congestion,
 		SGP:                sgpConfig,
 		ApplicationServers: applicationServerConfig,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
+	t.Cleanup(func() { _ = endpoint.Close() })
 	listener := newListener(endpoint, NewListenerConfig(config))
 	listener.as, listener.nif, listener.destinations = listener.registry()
 	applicationServer := listener.as.get(associationConfigASKey(listener.AssociationConfig, routingContexts[0]))
@@ -1198,6 +1198,9 @@ func addDistributionASP(t *testing.T, listener *Listener, state State, routingCo
 	asp.as.register(asp.configuredASKeys())
 	capture := new(distributionCapture)
 	asp.signalWriter = capture.write
+	if !listener.endpoint.trackAssociation(asp) {
+		t.Fatal("attach configured distribution association")
+	}
 	return asp, capture
 }
 

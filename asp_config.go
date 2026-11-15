@@ -97,10 +97,11 @@ func validRouteSelectionMode(mode RouteSelectionMode) bool {
 
 // ASPCongestionPolicy decides whether an ASP may use a route carrying the
 // reported congestion state for a Protocol Data Message Priority. A nil policy
-// permits every reachable route. The policy runs without Endpoint locks and
+// adds no veto to the configured method's local-user gate. The policy runs without Endpoint locks and
 // may be evaluated concurrently for candidate levels before route selection;
 // it must not depend on invocation count. An unknown transport observation
-// also consults the unknown-level decision; a nil policy permits it.
+// also consults the unknown-level decision. The configured national priority
+// method can still refuse an unknown observation when the policy permits it.
 type ASPCongestionPolicy func(messagePriority, congestionLevel uint8, levelSet bool) bool
 
 // MTPRouteConfig describes the MTP routing-label fields used to select one

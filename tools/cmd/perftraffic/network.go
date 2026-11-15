@@ -91,7 +91,7 @@ func runReceiver(ctx context.Context, config commandConfig) (runRecord, error) {
 		}
 	}()
 
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP, Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: config.CongestionMethod}}})
 	if err != nil {
 		return runRecord{}, fmt.Errorf("startup endpoint: %w", err)
 	}

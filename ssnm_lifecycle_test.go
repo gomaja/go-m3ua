@@ -340,7 +340,7 @@ func TestSSNMPartitionIsAuthorizedWhileAnyBindingIsComplete(t *testing.T) {
 // An Association with no provisioned Application Server owns its knowledge
 // alone, and that knowledge cannot be preserved by anyone else.
 func TestSSNMStateStandalonePartitionIsOwnedByOneAssociation(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: &ASPConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: &ASPConfig{
 		SignallingGateways: []SignallingGatewayConfig{{
 			ID: "sg-a",
 			SGPs: []SignallingGatewayProcessConfig{{
@@ -348,7 +348,7 @@ func TestSSNMStateStandalonePartitionIsOwnedByOneAssociation(t *testing.T) {
 				ApplicationServers: []RemoteASConfig{{ID: "as-core", ASKey: staticASKey(7, 1)}},
 			}},
 		}},
-	}})
+	}}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

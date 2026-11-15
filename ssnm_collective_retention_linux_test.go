@@ -13,12 +13,12 @@ import (
 func TestIPSPCollectiveCongestionAbatementOverSCTP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	e, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "mapped", PointCode: 100}, AS: *staticASKey(10, 9)}}})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "mapped", PointCode: 100}, AS: *staticASKey(10, 9)}}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = e.Close() })
-	peer, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}})
+	peer, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}}))
 	if err != nil {
 		t.Fatal(err)
 	}

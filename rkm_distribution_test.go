@@ -11,7 +11,7 @@ import (
 )
 
 func TestSGPDistributionResolvesOmittedRoutingContextFromRegisteredRoutingKey(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		RoutingKeyManagement: &RoutingKeyManagementConfig{
 			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
@@ -19,7 +19,7 @@ func TestSGPDistributionResolvesOmittedRoutingContextFromRegisteredRoutingKey(t 
 			},
 			AllowDynamicRoutingKeys: true,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestSGPDistributionExplicitRoutingContextMatchesAllNetworkAppearancesRoutin
 }
 
 func TestSGPDistributesExplicitRoutingContextForDynamicallyRegisteredAllNetworkAppearancesKey(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		RoutingKeyManagement: &RoutingKeyManagementConfig{
 			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
@@ -284,7 +284,7 @@ func TestSGPDistributesExplicitRoutingContextForDynamicallyRegisteredAllNetworkA
 			},
 			AllowDynamicRoutingKeys: true,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

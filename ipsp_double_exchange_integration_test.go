@@ -59,12 +59,12 @@ func exerciseIPSPDoubleExchangeIntegration(
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	endpointA, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpointA, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint IPSP-A: %v", err)
 	}
 	t.Cleanup(func() { _ = endpointA.Close() })
-	endpointB, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpointB, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint IPSP-B: %v", err)
 	}

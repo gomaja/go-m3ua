@@ -80,19 +80,19 @@ func runSGPFailureLive(testContext *testing.T, extra ...string) combinedResult {
 	base := routedLoopbackPortBase(testContext)
 	control := routedLoopbackControlAddress(testContext)
 	sctpAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(base))
-	receiverConfig, err := parseConfig(append([]string{
+	receiverConfig, err := parseConfig(nationalCongestionArguments(append([]string{
 		"-role=sgp", "-transport=listen", "-mode=routed", "-sctp-address=" + sctpAddress,
 		"-control-address=" + control, "-associations=8", "-same-host-clock", "-sgp-failure=2s",
-	}, extra...))
+	}, extra...)))
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	senderConfig, err := parseConfig(append([]string{
+	senderConfig, err := parseConfig(nationalCongestionArguments(append([]string{
 		"-role=asp", "-transport=dial", "-mode=routed", "-sctp-address=" + sctpAddress,
 		"-local-address=127.0.0.1:0", "-peer-control=http://" + control, "-associations=8",
 		"-payload=mix", "-rate=2000", "-warmup=1s", "-duration=12s", "-drain=2s",
 		"-cohort=sgp-failure-live", "-seed=9", "-same-host-clock", "-sgp-failure=2s",
-	}, extra...))
+	}, extra...)))
 	if err != nil {
 		testContext.Fatal(err)
 	}

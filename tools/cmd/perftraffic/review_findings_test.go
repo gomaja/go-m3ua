@@ -24,7 +24,7 @@ func startFaultedLocalReceiver(testContext *testing.T) *localReceiver {
 	testContext.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	testContext.Cleanup(cancel)
-	local, err := startLocalReceiver(ctx, commandConfig{Associations: 1, ControlAddress: "127.0.0.1:0"}, nil)
+	local, err := startLocalReceiver(ctx, nationalCongestionCommandConfig(commandConfig{Associations: 1, ControlAddress: "127.0.0.1:0"}), nil)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -74,10 +74,10 @@ func TestLocalReceiverReadFaultFailsTheBidirectionalCohort(testContext *testing.
 			runner := func(_ commandConfig, phase, _ string, _ time.Duration) (cohortResult, error) {
 				sender, receiver := directionRecords(true)
 				result := newCohortResult(phase, sender, receiver, validity)
-				finishBidirectionalCohort(context.Background(), commandConfig{PeerControl: server.URL, Drain: time.Second}, &result, local)
+				finishBidirectionalCohort(context.Background(), nationalCongestionCommandConfig(commandConfig{PeerControl: server.URL, Drain: time.Second}), &result, local)
 				return result, validity
 			}
-			result, _ := runWarmupAndMeasurement(commandConfig{Warmup: scenario.warmup, Duration: time.Second}, runner, nil)
+			result, _ := runWarmupAndMeasurement(nationalCongestionCommandConfig(commandConfig{Warmup: scenario.warmup, Duration: time.Second}), runner, nil)
 			want := "reverse cohort local receiver: " + localReadFault
 			if result.Verdict != verdictInvalid || result.Error == warmupValidityError || !strings.Contains(result.Error, want) ||
 				!strings.Contains(result.Error, "reverse cohort: "+cohortValidityError) {
@@ -268,7 +268,7 @@ func TestCollectReverseFailuresAreFaults(testContext *testing.T) {
 			validity := errors.New(cohortValidityError)
 			sender, receiver := directionRecords(true)
 			result := newCohortResult("warmup", sender, receiver, validity)
-			collectReverse(ctx, commandConfig{PeerControl: pending.URL, Drain: time.Millisecond}, &result)
+			collectReverse(ctx, nationalCongestionCommandConfig(commandConfig{PeerControl: pending.URL, Drain: time.Millisecond}), &result)
 			if result.validityOnly || result.Verdict != verdictInvalid || !strings.Contains(result.Error, scenario.want) {
 				testContext.Fatalf("result validity-only %t verdict %q error %q", result.validityOnly, result.Verdict, result.Error)
 			}

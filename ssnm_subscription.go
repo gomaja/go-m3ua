@@ -137,6 +137,7 @@ func (e SSNMEvent) clone() SSNMEvent {
 	if contexts > 0 {
 		arena.free = make([]uint32, contexts)
 	}
+	e.Report.ProfileMismatches = append([]CongestionProfileMismatch(nil), e.Report.ProfileMismatches...)
 	e.Report.Scope.RoutingContexts = arena.own(e.Report.Scope.RoutingContexts)
 	if e.Report.UnmappedConcernedDestination != nil {
 		unmapped := *e.Report.UnmappedConcernedDestination
@@ -175,15 +176,17 @@ func (a *ssnmRoutingContextArena) own(values []uint32) []uint32 {
 }
 
 const (
-	ssnmEventBaseBytes        = 512
-	ssnmEventDestinationBytes = 8
-	ssnmEventStateBytes       = 256
+	ssnmEventBaseBytes            = 512
+	ssnmEventProfileMismatchBytes = 32
+	ssnmEventDestinationBytes     = 8
+	ssnmEventStateBytes           = 256
 )
 
 func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 	remaining := limit
 	if !reserveSSNMEventBytes(&remaining, 1, ssnmEventBaseBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Destinations), ssnmEventDestinationBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.Report.ProfileMismatches), ssnmEventProfileMismatchBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Updated), ssnmEventStateBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 		return 0, false

@@ -148,7 +148,7 @@ func newRoutedTestReceiver(testContext *testing.T, mode string) *routedTestRecei
 		created++
 		return receiver.endpoints[created-1], nil
 	}
-	set, err := startRoutingPeerSet(lifetime, topology, addresses, factory)
+	set, err := startRoutingPeerSet(lifetime, topology, addresses, factory, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -708,7 +708,7 @@ func TestRoutedSenderStopsThePeerOnEveryPreparationFailure(testContext *testing.
 			}
 			server := httptest.NewServer(routing.handler())
 			defer server.Close()
-			config, err := parseConfig(routedSenderArguments(modeRouted, "-sctp-address=192.0.2.2:2905", "-local-address=192.0.2.1:0", "-peer-control="+server.URL))
+			config, err := parseConfig(nationalCongestionArguments(routedSenderArguments(modeRouted, "-sctp-address=192.0.2.2:2905", "-local-address=192.0.2.1:0", "-peer-control="+server.URL)))
 			if err != nil {
 				testContext.Fatal(err)
 			}

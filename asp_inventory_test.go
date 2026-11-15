@@ -84,7 +84,7 @@ func TestASPInventoryWithoutRoutingEstablishesAndAuthorizes(t *testing.T) {
 	if config.Routing != nil {
 		t.Fatal("inventory-only fixture must select application-managed routing")
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint with peer inventory and no routing: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestASPInventoryWithoutRoutingEstablishesAndAuthorizes(t *testing.T) {
 // A missing SGP identity is missing configuration, not a standalone
 // association: the Endpoint provisions peers, so the Association must name one.
 func TestASPInventoryRejectsAssociationWithoutSGPIdentity(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: inventoryOnlyASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: inventoryOnlyASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestASPInventoryRejectsAssociationWithoutSGPIdentity(t *testing.T) {
 // With no ASP inventory at all the existing standalone associations stay
 // supported and need no SGP identity.
 func TestStandaloneASPAssociationStaysSupported(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -588,7 +588,7 @@ func TestASPRoutingRejectsUnprovisionedReferences(t *testing.T) {
 // route, and the Association keeps the inbound DATA authorization its
 // provisioned scope established.
 func TestASPInventoryWithoutRoutingKeepsDataAuthorization(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: inventoryOnlyASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: inventoryOnlyASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -680,7 +680,7 @@ func TestASPRoutesShareOneApplicationServerAcrossRoutesAndASPs(t *testing.T) {
 			},
 		},
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1001,7 +1001,7 @@ func TestASPApplicationServerReferenceCountIsInvisibleToTheProtocol(t *testing.T
 			if got := countASReferences(config, "as-core"); got != stage.references {
 				t.Fatalf("stage names as-core in %d route bindings, want %d", got, stage.references)
 			}
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 			if err != nil {
 				t.Fatalf("NewEndpoint: %v", err)
 			}
@@ -1194,7 +1194,7 @@ func TestRoutePathMayNameADynamicallyBoundApplicationServer(t *testing.T) {
 	// An Association serving only the dynamically bound Application Server is
 	// authorized without a Routing Context, which is exactly what it has
 	// before registration.
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: base()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: base()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint with a dynamically bound Application Server and no path to it: %v", err)
 	}

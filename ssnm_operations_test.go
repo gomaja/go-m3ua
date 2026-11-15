@@ -77,6 +77,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 	t.Run("SCON optional fields and direction", func(t *testing.T) {
 		for level := uint8(0); level <= 3; level++ {
 			association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+			association.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 			setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 			association.noteRoutingContextsActive([]uint32{1})
 			writes := 0
@@ -130,7 +131,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 			t.Fatalf("invalid SCON requests wrote %d messages, want 0", writes)
 		}
 
-		endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint: %v", err)
 		}
@@ -152,7 +153,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 			User:        params.SCCP,
 			Cause:       params.Unequipped,
 		}
-		endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint: %v", err)
 		}
@@ -179,7 +180,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 	})
 
 	t.Run("Endpoint role rejects before association writes", func(t *testing.T) {
-		endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint: %v", err)
 		}
@@ -203,6 +204,7 @@ func TestSSNMOperationValidation(t *testing.T) {
 
 func TestSSNMOperationAssociationWire(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
+	association.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(0))
 	association.noteRoutingContextsActive([]uint32{1, 2})
 	writes := make(chan messages.M3UA, 4)
@@ -400,7 +402,7 @@ func TestSSNMOperationEndpointFanout(t *testing.T) {
 	})
 
 	t.Run("mixed contextless and RC scopes split messages", func(t *testing.T) {
-		endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 		if err != nil {
 			t.Fatalf("NewEndpoint: %v", err)
 		}
@@ -536,7 +538,7 @@ func TestSSNMOperationEndpointOmittedNetworkAppearanceUsesUnambiguousAS(t *testi
 }
 
 func TestSSNMOperationEndpointRejectsOmittedMixedNetworkAppearances(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -579,7 +581,7 @@ func TestSSNMOperationEndpointRejectsOmittedMixedNetworkAppearances(t *testing.T
 }
 
 func TestSSNMOperationPartialFanoutErrorPreservesEveryOutcome(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -646,7 +648,7 @@ func TestSSNMOperationPartialFanoutErrorPreservesEveryOutcome(t *testing.T) {
 }
 
 func TestSSNMOperationConcurrentAssociationCloseReturnsTypedFailure(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -717,7 +719,7 @@ func TestSSNMOperationConcurrentAssociationCloseReturnsTypedFailure(t *testing.T
 }
 
 func TestSSNMOperationRevalidatesActiveScopeAfterFanoutSelection(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -750,7 +752,9 @@ func TestSSNMOperationRevalidatesActiveScopeAfterFanoutSelection(t *testing.T) {
 			close(firstWriteEntered)
 			<-releaseFirstWrite
 		} else {
-			secondWrite <- message
+			if _, scon := message.(*messages.SignallingCongestion); scon {
+				secondWrite <- message
+			}
 		}
 		return message.MarshalLen(), nil
 	}

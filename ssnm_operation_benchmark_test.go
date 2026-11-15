@@ -198,7 +198,7 @@ func newSSNMOperationFixture(owner testing.TB, peers, partitionsPerPeer, rangesP
 		gateway.SGPs = []SignallingGatewayProcessConfig{process}
 		inventory.SignallingGateways = append(inventory.SignallingGateways, gateway)
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: inventory, SSNMState: &SSNMStateConfig{MaxRecords: 16384, MaxRecordsPerPartition: 2048, MaxRecordsPerPeer: 8192, MaxPartitions: 128, MaxBytes: 16 << 20, MaxSubscribers: 8, SubscriptionQueueSize: 256, SubscriptionQueueBytes: 1 << 20, MaxAffectedPointCodes: 1024}})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: inventory, SSNMState: &SSNMStateConfig{MaxRecords: 16384, MaxRecordsPerPartition: 2048, MaxRecordsPerPeer: 8192, MaxPartitions: 128, MaxBytes: 16 << 20, MaxSubscribers: 8, SubscriptionQueueSize: 256, SubscriptionQueueBytes: 1 << 20, MaxAffectedPointCodes: 1024}}))
 	if err != nil {
 		owner.Fatal(err)
 	}

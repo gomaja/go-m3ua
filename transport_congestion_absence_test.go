@@ -7,7 +7,7 @@ func TestTransportCongestionAbsenceSurvivesEpochReset(t *testing.T) {
 		t.Run(owner, func(t *testing.T) {
 			a, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 			if owner != "standalone" {
-				e, err := NewEndpoint(EndpointConfig{Role: RoleASP, TransportCongestion: &TransportCongestionConfig{Disabled: owner == "disabled"}})
+				e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, TransportCongestion: &TransportCongestionConfig{Disabled: owner == "disabled"}}))
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -12,7 +12,7 @@ import (
 )
 
 func TestTransportCongestionRejectsLateEpochAndClosedAssociation(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestTransportCongestionRejectsLateEpochAndClosedAssociation(t *testing.T) {
 }
 
 func TestTransportCongestionManagementReportsChangesWithoutSCON(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestTransportCongestionRoutingPolicyAndPreference(t *testing.T) {
 func TestTransportCongestionIPSPChannelMappingAndTypedSCON(t *testing.T) {
 	key := ASKey{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	d := MTPDestination{MTPRoute: "peer", PointCode: 0x123456}
-	e, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, IPSPDestinations: []IPSPDestinationConfig{{Destination: d, AS: key}}})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, IPSPDestinations: []IPSPDestinationConfig{{Destination: d, AS: key}}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestTransportCongestionRestartIsUnknownAndBroadcastIncludesEveryCopy(t *tes
 
 func TestTransportCongestionIPSPScopedLifecycleWithoutDetector(t *testing.T) {
 	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
-	e, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "peer", PointCode: 0x120000, Mask: 16}, AS: key}}})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, TransportCongestion: &TransportCongestionConfig{Disabled: true}, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "peer", PointCode: 0x120000, Mask: 16}, AS: key}}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestTransportCongestionIPSPScopedLifecycleWithoutDetector(t *testing.T) {
 }
 
 func TestTransportCongestionSamplingReleasesLocksAndRejectsIdentity(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestTransportCongestionBroadcastIncludesRestrictedCopy(t *testing.T) {
 }
 
 func TestTransportCongestionDelayedDiagnosticsCannotRestoreStaleBacklog(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}

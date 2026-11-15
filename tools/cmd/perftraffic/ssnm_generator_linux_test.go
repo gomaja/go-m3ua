@@ -30,8 +30,8 @@ func TestSSNMGeneratorLeavesSGPWritesToTheLibrary(testContext *testing.T) {
 	// The reverse driver is only a probe here: registration hands it the
 	// accepted SGP association exactly as the bidirectional receiver sees it.
 	control.driver = &reverseDriver{ctx: ctx}
-	control.ssnm = newSSNMGenerator(ctx, commandConfig{Associations: 1, SSNM: ssnm}, clock)
-	sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+	control.ssnm = newSSNMGenerator(ctx, nationalCongestionCommandConfig(commandConfig{Associations: 1, SSNM: ssnm}), clock)
+	sgp, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP}))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -50,8 +50,8 @@ func TestSSNMGeneratorLeavesSGPWritesToTheLibrary(testContext *testing.T) {
 	server := httptest.NewServer(control.handler())
 	defer server.Close()
 
-	aspConfig := commandConfig{SCTPAddress: listener.Addr().String(), Associations: 1, SSNM: ssnm}
-	asp, err := m3ua.NewEndpoint(senderEndpointConfig(aspConfig))
+	aspConfig := nationalCongestionCommandConfig(commandConfig{SCTPAddress: listener.Addr().String(), Associations: 1, SSNM: ssnm})
+	asp, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(senderEndpointConfig(aspConfig)))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -176,8 +176,8 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 			// judges where each message went.
 			ssnm.Budgets = ssnmBudgets{ApplyP99: time.Second, Resync: ssnmDefaultResyncBudget, Recovery: ssnmDefaultRecoveryBudget}
 			control := newReceiverControl(associations, maxOutstanding)
-			control.ssnm = newSSNMGenerator(ctx, commandConfig{Associations: associations, SSNM: ssnm}, clock)
-			sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP, TransportCongestion: &m3ua.TransportCongestionConfig{Disabled: true}})
+			control.ssnm = newSSNMGenerator(ctx, nationalCongestionCommandConfig(commandConfig{Associations: associations, SSNM: ssnm}), clock)
+			sgp, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP, TransportCongestion: &m3ua.TransportCongestionConfig{Disabled: true}}))
 			if err != nil {
 				testContext.Fatal(err)
 			}
@@ -196,10 +196,10 @@ func TestSSNMTotalRateOverEightAssociations(testContext *testing.T) {
 			server := httptest.NewServer(control.handler())
 			defer server.Close()
 
-			aspConfig := commandConfig{SCTPAddress: listener.Addr().String(), Associations: associations, SSNM: ssnm, PeerControl: server.URL, Drain: 200 * time.Millisecond, Duration: row.window}
+			aspConfig := nationalCongestionCommandConfig(commandConfig{SCTPAddress: listener.Addr().String(), Associations: associations, SSNM: ssnm, PeerControl: server.URL, Drain: 200 * time.Millisecond, Duration: row.window})
 			aspEndpointConfig := senderEndpointConfig(aspConfig)
 			aspEndpointConfig.TransportCongestion = &m3ua.TransportCongestionConfig{Disabled: true}
-			asp, err := m3ua.NewEndpoint(aspEndpointConfig)
+			asp, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(aspEndpointConfig))
 			if err != nil {
 				testContext.Fatal(err)
 			}

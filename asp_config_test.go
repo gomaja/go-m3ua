@@ -24,7 +24,7 @@ func TestNewEndpointSnapshotsASPRoutingPolicy(t *testing.T) {
 			}},
 		}},
 	)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestASPConfigValidation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			config := validASPConfig()
 			test.mutate(config)
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 			if endpoint != nil {
 				t.Fatalf("NewEndpoint returned %#v", endpoint)
 			}
@@ -390,7 +390,7 @@ func TestASPConfigValidation(t *testing.T) {
 
 func TestEndpointRejectsASPPolicyForOtherRoles(t *testing.T) {
 	for _, role := range []Role{RoleSGP, RoleIPSP} {
-		endpoint, err := NewEndpoint(EndpointConfig{Role: role, ASP: validASPConfig()})
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: role, ASP: validASPConfig()}))
 		if endpoint != nil {
 			t.Fatalf("NewEndpoint(%v) returned %#v", role, endpoint)
 		}
@@ -433,7 +433,7 @@ func TestSGPAssociationRejectsPeerSGPIdentity(t *testing.T) {
 }
 
 func TestASPEndpointValidatesAssociationSGPIdentityAndScope(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: validASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: validASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -622,7 +622,7 @@ func TestEndpointOwnsTheASPCongestionPolicyItWasGiven(t *testing.T) {
 		return true
 	}
 
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

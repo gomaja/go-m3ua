@@ -32,7 +32,7 @@ func TestOverloadCohortAccountsForEveryMessageOverLoopbackSCTP(testContext *test
 func runLiveOverloadCohort(testContext *testing.T, sharedClock bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP}))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -58,12 +58,12 @@ func runLiveOverloadCohort(testContext *testing.T, sharedClock bool) {
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	config := commandConfig{
+	config := nationalCongestionCommandConfig(commandConfig{
 		Role: "asp", Mode: modeThroughput, Direction: directionASPToSGP, Initiation: initiationASPDial,
 		SCTPAddress: listener.Addr().String(), Associations: 1, PeerControl: server.URL, Cohort: "overload-live", Seed: 7,
 		Rate: 20_000, Workload: workloadMix, Duration: profile.duration(), Drain: overloadRequestDeadline + overloadDrainMargin,
 		Outstanding: 1, OverloadProfile: profile.text, overload: profile, SameHostClock: sharedClock,
-	}
+	})
 	result, runErr := runSender(ctx, config)
 	select {
 	case err := <-fatal:

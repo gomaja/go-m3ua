@@ -36,7 +36,7 @@ func TestIPSPPeerDownCrossesPendingASPUpOverSCTP(t *testing.T) {
 					accepted <- conn
 				}
 			}()
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 			if err != nil {
 				t.Fatal(err)
 			}

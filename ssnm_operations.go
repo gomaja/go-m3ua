@@ -190,6 +190,16 @@ func (e *Endpoint) SignallingCongestion(request SignallingCongestionRequest) err
 	if err != nil {
 		return err
 	}
+	// RFC 4666 §3.4.4: validate the configured method before installing authoritative
+	// state, even when there is no active peer to receive the report.
+	appearance, appearanceSet, err := resolveEndpointSSNMNetworkAppearance(e, request.Scope)
+	if err != nil {
+		return err
+	}
+	profile := e.congestion.profile(nil, ASKey{NetworkAppearance: appearance, NetworkAppearanceSet: appearanceSet})
+	if !profile.allowsLevel(request.CongestionLevel, request.CongestionLevelSet) {
+		return ErrInvalidParameterValue
+	}
 	return publishEndpointDestinationState(e, request.Scope, request.Destinations,
 		DestinationNetworkState{
 			Congestion: congestionStateFor(request.CongestionLevel, request.CongestionLevelSet),

@@ -84,7 +84,7 @@ type SSNMStateConfig struct {
 	// SubscriptionQueueBytes bounds the portable accounted payload of queued
 	// events. Zero selects DefaultSSNMSubscriptionQueueBytes; a positive limit
 	// must be at least 512 bytes. Accounting charges 512 bytes per event,
-	// 8 per report destination, 256 per updated destination, 4 per Routing
+	// 8 per report destination, 32 per profile mismatch, 256 per updated destination, 4 per Routing
 	// Context in the report and both dimensions of each update, and the byte
 	// lengths of Reason and the event/report partition identity strings.
 	// Snapshot results, the fixed continuity-loss marker, queue backing-array
@@ -225,12 +225,15 @@ func (s SSNMReportSource) String() string {
 // validated under, so a report that predates a source reset is recognisable
 // after one.
 type SSNMReport struct {
-	Kind        SSNMReportKind
-	Source      SSNMReportSource
-	Scope       WireScope
-	Partition   SSNMPartition
-	Association AssociationID
-	Epoch       uint64
+	// ProfileMismatches reports incompatible method profiles to Layer Management.
+	// CongestionLevel and retained state preserve the received value unchanged.
+	ProfileMismatches []CongestionProfileMismatch
+	Kind              SSNMReportKind
+	Source            SSNMReportSource
+	Scope             WireScope
+	Partition         SSNMPartition
+	Association       AssociationID
+	Epoch             uint64
 	// Revision is the store revision this report produced. It is zero for a
 	// report the store did not retain or publish.
 	Revision uint64

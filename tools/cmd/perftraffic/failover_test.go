@@ -25,15 +25,15 @@ func sgpFailureASPArguments(extra ...string) []string {
 }
 
 func TestSGPFailureFlagIsOptInAndBounded(testContext *testing.T) {
-	config, err := parseConfig(sgpFailureASPArguments())
+	config, err := parseConfig(nationalCongestionArguments(sgpFailureASPArguments()))
 	if err != nil || config.SGPFailure != 10*time.Second {
 		testContext.Fatalf("valid failure trial: %+v, %v", config.SGPFailure, err)
 	}
-	receiver, err := parseConfig([]string{"-role=sgp", "-mode=routed", "-sctp-address=127.0.0.1:2905", "-associations=8", "-same-host-clock", "-sgp-failure=10s"})
+	receiver, err := parseConfig(nationalCongestionArguments([]string{"-role=sgp", "-mode=routed", "-sctp-address=127.0.0.1:2905", "-associations=8", "-same-host-clock", "-sgp-failure=10s"}))
 	if err != nil || receiver.SGPFailure != 10*time.Second {
 		testContext.Fatalf("valid failure receiver: %v", err)
 	}
-	plain, err := parseConfig([]string{"-role=sgp", "-mode=routed", "-sctp-address=127.0.0.1:2905", "-associations=8"})
+	plain, err := parseConfig(nationalCongestionArguments([]string{"-role=sgp", "-mode=routed", "-sctp-address=127.0.0.1:2905", "-associations=8"}))
 	if err != nil || plain.SGPFailure != 0 || plain.sgpFailureCohort {
 		testContext.Fatalf("routed receiver without the flag changed: %+v, %v", plain.SGPFailure, err)
 	}
@@ -48,7 +48,7 @@ func TestSGPFailureFlagIsOptInAndBounded(testContext *testing.T) {
 		"window too short":  sgpFailureASPArguments("-duration=11s", "-sgp-failure=2s"),
 		"after window ends": sgpFailureASPArguments("-sgp-failure=31s"),
 	} {
-		if _, err := parseConfig(arguments); err == nil {
+		if _, err := parseConfig(nationalCongestionArguments(arguments)); err == nil {
 			testContext.Errorf("%s: accepted", name)
 		}
 	}
@@ -906,16 +906,16 @@ func TestFailoverInjectionCancelsWithItsCohort(testContext *testing.T) {
 }
 
 func TestSGPFailureKindFlagIsOptInAndBounded(testContext *testing.T) {
-	config, err := parseConfig(sgpFailureASPArguments())
+	config, err := parseConfig(nationalCongestionArguments(sgpFailureASPArguments()))
 	if err != nil || config.SGPFailureKind != sgpFailureKindClose {
 		testContext.Fatalf("a failure trial without -sgp-failure-kind is not a close trial: %q, %v", config.SGPFailureKind, err)
 	}
 	for _, kind := range []string{sgpFailureKindClose, sgpFailureKindAbort} {
-		sender, err := parseConfig(sgpFailureASPArguments("-sgp-failure-kind=" + kind))
+		sender, err := parseConfig(nationalCongestionArguments(sgpFailureASPArguments("-sgp-failure-kind=" + kind)))
 		if err != nil || sender.SGPFailureKind != kind {
 			testContext.Errorf("sender -sgp-failure-kind=%s: %q, %v", kind, sender.SGPFailureKind, err)
 		}
-		receiver, err := parseConfig([]string{"-role=sgp", "-mode=routed", "-sctp-address=127.0.0.1:2905", "-associations=8", "-same-host-clock", "-sgp-failure=10s", "-sgp-failure-kind=" + kind})
+		receiver, err := parseConfig(nationalCongestionArguments([]string{"-role=sgp", "-mode=routed", "-sctp-address=127.0.0.1:2905", "-associations=8", "-same-host-clock", "-sgp-failure=10s", "-sgp-failure-kind=" + kind}))
 		if err != nil || receiver.SGPFailureKind != kind {
 			testContext.Errorf("receiver -sgp-failure-kind=%s: %q, %v", kind, receiver.SGPFailureKind, err)
 		}
@@ -929,7 +929,7 @@ func TestSGPFailureKindFlagIsOptInAndBounded(testContext *testing.T) {
 		"abort without the trial": append(append([]string(nil), receiver...), "-sgp-failure-kind=abort"),
 		"close without the trial": append(append([]string(nil), receiver...), "-sgp-failure-kind=close"),
 	} {
-		if _, err := parseConfig(arguments); err == nil {
+		if _, err := parseConfig(nationalCongestionArguments(arguments)); err == nil {
 			testContext.Errorf("%s: accepted", name)
 		}
 	}
@@ -946,7 +946,7 @@ func TestSGPFailureKindIsPartOfTheDeclaration(testContext *testing.T) {
 		"close": sgpFailureASPArguments("-sgp-failure-kind=close"),
 		"abort": sgpFailureASPArguments("-sgp-failure-kind=abort"),
 	} {
-		config, err := parseConfig(arguments)
+		config, err := parseConfig(nationalCongestionArguments(arguments))
 		if err != nil {
 			testContext.Fatal(err)
 		}

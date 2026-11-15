@@ -11,7 +11,7 @@ func aspArguments(extra ...string) []string {
 }
 
 func TestConfigDefaultsAreTheContractWorkload(t *testing.T) {
-	config, err := parseConfig(aspArguments())
+	config, err := parseConfig(nationalCongestionArguments(aspArguments()))
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
@@ -30,14 +30,14 @@ func TestConfigDefaultsAreTheContractWorkload(t *testing.T) {
 }
 
 func TestConfigKeepsTheLoadConfigurable(t *testing.T) {
-	config, err := parseConfig(aspArguments("-data-rate=40000", "-payload=128", "-reverse-rate=640"))
+	config, err := parseConfig(nationalCongestionArguments(aspArguments("-data-rate=40000", "-payload=128", "-reverse-rate=640")))
 	if err != nil || config.DataRate != 40000 || config.Payload != "128" || config.ReverseRate != 640 {
 		t.Fatalf("config %+v, %v", config, err)
 	}
 }
 
 func TestConfigAcceptsZeroRouteRetention(t *testing.T) {
-	config, err := parseConfig(aspArguments("-routes=0", "-blocks=2", "-block-cycles=40", "-steady=20s"))
+	config, err := parseConfig(nationalCongestionArguments(aspArguments("-routes=0", "-blocks=2", "-block-cycles=40", "-steady=20s")))
 	if err != nil {
 		t.Fatalf("parseConfig: %v", err)
 	}
@@ -47,11 +47,11 @@ func TestConfigAcceptsZeroRouteRetention(t *testing.T) {
 }
 
 func TestConfigPeerNeedsOneSpecificLocalIP(t *testing.T) {
-	if _, err := parseConfig([]string{"-role=peer", "-sctp-address=10.0.0.1:2905", "-local-ip=10.0.0.2"}); err != nil {
+	if _, err := parseConfig(nationalCongestionArguments([]string{"-role=peer", "-sctp-address=10.0.0.1:2905", "-local-ip=10.0.0.2"})); err != nil {
 		t.Fatalf("valid peer rejected: %v", err)
 	}
 	for _, localIP := range []string{"", "0.0.0.0", "not-an-ip", "10.0.0.2:30000"} {
-		if _, err := parseConfig([]string{"-role=peer", "-local-ip=" + localIP}); err == nil {
+		if _, err := parseConfig(nationalCongestionArguments([]string{"-role=peer", "-local-ip=" + localIP})); err == nil {
 			t.Errorf("peer local-ip %q accepted", localIP)
 		}
 	}
@@ -90,7 +90,7 @@ func TestConfigRejectsInvalidRuns(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := parseConfig(testCase.arguments)
+			_, err := parseConfig(nationalCongestionArguments(testCase.arguments))
 			if err == nil || !strings.Contains(err.Error(), testCase.want) {
 				t.Fatalf("error %v, want one naming %q", err, testCase.want)
 			}

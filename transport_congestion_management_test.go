@@ -23,12 +23,13 @@ func TestLocalCongestionReportsUseImplementationNames(t *testing.T) {
 }
 
 func TestCongestionManagementSourcesRemainIndependent(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, Congestion: &CongestionConfig{Default: CongestionProfile{Method: CongestionInternational}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = e.Close() })
 	c, sent := overflowAssociation(t)
+	c.endpoint = nil
 	if !e.trackAssociation(c) {
 		t.Fatal("track")
 	}
@@ -122,12 +123,13 @@ func TestCongestionManagementSourcesRemainIndependent(t *testing.T) {
 }
 
 func TestQueueCongestionConsumerFiltersManagementSources(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, Congestion: &CongestionConfig{Default: CongestionProfile{Method: CongestionInternational}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = e.Close() })
 	c, _ := overflowAssociation(t)
+	c.endpoint = nil
 	if !e.trackAssociation(c) {
 		t.Fatal("track")
 	}
@@ -142,11 +144,12 @@ func TestQueueCongestionConsumerFiltersManagementSources(t *testing.T) {
 }
 
 func TestTransportCongestionWaitsForSubscriptionReturn(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	c, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
+	c.endpoint = nil
 	if !e.trackAssociation(c) {
 		t.Fatal("track")
 	}

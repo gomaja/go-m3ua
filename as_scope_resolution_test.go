@@ -66,6 +66,7 @@ func newMixedNetworkScopeAssociation(test *testing.T, appearance uint32, dynamic
 		}
 	}
 	association.noteRoutingContextsAcked(params.NewRoutingContext(1, 3, 5))
+	association.endpoint = nil
 	if !endpoint.trackAssociation(association) {
 		test.Fatal("Endpoint refused the mixed-network Association")
 	}
@@ -144,6 +145,7 @@ func TestMTPTransferHonorsDUNAWithOmittedNetworkAppearance(test *testing.T) {
 	association.cfg.ApplicationServers = []ASConfig{{ASKey: *staticASKey(7, 1)}, {ASKey: *staticASKey(8, 3)}}
 	association.cfg.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
 	association.noteRoutingContextsAcked(params.NewRoutingContext(1, 3))
+	association.endpoint = nil
 	if !endpoint.trackAssociation(association) {
 		test.Fatal("Endpoint refused the mixed-network Association")
 	}

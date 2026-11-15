@@ -207,7 +207,7 @@ func TestIPSPSingleExchangeSimultaneousASPSMAndASPTM(t *testing.T) {
 }
 
 func TestIPSPEndpointSharesApplicationServerStateAcrossAssociations(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(): %v", err)
 	}
@@ -221,6 +221,7 @@ func TestIPSPEndpointSharesApplicationServerStateAcrossAssociations(t *testing.T
 	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	for _, association := range []*Association{incumbent, challenger} {
 		setInventoryTrafficModeType(&association.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
+		association.endpoint = nil
 		if !listener.promoteAcceptedAssociation(association) {
 			t.Fatal("promoteAcceptedAssociation() = false")
 		}
@@ -1681,6 +1682,7 @@ func ipspInitiationPolicy(initiateASPSM, initiateASPTM bool) *ASPProcedurePolicy
 func newSingleExchangeIPSPForTest(t *testing.T, state State) (*Association, *[]messages.M3UA) {
 	t.Helper()
 	association, sent := newTestConn(t, state, RoleIPSP)
+	association.endpoint = methodEndpointForTest(t, RoleIPSP, uint8(CongestionNationalWithoutPriorities), 3)
 	association.cfg.IPSP = &IPSPConfig{ExchangeModel: IPSPExchangeSingle}
 	// This IPSP waits for its peer to start both startup exchanges and drives
 	// its own orderly shutdown, which is what an Association configuration has

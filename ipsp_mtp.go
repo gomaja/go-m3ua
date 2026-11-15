@@ -118,6 +118,7 @@ func (e *Endpoint) refreshIPSPDestinations() {
 					s.congestionLevelSet = received.Congestion.LevelSet
 				}
 				s = combineASPTransport(s, transportASPStatus(a))
+				s = adaptMethodDestination(a.congestionProfile(c.AS), s)
 				if !found || aspAvailabilityRank(s.availability) < aspAvailabilityRank(best.availability) {
 					best = s
 					found = true

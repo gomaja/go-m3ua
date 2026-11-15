@@ -107,7 +107,7 @@ func TestSSNMByteCapMatchesLibraryAccounting(testContext *testing.T) {
 		{name: "count cap", limits: m3ua.SSNMStateConfig{SubscriptionQueueSize: 4}, retained: 4, binding: ssnmBindingCount},
 	}
 
-	sgp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+	sgp, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleSGP}))
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestSSNMByteCapMatchesLibraryAccounting(testContext *testing.T) {
 	remote := listener.Addr().(*sctp.Addr)
 	for _, peer := range peers {
 		endpointConfig, associationConfig := byteCapPeerConfig(peer)
-		peer.endpoint, err = m3ua.NewEndpoint(endpointConfig)
+		peer.endpoint, err = m3ua.NewEndpoint(nationalCongestionEndpointConfig(endpointConfig))
 		if err != nil {
 			testContext.Fatalf("%s: %v", peer.name, err)
 		}

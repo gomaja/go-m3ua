@@ -48,11 +48,11 @@ func TestTypedDataCrossesBothSCTPInitiationDirections(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			acceptEndpoint, err := NewEndpoint(EndpointConfig{Role: test.acceptRole})
+			acceptEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: test.acceptRole}))
 			if err != nil {
 				t.Fatalf("NewEndpoint(%v): %v", test.acceptRole, err)
 			}
-			dialEndpoint, err := NewEndpoint(EndpointConfig{Role: test.dialRole})
+			dialEndpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: test.dialRole}))
 			if err != nil {
 				t.Fatalf("NewEndpoint(%v): %v", test.dialRole, err)
 			}

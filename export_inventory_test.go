@@ -655,7 +655,7 @@ func TestApprovedExportsCompile(t *testing.T) {
 	}
 	aspConfig.Routing = &routing
 
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: &aspConfig})
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: &aspConfig}))
 	if err != nil {
 		t.Fatalf("NewEndpoint() error = %v", err)
 	}

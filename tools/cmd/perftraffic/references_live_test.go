@@ -38,7 +38,7 @@ func (association *processedRoutingAssociation) ReadData(ctx context.Context) (*
 // indication delivered by an enabled producer still fails the cohort.
 func newCohortRoutingEndpoint(config m3ua.EndpointConfig) (routingSetupEndpoint, error) {
 	config.TransportCongestion = &m3ua.TransportCongestionConfig{Disabled: true}
-	endpoint, err := m3ua.NewEndpoint(config)
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(config))
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func newRouteReferenceLiveFixture(testContext *testing.T, mode string) *routeRef
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	peers, err := startRoutingPeerSet(ctx, topology, addresses, newCohortRoutingEndpoint)
+	peers, err := startRoutingPeerSet(ctx, topology, addresses, newCohortRoutingEndpoint, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func newRouteReferenceLiveFixture(testContext *testing.T, mode string) *routeRef
 	if err != nil {
 		testContext.Fatal(err)
 	}
-	senders, err := startRoutingSenderSet(ctx, topology, local, addresses, newCohortRoutingEndpoint)
+	senders, err := startRoutingSenderSet(ctx, topology, local, addresses, newCohortRoutingEndpoint, m3ua.CongestionNationalWithPriorities)
 	if err != nil {
 		testContext.Fatal(err)
 	}

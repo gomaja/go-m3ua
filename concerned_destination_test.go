@@ -31,6 +31,7 @@ func TestConcernedSCONSendRequiresSingleUnmaskedDestination(t *testing.T) {
 					for _, path := range []string{"operation", "typed-message", "generic-message"} {
 						t.Run(path, func(t *testing.T) {
 							c, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
+							c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 							setInventoryNetworkAppearance(&c.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 							c.noteRoutingContextsAcked(params.NewRoutingContext(1))
 							request := SignallingCongestionRequest{Scope: testWireScope(7, true, 1), Destinations: tc.destinations, ConcernedDestination: 0, ConcernedDestinationSet: cd, CongestionLevel: 2, CongestionLevelSet: true}

@@ -93,7 +93,7 @@ func TestAssociationConfigDuplicateRoutingContextPresenceAndTrafficMode(t *testi
 }
 
 func TestEndpointAssociationPathsRejectDuplicateRoutingContext(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestASPConfigRejectsDuplicateRoutingContext(t *testing.T) {
 				{ID: "as-core", ASKey: staticASKey(7, 17)},
 				{ID: "as-other", ASKey: staticASKey(9, 17)},
 			}
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: cfg})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: cfg}))
 			if endpoint != nil {
 				_ = endpoint.Close()
 			}
@@ -185,7 +185,7 @@ func TestRKMRejectsRoutingContextSharedByCanonicalApplicationServers(t *testing.
 				asp.SignallingGateways[0].SGPs[0].ApplicationServers[0] = RemoteASConfig{ID: "first", ASKey: staticASKey(7, 17)}
 				cfg.ApplicationServers = []ASConfig{{ASKey: *staticASKey(7, 17)}}
 			}
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: asp})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: asp}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -244,7 +244,7 @@ func TestRKMCanceledRegistrationKeepsCanonicalApplicationServer(t *testing.T) {
 					},
 				}},
 			}}}
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: asp})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: asp}))
 			if err != nil {
 				t.Fatal(err)
 			}

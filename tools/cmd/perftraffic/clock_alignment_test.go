@@ -14,18 +14,18 @@ import (
 )
 
 func TestSharedClockRequiresExplicitOptIn(testContext *testing.T) {
-	config, err := parseConfig([]string{"-same-host-clock"})
+	config, err := parseConfig(nationalCongestionArguments([]string{"-same-host-clock"}))
 	if err != nil {
 		testContext.Fatalf("same-host clock opt-in: %v", err)
 	}
 	if !config.SameHostClock {
 		testContext.Fatal("same-host clock opt-in was lost")
 	}
-	legacy, err := parseConfig(nil)
+	legacy, err := parseConfig(nationalCongestionArguments(nil))
 	if err != nil || legacy.SameHostClock {
 		testContext.Fatalf("legacy mode changed: %+v, %v", legacy, err)
 	}
-	if _, err := parseConfig([]string{"-same-host-clock", "-mode=echo"}); err == nil {
+	if _, err := parseConfig(nationalCongestionArguments([]string{"-same-host-clock", "-mode=echo"})); err == nil {
 		testContext.Fatal("shared clock silently reinterpreted echo timing")
 	}
 }
@@ -299,7 +299,7 @@ func TestSharedClockRejectsMissedSchedulerStart(testContext *testing.T) {
 	clock.now.Store(specification.Clock.Start)
 	counters := newSenderCounters(1)
 	queues := []chan sendJob{make(chan sendJob, 1)}
-	dispatchScheduled(context.Background(), commandConfig{Rate: specification.Rate}, specification.Cohort, specification.Duration, time.Now(), specification.Expected, queues, counters, nil, &sharedRunClock{source: clock, window: *specification.Clock})
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: specification.Rate}), specification.Cohort, specification.Duration, time.Now(), specification.Expected, queues, counters, nil, &sharedRunClock{source: clock, window: *specification.Clock})
 	if len(queues[0]) != 0 || counters.capped != specification.Expected || counters.fatal == "" {
 		testContext.Fatal("missed common start silently shifted the offered schedule")
 	}

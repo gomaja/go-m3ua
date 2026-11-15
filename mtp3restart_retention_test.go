@@ -10,7 +10,7 @@ import (
 
 func restartRetentionFixture(t *testing.T, limit int) (*Endpoint, *Association, *distributionCapture) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, SGP: &SGPConfig{MaxSSNMDestinationRecords: limit}})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP, SGP: &SGPConfig{MaxSSNMDestinationRecords: limit}}))
 	if err != nil {
 		t.Fatal(err)
 	}

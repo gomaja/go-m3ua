@@ -76,6 +76,7 @@ func (c *dataFrameCapture) messages(t *testing.T) []*messages.Data {
 func newDataWriteAssociation(t *testing.T, routingContexts ...uint32) (*Association, *dataFrameCapture) {
 	t.Helper()
 	conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, routingContexts...)
+	conn.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 	setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	conn.noteRoutingContextsAcked(params.NewRoutingContext(routingContexts...))
 	capture := &dataFrameCapture{}
@@ -102,6 +103,7 @@ func writeScope(routingContext uint32) ASKey {
 // goroutine can change between this goroutine's choice and its write.
 func TestConcurrentWriteDataCarriesEachMessagesOwnLabelAndScope(t *testing.T) {
 	conn, capture := newDataWriteAssociation(t, 1, 2, 3)
+	conn.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithPriorities), 3)
 
 	// The configuration is shared by every association a Listener accepts, so a
 	// send that writes to it corrupts the others. Pinned by value here.
@@ -360,6 +362,7 @@ func TestWriteDataRequiresAnExactApplicationServerScope(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conn, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, test.contexts...)
+			conn.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 			setInventoryNetworkAppearance(&conn.cfg.ApplicationServers, test.appearance)
 			capture := &dataFrameCapture{}
 			conn.dataWriter = capture.write
@@ -544,7 +547,7 @@ func TestWriteDataValidatesTheRequestedStream(t *testing.T) {
 // route inventory. The Endpoint's own MTP-TRANSFER refuses for want of routes
 // in exactly the same configuration.
 func TestWriteDataIsIndependentOfLocalRouteAvailability(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: inventoryOnlyASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: inventoryOnlyASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -552,6 +555,7 @@ func TestWriteDataIsIndependentOfLocalRouteAvailability(t *testing.T) {
 
 	conn, capture := newDataWriteAssociation(t, 1)
 	conn.cfg.PeerSGP = &SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}
+	conn.endpoint = nil
 	if !endpoint.trackAssociation(conn) {
 		t.Fatal("the association was not attached to the Endpoint")
 	}

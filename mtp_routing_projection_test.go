@@ -258,7 +258,7 @@ func attachMultiScopeASPAssociation(
 // route going away.
 func TestMTPTransferFailsBackToTheNextApplicationServerOfOneSGP(t *testing.T) {
 	const pointCode = uint32(0x123456)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestMTPTransferProjectsStateRetainedForADynamicallyBoundApplicationServer(t
 			}},
 		},
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestBroadcastSelectsOneApplicationServerPerSGP(t *testing.T) {
 				{ID: "as-backup", ASKey: staticASKey(7, 2)},
 			},
 		})
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestBroadcastSelectsOneApplicationServerPerSGP(t *testing.T) {
 // Application Server of the same SGP would risk a duplicate.
 func TestFailedTargetIsNotRetriedThroughAnotherApplicationServer(t *testing.T) {
 	const pointCode = uint32(0x123456)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestRouteLookupSendsNothingOfItsOwn(t *testing.T) {
 	config := validASPConfig()
 	config.Routing.SignallingGatewaySelection = RouteSelectionPrimaryBackup
 	useSignallingGateways(config, "sg-a")
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -715,7 +715,7 @@ func TestSharedRoutePathPreservesAssociationAndMembership(t *testing.T) {
 			Paths:             []MTPRoutePathID{"sg-a-pair"},
 		},
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -753,7 +753,7 @@ func TestSharedRoutePathPreservesAssociationAndMembership(t *testing.T) {
 // An Endpoint with no Routing owns no outbound selection at all: MTPTransfer
 // says so, and direct per-message WriteData is unaffected by it.
 func TestApplicationManagedDirectIORemainsIndependent(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: &ASPConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: &ASPConfig{
 		SignallingGateways: []SignallingGatewayConfig{{
 			ID: "sg-a",
 			SGPs: []SignallingGatewayProcessConfig{{
@@ -761,7 +761,7 @@ func TestApplicationManagedDirectIORemainsIndependent(t *testing.T) {
 				ApplicationServers: []RemoteASConfig{{ID: "as-core", ASKey: staticASKey(7, 1)}},
 			}},
 		}},
-	}})
+	}}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -900,7 +900,7 @@ func TestSGPRouteOrderListsEachRouteOnce(t *testing.T) {
 // active. The two are different answers and the rejection says which.
 func TestSelectionDistinguishesUnboundFromInactiveCandidates(t *testing.T) {
 	const pointCode = uint32(0x123456)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1077,7 +1077,7 @@ func TestRememberedBroadcastWidensWhenAnSGPJoins(t *testing.T) {
 	second := config.SignallingGateways[0].SGPs[0]
 	second.ID = "sgp-a2"
 	config.SignallingGateways[0].SGPs = append(config.SignallingGateways[0].SGPs, second)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1138,7 +1138,7 @@ func TestSGPSelectionPrefersTheBetterPlacedSGP(t *testing.T) {
 			}},
 		},
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1171,7 +1171,7 @@ func TestSGPSelectionPrefersTheBetterPlacedSGP(t *testing.T) {
 // the application's decision to make.
 func TestFailedWriteIsNotRetriedThroughAWorkingApplicationServer(t *testing.T) {
 	const pointCode = uint32(0x123456)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1425,7 +1425,7 @@ func TestLoadsharedFlowKeepsItsSGPWhenAThirdJoins(t *testing.T) {
 	third := config.SignallingGateways[0].SGPs[0]
 	third.ID = "sgp-a3"
 	config.SignallingGateways[0].SGPs = append(config.SignallingGateways[0].SGPs, third)
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1557,7 +1557,7 @@ func TestBroadcastWithinASignallingGatewayIncludesARestrictedSGP(t *testing.T) {
 			}},
 		},
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

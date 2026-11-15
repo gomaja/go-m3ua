@@ -157,7 +157,7 @@ func TestSGPSendsEachMessageClassOnItsSection147Stream(t *testing.T) {
 	config.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: uint16(port)}
 
-	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}

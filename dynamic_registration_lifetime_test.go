@@ -15,10 +15,10 @@ import (
 
 func newRegistrationLifetimeEndpoint(t *testing.T, removeUnused bool, provisioned ...ProvisionedRoutingKey) *Endpoint {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: &RoutingKeyManagementConfig{
 		AuthorizeRegistration:   func(RoutingKeyRegistrationRequest) RegistrationStatus { return RegistrationSuccessfullyRegistered },
 		AllowDynamicRoutingKeys: true, RemoveUnusedRoutingKeys: removeUnused, ProvisionedRoutingKeys: provisioned,
-	}})
+	}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,10 +544,10 @@ func TestIPSPASPSMKeepsDynamicRegistration(t *testing.T) {
 	for _, model := range ipspDownModels {
 		for _, activeUp := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/active-up=%v", model.name, activeUp), func(t *testing.T) {
-				endpoint, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, RoutingKeyManagement: &RoutingKeyManagementConfig{
+				endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, RoutingKeyManagement: &RoutingKeyManagementConfig{
 					AuthorizeRegistration:   func(RoutingKeyRegistrationRequest) RegistrationStatus { return RegistrationSuccessfullyRegistered },
 					AllowDynamicRoutingKeys: true, RemoveUnusedRoutingKeys: true,
-				}})
+				}}))
 				if err != nil {
 					t.Fatal(err)
 				}

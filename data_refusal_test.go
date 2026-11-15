@@ -91,7 +91,7 @@ func TestMTPTransferReportsATransportRefusalAsNotSent(t *testing.T) {
 	const pointCode = uint32(0x123456)
 	for _, refusal := range transportRefusals {
 		t.Run(refusal.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: twoApplicationServerASPConfig()}))
 			if err != nil {
 				t.Fatalf("NewEndpoint: %v", err)
 			}

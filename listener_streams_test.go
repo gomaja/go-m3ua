@@ -31,12 +31,12 @@ func TestAcceptedAssociationNegotiatesAsManyStreamsAsADialledOne(t *testing.T) {
 	}
 	address := &sctp.Addr{IPs: []netip.Addr{netip.MustParseAddr("127.0.0.1")}, Port: port}
 
-	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = sgp.Close() }()
-	asp, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	asp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatal(err)
 	}

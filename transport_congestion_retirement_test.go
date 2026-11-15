@@ -19,7 +19,7 @@ func TestIPSPDynamicRetirementDoesNotReuseReceivedCongestion(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			key, other := *staticASKey(10, 7), *staticASKey(10, 8)
-			e, err := NewEndpoint(EndpointConfig{Role: RoleIPSP, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "retired", PointCode: 100}, AS: key}, {Destination: MTPDestination{MTPRoute: "other", PointCode: 100}, AS: other}}})
+			e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleIPSP, IPSPDestinations: []IPSPDestinationConfig{{Destination: MTPDestination{MTPRoute: "retired", PointCode: 100}, AS: key}, {Destination: MTPDestination{MTPRoute: "other", PointCode: 100}, AS: other}}}))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +98,7 @@ func TestIPSPDynamicRetirementDoesNotReuseReceivedCongestion(t *testing.T) {
 func TestCongestionRetirementPreservesStaticScope(t *testing.T) {
 	for _, role := range []Role{RoleASP, RoleIPSP} {
 		t.Run(role.String(), func(t *testing.T) {
-			e, err := NewEndpoint(EndpointConfig{Role: role})
+			e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: role}))
 			if err != nil {
 				t.Fatal(err)
 			}

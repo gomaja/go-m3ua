@@ -74,7 +74,7 @@ func runRoutedSenderWith(ctx context.Context, config commandConfig, environment 
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("resolve routed SGP addresses: %w", err)
 	}
-	set, err = startRoutingSenderSet(ctx, topology, local, peers, environment.factory)
+	set, err = startRoutingSenderSet(ctx, topology, local, peers, environment.factory, config.CongestionMethod)
 	if err != nil {
 		return combinedResult{}, fmt.Errorf("start routed associations: %w", err)
 	}

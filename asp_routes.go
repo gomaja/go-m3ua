@@ -103,7 +103,8 @@ const maxIdleTransferFlowLocks = 64
 // updates to the originating SG, while Section 1.3.2.5 requires the ASP to
 // derive one destination state from all such routes.
 type aspRoutes struct {
-	mu sync.RWMutex
+	methods *congestionMethodConfig
+	mu      sync.RWMutex
 
 	config aspRoutingConfig
 	ssnm   *ssnmState
@@ -1046,14 +1047,14 @@ func (r *aspRoutes) destinationStatusFromGatewayPath(
 			pressureBest = pressureRequired
 		}
 		pressureBest.availability = best.availability
-		return pressureBest
+		return adaptMethodDestination(r.routeCongestionProfile(mtpRoute), pressureBest)
 	}
 	if hasTransport && best.availability != DestinationUnavailable {
 		// Retained legacy DAVA cannot turn missing canonical eligibility into
 		// a measured transport clear when there is no usable candidate.
 		best.transportUnknown = true
 	}
-	return best
+	return adaptMethodDestination(r.routeCongestionProfile(mtpRoute), best)
 }
 
 func (r *aspRoutes) derivedStatusIndicationsLocked(

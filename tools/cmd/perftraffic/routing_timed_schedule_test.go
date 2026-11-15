@@ -63,7 +63,7 @@ func TestRoutingTimedCharacterizesLocalDispatchSchedule(testContext *testing.T) 
 	started := time.Now().Add(-duration)
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(int(expected))
-	config := commandConfig{Rate: 1_000, Workload: workloadMix, Seed: 17}
+	config := nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workloadMix, Seed: 17})
 
 	dispatchScheduled(context.Background(), config, "routing-schedule", duration, started, expected, []chan sendJob{queue}, counters, nil, nil)
 
@@ -92,7 +92,7 @@ func TestRoutingTimedCharacterizesCanceledDispatchAccounting(testContext *testin
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(int(expected))
 
-	dispatchScheduled(testContextCanceled, commandConfig{Rate: 1_000, Workload: workload128}, "routing-canceled", 4*time.Millisecond, time.Now(), expected, []chan sendJob{queue}, counters, nil, nil)
+	dispatchScheduled(testContextCanceled, nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "routing-canceled", 4*time.Millisecond, time.Now(), expected, []chan sendJob{queue}, counters, nil, nil)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if len(queue) != 0 || snapshot.scheduled != expected || snapshot.capped != expected || snapshot.outstanding != 0 ||
@@ -106,7 +106,7 @@ func TestRoutingTimedCharacterizesOutstandingCap(testContext *testing.T) {
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(1)
 
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128}, "routing-cap", 4*time.Millisecond, time.Now().Add(-4*time.Millisecond), expected, []chan sendJob{queue}, counters, nil, nil)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "routing-cap", 4*time.Millisecond, time.Now().Add(-4*time.Millisecond), expected, []chan sendJob{queue}, counters, nil, nil)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if len(queue) != 1 || snapshot != (routingTimedCounterSnapshot{scheduled: expected, capped: expected - 1, outstanding: 1}) {
@@ -119,7 +119,7 @@ func TestRoutingTimedCharacterizesFullWorkerQueue(testContext *testing.T) {
 	queue := make(chan sendJob)
 	counters := newSenderCounters(int(expected))
 
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128}, "routing-queue-full", 4*time.Millisecond, time.Now().Add(-4*time.Millisecond), expected, []chan sendJob{queue}, counters, nil, nil)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "routing-queue-full", 4*time.Millisecond, time.Now().Add(-4*time.Millisecond), expected, []chan sendJob{queue}, counters, nil, nil)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if len(queue) != 0 || snapshot != (routingTimedCounterSnapshot{scheduled: expected, capped: expected}) {
@@ -139,7 +139,7 @@ func TestRoutingTimedCharacterizesSharedClockBoundaries(testContext *testing.T) 
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(int(expected))
 
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128, Seed: 19}, "routing-shared", duration, time.Now().Add(-time.Hour), expected, []chan sendJob{queue}, counters, nil, clock)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128, Seed: 19}), "routing-shared", duration, time.Now().Add(-time.Hour), expected, []chan sendJob{queue}, counters, nil, clock)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if snapshot != (routingTimedCounterSnapshot{scheduled: expected, outstanding: expected}) || len(queue) != int(expected) {
@@ -169,7 +169,7 @@ func TestRoutingTimedCharacterizesSharedClockMissedStart(testContext *testing.T)
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(int(expected))
 
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128}, "routing-missed-start", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "routing-missed-start", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if len(queue) != 0 || snapshot.scheduled != expected || snapshot.capped != expected || snapshot.outstanding != 0 || !strings.Contains(snapshot.fatal, "start was missed") {
@@ -195,7 +195,7 @@ func TestRoutingTimedCharacterizesSharedClockCancellationBeforeFirstDue(testCont
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(int(expected))
 
-	dispatchScheduled(dispatchContext, commandConfig{Rate: 1_000, Workload: workload128}, "routing-canceled-wait", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
+	dispatchScheduled(dispatchContext, nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "routing-canceled-wait", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if len(queue) != 0 || snapshot.scheduled != expected || snapshot.capped != expected || snapshot.outstanding != 0 ||
@@ -222,7 +222,7 @@ func TestRoutingTimedCharacterizesSharedClockCancellationAtEndBoundary(testConte
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(int(expected))
 
-	dispatchScheduled(dispatchContext, commandConfig{Rate: 1_000, Workload: workload128}, "routing-canceled-end", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
+	dispatchScheduled(dispatchContext, nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "routing-canceled-end", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if len(queue) != int(expected) || snapshot.scheduled != expected || snapshot.outstanding != expected || snapshot.capped != 0 || !strings.Contains(snapshot.fatal, context.Canceled.Error()) {
@@ -242,7 +242,7 @@ func TestRoutingTimedCharacterizesSharedClockRegression(testContext *testing.T) 
 	queue := make(chan sendJob, expected)
 	counters := newSenderCounters(int(expected))
 
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128}, "routing-regression", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "routing-regression", duration, time.Now(), expected, []chan sendJob{queue}, counters, nil, clock)
 
 	snapshot := routingTimedCountersSnapshot(counters)
 	if len(queue) != 3 || snapshot.scheduled != expected || snapshot.capped != 1 || snapshot.outstanding != 3 || !strings.Contains(snapshot.fatal, "regressed") {

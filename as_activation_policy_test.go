@@ -27,10 +27,10 @@ func TestEndpointSnapshotsApplicationServerConfiguration(t *testing.T) {
 		ActivationPolicies:      policies,
 	}
 
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role:               RoleSGP,
 		ApplicationServers: config,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestApplicationServerConfigurationUsesExactASKey(t *testing.T) {
 		NetworkAppearance:    10,
 		NetworkAppearanceSet: true,
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleIPSP,
 		ApplicationServers: &ApplicationServerConfig{
 			DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
@@ -87,7 +87,7 @@ func TestApplicationServerConfigurationUsesExactASKey(t *testing.T) {
 				contextlessKey: {RequiredActiveASPs: 5},
 			},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestEndpointValidatesApplicationServerConfiguration(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(test.config)
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(test.config))
 			if endpoint != nil {
 				_ = endpoint.Close()
 				t.Fatalf("NewEndpoint returned %#v", endpoint)
@@ -191,10 +191,10 @@ func TestEndpointValidatesApplicationServerConfiguration(t *testing.T) {
 	}
 
 	for _, role := range []Role{RoleSGP, RoleIPSP} {
-		endpoint, err := NewEndpoint(EndpointConfig{
+		endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 			Role:               role,
 			ApplicationServers: &ApplicationServerConfig{},
-		})
+		}))
 		if err != nil {
 			t.Fatalf("NewEndpoint(%s): %v", role, err)
 		}
@@ -206,7 +206,7 @@ func TestEndpointRejectsProvisionedOverrideWhenNExceedsOne(t *testing.T) {
 	routingKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
 	routingKey.TrafficMode = params.TrafficModeOverride
 	routingKey.TrafficModeSet = true
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		ApplicationServers: &ApplicationServerConfig{
 			ActivationPolicies: map[ASKey]ASActivationPolicy{
@@ -227,7 +227,7 @@ func TestEndpointRejectsProvisionedOverrideWhenNExceedsOne(t *testing.T) {
 				RoutingKey:     routingKey,
 			}},
 		},
-	})
+	}))
 	if endpoint != nil {
 		_ = endpoint.Close()
 		t.Fatalf("NewEndpoint returned %#v", endpoint)
@@ -284,12 +284,12 @@ func TestEndpointRejectsAssociationOverrideWhenNExceedsOne(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 				Role: test.role,
 				ApplicationServers: &ApplicationServerConfig{
 					DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
 				},
-			})
+			}))
 			if err != nil {
 				t.Fatalf("NewEndpoint: %v", err)
 			}
@@ -310,14 +310,14 @@ func TestAssociationOverrideValidationUsesExactASKey(t *testing.T) {
 		RoutingContext:       1,
 		RoutingContextSet:    true,
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		ApplicationServers: &ApplicationServerConfig{
 			ActivationPolicies: map[ASKey]ASActivationPolicy{
 				restrictedKey: {RequiredActiveASPs: 2},
 			},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -340,14 +340,14 @@ func TestAssociationOverrideValidationUsesExactASKey(t *testing.T) {
 
 func TestSGPDefersOverrideValidationUntilASPAuthorization(t *testing.T) {
 	restrictedKey := ASKey{RoutingContext: 1, RoutingContextSet: true}
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		ApplicationServers: &ApplicationServerConfig{
 			ActivationPolicies: map[ASKey]ASActivationPolicy{
 				restrictedKey: {RequiredActiveASPs: 2},
 			},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -428,12 +428,12 @@ func TestContextlessApplicationServerCarriesItsOwnTrafficMode(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			endpoint, err := NewEndpoint(EndpointConfig{
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 				Role: test.role,
 				ApplicationServers: &ApplicationServerConfig{
 					DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
 				},
-			})
+			}))
 			if err != nil {
 				t.Fatalf("NewEndpoint: %v", err)
 			}
@@ -470,12 +470,12 @@ func TestContextlessApplicationServerCarriesItsOwnTrafficMode(t *testing.T) {
 }
 
 func TestIPSPDoubleExchangeLocalOverrideDoesNotUsePeerActivationPolicy(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleIPSP,
 		ApplicationServers: &ApplicationServerConfig{
 			DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -881,12 +881,12 @@ func TestConcurrentApplicationServerActivationThreshold(t *testing.T) {
 }
 
 func TestEndpointCloseRacesApplicationServerThresholdChanges(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		ApplicationServers: &ApplicationServerConfig{
 			DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1249,13 +1249,13 @@ func TestASPActivePublishesShortageAfterAdoptingTrafficMode(t *testing.T) {
 
 func applicationServerRegistryForActivationTest(t *testing.T, policy ASActivationPolicy) *applicationServers {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		ApplicationServers: &ApplicationServerConfig{
 			RecoveryTimer:           time.Hour,
 			DefaultActivationPolicy: policy,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

@@ -156,6 +156,7 @@ func TestOverflowIdleDataPathDoesNotTakeTrackerMutex(t *testing.T) {
 	for _, operation := range []string{"enqueue", "dequeue"} {
 		t.Run(operation, func(t *testing.T) {
 			c, _ := newDataWriteAssociation(t, 1)
+			c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionInternational), 0)
 			if operation == "dequeue" {
 				deliver(t, c, 1, inboundData(1, "queued"))
 			}
@@ -217,6 +218,7 @@ func TestOverflowConcurrentHandoffsAllowSustainedDrain(t *testing.T) {
 	for _, capacity := range []int{1, 2} {
 		t.Run(fmt.Sprint(capacity), func(t *testing.T) {
 			c, _ := newDataWriteAssociation(t, 1)
+			c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionInternational), 0)
 			c.dataChan = make(chan *DataMessage, capacity)
 			for range capacity + 1 {
 				deliver(t, c, 1, inboundData(1, "initial overflow"))
@@ -266,6 +268,7 @@ func TestOverflowConcurrentHandoffsAllowSustainedDrain(t *testing.T) {
 
 func TestOverflowDoubleExchangeCarriesLocalDirectionScope(t *testing.T) {
 	c, sent := newDoubleExchangeIPSPForTest(t)
+	c.endpoint = methodEndpointForTest(t, RoleIPSP, uint8(CongestionInternational), 0)
 	c.setIPSPState(IPSPState{TrafficToLocal: StateASPActive, TrafficToPeer: StateASPActive})
 	c.noteRoutingContextsAcked(params.NewRoutingContext(11))
 	c.noteRoutingContextsActive([]uint32{22})

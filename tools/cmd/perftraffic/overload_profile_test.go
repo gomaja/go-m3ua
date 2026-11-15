@@ -106,18 +106,18 @@ func TestParseOverloadProfileRejectsMalformedAndUnsafeProfiles(testContext *test
 
 func TestOverloadProfileFlagConfiguresOnlyTheThroughputSender(testContext *testing.T) {
 	base := []string{"-role=asp", "-transport=dial", "-peer-control=http://peer:8080", "-cohort=overload", "-rate=40000", "-associations=8", "-payload=mix"}
-	config, err := parseConfig(append(base, "-overload-profile=2x:15s,0.5x:15s", "-warmup=5s", "-same-host-clock"))
+	config, err := parseConfig(nationalCongestionArguments(append(base, "-overload-profile=2x:15s,0.5x:15s", "-warmup=5s", "-same-host-clock")))
 	if err != nil {
 		testContext.Fatal(err)
 	}
 	if config.overload == nil || config.Duration != 30*time.Second || config.Drain != 3*time.Second || config.Rate != 40_000 {
 		testContext.Fatalf("overload config = %+v", config)
 	}
-	config, err = parseConfig(append(base, "-overload-profile=2x:15s,0.5x:15s", "-duration=30s", "-drain=5s"))
+	config, err = parseConfig(nationalCongestionArguments(append(base, "-overload-profile=2x:15s,0.5x:15s", "-duration=30s", "-drain=5s")))
 	if err != nil || config.Duration != 30*time.Second || config.Drain != 5*time.Second {
 		testContext.Fatalf("matching duration and longer drain: %+v, %v", config, err)
 	}
-	plain, err := parseConfig(base)
+	plain, err := parseConfig(nationalCongestionArguments(base))
 	if err != nil || plain.overload != nil || plain.OverloadProfile != "" || plain.Duration != 2*time.Minute || plain.Drain != 2*time.Second {
 		testContext.Fatalf("default config changed: %+v, %v", plain, err)
 	}
@@ -132,7 +132,7 @@ func TestOverloadProfileFlagConfiguresOnlyTheThroughputSender(testContext *testi
 		{arguments: append(base, "-overload-profile=2x:15s"), want: "between 2 and 8 phases"},
 		{arguments: append(base, "-overload-profile=2x:300s,0.5x:299s", "-warmup=5s"), want: "exceed"},
 	} {
-		if _, err := parseConfig(scenario.arguments); err == nil || !strings.Contains(err.Error(), scenario.want) {
+		if _, err := parseConfig(nationalCongestionArguments(scenario.arguments)); err == nil || !strings.Contains(err.Error(), scenario.want) {
 			testContext.Errorf("%v: err = %v, want %q", scenario.arguments, err, scenario.want)
 		}
 	}
@@ -142,14 +142,14 @@ func TestOverloadProfileFlagConfiguresOnlyTheThroughputSender(testContext *testi
 // combined: the sender refuses both flags together and a receiver refuses a
 // specification that carries both.
 func TestOverloadProfileIsNeverCombinedWithSSNMLoad(testContext *testing.T) {
-	_, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000", "-overload-profile=2x:15s,0.5x:15s"))
+	_, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments("-ssnm-total-rate=1000", "-overload-profile=2x:15s,0.5x:15s")))
 	if err == nil || !strings.Contains(err.Error(), "cannot be combined with SSNM load") {
 		testContext.Fatalf("sender flags: %v", err)
 	}
-	if _, err := parseConfig(ssnmSenderArguments("-ssnm-total-rate=1000")); err != nil {
+	if _, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments("-ssnm-total-rate=1000"))); err != nil {
 		testContext.Fatalf("SSNM load alone: %v", err)
 	}
-	if config, err := parseConfig(ssnmSenderArguments("-overload-profile=2x:15s,0.5x:15s")); err != nil || config.overload == nil || config.SSNM.enabled() {
+	if config, err := parseConfig(nationalCongestionArguments(ssnmSenderArguments("-overload-profile=2x:15s,0.5x:15s"))); err != nil || config.overload == nil || config.SSNM.enabled() {
 		testContext.Fatalf("overload profile alone: %+v, %v", config, err)
 	}
 	profile, err := parseOverloadProfile("2x:15s,0.5x:15s", 40_000)
@@ -297,7 +297,7 @@ func TestOverloadSchedulerSwitchesRatesOnTheSharedClock(testContext *testing.T) 
 	counters := newSenderCounters(int(schedule.expected))
 	counters.overload = newOverloadCounters(schedule)
 	queue := make(chan sendJob, schedule.expected)
-	maxima := dispatchOverload(context.Background(), commandConfig{Seed: 3, Workload: workloadMix}, "phased", schedule, time.Now(), []chan sendJob{queue}, counters, clock)
+	maxima := dispatchOverload(context.Background(), nationalCongestionCommandConfig(commandConfig{Seed: 3, Workload: workloadMix}), "phased", schedule, time.Now(), []chan sendJob{queue}, counters, clock)
 	close(queue)
 	perPhase := make([]uint64, len(phases))
 	var previous time.Duration
@@ -349,7 +349,7 @@ func TestOverloadSchedulerRecordsHowLateItEmits(testContext *testing.T) {
 	counters := newSenderCounters(int(schedule.expected))
 	counters.overload = newOverloadCounters(schedule)
 	queue := make(chan sendJob, schedule.expected)
-	dispatchOverload(context.Background(), commandConfig{Seed: 3, Workload: workload128}, "late", schedule, time.Now(), []chan sendJob{queue}, counters, clock)
+	dispatchOverload(context.Background(), nationalCongestionCommandConfig(commandConfig{Seed: 3, Workload: workload128}), "late", schedule, time.Now(), []chan sendJob{queue}, counters, clock)
 	// Every message is recorded; the first of the first batch waited 14 ms,
 	// and at 1,000/s each later batch starts 14 ms late again.
 	lags := counters.overload.emission.percentiles()
@@ -359,7 +359,7 @@ func TestOverloadSchedulerRecordsHowLateItEmits(testContext *testing.T) {
 	// A nominal cohort's scheduler records nothing.
 	nominal := newSenderCounters(10)
 	source.now = start - int64(16*time.Millisecond)
-	dispatchScheduled(context.Background(), commandConfig{Rate: 1_000, Workload: workload128}, "nominal", 10*time.Millisecond, time.Now(), 10, []chan sendJob{make(chan sendJob, 10)}, nominal, nil, &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: start, End: start + int64(10*time.Millisecond)}})
+	dispatchScheduled(context.Background(), nationalCongestionCommandConfig(commandConfig{Rate: 1_000, Workload: workload128}), "nominal", 10*time.Millisecond, time.Now(), 10, []chan sendJob{make(chan sendJob, 10)}, nominal, nil, &sharedRunClock{source: source, window: sharedClockWindow{Domain: domain, Start: start, End: start + int64(10*time.Millisecond)}})
 	if nominal.overload != nil || nominal.scheduled != 10 {
 		testContext.Fatalf("nominal counters = %+v", nominal)
 	}
@@ -380,7 +380,7 @@ func TestOverloadSchedulerCountsCapRefusalsByPhase(testContext *testing.T) {
 	counters.overload = newOverloadCounters(schedule)
 	full := make(chan sendJob, 4)
 	spare := make(chan sendJob, 100)
-	dispatchOverload(context.Background(), commandConfig{Seed: 3, Workload: workload128}, "capped", schedule, time.Now(), []chan sendJob{full, spare}, counters, clock)
+	dispatchOverload(context.Background(), nationalCongestionCommandConfig(commandConfig{Seed: 3, Workload: workload128}), "capped", schedule, time.Now(), []chan sendJob{full, spare}, counters, clock)
 	first, second := counters.overload.phases[0], counters.overload.phases[1]
 	queued := uint64(len(full) + len(spare))
 	refused := first.CapRefusedOutstanding + first.CapRefusedQueue + second.CapRefusedOutstanding + second.CapRefusedQueue

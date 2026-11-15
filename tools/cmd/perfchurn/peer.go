@@ -48,7 +48,7 @@ func runPeer(ctx context.Context, config commandConfig) (peerRecord, error) {
 	}
 	peer.remote = remote
 	for index := range peer.endpoints {
-		endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP, SGP: sgpEndpointConfig()})
+		endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP, Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: peer.config.CongestionMethod}}, SGP: sgpEndpointConfig()})
 		if err != nil {
 			return peer.record, fmt.Errorf("SGP endpoint %d: %w", index, err)
 		}

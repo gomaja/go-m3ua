@@ -43,7 +43,7 @@ func exercisePendingProtocolErrorBoundary(t *testing.T, inside bool) {
 	var enterOnce, releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(released) }) }
 
-	targetEndpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	targetEndpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role:                m3ua.RoleIPSP,
 		TransportCongestion: &m3ua.TransportCongestionConfig{Disabled: true},
 		RoutingKeyManagement: &m3ua.RoutingKeyManagementConfig{
@@ -56,15 +56,15 @@ func exercisePendingProtocolErrorBoundary(t *testing.T, inside bool) {
 				return m3ua.RegistrationPermissionDenied
 			},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = targetEndpoint.Close() })
-	peerEndpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+	peerEndpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{
 		Role:                m3ua.RoleIPSP,
 		TransportCongestion: &m3ua.TransportCongestionConfig{Disabled: true},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func stateHistoryAssociation(t *testing.T) (context.Context, *m3ua.Endpoint, *m3
 		}
 		<-done
 	})
-	endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, TransportCongestion: &m3ua.TransportCongestionConfig{Disabled: true}})
+	endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleASP, TransportCongestion: &m3ua.TransportCongestionConfig{Disabled: true}}))
 	if err != nil {
 		t.Fatal(err)
 	}

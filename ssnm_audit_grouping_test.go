@@ -71,7 +71,7 @@ func TestDAUDSparseFullSpaceGetsCompleteGroupedAnswer(t *testing.T) {
 }
 
 func TestDAUDGroupsAllPermittedListsAndSplitsAtConfiguredLimit(t *testing.T) {
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, SSNMState: &SSNMStateConfig{MaxAffectedPointCodes: 2}})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP, SSNMState: &SSNMStateConfig{MaxAffectedPointCodes: 2}}))
 	if err != nil {
 		t.Fatal(err)
 	}

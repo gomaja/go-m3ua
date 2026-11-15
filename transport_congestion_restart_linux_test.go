@@ -31,7 +31,7 @@ func TestDisabledTransportCongestionRestartPreservesClearRoute(t *testing.T) {
 	cfg := transportBacklogASPConfig()
 	cfg.Routing.AllowUnknownDestinations = false
 	cfg.Routing.CongestionPolicy = func(_, level uint8, levelSet bool) bool { return levelSet && level < 3 }
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: cfg, TransportCongestion: &TransportCongestionConfig{Disabled: true}})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: cfg, TransportCongestion: &TransportCongestionConfig{Disabled: true}}))
 	if err != nil {
 		t.Fatal(err)
 	}

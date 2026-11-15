@@ -51,7 +51,7 @@ func TestRoutingTopologyHasApprovedInventory(testContext *testing.T) {
 					testContext.Fatalf("route %d differs: %+v", routeIndex, route)
 				}
 			}
-			endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: topology.ASP})
+			endpoint, err := m3ua.NewEndpoint(nationalCongestionEndpointConfig(m3ua.EndpointConfig{Role: m3ua.RoleASP, ASP: topology.ASP}))
 			if err != nil {
 				testContext.Fatalf("public Endpoint rejects topology: %v", err)
 			}

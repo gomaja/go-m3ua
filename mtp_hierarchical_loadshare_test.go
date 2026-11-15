@@ -105,7 +105,7 @@ func newNamedHierarchicalLoadshareFixture(testContext *testing.T, preferred Remo
 			SignallingGateway: gatewayID, ApplicationServers: applicationServers})
 		config.Routing.MTPRoutes[0].Paths = append(config.Routing.MTPRoutes[0].Paths, MTPRoutePathID(string(gatewayID)+"-path"))
 	}
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		testContext.Fatalf("NewEndpoint: %v", err)
 	}

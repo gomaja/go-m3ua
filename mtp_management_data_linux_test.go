@@ -25,12 +25,12 @@ func TestMTPManagementDataOverSCTP(t *testing.T) {
 		c.HeartbeatInfo = &HeartbeatInfo{Enabled: false}
 		return c
 	}
-	sgp, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	sgp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = sgp.Close() }()
-	asp, err := NewEndpoint(EndpointConfig{Role: RoleASP})
+	asp, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP}))
 	if err != nil {
 		t.Fatal(err)
 	}

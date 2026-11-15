@@ -96,6 +96,11 @@ func runSender(ctx context.Context, config commandConfig) (combinedResult, error
 		return combinedResult{}, fmt.Errorf("create standalone ASP endpoint: %w", err)
 	}
 	defer func() { _ = endpoint.Close() }()
+	return runDirectSender(ctx, config, endpoint)
+}
+
+// runDirectSender runs the direct workload on its caller-owned endpoint.
+func runDirectSender(ctx context.Context, config commandConfig, endpoint *m3ua.Endpoint) (combinedResult, error) {
 	// The listener (ASP-listen initiation) stays open for the whole run:
 	// closing it closes every association it accepted.
 	associations, releaseAssociations, err := establishSenderAssociations(ctx, config, m3uaConnector{endpoint: endpoint})

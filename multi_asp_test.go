@@ -22,12 +22,12 @@ func TestApplicationServerWaitsForConfiguredActiveASPThreshold(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		ApplicationServers: &ApplicationServerConfig{
 			DefaultActivationPolicy: ASActivationPolicy{RequiredActiveASPs: 2},
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

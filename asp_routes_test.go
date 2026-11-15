@@ -592,7 +592,7 @@ func newASPMultiSGFixture(t *testing.T) (*Endpoint, *Association, *Association) 
 
 func newASPMultiSGFixtureWithConfig(t *testing.T, config *ASPConfig) (*Endpoint, *Association, *Association) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -779,7 +779,7 @@ func BenchmarkASPRouteIndexedTransferLookup(b *testing.B) {
 func benchmarkASPRoutesWithSparseRecords(b *testing.B) (*aspRoutes, aspSignallingGatewayConfig) {
 	b.Helper()
 	config := validASPConfig()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: config})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: config}))
 	if err != nil {
 		b.Fatalf("NewEndpoint: %v", err)
 	}

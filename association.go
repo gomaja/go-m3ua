@@ -45,6 +45,7 @@ const M3UAPPID uint32 = 3
 // SCTP association has been released, which for a SHUTDOWN can take up to
 // three seconds.
 type Association struct {
+	profileDiagnostics congestionProfileDiagnostics
 	// sctpConn is the SCTP association this Association owns.
 	//
 	// It belongs to the Association and not to AssociationConfig, because one
@@ -173,7 +174,11 @@ type Association struct {
 	peerIPSPTrafficModes  trafficModeSnapshot
 	// Dynamic Routing Keys are keyed by Routing Context because one
 	// Association may coordinate keys in several Network Appearances.
-	muDynamicASKeys           sync.RWMutex
+	muDynamicASKeys sync.RWMutex
+	// sconSubmissions guards only short binding admission/change bookkeeping.
+	// A binding change cancels matching submissions before waiting for their
+	// completion; neither this mutex nor a short state lock spans that join.
+	sconSubmissions           sconSubmissionTracker
 	dynamicPeerASKeys         map[uint32]ASKey
 	dynamicLocalASKeys        map[uint32]ASKey
 	dynamicPeerASKeyVersions  map[uint32]uint64
@@ -337,7 +342,7 @@ type Association struct {
 	// active, even after end. Each send-side high-water observation adds two.
 	dataOverflowRefills      atomic.Uint64
 	dataOverflowSeenRefill   uint64
-	dataOverflowScopes       map[dataOverflowKey]DataQueueCongestionIndication
+	dataOverflowScopes       map[dataOverflowKey]dataOverflowScope
 	dataOverflowLowSince     time.Time
 	dataOverflowWorker       bool
 	dataOverflowTrackingLost bool
@@ -491,6 +496,7 @@ type mandatoryControl struct {
 	messages            []messages.M3UA
 	enforceTrafficScope bool
 	result              chan error
+	congestionBindings  [][]queueCongestionBinding
 }
 
 // newAssociation builds an unconnected Association for the given endpoint role.
@@ -900,7 +906,7 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 // WriteSignal or WriteData on the same association waits behind it for the
 // socket.
 func (c *Association) WriteSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, true, applicationWrite, nil, nil)
+	return c.writeSignal(m3, true, applicationWrite, nil, nil, nil)
 }
 
 // writeControl writes a message the library sends on its own behalf. It waits
@@ -913,11 +919,11 @@ func (c *Association) writeControl(m3 messages.M3UA) (n int, err error) {
 // serialized transport boundary (RFC 4666 §4.3.4.1–§4.3.4.4).
 func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan struct{}, request *pendingRequest) (n int, err error) {
 	if _, isASPDown := m3.(*messages.AspDown); !isASPDown || c.tack == nil || !c.isIPSPDoubleExchange() {
-		return c.writeSignal(m3, true, libraryWrite, stopped, request)
+		return c.writeSignal(m3, true, libraryWrite, stopped, request, nil)
 	}
 	c.tack.aspDownDeliveryMu.Lock()
 	defer c.tack.aspDownDeliveryMu.Unlock()
-	n, err = c.writeSignal(m3, true, libraryWrite, stopped, request)
+	n, err = c.writeSignal(m3, true, libraryWrite, stopped, request, nil)
 	if err == nil && n > 0 {
 		c.tack.mu.Lock()
 		c.tack.aspDownAcksOutstanding++
@@ -929,8 +935,8 @@ func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan 
 // writeDistributedSignal writes a message whose Application Server has already
 // been selected and whose deliveryMu is already held by the distribution
 // engine. Re-entering the public scope barrier there would deadlock.
-func (c *Association) writeDistributedSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, false, applicationWrite, nil, nil)
+func (c *Association) writeDistributedSignal(m3 messages.M3UA, resolvedAS ASKey) (n int, err error) {
+	return c.writeSignal(m3, false, applicationWrite, nil, nil, &resolvedAS)
 }
 
 // writeOrigin records who decided a message should be sent, because that
@@ -1000,7 +1006,7 @@ const (
 // When the bound expires the association is closed, and that also ends the
 // wait: closing the SCTP association releases any write parked in the poller
 // before the descriptor goes.
-func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}, request *pendingRequest) (submitted bool, resultErr error) {
+func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}, request *pendingRequest, bindings ...queueCongestionBinding) (submitted bool, resultErr error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	// Entry and cancellation share the request's short lock. The completion
@@ -1021,10 +1027,20 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 	if err := c.validateIPSPCongestionFrame(frame); err != nil {
 		return false, err
 	}
+	submission, err := c.beginSCONSubmission(bindings)
+	if err != nil {
+		return false, err
+	}
+	defer c.finishSCONSubmission(submission)
 	transport := c.controlSender()
 	send := transport.SendMsg
+	parent := context.Background()
+	if submission != nil {
+		parent = submission.ctx
+		send = func(b []byte, opts sctp.SendOptions) (int, error) { return transport.SendMsgContext(parent, b, opts) }
+	}
 	if stopped != nil {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(parent)
 		finished, joined := make(chan struct{}), make(chan struct{})
 		go func() {
 			defer close(joined)
@@ -1048,7 +1064,10 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 			return false
 		}
 	}
-	_, err := send(frame, sctp.SendOptions{Info: info, NoWait: true})
+	_, err = send(frame, sctp.SendOptions{Info: info, NoWait: true})
+	if sconSubmissionCancelled(submission, err) {
+		return false, ErrRoutingContextNotActive
+	}
 	if cancelledSend(err) {
 		return false, nil
 	}
@@ -1073,6 +1092,7 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 		}
 	})
 	_, err = send(frame, sctp.SendOptions{Info: info})
+	bindingCancelled := sconSubmissionCancelled(submission, err)
 	cancelled := cancelledSend(err)
 	if cancelled {
 		err = nil
@@ -1083,6 +1103,9 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 		return true, expired
 	}
 	watchdog.Stop()
+	if bindingCancelled && !cancelled {
+		return false, ErrRoutingContextNotActive
+	}
 	return !cancelled, err
 }
 
@@ -1101,6 +1124,14 @@ func (c *Association) writeMandatoryASControls(control []messages.M3UA, enforceT
 		messages:            append([]messages.M3UA(nil), control...),
 		enforceTrafficScope: enforceTrafficScope,
 		applicationServer:   owner,
+	}
+	for index, message := range entry.messages {
+		if scon, ok := message.(*messages.SignallingCongestion); ok {
+			if entry.congestionBindings == nil {
+				entry.congestionBindings = make([][]queueCongestionBinding, len(entry.messages))
+			}
+			entry.congestionBindings[index] = c.sconPublicationBindings(scon)
+		}
 	}
 
 	// Hand-built state-machine tests intentionally omit the production queue so
@@ -1175,21 +1206,46 @@ func (c *Association) writeMandatoryControl(control mandatoryControl, queued boo
 			return nil
 		}
 	}
-	for _, message := range control.messages {
+	var refused []error
+	for index, message := range control.messages {
 		var err error
 		if queued && c.notificationWriter != nil {
 			_, err = c.notificationWriter(message)
 		} else {
-			_, err = c.writeSignal(message, control.enforceTrafficScope, libraryWrite, nil, nil)
+			var bindings []queueCongestionBinding
+			if index < len(control.congestionBindings) {
+				bindings = control.congestionBindings[index]
+			}
+			_, err = c.writeSignal(message, control.enforceTrafficScope, libraryWrite, nil, nil, nil, bindings...)
 		}
 		if err != nil {
+			if sconProfileRefusal(err) {
+				refused = append(refused, err)
+				continue
+			}
+			// Return a transport failure on its own. Joining it to a local
+			// admission refusal would hide it from the queue's teardown rule.
 			return err
 		}
 	}
-	return nil
+	return errors.Join(refused...)
 }
 
-func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest) (n int, err error) {
+// Only a known-not-sent SCON method refusal permits independent replies to
+// continue. State, framing and transport failures retain their existing paths.
+func sconProfileRefusal(err error) bool {
+	var refusal *controlAdmissionError
+	return errors.As(err, &refusal) && refusal.sconProfile
+}
+
+func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, bindings ...queueCongestionBinding) (n int, err error) {
+	transportAttempted := false
+	profileRefused := false
+	defer func() {
+		if err != nil && origin == libraryWrite && !transportAttempted {
+			err = &controlAdmissionError{error: err, sconProfile: profileRefused}
+		}
+	}()
 	if m3 == nil {
 		return 0, errors.New("cannot write a nil M3UA signal")
 	}
@@ -1209,7 +1265,8 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	// A caller-built DATA is admitted and classified exactly as WriteData's
 	// own messages are; only the reported count differs.
 	if isPayloadData(buf) {
-		return c.writeRawData(m3, buf, n, enforceTrafficScope)
+		transportAttempted = true // DATA carries its own submission outcome.
+		return c.writeRawData(m3, buf, n, enforceTrafficScope, resolvedDataScope)
 	}
 	// RFC 4666 §3.4.4 maps Concerned Destination to a TFC using one
 	// unmasked affected DPC, only ASP -> SGP. Inspect the encoded message so
@@ -1222,6 +1279,9 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 			return 0, parseErr
 		}
 		scon = decoded.(*messages.SignallingCongestion)
+		if len(bindings) == 0 {
+			bindings = c.sconPublicationBindings(scon)
+		}
 	}
 	// RFC 4666 §3.4.5 permits exactly one unmasked DUPU destination.
 	// Check the encoded message so caller-built headers and serializers use
@@ -1247,6 +1307,12 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	if scon != nil && scon.ConcernedDestination != nil && (c.role != RoleASP || !singleUnmaskedAffectedPointCode(scon.AffectedPointCode)) {
 		return 0, ErrInvalidParameterValue
 	}
+	if scon != nil {
+		if err := c.validateCongestionSCON(scon); err != nil {
+			profileRefused = true
+			return 0, err
+		}
+	}
 
 	if c.signalWriter != nil {
 		select {
@@ -1254,6 +1320,12 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 			return 0, nil
 		default:
 		}
+		submission, err := c.beginSCONSubmission(bindings)
+		if err != nil {
+			return 0, err
+		}
+		defer c.finishSCONSubmission(submission)
+		transportAttempted = true
 		return c.signalWriter(m3)
 	}
 
@@ -1267,7 +1339,8 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 
 	if origin == libraryWrite {
 		var submitted bool
-		submitted, err = c.writeControlFrame(buf, &sctpInfo, stopped, request)
+		submitted, err = c.writeControlFrame(buf, &sctpInfo, stopped, request, bindings...)
+		transportAttempted = submitted
 		if !submitted && err == nil {
 			return 0, nil
 		}
@@ -1275,7 +1348,19 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 		c.sendMu.Lock()
 		err = c.validateIPSPCongestionFrame(buf)
 		if err == nil {
-			_, err = c.controlSender().SendMsg(buf, sctp.SendOptions{Info: &sctpInfo, NoWait: c.applicationWriteDeadline.Load() == nil})
+			var submission *sconSubmission
+			submission, err = c.beginSCONSubmission(bindings)
+			if err == nil {
+				transportAttempted = true
+				options := sctp.SendOptions{Info: &sctpInfo, NoWait: c.applicationWriteDeadline.Load() == nil}
+				if submission == nil {
+					_, err = c.controlSender().SendMsg(buf, options)
+				} else {
+					_, err = c.controlSender().SendMsgContext(submission.ctx, buf, options)
+					err = sconSubmissionError(submission, err)
+				}
+				c.finishSCONSubmission(submission)
+			}
 		}
 		c.sendMu.Unlock()
 	}
@@ -1660,12 +1745,29 @@ func (c *Association) writeNotifications() {
 				control.result <- writeErr
 			}
 			if writeErr != nil {
+				var refusal *controlAdmissionError
+				if errors.As(writeErr, &refusal) {
+					if control.result == nil {
+						logf("m3ua: local control publication not sent: %v", writeErr)
+					}
+					continue
+				}
 				_ = c.closeWith(writeErr)
 				return
 			}
 		}
 	}
 }
+
+// controlAdmissionError distinguishes a local, known-not-sent control refusal
+// from a transport failure. In particular, one target's congestion profile
+// must not turn an Endpoint publication refusal into association teardown.
+type controlAdmissionError struct {
+	error
+	sconProfile bool
+}
+
+func (e *controlAdmissionError) Unwrap() error { return e.error }
 
 // isPayloadData classifies from the bytes that will actually be written, not
 // from interface methods a custom M3UA value could make disagree with its
@@ -2415,6 +2517,8 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 	if c == nil || !key.RoutingContextSet {
 		return
 	}
+	releaseChange, _ := c.beginSCONBindingChange(key.RoutingContext, local, false, nil)
+	defer releaseChange()
 	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
 		c.muAckedRCs.Lock()
 		c.muDynamicASKeys.Lock()
@@ -2455,6 +2559,11 @@ func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 	if c == nil {
 		return
 	}
+	releaseChange, changing := c.beginSCONBindingChange(routingContext, local, true, nil)
+	if !changing {
+		return
+	}
+	defer releaseChange()
 	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
 		c.muAckedRCs.Lock()
 		c.muDynamicASKeys.Lock()
@@ -2509,6 +2618,11 @@ func (c *Association) removeDynamicASKeyVersion(
 	if c == nil {
 		return ASKey{}, false
 	}
+	releaseChange, changing := c.beginSCONBindingChange(routingContext, local, true, &expectedVersion)
+	if !changing {
+		return ASKey{}, false
+	}
+	defer releaseChange()
 	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
 		c.muAckedRCs.Lock()
 		defer c.muAckedRCs.Unlock()
@@ -3836,6 +3950,9 @@ const (
 	// an outstanding activation request (RFC 4666 §§3.8.1, 4.3.4.3). The
 	// application decides whether to retain the grant or request ASP Inactive.
 	ManagementASPActivation
+	// ManagementCongestionProfileMismatch reports the first accepted DATA profile mismatch.
+	// Subsequent mismatches update CongestionProfileDiagnostics without another primitive.
+	ManagementCongestionProfileMismatch
 )
 
 // String names the indication as RFC 4666 Section 1.6.3 does, or uses an
@@ -3850,6 +3967,8 @@ func (k ManagementIndicationKind) String() string {
 		return "M-SCTP_RESTART"
 	case ManagementSCTPRelease:
 		return "M-SCTP_RELEASE"
+	case ManagementCongestionProfileMismatch:
+		return "CONGESTION-PROFILE-MISMATCH"
 	case ManagementTransportCongestion:
 		return "TRANSPORT-CONGESTION"
 	case ManagementSCTPStatus:
@@ -3888,6 +4007,8 @@ type ManagementIndication struct {
 	// IPSP. Shared ASPSM withdrawals may affect scopes in both directions.
 	// Zero for an ASP.
 	PreviousIPSPState IPSPState
+	// CongestionProfileMismatch is set only on the first DATA mismatch indication.
+	CongestionProfileMismatch *DataCongestionProfileMismatch
 	// DataQueueCongestion is set only for ManagementDataQueueCongestion.
 	// The indication owns this copy and its wire scope.
 	DataQueueCongestion *DataQueueCongestionIndication
@@ -4049,6 +4170,11 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 		return
 	}
 	snapshot := *ind
+	if ind.CongestionProfileMismatch != nil {
+		mismatch := *ind.CongestionProfileMismatch
+		mismatch.Scope = mismatch.Scope.clone()
+		snapshot.CongestionProfileMismatch = &mismatch
+	}
 	if ind.DataQueueCongestion != nil {
 		congestion := *ind.DataQueueCongestion
 		congestion.Scope = congestion.Scope.clone()

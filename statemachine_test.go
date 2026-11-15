@@ -160,6 +160,7 @@ func TestSecondAspActiveAckIsAccepted(t *testing.T) {
 // for contexts the SGP had never agreed to carry.
 func TestDataOnlyFlowsForAnAcknowledgedRoutingContext(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPInactive, RoleASP, 1, 2)
+	asp.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionNationalWithoutPriorities), 3)
 
 	// Only context 1 is acknowledged.
 	if err := asp.handleAspActiveAck(messages.NewAspActiveAck(

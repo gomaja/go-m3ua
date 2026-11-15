@@ -7,6 +7,21 @@ Simple M3UA protocol implementation in the Go programming language.
 [![Go Reference](https://pkg.go.dev/badge/github.com/gomaja/go-m3ua.svg)](https://pkg.go.dev/github.com/gomaja/go-m3ua)
 [![GitHub](https://img.shields.io/github/license/mashape/apistatus.svg)](https://github.com/gomaja/go-m3ua/blob/main/LICENSE)
 
+Every endpoint must choose its SS7 congestion method explicitly through
+`EndpointConfig.Congestion.Default.Method`: `CongestionInternational`,
+`CongestionNationalWithPriorities`, or `CongestionNationalWithoutPriorities`.
+Nil and zero methods are rejected. RFC 4666 and Q.704 define different network
+procedures without choosing a default; only the application knows which applies.
+Network selectors and association overrides also require a nonzero method.
+The examples below explicitly model the International method; choose the method
+of your network when adapting them. National MaxLevel zero selects 3 as an
+engineering level default, not a method selection.
+
+The examples and perfchurn require `-congestion-method=international`,
+`-congestion-method=national-with-priorities`, or
+`-congestion-method=national-without-priorities`. There is no method flag default. Perftraffic’s fixed MP0..3 workload requires
+`-congestion-method=national-with-priorities`.
+
 ## Quickstart
 
 Applications upgrading from v1.0 should read the
@@ -110,11 +125,11 @@ orientation.
 ```shell-session
 # Run the SGP first.
 cd examples/sgp
-go run m3ua-sgp.go
+go run m3ua-sgp.go -congestion-method=international
 
 # Run the ASP.
 cd examples/asp
-go run m3ua-asp.go
+go run m3ua-asp.go -congestion-method=international
 ```
 
 Point-code notation is not part of this module. International signalling point
@@ -224,7 +239,7 @@ explicitly, and must state which procedures it initiates: RFC 4666 permits
 either IPSP to initiate either exchange, so there is no role-implied default.
 
 ```go
-ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleIPSP})
+ipsp, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role:m3ua.RoleIPSP,Congestion:&m3ua.CongestionConfig{Default:m3ua.CongestionProfile{Method:m3ua.CongestionInternational}}})
 if err != nil {
     log.Fatal(err)
 }
@@ -344,6 +359,7 @@ asKey := m3ua.ASKey{
     RoutingContext: 1, RoutingContextSet: true,
 }
 endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}},
     Role: m3ua.RoleASP,
     ASP: &m3ua.ASPConfig{
         SignallingGateways: []m3ua.SignallingGatewayConfig{{
@@ -483,6 +499,7 @@ chose:
 
 ```go
 endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}},
     Role: m3ua.RoleASP,
     ASP: &m3ua.ASPConfig{SignallingGateways: gateways}, // Routing left nil.
 })
@@ -607,7 +624,7 @@ listenerConfig.SelectAssociationConfig = func(info m3ua.AcceptInfo) (*m3ua.Assoc
     return configForPeer(info.RemoteAddr)
 }
 
-endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role: m3ua.RoleSGP})
+endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{Role:m3ua.RoleSGP,Congestion:&m3ua.CongestionConfig{Default:m3ua.CongestionProfile{Method:m3ua.CongestionInternational}}})
 if err != nil {
     log.Fatal(err)
 }
@@ -840,9 +857,9 @@ Outbound pressure sends no automatic SCON. `Association.SignallingCongestion`
 permits deliberate local ASP/IPSP reports; double exchange uses its local-directed
 SCON scope. An SGP exposes detector status to its application/NIF, which owns
 SPMC aggregation and SS7 actions. This detector supplies local pressure events;
-it does not implement national/international congestion-method profiles,
-Message Priority discard, repeated User Part notifications, SCON validity timers,
-DAUD level-zero policy, or SS7 TFC procedures.
+the configured method adapts those observations for local-user priority admission.
+Repeated User Part notifications, SCON validity timers, DAUD level-zero policy
+and SS7 TFC procedures remain outside this detector.
 
 Select the default peer path with `SetSCTPPrimaryAddr(netip.Addr)`. Read and
 change path options with `SCTPPathParams`/`SetSCTPPathParams` and
@@ -1019,6 +1036,7 @@ Context allocation policy:
 
 ```go
 endpoint, err := m3ua.NewEndpoint(m3ua.EndpointConfig{
+    Congestion: &m3ua.CongestionConfig{Default: m3ua.CongestionProfile{Method: m3ua.CongestionInternational}},
     Role: m3ua.RoleSGP,
     RoutingKeyManagement: &m3ua.RoutingKeyManagementConfig{
         AuthorizeRegistration: func(request m3ua.RoutingKeyRegistrationRequest) m3ua.RegistrationStatus {
@@ -1261,7 +1279,7 @@ there is no hidden recovery procedure to reuse or supersede. An omitted Active
 covers the whole configured inventory (RFC 4666 §4.3.4.3). A contextless AS
 cannot be addressed independently beside numeric ASes: the application must
 decide whether whole-inventory activation through `ASPActive(ctx)` is
-appropriate. The configured automatic start after ASP Up Ack is unchanged. The
+appropriate. The configured automatic start after a solicited ASP Up Ack is unchanged. The
 peer-withdrawal policy applies to ASP and IPSP Single and Double Exchange; in
 Double Exchange only the affected traffic direction stops (§4.3.4.4.1).
 
@@ -1302,10 +1320,12 @@ local replacement; shutdown still closes it after its withdrawal sequence.
 
 No acknowledgement evidence is retained for a cancelled send. Later Active
 Acks use the ordinary duplicate and validation rules; M3UA has no request
-identifier that correlates one with the cancelled message. Delayed duplicate
-Active Ack handling remains a separate deferred behavior. The library changes
-no state and sends no replacement request because SCTP accepted the cancelled
-send.
+identifier that correlates one with the cancelled message. A later valid Active
+Ack without an outstanding request or duplicate history retains its grant and
+reports `ManagementASPActivation`, with `PreviousState` and `PreviousIPSPState`.
+The application decides whether to retain that grant or request inactivity
+(RFC 4666 §§3.8.1 and 4.3.4.3). The accepted-send report itself changes no state
+and sends no replacement request.
 
 ## Supported Features
 

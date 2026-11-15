@@ -674,3 +674,72 @@ The implementation requires failing tests first for:
 - parser fuzz seeds for every typed SSNM representation; and
 - Linux SCTP integration for readiness, request/ack sequencing, shutdown
   policy, fan-out, and no post-cancellation retransmission.
+
+## Congestion method profiles
+
+`EndpointConfig.Congestion` selects immutable network methods from the procedures
+read in Q.704 (07/96) §§11.2.3–11.2.5 and the encodings in RFC 4666 §§3.3.1 and
+3.4.4. This does not certify ANSI, TTC or the unavailable Q.704 covering-note
+erratum. Every role requires an explicitly chosen Default.Method. Nil Congestion,
+a zero default method or zero method in either override table is invalid; there
+is no auto-detection or permissive fallback. The application knows which SS7
+network procedure applies. The three valid method numbers remain 1, 2 and 3.
+
+
+An explicit International profile sends MP zero and omits Congestion Indications.
+National-with-priorities allows MP 0 through MaxLevel; national-without-priorities
+sends MP zero. National SCON may omit its level or carry 0 through MaxLevel.
+National MaxLevel zero selects 3 as an engineering default, not a standards value.
+Invalid ASP/IPSP DATA and any invalid SCON, typed or serialized, fail with known-not-sent
+errors after the existing framing, stream, scope and state checks.
+
+Profiles match the validated AS network, preserving omitted versus explicit NA
+zero. A peer-qualified ASP selector precedes the unqualified selector and Default;
+association overrides precede the Endpoint table and cannot specify PeerSGP.
+Selectors are copied, immutable and unique within each table. One logical ASP
+route must resolve to the same method and maximum across alternatives; static
+configuration is checked at construction and resolved bindings before transfer.
+
+Reception is lenient about well-formed profile mismatches. SSNM retains the raw
+level unchanged and carries `ProfileMismatches` on its accepted report for Layer
+Management. DATA is delivered with its original MP. Its first mismatch produces
+one `ManagementCongestionProfileMismatch` indication per association lifetime;
+`Association.CongestionProfileDiagnostics()` retains a cumulative count and the
+latest owned sample, including exact wire scope. Subsequent mismatches update the
+snapshot without queuing more primitives, even across valid traffic or SCTP
+restart. This reporting limit is an engineering choice. The bounded diagnostic
+never sends a protocol Error. Existing malformed
+input, framing, scope and state errors are unchanged.
+
+Only ASP/IPSP local-user offers use the national-with-priorities discard boundary
+of Q.704 (07/96) §11.2.4. MP equal to effective congestion is permitted; lower MP
+is refused before transport submission. Received levels and transport severity
+are separate inputs; their effective national level is capped at MaxLevel.
+Unknown present congestion refuses the candidate conservatively as an engineering
+policy. No detector observation remains absent. The SGP NIF transit path validates
+the supported MP width but does not acquire the local-user discard rule. It
+relays NIF MP0..3 unchanged even when its profile does not allow that MP, and
+uses the same lifetime mismatch count/latest sample/first indication as peer
+DATA. Precheck is pure so a raw send cannot count twice. MP>3 is refused before
+writing under the selected fallback bound; this is not a full ANSI/TTC-width
+compliance claim. Application congestion
+policy remains an additional veto, outside Endpoint/AS locks.
+
+Transport pressure stays local and never originates SCON or clears received SS7
+congestion. National receive-queue overload sends MaxLevel on onset and zero after
+sustained drain; the MaxLevel mapping is an engineering choice. The clear omits
+Concerned Destination because recovery has no fresh DATA trigger. International
+queue episodes retain omitted-level onset and no wire clear.
+Both transitions preserve exact received scope, live-state barriers and episode
+generation fences. Publication remains best effort with NoWait transport
+submission; durable optional retry/fairness belongs to later work. SGP receive
+queue overload stays local. SPMC policy and SS7 TFC generation remain with the
+application/NIF; continued offered-traffic status procedures are a later batch.
+
+Distribution passes its resolved AS network into the shared encoded admission,
+without inserting an omitted wire NA. Unused values of absent scope fields are
+normalized consistently with binding admission. Transport preference can rank an
+unobserved member below a measured clear member; that ranking signal alone is
+not present congestion for the mandatory priority gate. Required broadcast copies
+try later AS and SGP alternatives before reporting an explicit unsent obligation;
+a successful copy is never replayed when another required recipient is refused.

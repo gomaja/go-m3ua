@@ -711,7 +711,7 @@ func TestOmittedInactiveAckPreservesExplicitDeactivation(t *testing.T) {
 func TestInactiveAckReactivationRefreshesTransportProjection(t *testing.T) {
 	cfg := validASPConfig()
 	useSignallingGateways(cfg, "sg-a")
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, ASP: cfg})
+	e, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleASP, ASP: cfg}))
 	if err != nil {
 		t.Fatal(err)
 	}

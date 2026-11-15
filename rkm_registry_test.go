@@ -1007,7 +1007,7 @@ func TestRoutingKeyRegistryRegistrationPoliciesCanCloseAssociation(t *testing.T)
 					return 7, nil
 				}
 			}
-			endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: config})
+			endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP, RoutingKeyManagement: config}))
 			if err != nil {
 				t.Fatalf("NewEndpoint: %v", err)
 			}
@@ -1040,7 +1040,7 @@ func TestRoutingKeyRegistryRegistrationPoliciesCanCloseAssociation(t *testing.T)
 
 func TestRoutingKeyRegistryDeregistrationPolicyCanCloseAssociation(t *testing.T) {
 	var association *Association
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		RoutingKeyManagement: &RoutingKeyManagementConfig{
 			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
@@ -1053,7 +1053,7 @@ func TestRoutingKeyRegistryDeregistrationPolicyCanCloseAssociation(t *testing.T)
 			AllowDynamicRoutingKeys: true,
 			RemoveUnusedRoutingKeys: true,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1094,7 +1094,7 @@ func TestRoutingKeyRegistryRegistrationAuthorizationIsNotRepeatedAfterConcurrent
 	var victim *Association
 	policyCalls := 0
 	triggerTeardown := false
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		RoutingKeyManagement: &RoutingKeyManagementConfig{
 			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
@@ -1107,7 +1107,7 @@ func TestRoutingKeyRegistryRegistrationAuthorizationIsNotRepeatedAfterConcurrent
 			AllowDynamicRoutingKeys: true,
 			RemoveUnusedRoutingKeys: true,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1134,7 +1134,7 @@ func TestRoutingKeyRegistryAllocatorReevaluatesAfterConcurrentTeardown(t *testin
 	var victim *Association
 	allocatorCalls := 0
 	triggerTeardown := false
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		RoutingKeyManagement: &RoutingKeyManagementConfig{
 			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
@@ -1151,7 +1151,7 @@ func TestRoutingKeyRegistryAllocatorReevaluatesAfterConcurrentTeardown(t *testin
 			AllowDynamicRoutingKeys: true,
 			RemoveUnusedRoutingKeys: true,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
@@ -1176,7 +1176,7 @@ func TestRoutingKeyRegistryAllocatorReevaluatesAfterConcurrentTeardown(t *testin
 func TestRoutingKeyRegistryDeregistrationAuthorizationIsNotRepeatedAfterConcurrentTeardown(t *testing.T) {
 	var victim *Association
 	policyCalls := 0
-	endpoint, err := NewEndpoint(EndpointConfig{
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{
 		Role: RoleSGP,
 		RoutingKeyManagement: &RoutingKeyManagementConfig{
 			AuthorizeRegistration: func(RoutingKeyRegistrationRequest) RegistrationStatus {
@@ -1190,7 +1190,7 @@ func TestRoutingKeyRegistryDeregistrationAuthorizationIsNotRepeatedAfterConcurre
 			AllowDynamicRoutingKeys: true,
 			RemoveUnusedRoutingKeys: true,
 		},
-	})
+	}))
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}

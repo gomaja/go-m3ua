@@ -377,7 +377,7 @@ func TestDialedSGPDestinationUpdateRejectsUnknownExactApplicationServer(t *testi
 
 func multiAssociationDialedSGPFixture(t *testing.T) (*Endpoint, *Association, *distributionCapture, *Association, *distributionCapture) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -509,7 +509,7 @@ func TestDialedSGPDestinationRecoveryLeavesCongestionToSCON(t *testing.T) {
 // owner-level.
 func dialedSGPProactiveSSNMFixture(t *testing.T, networkAppearance uint32, routingContexts ...uint32) (*Endpoint, *Association, *distributionCapture) {
 	t.Helper()
-	endpoint, err := NewEndpoint(EndpointConfig{Role: RoleSGP})
+	endpoint, err := NewEndpoint(nationalCongestionEndpointConfig(EndpointConfig{Role: RoleSGP}))
 	if err != nil {
 		t.Fatalf("NewEndpoint(RoleSGP): %v", err)
 	}
@@ -566,9 +566,12 @@ func TestDestinationPublicationDoesNotBlockHealthyPeersBehindOneASP(t *testing.T
 	writeEntered := make(chan struct{})
 	writeRelease := make(chan struct{})
 	blocked.notificationQueue = make(chan mandatoryControl, defaultNotificationQueueSize)
+	var enteredOnce sync.Once
 	blocked.notificationWriter = func(message messages.M3UA) (int, error) {
-		close(writeEntered)
-		<-writeRelease
+		if _, ok := message.(*messages.DestinationUnavailable); ok {
+			enteredOnce.Do(func() { close(writeEntered) })
+			<-writeRelease
+		}
 		return message.MarshalLen(), nil
 	}
 	endpoint := listenerEndpoint(t, listener)

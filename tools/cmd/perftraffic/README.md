@@ -21,6 +21,12 @@ Both processes run this binary, so `fixture_verdict: pass` establishes
 loss-free fixture validity only, not independent-peer, sustainable-capacity,
 or candidate acceptance.
 
+Every process requires `-congestion-method=national-with-priorities`. The fixed
+traffic tuples vary MP0..3, so the command rejects International and national
+without-priorities profiles during configuration. Those networks require a
+workload with different tuples. There is no method flag default. This is a
+synthetic workload choice, not certification of a national protocol variant.
+
 ## Initiation direction
 
 `-role` selects the M3UA endpoint role and `-transport` the SCTP initiation
@@ -298,12 +304,12 @@ target, as section 4 prescribes:
 
 ```sh
 # F3 with the count cap binding: 256 events of 784 bytes at loss
-perftraffic -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048
-perftraffic -role=asp ... -associations=8 -payload=mix -rate=20000 -same-host-clock \
+perftraffic -congestion-method=national-with-priorities -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048
+perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=20000 -same-host-clock \
   -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048 -pause-subscriber=5s/10s
 # F3 with the byte cap binding: 125 events of 784 bytes at loss
-perftraffic -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=256
-perftraffic -role=asp ... -associations=8 -payload=mix -rate=20000 -same-host-clock \
+perftraffic -congestion-method=national-with-priorities -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=256
+perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=20000 -same-host-clock \
   -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=256 -pause-subscriber=5s/10s \
   -ssnm-subscription-queue-bytes=98304
 ```
@@ -387,16 +393,16 @@ control is the same pair of commands without the SSNM flags on either process:
 
 ```sh
 # Steady row probe: 1,000 one-APC messages/s in total, 2,048 records per partition, 16,384 in the store
-perftraffic -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048
-perftraffic -role=asp ... -associations=8 -payload=mix -rate=<probe> -same-host-clock \
+perftraffic -congestion-method=national-with-priorities -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048
+perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=<probe> -same-host-clock \
   -ssnm-total-rate=1000 -ssnm-apcs=1 -ssnm-records=2048
 # Large row probe: 10 messages/s of 1,024 APCs in total against the same full store
-perftraffic -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=10 -ssnm-apcs=1024 -ssnm-records=2048
-perftraffic -role=asp ... -associations=8 -payload=mix -rate=<probe> -same-host-clock \
+perftraffic -congestion-method=national-with-priorities -role=sgp ... -associations=8 -same-host-clock -ssnm-total-rate=10 -ssnm-apcs=1024 -ssnm-records=2048
+perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=<probe> -same-host-clock \
   -ssnm-total-rate=10 -ssnm-apcs=1024 -ssnm-records=2048
 # Matched no-update control probe: identical except the SSNM flags
-perftraffic -role=sgp ... -associations=8 -same-host-clock
-perftraffic -role=asp ... -associations=8 -payload=mix -rate=<probe> -same-host-clock
+perftraffic -congestion-method=national-with-priorities -role=sgp ... -associations=8 -same-host-clock
+perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=<probe> -same-host-clock
 ```
 
 Run each campaign through `perfcapacity` separately and compare the selected
@@ -596,12 +602,12 @@ deliberately lost, so `perfcapacity` refuses these records as capacity
 evidence.
 
 ```sh
-perftraffic -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s
-perftraffic -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -rate=20000 -duration=30s
+perftraffic -congestion-method=national-with-priorities -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s
+perftraffic -congestion-method=national-with-priorities -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -rate=20000 -duration=30s
 
 # The abortive failure: both processes name the kind.
-perftraffic -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s -sgp-failure-kind=abort
-perftraffic -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -sgp-failure-kind=abort -rate=20000 -duration=30s
+perftraffic -congestion-method=national-with-priorities -role=sgp -mode=routed ... -same-host-clock -sgp-failure=10s -sgp-failure-kind=abort
+perftraffic -congestion-method=national-with-priorities -role=asp -mode=routed ... -same-host-clock -sgp-failure=10s -sgp-failure-kind=abort -rate=20000 -duration=30s
 ```
 
 ### Application route-reference churn
@@ -675,10 +681,10 @@ churned campaign's selected capacity with the control's: the row needs at
 least 90%.
 
 ```sh
-perftraffic -role=sgp -mode=routed-direct ... -same-host-clock
-perftraffic -role=asp -mode=routed-direct ... -same-host-clock -route-references=churn -rate=<probe>
+perftraffic -congestion-method=national-with-priorities -role=sgp -mode=routed-direct ... -same-host-clock
+perftraffic -congestion-method=national-with-priorities -role=asp -mode=routed-direct ... -same-host-clock -route-references=churn -rate=<probe>
 # matched unchanged-reference control
-perftraffic -role=asp -mode=routed-direct ... -same-host-clock -route-references=static -rate=<probe>
+perftraffic -congestion-method=national-with-priorities -role=asp -mode=routed-direct ... -same-host-clock -route-references=static -rate=<probe>
 ```
 
 ## DATA overload mode
@@ -691,7 +697,7 @@ throughput recovers within 2 s." The matched required rate is the section 2
 mixed row, so the approved trial is
 
 ```sh
-perftraffic -role=asp ... -associations=8 -payload=mix -rate=40000 \
+perftraffic -congestion-method=national-with-priorities -role=asp ... -associations=8 -payload=mix -rate=40000 \
   -overload-profile=2x:60s,0.5x:60s -warmup=30s -same-host-clock
 ```
 
@@ -899,7 +905,7 @@ docker run --rm --name go-m3ua-perf-sgp \
   -e GOMAXPROCS=4 -e GOGC=100 -e GOMEMLIMIT=1536MiB \
   -v go-m3ua-perf-bin:/out:ro \
   golang@sha256:154bd7001b6eb339e88c964442c0ad6ed5e53f09844cc818a41ce4ecb3ce3b43 \
-  /out/perftraffic \
+  /out/perftraffic -congestion-method=national-with-priorities \
     -role=sgp -transport=listen \
     -sctp-address=0.0.0.0:2905 -control-address=0.0.0.0:8080 \
     -associations=8
@@ -913,7 +919,7 @@ docker run --rm --name go-m3ua-perf-asp \
   -e GOMAXPROCS=4 -e GOGC=100 -e GOMEMLIMIT=1536MiB \
   -v go-m3ua-perf-bin:/out:ro \
   golang@sha256:154bd7001b6eb339e88c964442c0ad6ed5e53f09844cc818a41ce4ecb3ce3b43 \
-  /out/perftraffic \
+  /out/perftraffic -congestion-method=national-with-priorities \
     -role=asp -transport=dial \
     -sctp-address=go-m3ua-perf-sgp:2905 \
     -peer-control=http://go-m3ua-perf-sgp:8080 \

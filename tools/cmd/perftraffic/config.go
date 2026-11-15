@@ -8,6 +8,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/gomaja/go-m3ua"
+	"github.com/gomaja/go-m3ua/internal/congestionmethod"
 )
 
 const (
@@ -78,28 +81,29 @@ func (workload workload) size(sequence uint64) int {
 }
 
 type commandConfig struct {
-	Role           string
-	Transport      string
-	Mode           string
-	Direction      string
-	Initiation     string
-	SCTPAddress    string
-	LocalAddress   string
-	ControlAddress string
-	ControlURL     string
-	PeerControl    string
-	Associations   int
-	Workload       workload
-	Rate           uint64
-	Warmup         time.Duration
-	Duration       time.Duration
-	Drain          time.Duration
-	Cohort         string
-	Seed           uint64
-	Outstanding    int
-	CPUStatPath    string
-	SameHostClock  bool
-	clockWindow    *sharedClockWindow
+	CongestionMethod m3ua.CongestionMethod
+	Role             string
+	Transport        string
+	Mode             string
+	Direction        string
+	Initiation       string
+	SCTPAddress      string
+	LocalAddress     string
+	ControlAddress   string
+	ControlURL       string
+	PeerControl      string
+	Associations     int
+	Workload         workload
+	Rate             uint64
+	Warmup           time.Duration
+	Duration         time.Duration
+	Drain            time.Duration
+	Cohort           string
+	Seed             uint64
+	Outstanding      int
+	CPUStatPath      string
+	SameHostClock    bool
+	clockWindow      *sharedClockWindow
 	// SSNM is the opt-in SSNM load workload; zero when -ssnm-total-rate is unset.
 	SSNM ssnmConfig
 	// ssnmPhase names the cohort phase an SSNM cohort declares; empty is the
@@ -135,7 +139,9 @@ func parseConfig(arguments []string) (commandConfig, error) {
 
 func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandConfig, error) {
 	config := commandConfig{}
+	var methodName string
 	var workloadValue string
+	flagSet.StringVar(&methodName, "congestion-method", "", "required: national-with-priorities (fixture varies MP0..3)")
 	flagSet.StringVar(&config.Role, "role", "sgp", "M3UA endpoint role: asp or sgp")
 	flagSet.StringVar(&config.Transport, "transport", "listen", "SCTP initiation: listen or dial")
 	flagSet.StringVar(&config.Mode, "mode", "throughput", "measurement mode: throughput, echo, bidirectional, routed, or routed-direct")
@@ -169,6 +175,14 @@ func parseConfigWithFlagSet(flagSet *flag.FlagSet, arguments []string) (commandC
 			durationSet = true
 		}
 	})
+	method, methodErr := congestionmethod.Parse(methodName)
+	if methodErr != nil {
+		return commandConfig{}, methodErr
+	}
+	if method != m3ua.CongestionNationalWithPriorities {
+		return commandConfig{}, fmt.Errorf("perftraffic varies MP0..3: congestion-method must be national-with-priorities, got %q", methodName)
+	}
+	config.CongestionMethod = method
 	if flagSet.NArg() != 0 {
 		return commandConfig{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flagSet.Args(), " "))
 	}
