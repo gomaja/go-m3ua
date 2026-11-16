@@ -230,6 +230,7 @@ type aspTransferFlowKey struct {
 // DAVA. Congestion is a separate dimension, as RFC 4666 Section 4.5.2.2
 // requires, and an absent congestion record says nothing about availability.
 type aspSelectionStatus struct {
+	receivedUnknown    bool
 	epoch              uint64
 	availabilitySet    bool
 	availability       DestinationAvailability
@@ -275,7 +276,7 @@ func (status aspSelectionStatus) availabilityRank() int {
 }
 
 func (status aspSelectionStatus) congestionRank() int {
-	if status.transportUnknown {
+	if status.transportUnknown || status.receivedUnknown {
 		return 4
 	}
 	if !status.congested {
@@ -897,6 +898,8 @@ func (r *aspRoutes) transferSGPCandidateLocked(
 			rejections = append(rejections, rejection)
 			continue
 		}
+		// Configuration resolves SGP-local NA/RC labels to this SG/AS owner
+		// (RFC 4666 §§1.2, 1.4.2.1, 3.3.1); selection uses its shared view.
 		status := store.destinationKnowledge(SSNMPartition{
 			Kind:              SSNMCanonicalPartition,
 			SignallingGateway: identity.SignallingGateway,

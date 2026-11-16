@@ -397,21 +397,187 @@ Gateway.
 
 # Scoped SSNM loss
 
-Oversized received reports discard only destination dimensions in the resolved
-AS and Network Appearance scope, even when several ASes share a standalone
-partition. An unresolved scope discards the selected partition's destination
-knowledge. Records keep their admission-time resolved scope through source
-reconfiguration. SSNMDestinationsInvalidatedEvent replaces the removed
-SSNMPartitionInvalidatedEvent identifier. It identifies its partition by Epoch,
-leaves Partition empty, and carries exact destination keys/removal flags in
-SSNMEvent.Invalidated. Use SSNMEvent.ApplyInvalidation on a matching snapshot
-partition. Each publication has at most 2048 entries and costs at most 33440
-accounted bytes, including the bounded reason. No RC lists or configured names
-are replayed. PartitionsInvalidated counts these publications, including chunks
-for large custom partitions, plus last-binding retirement as before. Total
-queued bursts and smaller custom queues can still require Resync. Destination
-retention charges 128 bytes, 4 per wire RC and 16 per resolved AS entry. Resync returns the surviving knowledge. Oversized DAUD
-removes nothing because it is a query (RFC 4666 §4.5.3).
+Oversized received reports discard only destination dimensions and retained
+availability/congestion sources in the resolved AS and Network Appearance scope,
+even when several ASes share a standalone partition. Admission-time resolution
+survives source reconfiguration. An unresolved scope discards the selected
+partition's destination knowledge. SSNMDestinationsInvalidatedEvent replaces the
+removed SSNMPartitionInvalidatedEvent identifier. It routes by the
+Endpoint-unique partition Epoch and leaves Partition empty.
+
+SSNMEvent.Invalidated carries dimension-removal flags. The independent
+CongestionSourcesInvalidated and AvailabilitySourcesInvalidated arrays carry
+SSNMCongestionSourceInvalidation and SSNMAvailabilitySourceInvalidation IDs,
+each with Destination, AS and Revision. ApplyInvalidation updates all three on a
+matching caller-owned snapshot partition, including a destination that retains
+only availability or congestion source history. It preserves unrelated
+dimensions, sources and bindings. Each array is independently capped at 2048
+entries per chunk: 16 accounted bytes per dimension ID and 48 per source ID. A
+dimension-only event still costs at most 33440 bytes; all three arrays combined
+cost at most 230048 bytes, including the 512-byte base and 160-byte reason
+allowance. No RC lists or configured names are replayed. Larger custom
+partitions use chunks; queued bursts and smaller custom queues can still require
+Resync. Destination retention charges 128 bytes plus 4 per raw wire RC and 16
+per resolved AS. Oversized DAUD removes nothing because it is a query (RFC 4666
+§4.5.3).
+
+# Received congestion validity and audits
+
+CongestionConfig.Validity and CongestionConfig.Auditing independently enable local
+received-SCON expiry and optional ASP audits. Nil disables each. A nonnil zero
+configuration selects 30 seconds for After and Period, 256 for MaxPending and 10
+for MaxMessagesPerSecond; negative fields are invalid. Auditing is ASP-only.
+RFC 4666 §3.4.4 says a node may maintain a validity timer; §4.5.3 uses MAY for
+periodic and isolation DAUD and lowercase must for its level-zero periodic
+exception. These are optional procedures with engineering defaults.
+
+Congestion-origin audits require the national-with-priorities method;
+availability audits after DUNA/DRST are independent of method. OnActivation
+configures isolation scopes after committed activation. A job retains its
+original Association, epoch, wire scope and range, with independent per-AS
+origins and deadlines. DAUD narrows its RC list to still-due origins. Separate
+SCON(0) clears only congestion origins; DAVA clears availability/isolation
+origins and resets surviving congestion work without clearing congestion.
+Positive job replacements are staged; a budget refusal restores prior origins
+and charges. There is no sibling fallback or automatic reactivation. Newer
+applicable clear prefixes retire a masked-range cause only after covering every
+AS still needing it, including interleaved reports. Partial coverage,
+unrelated-AS clears and unknown congestion keep needed work. Coverage uses
+bounded prefixes and three fixed uint64 per-job cause versions, without
+per-point audit history or a change to the 256-byte job base charge. Received
+statements apply to their resolved AS and Network Appearance; another AS's
+Routing Context supplies no authority. Lookup and retirement use the same rule.
+Auditing retains AvailabilitySources; validity or auditing retains
+CongestionSources, preserving interleaved per-AS evidence. With both policies
+nil, the scalar cache filters by AS and can displace old evidence to unknown; it
+adds no source-history records and never borrows another AS's statement.
+
+Canonical transfer selection, observed status and direct national-priority DATA
+admission use the configured SG/AS aggregate. RFC 4666 §§1.2, 1.4.2.1 and
+3.3.1 allow coordinated SGPs to use different local NA/RC labels for that
+owner; a sibling's report is not filtered by another SGP's numeric labels.
+Standalone projections and explicit source-scoped reads retain AS/network
+filtering. Source history, audit origins and invalidation retain their
+original reporter and scope; a shared route view does not widen them.
+
+When validity or auditing is enabled, full source admission is rechecked under
+submission-tracker, peer-dynamic binding and store locks in that order. Store
+epochs advance monotonically; retention and job insertion use the same admitted
+token. Registration removal, version/epoch replacement and source loss remove
+only affected source history and audit origins and release their charges.
+Unaffected static membership and the independent local registration direction
+survive.
+
+Association.ForgetDestinations reclaims the reporter's canonical availability,
+congestion history and periodic audit causes as well as legacy destinations. It
+preserves canonical siblings, peer congestion, transport observations and
+configured isolation. Its integer result still counts only released legacy rows.
+The unconditional forget-generation fence rejects pre-forget received admission
+and legacy writes delayed after route resolution even when both policies are
+nil; genuinely new reports can use the retained bindings. With both policies
+nil, receive admission captures only one atomic forget-generation load and
+checks it under the mutation locks already needed by the legacy and canonical
+stores; it adds no tracker acquisition or source-history retention. The full
+source-epoch and registration-token capture remains conditional on validity or
+auditing.
+
+The forget generation is also checked under the existing route-cache mutex
+before a delayed report can publish derived indications. ForgetDestinations
+does not reclaim pre-existing shared SG route-index allocations; its reclaim
+contract covers the reporter-owned stores and periodic work described here.
+
+A scalar destination dimension costs 128 + 4 per raw RC + 16 per resolved AS.
+Each independent availability or congestion source adds one record and costs 144
++ 4 per raw RC per resolved AS. Auditing retains availability history; validity
+or auditing retains congestion history. Nil policies preserve scalar record
+counts and charges. The minimum MaxBytes is 400. A partition plus one single-RC
+auditing availability statement or validity/auditing SCON costs 552 bytes; its
+one-binding/one-partition job adds 472 before Info String, totaling 1024.
+General jobs cost 256 + Info String bytes + 8 per raw RC + 144 per binding + 64
+per unique partition. These portable charges are not heap or RSS measurements.
+
+SSNMAuditOutcomeEvent reports one aggregate per fixed reason per report, pass or
+retirement batch. AuditCount counts every completed job outcome for
+submitted, send-failed and transport send-deferred, including consecutive equal reasons and a same-key
+refresh during transport. The refreshed job retains its newer causes and
+deadlines. Every removed job contributes exactly once to reporter-retired,
+regardless of retirement-pass order. Deferred and contended work counts outcome
+transitions. Counts remain per job; one batched DAUD can complete several jobs.
+AuditScopeOmitted marks mixed original scopes or more than 64 raw RCs; zero
+Report.Association marks mixed sources. No APC lists, Info String or configured
+names are replayed. Repeated contention and rate deferrals of a retained job are suppressed.
+Each diagnostic costs at most 928 conservative bytes (784 with fixed reasons);
+seven diagnostics plus a separate report use at most eight queue slots. A full
+report has its own payload accounting; custom queues and bursts may still need
+Resync. The seven reasons are queue-full, rate-deferred, reporter-retired, send-deferred,
+contended, send-failed and submitted. A successful send also has a separate local
+DAUD report; neither establishes peer receipt or response correlation.
+
+SSNMCongestion and PeerCongestionState expose ReceivedAt, ExpiresAt and
+Freshness. Expiry preserves severity/provenance as CongestionExpired history and
+emits SSNMCongestionExpiredEvent. Its owned Expired slice contains compact
+SSNMCongestionExpiry identities with partition Epoch, Destination, AS, original
+Revision and Peer. ApplyExpiry on the owned full SSNMSnapshot expires only
+matching records and their scalar copies, preserving values and provenance. It
+leaves the snapshot revision for the caller to order. Expiry no longer replays
+Updated or PeerCongestion values; top-level Partition and Epoch are empty. Each
+atomic store commit revalidates up to 256 candidates, changes freshness and
+publishes before unlocking. Locks are released and cancellation checked between
+chunks. Accounting charges 56 bytes per ID: the default record ceiling permits
+at most 64 compact SSNM expiry events and 950272 bytes in one expiry-only pass.
+This bound excludes other queued SSNM events and the separate MTP indication
+channel; it does not remove either channel's overflow and resynchronization
+contract.
+
+Queued Updated destinations now charge 320 fixed bytes, reflecting the
+larger public destination shape. Each individual peer or availability/congestion
+source row still charges 256 bytes, plus its Routing Context storage. Review
+custom subscription byte budgets: report updates can reach them sooner. This
+queued-payload change leaves source-removal IDs at 48, expiry IDs at 56, the
+230,048-byte combined invalidation maximum and the 950,272-byte compact expiry
+pass bound unchanged; retained record and job charges are separate.
+
+Expiry may produce more MTP indications than receipt when transport pressure
+masks the received level but expiry changes ReceivedCongestionUnknown. A
+projection emits at most one indication per destination whose exposed status
+changes; it does not suppress that uncertainty change. If the bounded indication
+queue overflows, it emits ResyncRequired and the consumer must recover current
+statuses with MTPDestinationStatuses. The compact expiry bound applies to SSNM
+subscription events, not this MTP indication queue.
+
+SSNMAvailability.AS identifies the resolved AS in auditing history, and
+SSNMDestinationKnowledge.AvailabilitySources preserves independent statements
+when auditing is enabled. CongestionSources preserves independent AS/source
+history when validity or auditing is enabled. Snapshots own both histories;
+public field additions break unkeyed literals. ApplyInvalidation consumers must
+handle dimension IDs and both source-removal arrays, or use the helper.
+MTPDestinationStatus.ReceivedCongestionUnknown means local uncertainty, not
+abatement. A fresh independent contribution may remain congested. Newest
+covering source statements are selected before freshness, so expiry cannot
+reveal an older superseded range. Bare DAVA changes availability only. Validity
+is not negotiated, does not expire independent transport observations, and emits
+no invented SCON(0), DAVA or RESUME.
+
+Endpoint.Close cancels and joins the worker through its operation wait after
+Association closure, outside locks needed for completion. Passes check
+cancellation between jobs and expiry commits. Association withdrawal and
+teardown do not join the worker. Late REG/DEREG dispatcher/request processing
+can hold RKM correlation/lifecycle locks while joining a cancelled tracked
+optional DAUD. Completion needs only the tracker and optional submission never
+acquires those RKM locks. One NoWait send avoids waiting for socket buffer space;
+the pinned transport's internal mutex and application-deadline limits remain
+(RFC 6458 §5.3.4; Errata 6111).
+
+Restart and ForgetDestinations now gate new optional DAUD and settle any
+cancelled optional attempt before changing the epoch or reclaiming knowledge.
+Concurrent lifetime changes share counted admission closure and settle only the
+admitted optional attempt, without waiting for another owner's cleanup. They
+wait outside transport, destination, store and procedure locks, never for DATA
+or ordinary SCON; at most one optional attempt holds the writer lock. The
+restart receive path and state monitor can therefore wait for cancellation
+completion. Ordinary received status admission rejects the gate or stale
+generation instead of joining it. These joins add no universal elapsed-time
+guarantee.
 
 # SGP peer congestion
 
@@ -516,8 +682,7 @@ implemented, and a security review will want to know about them: an ASP's SCON
 is recorded apart from the SGP's own destination state, so a peer cannot inject
 SS7 congestion into what other ASPs are told when they audit (it is delivered by
 Endpoint.SubscribeSSNM as an SSNMReport with PeerReported set and as separate
-retained peer records, without changing authoritative destination state); and an ASP Active from a peer in ASP-DOWN is
-refused rather than acknowledged, so an association that has not completed
-ASPSM cannot be driven into carrying traffic.
-*/
-package m3ua
+retained peer records, without changing authoritative destination state); and an
+ASP Active from a peer in ASP-DOWN is refused rather than acknowledged, so an
+association that has not completed ASPSM cannot be driven into carrying traffic.
+*/package m3ua

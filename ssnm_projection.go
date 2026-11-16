@@ -24,7 +24,7 @@ const maxPointCodeMask = 24
 //
 // A partition with no binding is not knowledge this node holds: it reports
 // nothing, and the caller decides what to do about that.
-func (s *ssnmState) destinationKnowledge(partition SSNMPartition, pointCode uint32) aspSelectionStatus {
+func (s *ssnmState) destinationKnowledge(partition SSNMPartition, pointCode uint32, query ...ASKey) aspSelectionStatus {
 	if s == nil {
 		return aspSelectionStatus{}
 	}
@@ -39,13 +39,13 @@ func (s *ssnmState) destinationKnowledge(partition SSNMPartition, pointCode uint
 	congestionRevision := uint64(0)
 	for mask := uint8(0); mask <= maxPointCodeMask; mask++ {
 		key := ssnmDestinationKey{pointCode: destinationRangePrefix(pointCode, mask), mask: mask}
-		if record, held := state.availability[key]; held &&
+		if record, held := state.availability[key]; len(state.receivedAvailability) == 0 && held && receivedScalarApplies(state.partition, record.Scope, record.resolved, query...) &&
 			(!status.availabilitySet || record.Revision > availabilityRevision) {
 			availabilityRevision = record.Revision
 			status.availability = record.State
 			status.availabilitySet = true
 		}
-		if record, held := state.congestion[key]; held &&
+		if record, held := state.congestion[key]; len(state.receivedCongestion) == 0 && held && receivedScalarApplies(state.partition, record.Scope, record.resolved, query...) &&
 			(!status.congestionSet || record.Revision > congestionRevision) {
 			congestionRevision = record.Revision
 			status.congestionSet = true
@@ -53,6 +53,9 @@ func (s *ssnmState) destinationKnowledge(partition SSNMPartition, pointCode uint
 			status.congestionLevel = record.Level
 			status.congestionLevelSet = record.LevelSet
 		}
+	}
+	if len(state.receivedAvailability)+len(state.receivedCongestion) > 0 {
+		status = state.sourceStatus(pointCode, status, query...)
 	}
 	return status
 }
@@ -67,4 +70,23 @@ func (s *ssnmState) currentRevision() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.revision
+}
+
+// Scalar caches may replace a different AS's exact-prefix slot, but that does
+// not broaden a scoped statement's applicability (RFC 4666 §§3.4.1, 3.4.4).
+func receivedScalarApplies(partition SSNMPartition, scope WireScope, resolved []ASKey, query ...ASKey) bool {
+	if len(query) == 0 {
+		return true
+	}
+	if len(resolved) == 0 {
+		// Omission without captured resolution cannot establish disjointness.
+		// Keep the pre-existing implicit-scope fallback used by direct store inputs.
+		return (ssnmDestinationRefusal{resolved: true, keys: query[:1]}).matches(partition, scope, nil)
+	}
+	for _, as := range resolved {
+		if receivedCongestionApplies(SSNMCongestion{AS: as, Scope: scope}, query[0], partition.Kind == SSNMStandalonePartition) {
+			return true
+		}
+	}
+	return false
 }

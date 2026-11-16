@@ -343,8 +343,16 @@ func (c *Association) handleRegistrationRequest(message *messages.RegistrationRe
 		return ErrAssociationClosed
 	default:
 	}
+	changes := make([]sconBindingChange, 0, len(successful))
 	for _, registration := range successful {
-		c.addDynamicASKey(registration.key, registration.routingKey, false)
+		changes = append(changes, sconBindingChange{id: sconBindingID{registration.key.RoutingContext, false}})
+	}
+	release, _ := c.beginSCONBindingChanges(changes)
+	for _, registration := range successful {
+		c.addDynamicASKeyChanged(registration.key, registration.routingKey, false)
+	}
+	release()
+	for _, registration := range successful {
 		if c.as != nil {
 			c.as.registerDynamicASP(c, registration.key)
 		}
@@ -405,18 +413,30 @@ func (c *Association) handleDeregistrationRequest(message *messages.Deregistrati
 func (c *Association) applyDeregistrationResults(results []RoutingKeyDeregistrationResult) func() {
 	var notifications []func()
 	retired := false
+	var retiredKeys []ASKey
+	var changes []sconBindingChange
+	for _, result := range results {
+		if result.Status == DeregistrationSuccessfullyDeregistered && result.ASKey.RoutingContextSet {
+			changes = append(changes, sconBindingChange{id: sconBindingID{result.RoutingContext, false}})
+		}
+	}
+	release, _ := c.beginSCONBindingChanges(changes)
+	for _, change := range changes {
+		c.removeDynamicASKeyChanged(change.id.routingContext, false)
+		c.forgetCanonicalRemoteASChanged(change.id.routingContext)
+	}
+	release()
 	for _, result := range results {
 		if result.Status != DeregistrationSuccessfullyDeregistered || !result.ASKey.RoutingContextSet {
 			continue
 		}
-		c.removeDynamicASKey(result.RoutingContext, false)
-		c.retireDynamicCongestion(result.ASKey, false)
+		retiredKeys = append(retiredKeys, result.ASKey)
 		retired = true
-		c.forgetCanonicalRemoteAS(result.RoutingContext)
 		if c.as != nil && !c.hasStaticApplicationServerMembership(result.ASKey) {
 			notifications = append(notifications, c.as.prepareDeregisterDynamicASP(c, result.ASKey, result.removeAS))
 		}
 	}
+	c.retireDynamicCongestions(retiredKeys, false)
 	if retired {
 		c.notifyASPRouteStateChanged()
 	}
@@ -426,12 +446,18 @@ func (c *Association) applyDeregistrationResults(results []RoutingKeyDeregistrat
 // Retained received congestion belongs to the registration lifetime. The
 // physical detector, its dwell and publication bit belong to the association,
 // and remain valid for other ASs; publication resolves current membership.
-func (c *Association) retireDynamicCongestion(key ASKey, local bool) {
-	// An SGP's destination store is shared SS7 authority, not a cache of
-	// peer congestion (RFC 4666 Section 3.4.4). A departing ASP cannot erase it.
-	if c.role != RoleSGP && !local && !c.hasStaticallyConfiguredASKey(key) {
-		c.destinations.forgetRoutingContext(key.RoutingContext)
+func (c *Association) retireDynamicCongestions(keys []ASKey, local bool) {
+	// An SGP's store is shared SS7 authority (RFC 4666 §3.4.4).
+	if c.role == RoleSGP || local {
+		return
 	}
+	contexts := make(map[uint32]struct{}, len(keys))
+	for _, key := range keys {
+		if !c.hasStaticallyConfiguredASKey(key) {
+			contexts[key.RoutingContext] = struct{}{}
+		}
+	}
+	c.destinations.forgetRoutingContexts(contexts)
 }
 
 // retirePeerRegistrations runs after traffic is quiesced and before the ASPSM
@@ -543,19 +569,18 @@ func (c *Association) deliverDeregistrationResponse(message *messages.Deregistra
 		}
 	}
 
+	versions := make(map[uint32]uint64, len(staleStatus))
 	for routingContext, status := range staleStatus {
 		// RFC 4666 Section 4.4.2 makes a successful DEREG RSP the peer's
 		// confirmation that this ASP was removed from the related AS. A late
 		// response therefore has to repair the local dynamic scope before the
 		// Routing Context becomes eligible for another procedure.
 		if status == DeregistrationSuccessfullyDeregistered {
-			c.removeRequesterRoutingKeyVersion(
-				routingContext,
-				c.rkmUnresolvedDeregistrationRCs[routingContext],
-			)
+			versions[routingContext] = c.rkmUnresolvedDeregistrationRCs[routingContext]
 		}
 		delete(c.rkmUnresolvedDeregistrationRCs, routingContext)
 	}
+	c.removeRequesterRoutingKeyVersions(versions)
 	if len(filtered) > 0 {
 		for routingContext, status := range pendingStatus {
 			delete(c.rkmPendingDeregistrationRCs, routingContext)
@@ -810,17 +835,10 @@ func (c *Association) unresolvedRKMOutcomeCountLocked() int {
 
 func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) {
 	c.rkmCorrelationMu.Lock()
-	type successfulDeregistration struct {
-		routingContext uint32
-		version        uint64
-	}
-	successful := make([]successfulDeregistration, 0, len(c.rkmDeliveredDeregistrationStatus))
+	successful := make(map[uint32]uint64, len(c.rkmDeliveredDeregistrationStatus))
 	for routingContext, status := range c.rkmDeliveredDeregistrationStatus {
 		if status == DeregistrationSuccessfullyDeregistered {
-			successful = append(successful, successfulDeregistration{
-				routingContext: routingContext,
-				version:        c.rkmPendingDeregistrationVersions[routingContext],
-			})
+			successful[routingContext] = c.rkmPendingDeregistrationVersions[routingContext]
 		}
 	}
 	if requestWritten && len(c.rkmPendingDeregistrationRCs) > 0 {
@@ -839,24 +857,51 @@ func (c *Association) endDeregistrationResponseCorrelation(requestWritten bool) 
 	c.rkmResponseChan = nil
 	c.rkmCorrelationMu.Unlock()
 
-	for _, deregistration := range successful {
-		c.removeRequesterRoutingKeyVersion(deregistration.routingContext, deregistration.version)
-	}
+	c.removeRequesterRoutingKeyVersions(successful)
 }
 
 func (c *Association) removeRequesterRoutingKeyVersion(routingContext uint32, version uint64) {
+	c.removeRequesterRoutingKeyVersions(map[uint32]uint64{routingContext: version})
+}
+
+func (c *Association) removeRequesterRoutingKeyVersions(versions map[uint32]uint64) {
+	if len(versions) == 0 {
+		return
+	}
 	c.rkmLifecycleMu.Lock()
 	defer c.rkmLifecycleMu.Unlock()
 	local := c.isIPSPDoubleExchange()
-	key, removed := c.removeDynamicASKeyVersion(routingContext, local, version)
-	if !local && removed {
-		c.forgetCanonicalRemoteAS(routingContext)
-		if c.as != nil && !c.hasStaticApplicationServerMembership(key) {
+	contexts := make([]uint32, 0, len(versions))
+	for rc := range versions {
+		contexts = append(contexts, rc)
+	}
+	slices.Sort(contexts)
+	changes := make([]sconBindingChange, 0, len(contexts))
+	for _, rc := range contexts {
+		version := versions[rc]
+		changes = append(changes, sconBindingChange{sconBindingID{rc, local}, true, &version})
+	}
+	release, admitted := c.beginSCONBindingChanges(changes)
+	removed := make([]ASKey, 0, len(admitted))
+	for _, rc := range contexts {
+		if !admitted[sconBindingID{rc, local}] {
+			continue
+		}
+		if key, ok := c.removeDynamicASKeyVersionChanged(rc, local, versions[rc]); ok {
+			if !local {
+				c.forgetCanonicalRemoteASChanged(rc)
+			}
+			removed = append(removed, key)
+		}
+	}
+	release()
+	for _, key := range removed {
+		if !local && c.as != nil && !c.hasStaticApplicationServerMembership(key) {
 			c.as.deregisterDynamicASP(c, key, true)
 		}
 	}
-	if removed {
-		c.retireDynamicCongestion(key, local)
+	c.retireDynamicCongestions(removed, local)
+	if len(removed) > 0 {
 		c.notifyASPRouteStateChanged()
 	}
 }
@@ -1038,10 +1083,20 @@ func (c *Association) applyRegistrationResults(applications []registrationResult
 		})
 	}
 
+	changes := make([]sconBindingChange, 0, len(prepared))
 	for _, registration := range prepared {
-		c.addDynamicASKey(registration.key, registration.routingKey, registration.local)
+		changes = append(changes, sconBindingChange{id: sconBindingID{registration.key.RoutingContext, registration.local}})
+	}
+	release, _ := c.beginSCONBindingChanges(changes)
+	for _, registration := range prepared {
+		c.addDynamicASKeyChanged(registration.key, registration.routingKey, registration.local)
 		if !registration.local {
-			c.noteCanonicalRemoteAS(registration.key.RoutingContext, registration.remoteAS)
+			c.noteCanonicalRemoteASChanged(registration.key.RoutingContext, registration.remoteAS)
+		}
+	}
+	release()
+	for _, registration := range prepared {
+		if !registration.local {
 			if c.as != nil {
 				c.as.registerDynamicASP(c, registration.key)
 			}

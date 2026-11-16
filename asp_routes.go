@@ -39,6 +39,7 @@ type aspCongestionRecord struct {
 }
 
 type aspDestinationStatus struct {
+	receivedUnknown    bool
 	transportLevel     uint8
 	transportUnknown   bool
 	availability       DestinationAvailability
@@ -423,6 +424,7 @@ func (r *aspRoutes) apply(
 	association *Association,
 	statuses []*destinationStatus,
 	update aspRouteUpdate,
+	fence ...receivedForgetFence,
 ) error {
 	if r == nil || association == nil || len(statuses) == 0 {
 		return nil
@@ -455,6 +457,10 @@ func (r *aspRoutes) apply(
 	}
 
 	r.mu.Lock()
+	if len(fence) > 0 && !fence[0].current() {
+		r.mu.Unlock()
+		return errReceivedBeforeForget
+	}
 	// The Association may have detached, or reattached under another identity,
 	// while the ranges were resolved; the report then belongs to no route of
 	// this registry, exactly as when it arrives after detach.
@@ -970,7 +976,7 @@ func (r *aspRoutes) destinationStatusFromGatewayPath(
 	bestSet := false
 	required := aspDestinationStatus{}
 	best := aspDestinationStatus{availability: DestinationUnavailable}
-	hasTransport := false
+	hasTransport := r.ssnm != nil && r.ssnm.validity > 0
 	for _, gateway := range gateways {
 		hasTransport = hasTransport || gateway.hasTransport
 	}
@@ -1231,6 +1237,7 @@ func newMTPDestinationStatus(destination MTPDestination, status aspDestinationSt
 		CongestionLevelSet:         status.congestionLevelSet,
 		TransportCongestionLevel:   status.transportLevel,
 		TransportCongestionUnknown: status.transportUnknown,
+		ReceivedCongestionUnknown:  status.receivedUnknown,
 	}
 }
 
@@ -1649,7 +1656,7 @@ func leastCongestedASPStatus(first, second aspDestinationStatus) aspDestinationS
 }
 
 func aspCongestionRank(status aspDestinationStatus) int {
-	if status.transportUnknown {
+	if status.transportUnknown || status.receivedUnknown {
 		return 4
 	}
 	if !status.congested {

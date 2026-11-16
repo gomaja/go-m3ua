@@ -90,8 +90,8 @@ func byteCapPrefix(count int, canonical bool) int {
 // each queue, and a peer with a four-event count limit shows the count cap.
 //
 // The judgment credits the byte cap only when the workload's smallest event,
-// a standalone one-APC report of 784 bytes, would not have fitted. A
-// canonical one-APC report is 812 bytes, so the canonical peer one byte
+// a standalone one-APC report of 848 bytes, would not have fitted. A
+// canonical one-APC report is 876 bytes, so the canonical peer one byte
 // short, whose refused event is one of those, is not credited: the fixture
 // reports an unproven cap rather than guess. Every fixture association is
 // standalone, where the bound is exact.

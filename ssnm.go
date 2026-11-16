@@ -201,10 +201,12 @@ var ErrSSNMDestinationRecordLimit = fmt.Errorf("%w: SSNM destination record limi
 // DefaultMaxSSNMDestinationRecords, so a store assembled without a limit is
 // bounded rather than unbounded.
 type destinations struct {
-	mu         sync.RWMutex
-	state      map[destinationKey]destinationRecord
-	sequence   uint64
-	maxRecords int
+	// Optional test probe: original records visited under mu during retirement.
+	retirementRows *uint64
+	mu             sync.RWMutex
+	state          map[destinationKey]destinationRecord
+	sequence       uint64
+	maxRecords     int
 	// prefixes indexes only exact appearance/prefix/mask cohorts for reclamation.
 	prefixes map[destinationKey]map[destinationKey]struct{}
 }
@@ -267,37 +269,62 @@ func (d *destinations) forget() int {
 // forgetRoutingContext retires records owned by a withdrawn dynamic wire label.
 // Routing Contexts are unique within an association's traffic inventory.
 func (d *destinations) forgetRoutingContext(routingContext uint32) {
-	if d == nil {
+	d.forgetRoutingContexts(map[uint32]struct{}{routingContext: {}})
+}
+
+// One lifecycle event filters each original scope once. Stage the transformed
+// records before insertion: Go map iteration may otherwise revisit new keys.
+func (d *destinations) forgetRoutingContexts(contexts map[uint32]struct{}) {
+	if d == nil || len(contexts) == 0 {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.indexPrefixesLocked()
 	affected := make(map[destinationKey]struct{})
+	type replacement struct {
+		key    destinationKey
+		record destinationRecord
+	}
+	var updates []replacement
 	for key, record := range d.state {
+		if d.retirementRows != nil {
+			*d.retirementRows++
+		}
 		if len(record.routingContexts) > 0 {
-			index := sort.Search(len(record.routingContexts), func(i int) bool { return record.routingContexts[i] >= routingContext })
-			if index == len(record.routingContexts) || record.routingContexts[index] != routingContext {
+			var kept []uint32
+			matched := false
+			for i, rc := range record.routingContexts {
+				if _, removed := contexts[rc]; removed {
+					if !matched {
+						kept = append([]uint32(nil), record.routingContexts[:i]...)
+						matched = true
+					}
+				} else if matched {
+					kept = append(kept, rc)
+				}
+			}
+			if !matched {
 				continue
 			}
-			kept := append([]uint32(nil), record.routingContexts[:index]...)
-			kept = append(kept, record.routingContexts[index+1:]...)
 			affected[destinationPrefixKey(key)] = struct{}{}
 			d.deleteRecordLocked(key)
 			if len(kept) > 0 {
-				// Per-dimension stamps preserve isolation and chronology on a canonical
-				// scope collision (RFC 4666 Sections 4.5.2.2 and 4.5.3).
 				record.routingContexts, record.routingContextScope = canonicalRoutingContextScope(kept)
-				newKey := destinationRecordKey(record)
-				if held, ok := d.state[newKey]; ok {
-					record = mergeDestinationDimensions(held, record)
-				}
-				d.putRecordLocked(newKey, record)
+				updates = append(updates, replacement{destinationRecordKey(record), record})
 			}
-		} else if key.routingContextSet && key.routingContext == routingContext {
+		} else if _, removed := contexts[key.routingContext]; key.routingContextSet && removed {
 			affected[destinationPrefixKey(key)] = struct{}{}
 			d.deleteRecordLocked(key)
 		}
+	}
+	for _, update := range updates {
+		record := update.record
+		if held, ok := d.state[update.key]; ok {
+			// Preserve per-dimension stamps on scope collisions (RFC 4666 §§4.5.2.2, 4.5.3).
+			record = mergeDestinationDimensions(held, record)
+		}
+		d.putRecordLocked(update.key, record)
 	}
 	for prefix := range affected {
 		plan, _ := d.deadDimensionsLocked(prefix, nil)
@@ -329,12 +356,15 @@ func (d *destinations) setRanges(ranges []destinationRange) {
 // callers that can surface a refusal — the SSNM receive path and the local
 // destination-report API — use this form; the rest retain what they can and
 // carry on, because there is no peer or caller left to tell.
-func (d *destinations) setRangesWithinBudget(ranges []destinationRange) error {
+func (d *destinations) setRangesWithinBudget(ranges []destinationRange, fence ...receivedForgetFence) error {
 	if d == nil || len(ranges) == 0 {
 		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if len(fence) > 0 && !fence[0].current() {
+		return errReceivedBeforeForget
+	}
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
@@ -360,7 +390,7 @@ func (d *destinations) setScopedRanges(routingContexts []uint32, ranges []destin
 
 // setScopedRangesWithinBudget is setScopedRanges with the record budget
 // reported.
-func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ranges []destinationRange) error {
+func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ranges []destinationRange, fence ...receivedForgetFence) error {
 	if d == nil || len(routingContexts) == 0 || len(ranges) == 0 {
 		return nil
 	}
@@ -368,6 +398,9 @@ func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ran
 	canonical, scope := canonicalRoutingContextScope(routingContexts)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if len(fence) > 0 && !fence[0].current() {
+		return errReceivedBeforeForget
+	}
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
@@ -398,12 +431,15 @@ func (d *destinations) setScopedRangesWithinBudget(routingContexts []uint32, ran
 // reported unavailable: Section 4.5.1 makes DUNA followed by SCON an ordinary
 // sequence, and Section 4.5.3 has the SG keep answering a DAUD for that
 // destination with DUNA until a DAVA arrives.
-func (d *destinations) setCongestionRangesWithinBudget(ranges []destinationRange) error {
+func (d *destinations) setCongestionRangesWithinBudget(ranges []destinationRange, fence ...receivedForgetFence) error {
 	if d == nil || len(ranges) == 0 {
 		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if len(fence) > 0 && !fence[0].current() {
+		return errReceivedBeforeForget
+	}
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
@@ -425,6 +461,7 @@ func (d *destinations) setCongestionRangesWithinBudget(ranges []destinationRange
 func (d *destinations) setScopedCongestionRangesWithinBudget(
 	routingContexts []uint32,
 	ranges []destinationRange,
+	fence ...receivedForgetFence,
 ) error {
 	if d == nil || len(routingContexts) == 0 || len(ranges) == 0 {
 		return nil
@@ -433,6 +470,9 @@ func (d *destinations) setScopedCongestionRangesWithinBudget(
 	canonical, scope := canonicalRoutingContextScope(routingContexts)
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if len(fence) > 0 && !fence[0].current() {
+		return errReceivedBeforeForget
+	}
 	if d.state == nil {
 		d.state = make(map[destinationKey]destinationRecord)
 	}
@@ -1003,18 +1043,19 @@ func (c *Association) applySSNM(
 ) error {
 	report.Scope = c.ssnmWireScope(networkAppearance, routingContext)
 	report.Source = SSNMPeerReport
+	admission := c.receivedReportAdmission(report)
 	if c.role == RoleASP && (c.State() != StateASPActive || !c.ssnmRoutingContextsAllowed(routingContext, false)) && !c.ssnmEarlyNetworkAppearanceMatches(report.Scope) {
 		return nil
 	}
 
-	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope, report.Kind)
+	pcs, masks, err := c.receivedAffectedPointCodes(apc, report.Scope, report.Kind, admission)
 	if err != nil {
 		return err
 	}
 	report.Destinations = ssnmDestinationsFrom(pcs, masks)
 	c.reportCongestionProfileMismatch(&report)
 	if report.Kind == SSNMDestinationUserPartUnavailableReport || report.PeerReported {
-		return c.publishSSNMReport(report)
+		return c.publishSSNMReport(report, admission)
 	}
 	routingContexts, routingContextSet := c.destinationRoutingContexts(routingContext)
 	appearance := c.destinationKey(networkAppearance, 0)
@@ -1051,22 +1092,46 @@ func (c *Association) applySSNM(
 	}
 
 	if update != nil && c.endpoint != nil && c.endpoint.aspRoutes != nil {
-		if err := c.endpoint.aspRoutes.apply(c, statuses, *update); err != nil {
+		if err := c.endpoint.aspRoutes.apply(c, statuses, *update, admission.forget); err != nil {
+			if errors.Is(err, errReceivedBeforeForget) {
+				return nil
+			}
 			return err
 		}
 	}
-	c.destinations.setRecordLimit(c.destinationRecordLimit())
 	var retained error
-	switch {
-	case congestionUpdate && routingContextSet:
-		retained = c.destinations.setScopedCongestionRangesWithinBudget(routingContexts, updates)
-	case congestionUpdate:
-		retained = c.destinations.setCongestionRangesWithinBudget(updates)
-	case routingContextSet:
-		retained = c.destinations.setScopedRangesWithinBudget(routingContexts, updates)
-	default:
-		retained = c.destinations.setRangesWithinBudget(updates)
+	legacyCommitted := false
+	commitLegacy := func() error {
+		legacyCommitted = true
+		c.destinations.setRecordLimit(c.destinationRecordLimit())
+		switch {
+		case congestionUpdate && routingContextSet:
+			retained = c.destinations.setScopedCongestionRangesWithinBudget(routingContexts, updates, admission.forget)
+		case congestionUpdate:
+			retained = c.destinations.setCongestionRangesWithinBudget(updates, admission.forget)
+		case routingContextSet:
+			retained = c.destinations.setScopedRangesWithinBudget(routingContexts, updates, admission.forget)
+		default:
+			retained = c.destinations.setRangesWithinBudget(updates, admission.forget)
+		}
+		if errors.Is(retained, errReceivedBeforeForget) {
+			legacyCommitted = false
+			retained = nil
+		}
+		return nil
 	}
+	if admission.active && !admission.forgetOnly {
+		_ = c.withReceivedSSNMAdmission(admission, commitLegacy)
+	} else {
+		_ = commitLegacy()
+	}
+	if !legacyCommitted {
+		if admission.active {
+			c.projectReceivedChanges(admission.partitions)
+		}
+		return nil
+	}
+
 	if c.endpoint != nil {
 		c.endpoint.refreshIPSPDestinations()
 	}
@@ -1080,7 +1145,7 @@ func (c *Association) applySSNM(
 			store.mu.Unlock()
 		}
 	}
-	if err := c.publishSSNMReport(report); err != nil && retained == nil {
+	if err := c.publishSSNMReport(report, admission); err != nil && retained == nil {
 		retained = err
 	}
 
@@ -1143,6 +1208,7 @@ func (c *Association) reportSSNM(
 ) error {
 	report.Scope = c.ssnmWireScope(networkAppearance, routingContext)
 	report.Source = SSNMPeerReport
+	admission := c.receivedReportAdmission(report)
 	var peerAdmission peerCongestionAdmission
 	var peerRefusal []peerCongestionRefusal
 	if report.PeerReported && c.role == RoleSGP {
@@ -1154,7 +1220,7 @@ func (c *Association) reportSSNM(
 			peerRefusal = []peerCongestionRefusal{c.ssnmStore().captureUnresolvedPeerCongestionRefusal(c.ID(), peerAdmission.epoch, report.Scope)}
 		}
 	}
-	pcs, masks, err := c.ssnmAffectedPointCodes(apc, report.Scope, report.Kind, peerRefusal...)
+	pcs, masks, err := c.receivedAffectedPointCodes(apc, report.Scope, report.Kind, admission, peerRefusal...)
 	if err != nil {
 		return err
 	}
@@ -1174,7 +1240,7 @@ func (c *Association) reportSSNM(
 	if report.PeerReported && c.role == RoleSGP && c.as != nil {
 		return c.publishPeerCongestionReport(report, peerAdmission)
 	}
-	return c.publishSSNMReport(report)
+	return c.publishSSNMReport(report, admission)
 }
 
 func singleUnmaskedAffectedPointCode(apc *params.Param) bool {
@@ -1693,7 +1759,12 @@ type destinationAuditGroup struct {
 }
 
 // ForgetDestinations discards every SSNM destination record the association's
-// state store retains and reports how many were released.
+// legacy state store retains and returns that legacy row count. It also
+// reclaims this ASP/IPSP reporter's canonical destination dimensions, validity
+// history and periodic audit origins; those additional records are not counted.
+// Canonical siblings, peer congestion, transport observations and configured
+// isolation work remain independent. Local reclaim does not change the
+// association epoch. Pending optional DAUD attempts settle before reclaim.
 //
 // It is the reclaim path for the record budget: a store holding
 // MaxSSNMDestinationRecords, or DefaultMaxSSNMDestinationRecords where no ASP
@@ -1712,6 +1783,8 @@ func (c *Association) ForgetDestinations() int {
 	if c == nil {
 		return 0
 	}
+	releaseOptional := c.beginOptionalSSNMChange(true)
+	changed := c.forgetReceivedDestinations()
 	if c.mtp3Restarts != nil {
 		c.mtp3Restarts.procedureMu.Lock()
 	}
@@ -1719,9 +1792,12 @@ func (c *Association) ForgetDestinations() int {
 	if c.mtp3Restarts != nil {
 		c.mtp3Restarts.procedureMu.Unlock()
 	}
+	releaseOptional()
 	// Projection takes its own snapshots after destination/restart locks end.
+	c.projectReceivedChanges(changed)
 	if c.endpoint != nil {
 		c.endpoint.refreshIPSPDestinations()
 	}
+	c.reconcileDestinationAudits()
 	return released
 }

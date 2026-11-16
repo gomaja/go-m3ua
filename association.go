@@ -2535,6 +2535,10 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 	}
 	releaseChange, _ := c.beginSCONBindingChange(key.RoutingContext, local, false, nil)
 	defer releaseChange()
+	c.addDynamicASKeyChanged(key, routingKey, local)
+}
+
+func (c *Association) addDynamicASKeyChanged(key ASKey, routingKey RoutingKey, local bool) {
 	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
 		c.muAckedRCs.Lock()
 		c.muDynamicASKeys.Lock()
@@ -2544,11 +2548,6 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 				c.inactiveDynamicRCs = make(map[uint32]struct{})
 			}
 			c.inactiveDynamicRCs[key.RoutingContext] = struct{}{}
-		}
-		if c.role == RoleSGP {
-			if store := c.ssnmStore(); store != nil {
-				store.retirePeerCongestionContext(c.ID(), key.RoutingContext)
-			}
 		}
 		c.dynamicPeerASKeys[key.RoutingContext] = key
 		c.dynamicPeerASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
@@ -2567,11 +2566,6 @@ func (c *Association) addDynamicASKey(key ASKey, routingKey RoutingKey, local bo
 			c.dynamicLocalTrafficModes[key.RoutingContext] = routingKey.TrafficMode
 		}
 	} else {
-		if c.role == RoleSGP {
-			if store := c.ssnmStore(); store != nil {
-				store.retirePeerCongestionContext(c.ID(), key.RoutingContext)
-			}
-		}
 		c.dynamicPeerASKeys[key.RoutingContext] = key
 		c.dynamicPeerASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
 		if routingKey.TrafficModeSet {
@@ -2590,14 +2584,13 @@ func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 		return
 	}
 	defer releaseChange()
+	c.removeDynamicASKeyChanged(routingContext, local)
+}
+
+func (c *Association) removeDynamicASKeyChanged(routingContext uint32, local bool) {
 	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
 		c.muAckedRCs.Lock()
 		c.muDynamicASKeys.Lock()
-		if c.role == RoleSGP {
-			if store := c.ssnmStore(); store != nil {
-				store.retirePeerCongestionContext(c.ID(), routingContext)
-			}
-		}
 		delete(c.dynamicPeerASKeys, routingContext)
 		delete(c.dynamicPeerASKeyVersions, routingContext)
 		delete(c.dynamicPeerTrafficModes, routingContext)
@@ -2612,11 +2605,6 @@ func (c *Association) removeDynamicASKey(routingContext uint32, local bool) {
 		delete(c.dynamicLocalASKeyVersions, routingContext)
 		delete(c.dynamicLocalTrafficModes, routingContext)
 	} else {
-		if c.role == RoleSGP {
-			if store := c.ssnmStore(); store != nil {
-				store.retirePeerCongestionContext(c.ID(), routingContext)
-			}
-		}
 		delete(c.dynamicPeerASKeys, routingContext)
 		delete(c.dynamicPeerASKeyVersions, routingContext)
 		delete(c.dynamicPeerTrafficModes, routingContext)
@@ -2659,6 +2647,10 @@ func (c *Association) removeDynamicASKeyVersion(
 		return ASKey{}, false
 	}
 	defer releaseChange()
+	return c.removeDynamicASKeyVersionChanged(routingContext, local, expectedVersion)
+}
+
+func (c *Association) removeDynamicASKeyVersionChanged(routingContext uint32, local bool, expectedVersion uint64) (ASKey, bool) {
 	if !local && (c.role == RoleSGP || c.role == RoleIPSP) {
 		c.muAckedRCs.Lock()
 		defer c.muAckedRCs.Unlock()
@@ -2679,11 +2671,6 @@ func (c *Association) removeDynamicASKeyVersion(
 	key, exists := keys[routingContext]
 	if !exists {
 		return ASKey{}, false
-	}
-	if !local && c.role == RoleSGP {
-		if store := c.ssnmStore(); store != nil {
-			store.retirePeerCongestionContext(c.ID(), routingContext)
-		}
 	}
 	delete(keys, routingContext)
 	delete(versions, routingContext)

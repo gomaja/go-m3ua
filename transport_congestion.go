@@ -280,6 +280,8 @@ func (c *Association) transportDetectorLocked() *transportCongestionDetector {
 }
 
 func (c *Association) resetTransportCongestionEpoch() {
+	releaseOptional := c.beginOptionalSSNMChange(false)
+	defer releaseOptional()
 	c.transportMu.Lock()
 	before := c.transportSnapshot.Load()
 	c.epoch.Add(1)
@@ -300,6 +302,9 @@ func (c *Association) resetTransportCongestionEpoch() {
 		c.transportSnapshot.Store(&state)
 	}
 	c.transportMu.Unlock()
+	if store := c.ssnmStore(); store != nil {
+		c.projectReceivedChanges(store.retireReceivedEpoch(c.ID(), c.Epoch()))
+	}
 	if c.endpoint != nil {
 		c.endpoint.transport.project(c.endpoint, c)
 	}

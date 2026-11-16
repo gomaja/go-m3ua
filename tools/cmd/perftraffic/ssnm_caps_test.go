@@ -10,7 +10,7 @@ import (
 )
 
 // Every size below is worked by hand from the SubscriptionQueueBytes doc
-// comment: 512 per event, 8 per report destination, 256 per updated
+// comment: 512 per event, 8 per report destination, 320 per updated
 // destination, 4 per Routing Context in the report and in both dimensions of
 // each update, plus the byte lengths of Reason and of the event's and the
 // report's partition identity strings.
@@ -35,21 +35,21 @@ func TestSSNMEventBytesFollowsTheDocumentedFormula(testContext *testing.T) {
 		// 512 + 8.
 		{"report naming one destination and updating none", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
 			Report: m3ua.SSNMReport{Destinations: make([]m3ua.PointCodeRange, 1)}}, 520},
-		// 512 + 8 + 256 + 4 (report) + 4 (availability): the one-APC F3 event.
+		// 512 + 8 + 320 + 4 (report) + 4 (availability): the one-APC F3 event.
 		{"one-APC workload report", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
 			Report:  m3ua.SSNMReport{Scope: scope(100), Destinations: make([]m3ua.PointCodeRange, 1)},
-			Updated: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 784},
-		// 512 + 3*8 + 2*256 + 4*(2 report + 2+1 first update + 0+3 second).
+			Updated: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 848},
+		// 512 + 3*8 + 2*320 + 4*(2 report + 2+1 first update + 0+3 second).
 		{"routing contexts in the report and both dimensions", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
 			Report: m3ua.SSNMReport{Scope: scope(100, 101), Destinations: make([]m3ua.PointCodeRange, 3)},
 			Updated: []m3ua.SSNMDestinationKnowledge{
 				update(scope(100, 101), scope(7)),
 				update(scope(), scope(1, 2, 3)),
-			}}, 512 + 24 + 512 + 32},
-		// 784 + 2*(len("sg-a") + len("as-core")) = 784 + 22.
+			}}, 512 + 24 + 640 + 32},
+		// 848 + 2*(len("sg-a") + len("as-core")) = 848 + 22.
 		{"canonical partition on the event and its report", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent, Partition: canonical,
 			Report:  m3ua.SSNMReport{Scope: scope(100), Partition: canonical, Destinations: make([]m3ua.PointCodeRange, 1)},
-			Updated: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 806},
+			Updated: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 870},
 		// 512 + len("sg-b") + len("sg-longer-name") + len("x") = 512 + 4 + 14 + 1.
 		{"event and report partitions counted separately", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
 			Partition: m3ua.SSNMPartition{SignallingGateway: "sg-b"},
@@ -62,8 +62,8 @@ func TestSSNMEventBytesFollowsTheDocumentedFormula(testContext *testing.T) {
 			Invalidated: []m3ua.SSNMDestinationInvalidation{{AvailabilityRemoved: true, CongestionRemoved: true}}}, 512 + 16},
 		// Byte lengths, not runes: "état" is five bytes.
 		{"reason counted in bytes", m3ua.SSNMEvent{Kind: m3ua.SSNMResourceLossEvent, Reason: "état"}, 517},
-		// 512 + 1024*(8 + 256 + 4) + 4.
-		{"1,024-APC workload report", deliveredEvent(singlePlan(1024, 1024), 1), 274_948},
+		// 512 + 1024*(8 + 320 + 4) + 4.
+		{"1,024-APC workload report", deliveredEvent(singlePlan(1024, 1024), 1), 340_484},
 	} {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
 			if got := ssnmEventBytes(testCase.event); got != testCase.want {
@@ -74,9 +74,9 @@ func TestSSNMEventBytesFollowsTheDocumentedFormula(testContext *testing.T) {
 }
 
 // The smallest queued event of a workload is one generated message: 516 plus
-// 268 per Affected Point Code (8 + 256 + 4).
+// 332 per Affected Point Code (8 + 320 + 4).
 func TestSSNMWorkloadEventBytes(testContext *testing.T) {
-	for destinations, want := range map[int]int{1: 784, 32: 9_092, 256: 69_124, 1024: 274_948} {
+	for destinations, want := range map[int]int{1: 848, 32: 11_140, 256: 85_508, 1024: 340_484} {
 		if got := ssnmWorkloadEventBytes(destinations); got != want {
 			testContext.Errorf("%d-destination message = %d accounted bytes, want %d", destinations, got, want)
 		}
@@ -88,12 +88,12 @@ func TestSSNMWorkloadEventBytes(testContext *testing.T) {
 }
 
 // capEvidence is the F3 record of a paused one-APC subscriber that retained
-// queued events of 784 bytes each before its continuity loss, classified as
+// queued events of 848 bytes each before its continuity loss, classified as
 // the subscriber classifies it.
 func capEvidence(queueLimit, queueBytes, queued int) *ssnmPauseRecord {
 	pause := &ssnmPauseRecord{
 		ContinuityLossObserved: true, QueueLimit: queueLimit, QueueByteLimit: queueBytes,
-		QueuedAtLoss: queued, QueuedBytesAtLoss: queued * 784, SmallestEventBytes: 784, SmallestQueuedEventBytes: 784,
+		QueuedAtLoss: queued, QueuedBytesAtLoss: queued * 848, SmallestEventBytes: 848, SmallestQueuedEventBytes: 848,
 		SnapshotValidated: 1,
 	}
 	pause.CountCapEnforced, pause.ByteCapEnforced = ssnmCapsReached(pause)
@@ -109,24 +109,24 @@ func TestSSNMCapFailureJudgesTheBindingCap(testContext *testing.T) {
 		binding string
 		reason  string
 	}{
-		// 256 x 784 = 200,704 bytes under 1 MiB: the count cap binds.
+		// 256 x 848 = 217,088 bytes under 1 MiB: the count cap binds.
 		{"count cap binds under the default byte limit", func() *ssnmPauseRecord { return capEvidence(256, 1<<20, 256) }, ssnmBindingCount, ""},
-		// 125 x 784 = 98,000; another 784 would make 98,784 > 98,304.
-		{"byte cap binds", func() *ssnmPauseRecord { return capEvidence(256, 98_304, 125) }, ssnmBindingBytes, ""},
-		{"byte cap filled exactly", func() *ssnmPauseRecord { return capEvidence(256, 98_000, 125) }, ssnmBindingBytes, ""},
-		{"both caps reached count first", func() *ssnmPauseRecord { return capEvidence(256, 256*784, 256) }, ssnmBindingCount, ""},
-		{"retained bytes over the byte cap", func() *ssnmPauseRecord { return capEvidence(256, 98_304, 126) }, "", "retained 98784 accounted bytes, over the 98304-byte cap"},
+		// 115 x 848 = 97,520; another 848 would make 98,368 > 98,304.
+		{"byte cap binds", func() *ssnmPauseRecord { return capEvidence(256, 98_304, 115) }, ssnmBindingBytes, ""},
+		{"byte cap filled exactly", func() *ssnmPauseRecord { return capEvidence(256, 97_520, 115) }, ssnmBindingBytes, ""},
+		{"both caps reached count first", func() *ssnmPauseRecord { return capEvidence(256, 256*848, 256) }, ssnmBindingCount, ""},
+		{"retained bytes over the byte cap", func() *ssnmPauseRecord { return capEvidence(256, 98_304, 116) }, "", "retained 98368 accounted bytes, over the 98304-byte cap"},
 		{"retained events over the count cap", func() *ssnmPauseRecord {
 			pause := capEvidence(256, 1<<20, 257)
 			pause.ContinuityLossObserved = false
 			return pause
 		}, "", "retained 257 events, over the 256-event cap"},
 		{"loss with neither cap reached", func() *ssnmPauseRecord { return capEvidence(256, 1<<20, 100) }, "", "below both caps"},
-		// 98,000 + 784 = 98,784 fits a 98,784-byte limit, so one more event
+		// 97,520 + 848 = 98,368 fits a 98,368-byte limit, so one more event
 		// could have been queued.
-		{"loss one event short of the byte cap", func() *ssnmPauseRecord { return capEvidence(256, 98_784, 125) }, "", "below both caps"},
+		{"loss one event short of the byte cap", func() *ssnmPauseRecord { return capEvidence(256, 98_368, 115) }, "", "below both caps"},
 		{"byte binding recorded as count", func() *ssnmPauseRecord {
-			pause := capEvidence(256, 98_304, 125)
+			pause := capEvidence(256, 98_304, 115)
 			pause.BindingCap = ssnmBindingCount
 			return pause
 		}, "", `recorded binding cap "count"`},
@@ -136,20 +136,20 @@ func TestSSNMCapFailureJudgesTheBindingCap(testContext *testing.T) {
 			return pause
 		}, "", `recorded binding cap "bytes"`},
 		{"byte binding not recorded", func() *ssnmPauseRecord {
-			pause := capEvidence(256, 98_304, 125)
+			pause := capEvidence(256, 98_304, 115)
 			pause.BindingCap = ""
 			return pause
 		}, "", "recorded binding cap"},
 		{"byte cap reached but not flagged", func() *ssnmPauseRecord {
-			pause := capEvidence(256, 98_304, 125)
+			pause := capEvidence(256, 98_304, 115)
 			pause.ByteCapEnforced = false
 			return pause
 		}, "", "recorded binding cap"},
 		{"retained event below the workload's smallest", func() *ssnmPauseRecord {
-			pause := capEvidence(256, 98_304, 125)
+			pause := capEvidence(256, 98_304, 115)
 			pause.SmallestQueuedEventBytes = 520
 			return pause
-		}, "", "below the workload's smallest 784"},
+		}, "", "below the workload's smallest 848"},
 		{"no continuity loss", func() *ssnmPauseRecord {
 			pause := capEvidence(256, 1<<20, 256)
 			pause.ContinuityLossObserved = false
@@ -240,8 +240,8 @@ func TestSSNMPauseDrainAccountsRetainedBytes(testContext *testing.T) {
 	plan := singlePlan(256, 1)
 	// Under the total rate the retained queue interleaves eight partitions'
 	// reports; the caps count every event of the subscription alike, so the
-	// judgment is the same: 256 events for the count cap, and 125 events of
-	// 784 bytes under a 96 KiB byte limit.
+	// judgment is the same: 256 events for the count cap, and 115 events of
+	// 848 bytes under a 96 KiB byte limit.
 	eight := ssnmPlan{records: 256, apcs: 1, associations: 8}
 	for _, testCase := range []struct {
 		name       string
@@ -253,33 +253,33 @@ func TestSSNMPauseDrainAccountsRetainedBytes(testContext *testing.T) {
 		// eight marks a queue of the eight-association plan.
 		eight bool
 	}{
-		{"byte cap over eight partitions", 256, 98_304, retainedQueue(eight, 125, true), ssnmPauseRecord{
-			ContinuityLossObserved: true, QueuedAtLoss: 125, QueuedBytesAtLoss: 98_000, SmallestQueuedEventBytes: 784,
-			ByteCapEnforced: true, BindingCap: ssnmBindingBytes, QueuedStateEntries: 125,
+		{"byte cap over eight partitions", 256, 98_304, retainedQueue(eight, 115, true), ssnmPauseRecord{
+			ContinuityLossObserved: true, QueuedAtLoss: 115, QueuedBytesAtLoss: 97_520, SmallestQueuedEventBytes: 848,
+			ByteCapEnforced: true, BindingCap: ssnmBindingBytes, QueuedStateEntries: 115,
 		}, "", true},
 		{"count cap over eight partitions", 256, 1 << 20, retainedQueue(eight, 256, true), ssnmPauseRecord{
-			ContinuityLossObserved: true, QueuedAtLoss: 256, QueuedBytesAtLoss: 256 * 784, SmallestQueuedEventBytes: 784,
+			ContinuityLossObserved: true, QueuedAtLoss: 256, QueuedBytesAtLoss: 256 * 848, SmallestQueuedEventBytes: 848,
 			CountCapEnforced: true, BindingCap: ssnmBindingCount, QueuedStateEntries: 256,
 		}, "", true},
 		{"eight partitions over the count cap", 256, 1 << 20, retainedQueue(eight, 300, false), ssnmPauseRecord{
-			QueuedAtLoss: 257, QueuedBytesAtLoss: 257 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 257,
+			QueuedAtLoss: 257, QueuedBytesAtLoss: 257 * 848, SmallestQueuedEventBytes: 848, QueuedStateEntries: 257,
 		}, "retained 257 events, over the 256-event cap", true},
 		{"eight partitions losing continuity early", 256, 1 << 20, retainedQueue(eight, 40, true), ssnmPauseRecord{
-			ContinuityLossObserved: true, QueuedAtLoss: 40, QueuedBytesAtLoss: 40 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 40,
+			ContinuityLossObserved: true, QueuedAtLoss: 40, QueuedBytesAtLoss: 40 * 848, SmallestQueuedEventBytes: 848, QueuedStateEntries: 40,
 		}, "below both caps", true},
-		{"byte cap", 256, 98_304, retainedQueue(plan, 125, true), ssnmPauseRecord{
-			ContinuityLossObserved: true, QueuedAtLoss: 125, QueuedBytesAtLoss: 98_000, SmallestQueuedEventBytes: 784,
-			ByteCapEnforced: true, BindingCap: ssnmBindingBytes, QueuedStateEntries: 125,
+		{"byte cap", 256, 98_304, retainedQueue(plan, 115, true), ssnmPauseRecord{
+			ContinuityLossObserved: true, QueuedAtLoss: 115, QueuedBytesAtLoss: 97_520, SmallestQueuedEventBytes: 848,
+			ByteCapEnforced: true, BindingCap: ssnmBindingBytes, QueuedStateEntries: 115,
 		}, "", false},
 		{"count cap", 4, 1 << 20, retainedQueue(plan, 4, true), ssnmPauseRecord{
-			ContinuityLossObserved: true, QueuedAtLoss: 4, QueuedBytesAtLoss: 4 * 784, SmallestQueuedEventBytes: 784,
+			ContinuityLossObserved: true, QueuedAtLoss: 4, QueuedBytesAtLoss: 4 * 848, SmallestQueuedEventBytes: 848,
 			CountCapEnforced: true, BindingCap: ssnmBindingCount, QueuedStateEntries: 4,
 		}, "", false},
 		{"queue over the count cap", 4, 1 << 20, retainedQueue(plan, 6, false), ssnmPauseRecord{
-			QueuedAtLoss: 5, QueuedBytesAtLoss: 5 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 5,
+			QueuedAtLoss: 5, QueuedBytesAtLoss: 5 * 848, SmallestQueuedEventBytes: 848, QueuedStateEntries: 5,
 		}, "retained 5 events, over the 4-event cap", false},
 		{"early loss", 256, 1 << 20, retainedQueue(plan, 3, true), ssnmPauseRecord{
-			ContinuityLossObserved: true, QueuedAtLoss: 3, QueuedBytesAtLoss: 3 * 784, SmallestQueuedEventBytes: 784, QueuedStateEntries: 3,
+			ContinuityLossObserved: true, QueuedAtLoss: 3, QueuedBytesAtLoss: 3 * 848, SmallestQueuedEventBytes: 848, QueuedStateEntries: 3,
 		}, "below both caps", false},
 	} {
 		testContext.Run(testCase.name, func(testContext *testing.T) {
@@ -297,7 +297,7 @@ func TestSSNMPauseDrainAccountsRetainedBytes(testContext *testing.T) {
 				testContext.Fatalf("pause record %+v", got)
 			}
 			want := testCase.want
-			if got.QueueLimit != testCase.queueLimit || got.QueueByteLimit != testCase.queueBytes || got.SmallestEventBytes != 784 ||
+			if got.QueueLimit != testCase.queueLimit || got.QueueByteLimit != testCase.queueBytes || got.SmallestEventBytes != 848 ||
 				got.ContinuityLossObserved != want.ContinuityLossObserved || got.QueuedAtLoss != want.QueuedAtLoss ||
 				got.QueuedBytesAtLoss != want.QueuedBytesAtLoss || got.SmallestQueuedEventBytes != want.SmallestQueuedEventBytes ||
 				got.CountCapEnforced != want.CountCapEnforced || got.ByteCapEnforced != want.ByteCapEnforced ||

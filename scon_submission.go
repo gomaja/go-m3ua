@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 )
 
 // A Routing Context is unique within each registration direction. Network
@@ -18,16 +19,21 @@ type sconBindingID struct {
 }
 
 type sconSubmissionTracker struct {
-	mu       sync.Mutex
-	active   map[*sconSubmission]struct{}
-	changing map[sconBindingID]chan struct{}
+	mu                  sync.Mutex
+	active              map[*sconSubmission]struct{}
+	changing            map[sconBindingID]chan struct{}
+	optionalChanging    chan struct{}
+	optionalChanges     int
+	forgetChanges       int
+	knowledgeGeneration atomic.Uint64
 }
 
 type sconSubmission struct {
-	ctx      context.Context
-	cancel   context.CancelCauseFunc
-	done     chan struct{}
-	bindings []queueCongestionBinding
+	optionalAudit bool
+	ctx           context.Context
+	cancel        context.CancelCauseFunc
+	done          chan struct{}
+	bindings      []queueCongestionBinding
 }
 
 // beginSCONSubmission runs after sendMu. A change in progress has already
@@ -102,44 +108,77 @@ func sconSubmissionError(submission *sconSubmission, err error) error {
 	return err
 }
 
-// beginSCONBindingChange fences only this registration direction/RC. The
+// Binding changes fence only the selected registration directions/RCs. The
 // dependency's SendMsgContext cancels a buffer or send-lock wait, preserves the
 // latest application deadline, and leaves no pending send after returning.
 // Known acceptance wins cancellation, so an accepted current SCON settles before
-// the replacement commits. No short mutex is retained while joining the call.
+// the replacement commits. Tracker and dynamic mutexes are released while joining.
+// RKM correlation and lifecycle caller locks can remain held, including on the
+// receive dispatcher for late REG/DEREG responses. A cancelled optional audit
+// completes through the tracker alone; it never acquires either RKM lock.
+type sconBindingChange struct {
+	id              sconBindingID
+	removing        bool
+	expectedVersion *uint64
+}
+
 func (c *Association) beginSCONBindingChange(routingContext uint32, local, removing bool, expectedVersion *uint64) (func(), bool) {
-	tracker := &c.sconSubmissions
 	id := sconBindingID{routingContext, local}
+	release, admitted := c.beginSCONBindingChanges([]sconBindingChange{{id, removing, expectedVersion}})
+	return release, admitted[id]
+}
+
+// Acquire the whole event's gates together. Never wait while owning a subset:
+// overlapping multi-context events must not depend on one another's gates.
+// History and jobs are retired once before any replacement becomes visible.
+func (c *Association) beginSCONBindingChanges(changes []sconBindingChange) (func(), map[sconBindingID]bool) {
+	tracker := &c.sconSubmissions
 	for {
 		tracker.mu.Lock()
-		if gate := tracker.changing[id]; gate != nil {
+		var blocked <-chan struct{}
+		for _, change := range changes {
+			if gate := tracker.changing[change.id]; gate != nil {
+				blocked = gate
+				break
+			}
+		}
+		if blocked != nil {
 			tracker.mu.Unlock()
-			<-gate
+			<-blocked
 			continue
 		}
-		if removing {
-			c.muDynamicASKeys.RLock()
+		admitted := make(map[sconBindingID]bool, len(changes))
+		c.muDynamicASKeys.RLock()
+		for _, change := range changes {
 			keys, versions := c.dynamicPeerASKeys, c.dynamicPeerASKeyVersions
-			if local {
+			if change.id.local {
 				keys, versions = c.dynamicLocalASKeys, c.dynamicLocalASKeyVersions
 			}
-			_, present := keys[routingContext]
-			current := present && (expectedVersion == nil || versions[routingContext] == *expectedVersion)
-			c.muDynamicASKeys.RUnlock()
-			if !current {
-				tracker.mu.Unlock()
-				return noDeliveryBarrier, false
+			_, present := keys[change.id.routingContext]
+			if !change.removing || present && (change.expectedVersion == nil || versions[change.id.routingContext] == *change.expectedVersion) {
+				admitted[change.id] = true
 			}
+		}
+		c.muDynamicASKeys.RUnlock()
+		if len(admitted) == 0 {
+			tracker.mu.Unlock()
+			return noDeliveryBarrier, admitted
 		}
 		if tracker.changing == nil {
 			tracker.changing = make(map[sconBindingID]chan struct{})
 		}
 		gate := make(chan struct{})
-		tracker.changing[id] = gate
+		received := make(map[uint32]struct{}, len(admitted))
+		for id := range admitted {
+			tracker.changing[id] = gate
+			if !id.local {
+				received[id.routingContext] = struct{}{}
+			}
+		}
 		var pending []*sconSubmission
 		for submission := range tracker.active {
 			for _, binding := range submission.bindings {
-				if binding.key.RoutingContextSet && binding.key.RoutingContext == routingContext && binding.local == local {
+				if binding.key.RoutingContextSet && admitted[sconBindingID{binding.key.RoutingContext, binding.local}] {
 					submission.cancel(ErrRoutingContextNotActive)
 					pending = append(pending, submission)
 					break
@@ -150,6 +189,28 @@ func (c *Association) beginSCONBindingChange(routingContext uint32, local, remov
 		for _, submission := range pending {
 			<-submission.done
 		}
-		return func() { tracker.mu.Lock(); delete(tracker.changing, id); close(gate); tracker.mu.Unlock() }, true
+		changedPartitions := c.retireReceivedRegistrations(received)
+		peerChange := c.role == RoleSGP && len(received) > 0
+		if peerChange {
+			// Peer admission does not use the SCON tracker. Keep its snapshot mutex
+			// through map publication so old tokens cannot be restored in this gap.
+			// All tracked submissions have completed before acquiring this mutex.
+			c.peerRetentionMu.Lock()
+			if store := c.ssnmStore(); store != nil {
+				store.retirePeerCongestionContexts(c.ID(), received)
+			}
+		}
+		return func() {
+			if peerChange {
+				c.peerRetentionMu.Unlock()
+			}
+			tracker.mu.Lock()
+			for id := range admitted {
+				delete(tracker.changing, id)
+			}
+			close(gate)
+			tracker.mu.Unlock()
+			c.projectReceivedChanges(changedPartitions)
+		}, admitted
 	}
 }

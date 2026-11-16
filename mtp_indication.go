@@ -65,6 +65,8 @@ type MTPDestination struct {
 // derived from the other: this one is the aggregate MTP3-User status of
 // Section 4.5.2.2, and that one is a decision about one candidate.
 type MTPDestinationStatus struct {
+	// ReceivedCongestionUnknown marks expired received knowledge, not abatement.
+	ReceivedCongestionUnknown bool
 	// TransportCongestionLevel is the aggregate local pressure level; raw inputs are on Association.TransportCongestion.
 	TransportCongestionLevel uint8
 	// TransportCongestionUnknown marks unavailable or stale transport observations, not abatement.

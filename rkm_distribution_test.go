@@ -24,7 +24,7 @@ func TestSGPDistributionResolvesOmittedRoutingContextFromRegisteredRoutingKey(t 
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig())
+	association := newRoutingKeyTestAssociation(t, RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()
@@ -289,7 +289,7 @@ func TestSGPDistributesExplicitRoutingContextForDynamicallyRegisteredAllNetworkA
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	defer func() { _ = endpoint.Close() }()
-	association := newAssociation(RoleSGP, NewAssociationConfig())
+	association := newRoutingKeyTestAssociation(t, RoleSGP, NewAssociationConfig())
 	association.endpoint = endpoint
 	association.as = endpoint.as
 	association.muState.Lock()

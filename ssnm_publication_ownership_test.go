@@ -338,7 +338,9 @@ func TestSSNMPublicationOverflowAndResyncOwnership(testContext *testing.T) {
 				limits := &SSNMStateConfig{SubscriptionQueueSize: 1}
 				if byteBound {
 					limits.SubscriptionQueueSize = 256
-					limits.SubscriptionQueueBytes = 520 + count*280
+					// Each APC carries an eight-byte report range, a 320-byte
+					// Updated entry and two eight-byte retained RC scopes.
+					limits.SubscriptionQueueBytes = 520 + count*344
 				}
 				endpoint := newSSNMOwnershipEndpoint(testContext, count, false, limits)
 				slow := mustSubscribeSSNM(testContext, endpoint)
