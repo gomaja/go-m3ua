@@ -159,6 +159,7 @@ func (s *ssnmState) retireReceivedEpoch(association AssociationID, epoch uint64)
 	}
 	s.liveSources[association] = epoch
 	s.retireDestinationAuditsLocked(association, nil)
+	s.retireLocalCongestionLocked(association, nil)
 	return s.retireReceivedAssociationLocked(association, nil)
 }
 

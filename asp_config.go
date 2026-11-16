@@ -30,7 +30,12 @@ const (
 )
 
 // SignallingGatewayID is the local identity of an RFC 4666 Signalling Gateway.
+// Configured identities contain at most 255 octets.
 type SignallingGatewayID string
+
+// Local names have no RFC-defined ceiling. This engineering bound mirrors
+// the INFO String's 255-octet ceiling in RFC 4666 §3.4.1 and bounds observations.
+const maxObservationIdentityBytes = 255
 
 // SignallingGatewayProcessID is the local identity of an RFC 4666 Signalling
 // Gateway Process within one Signalling Gateway.
@@ -45,6 +50,7 @@ type SignallingGatewayProcessID string
 // supported Application Servers". The name is local: it is not carried on the
 // wire, and equal names in different Signalling Gateways are different
 // Application Servers.
+// Configured identities contain at most 255 octets.
 type RemoteASID string
 
 // SGASKey is the canonical identity of one Application Server this ASP reaches
@@ -63,6 +69,7 @@ type SGASKey struct {
 
 // MTPRouteID identifies one local ASP MTP route. It is distinct from a
 // peer-specific Routing Key, which one SGP binds to an Application Server.
+// ASP and IPSP destination route identities contain at most 255 octets.
 type MTPRouteID string
 
 // SGPIdentity identifies one Signalling Gateway Process and its containing
@@ -510,6 +517,9 @@ func snapshotASPLimits(config *ASPConfig) (aspRoutingConfig, error) {
 func compilePeerInventory(config *ASPConfig, snapshot *aspRoutingConfig) error {
 	signallingGatewayIDs := make(map[SignallingGatewayID]struct{}, len(config.SignallingGateways))
 	for _, signallingGateway := range config.SignallingGateways {
+		if err := validateIdentityLength("SignallingGatewayID", string(signallingGateway.ID), maxObservationIdentityBytes); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidASPConfig, err)
+		}
 		if signallingGateway.ID == "" {
 			return invalidASPConfig("empty Signalling Gateway ID")
 		}
@@ -569,6 +579,9 @@ func compileSGPApplicationServers(
 	dynamicKeys := make([]canonicalRoutingKey, 0, len(sgp.ApplicationServers))
 	contextless := false
 	for _, applicationServer := range sgp.ApplicationServers {
+		if err := validateIdentityLength("RemoteASID", string(applicationServer.ID), maxObservationIdentityBytes); err != nil {
+			return aspSGPConfig{}, fmt.Errorf("%w: %w", ErrInvalidASPConfig, err)
+		}
 		if applicationServer.ID == "" {
 			return aspSGPConfig{}, invalidASPConfig(
 				"SGP %q in Signalling Gateway %q has an unnamed Application Server", sgp.ID, signallingGateway)
@@ -697,6 +710,9 @@ func compileRoutingInventory(routing *ASPRoutingConfig, snapshot *aspRoutingConf
 func compileMTPRoutes(mtpRoutes []MTPRouteConfig, snapshot *aspRoutingConfig) error {
 	snapshot.mtpRoutes = make([]aspMTPRoute, 0, len(mtpRoutes))
 	for _, mtpRoute := range mtpRoutes {
+		if err := validateIdentityLength("MTPRouteID", string(mtpRoute.ID), maxObservationIdentityBytes); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidASPConfig, err)
+		}
 		if mtpRoute.ID == "" {
 			return invalidASPConfig("empty MTP Route ID")
 		}
@@ -740,6 +756,9 @@ func applySGPSelection(routing *ASPRoutingConfig, snapshot *aspRoutingConfig) er
 		provisioned[gateway.id] = struct{}{}
 	}
 	for signallingGateway, mode := range routing.SignallingGatewayProcessSelection {
+		if err := validateIdentityLength("SignallingGatewayProcessSelection.SignallingGateway", string(signallingGateway), maxObservationIdentityBytes); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidASPConfig, err)
+		}
 		if _, exists := provisioned[signallingGateway]; !exists {
 			return invalidASPConfig("SGP selection names unprovisioned Signalling Gateway %q", signallingGateway)
 		}
@@ -770,6 +789,9 @@ func compileRoutePaths(
 	}
 	compiled := make(map[MTPRoutePathID]aspRoutePath, len(paths))
 	for _, path := range paths {
+		if err := validateIdentityLength("MTPRoutePath.SignallingGateway", string(path.SignallingGateway), maxObservationIdentityBytes); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidASPConfig, err)
+		}
 		if path.ID == "" {
 			return nil, invalidASPConfig("empty route path ID")
 		}
@@ -787,6 +809,9 @@ func compileRoutePaths(
 		}
 		named := make(map[RemoteASID]struct{}, len(path.ApplicationServers))
 		for _, applicationServer := range path.ApplicationServers {
+			if err := validateIdentityLength("MTPRoutePath.ApplicationServers", string(applicationServer), maxObservationIdentityBytes); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrInvalidASPConfig, err)
+			}
 			if _, duplicate := named[applicationServer]; duplicate {
 				return nil, invalidASPConfig(
 					"route path %q names Application Server %q twice", path.ID, applicationServer)

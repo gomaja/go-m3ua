@@ -148,19 +148,23 @@ func (c *Association) canonicalRemoteASBinding(routingContext uint32) (RemoteASI
 
 // Mapping changes are registration-lifetime changes too. Acquire the change
 // gate before either map mutex; never hold canonical while joining a send.
-func (c *Association) noteCanonicalRemoteAS(routingContext uint32, id RemoteASID) {
+func (c *Association) noteCanonicalRemoteAS(routingContext uint32, id RemoteASID) error {
+	if err := validateIdentityLength("CanonicalRemoteAS", string(id), maxObservationIdentityBytes); err != nil {
+		return err
+	}
 	if c == nil || id == "" {
-		return
+		return nil
 	}
 	c.muCanonicalAS.RLock()
 	previous := c.canonicalRemoteAS[routingContext]
 	c.muCanonicalAS.RUnlock()
 	if previous == id {
-		return
+		return nil
 	}
 	release, _ := c.beginSCONBindingChange(routingContext, false, false, nil)
 	defer release()
 	c.noteCanonicalRemoteASChanged(routingContext, id)
+	return nil
 }
 
 func (c *Association) noteCanonicalRemoteASChanged(routingContext uint32, id RemoteASID) {
@@ -184,6 +188,7 @@ func (c *Association) noteCanonicalRemoteASChanged(routingContext uint32, id Rem
 	c.canonicalRemoteAS[routingContext] = id
 	finishStatus()
 }
+
 func (c *Association) forgetCanonicalRemoteAS(routingContext uint32) {
 	if c == nil {
 		return
@@ -359,7 +364,11 @@ func (c *Association) syncSSNMBindings() {
 		withdrawn = append(withdrawn, partition)
 	}
 	store.retirePartitions(withdrawn, c.ID())
+
+	c.reconcileQueueCongestionLifetimes()
+	c.reconcileLocalCongestion()
 	c.reconcileDestinationAudits()
+	c.reconcileCongestionPublications()
 	if c.endpoint != nil {
 		// A pending reporter can affect active siblings without ever gaining
 		// a traffic capability (RFC 4666 §4.5.1). Project its source removal

@@ -48,6 +48,9 @@ type CongestionConfig struct {
 	// MaxStatusDestinations bounds the Endpoint-wide exact-DPC offered-status LRU.
 	// Zero selects 4096 as an engineering default; negative values are invalid.
 	MaxStatusDestinations int
+
+	// Publication bounds automatic optional SCON and DAUD work; nil selects defaults.
+	Publication *CongestionPublicationConfig
 	// Validity enables local expiry of received congestion; nil disables it.
 	Validity *CongestionValidityConfig
 	// Auditing enables optional ASP audits; nil disables them.
@@ -61,6 +64,7 @@ type CongestionConfig struct {
 var ErrCongestionMethodMismatch = errors.New("congestion methods differ across route alternatives")
 
 type congestionMethodConfig struct {
+	publication           CongestionPublicationConfig
 	maxStatusDestinations int
 	validity              time.Duration
 	auditing              *DestinationAuditConfig
@@ -111,6 +115,9 @@ func validateCongestionProfiles(input []NetworkCongestionProfile, role Role, rou
 		}
 		key := selector{appearance: entry.NetworkAppearance, set: entry.NetworkAppearanceSet}
 		if entry.PeerSGP != nil {
+			if err := validateIdentityLength("CongestionProfile.PeerSGP.SignallingGateway", string(entry.PeerSGP.SignallingGateway), maxObservationIdentityBytes); err != nil {
+				return fmt.Errorf("%w: %w", ErrInvalidRoleConfiguration, err)
+			}
 			if association || role != RoleASP || routes == nil {
 				return fmt.Errorf("%w: peer-qualified congestion selector", ErrInvalidRoleConfiguration)
 			}
@@ -149,7 +156,11 @@ func newCongestionMethodConfig(role Role, input *CongestionConfig, routes *aspRo
 	if err != nil {
 		return nil, err
 	}
-	return &congestionMethodConfig{maxStatusDestinations: limit, validity: after, auditing: audits, defaultProfile: profile, networks: snapshotCongestionProfiles(input.Networks)}, nil
+	publication, err := resolveCongestionPublication(input.Publication)
+	if err != nil {
+		return nil, err
+	}
+	return &congestionMethodConfig{publication: publication, maxStatusDestinations: limit, validity: after, auditing: audits, defaultProfile: profile, networks: snapshotCongestionProfiles(input.Networks)}, nil
 }
 
 func lookupCongestionProfile(table []NetworkCongestionProfile, peer *SGPIdentity, key ASKey) (CongestionProfile, bool) {

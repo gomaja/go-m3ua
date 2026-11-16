@@ -324,22 +324,21 @@ func TestDataQueueRecoversAfterOverflow(t *testing.T) {
 // this node was discarding from. SCON is the protocol's own way to ask it to
 // back off.
 func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
-	conn, sent := newTestConn(t, StateASPActive, RoleASP)
-	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
+	conn, sent := overflowAssociation(t)
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)
 
-	// newTestConn's dataChan holds 8; overflow it.
+	// The tracked fixture has already filled its bounded receive queue.
 	for i := 0; i < 64; i++ {
 		conn.handleData(context.Background(), messages.NewData(
 			nil, params.NewRoutingContext(1),
-			params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("flood")),
+			params.NewProtocolData(0x111111, 0x222222, params.ServiceIndSCCP, 0, 0, 1, []byte("flood")),
 			nil,
 		), nil)
 	}
 
-	// The overflow is reported to monitor, which turns it into the wire message.
+	// Error handling retains bounded optional work; a scheduler pass submits it.
 	select {
 	case err := <-conn.errChan:
 		if e := conn.handleErrors(err); e != nil {
@@ -348,6 +347,8 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 	default:
 		t.Fatal("the overflow was not reported")
 	}
+
+	runOverflowPublicationsForTest(conn)
 
 	var scon *messages.SignallingCongestion
 	for _, m := range *sent {
@@ -361,13 +362,12 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 	// Affected Point Code is Mandatory (Section 3.4.4), and the congested node
 	// is this one — named by the Destination Point Code of the traffic being
 	// discarded, which is the node that traffic was travelling to (Section
-	// 3.3.1). The flood above is addressed to 0x22222222.
+	// 3.3.1). The flood above is addressed to 0x222222.
 	if scon.AffectedPointCode == nil {
 		t.Fatal("SCON carried no Affected Point Code, which the RFC makes Mandatory")
 	}
 	// The Affected PC field is 24 bits with an 8-bit Mask above it (Section
-	// 3.4.1), so 0x22222222 cannot be carried whole: what goes on the wire is
-	// its low 24 bits, under a Mask of 0 naming this one node.
+	// 3.4.1). This exact destination uses Mask 0, naming one node.
 	if got := scon.AffectedPointCode.AffectedPointCodes(); len(got) != 1 || got[0] != 0x222222 {
 		t.Errorf("SCON named point codes %#v, want [0x222222] (this node's)", got)
 	}
@@ -380,8 +380,7 @@ func TestLocalCongestionTellsThePeerWithSCON(t *testing.T) {
 // overflow must not turn into an SCON flood on an association already in
 // trouble.
 func TestLocalCongestionSCONIsSentOncePerEpisode(t *testing.T) {
-	conn, sent := newTestConn(t, StateASPActive, RoleASP)
-	conn.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
+	conn, sent := overflowAssociation(t)
 	// A legal arrival stream: Section 1.4.7's rule 1 refuses DATA on stream 0,
 	// so without this the payloads below never reach the handler under test.
 	conn.recvStream.Store(1)
@@ -390,7 +389,9 @@ func TestLocalCongestionSCONIsSentOncePerEpisode(t *testing.T) {
 		for {
 			select {
 			case err := <-conn.errChan:
-				_ = conn.handleErrors(err)
+				if err := conn.handleErrors(err); err != nil {
+					t.Fatalf("overflow handling closed association: %v", err)
+				}
 			default:
 				return
 			}
@@ -400,10 +401,19 @@ func TestLocalCongestionSCONIsSentOncePerEpisode(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		conn.handleData(context.Background(), messages.NewData(
 			nil, params.NewRoutingContext(1),
-			params.NewProtocolData(0x11111111, 0x22222222, params.ServiceIndSCCP, 0, 0, 1, []byte("flood")),
+			params.NewProtocolData(0x111111, 0x222222, params.ServiceIndSCCP, 0, 0, 1, []byte("flood")),
 			nil,
 		), nil)
 		drain()
+	}
+
+	if len(*sent) != 0 {
+		t.Fatalf("manual publication fixture wrote before its scheduler pass: %v", typeNames(*sent))
+	}
+	runOverflowPublicationsForTest(conn)
+	// Current same-state work must not periodically reassert after submission.
+	for range 3 {
+		runOverflowPublicationsForTest(conn)
 	}
 
 	count := 0

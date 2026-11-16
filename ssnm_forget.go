@@ -5,12 +5,17 @@ package m3ua
 // inputs. Bindings remain live so a genuinely new report can be admitted.
 func (c *Association) forgetReceivedDestinations() []SSNMPartition {
 	s := c.ssnmStore()
-	if s == nil || c.role == RoleSGP {
+	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
+		return nil
+	}
+	s.retireLocalCongestionLocked(c.ID(), nil)
+	s.retireCongestionPublicationsLocked(c.ID(), nil)
+	if c.role == RoleSGP {
 		return nil
 	}
 	var outcomes auditOutcomeBatch

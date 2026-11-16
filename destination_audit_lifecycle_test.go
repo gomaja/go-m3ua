@@ -228,7 +228,7 @@ func TestAuditDiagnosticsFitDefaultQueueForMaximumReport(t *testing.T) {
 	lost, n, bytes := sub.continuityLost, len(sub.queue), sub.queuedBytes
 	diagnosticCount, diagnosticBytes := 0, 0
 	for _, queued := range sub.queue {
-		if queued.event.Kind == SSNMAuditOutcomeEvent {
+		if queued.event.Kind == SSNMPublicationOutcomeEvent {
 			diagnosticCount++
 			diagnosticBytes += queued.bytes
 		}

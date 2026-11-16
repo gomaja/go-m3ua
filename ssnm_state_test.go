@@ -893,8 +893,8 @@ func TestScopeInvalidSSNMStillFollowsProtocolValidation(t *testing.T) {
 // what a peer sent, or a list of them that grew with how often it sent, would
 // be the resource problem it was added to report.
 func TestSSNMResourceDiagnosticsAreBoundedAndCoalesced(t *testing.T) {
-	gateway := SignallingGatewayID(strings.Repeat("g", 300))
-	applicationServer := RemoteASID(strings.Repeat("a", 300))
+	gateway := SignallingGatewayID(strings.Repeat("g", 255))
+	applicationServer := RemoteASID(strings.Repeat("a", 255))
 	endpoint := newSSNMStateEndpoint(t, &ASPConfig{
 		SignallingGateways: []SignallingGatewayConfig{{
 			ID: gateway,
@@ -982,7 +982,8 @@ func TestSSNMNamesAreStable(t *testing.T) {
 		{SSNMPeerReport.String(), "peer"},
 		{SSNMLocalReport.String(), "local"},
 		{SSNMReportSource(0).String(), "unknown"},
-		{SSNMReportEvent.String(), "report"},
+		{SSNMReportObservedEvent.String(), "report-observed"},
+		{SSNMReportPatchEvent.String(), "report-patch"},
 		{SSNMBindingAdmittedEvent.String(), "binding-admitted"},
 		{SSNMBindingActivatedEvent.String(), "binding-activated"},
 		{SSNMBindingRetiredEvent.String(), "binding-retired"},

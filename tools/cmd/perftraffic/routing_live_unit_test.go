@@ -66,6 +66,9 @@ func TestRoutingLiveWriteAtomicRefusesOverwrite(testContext *testing.T) {
 
 func TestRoutingLiveWriteAtomicFailsClosedOnUnreadableDestination(testContext *testing.T) {
 	directory := testContext.TempDir()
+	if err := os.Symlink("missing", filepath.Join(directory, "symlink-probe")); err != nil {
+		testContext.Skipf("requires symbolic-link support and permission: %v", err)
+	}
 	path := filepath.Join(directory, "result.json")
 	if err := os.Symlink(filepath.Join(directory, "missing"), path); err != nil {
 		testContext.Fatal(err)

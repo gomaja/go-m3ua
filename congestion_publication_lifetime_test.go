@@ -115,6 +115,7 @@ func TestQueueRecoveryCannotPublishForReplacedBinding(t *testing.T) {
 					return results[0].ASKey
 				}
 				old := register(7, "old-as")
+				attachOverflowEndpointForTest(t, c)
 				_ = c.ManagementIndications()
 				c.recvStream.Store(1)
 				c.dataChan = make(chan *DataMessage, 1)
@@ -132,6 +133,16 @@ func TestQueueRecoveryCannotPublishForReplacedBinding(t *testing.T) {
 				if recovery {
 					if err := c.handleErrors(overflow); err != nil {
 						t.Fatal(err)
+					}
+					runOverflowPublicationsForTest(c)
+					reports := 0
+					for _, m := range *sent {
+						if _, ok := m.(*messages.SignallingCongestion); ok {
+							reports++
+						}
+					}
+					if reports != 1 {
+						t.Fatalf("submitted onset reports=%d", reports)
 					}
 				}
 				if !nextQueueCongestion(t, c).Congested {
@@ -172,6 +183,7 @@ func TestQueueRecoveryCannotPublishForReplacedBinding(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("recovery writer did not finish")
 				}
+				runOverflowPublicationsForTest(c)
 				for _, message := range *sent {
 					if scon, ok := message.(*messages.SignallingCongestion); ok && (!recovery || scon.CongestionIndications != nil && scon.CongestionIndications.CongestionLevel() == 0) {
 						t.Fatalf("recovery published for retired binding: %+v", scon)

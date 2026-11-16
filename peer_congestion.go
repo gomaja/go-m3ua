@@ -474,6 +474,7 @@ func (s *ssnmState) retirePeerCongestionScopes(association AssociationID, matche
 	if s.closed {
 		return
 	}
+	s.retireLocalCongestionLocked(association, matches)
 	source := s.peerSources[association]
 	selected := make(map[SSNMPartition][]peerCongestionKey)
 	for key := range source.active {

@@ -85,7 +85,7 @@ func exerciseContextlessEarlySSNMOverSCTP(t *testing.T, indications bool) {
 					if err != nil {
 						return err
 					}
-					if event.Kind != SSNMReportEvent || !event.ReportSet {
+					if event.Kind != SSNMReportObservedEvent || !event.ReportSet {
 						continue
 					}
 					report := event.Report

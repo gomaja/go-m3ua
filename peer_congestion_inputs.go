@@ -25,12 +25,18 @@ type PeerCongestionInput struct {
 	Transport      TransportCongestionState
 }
 
-// PeerCongestionVersion identifies one member and the independent transport
+// PeerCongestionVersion identifies one association and the independent transport
 // observation collected for it. Active includes the current binding's active
 // scope. TransportPresent distinguishes absent detector state from a present
 // unknown state, including initialization before the first sample. Transport includes its epoch,
 // configuration generation, sample timestamps and missed-sample counters.
+// A version vector also includes retained local-source associations that are
+// absent from peer membership. Such entries have Active=false and need not
+// appear in CongestionInputSnapshot.Peers; LocalGeneration covers their marks.
 type PeerCongestionVersion struct {
+	// LocalGeneration is an opaque version for local lifetime/queue evidence.
+	// Collection refuses consistency while a local evidence mark is in progress.
+	LocalGeneration   uint64
 	Association       AssociationID
 	Epoch             uint64
 	Active            bool
@@ -54,6 +60,9 @@ type CongestionInputVersion struct {
 // bracket collection; a changed vector is retried once, then Consistent=false
 // exposes both vectors. Revision is the retained SSNM revision collected.
 type CongestionInputSnapshot struct {
+	// Local contains independently identified queue and application contributions.
+	// Their wire scopes are owned copies; absence is not a measured capacity verdict.
+	Local                []LocalCongestionContribution
 	AS                   ASKey
 	TrafficMode          uint32
 	Peers                []PeerCongestionInput
@@ -106,7 +115,7 @@ func (e *Endpoint) congestionVersions(as *applicationServer) (CongestionInputVer
 	v := CongestionInputVersion{MembershipGeneration: generation, Revision: e.ssnm.currentRevision(), Peers: make([]PeerCongestionVersion, 0, len(members))}
 	for _, member := range members {
 		a := member.association
-		p := PeerCongestionVersion{Association: a.ID(), Epoch: a.Epoch()}
+		p := PeerCongestionVersion{Association: a.ID(), Epoch: a.Epoch(), LocalGeneration: a.localCongestionInputGeneration()}
 		p.Active = member.active && a.congestionBindingActive(as.key, as.key)
 		if as.key.RoutingContextSet {
 			p.BindingGeneration = a.dynamicASKeyVersionFor(as.key.RoutingContext, false)
@@ -117,6 +126,9 @@ func (e *Endpoint) congestionVersions(as *applicationServer) (CongestionInputVer
 		}
 		v.Peers = append(v.Peers, p)
 	}
+	if e.role == RoleIPSP {
+		e.appendLocalSourceVersions(as.key, &v)
+	}
 	return v, members, mode
 }
 
@@ -126,6 +138,9 @@ func sameCongestionVersions(a, b CongestionInputVersion) bool {
 
 func coherentCongestionVersion(v CongestionInputVersion) bool {
 	for _, peer := range v.Peers {
+		if peer.LocalGeneration&1 != 0 {
+			return false
+		}
 		if peer.TransportPresent && peer.Transport.Epoch != peer.Epoch {
 			return false
 		}
@@ -133,8 +148,11 @@ func coherentCongestionVersion(v CongestionInputVersion) bool {
 	return true
 }
 
-// CongestionInputs collects membership, retained peer reports and outbound
-// transport pressure for a registered AS. It retries a changing component
+// CongestionInputs collects local contributions, membership, retained peer reports and outbound
+// transport pressure for a registered AS, or a configured local ASP/IPSP AS
+// represented by a current Association. The latter uses the local traffic
+// direction and an aggregate of association lifetime marks for MembershipGeneration.
+// It retries a changing component
 // vector once. Consistent means these Endpoint-local observations were stable
 // across collection; it does not certify cluster capacity. An absent key
 // returns ErrNoConfiguredAS. No application callback runs during collection.
@@ -148,7 +166,10 @@ func (e *Endpoint) CongestionInputs(key ASKey) (CongestionInputSnapshot, error) 
 	defer e.endOperation()
 	as, exists := e.as.lookup(normalizeOutboundASKey(key))
 	if !exists {
-		return CongestionInputSnapshot{}, ErrNoConfiguredAS
+		if e.role == RoleSGP {
+			return CongestionInputSnapshot{}, ErrNoConfiguredAS
+		}
+		return e.collectLocalCongestionInputs(normalizeOutboundASKey(key))
 	}
 	return e.collectCongestionInputs(as), nil
 }
@@ -171,6 +192,7 @@ func (e *Endpoint) collectCongestionInputs(as *applicationServer) CongestionInpu
 				result.Peers[index].PeerCongestion = append(result.Peers[index].PeerCongestion, record)
 			}
 		}
+		result.Local = e.ssnm.localCongestionSnapshot(as.key)
 		result.VersionsAfter, _, _ = e.congestionVersions(as)
 		result.Consistent = sameCongestionVersions(before, result.VersionsAfter) && coherentCongestionVersion(before) && coherentCongestionVersion(result.VersionsAfter)
 		if result.Consistent {

@@ -101,13 +101,13 @@ func routingSSNMTestEvent(publication routingSSNMPublication, association m3ua.A
 		}
 	}
 	return m3ua.SSNMEvent{
-		Kind:      m3ua.SSNMReportEvent,
-		Revision:  revision,
-		Partition: report.Partition,
-		Epoch:     epoch,
-		Report:    report,
-		ReportSet: true,
-		Updated:   states,
+		Kind:               m3ua.SSNMReportObservedEvent,
+		Revision:           revision,
+		Partition:          report.Partition,
+		Epoch:              epoch,
+		Report:             report,
+		ReportSet:          true,
+		DestinationUpdates: states,
 	}
 }
 
@@ -280,8 +280,8 @@ func TestRoutingSSNMOracleRejectsContradictoryReports(t *testing.T) {
 		"wrong partition": func(event *m3ua.SSNMEvent) { event.Report.Partition.ApplicationServer = "other" },
 		"wrong association": func(event *m3ua.SSNMEvent) {
 			event.Report.Association = 999
-			for index := range event.Updated {
-				event.Updated[index].Availability.Association = 999
+			for index := range event.DestinationUpdates {
+				event.DestinationUpdates[index].Availability.Association = 999
 			}
 		},
 		"wrong epoch":  func(event *m3ua.SSNMEvent) { event.Report.Epoch++ },
@@ -291,7 +291,9 @@ func TestRoutingSSNMOracleRejectsContradictoryReports(t *testing.T) {
 		},
 		"duplicate destination": func(event *m3ua.SSNMEvent) { event.Report.Destinations[1] = event.Report.Destinations[0] },
 		"wrong mask":            func(event *m3ua.SSNMEvent) { event.Report.Destinations[0].Mask = 1 },
-		"contradictory state":   func(event *m3ua.SSNMEvent) { event.Updated[0].Availability.State = m3ua.DestinationUnavailable },
+		"contradictory state": func(event *m3ua.SSNMEvent) {
+			event.DestinationUpdates[0].Availability.State = m3ua.DestinationUnavailable
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -465,7 +467,7 @@ func TestRoutingSSNMOracleRetainsOnlyCompactOwnedReceipt(t *testing.T) {
 	}
 	event.Report.Scope.RoutingContexts[0] = 999
 	event.Report.Destinations[0].PointCode = 1
-	event.Updated[0].Availability.Scope.RoutingContexts[0] = 999
+	event.DestinationUpdates[0].Availability.Scope.RoutingContexts[0] = 999
 	receipt := oracle.receipts[0]
 	if !reflect.DeepEqual(receipt.Scope.RoutingContexts, []uint32{100}) || receipt.Association != publication.ExpectedSenderAssociations[0] {
 		t.Fatalf("receipt aliases the raw event: %+v", receipt)

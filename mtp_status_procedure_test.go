@@ -8,6 +8,15 @@ import (
 	"testing"
 )
 
+func offeredProcedureStatus(t *testing.T, p *MTPStatusProcedure, status MTPDestinationStatus) *MTPIndication {
+	t.Helper()
+	indication, err := p.Offered(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return indication
+}
+
 func congestedProcedureStatus() MTPDestinationStatus {
 	return MTPDestinationStatus{Destination: MTPDestination{MTPRoute: "local", PointCode: 123}, Availability: DestinationAvailable, Congested: true, CongestionLevel: 2, CongestionLevelSet: true}
 }
@@ -21,7 +30,7 @@ func TestApplicationOwnedProcedureUsesSuppliedAggregateStatus(t *testing.T) {
 			status := congestedProcedureStatus()
 			var positions []int
 			for offer := 1; offer <= 33; offer++ {
-				if got := p.Offered(status); got != nil {
+				if got := offeredProcedureStatus(t, p, status); got != nil {
 					if got.Kind != MTPStatusIndication || got.Destination != status || got.Cause != MTPStatusSignallingNetworkCongested || got.Reason != MTPStatusOfferedTraffic {
 						t.Fatalf("status=%+v", got)
 					}
@@ -46,24 +55,24 @@ func TestOfferedStatusProcedureResetsDestinationClearExpiryAndExplicitReset(t *t
 	status := congestedProcedureStatus()
 	for _, reset := range []string{"clear", "expiry", "destination", "explicit"} {
 		t.Run(reset, func(t *testing.T) {
-			if p.Offered(status) == nil {
+			if offeredProcedureStatus(t, p, status) == nil {
 				t.Fatal("initial offer missing")
 			}
-			if p.Offered(status) != nil {
+			if offeredProcedureStatus(t, p, status) != nil {
 				t.Fatal("early repeat")
 			}
 			switch reset {
 			case "clear":
 				clear := status
 				clear.Congested = false
-				if p.Offered(clear) != nil {
+				if offeredProcedureStatus(t, p, clear) != nil {
 					t.Fatal("clear repeated")
 				}
 			case "expiry":
 				expired := status
 				expired.ReceivedCongestionUnknown = true
 				for range 17 {
-					if p.Offered(expired) != nil {
+					if offeredProcedureStatus(t, p, expired) != nil {
 						t.Fatal("expired knowledge repeated")
 					}
 				}
@@ -72,7 +81,7 @@ func TestOfferedStatusProcedureResetsDestinationClearExpiryAndExplicitReset(t *t
 			case "explicit":
 				p.Reset()
 			}
-			if p.Offered(status) == nil {
+			if offeredProcedureStatus(t, p, status) == nil {
 				t.Fatal("reset did not restore initial indication")
 			}
 			p.Reset()
@@ -89,7 +98,7 @@ func TestOfferedStatusProcedureConcurrentCalls(t *testing.T) {
 	for range 16 {
 		wg.Go(func() {
 			for range 256 {
-				if p.Offered(congestedProcedureStatus()) != nil {
+				if offeredProcedureStatus(t, p, congestedProcedureStatus()) != nil {
 					due.Add(1)
 				}
 			}
@@ -104,7 +113,7 @@ func TestOfferedStatusProcedureConcurrentCalls(t *testing.T) {
 		wg.Go(func() {
 			for range 64 {
 				p.Reset()
-				p.Offered(congestedProcedureStatus())
+				offeredProcedureStatus(t, p, congestedProcedureStatus())
 			}
 		})
 	}
@@ -124,7 +133,7 @@ func TestOfferedStatusProcedureProfileValidationAndBoundedInterval(t *testing.T)
 	status := congestedProcedureStatus()
 	// Cross both eight-bit and sixteen-bit wrap boundaries without missing a repeat.
 	for offer := 1; offer <= 65553; offer++ {
-		got := p.Offered(status)
+		got := offeredProcedureStatus(t, p, status)
 		if (got != nil) != (offer%8 == 1) {
 			t.Fatalf("offer %d: %+v", offer, got)
 		}
@@ -134,10 +143,10 @@ func TestOfferedStatusProcedureProfileValidationAndBoundedInterval(t *testing.T)
 	}
 	// A level change supplies current status, but does not postpone the next repeat.
 	p.Reset()
-	p.Offered(status)
+	offeredProcedureStatus(t, p, status)
 	status.CongestionLevel = 3
 	for offer := 2; offer <= 9; offer++ {
-		got := p.Offered(status)
+		got := offeredProcedureStatus(t, p, status)
 		if (got != nil) != (offer == 9) {
 			t.Fatalf("level change offer %d=%+v", offer, got)
 		}
@@ -154,11 +163,11 @@ func TestOfferedStatusProcedureTransportUnknownIsNotKnownCongestion(t *testing.T
 	}
 	status := congestedProcedureStatus()
 	status.TransportCongestionUnknown = true
-	if got := p.Offered(status); got != nil {
+	if got := offeredProcedureStatus(t, p, status); got != nil {
 		t.Fatalf("unknown transport repeated congestion: %+v", got)
 	}
 	status.TransportCongestionUnknown = false
-	if got := p.Offered(status); got == nil {
+	if got := offeredProcedureStatus(t, p, status); got == nil {
 		t.Fatal("valid knowledge did not restore initial status")
 	}
 }
@@ -172,7 +181,7 @@ func TestOfferedStatusProcedureDestinationIdentityIncludesRouteAndMask(t *testin
 			}
 			status := congestedProcedureStatus()
 			status.Destination.PointCode = 124
-			if p.Offered(status) == nil {
+			if offeredProcedureStatus(t, p, status) == nil {
 				t.Fatal("initial status missing")
 			}
 			switch field {
@@ -181,7 +190,7 @@ func TestOfferedStatusProcedureDestinationIdentityIncludesRouteAndMask(t *testin
 			case "mask":
 				status.Destination.Mask = 2
 			}
-			if p.Offered(status) == nil {
+			if offeredProcedureStatus(t, p, status) == nil {
 				t.Fatal("changed destination identity did not reset interval")
 			}
 		})

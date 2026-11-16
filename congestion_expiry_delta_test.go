@@ -68,7 +68,7 @@ func TestExpiryDeltaRejectsStaleIdentities(t *testing.T) {
 				case "destination":
 					event.Expired[0].Destination.PointCode++
 				case "kind":
-					event.Kind = SSNMReportEvent
+					event.Kind = SSNMReportObservedEvent
 				}
 				if event.ApplyExpiry(&snapshot) || snapshot.Partitions[0].Destinations[0].Congestion.Freshness != CongestionFresh || snapshot.Partitions[0].Destinations[0].CongestionSources[0].Freshness != CongestionFresh || snapshot.PeerCongestion[0].Freshness != CongestionFresh {
 					t.Fatal("stale identity changed retained knowledge")
@@ -159,7 +159,7 @@ func TestWholeRecordBoundExpiryFitsDefaultSubscription(t *testing.T) {
 	}
 	count := 0
 	for _, event := range events {
-		if event.Kind != SSNMCongestionExpiredEvent || len(event.Expired) == 0 || len(event.Expired) > 256 || event.Partition != (SSNMPartition{}) || event.Epoch != 0 || len(event.Updated) != 0 || event.PeerCongestion != nil || !event.ApplyExpiry(&replica) {
+		if event.Kind != SSNMCongestionExpiredEvent || len(event.Expired) == 0 || len(event.Expired) > 256 || event.Partition != (SSNMPartition{}) || event.Epoch != 0 || len(event.DestinationUpdates) != 0 || event.PeerCongestion != nil || !event.ApplyExpiry(&replica) {
 			t.Fatalf("expiry replay failed or replayed retained values: %+v", event)
 		}
 		count += len(event.Expired)

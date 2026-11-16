@@ -725,6 +725,9 @@ func (r *aspRoutes) resolveTransferMTPRouteLocked(
 	requested MTPRouteID,
 	protocolData *params.ProtocolDataPayload,
 ) (aspMTPRoute, error) {
+	if err := validateIdentityLength("MTPTransferRequest.MTPRoute", string(requested), maxObservationIdentityBytes); err != nil {
+		return aspMTPRoute{}, err
+	}
 	if protocolData == nil {
 		return aspMTPRoute{}, ErrMissingProtocolData
 	}

@@ -40,7 +40,9 @@ func testStatusBindingCommit(t *testing.T, kind string) {
 		if peer == a {
 			remote = "as-other"
 		}
-		peer.noteCanonicalRemoteAS(8, remote)
+		if err := peer.noteCanonicalRemoteAS(8, remote); err != nil {
+			t.Fatal(err)
+		}
 		peer.noteRoutingContextsAcked(params.NewRoutingContext(1, 8))
 		peer.notifyASPRouteStateChanged()
 	}
@@ -48,7 +50,9 @@ func testStatusBindingCommit(t *testing.T, kind string) {
 	case "canonical-removal":
 		a.forgetCanonicalRemoteAS(8)
 	case "dynamic-removal", "versioned-dynamic-removal":
-		a.noteCanonicalRemoteAS(8, "as-backup")
+		if err := a.noteCanonicalRemoteAS(8, "as-backup"); err != nil {
+			t.Fatal(err)
+		}
 		a.removeDynamicASKey(8, false)
 	}
 	// The backup's existing provider keeps its canonical permission and clear
@@ -82,7 +86,9 @@ func testStatusBindingCommit(t *testing.T, kind string) {
 	if kind == "dynamic-removal" || kind == "versioned-dynamic-removal" {
 		a.addDynamicASKey(key, RoutingKey{}, false)
 	} else {
-		a.noteCanonicalRemoteAS(8, "as-backup")
+		if err := a.noteCanonicalRemoteAS(8, "as-backup"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	assertCongestion(false)
 	// Consume the activation mark using the still-positive coalesced projection.
@@ -90,7 +96,9 @@ func testStatusBindingCommit(t *testing.T, kind string) {
 	_ = takeOfferedIndications(e.MTPIndications())
 	switch kind {
 	case "canonical-replacement":
-		a.noteCanonicalRemoteAS(8, "as-other")
+		if err := a.noteCanonicalRemoteAS(8, "as-other"); err != nil {
+			t.Fatal(err)
+		}
 	case "canonical-removal":
 		a.forgetCanonicalRemoteAS(8)
 	case "dynamic-removal":
@@ -105,7 +113,9 @@ func testStatusBindingCommit(t *testing.T, kind string) {
 	locked = false
 	requireOfferedStatus(t, offerStatusAt(t, e, statusCommitPC), true)
 	for offer := 2; offer <= 9; offer++ {
-		a.noteCanonicalRemoteAS(99, "as-other") // An AS outside this route, then equal mappings.
+		if err := a.noteCanonicalRemoteAS(99, "as-other"); err != nil { // An AS outside this route, then equal mappings.
+			t.Fatal(err)
+		}
 		requireOfferedStatus(t, offerStatusAt(t, e, statusCommitPC), offer == 9)
 	}
 }

@@ -281,7 +281,9 @@ func TestVisitASKeysVisitsDynamicScopesInOrderAndStops(testContext *testing.T) {
 	association.cfg.PeerSGP = &identity
 	for _, routingContext := range []uint32{11, 9, 13} {
 		association.addDynamicASKey(ASKey{RoutingContext: routingContext, RoutingContextSet: true}, RoutingKey{}, false)
-		association.noteCanonicalRemoteAS(routingContext, "as-dynamic")
+		if err := association.noteCanonicalRemoteAS(routingContext, "as-dynamic"); err != nil {
+			testContext.Fatal(err)
+		}
 	}
 	routing := endpoint.aspRoutes.config
 	var all []uint32

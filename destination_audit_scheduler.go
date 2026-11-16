@@ -2,14 +2,12 @@ package m3ua
 
 import (
 	"cmp"
-	"context"
-	"fmt"
+	"errors"
 	"slices"
 	"sync/atomic"
 	"time"
 
 	"github.com/gomaja/go-m3ua/messages"
-	"github.com/gomaja/go-sctp"
 )
 
 type destinationAuditKey struct {
@@ -341,6 +339,7 @@ func (s *ssnmState) retireDestinationAuditPartitionsLocked(association Associati
 	if partitions != nil && len(partitions) == 0 {
 		return
 	}
+	s.retirePublicationPartitionsLocked(association, partitions)
 	var outcomes auditOutcomeBatch
 	for key := range s.auditByAssociation[association] {
 		job := s.audits[key]
@@ -377,42 +376,54 @@ func (e *Endpoint) startCongestionAutomation() {
 	if e.ssnm.validity == 0 && e.ssnm.auditing == nil {
 		return
 	}
-	interval := 100 * time.Millisecond
-	if after := e.ssnm.validity; after > 0 && after < interval {
-		interval = after
-	}
-	if cfg := e.ssnm.auditing; cfg != nil && cfg.Period < interval {
-		interval = cfg.Period
-	}
-	if interval < time.Millisecond {
-		interval = time.Millisecond
-	}
-	if !e.beginOperation() {
-		return
-	}
-	done := make(chan struct{})
-	e.congestionAutomationDone = done
-	go func() {
-		defer e.endOperation()
-		defer close(done)
-		timer := time.NewTicker(interval)
-		defer timer.Stop()
-		for {
-			select {
-			case <-e.ctx.Done():
-				return
-			case <-timer.C:
-				if e.ctx.Err() != nil {
-					return
-				}
-				e.runCongestionAutomation(e.ssnm.automationNow())
-			}
+	e.ensureCongestionAutomation()
+}
+
+func (e *Endpoint) ensureCongestionAutomation() {
+	e.congestionAutomationOnce.Do(func() {
+		interval := 100 * time.Millisecond
+		if after := e.ssnm.validity; after > 0 && after < interval {
+			interval = after
 		}
-	}()
+		if cfg := e.ssnm.auditing; cfg != nil && cfg.Period < interval {
+			interval = cfg.Period
+		}
+		if interval < time.Millisecond {
+			interval = time.Millisecond
+		}
+		if !e.beginOperation() {
+			return
+		}
+		done := make(chan struct{})
+		e.congestionAutomationDone = done
+		go func() {
+			defer e.endOperation()
+			defer close(done)
+			timer := time.NewTicker(interval)
+			defer timer.Stop()
+			for {
+				select {
+				case <-e.ctx.Done():
+					return
+				case <-timer.C:
+					if e.ctx.Err() != nil {
+						return
+					}
+					e.runCongestionAutomation(e.ssnm.automationNow())
+				}
+			}
+		}()
+	})
 }
 
 func (e *Endpoint) runCongestionAutomation(now time.Time) {
 	s := e.ssnm
+	if !s.publicationPass.TryLock() {
+		return
+	}
+	defer s.publicationPass.Unlock()
+	pass := &optionalPublicationPass{used: make(map[AssociationID]bool), remaining: s.publicationConfig.MaxPending, bytes: s.publicationConfig.MaxBytes}
+	e.runLocalCongestionPublications(now, pass)
 	select {
 	case <-e.ctx.Done():
 		return
@@ -509,48 +520,98 @@ func (e *Endpoint) runCongestionAutomation(now time.Time) {
 			s.mu.Unlock()
 			continue
 		}
+		s.mu.Lock()
+		charge := publicationCharge(first.submissionScope(now), len(jobs))
+		allowed := !pass.used[c.ID()] && pass.remaining > 0 && charge <= pass.bytes && !now.Before(c.optionalPublicationNext) && s.publicationFitsLocked(c.ID(), charge)
+		if !allowed {
+			s.publicationCounters.Deferred++
+			for _, job := range jobs {
+				s.auditOutcomeLocked(job, "send-deferred", &outcomes)
+			}
+			s.mu.Unlock()
+			continue
+		}
+		auditState := CongestionPublicationState{Association: c.ID(), Epoch: first.key.epoch, Kind: CongestionPublicationDAUD, Scope: first.submissionScope(now).clone(), DesiredRevision: first.generation, Pending: true}
+		for _, job := range jobs {
+			auditState.Destinations = append(auditState.Destinations, job.key.destination.pointCodeRange())
+		}
+		publicationKey := congestionPublicationKey{association: c.ID(), epoch: first.key.epoch, kind: CongestionPublicationDAUD, scope: peerCongestionScopeKey(auditState.Scope), destination: first.key.destination.pointCode, mask: first.key.destination.mask}
+		transient := &congestionPublication{key: publicationKey, state: auditState, charge: charge}
+		s.publications[publicationKey] = transient
+		s.publicationBytes += charge
+		s.publicationCounters.Queued++
+		pass.used[c.ID()] = true
+		pass.remaining--
+		pass.bytes -= charge
+		s.mu.Unlock()
 		submitted, err := c.tryOptionalSSNMBatch(jobs, now)
 		issuedAt := s.automationNow()
 		if issuedAt.Before(now) {
 			issuedAt = now
 		}
 		s.mu.Lock()
+		s.removePublicationLocked(transient)
+		if submitted || sendBufferFull(err) {
+			auditState.Attempts = 1
+			auditState.LastAttempt = issuedAt
+			auditState.LastError = boundedPublicationError(err)
+			if err != nil {
+				c.optionalPublicationNext = issuedAt.Add(s.publicationConfig.RetryInterval)
+			} else {
+				c.optionalPublicationNext = issuedAt.Add(s.publicationConfig.MinReportInterval)
+			}
+			if err == nil {
+				auditState.SubmittedRevision = auditState.DesiredRevision
+				s.publicationCounters.Submitted++
+			} else {
+				s.publicationCounters.Failed++
+				if sendBufferFull(err) {
+					s.publicationCounters.Deferred++
+				}
+			}
+		}
 		if submitted || sendBufferFull(err) {
 			step := auditRateInterval(s.auditing.MaxMessagesPerSecond)
 			s.auditNext = issuedAt.Add(step)
 		}
 		if submitted && err == nil && !s.closed && e.ctx.Err() == nil && c.Epoch() == first.key.epoch {
-			byPartition := make(map[SSNMPartition][]PointCodeRange)
-			for _, job := range jobs {
-				seen := make(map[SSNMPartition]bool)
-				for i, origin := range job.origins {
-					if job.originDue(i, now) && !seen[origin.partition] {
-						seen[origin.partition] = true
-						byPartition[origin.partition] = append(byPartition[origin.partition], job.key.destination.pointCodeRange())
-					}
-				}
-			}
-			partitions := make([]SSNMPartition, 0, len(byPartition))
-			for partition := range byPartition {
-				partitions = append(partitions, partition)
-			}
-			sortSSNMPartitions(partitions)
-			for _, partition := range partitions {
-				state := s.partitions[partition]
-				if state == nil {
-					continue
-				}
-				pending, bound := state.bindings[c.ID()]
-				if bound && !pending {
-					_ = s.publishEventOnlyLocked(SSNMReport{Kind: SSNMDestinationStateAuditReport, Source: SSNMLocalReport, Association: c.ID(), Partition: partition, Epoch: state.epoch, Scope: first.submissionScope(now), Destinations: byPartition[partition]})
-				}
-			}
+			_ = s.publishEventOnlyLocked(SSNMReport{Kind: SSNMDestinationStateAuditReport, Source: SSNMLocalReport, Association: c.ID(), Scope: auditState.Scope.clone(), Destinations: slices.Clone(auditState.Destinations)})
 		}
+
 		for _, job := range jobs {
 			if s.closed {
 				continue
 			}
 			current := s.audits[job.key]
+			if associationDone(c) {
+				// Done fences every later submission before transport release and
+				// store retirement. Preserve an admitted attempt's actual result,
+				// then remove even a newer deadline without a second outcome.
+				outcome := "reporter-retired"
+				if submitted || sendBufferFull(err) {
+					reason := "submitted"
+					if err != nil {
+						reason = "send-failed"
+					}
+					if sendBufferFull(err) {
+						reason = "send-deferred"
+					}
+					outcomes.add(job, reason)
+					outcome = ""
+				}
+				if current != nil {
+					s.removeAuditLocked(job.key, outcome, &outcomes)
+				}
+				continue
+			}
+			permanent := errors.Is(err, ErrAssociationClosed) || errors.Is(err, ErrEndpointClosed) || errors.Is(err, ErrRoutingContextNotActive) || errors.Is(err, ErrInvalidState) && (submitted || c.Epoch() != job.key.epoch)
+			if permanent {
+				if current == job {
+					s.removeAuditLocked(job.key, "reporter-retired", &outcomes)
+				}
+				continue
+			}
+
 			if submitted || sendBufferFull(err) {
 				reason := "submitted"
 				if err != nil {
@@ -570,10 +631,10 @@ func (e *Endpoint) runCongestionAutomation(now time.Time) {
 				if current == job {
 					for i := range next.origins {
 						if job.originDue(i, now) {
-							if submitted {
+							if submitted && err == nil {
 								next.origins[i].due = issuedAt.Add(s.auditing.Period)
 							} else {
-								next.origins[i].due = issuedAt.Add(auditRateInterval(s.auditing.MaxMessagesPerSecond))
+								next.origins[i].due = issuedAt.Add(s.publicationConfig.RetryInterval)
 							}
 						}
 					}
@@ -594,7 +655,22 @@ func (e *Endpoint) runCongestionAutomation(now time.Time) {
 			}
 			s.replaceAuditLocked(job, next)
 		}
+		// The admitted attempt can outlive a covering clear or retirement.
+		// Describe retry work after reconciling its surviving deadline jobs;
+		// the actual outcome above still counts when no cause survives.
+		auditState.Pending = false
+		if err != nil && !permanentPublicationError(err) && !s.closed && e.ctx.Err() == nil && !associationDone(c) {
+			for _, job := range jobs {
+				if current := s.audits[job.key]; current != nil && current.live.Load() {
+					auditState.Pending = true
+					break
+				}
+			}
+		}
 		s.mu.Unlock()
+		if submitted || sendBufferFull(err) {
+			c.notifyManagement(&ManagementIndication{Kind: ManagementCongestionPublication, CongestionPublication: &auditState, Cause: err, Description: "optional destination audit attempt"})
+		}
 	}
 }
 
@@ -658,100 +734,15 @@ func (c *Association) tryOptionalSSNMBatch(jobs []*destinationAuditJob, at ...ti
 		destinations = append(destinations, candidate.key.destination.pointCodeRange())
 	}
 
-	if c.role != RoleASP || !c.aspTransferMu.TryRLock() {
-		return false, nil
-	}
-	defer c.aspTransferMu.RUnlock()
-	if !c.sendMu.TryLock() {
-		return false, nil
-	}
-	defer c.sendMu.Unlock()
-	if !c.muState.TryRLock() {
-		return false, nil
-	}
-	active := c.state == StateASPActive && !c.terminating.Load()
-	c.muState.RUnlock()
-	if !active || c.Epoch() != job.key.epoch || !currentJobs() {
+	if c.role != RoleASP {
 		return false, ErrInvalidState
-	}
-	select {
-	case <-c.done:
-		return false, ErrAssociationClosed
-	default:
-	}
-	if c.endpoint != nil {
-		select {
-		case <-c.endpoint.ctx.Done():
-			return false, ErrEndpointClosed
-		default:
-		}
 	}
 	parameters, err := buildSSNMParameters(scope, destinations, job.info)
 	if err != nil {
 		return false, err
 	}
 	msg := messages.NewDestinationStateAudit(parameters.networkAppearance, parameters.routingContext, parameters.affectedPointCode, parameters.info)
-	frame, err := msg.MarshalBinary()
-	if err != nil {
-		return false, err
-	}
-	tracker := &c.sconSubmissions
-	if !tracker.mu.TryLock() {
-		return false, nil
-	}
-	if !c.muDynamicASKeys.TryRLock() {
-		tracker.mu.Unlock()
-		return false, nil
-	}
-	if !c.muAckedRCs.TryRLock() {
-		c.muDynamicASKeys.RUnlock()
-		tracker.mu.Unlock()
-		return false, nil
-	}
-	current := true
-	for _, binding := range bindings {
-		if gate := tracker.changing[sconBindingID{binding.key.RoutingContext, binding.local}]; gate != nil {
-			current = false
-		}
-		current = current && c.queueCongestionBindingCurrent(binding)
-		if binding.key.RoutingContextSet {
-			_, held := c.ackedRCs[binding.key.RoutingContext]
-			_, overridden := c.overriddenRCs[binding.key.RoutingContext]
-			current = current && (!c.ackedRCsScoped || held) && !overridden
-		} else {
-			current = current && (!c.ackedRCsScoped || c.ackedContextlessAS)
-		}
-	}
-	c.muAckedRCs.RUnlock()
-	c.muDynamicASKeys.RUnlock()
-	if tracker.optionalChanging != nil || c.Epoch() != job.key.epoch || !current || !currentJobs() {
-		tracker.mu.Unlock()
-		return false, ErrRoutingContextNotActive
-	}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	submission := &sconSubmission{ctx: ctx, cancel: cancel, done: make(chan struct{}), bindings: bindings, optionalAudit: true}
-	if tracker.active == nil {
-		tracker.active = make(map[*sconSubmission]struct{})
-	}
-	tracker.active[submission] = struct{}{}
-	tracker.mu.Unlock()
-	defer c.finishSCONSubmission(submission)
-	if !currentJobs() {
-		return false, nil
-	}
-	if c.signalWriter != nil {
-		_, err = c.signalWriter(msg)
-	} else {
-		info := *c.sctpInfo
-		_, err = c.controlSender().SendMsgContext(ctx, frame, sctp.SendOptions{Info: &info, NoWait: true})
-	}
-	if sendBufferFull(err) {
-		return false, err
-	}
-	if err != nil {
-		return true, fmt.Errorf("optional DAUD: %w", err)
-	}
-	return true, nil
+	return c.tryOptionalSSNMFrame(msg, bindings, job.key.epoch, currentJobs)
 }
 
 func sortDestinationAudits(jobs []*destinationAuditJob) {
@@ -799,4 +790,38 @@ func (c *Association) optionalAuditPositiveAck(key ASKey) bool {
 	_, held := c.ackedRCs[key.RoutingContext]
 	_, overridden := c.overriddenRCs[key.RoutingContext]
 	return held && !overridden
+}
+
+// Scope marks retire only matching origins in the bounded deadline table. This
+// does not inspect destination/source history or acquire Endpoint.mu. A later
+// reconciliation can see reactivation, so it cannot substitute for this fence.
+func (s *ssnmState) retireDestinationAuditScopesLocked(association AssociationID, matches func(ASKey) bool) {
+	var outcomes auditOutcomeBatch
+	for key, job := range s.audits {
+		if key.association != association {
+			continue
+		}
+		var next *destinationAuditJob
+		for i, binding := range job.bindings {
+			if !job.origins[i].needed() || matches != nil && !matches(binding.key) {
+				continue
+			}
+			if next == nil {
+				next = job.clone()
+			}
+			next.origins[i] = destinationAuditOrigin{partition: job.origins[i].partition}
+		}
+		if next != nil {
+			s.replaceAuditLocked(job, next, &outcomes)
+		}
+	}
+	for key := range s.auditActivated[association] {
+		if matches == nil || matches(key) {
+			delete(s.auditActivated[association], key)
+		}
+	}
+	if len(s.auditActivated[association]) == 0 {
+		delete(s.auditActivated, association)
+	}
+	outcomes.publishLocked(s)
 }

@@ -369,7 +369,7 @@ func (oracle *routingSSNMOracle) observe(ordinal uint8, event m3ua.SSNMEvent) er
 		return oracle.reject(errors.New("routing SSNM report belongs to an inactive publication"))
 	}
 	publication := oracle.plan.publications[ordinal]
-	if event.Kind != m3ua.SSNMReportEvent || event.ContinuityLost || !event.ReportSet || event.Reason != "" ||
+	if event.Kind != m3ua.SSNMReportObservedEvent || event.ContinuityLost || !event.ReportSet || event.Reason != "" ||
 		event.Binding != (m3ua.SSNMBinding{}) {
 		return oracle.reject(fmt.Errorf("routing SSNM publication received terminal event %s", event.Kind))
 	}
@@ -397,7 +397,7 @@ func (oracle *routingSSNMOracle) observe(ordinal uint8, event m3ua.SSNMEvent) er
 		return oracle.reject(errors.New("routing SSNM report association is unexpected or duplicated"))
 	}
 	if !sameRoutingSSNMDestinations(report.Destinations, oracle.plan.destinations) ||
-		!sameRoutingSSNMEventUpdates(event.Updated, oracle.plan.destinations, report) {
+		!sameRoutingSSNMEventUpdates(event.DestinationUpdates, oracle.plan.destinations, report) {
 		return oracle.reject(errors.New("routing SSNM report destinations or resulting states differ"))
 	}
 	if oracle.receiptCount >= len(oracle.receipts) {

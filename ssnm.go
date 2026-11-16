@@ -1793,6 +1793,7 @@ func (c *Association) ForgetDestinations() int {
 		c.mtp3Restarts.procedureMu.Unlock()
 	}
 	releaseOptional()
+	c.reconcileQueueCongestionLifetimes()
 	// Projection takes its own snapshots after destination/restart locks end.
 	c.projectReceivedChanges(changed)
 	if c.endpoint != nil {

@@ -164,7 +164,9 @@ func TestOverflowSCONSocketDropsRecoveredOnset(t *testing.T) {
 	if !nextQueueCongestion(t, c).Congested {
 		t.Fatal("missing onset")
 	}
-	waitForOverflowWriter(t)
+	if !waitFor(func() bool { return c.endpoint.CongestionPublicationCounters().Deferred > 0 }, time.Second) {
+		t.Fatal("optional onset did not defer behind held writer")
+	}
 	for range 2 {
 		if _, err = c.ReadData(ctx); err != nil {
 			t.Fatal(err)
@@ -174,8 +176,8 @@ func TestOverflowSCONSocketDropsRecoveredOnset(t *testing.T) {
 		t.Fatal("missing end")
 	}
 	unlock()
-	if !waitFor(func() bool { return len(goroutinesBlockedIn("handleErrors")) == 0 }, time.Second) {
-		t.Fatal("writer did not finish dropping expired onset")
+	if len(c.endpoint.CongestionPublications()) != 0 {
+		t.Fatal("ended unsent onset retained publication work")
 	}
 	time.Sleep(3 * dataOverflowCheckInterval)
 	if got := peer.count("Signalling Congestion"); got != 0 {

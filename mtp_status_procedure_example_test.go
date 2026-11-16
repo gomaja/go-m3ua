@@ -16,7 +16,11 @@ func ExampleMTPStatusProcedure() {
 	// Call Offered once per original request before submitting through raw APIs.
 	users := [2][]int{}
 	for offer := 1; offer <= 17; offer++ {
-		if indication := procedure.Offered(status); indication != nil {
+		indication, err := procedure.Offered(status)
+		if err != nil {
+			panic(err)
+		}
+		if indication != nil {
 			for user := range users {
 				users[user] = append(users[user], offer)
 			}

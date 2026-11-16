@@ -24,7 +24,7 @@ import (
 
 func verifySSNMOperation(event, wantEvent SSNMEvent) error {
 	if event.ContinuityLost || !reflect.DeepEqual(event, wantEvent) {
-		return fmt.Errorf("typed event mismatch: kind=%s revision=%d updated=%d; want kind=%s revision=%d updated=%d", event.Kind, event.Revision, len(event.Updated), wantEvent.Kind, wantEvent.Revision, len(wantEvent.Updated))
+		return fmt.Errorf("typed event mismatch: kind=%s revision=%d updated=%d; want kind=%s revision=%d updated=%d", event.Kind, event.Revision, len(event.DestinationUpdates), wantEvent.Kind, wantEvent.Revision, len(wantEvent.DestinationUpdates))
 	}
 	return nil
 }
@@ -298,7 +298,7 @@ func (fixture *ssnmOperationFixture) expected(partition *ssnmOperationPartition,
 		}
 		cached[index] = ssnmOperationCachedState{Destination: destination, State: state}
 	}
-	return cached, SSNMEvent{Kind: SSNMReportEvent, Revision: fixture.revision, Partition: partition.identity, Epoch: partition.epoch, Report: report, ReportSet: true, Updated: partition.expectedUpdated(ranges)}
+	return cached, SSNMEvent{Kind: SSNMReportObservedEvent, Revision: fixture.revision, Partition: partition.identity, Epoch: partition.epoch, Report: report, ReportSet: true, DestinationUpdates: partition.expectedUpdated(ranges)}
 }
 
 // expectedUpdated is the delta a retained report publishes: the destinations

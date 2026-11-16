@@ -621,6 +621,10 @@ func (c *Association) deliverRegistrationResponse(message *messages.Registration
 	for _, decoded := range results {
 		identifier := decoded.result.LocalRoutingKeyIdentifier
 		decoded.result.RemoteAS = c.rkmRegistrationRemoteAS[identifier]
+		if err := validateRemoteIdentity(decoded.result.RemoteAS); err != nil {
+			c.rkmCorrelationMu.Unlock()
+			return err
+		}
 		if request, late := c.rkmUnresolvedRegistrations[identifier]; late {
 			if previous, duplicate := lateResults[identifier]; duplicate {
 				if previous != decoded.result {
@@ -975,6 +979,11 @@ type assignedRegistrationResultScope struct {
 }
 
 func (c *Association) applyRegistrationResults(applications []registrationResultApplication) error {
+	for _, application := range applications {
+		if err := validateRemoteIdentity(application.result.RemoteAS); err != nil {
+			return err
+		}
+	}
 	c.rkmLifecycleMu.Lock()
 	defer c.rkmLifecycleMu.Unlock()
 	if associationEnded(c) {
@@ -1189,6 +1198,13 @@ func routingKeyParameter(request RoutingKeyRegistrationRequest) (*params.Param, 
 // remoteASKeyFor resolves the canonical identity of one Application Server this
 // Association may register a Routing Key for.
 func (c *Association) remoteASKeyFor(id RemoteASID) (SGASKey, error) {
+	key := SGASKey{ApplicationServer: id}
+	if c.cfg != nil && c.cfg.PeerSGP != nil {
+		key.SignallingGateway = c.cfg.PeerSGP.SignallingGateway
+	}
+	if err := validateRemoteIdentity(key); err != nil {
+		return SGASKey{}, err
+	}
 	if id == "" {
 		if c.aspPeerInventory() != nil && c.cfg != nil && c.cfg.PeerSGP != nil {
 			return SGASKey{}, fmt.Errorf("%w: a provisioned Association must name one", ErrUnknownRemoteAS)
@@ -1198,7 +1214,7 @@ func (c *Association) remoteASKeyFor(id RemoteASID) (SGASKey, error) {
 	if c.cfg == nil || c.cfg.PeerSGP == nil {
 		return SGASKey{ApplicationServer: id}, nil
 	}
-	key := SGASKey{
+	key = SGASKey{
 		SignallingGateway: c.cfg.PeerSGP.SignallingGateway,
 		ApplicationServer: id,
 	}

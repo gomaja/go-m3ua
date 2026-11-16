@@ -159,10 +159,10 @@ func (s *ssnmState) applyReceivedCongestionLocked(state *ssnmPartitionState, rep
 	s.peerRecords[report.Partition.peerKey()] += added
 	s.bytes += bytes
 	state.bytes += bytes
-	event := SSNMEvent{Kind: SSNMReportEvent, Revision: record.Revision, Partition: report.Partition, Epoch: report.Epoch, Report: report, ReportSet: true}
+	event := SSNMEvent{Kind: SSNMReportObservedEvent, Revision: record.Revision, Partition: report.Partition, Epoch: report.Epoch, Report: report, ReportSet: true}
 	if len(s.subscribers) > 0 {
 		for _, d := range keys {
-			event.Updated = append(event.Updated, state.retainedKnowledge(d))
+			event.DestinationUpdates = append(event.DestinationUpdates, state.retainedKnowledge(d))
 		}
 	}
 	s.publishLocked(event)

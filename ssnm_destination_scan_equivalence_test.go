@@ -296,7 +296,7 @@ func TestDestinationReadsMatchAuthoritativeScans(t *testing.T) {
 						}
 						lastRevision = event.Revision
 						var want []SSNMDestinationKnowledge
-						if event.Kind == SSNMReportEvent {
+						if event.Kind == SSNMReportObservedEvent {
 							s.mu.Lock()
 							if state := s.partitions[event.Partition]; state != nil && (event.Report.retainsAvailability() || event.Report.retainsCongestion()) {
 								var destinations []ssnmDestinationKey
@@ -310,13 +310,13 @@ func TestDestinationReadsMatchAuthoritativeScans(t *testing.T) {
 							}
 							s.mu.Unlock()
 						}
-						if !reflect.DeepEqual(event.Updated, want) {
-							t.Fatalf("event delta differs from scan\ngot %#v\nwant %#v", event.Updated, want)
+						if !reflect.DeepEqual(event.DestinationUpdates, want) {
+							t.Fatalf("event delta differs from scan\ngot %#v\nwant %#v", event.DestinationUpdates, want)
 						}
 						// One consumer may freely edit scopes and source slices. The
 						// second consumer and store must retain their original data.
-						mutateDestinationCopies(event.Updated)
-						if !reflect.DeepEqual(other.Updated, want) {
+						mutateDestinationCopies(event.DestinationUpdates)
+						if !reflect.DeepEqual(other.DestinationUpdates, want) {
 							t.Fatal("event consumers share mutable destination fields")
 						}
 					}
@@ -540,7 +540,7 @@ func TestDestinationScansPreserveSubscriptionLossBarrier(t *testing.T) {
 		t.Fatal("setup did not overflow subscription queue")
 	}
 	assertDestinationScans(t, s, []SSNMPartition{partition}, []ASKey{{NetworkAppearance: 7, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}})
-	if event, ready, err := sub.take(); err != nil || !ready || event.Kind != SSNMReportEvent {
+	if event, ready, err := sub.take(); err != nil || !ready || event.Kind != SSNMReportObservedEvent {
 		t.Fatal("queued report lost", event, ready, err)
 	}
 	if event, ready, err := sub.take(); err != nil || !ready || !event.ContinuityLost {

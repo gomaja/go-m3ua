@@ -26,7 +26,7 @@ import (
 
 // ssnmEventUpdates is the one place these tests read an event's destination
 // delta.
-func ssnmEventUpdates(event SSNMEvent) []SSNMDestinationKnowledge { return event.Updated }
+func ssnmEventUpdates(event SSNMEvent) []SSNMDestinationKnowledge { return event.DestinationUpdates }
 
 // ssnmTestDestinationKey is the canonical identity of an Affected Point Code
 // range, computed here independently of the store: the effective mask is at
@@ -129,7 +129,7 @@ func (r *ssnmReplica) apply(event SSNMEvent) error {
 	}
 	r.revision = event.Revision
 	updates := ssnmEventUpdates(event)
-	if event.Kind != SSNMReportEvent && len(updates) != 0 {
+	if event.Kind != SSNMReportObservedEvent && len(updates) != 0 {
 		return fmt.Errorf("%v event carries %d destination states, but only a report writes destination knowledge",
 			event.Kind, len(updates))
 	}
@@ -145,7 +145,7 @@ func (r *ssnmReplica) apply(event SSNMEvent) error {
 		} else {
 			r.peerCongestion[identity] = event.PeerCongestion.clone()
 		}
-	case SSNMReportEvent:
+	case SSNMReportObservedEvent:
 		if err := checkSSNMReportDelta(event, partition); err != nil {
 			return err
 		}
@@ -724,7 +724,7 @@ func TestSSNMEventDeltasReplayToKnowledge(t *testing.T) {
 					t.Fatalf("a draining consumer lost continuity: healthy %d, late %d", healthy.resyncs, late.resyncs)
 				}
 				for _, kind := range []SSNMEventKind{
-					SSNMReportEvent, SSNMBindingAdmittedEvent, SSNMBindingActivatedEvent, SSNMBindingRetiredEvent,
+					SSNMReportObservedEvent, SSNMBindingAdmittedEvent, SSNMBindingActivatedEvent, SSNMBindingRetiredEvent,
 					SSNMPartitionRetiredEvent, SSNMDestinationsInvalidatedEvent, SSNMResourceLossEvent,
 				} {
 					if healthy.kinds[kind] == 0 {
@@ -817,7 +817,7 @@ func TestSSNMEventDeltasReplayThroughAssociations(t *testing.T) {
 			slow.requireStore(t, endpoint, operation)
 		}
 	}
-	if healthy.kinds[SSNMReportEvent] == 0 || healthy.kinds[SSNMPartitionRetiredEvent] == 0 ||
+	if healthy.kinds[SSNMReportObservedEvent] == 0 || healthy.kinds[SSNMPartitionRetiredEvent] == 0 ||
 		healthy.kinds[SSNMBindingAdmittedEvent] == 0 || slow.resyncs == 0 {
 		t.Fatalf("scenario did not exercise reports, retirement, admission and Resync: %v, %d Resyncs",
 			healthy.kinds, slow.resyncs)
@@ -915,7 +915,7 @@ func (f *ssnmPublicationFixture) publish(ctx context.Context) {
 	f.next++
 	for _, subscription := range f.subscriptions {
 		event, err := subscription.Next(ctx)
-		if err != nil || event.Kind != SSNMReportEvent {
+		if err != nil || event.Kind != SSNMReportObservedEvent {
 			panic(fmt.Sprintf("subscriber missed the report: %v %v", event.Kind, err))
 		}
 	}
@@ -1012,7 +1012,7 @@ func TestSSNMEventCopyOwnsEachRoutingContextList(t *testing.T) {
 			Scope:        WireScope{RoutingContexts: []uint32{1, 2}, RoutingContextSet: true},
 			Destinations: []PointCodeRange{{PointCode: 7}},
 		},
-		Updated: []SSNMDestinationKnowledge{
+		DestinationUpdates: []SSNMDestinationKnowledge{
 			{
 				Availability: SSNMAvailability{Scope: WireScope{RoutingContexts: []uint32{3}}},
 				Congestion:   SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{4, 5}}},
@@ -1027,9 +1027,9 @@ func TestSSNMEventCopyOwnsEachRoutingContextList(t *testing.T) {
 	lists := func(event *SSNMEvent) []*[]uint32 {
 		return []*[]uint32{
 			&event.Report.Scope.RoutingContexts,
-			&event.Updated[0].Availability.Scope.RoutingContexts,
-			&event.Updated[0].Congestion.Scope.RoutingContexts,
-			&event.Updated[1].Congestion.Scope.RoutingContexts,
+			&event.DestinationUpdates[0].Availability.Scope.RoutingContexts,
+			&event.DestinationUpdates[0].Congestion.Scope.RoutingContexts,
+			&event.DestinationUpdates[1].Congestion.Scope.RoutingContexts,
 		}
 	}
 	for target := range lists(&source) {
@@ -1063,10 +1063,10 @@ func TestSSNMEventCopyOwnsEachRoutingContextList(t *testing.T) {
 			}
 		}
 	}
-	if owned := source.clone(); owned.Updated[1].Availability.Scope.RoutingContexts != nil {
+	if owned := source.clone(); owned.DestinationUpdates[1].Availability.Scope.RoutingContexts != nil {
 		t.Fatal("an empty Routing Context list was not copied as nil, as WireScope.clone copies it")
 	}
-	if owned := (SSNMEvent{}).clone(); owned.Updated != nil || owned.Report.Destinations != nil ||
+	if owned := (SSNMEvent{}).clone(); owned.DestinationUpdates != nil || owned.Report.Destinations != nil ||
 		owned.Report.Scope.RoutingContexts != nil {
 		t.Fatalf("an event without slices gained some: %+v", owned)
 	}
@@ -1155,8 +1155,8 @@ func TestSSNMDeltaEventsAreChargedForWhatTheyCarry(t *testing.T) {
 				t.Fatalf("one-APC delta charged %d bytes, want %d", subscription.queuedBytes, want)
 			}
 			event, err := subscription.Next(context.Background())
-			if err != nil || len(event.Updated) != 1 || !event.Updated[0].AvailabilitySet || !event.Updated[0].CongestionSet {
-				t.Fatalf("one-APC delta = %+v, %v", event.Updated, err)
+			if err != nil || len(event.DestinationUpdates) != 1 || !event.DestinationUpdates[0].AvailabilitySet || !event.DestinationUpdates[0].CongestionSet {
+				t.Fatalf("one-APC delta = %+v, %v", event.DestinationUpdates, err)
 			}
 			if err := fixture.store.bind(report.Partition, 2, true); err != nil {
 				t.Fatal(err)

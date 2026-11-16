@@ -16,20 +16,6 @@ import (
 	"github.com/gomaja/go-m3ua/messages/params"
 )
 
-func waitForOverflowWriter(t *testing.T) {
-	t.Helper()
-	if !waitFor(func() bool {
-		for _, stack := range goroutinesBlockedIn("handleErrors") {
-			if strings.Contains(stack, "lockSlow") {
-				return true
-			}
-		}
-		return false
-	}, time.Second) {
-		t.Fatal("overflow writer did not wait behind the application write")
-	}
-}
-
 func overflowTransportAttempts(transport *fullSendBuffer) int {
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
@@ -50,15 +36,26 @@ func TestOverflowPendingOnsetExpiresBeforeTransport(t *testing.T) {
 			unlock := func() { release.Do(c.sendMu.Unlock) }
 			defer unlock()
 			deliver(t, c, 1, inboundData(1, "discarded"))
-			overflow := firstErr(c)
-			if overflow == nil {
+			old := firstErr(c)
+			if old == nil {
 				t.Fatal("missing onset")
 			}
 			written := make(chan error, 1)
-			go func() { written <- c.handleErrors(overflow) }()
-			waitForOverflowWriter(t)
+			go func() { written <- c.handleErrors(old) }()
+			select {
+			case err := <-written:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("overflow producer waited for writer")
+			}
+			c.endpoint.runCongestionAutomation(time.Now())
+			if overflowTransportAttempts(transport) != 0 {
+				t.Fatal("contended onset submitted")
+			}
 			if !nextQueueCongestion(t, c).Congested {
-				t.Fatal("missing management onset")
+				t.Fatal("missing onset")
 			}
 			for range 2 {
 				if _, err := c.ReadData(context.Background()); err != nil {
@@ -66,22 +63,27 @@ func TestOverflowPendingOnsetExpiresBeforeTransport(t *testing.T) {
 				}
 			}
 			if nextQueueCongestion(t, c).Congested {
-				t.Fatal("missing management end")
+				t.Fatal("missing end")
+			}
+			if len(c.endpoint.CongestionPublications()) != 0 {
+				t.Fatal("ended unsent onset kept reservation")
 			}
 			if restart {
 				for range 3 {
 					deliver(t, c, 1, inboundData(1, "new episode"))
 				}
-				if firstErr(c) == nil || !c.DataQueueStats().Congested {
-					t.Fatal("new episode did not start")
+				if firstErr(c) == nil {
+					t.Fatal("new onset missing")
 				}
 			}
 			unlock()
-			if err := <-written; err != nil {
-				t.Fatal(err)
+			runOverflowPublicationsForTest(c)
+			want := 0
+			if restart {
+				want = 1
 			}
-			if got := overflowTransportAttempts(transport); got != 0 {
-				t.Fatalf("expired onset submitted %d frames after management end", got)
+			if got := overflowTransportAttempts(transport); got != want {
+				t.Fatalf("transport attempts=%d, want only current episode=%d", got, want)
 			}
 		})
 	}
@@ -89,9 +91,11 @@ func TestOverflowPendingOnsetExpiresBeforeTransport(t *testing.T) {
 
 func TestOverflowDoubleExchangeWithdrawalSerializesPendingOnset(t *testing.T) {
 	c, _ := newDoubleExchangeIPSPForTest(t)
+	c.endpoint = methodEndpointForTest(t, RoleIPSP, uint8(CongestionInternational), 0)
 	c.setIPSPState(IPSPState{TrafficToLocal: StateASPActive, TrafficToPeer: StateASPActive})
 	c.noteRoutingContextsAcked(params.NewRoutingContext(11))
 	c.noteRoutingContextsActive([]uint32{22})
+	attachOverflowEndpointForTest(t, c)
 	c.recvStream.Store(1)
 	c.dataChan = make(chan *DataMessage, 1)
 	if err := c.DeactivateRoutingContexts(11); err != nil {
@@ -112,43 +116,42 @@ func TestOverflowDoubleExchangeWithdrawalSerializesPendingOnset(t *testing.T) {
 	}
 	overflow := firstErr(c)
 	if overflow == nil {
-		t.Fatal("missing Double Exchange overflow")
+		t.Fatal("missing onset")
 	}
 	written := make(chan error, 1)
 	go func() { written <- c.handleErrors(overflow) }()
-	waitForOverflowWriter(t)
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("optional producer waited behind writer")
+	}
+	c.endpoint.runCongestionAutomation(time.Now())
 	withdrawn := make(chan error, 1)
 	go func() {
 		withdrawn <- c.handleAspInactiveAck(messages.NewAspInactiveAck(params.NewRoutingContext(11), nil))
 	}()
-	var early bool
 	select {
 	case err := <-withdrawn:
 		if err != nil {
 			t.Fatal(err)
 		}
-		early = true
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
+		unlock()
+		if err := <-withdrawn; err != nil {
+			t.Error(err)
+		}
+		t.Fatal("local withdrawal waited for optional publication")
 	}
 	unlock()
-	if err := <-written; err != nil {
-		t.Fatal(err)
+	runOverflowPublicationsForTest(c)
+	if overflowTransportAttempts(transport) != 0 {
+		t.Fatal("withdrawn local scope submitted onset")
 	}
-	if !early {
-		select {
-		case err := <-withdrawn:
-			if err != nil {
-				t.Fatal(err)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("withdrawal did not finish")
-		}
-	}
-	if early {
-		t.Error("withdrawal bypassed the pending overflow SCON delivery barrier")
-	}
-	if got := overflowTransportAttempts(transport); got != 0 {
-		t.Errorf("sent %d overflow SCONs after direction became inactive", got)
+	if state := c.IPSPState(); state.TrafficToLocal != StateASPInactive || state.TrafficToPeer != StateASPActive {
+		t.Fatalf("wrong direction withdrawn: %+v", state)
 	}
 }
 
@@ -272,6 +275,8 @@ func TestOverflowDoubleExchangeCarriesLocalDirectionScope(t *testing.T) {
 	c.setIPSPState(IPSPState{TrafficToLocal: StateASPActive, TrafficToPeer: StateASPActive})
 	c.noteRoutingContextsAcked(params.NewRoutingContext(11))
 	c.noteRoutingContextsActive([]uint32{22})
+	attachOverflowEndpointForTest(t, c)
+	*sent = nil
 	c.recvStream.Store(1)
 	c.dataChan = make(chan *DataMessage, 1)
 	for range 2 {

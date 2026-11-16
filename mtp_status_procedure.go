@@ -25,7 +25,9 @@ func NewMTPStatusProcedure(profile CongestionProfile) (*MTPStatusProcedure, erro
 }
 
 // Offered records one original, validated local-user offer, including a failed
-// transport attempt. It returns nil unless initial/every-eight status is due.
+// transport attempt. It returns (nil, nil) unless initial/every-eight status is due.
+// MTPRouteID is limited to 255 octets; overlength returns IdentityLengthError
+// wrapping ErrInvalidParameterValue before changing the destination or cadence.
 // The caller supplies its effective aggregate status and fans each returned
 // primitive to each registered MTP3-User. Raw WriteData/WriteSignal do not offer
 // automatically. A changed Destination, clear or expired received knowledge
@@ -37,16 +39,19 @@ func NewMTPStatusProcedure(profile CongestionProfile) (*MTPStatusProcedure, erro
 // every intermediate ending; use an ordered source stream and Reset after lost
 // continuity/resynchronization when that stream owns the boundary.
 // National-with-priorities stays transition-driven under
-// Q.704 (07/96) §11.2.4 and returns nil here. Level-4 users decide when to resume
+// Q.704 (07/96) §11.2.4 and returns (nil, nil) here. Level-4 users decide when to resume
 // traffic under §11.2.3.3; an unknown snapshot is not measured abatement.
-func (p *MTPStatusProcedure) Offered(status MTPDestinationStatus) *MTPIndication {
+func (p *MTPStatusProcedure) Offered(status MTPDestinationStatus) (*MTPIndication, error) {
+	if err := validateIdentityLength("MTPRouteID", string(status.Destination.MTPRoute), maxObservationIdentityBytes); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.destination != status.Destination {
 		p.destination = status.Destination
 		p.interval = mtpStatusInterval{}
 	}
-	return p.interval.offered(p.profile, status)
+	return p.interval.offered(p.profile, status), nil
 }
 
 // Reset retires the current destination's offered-message interval. The next

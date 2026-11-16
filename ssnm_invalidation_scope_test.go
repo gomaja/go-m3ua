@@ -261,7 +261,9 @@ func TestOversizedSSNMCanonicalScopeUsesIdentityAndNetwork(t *testing.T) {
 	sendDUNA(t, sibling, 7, 2, 101)
 	// A different registered appearance of the same canonical AS must survive.
 	sibling.addDynamicASKey(*staticASKey(8, 2), RoutingKey{}, false)
-	sibling.noteCanonicalRemoteAS(2, "as-core")
+	if err := sibling.noteCanonicalRemoteAS(2, "as-core"); err != nil {
+		t.Fatal(err)
+	}
 	sendDUNA(t, sibling, 8, 2, 102)
 	before := ssnmPartitionKnowledge(t, endpoint.SSNMKnowledge(), partition)
 	if err := first.handleDestinationUnavailable(messages.NewDestinationUnavailable(params.NewNetworkAppearance(7), params.NewRoutingContext(1), params.NewAffectedPointCode(201, 202), nil)); !errors.Is(err, ErrSSNMOversizedReport) {

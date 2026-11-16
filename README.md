@@ -927,9 +927,12 @@ For IPSP or application-owned routing, construct
 `NewMTPStatusProcedure(profile)` once per destination and local MTP3 boundary.
 It keeps no destination map, is safe for concurrent calls, and must not be
 copied after use. Call `Offered(status)` once per original validated offer,
-supplying the effective aggregate `MTPDestinationStatus`; distribute a non-nil
-result to each registered MTP3-User. It returns nil when no indication is due,
-including under the national-with-priorities method. A changed `Destination`
+supplying the effective aggregate `MTPDestinationStatus`. Handle its
+`(indication, error)` result, then distribute a non-nil indication to each
+registered MTP3-User. It returns `(nil, nil)` when no indication is due,
+including under the national-with-priorities method. A route name above 255
+octets returns `IdentityLengthError` wrapping `ErrInvalidParameterValue`, before
+retaining the name or changing cadence. A changed `Destination`
 resets the interval automatically; supplying clear or uncertain status to
 `Offered` also resets the interval. The helper sees snapshots only. Call
 `Reset()` on known clear, uncertainty, expiry or local lifecycle/method
@@ -1027,7 +1030,7 @@ barrier is provided (RFC 4666 §1.4.7). Accepted or indeterminate DATA is never
 retried on a different association because pressure changed.
 
 Outbound pressure sends no automatic SCON. `Association.SignallingCongestion`
-permits deliberate local ASP/IPSP reports; double exchange uses its local-directed
+permits deliberate synchronous local ASP/IPSP reports; double exchange uses its local-directed
 SCON scope. An SGP exposes detector status to its application/NIF, which owns
 SPMC aggregation and SS7 actions. This detector supplies local pressure events;
 the configured method adapts those observations for local-user priority admission.
@@ -1041,7 +1044,8 @@ Repeated User Part notifications and SS7 TFC procedures remain outside this dete
 `CongestionConfig.Validity` optionally expires received SCON knowledge locally;
 `CongestionConfig.Auditing` optionally schedules ASP DAUD traffic. Nil disables
 each policy independently. Non-nil zero values select 30-second validity,
-30-second audit period, 256 pending jobs and 10 audit submissions per second;
+30-second audit period, 256 pending jobs and a global ceiling of 10 audit
+submissions per second;
 negative fields are invalid. Auditing is ASP-only. These defaults are
 engineering choices, not RFC timer values. Jobs keep the original reporter and
 independent per-AS congestion, availability and isolation deadlines. Separate
@@ -1060,9 +1064,9 @@ resynchronization after ResyncRequired. Audit counts include each completed job
 outcome, even after a same-key refresh or consecutive equal outcomes; repeated
 contention and rate deferrals remain suppressed. `Endpoint.Close` cancels and
 joins its worker; Association withdrawal does not join it. Restart and
-`ForgetDestinations` do settle an optional DAUD attempt before changing its
+`ForgetDestinations` do settle an optional SCON/DAUD attempt before changing its
 lifetime, outside transport, store and procedure locks; this can wait on restart
-receive/state-monitor paths but never joins DATA or ordinary SCON. Forget also
+receive/state-monitor paths but never joins DATA or synchronous SCON. Forget also
 reclaims this reporter's canonical history and periodic work while preserving
 siblings, peer congestion, transport observations and configured isolation; its
 return value still counts legacy rows only. Source history, jobs and event
@@ -1070,6 +1074,81 @@ payloads have separate accounted budgets; see [received congestion validity and
 audits](docs/design/endpoint-management-and-ssnm.md#received-congestion-validity-and-audits)
 and the [migration
 contracts](docs/migration-v1.2.md#received-congestion-validity-and-audits).
+
+### Local congestion publication and DATA admission
+
+`Endpoint.ReportLocalCongestion` accepts independently identified application
+contributions; `WithdrawLocalCongestion` removes only the named source. A
+`LocalCongestionRequest` identifies the current association epoch, an active
+association member/binding of the exact AS, and an exact 24-bit DPC. The AS has no
+authoritative local-destination inventory; this validates the numeric value and
+current binding. Local input admission does not prove aggregate AS readiness or
+authorize DATA/SPMC delivery; optional wire admission checks applicable delivery
+readiness separately. Its `Source` is an
+identifier of 1–64 UTF-8 bytes containing Unicode letters/digits or `_`, `-`,
+`.`, `:`, `/`. The `$` namespace is reserved; queue records use `$queue:<OPC>`. Contributions have no implicit lifetime: withdraw
+them explicitly, use `ForgetDestinations`, or let the association/AS lifetime
+retire them. National
+numeric levels must agree with `Congested`; international states omit a level.
+Contradictory states return `ErrInvalidParameterValue`. Retention shares
+`SSNMStateConfig` limits and reports `ErrSSNMResourceLoss` and loss events.
+A changing or contended admission can return `ErrCongestionDecisionStale`; retry
+the complete declaration after refreshing its scope. Withdrawal of an absent
+source is idempotent only for a current active association member/binding.
+
+`CongestionInputSnapshot.Local` exposes queue and application contributions
+separately as `LocalCongestionContribution` values, including copied wire scope
+and library-assigned revision. Their maximum or unknown congestion is aggregated
+only within the same association, AS and DPC. Queue drain does not clear an
+application source, and failed publication does not clear local evidence. SGP
+contributions stay local for the application/NIF; they do not originate SS7 SCON.
+
+Automatic queue reports, application reports and configured audits share bounded
+optional scheduling. `CongestionConfig.Publication` selects the limits; nil or
+zero fields select 64 Endpoint-wide slots, 32 per association, 64 KiB of
+accounted metadata, 100 ms retry and a 1 s interval after successful submission. These are
+engineering defaults. Negative fields and a per-association limit above the
+Endpoint limit are invalid. Equal desired states coalesce, and a cleared onset
+that was never submitted is cancelled. A submitted national onset reserves its
+slot until its clear is submitted or its lifetime retires; audits use only
+unreserved transient capacity. A blocked clear can exhaust capacity, visibly
+refusing new onsets rather than being evicted. Different triggering OPCs retain
+separate reservations. A clear has no fresh trigger and omits Concerned
+Destination; international recovery sends no numeric zero. There is no periodic
+local SCON reassertion.
+
+The worker tries existing traffic and send barriers, rechecks current state and
+revision, and makes one `NoWait` attempt. It defers contention, full buffers and
+pending mandatory control, with at most one optional attempt per association per
+pass across reports and audits. The audit ceiling is additional to this shared
+per-association interval after successful submission. Restart, withdrawal and
+teardown fence old work;
+no report reactivates an AS. `Endpoint.Close` cancels and joins the worker.
+Explicit `SignallingCongestion` and `DestinationStateAudit` stay synchronous and
+return actual submission errors. A successful automatic DAUD now produces one
+local SSNM send observation per wire batch, with an empty canonical partition,
+rather than repeating it for each resolved partition. Publication state and bounded error strings are
+available through `CongestionPublications`, `CongestionPublicationCounters` and
+`ManagementCongestionPublication`; logging is not required to observe failures.
+Management observations include new reservations, visible capacity refusals,
+changed desired state for the updated key, and each actual transport attempt.
+Equal desired state coalesces without another state-change observation.
+Publication observations share the association's existing 64-slot management
+channel. Subscribed applications must drain it for the association lifetime;
+coalesced source updates do not suppress observations of actual retry attempts.
+
+`AssociationConfig.CongestionAdmission` is an additional opt-in DATA gate. Nil
+disables it. A nonnil `CongestionAdmissionConfig` with zero `ChargedRatioLimit`
+selects 0.9; require a finite value strictly between zero and one and an enabled
+backlog monitor. Every typed, raw and distributed DATA submission checks the
+cached sample under send serialization, without a socket query. At or above the
+ratio, before the first valid sample, or with invalid/stale evidence, it returns
+a typed known-not-sent error wrapping `ErrDataCongestionRefused`. Control bypasses
+this gate. The gate reserves no kernel memory: one large message, retransmissions
+or other descriptor users can consume the remaining charge. It provides no
+control delivery guarantee; `ControlWriteTimeout` still closes a permanently
+stalled association. See the [publication migration
+contract](docs/migration-v1.2.md#local-congestion-publication-and-data-admission).
 
 Received statements apply only to their resolved AS and Network Appearance.
 Auditing retains `AvailabilitySources`; validity or auditing retains
@@ -1095,7 +1174,7 @@ statement and partition need 552 bytes; its one-binding/one-partition job adds
 472 before Info String, totaling 1,024 bytes. Nil policies preserve scalar
 costs.
 
-Queued `Updated` destinations now charge 320 fixed bytes, reflecting the
+Queued `DestinationUpdates` destinations now charge 320 fixed bytes, reflecting the
 larger public destination shape. Each individual peer or availability/congestion
 source row still charges 256 bytes, plus its Routing Context storage. Review
 custom subscription byte budgets: report updates can reach them sooner. This
@@ -1149,6 +1228,21 @@ the socket default, which follows `net.sctp.pf_expose` at socket creation; selec
 Sections 7.1 and 7.3). These are SCTP HEARTBEAT and failure controls, separate
 from M3UA BEAT configuration. Each Association owns one SCTP association;
 applications create a replacement with a new Dial or Accept.
+
+
+SSNM subscriptions keep their existing bounded continuity-loss/`Resync` contract.
+Every individual event fits the default subscription byte budget: configured
+SG/AS and ASP/IPSP destination route names are capped at 255 octets, and oversized
+report histories use explicit bounded fragments (`ApplyReport`, `ReportContinues`
+and `ReportPatch.SourcesContinued`). The stricter local-source limit remains 64 octets.
+A legal multi-AS report or a combined report/expiry burst can still overflow an
+unread default queue. Queued deltas precede an explicit continuity-loss marker;
+`Resync` recovers exact retained state and resumes the stream, without replaying
+discarded raw observations or diagnostics. Defaults remain 256 slots / 1 MiB;
+there is no whole-report-plus-pass default-fit guarantee. MTP indication overflow
+continues to use `ResyncRequired`, with at most one indication per changed
+destination. See the endpoint-management design for per-event ceilings and queue
+sizing with validity, auditing and publication enabled.
 
 ### SCTP tuning
 
@@ -1456,7 +1550,7 @@ for {
 ```
 
 Events are deltas, and `applyDelta` patches the view rather than replacing it. A
-report event's `Updated` holds only the destinations that report wrote, each
+report event's `DestinationUpdates` holds only the destinations that report wrote, each
 with both dimensions as retained afterwards, so it replaces those entries of
 `event.Partition` and leaves every other destination alone. Binding events set
 or remove `event.Binding`; `SSNMPartitionRetiredEvent` drops the partition and
@@ -1524,15 +1618,17 @@ atomically and appears in existing resource-loss counters/events. Resync restore
 current retained state, including known clear, but cannot recover a refused report
 or replay the history of Concerned Destination triggers.
 
-`Endpoint.CongestionInputs(as)` returns AS membership, retained peer records and
-independent outbound transport observations as caller-owned copies. It retries
+`Endpoint.CongestionInputs(as)` returns AS membership, retained peer records,
+local contributions and independent outbound transport observations as caller-owned copies. It retries
 collection once when its component version vector changes. `Consistent` says
 whether that bounded collection was stable; `Revision` covers SSNM only. Inspect
 `VersionsBefore` and `VersionsAfter` (`CongestionInputVersion`), including
 `MembershipGeneration` and each `PeerCongestionVersion` binding generation,
-transport observation and `TransportPresent` flag. There is no `Local`
-contribution field in this snapshot. Queue overload remains available through
-its independent management stream.
+opaque `LocalGeneration`, transport observation and `TransportPresent` flag.
+`LocalGeneration` versions local lifetime/queue evidence; compare it as an opaque
+component, without interpreting its numeric value. `Local` carries independent
+queue/application contributions. Queue overload also remains available through
+its management stream; a snapshot does not replace that stream's loss contract.
 
 `SGPConfig.CongestionPolicy` (`SGPCongestionPolicy`) can veto an SGP DATA
 candidate using separate peer and transport inputs. It runs outside Endpoint,

@@ -175,12 +175,12 @@ func TestSSNMByteCapMatchesLibraryAccounting(testContext *testing.T) {
 			nextContext, nextCancel := context.WithTimeout(ctx, 5*time.Second)
 			event, err := peer.reference.Next(nextContext)
 			nextCancel()
-			if err != nil || event.Kind != m3ua.SSNMReportEvent {
+			if err != nil || event.Kind != m3ua.SSNMReportObservedEvent {
 				testContext.Fatalf("%s: report %d delivered %s, %v", peer.name, index, event.Kind, err)
 			}
 			if got, want := ssnmEventBytes(event), byteCapModel(index, peer.canonical); got != want {
 				testContext.Fatalf("%s: report %d (%d APCs, %d updated, partition %+v) accounts %d bytes, the documented formula predicts %d",
-					peer.name, index, len(event.Report.Destinations), len(event.Updated), event.Partition, got, want)
+					peer.name, index, len(event.Report.Destinations), len(event.DestinationUpdates), event.Partition, got, want)
 			}
 			peer.delivered = append(peer.delivered, event)
 		}

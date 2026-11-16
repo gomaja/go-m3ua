@@ -1970,9 +1970,17 @@ func (as *applicationServer) rebuildActiveLocked() {
 		if as.memberGenerations == nil {
 			as.memberGenerations = make(map[*Association]uint64, len(as.asps))
 		}
+		for association, current := range as.asps {
+			if current == StateASPActive && as.membershipStates[association] != StateASPActive && (association.role == RoleSGP || association.role == RoleIPSP && !association.isIPSPDoubleExchange()) {
+				association.localQueueLifetimeRevision.Add(1)
+			}
+		}
 		for association, previous := range as.membershipStates {
 			current, exists := as.asps[association]
 			if previous == StateASPActive && (!exists || current != StateASPActive) {
+				if association.role == RoleSGP || association.role == RoleIPSP && !association.isIPSPDoubleExchange() {
+					association.retireLocalCongestionScopes(func(key ASKey) bool { return key == as.key })
+				}
 				if store := association.ssnmStore(); association.role == RoleSGP && store != nil {
 					store.retirePeerCongestionAS(association.ID(), as.key)
 				}

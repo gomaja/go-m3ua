@@ -328,7 +328,7 @@ func TestOptionalAuditSubmissionObservationSurvivesReportRefresh(t *testing.T) {
 	local := 0
 	sub.mu.Lock()
 	for _, queued := range sub.queue {
-		if queued.event.Kind == SSNMReportEvent && queued.event.Report.Kind == SSNMDestinationStateAuditReport && queued.event.Report.Source == SSNMLocalReport {
+		if queued.event.Kind == SSNMReportObservedEvent && queued.event.Report.Kind == SSNMDestinationStateAuditReport && queued.event.Report.Source == SSNMLocalReport {
 			local++
 		}
 	}
@@ -347,7 +347,9 @@ func TestReceiveAdmissionPrecedesLegacyRouteResolution(t *testing.T) {
 			a := attachSSNMAssociation(t, e, SGPIdentity{"sg-a", "sgp-a1"}, 7, 1, 3)
 			key := *staticASKey(7, 9)
 			a.addDynamicASKey(key, testRoutingKey(9, 100, params.ServiceIndSCCP), false)
-			a.noteCanonicalRemoteAS(9, "as-core")
+			if err := a.noteCanonicalRemoteAS(9, "as-core"); err != nil {
+				t.Fatal(err)
+			}
 			a.noteRoutingContextsActive([]uint32{1, 3, 9})
 			a.noteRoutingContextsAcked(params.NewRoutingContext(1, 3, 9))
 			resolved := false
@@ -355,7 +357,9 @@ func TestReceiveAdmissionPrecedesLegacyRouteResolution(t *testing.T) {
 				resolved = true
 				a.removeRequesterRoutingKeyVersion(9, a.dynamicASKeyVersionFor(9, false))
 				a.addDynamicASKey(key, testRoutingKey(9, 100, params.ServiceIndSCCP), false)
-				a.noteCanonicalRemoteAS(9, "as-core")
+				if err := a.noteCanonicalRemoteAS(9, "as-core"); err != nil {
+					t.Fatal(err)
+				}
 				a.noteRoutingContextsActive([]uint32{1, 3, 9})
 				a.noteRoutingContextsAcked(params.NewRoutingContext(1, 3, 9))
 			}

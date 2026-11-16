@@ -61,6 +61,7 @@ type Endpoint struct {
 	cancel                   context.CancelCauseFunc
 	operations               sync.WaitGroup
 	congestionAutomationDone <-chan struct{}
+	congestionAutomationOnce sync.Once
 	as                       *applicationServers
 	aspRoutes                *aspRoutes
 	nif                      *nifAvailability
@@ -162,6 +163,8 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		}
 		ssnm.validity = congestion.validity
 		ssnm.auditing = congestion.auditing
+		ssnm.publicationConfig = congestion.publication
+		ssnm.publications = make(map[congestionPublicationKey]*congestionPublication)
 		if routes != nil {
 			routes.ssnm = ssnm
 			ssnm.statusMarks = routes.statusMarks
@@ -594,6 +597,9 @@ func (e *Endpoint) associationRole() (Role, error) {
 func (e *Endpoint) validateAssociationConfig(config *AssociationConfig) error {
 	if e == nil {
 		return ErrUnsupportedRole
+	}
+	if err := e.validateCongestionAdmissionMonitor(config); err != nil {
+		return err
 	}
 	if e.role == RoleASP && e.aspRoutes != nil {
 		return e.aspRoutes.validateAssociationConfig(config)

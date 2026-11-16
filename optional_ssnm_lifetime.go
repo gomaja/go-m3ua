@@ -1,8 +1,8 @@
 package m3ua
 
-// beginOptionalSSNMChange excludes new optional DAUD admission and settles at
+// beginOptionalSSNMChange excludes new optional SCON/DAUD admission and settles at
 // most the one attempt holding sendMu. Its completion join excludes DATA and
-// ordinary SCON. Concurrent lifetime changes share admission closure without
+// synchronous SCON. Concurrent lifetime changes share admission closure without
 // joining each other's cleanup. Epoch reset and local reclaim call it before
 // taking transport, destination, restart-procedure or store locks. Completion
 // needs only the tracker; SSNM receive admission discards stale knowledge, while
@@ -14,6 +14,7 @@ func (c *Association) beginOptionalSSNMChange(forget bool) func() {
 		tracker.optionalChanging = make(chan struct{})
 	}
 	tracker.optionalChanges++
+	c.retireQueueCongestionLifetimes(nil)
 	if forget {
 		if tracker.forgetChanges == 0 {
 			tracker.knowledgeGeneration.Add(1)

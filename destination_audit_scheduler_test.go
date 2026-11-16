@@ -415,7 +415,7 @@ func TestValidityExpiryDeltaOwnsHistoricalSources(t *testing.T) {
 	defer func() { _ = sub.Close() }()
 	r.advance(30 * time.Second)
 	event := peerRetentionNext(t, sub)
-	if event.Kind != SSNMCongestionExpiredEvent || event.ReportSet || len(event.Expired) != 1 || len(event.Updated) != 0 || event.PeerCongestion != nil || !event.ApplyExpiry(&replica) {
+	if event.Kind != SSNMCongestionExpiredEvent || event.ReportSet || len(event.Expired) != 1 || len(event.DestinationUpdates) != 0 || event.PeerCongestion != nil || !event.ApplyExpiry(&replica) {
 		t.Fatalf("expiry is not a compact versioned unknown delta: %+v", event)
 	}
 	snapshot := r.e.SSNMKnowledge()
