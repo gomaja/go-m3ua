@@ -486,6 +486,9 @@ type ssnmCongestionRecord struct {
 }
 
 type ssnmPartitionState struct {
+	availabilityProjection                 *ssnmAvailabilityIndex
+	statusSources                          *mtpStatusSourceIndex
+	statusActiveBindings                   int
 	sourceProjection                       *ssnmSourceProjection
 	congestionSources, availabilitySources map[ssnmDestinationKey]ssnmSourceBucket
 	work                                   *ssnmWorkCount
@@ -520,6 +523,7 @@ func (p *ssnmPartitionState) trafficAuthorized() bool {
 // other: the snapshot is taken and the subscriber registered in the same
 // critical section, so no report can slip between them.
 type ssnmState struct {
+	statusMarks        *mtpStatusMarks
 	auditByAssociation map[AssociationID]map[destinationAuditKey]struct{}
 	auditBySource      map[destinationAuditSourceKey]map[destinationAuditKey]struct{}
 	work               *ssnmWorkCount
@@ -738,7 +742,17 @@ func (s *ssnmState) bindLocked(partition SSNMPartition, association AssociationI
 	if bound && previous == pending {
 		return nil
 	}
+	wasAuthorized := state.statusActiveBindings > 0
+	if bound && !previous {
+		state.statusActiveBindings--
+	}
+	if !pending {
+		state.statusActiveBindings++
+	}
 	state.bindings[association] = pending
+	if wasAuthorized != (state.statusActiveBindings > 0) {
+		s.statusMarks.change(partition, nil, nil)
+	}
 	// A binding that was pending and is now complete is the activation
 	// acknowledgment arriving, not a fresh admission. It keeps what the
 	// Section 4.5.1 window admitted.
@@ -801,14 +815,22 @@ func (s *ssnmState) retirePartitionRecordsLocked(partition SSNMPartition, associ
 	if !exists {
 		return
 	}
-	if _, bound := state.bindings[association]; !bound {
+	pending, bound := state.bindings[association]
+	if !bound {
 		return
 	}
 	s.retirePeerRecordsLocked(state, func(record PeerCongestionState) bool { return record.Association == association })
 	if len(state.bindings) > 1 {
 		s.retireReceivedAssociationLocked(association, &partition, outcomes)
 	}
+	wasAuthorized := state.statusActiveBindings > 0
+	if !pending {
+		state.statusActiveBindings--
+	}
 	delete(state.bindings, association)
+	if wasAuthorized != (state.statusActiveBindings > 0) {
+		s.statusMarks.change(partition, nil, nil)
+	}
 	epoch := state.epoch
 	if len(state.bindings) > 0 {
 		revision := s.nextRevisionLocked()
@@ -822,6 +844,7 @@ func (s *ssnmState) retirePartitionRecordsLocked(partition SSNMPartition, associ
 		return
 	}
 	s.dropDestinationRecordsLocked(state)
+	s.statusMarks.change(partition, nil, nil)
 	delete(s.partitions, partition)
 	s.bytes -= ssnmPartitionBaseBytes
 	s.partitionsInvalidated++
@@ -907,10 +930,12 @@ func (s *ssnmState) dropDestinationRecordsLocked(state *ssnmPartitionState) {
 		releasedBytes += receivedAvailabilityBytes(record)
 	}
 	state.receivedAvailability = nil
+	state.availabilityProjection = nil
 	state.receivedCongestion = nil
 	state.sourceProjection = nil
 	state.availabilitySources = nil
 	state.congestionSources = nil
+	state.statusSources = nil
 	s.records -= released
 	s.peerRecords[peer] -= released
 	if s.peerRecords[peer] <= 0 {
@@ -979,18 +1004,22 @@ func (s *ssnmState) invalidateScopedDestinationKnowledgePreparedLocked(state *ss
 		delta := SSNMDestinationInvalidation{Destination: key.pointCodeRange()}
 		if record, held := state.availability[key]; held && matcher.matches(record.Scope, record.resolved) {
 			delta.AvailabilityRemoved = true
+			destination := key.pointCodeRange()
 			if s.auditing == nil {
 				s.retireAuditDimensionLocked(state.partition, key, false, true, record.Scope, record.resolved, outcomes)
 			}
 			delete(state.availability, key)
+			s.statusMarks.change(state.partition, &destination, nil)
 			release(record.Scope, record.resolved)
 		}
 		if record, held := state.congestion[key]; held && matcher.matches(record.Scope, record.resolved) {
 			delta.CongestionRemoved = true
+			destination := key.pointCodeRange()
 			if s.validity == 0 && s.auditing == nil {
 				s.retireAuditDimensionLocked(state.partition, key, true, false, record.Scope, record.resolved, outcomes)
 			}
 			delete(state.congestion, key)
+			s.statusMarks.change(state.partition, &destination, nil)
 			release(record.Scope, record.resolved)
 		}
 		if delta.AvailabilityRemoved || delta.CongestionRemoved {
@@ -999,7 +1028,7 @@ func (s *ssnmState) invalidateScopedDestinationKnowledgePreparedLocked(state *ss
 	}
 	sources, sourceDimensions := s.retireReceivedSourcesLocked(state, func(_ receivedCongestionKey, record SSNMCongestion) bool {
 		return matcher.matches(record.Scope, []ASKey{record.AS})
-	}, outcomes)
+	}, false, outcomes)
 	removed = append(removed, sourceDimensions...)
 	availabilitySources, availabilityDimensions := s.retireReceivedAvailabilityLocked(state, func(_ receivedCongestionKey, record SSNMAvailability) bool {
 		return matcher.matches(record.Scope, []ASKey{record.AS})
@@ -1132,6 +1161,7 @@ func (s *ssnmState) applyPreparedLocked(report SSNMReport, resolved []ASKey, sou
 	scope := report.Scope.clone()
 	resolved = slices.Clone(resolved)
 	for _, write := range writes {
+		finishStatus := s.beginScalarStatusChangeLocked(state, write.key, report)
 		if write.availability {
 			state.availability[write.key] = ssnmAvailabilityRecord{resolved: resolved, SSNMAvailability: SSNMAvailability{
 				State:       report.availabilityState(),
@@ -1154,6 +1184,7 @@ func (s *ssnmState) applyPreparedLocked(report SSNMReport, resolved []ASKey, sou
 				Revision:    revision,
 			}}
 		}
+		finishStatus()
 		delta := write.bytes - write.previous
 		state.bytes += delta
 		s.bytes += delta
@@ -1502,6 +1533,8 @@ func (s *ssnmState) close() {
 		return
 	}
 	s.closed = true
+	s.statusMarks.close()
+
 	for _, job := range s.audits {
 		job.live.Store(false)
 	}

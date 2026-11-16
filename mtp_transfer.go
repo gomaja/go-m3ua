@@ -566,6 +566,7 @@ func (r *aspRoutes) selectTransfer(
 	if err != nil {
 		return nil, err
 	}
+	r.offerMTPTransferLocked(mtpRoute, request)
 	// Preserve the existing route, binding, payload and stream error order.
 	// An invalid MP is refused at final submission, after those checks, rather
 	// than hiding an already-invalid request or an unusable route at selection.

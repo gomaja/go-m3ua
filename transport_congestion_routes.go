@@ -11,6 +11,7 @@ func (r *aspRoutes) transportChanged(a *Association) {
 	if _, ok := r.associations[a]; !ok {
 		return
 	}
+	r.retireTransportStatusProceduresLocked()
 	r.transportRevision++
 	r.publish(r.recomputeLocked(r.associationEligibleRoutes[a]))
 }
@@ -18,7 +19,7 @@ func (r *aspRoutes) transportChanged(a *Association) {
 // Canonical knowledge belongs to an SG/AS, not to the reporting association's
 // active routes. Reports admitted before ASPAC Ack and knowledge invalidation
 // can therefore change the active siblings' eligibility (RFC 4666 §4.5.2.2).
-func (r *aspRoutes) canonicalStateChanged(partitions []SSNMPartition) {
+func (r *aspRoutes) canonicalStateChanged(partitions []SSNMPartition, reason ...MTPStatusReason) {
 	if r == nil {
 		return
 	}
@@ -43,7 +44,7 @@ func (r *aspRoutes) canonicalStateChanged(partitions []SSNMPartition) {
 			}
 		}
 	}
-	r.publish(r.recomputeLocked(affected))
+	r.publish(r.recomputeLocked(affected, reason...))
 }
 
 func transportASPStatus(a *Association) aspDestinationStatus {

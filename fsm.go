@@ -220,13 +220,18 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 	entering := current != previous || !c.stateEntered
 	c.stateEntered = true
 	c.appliedState = current
-	if c.state != current {
+	wasActive := c.state == StateASPActive
+	stateChanged := c.state != current
+	if stateChanged {
 		c.recordStateChange(current)
 	}
 	// Still written here as well as in sendState: applyStateUpdate is reached
 	// directly, without a publish, by callers that place an Association in a state
 	// outright, and it must remain correct for them.
 	c.state = current
+	if stateChanged && (wasActive || current == StateASPActive) {
+		c.invalidateMTPStatusState()
+	}
 	c.flushStateChanges(false)
 
 	switch c.role {
@@ -636,6 +641,7 @@ func (c *Association) commitStateGuarded(s State, peerDown, override, inactiveAc
 		unlockTransfer()
 		return false
 	}
+	wasActive := c.state == StateASPActive
 	stateChanged := c.state != s
 	c.state = s
 	if inactiveAck && s == StateASPInactive {
@@ -643,6 +649,9 @@ func (c *Association) commitStateGuarded(s State, peerDown, override, inactiveAc
 		c.stateEntered = true
 	}
 	if stateChanged {
+		if wasActive || s == StateASPActive {
+			c.invalidateMTPStatusState()
+		}
 		c.recordStateChange(s)
 	}
 	if peerDown {

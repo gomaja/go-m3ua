@@ -65,12 +65,14 @@ func (s *ssnmState) applyReceivedAvailabilityLocked(state *ssnmPartitionState, r
 	record.Revision = s.nextRevisionLocked()
 	report.Revision = record.Revision
 	for _, d := range keys {
+		finishStatus := s.beginScalarStatusChangeLocked(state, d, report)
 		for _, as := range resolved {
 			record.AS = as
-			state.setReceivedAvailability(receivedCongestionKey{association: report.Association, as: as, scope: scopeKey, destination: d}, record)
-
+			key := receivedCongestionKey{association: report.Association, as: as, scope: scopeKey, destination: d}
+			state.setReceivedAvailability(key, record)
 		}
 		state.availability[d] = ssnmAvailabilityRecord{SSNMAvailability: record, resolved: resolved}
+		finishStatus()
 	}
 	s.records += added
 	s.peerRecords[report.Partition.peerKey()] += added
@@ -104,6 +106,8 @@ func (s *ssnmState) retireReceivedAvailabilityLocked(state *ssnmPartitionState, 
 			continue
 		}
 		sources = append(sources, SSNMAvailabilitySourceInvalidation{Destination: key.destination.pointCodeRange(), AS: record.AS, Revision: record.Revision})
+		destination := key.destination.pointCodeRange()
+		finishStatus := s.statusMarks.beginChange(state.partition, &destination, nil)
 		state.deleteReceivedAvailability(key)
 		s.releaseDestinationRecordLocked(state, receivedAvailabilityBytes(record))
 		outcomes.retireSourceLocked(s, state.partition, key, false)
@@ -112,6 +116,7 @@ func (s *ssnmState) retireReceivedAvailabilityLocked(state *ssnmPartitionState, 
 			s.releaseDestinationRecordLocked(state, ssnmScopeBytes(scalar.Scope, scalar.resolved))
 			dimensions = append(dimensions, SSNMDestinationInvalidation{Destination: key.destination.pointCodeRange(), AvailabilityRemoved: true})
 		}
+		finishStatus()
 	}
 	return sources, dimensions
 }

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gomaja/go-ctxsync"
 )
@@ -104,11 +105,15 @@ const maxIdleTransferFlowLocks = 64
 // updates to the originating SG, while Section 1.3.2.5 requires the ASP to
 // derive one destination state from all such routes.
 type aspRoutes struct {
-	methods *congestionMethodConfig
-	mu      sync.RWMutex
+	statusProcedures            map[mtpStatusKey]*list.Element
+	transportStatusResetPending atomic.Bool
+	statusLRU                   *list.List
+	methods                     *congestionMethodConfig
+	mu                          sync.RWMutex
 
-	config aspRoutingConfig
-	ssnm   *ssnmState
+	config      aspRoutingConfig
+	ssnm        *ssnmState
+	statusMarks *mtpStatusMarks
 	// applyResolved, when set, runs in apply between resolving a report's
 	// route ranges and taking the routing write lock. Tests use it to detach
 	// the Association in that window; it is nil otherwise.
@@ -160,6 +165,7 @@ func newASPRoutes(config *ASPConfig) (*aspRoutes, error) {
 	}
 	routes := &aspRoutes{
 		config:                           snapshot,
+		statusMarks:                      &mtpStatusMarks{config: snapshot},
 		associations:                     make(map[*Association]SGPIdentity),
 		associationsBySGP:                make(map[SGPIdentity]map[*Association]struct{}),
 		associationEligibleRoutes:        make(map[*Association]map[MTPRouteID]struct{}),
@@ -220,6 +226,9 @@ func (r *aspRoutes) attach(association *Association) bool {
 
 	r.mu.Lock()
 	r.associations[association] = identity
+	r.statusMarks.mu.Lock()
+	r.statusMarks.associationLocked(association, nil)
+	r.statusMarks.mu.Unlock()
 	r.nextAssociationOrder++
 	r.associationOrder[association] = r.nextAssociationOrder
 	if r.associationsBySGP[identity] == nil {
@@ -230,6 +239,7 @@ func (r *aspRoutes) attach(association *Association) bool {
 	r.associationCapabilities[association] = capabilities
 	eligibleRoutes := aspCapabilityRouteSet(capabilities)
 	r.associationEligibleRoutes[association] = eligibleRoutes
+	r.retireRouteStatusProceduresLocked(eligibleRoutes)
 	indications := r.recomputeLocked(eligibleRoutes)
 	r.publish(indications)
 	r.mu.Unlock()
@@ -244,6 +254,9 @@ func (r *aspRoutes) detach(association *Association) {
 	identity, exists := r.associations[association]
 	affectedMTPRoutes := r.associationEligibleRoutes[association]
 	if exists {
+		r.statusMarks.mu.Lock()
+		r.statusMarks.associationLocked(association, nil)
+		r.statusMarks.mu.Unlock()
 		delete(r.associations, association)
 		delete(r.associationEligibleRoutes, association)
 		delete(r.associationCapabilities, association)
@@ -271,6 +284,7 @@ func (r *aspRoutes) detach(association *Association) {
 			r.reclaimSignallingGatewayStateLocked(identity.SignallingGateway)
 		}
 	}
+	r.retireRouteStatusProceduresLocked(affectedMTPRoutes)
 	indications := r.recomputeLocked(affectedMTPRoutes)
 	r.publish(indications)
 	r.mu.Unlock()
@@ -628,6 +642,7 @@ func (r *aspRoutes) associationStateChanged(association *Association) bool {
 	r.associationCapabilities[association] = currentCapabilities
 	r.associationEligibleRoutes[association] = aspCapabilityRouteSet(currentCapabilities)
 	r.transportRevision++
+	r.retireRouteStatusProceduresLocked(affectedMTPRoutes)
 	indications := r.recomputeLocked(affectedMTPRoutes)
 	r.publish(indications)
 	r.mu.Unlock()
@@ -839,7 +854,7 @@ func sortedDestinationStatuses(
 	return statuses
 }
 
-func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndication {
+func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}, reason ...MTPStatusReason) []*MTPIndication {
 	var indications []*MTPIndication
 	for _, mtpRoute := range r.config.mtpRoutes {
 		if only != nil {
@@ -848,7 +863,7 @@ func (r *aspRoutes) recomputeLocked(only map[MTPRouteID]struct{}) []*MTPIndicati
 			}
 		}
 		updated := r.recomputeMTPRouteLocked(mtpRoute)
-		routeIndications := r.derivedStatusIndicationsLocked(mtpRoute, updated)
+		routeIndications := r.derivedStatusIndicationsLocked(mtpRoute, updated, reason...)
 		indications = append(indications, routeIndications...)
 		// updated is built fresh for this route and nothing else retains it,
 		// so it replaces the route's set whole. This runs under the routing
@@ -1066,7 +1081,9 @@ func (r *aspRoutes) destinationStatusFromGatewayPath(
 func (r *aspRoutes) derivedStatusIndicationsLocked(
 	mtpRoute aspMTPRoute,
 	updated map[aspDerivedRangeKey]aspDestinationStatus,
+	reason ...MTPStatusReason,
 ) []*MTPIndication {
+	r.retireEndedStatusProceduresLocked(mtpRoute, updated, reason...)
 	previousTree := derivedStatusTree(mtpRoute, r.derived[mtpRoute.id])
 	currentTree := derivedStatusTree(mtpRoute, updated)
 	indications := make([]*MTPIndication, 0)
@@ -1084,6 +1101,16 @@ func (r *aspRoutes) derivedStatusIndicationsLocked(
 		false,
 		&indications,
 	)
+	// Expiry is an event origin, not just the first appearance of uncertainty.
+	// A fresh alternative may keep the aggregate known, or a later source can
+	// expire while receivedUnknown was already true. Preserve
+	// Kind and current aggregate flags; expiry never claims measured abatement.
+	if len(reason) > 0 && reason[0] == MTPStatusValidityExpired {
+		for _, indication := range indications {
+			indication.Cause = MTPStatusCauseNone
+			indication.Reason = MTPStatusValidityExpired
+		}
+	}
 	return indications
 }
 
@@ -1218,7 +1245,15 @@ func newMTPIndication(
 	case previous.availability == DestinationUnavailable && current.availability != DestinationUnavailable:
 		kind = MTPResumeIndication
 	}
+	// Q.704 (07/96) §§11.2.3.1, 11.2.4 and 11.2.5 identify congestion status
+	// separately from availability primitives. Optional received validity expiry
+	// (RFC 4666 §3.4.4) cannot establish measured congestion abatement.
+	cause, reason := MTPStatusCauseNone, MTPStatusTransition
+	if kind == MTPStatusIndication && (current.congested || !current.receivedUnknown && !current.transportUnknown) && (previous.congested != current.congested || previous.congestionLevel != current.congestionLevel || previous.congestionLevelSet != current.congestionLevelSet) {
+		cause = MTPStatusSignallingNetworkCongested
+	}
 	return &MTPIndication{
+		Cause: cause, Reason: reason,
 		Kind: kind,
 		Destination: newMTPDestinationStatus(MTPDestination{
 			MTPRoute:  key.mtpRoute,
@@ -1294,6 +1329,13 @@ func (r *aspRoutes) closeIndications() {
 	if r == nil {
 		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, element := range r.statusProcedures {
+		r.removeStatusProcedureLocked(element)
+	}
+	r.statusProcedures = nil
+	r.statusLRU = nil
 	r.indicationMu.Lock()
 	defer r.indicationMu.Unlock()
 	if r.indicationsClosed {

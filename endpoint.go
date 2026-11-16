@@ -164,6 +164,7 @@ func NewEndpoint(config EndpointConfig) (*Endpoint, error) {
 		ssnm.auditing = congestion.auditing
 		if routes != nil {
 			routes.ssnm = ssnm
+			ssnm.statusMarks = routes.statusMarks
 		}
 		ctx, cancel := context.WithCancelCause(context.Background())
 		endpoint := &Endpoint{
@@ -270,6 +271,12 @@ func (e *Endpoint) trackAssociation(association *Association) bool {
 	if e == nil || association == nil {
 		return false
 	}
+	// Initialize the active-state mirror before route ownership exposes a
+	// pre-established association. Scope commits can then read it without
+	// reversing muState -> muAckedRCs; no send-path state lock is added.
+	association.muState.RLock()
+	association.mtpStatusActive.Store(association.state == StateASPActive)
+	association.muState.RUnlock()
 	if !e.trackAssociationLocked(association) {
 		return false
 	}

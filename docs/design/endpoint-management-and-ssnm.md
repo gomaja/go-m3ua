@@ -919,7 +919,8 @@ Both transitions preserve exact received scope, live-state barriers and episode
 generation fences. Publication remains best effort with NoWait transport
 submission; durable optional retry/fairness belongs to later work. SGP receive
 queue overload stays local. SPMC policy and SS7 TFC generation remain with the
-application/NIF; continued offered-traffic status procedures are a later batch.
+application/NIF. Routed ASP offered traffic and the explicit application-owned
+procedure provide [continued MTP status](../../README.md#continued-mtp-status).
 
 Distribution passes its resolved AS network into the shared encoded admission,
 without inserting an omitted wire NA. Unused values of absent scope fields are
@@ -1206,7 +1207,8 @@ The work bounds below count visited records, copied entries and prefix nodes;
 there is no elapsed-time, heap or RSS guarantee. Let `R` be retained logical
 records, `S` received source rows, `D` distinct destination prefixes, `A` the
 report's resolved AS entries, `J` audit jobs, `O` their total origins, `B` retained
-bindings and `W = 25` the fixed 24-bit prefix depth including its root. Scope
+bindings, `S_a` and `S_c` the availability and congestion source counts,
+`H` the source rows included in an owned event, and `W = 25` the fixed 24-bit prefix depth including its root. Scope
 hashing, owned wire-list copies and publication also cost the bytes they process.
 Sorting costs are stated separately from row visits.
 
@@ -1226,7 +1228,7 @@ must fit the existing record and byte limits.
 | --- | --- |
 | Received congestion or availability report | Sort/deduplicate `D` destinations and `A` ASes, then update the `D*A` source identities the report actually names. Scalar resolution is copied once and shared immutably. With registered subscriptions, exact destination buckets visit only the `H` source rows included in `Updated`, once each, plus `D` scalar lookups and source ordering. Without subscriptions, no `Updated` entries are built. |
 | Partition snapshot, Subscribe and Resync | Enumerate scalar/bucket destination keys once, sort them, and read each retained source once. Destination ordering costs `O(D log D)`; source ordering costs the sum of `h*log h` within each destination. Whole snapshots additionally sort partitions, bindings and peer records and copy owned scope bytes; binding enumeration is `O(B)` plus its sorting. |
-| Canonical and standalone destination projection | On the first read after a source mutation, build one shared source aggregate in `O(W*S)` work. Each source enters the all-source tree and at most one scoped tree; reporter winners are rolled back incrementally, never copied or rescanned at every node. Warm reads scan no source rows and follow at most `W` nodes. Scalar dimensions without source history retain their at-most-25 prefix lookups and applicability checks over the corresponding captured AS metadata. |
+| Canonical and standalone destination projection | Availability uses one incremental input index shared with offered-status marks: at most two links per retained availability source and at most `W` prefix probes per query, with no cold history pass. Congestion builds one aggregate in `O(W*S_c)` on the first read after a congestion mutation, then follows at most `W` nodes without scanning source rows. Availability-only writes keep this congestion cache warm. Combined history reads use at most `2*W` probes/nodes. Scalar dimensions without history retain their fixed-prefix lookups and captured-AS applicability checks. |
 | Expiry discovery and commit | Discovery scans partitions and received/peer source rows once, bounded by `MaxPartitions` and `MaxRecords`. Each commit rechecks at most 256 candidate identities by key and publishes one chunk. Mutations invalidate the derived aggregate; subsequent projections rebuild once for each mutation interval they observe. |
 | Scoped invalidation | Compile the incoming AS/network sets once, sharing an unpartitioned set or using each captured partition's subset. Matching then visits retained rows and their captured AS metadata without an affected-AS cross join. One job pass visits origins and clones each affected job once across all affected partitions. Inline retirement performs exact source/origin index probes for each removed source; its final staged flush visits each candidate job/origin once more at most. Removal sorting and existing bounded event chunks remain separate. |
 | Partial binding withdrawal | Resolve the withdrawn partition set once. Visit the reporter's association-indexed jobs and all their origins once, cloning each affected origin slice at most once for the set; reconcile surviving jobs once afterward. Partition/source cleanup visits each selected partition once. Source deletion invalidates captured job liveness inline and shares one staged replacement flush across the event. Work is linear in selected partition/source rows plus the reporter's jobs and origins, with existing removal/output sorting separate. |
@@ -1244,10 +1246,12 @@ retirement remove the corresponding entries. It borrows immutable record keys
 and adds no portable record/byte charge. Like the other derived indexes, this
 is a cardinality bound rather than a heap measurement.
 
-The aggregate cache has at most two sparse insertions per received source and
-at most `50*S` nodes, across at most `S+1` query groups. Arbitrary queries create
-no groups. Every source insertion, replacement, expiry, removal or partition
-reclaim invalidates it under the same mutex. With concurrent mutations,
+Availability has one index node and at most two list memberships per retained
+availability source, shared by ordinary status reads and offered-status marks.
+The congestion aggregate has at most two sparse insertions per retained
+congestion source and at most `50*S_c` nodes across `S_c+1` query groups.
+Arbitrary queries create no groups. Congestion insertion, replacement, expiry,
+removal or partition reclaim invalidates that aggregate under the same mutex. With concurrent mutations,
 projection work is the sum of the rebuilds for the intervals actually observed,
 plus fixed-depth queries; it is not a promise that a continuously changing store
 builds only once. ASP/IPSP refreshes, transfer selection and direct DATA admission
@@ -1299,3 +1303,8 @@ AS/transport/dynamic/store locks remains intact; registration mutation uses
 `peerRetentionMu -> muAckedRCs -> muDynamicASKeys`. Acknowledgement mutators
 release `muAckedRCs` before synchronizing peer retention. Optional completion
 acquires none of these lifecycle locks.
+
+Final per-Association binding/profile checks outside Endpoint-wide locks retain
+their existing configured-inventory cost, conservatively one configuration-sized
+lookup per due binding. These checks scan no retained source history and add no
+end-to-end linear-time or latency guarantee.

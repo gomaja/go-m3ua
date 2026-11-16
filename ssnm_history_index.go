@@ -20,7 +20,6 @@ func (p *ssnmPartitionState) setReceivedCongestion(key receivedCongestionKey, re
 	p.congestionSources[key.destination][key] = struct{}{}
 }
 func (p *ssnmPartitionState) setReceivedAvailability(key receivedCongestionKey, record SSNMAvailability) {
-	p.sourceProjection = nil
 	if p.receivedAvailability == nil {
 		p.receivedAvailability = make(map[receivedCongestionKey]SSNMAvailability)
 	}
@@ -30,6 +29,7 @@ func (p *ssnmPartitionState) setReceivedAvailability(key receivedCongestionKey, 
 	if p.availabilitySources[key.destination] == nil {
 		p.availabilitySources[key.destination] = make(ssnmSourceBucket)
 	}
+	p.replaceAvailabilitySource(key, record)
 	p.receivedAvailability[key] = record
 	p.availabilitySources[key.destination][key] = struct{}{}
 }
@@ -43,7 +43,7 @@ func (p *ssnmPartitionState) deleteReceivedCongestion(key receivedCongestionKey)
 	}
 }
 func (p *ssnmPartitionState) deleteReceivedAvailability(key receivedCongestionKey) {
-	p.sourceProjection = nil
+	p.removeAvailabilitySource(key)
 	delete(p.receivedAvailability, key)
 	bucket := p.availabilitySources[key.destination]
 	delete(bucket, key)

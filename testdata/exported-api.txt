@@ -61,7 +61,12 @@ const MTPCandidateStateUnknown
 const MTPCandidateUnavailable
 const MTPPauseIndication
 const MTPResumeIndication
+const MTPStatusCauseNone
 const MTPStatusIndication
+const MTPStatusOfferedTraffic
+const MTPStatusSignallingNetworkCongested
+const MTPStatusTransition
+const MTPStatusValidityExpired
 const ManagementASPActivation
 const ManagementASPWithdrawal
 const ManagementCongestionProfileMismatch
@@ -226,6 +231,7 @@ field AssociationStatus.UnackedDataChunks
 field CompatibilityPolicy.Tolerator
 field CongestionConfig.Auditing
 field CongestionConfig.Default
+field CongestionConfig.MaxStatusDestinations
 field CongestionConfig.Networks
 field CongestionConfig.Validity
 field CongestionInputSnapshot.AS
@@ -356,8 +362,10 @@ field MTPDestinationStatus.Destination
 field MTPDestinationStatus.ReceivedCongestionUnknown
 field MTPDestinationStatus.TransportCongestionLevel
 field MTPDestinationStatus.TransportCongestionUnknown
+field MTPIndication.Cause
 field MTPIndication.Destination
 field MTPIndication.Kind
+field MTPIndication.Reason
 field MTPIndication.ResyncRequired
 field MTPRouteConfig.DestinationPointCode
 field MTPRouteConfig.ID
@@ -701,6 +709,7 @@ func NewInvalidRoutingContextError
 func NewInvalidSCTPStreamIDError
 func NewInvalidVersionError
 func NewListenerConfig
+func NewMTPStatusProcedure
 func NewNoConfiguredASError
 func NewParameterFaultErrorFor
 func NewUnexpectedMessageError
@@ -836,6 +845,8 @@ method MTPIndicationKind.String
 method MTPSelectionError.Error
 method MTPSelectionError.Unwrap
 method MTPSelectionReason.String
+method MTPStatusProcedure.Offered
+method MTPStatusProcedure.Reset
 method MTPTransferError.Error
 method MTPTransferError.Unwrap
 method ManagementIndicationKind.String
@@ -940,6 +951,9 @@ type MTPRoutePathID
 type MTPRouteStatus struct
 type MTPSelectionError struct
 type MTPSelectionReason
+type MTPStatusCause
+type MTPStatusProcedure struct
+type MTPStatusReason
 type MTPTransferError struct
 type MTPTransferFailure struct
 type MTPTransferPath struct

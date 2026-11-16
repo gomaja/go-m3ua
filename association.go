@@ -486,7 +486,13 @@ type Association struct {
 	transportSnapshot                atomic.Pointer[TransportCongestionState]
 	transportBusy                    atomic.Bool
 	transportProjectionPending       atomic.Bool
-	transportReady                   atomic.Bool
+	// Active mirror avoids acquiring muState from a scope commit under muAckedRCs.
+	mtpStatusActive                 atomic.Bool
+	transportStatusResetPending     atomic.Bool
+	transportStatusCommitting       atomic.Bool
+	transportStatusForcedCommitting atomic.Bool
+	transportStatusForcedPending    atomic.Bool
+	transportReady                  atomic.Bool
 }
 
 var netMap = map[string]string{
@@ -1987,7 +1993,7 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		// Serialize the start of teardown with state-history delivery. Neither
 		// path waits for a subscriber; muStateEvent never acquires muState.
 		c.muStateEvent.Lock()
-		close(c.done)
+		c.closeMTPStatusDone()
 		c.muStateEvent.Unlock()
 		// Retransmitters check done before each resend, and are cancelled here
 		// as well so none starts another. stopAllTAck does not take the retry
@@ -2006,6 +2012,7 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		c.muState.Lock()
 		previousState := c.state
 		c.state = StateASPDown
+		c.mtpStatusActive.Store(false)
 		c.localIPSPState = StateASPDown
 		c.appliedState = StateASPDown
 		c.muState.Unlock()
@@ -2559,6 +2566,7 @@ func (c *Association) addDynamicASKeyChanged(key ASKey, routingKey RoutingKey, l
 		return
 	}
 	c.muDynamicASKeys.Lock()
+	finishStatus := c.beginMTPStatusDynamicChangeLocked(key.RoutingContext, local)
 	if local {
 		c.dynamicLocalASKeys[key.RoutingContext] = key
 		c.dynamicLocalASKeyVersions[key.RoutingContext] = c.nextDynamicASKeyVersionLocked()
@@ -2572,6 +2580,7 @@ func (c *Association) addDynamicASKeyChanged(key ASKey, routingKey RoutingKey, l
 			c.dynamicPeerTrafficModes[key.RoutingContext] = routingKey.TrafficMode
 		}
 	}
+	finishStatus()
 	c.muDynamicASKeys.Unlock()
 }
 
@@ -2600,6 +2609,10 @@ func (c *Association) removeDynamicASKeyChanged(routingContext uint32, local boo
 		return
 	}
 	c.muDynamicASKeys.Lock()
+	finishStatus := func() {}
+	if _, held := c.dynamicPeerASKeys[routingContext]; held {
+		finishStatus = c.beginMTPStatusDynamicChangeLocked(routingContext, local)
+	}
 	if local {
 		delete(c.dynamicLocalASKeys, routingContext)
 		delete(c.dynamicLocalASKeyVersions, routingContext)
@@ -2609,6 +2622,7 @@ func (c *Association) removeDynamicASKeyChanged(routingContext uint32, local boo
 		delete(c.dynamicPeerASKeyVersions, routingContext)
 		delete(c.dynamicPeerTrafficModes, routingContext)
 	}
+	finishStatus()
 	c.muDynamicASKeys.Unlock()
 }
 
@@ -2672,6 +2686,8 @@ func (c *Association) removeDynamicASKeyVersionChanged(routingContext uint32, lo
 	if !exists {
 		return ASKey{}, false
 	}
+	finishStatus := c.beginMTPStatusDynamicChangeLocked(routingContext, local)
+	defer finishStatus()
 	delete(keys, routingContext)
 	delete(versions, routingContext)
 	delete(trafficModes, routingContext)
@@ -3093,7 +3109,12 @@ func (c *Association) outboundRoutingContextActive(rtCtx uint32) bool {
 func (c *Association) setState(s State) {
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muState.Lock()
+	wasActive := c.state == StateASPActive
+	changed := c.state != s
 	c.state = s
+	if changed && (wasActive || s == StateASPActive) {
+		c.invalidateMTPStatusState()
+	}
 	// Kept in step so a later transition measures itself against the state the
 	// Association was actually placed in, not against a stale applied value.
 	c.appliedState = s
@@ -3116,6 +3137,7 @@ func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
+	finishStatusChange := c.beginMTPStatusScopeChangeLocked()
 	changed := !c.ackedRCsScoped
 	if c.ackedRCs == nil {
 		c.ackedRCs = make(map[uint32]struct{})
@@ -3137,6 +3159,7 @@ func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 		c.ackedRCs[rc] = struct{}{}
 		delete(c.overriddenRCs, rc)
 	}
+	finishStatusChange()
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
 	if changed {
@@ -3175,10 +3198,12 @@ func (c *Association) forgetAckedRoutingContexts() {
 
 func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 	c.muAckedRCs.Lock()
+	finishStatusChange := c.beginMTPStatusScopeChangeLocked()
 	c.ackedRCs = nil
 	c.ackedRCsScoped = false
 	c.ackedContextlessAS = false
 	c.overriddenRCs = nil
+	finishStatusChange()
 	c.muAckedRCs.Unlock()
 }
 
@@ -3204,6 +3229,7 @@ func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
+	finishStatusChange := c.beginMTPStatusScopeChangeLocked()
 	if c.role == RoleIPSP && !c.isIPSPDoubleExchange() {
 		// Single Exchange uses the same per-AS state in both directions. An
 		// Alternate ASP Active Notify therefore makes each named context inactive,
@@ -3223,6 +3249,7 @@ func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 	for _, rc := range rcs {
 		c.overriddenRCs[rc] = struct{}{}
 	}
+	finishStatusChange()
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
 	c.notifyASPRouteStateChanged()
@@ -3304,6 +3331,7 @@ func (c *Association) commitPeerRoutingContextsActive(rcs []uint32) bool {
 	stateChanged := c.state != StateASPActive
 	c.state = StateASPActive
 	if stateChanged {
+		c.invalidateMTPStatusState()
 		c.recordStateChange(StateASPActive)
 	}
 	// The Application Server registry authorizes outbound traffic, and it is

@@ -171,7 +171,9 @@ func (m *transportCongestionMonitor) sample(e *Endpoint, job transportCongestion
 	after := detector.observe(m.config, now, backlog, err)
 	diagnosticDue := after.Level != before.Level || after.Level > 0 && (before.DiagnosticAt.IsZero() || now.Sub(before.DiagnosticAt) >= time.Second)
 
+	finishStatus := a.beginTransportStatusChange(before, after, initial)
 	a.transportSnapshot.Store(&after)
+	finishStatus()
 	changed := m.publishLocked(a, before, after, initial)
 	queued := changed && m.queueProjectionLocked(a)
 	a.transportMu.Unlock()
@@ -203,7 +205,9 @@ func (m *transportCongestionMonitor) missed(e *Endpoint, job transportCongestion
 			after.Known = false
 		}
 		detector.state = after
+		finishStatus := a.beginTransportStatusChange(before, after, initial)
 		a.transportSnapshot.Store(&after)
+		finishStatus()
 		changed = m.publishLocked(a, before, after, initial)
 		queued = changed && m.queueProjectionLocked(a)
 	}
@@ -283,6 +287,7 @@ func (c *Association) resetTransportCongestionEpoch() {
 	releaseOptional := c.beginOptionalSSNMChange(false)
 	defer releaseOptional()
 	c.transportMu.Lock()
+	finishStatus := c.beginTransportStatusReset(true)
 	before := c.transportSnapshot.Load()
 	c.epoch.Add(1)
 	if c.role == RoleSGP {
@@ -301,6 +306,10 @@ func (c *Association) resetTransportCongestionEpoch() {
 		*detector = transportCongestionDetector{state: state}
 		c.transportSnapshot.Store(&state)
 	}
+	// Retire the old lifetime's reminder interval even without a detector.
+	// Capture this before a new-epoch sample can replace the reset snapshot
+	// while route projection is delayed (RFC 4666 §4.3.3).
+	finishStatus()
 	c.transportMu.Unlock()
 	if store := c.ssnmStore(); store != nil {
 		c.projectReceivedChanges(store.retireReceivedEpoch(c.ID(), c.Epoch()))

@@ -18,7 +18,7 @@ Both databases identify the current Proposed Standard without an incoming
 obsolete/update relationship. The
 [SIGTRAN documents page](https://datatracker.ietf.org/wg/sigtran/documents/)
 identifies a concluded working group; the complete
-[M3UA draft query](https://datatracker.ietf.org/api/v1/doc/document/?name__contains=m3ua&type__slug=draft&format=json&limit=100)
+[M3UA draft query](https://datatracker.ietf.org/api/v1/doc/document/?name__contains=m3ua&type=draft&limit=100&format=json)
 returned 16 historical drafts with past expiry dates; none was an unexpired
 successor. No current successor was found.
 The [errata records](https://errata.rfc-editor.org/search/?rfc_number=4666&presentation=records)
@@ -59,7 +59,7 @@ model or show examples without creating a separate implementation requirement.
 | [1.4.3.4 IPSP considerations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.3.4) | Mandatory when IPSP is used | Implemented | `RoleIPSP` requires an explicit Association-level exchange model. Single Exchange and Double Exchange are implemented independently from SCTP association initiation. |
 | [1.4.4 Redundancy models](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.4) | Optional models | Implemented | Override, Loadshare, Broadcast, configurable n+k activation, explicit smooth start, recovery, shortage notification, restoration, and failover are implemented per exact ASKey. |
 | [1.4.5 Flow control](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.5) | Optional | Implemented | Association traffic can be stopped through the ASP Inactive and ASP Down procedures; bounded queues and explicit overflow prevent silent mandatory-event loss. |
-| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Mandatory/Optional | Partial | Periodic SCTP charged-memory detection and ASP/IPSP MTP-STATUS are implemented. Independent implementation indications ManagementTransportCongestion (TRANSPORT-CONGESTION) and ManagementDataQueueCongestion (DATA-QUEUE-CONGESTION) report outbound transport pressure and scoped inbound overflow to Layer Management. Inbound overflow recovers after sustained drain; international-form SCON has no wire clear. Received SCON stays independent. Transport route preference is opt-in because rerouting may missequence SLS traffic. SGP peer reports have independent bounded retention and loss/resync; CongestionInputs supplies membership/peer/transport component versions with bounded retry and a Consistent flag, not an atomic SPMC verdict. SGP policy is a veto outside Endpoint/AS/delivery locks; still-stale decisions return known-not-sent ErrCongestionDecisionStale. SGP SS7 TFC/SPMC actions belong to the application/NIF: §1.4.6 uses MAY and makes triggering implementation dependent. Explicit congestion-method profiles and local-user priority admission are implemented; repeated User Part notification remains an application responsibility. Optional local validity and ASP audit policies are available through CongestionConfig.Validity/Auditing; see [validity and audit policy](#received-congestion-validity-and-audits). |
+| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Mandatory/Optional | Partial | Periodic SCTP charged-memory detection and ASP/IPSP MTP-STATUS are implemented. Independent implementation indications ManagementTransportCongestion (TRANSPORT-CONGESTION) and ManagementDataQueueCongestion (DATA-QUEUE-CONGESTION) report outbound transport pressure and scoped inbound overflow to Layer Management. Inbound overflow recovers after sustained drain; international-form SCON has no wire clear. Received SCON stays independent. Transport route preference is opt-in because rerouting may missequence SLS traffic. SGP peer reports have independent bounded retention and loss/resync; CongestionInputs supplies membership/peer/transport component versions with bounded retry and a Consistent flag, not an atomic SPMC verdict. SGP policy is a veto outside Endpoint/AS/delivery locks; still-stale decisions return known-not-sent ErrCongestionDecisionStale. SGP SS7 TFC/SPMC actions belong to the application/NIF: §1.4.6 uses MAY and makes triggering implementation dependent. Explicit congestion-method profiles, local-user priority admission and routed ASP offered-traffic status are implemented. International and national-without-priorities status follows Q.704 (07/96) §§11.2.3.1/11.2.5; IPSP/application-owned routing uses NewMTPStatusProcedure. Applications fan out each primitive to each registered MTP3-User; see [continued status](#continued-mtp-status). Optional local validity and ASP audit policies are available through CongestionConfig.Validity/Auditing; see [validity and audit policy](#received-congestion-validity-and-audits). |
 | [1.4.7 SCTP stream mapping](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.7) | Mandatory/Recommended | Implemented | Management and SSNM use stream 0; DATA uses an SLS-derived nonzero stream while preserving same-flow order. |
 | [1.4.8 SCTP initiation model](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.8) | Recommended | Implemented | ASP and SGP Endpoints can each initiate or accept SCTP Associations. `Dial`, `Listen`, and `Accept` never select the M3UA role. |
 | [1.5 Sample configurations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.5) | Descriptive | Informative | ASP/SGP examples exist, and IPSP Single and Double Exchange configurations and bidirectional transfer matrices are covered. |
@@ -445,3 +445,130 @@ and [migration
 guide](migration-v1.2.md#received-congestion-validity-and-audits). These
 contract descriptions are not additional wire, timing or resource acceptance
 results.
+
+## Continued MTP status
+
+RFC 4666 §1.4.6's reference to current MTP3 procedures is service prose without
+an uppercase MUST; optional SCON/TFC triggering remains MAY. Its §4.5.2.2
+aggregate-change procedure remains distinct from continued offered-traffic
+status. Q.704 (07/96) §§11.2.3.1 and 11.2.5 prescribe initial and at least
+every-eight-message notification for international and national-without-priorities
+methods. Routed ASP `MTPTransfer` counts once per validated offer before
+transport, so a failed send counts and broadcast copies do not. Status is due
+on offer 1 and no later than eight offers after each indication. An uninterrupted
+interval reports at 1/9/17; resets can report earlier. Raw writes do not count. The
+full-level-2 octet alternative is not applied to UserData. National priority
+status remains transition-driven under §11.2.4.
+
+Conservative engineering policy suppresses repeats and retires automatic
+intervals for either `ReceivedCongestionUnknown` or `TransportCongestionUnknown`,
+even when a surviving contribution keeps `Congested` true. Supplying such status
+to the helper resets it. Transport uncertainty uses a normal transition reason,
+never received-validity expiry; this policy adds no Q.704 MUST.
+
+Each live exact-DPC LRU entry owns one restart mark in a single Endpoint
+registry. Matching uses shared immutable routing configuration and the changed
+input's scope; entries retain no association or source snapshots. Actual
+availability, congestion or freshness changes, including changes selected by
+the newest covering input, uncertainty, expiry and renewal after expiry,
+commit marks before route projection. Binding admission/retirement, association
+attachment, Active/Done/close and traffic-permission changes also mark affected
+entries at commit. An eligible routed offer consumes its mark and resets the interval.
+A later onset marks it again even if an offer already consumed the preceding
+clear, so coalesced projection cannot hide that restart.
+
+Equal renewals preserve the interval when all relevant newest inputs,
+including ties, remain unchanged and fresh. Timestamp/revision-only changes
+and changes outside the entry's point-code or configured SG/AS route scope
+also preserve it. Canonical mark matching uses that configured owner, just like
+canonical transfer and observation; peer-local NA/RC labels do not narrow it
+(RFC 4666 §§1.2, 1.4.2.1, 3.3.1). Standalone reads and source-specific
+invalidation keep their independent applicability rules. Association and lifecycle changes may conservatively mark
+all provisioned routes, including initially inactive or
+later-attached alternatives; per-AS permission changes mark the routes whose
+permission changed. Relevant changes can therefore cause extra initial
+reminders even while another contribution sustains congestion. The indication
+still carries the current coalesced route projection, without recomputing a
+fresh canonical aggregate for the offer. Marks retire with their LRU entries
+and Endpoint close and retain no event history.
+
+Mark matching is bounded by the entry budget, the change's own scope, the
+24-bit point-code width and configured candidates. It does not scan retained
+source history or recompute an aggregate per entry. A shared input index
+resolves a received source's newest covering input with at most 25 prefix
+checks per query. This also detects an equal broad reassertion replacing a
+newer narrow clear, including equivalent wire-scope aliases. An expired input
+tied for newest revision conservatively makes renewal restart the interval;
+it does not change the canonical projection, status payload or Cause/Reason.
+Removing that input lets unchanged fresh renewals preserve cadence again.
+Shared per-prefix/per-revision counts track retained records and expirations.
+For H retained received-source records, the index owns at most 2H links and
+2H revision groups, released with their source keys. It retains no additional
+statements, destination aggregate or interval-by-association table. These
+structural bounds are engineering contracts, not portable heap-byte or RSS
+measurements.
+
+Availability history uses one shared incremental prefix index for ordinary
+projection and offered-status marks. Each retained source has at most two links
+(all-source and normalized scoped inputs); a query checks at most 25 prefixes.
+Availability changes do not rebuild the separate congestion aggregate. Admission,
+withdrawal and forget fence their actual availability and scalar removals with
+marks, including when a remaining source supplies the same value after the
+scalar copy disappears. Equal current-input renewals preserve cadence. Restart
+settles optional DAUD before its existing epoch-reset fence; compact expiry
+identities leave the final validity notification as the only expiry origin.
+These operations add no wait to offered transfer beyond short bookkeeping locks.
+
+Bounded atomic flags per association preserve semantic transport Known/Level
+changes, including clear, later onset and positive-level changes, across
+coalesced projection. A commit fence begins before snapshot publication and
+stays visible until a pending reset has been posted. Consumers preserve the
+Endpoint dirty hint while a commit is in progress, so an offer consuming a
+clear cannot absorb a later onset or erase an in-flight snapshot change.
+Storage is four booleans per association plus the Endpoint hint, with no event
+history, additional sampler locks or user callbacks.
+
+The next routed offer or projection conservatively retires counters for the
+association's configured routes, covering activation before projection.
+Ordinary observations reset only while the association is Active at
+consumption; ordinary samples consumed while inactive preserve cadence.
+Forced epoch retirement is independent of Active. Sampling is fenced even
+when it starts inactive because activation can cross snapshot publication.
+Another contribution may sustain congestion, so a reset can produce an extra
+initial reminder without a false clear; the limit is no later than eight
+offers, not exactly eight. Equal Known/Level observations, including changes
+to diagnostic fields or timestamps alone, and unrelated peer timers preserve
+the interval. Sampling never waits for route or AS locks. These are engineering
+choices, not additional RFC or Q.704 requirements.
+
+Only an explicit expiration operation sets `MTPStatusValidityExpired`.
+Availability, transport or lifecycle operations that expose already-expired
+knowledge retain `MTPStatusTransition`; an uncertain noncongested result uses
+`MTPStatusCauseNone` and cannot indicate measured congestion clear. The RFC's
+optional validity timer (§3.4.4) does not prescribe these Go trigger values.
+
+`MTPStatusProcedure` exposes that boundary to IPSP/application-owned routing.
+A changed destination resets automatically; clear or uncertain status supplied
+to `Offered` also resets the interval. The helper sees snapshots only. Call
+`Reset()` on known clear, uncertainty, expiry or local lifecycle/method
+retirement between offers, including a source ending masked by a surviving
+contribution. The application must order source updates and resets with its
+offers at its own routing boundary. `Endpoint.SubscribeSSNM` can supply ordered
+source updates; handle subscription loss by resetting and resynchronizing.
+The coalesced `Endpoint.MTPIndications` stream alone cannot reconstruct hidden
+source endings. IPSP and SGP peer-input procedures have the same application-owned
+ordering responsibility. Reset keeps the configured profile; construct a new
+procedure for a changed method. Routed ASP `MTPTransfer` maintains restart marks
+and fenced transport reset flags internally, so do not also call the helper
+for those offers.
+
+`MTPIndications` is one bounded stream; the application fans each primitive to
+each registered user. Cause/reason fields distinguish congestion onset, repeat
+and clear from received-validity expiry, which is unknown knowledge rather than
+abatement. Exact-DPC retention, resets, the Endpoint-wide engineering budget
+and migration details are documented in [continued status](../README.md#continued-mtp-status)
+and the [migration guide](migration-v1.2.md#continued-mtp-status).
+Level-4 transmission resumption remains the user's decision (§11.2.3.3).
+Q.Imp704 (12/00) changes none of these clauses; the separately advertised
+17 September 1999 covering note remains unassessed. This is not a claim of
+complete corrected-Q.704, ANSI or TTC compliance.
