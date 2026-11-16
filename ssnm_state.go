@@ -63,7 +63,7 @@ const (
 // Endpoint. A field less than or equal to zero selects its default; a negative
 // field is a configuration error.
 type SSNMStateConfig struct {
-	// MaxRecords bounds retained availability, destination congestion, and
+	// MaxRecords bounds retained local contributions, availability, destination congestion, and
 	// peer congestion records across every partition. Each peer AS/range and
 	// wire scope costs one record independently of destination knowledge.
 	// Validity or auditing retains congestion source history; auditing also retains
@@ -78,6 +78,7 @@ type SSNMStateConfig struct {
 	// Routing Context for its retained scope and normalized scope key.
 	// Availability/congestion source rows charge 144 bytes plus 4 per wire RC,
 	// including their one captured AS.
+	// Local contributions charge 320 bytes plus source bytes and 8 per wire RC.
 	// Audit jobs charge 256 bytes plus Info String bytes, 8 per wire RC,
 	// 144 per binding (64 for its token, 80 for its origin), and 64 per partition.
 	// Derived source/job indexes and projection caches have cardinality bounds
@@ -96,6 +97,9 @@ type SSNMStateConfig struct {
 	// SubscriptionQueueSize bounds the deltas one subscription retains while
 	// the application is not reading them. Overflow is reported as continuity
 	// loss and cleared only by a successful Resync.
+	// A single legal report plus one automation pass can exceed the default;
+	// this is a queue bound, not a whole-burst admission guarantee. Size both
+	// queue limits for the event count and accounted sum of the intended burst.
 	SubscriptionQueueSize int
 	// SubscriptionQueueBytes bounds the portable accounted payload of queued
 	// events. Zero selects DefaultSSNMSubscriptionQueueBytes; a positive limit
@@ -113,6 +117,27 @@ type SSNMStateConfig struct {
 	// Total queued events/bytes can still overflow; such loss requires Resync.
 	// It also charges the byte lengths of Reason and the event/report
 	// partition identity strings.
+	// Each individual library event fits the default byte budget. Oversized
+	// reports use explicit bounded fragments; a continuously draining consumer
+	// must apply the complete sequence. A whole report plus a pass may overflow.
+	// Queued deltas are then delivered before one continuity-loss marker;
+	// subsequent deltas are suppressed until Resync returns the exact store
+	// snapshot and resets both queue limits. No gap is silently accepted.
+	//
+	// For a conservative attributed-output envelope, let N=MaxRecords,
+	// p=min(N,MaxRecordsPerPartition,MaxRecordsPerPeer), F be the report's
+	// captured partition fan-out (at most 16382), I=min(N,F*ceil(p/2048)),
+	// Q=Congestion.Publication.MaxPending and B=Congestion.Publication.MaxBytes.
+	// One report has at most F*(2+p)+3*N+I+8 events and at most
+	// F*(1022+1048575+262144*p)+3*N*66806+672*I+48*N+6160 bytes.
+	// One pass adds at most ceil(N/256)+Q+7 events and
+	// 512*ceil(N/256)+56*N+B+272*Q+5488 bytes. These sum independent ceilings,
+	// not simultaneously attainable maxima; include initial queue occupancy
+	// and separately add concurrent unrelated producers. Prefer the exact
+	// sum from the published accounting weights for a known deployment's
+	// fan-out/history, or provision both conservative envelopes. Validity,
+	// auditing and publication are all included; Resync remains necessary
+	// whenever either configured limit is insufficient.
 	// Snapshot results, the fixed continuity-loss marker, queue backing-array
 	// capacity, and allocator overhead are outside this accounting. It is not
 	// a Go heap or RSS limit. Either queue limit losing continuity requires
@@ -422,10 +447,11 @@ type SSNMSnapshot struct {
 	// destination knowledge. It contains no replayable Concerned Destination
 	// triggers. Every scope is owned by the caller.
 	PeerCongestion []PeerCongestionState
-	// RecordsRefused counts dimension, validity-source and peer records a resource bound refused since
-	// the store was created.
+	// RecordsRefused counts destination, scoped-source, peer and local contribution
+	// records refused from retention since the store was created.
 	RecordsRefused uint64
-	// ReportsRefused counts whole reports a resource bound refused.
+	// ReportsRefused counts whole reports and local-source observations refused
+	// from retention, including contended local queue-source admission.
 	ReportsRefused uint64
 	// PartitionsInvalidated counts destination invalidation events and
 	// last-binding partition retirements. Oversized refusals that remove only
@@ -486,6 +512,8 @@ type ssnmCongestionRecord struct {
 }
 
 type ssnmPartitionState struct {
+	localCongestion                        map[localCongestionBucketKey]*localCongestionBucket
+	localRecords                           int
 	availabilityProjection                 *ssnmAvailabilityIndex
 	statusSources                          *mtpStatusSourceIndex
 	statusActiveBindings                   int
@@ -504,7 +532,7 @@ type ssnmPartitionState struct {
 }
 
 func (p *ssnmPartitionState) records() int {
-	return len(p.availability) + len(p.congestion) + len(p.peerCongestion) + len(p.receivedCongestion) + len(p.receivedAvailability)
+	return p.localRecords + len(p.availability) + len(p.congestion) + len(p.peerCongestion) + len(p.receivedCongestion) + len(p.receivedAvailability)
 }
 
 func (p *ssnmPartitionState) trafficAuthorized() bool {
@@ -518,29 +546,38 @@ func (p *ssnmPartitionState) trafficAuthorized() bool {
 
 // ssnmState is the Endpoint's bounded, route-independent SSNM knowledge.
 //
-// Every mutation and every read runs under one mutex. That is what makes a
+// Retained maps and subscription state use one mutex. That makes a
 // subscription's snapshot and its delta stream atomic with respect to each
 // other: the snapshot is taken and the subscriber registered in the same
-// critical section, so no report can slip between them.
+// critical section, so no report can slip between them. Local contributions
+// additionally depend on atomic lifetime and queue-episode tokens; their
+// CongestionInputs view brackets those marks with LocalGeneration. Local
+// contributions are not part of the SSNM subscription's replicated state.
 type ssnmState struct {
-	statusMarks        *mtpStatusMarks
-	auditByAssociation map[AssociationID]map[destinationAuditKey]struct{}
-	auditBySource      map[destinationAuditSourceKey]map[destinationAuditKey]struct{}
-	work               *ssnmWorkCount
-	validity           time.Duration
-	auditing           *DestinationAuditConfig
-	now                func() time.Time
-	audits             map[destinationAuditKey]*destinationAuditJob
-	auditNext          time.Time
-	auditGeneration    uint64
-	auditActivated     map[AssociationID]map[ASKey]queueCongestionBinding
-	mu                 sync.Mutex
-	limits             SSNMStateConfig
-	partitions         map[SSNMPartition]*ssnmPartitionState
-	peerRecords        map[ssnmPeerKey]int
-	records            int
-	bytes              int
-	revision           uint64
+	localByAssociation  map[AssociationID]map[ASKey]*localCongestionBucket
+	publicationConfig   CongestionPublicationConfig
+	publications        map[congestionPublicationKey]*congestionPublication
+	publicationBytes    int
+	publicationCounters CongestionPublicationCounters
+	publicationPass     sync.Mutex
+	statusMarks         *mtpStatusMarks
+	auditByAssociation  map[AssociationID]map[destinationAuditKey]struct{}
+	auditBySource       map[destinationAuditSourceKey]map[destinationAuditKey]struct{}
+	work                *ssnmWorkCount
+	validity            time.Duration
+	auditing            *DestinationAuditConfig
+	now                 func() time.Time
+	audits              map[destinationAuditKey]*destinationAuditJob
+	auditNext           time.Time
+	auditGeneration     uint64
+	auditActivated      map[AssociationID]map[ASKey]queueCongestionBinding
+	mu                  sync.Mutex
+	limits              SSNMStateConfig
+	partitions          map[SSNMPartition]*ssnmPartitionState
+	peerRecords         map[ssnmPeerKey]int
+	records             int
+	bytes               int
+	revision            uint64
 	// epochs numbers binding generations across the whole store rather than
 	// per partition. A partition that loses its last binding is deleted, so a
 	// per-partition counter would restart at the same value the retired
@@ -815,6 +852,11 @@ func (s *ssnmState) retirePartitionRecordsLocked(partition SSNMPartition, associ
 	if !exists {
 		return
 	}
+	for _, bucket := range state.localCongestion {
+		if bucket.association == association {
+			s.dropLocalCongestionBucketLocked(bucket)
+		}
+	}
 	pending, bound := state.bindings[association]
 	if !bound {
 		return
@@ -892,6 +934,7 @@ func (s *ssnmState) retireAssociation(association AssociationID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.retireDestinationAuditsLocked(association, nil)
+	s.retireLocalCongestionLocked(association, nil)
 	delete(s.peerSources, association)
 	delete(s.liveSources, association)
 	if len(s.liveSources) == 0 {
@@ -1194,7 +1237,7 @@ func (s *ssnmState) applyPreparedLocked(report SSNMReport, resolved []ASKey, sou
 		}
 	}
 	event := SSNMEvent{
-		Kind:      SSNMReportEvent,
+		Kind:      SSNMReportObservedEvent,
 		Revision:  revision,
 		Partition: report.Partition,
 		Epoch:     report.Epoch,
@@ -1205,9 +1248,9 @@ func (s *ssnmState) applyPreparedLocked(report SSNMReport, resolved []ASKey, sou
 	// retained knowledge of exactly the destinations written, in both
 	// dimensions. Every subscriber takes its own copy of it.
 	if len(s.subscribers) > 0 {
-		event.Updated = make([]SSNMDestinationKnowledge, len(writes))
+		event.DestinationUpdates = make([]SSNMDestinationKnowledge, len(writes))
 		for index, write := range writes {
-			event.Updated[index] = state.retainedKnowledge(write.key)
+			event.DestinationUpdates[index] = state.retainedKnowledge(write.key)
 		}
 	}
 	s.publishLocked(event)
@@ -1335,7 +1378,7 @@ func (s *ssnmState) publishEventOnlyLocked(report SSNMReport) error {
 	revision := s.nextRevisionLocked()
 	report.Revision = revision
 	s.publishLocked(SSNMEvent{
-		Kind:      SSNMReportEvent,
+		Kind:      SSNMReportObservedEvent,
 		Revision:  revision,
 		Partition: report.Partition,
 		Epoch:     report.Epoch,
@@ -1544,6 +1587,7 @@ func (s *ssnmState) close() {
 	s.auditActivated = nil
 	s.liveSources = nil
 	s.peerSources = nil
+	s.localByAssociation = nil
 	s.partitions = make(map[SSNMPartition]*ssnmPartitionState)
 	s.peerRecords = make(map[ssnmPeerKey]int)
 	s.records, s.bytes = 0, 0

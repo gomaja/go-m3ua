@@ -386,7 +386,9 @@ func TestMTPTransferProjectsStateRetainedForADynamicallyBoundApplicationServer(t
 	}{{8, "as-other"}, {9, "as-dynamic"}, {11, "as-dynamic"}} {
 		key := ASKey{RoutingContext: assigned.routingContext, RoutingContextSet: true}
 		association.addDynamicASKey(key, RoutingKey{}, false)
-		association.noteCanonicalRemoteAS(assigned.routingContext, assigned.applicationServer)
+		if err := association.noteCanonicalRemoteAS(assigned.routingContext, assigned.applicationServer); err != nil {
+			t.Fatal(err)
+		}
 	}
 	association.noteRoutingContextsAcked(params.NewRoutingContext(8, 9, 11))
 	association.syncSSNMBindings()

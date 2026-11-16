@@ -509,7 +509,7 @@ func TestOfferedStatusIPSPMappingUsesExplicitProcedure(t *testing.T) {
 	}
 	var due []int
 	for offer := 1; offer <= 17; offer++ {
-		if indication := p.Offered(status); indication != nil {
+		if indication := offeredProcedureStatus(t, p, status); indication != nil {
 			if indication.Destination != status {
 				t.Fatalf("mapped primitive=%+v", indication)
 			}

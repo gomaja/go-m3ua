@@ -124,7 +124,7 @@ func (subscriber *ssnmSubscriber) observe(event m3ua.SSNMEvent, received int64) 
 func (subscriber *ssnmSubscriber) observeLocked(event m3ua.SSNMEvent, received int64) {
 	subscriber.counts.Events++
 	switch event.Kind {
-	case m3ua.SSNMReportEvent:
+	case m3ua.SSNMReportObservedEvent:
 		subscriber.counts.Reports++
 		subscriber.observeReportLocked(event, received)
 	case m3ua.SSNMContinuityLostEvent:
@@ -530,7 +530,7 @@ func (subscriber *ssnmSubscriber) pauseAndRecover(ctx context.Context, clock mea
 		}
 		queued++
 		queuedBytes += size
-		entries += len(event.Updated)
+		entries += len(event.DestinationUpdates)
 		subscriber.observe(event, received)
 	}
 	drained, _ := clock.Now()

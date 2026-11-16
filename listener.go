@@ -300,6 +300,9 @@ func (e *Endpoint) Listen(network string, laddr *sctp.Addr, cfg *ListenerConfig)
 		if err := validateAssociationConfigForRole(role, l.AssociationConfig); err != nil {
 			return nil, err
 		}
+		if err := e.validateCongestionAdmissionMonitor(l.AssociationConfig); err != nil {
+			return nil, err
+		}
 	}
 
 	n, ok := netMap[network]

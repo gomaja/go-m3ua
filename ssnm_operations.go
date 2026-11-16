@@ -572,6 +572,10 @@ func buildSSNMParameters(
 }
 
 func buildWireScope(scope WireScope) (*params.Param, *params.Param, error) {
+	// RFC 4666 §3.2: a parameter's uint16 length includes its four-byte header.
+	if len(scope.RoutingContexts) > 16382 || !scope.RoutingContextSet && len(scope.RoutingContexts) != 0 {
+		return nil, nil, fmt.Errorf("%w: unencoded or oversized Routing Context list", ErrInvalidParameterValue)
+	}
 	var networkAppearance *params.Param
 	if scope.NetworkAppearanceSet {
 		networkAppearance = params.NewNetworkAppearance(scope.NetworkAppearance)
@@ -594,6 +598,9 @@ func buildWireScope(scope WireScope) (*params.Param, *params.Param, error) {
 }
 
 func buildAffectedPointCodes(destinations []PointCodeRange) (*params.Param, error) {
+	if len(destinations) > 16382 {
+		return nil, fmt.Errorf("%w: Affected Point Code list exceeds parameter length", ErrInvalidParameterValue)
+	}
 	if len(destinations) == 0 {
 		return nil, ErrMissingAffectedPointCode
 	}

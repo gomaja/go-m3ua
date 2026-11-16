@@ -240,7 +240,9 @@ func TestReportRangesMatchesThePerStatusWalkWithRegistrationsAndMaskedRoutes(t *
 		association.cfg.PeerSGP = &identity
 		for routingContext, remoteAS := range variant.registered {
 			association.addDynamicASKey(ASKey{RoutingContext: routingContext, RoutingContextSet: true}, RoutingKey{}, false)
-			association.noteCanonicalRemoteAS(routingContext, remoteAS)
+			if err := association.noteCanonicalRemoteAS(routingContext, remoteAS); err != nil {
+				t.Fatal(err)
+			}
 		}
 		associations = append(associations, association)
 	}

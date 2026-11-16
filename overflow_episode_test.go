@@ -16,25 +16,77 @@ import (
 )
 
 func overflowAssociation(t *testing.T) (*Association, *[]messages.M3UA) {
+	return overflowAssociationForRole(t, RoleASP)
+}
+func overflowAssociationForRole(t *testing.T, role Role) (*Association, *[]messages.M3UA) {
 	t.Helper()
-	c, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1, 2)
-	c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionInternational), 0)
+	c, sent := newTestConnWithContexts(t, StateASPActive, role, 1, 2)
+	c.endpoint = methodEndpointForTest(t, role, uint8(CongestionInternational), 0)
+	if role != RoleASP {
+		setInventoryNetworkAppearance(&c.cfg.ApplicationServers, params.NewNetworkAppearance(7))
+	}
 	c.noteRoutingContextsAcked(params.NewRoutingContext(1, 2))
+	attachOverflowEndpointForTest(t, c)
+	*sent = nil
 	c.dataChan = make(chan *DataMessage, 2)
 	deliver(t, c, 1, inboundData(1, "queued"))
 	deliver(t, c, 1, inboundData(1, "queued"))
 	return c, sent
 }
-
+func attachOverflowEndpointForTest(t *testing.T, c *Association) {
+	t.Helper()
+	e := c.endpoint
+	e.congestionAutomationOnce.Do(func() {}) // These recorders use explicit scheduler passes.
+	if c.role != RoleASP {
+		c.as = e.as
+	}
+	if !e.trackAssociation(c) {
+		t.Fatal("track overflow association")
+	}
+	if c.role == RoleSGP || c.role == RoleIPSP {
+		c.as.aspStateChanged(c, StateASPActive)
+		c.syncSSNMBindings()
+	}
+}
+func runOverflowPublicationsForTest(c *Association) {
+	if c.endpoint == nil {
+		return
+	}
+	e := c.endpoint
+	e.ssnm.mu.Lock()
+	now := e.ssnm.automationNow()
+	if c.optionalPublicationNext.After(now) {
+		now = c.optionalPublicationNext
+	}
+	limit := e.ssnm.publicationConfig.MaxPending
+	interval := e.ssnm.publicationConfig.MinReportInterval
+	e.ssnm.mu.Unlock()
+	for n := 0; n < limit; n++ {
+		pending := false
+		for _, p := range e.CongestionPublications() {
+			pending = pending || p.Association == c.ID() && p.Pending
+		}
+		if !pending {
+			return
+		}
+		before := e.CongestionPublicationCounters()
+		e.runCongestionAutomation(now.Add(time.Duration(n) * interval))
+		after := e.CongestionPublicationCounters()
+		if after.Failed > before.Failed || after.Submitted == before.Submitted {
+			return
+		}
+	}
+}
 func handleOverflowReports(t *testing.T, c *Association) {
 	t.Helper()
 	for {
 		select {
 		case err := <-c.errChan:
-			if e := c.handleErrors(err); e != nil {
-				t.Fatal(e)
+			if err := c.handleErrors(err); err != nil {
+				t.Fatal(err)
 			}
 		default:
+			runOverflowPublicationsForTest(c)
 			return
 		}
 	}
@@ -110,8 +162,7 @@ func TestOverflowEpisodeStaysWhileOccupancyStaysHigh(t *testing.T) {
 }
 
 func TestOverflowAtSGPDoesNotReportSS7DestinationCongestion(t *testing.T) {
-	c, sent := overflowAssociation(t)
-	c.role = RoleSGP
+	c, sent := overflowAssociationForRole(t, RoleSGP)
 	setInventoryNetworkAppearance(&c.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	deliver(t, c, 1, inboundData(1, "discarded"))
 	handleOverflowReports(t, c)
@@ -177,9 +228,11 @@ func TestOverflowManagementSurvivesFailedSCON(t *testing.T) {
 }
 
 func TestOverflowScopesRetainPresenceAndOriginator(t *testing.T) {
-	c, _ := newTestConnWithContexts(t, StateASPActive, RoleASP, 0)
+	c, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 0)
 	c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionInternational), 0)
 	c.noteRoutingContextsAcked(params.NewRoutingContext(0))
+	attachOverflowEndpointForTest(t, c)
+	c.dataOverflowWorker = true
 	c.dataChan = make(chan *DataMessage, 1)
 	deliver(t, c, 1, messages.NewData(nil, nil, params.NewProtocolData(1, 2, 3, 0, 0, 1, nil), nil))
 	type wireCase struct {
@@ -199,7 +252,11 @@ func TestOverflowScopesRetainPresenceAndOriginator(t *testing.T) {
 		if ind.Scope.NetworkAppearanceSet != (tc.na != nil) || ind.Scope.RoutingContextSet != (tc.rc != nil) || ind.OriginatingPointCode != tc.opc || ind.DestinationPointCode != tc.dpc {
 			t.Fatalf("onset = %+v", ind)
 		}
-		s := c.overflowSCON(&DataQueueOverflowError{Scope: ind.Scope, OriginatingPointCode: tc.opc, DestinationPointCode: tc.dpc})
+		runOverflowPublicationsForTest(c)
+		if len(*sent) == 0 {
+			t.Fatal("missing current scope publication")
+		}
+		s := (*sent)[len(*sent)-1].(*messages.SignallingCongestion)
 		if (s.NetworkAppearance != nil) != (tc.na != nil) || (s.RoutingContext != nil) != (tc.rc != nil) {
 			t.Fatalf("SCON lost parameter presence: %+v", s)
 		}
@@ -272,8 +329,7 @@ func TestOverflowDrainThresholdAndDwellBoundaries(t *testing.T) {
 }
 
 func TestOverflowIPSPOnsetOmitsConcernedDestination(t *testing.T) {
-	c, sent := overflowAssociation(t)
-	c.role = RoleIPSP
+	c, sent := overflowAssociationForRole(t, RoleIPSP)
 	setInventoryNetworkAppearance(&c.cfg.ApplicationServers, params.NewNetworkAppearance(7))
 	deliver(t, c, 1, inboundData(1, "discarded"))
 	handleOverflowReports(t, c)

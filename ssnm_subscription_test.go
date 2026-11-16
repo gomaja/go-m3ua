@@ -87,7 +87,7 @@ func TestSubscribeSSNMSnapshotAndDeltasCoverEveryReportExactlyOnce(t *testing.T)
 		if err != nil {
 			t.Fatalf("Next after %d of %d reports: %v", len(seen), reports, err)
 		}
-		if event.Kind != SSNMReportEvent || !event.ReportSet || event.ContinuityLost {
+		if event.Kind != SSNMReportObservedEvent || !event.ReportSet || event.ContinuityLost {
 			t.Fatalf("atomicity fixture received an unexpected event: %+v", event)
 		}
 		if event.Revision <= snapshot.Revision {
@@ -462,7 +462,7 @@ func TestSSNMSnapshotAndEventsAreOwnedByTheCaller(t *testing.T) {
 	}
 	event.Report.Destinations[0].PointCode = 0
 	event.Report.Scope.RoutingContexts[0] = 888
-	event.Updated[0].Availability.State = DestinationAvailable
+	event.DestinationUpdates[0].Availability.State = DestinationAvailable
 
 	fresh := ssnmPartitionKnowledge(t, endpoint.SSNMKnowledge(), canonicalSSNMPartition("sg-a", "as-core"))
 	destination := ssnmDestination(t, fresh, 0x123456, 0)
@@ -498,8 +498,8 @@ func TestSSNMEventsAreNotSharedBetweenSubscribers(t *testing.T) {
 	}
 	firstEvent.Report.Destinations[0].PointCode = 0
 	firstEvent.Report.Scope.RoutingContexts[0] = 777
-	firstEvent.Updated[0].Availability.State = DestinationAvailable
-	firstEvent.Updated[0].Availability.Scope.RoutingContexts[0] = 777
+	firstEvent.DestinationUpdates[0].Availability.State = DestinationAvailable
+	firstEvent.DestinationUpdates[0].Availability.Scope.RoutingContexts[0] = 777
 
 	secondEvent, err := drainSSNMEvent(t, second)
 	if err != nil {
@@ -512,9 +512,9 @@ func TestSSNMEventsAreNotSharedBetweenSubscribers(t *testing.T) {
 	if secondEvent.Report.Scope.RoutingContexts[0] != 1 {
 		t.Fatalf("one subscriber rewrote another's wire scope: %+v", secondEvent.Report.Scope)
 	}
-	if secondEvent.Updated[0].Availability.State != DestinationUnavailable ||
-		secondEvent.Updated[0].Availability.Scope.RoutingContexts[0] != 1 {
-		t.Fatalf("one subscriber rewrote another's retained state: %+v", secondEvent.Updated)
+	if secondEvent.DestinationUpdates[0].Availability.State != DestinationUnavailable ||
+		secondEvent.DestinationUpdates[0].Availability.Scope.RoutingContexts[0] != 1 {
+		t.Fatalf("one subscriber rewrote another's retained state: %+v", secondEvent.DestinationUpdates)
 	}
 }
 
@@ -584,7 +584,7 @@ func TestSSNMSubscriptionQueueOverflowReportsContinuityLossUntilResync(t *testin
 	if err != nil {
 		t.Fatalf("Next after Resync: %v", err)
 	}
-	if event.Kind != SSNMReportEvent || event.Report.Kind != SSNMDestinationAvailableReport {
+	if event.Kind != SSNMReportObservedEvent || event.Report.Kind != SSNMDestinationAvailableReport {
 		t.Fatalf("after Resync the stream delivered %+v, want the DAVA report", event)
 	}
 	if event.Revision <= snapshot.Revision {

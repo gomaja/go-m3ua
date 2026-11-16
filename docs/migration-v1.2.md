@@ -21,6 +21,8 @@ delivers unknown values unchanged; applications can call `Valid()` to check them
 Contents:
 
 - [Continued MTP status](#continued-mtp-status)
+
+- [Local congestion publication and DATA admission](#local-congestion-publication-and-data-admission)
 - [Received congestion validity and audits](#received-congestion-validity-and-audits)
 - [Peer explanations, DUPU bounds and ASPAC errors](#peer-explanations-dupu-bounds-and-aspac-errors)
 - [Congestion method profiles and local-user priority](#congestion-method-profiles-and-local-user-priority)
@@ -325,7 +327,7 @@ it on a direct write:
 - **Upper-layer routing policy.** Which Signalling Gateway, which Application
   Server, which association — unless `ASPConfig.Routing` is configured, in which
   case `MTPTransfer` owns it.
-- **Retry.** Nothing is retried automatically, because a failed write does not
+- **DATA retry.** DATA is not retried automatically, because a failed write does not
   prove the peer received nothing. `DataSendOutcome` is what that decision is
   made from.
 - **Congestion response.** SCON is delivered; what to do about it — shed load,
@@ -364,7 +366,7 @@ peer SCON trigger details are event-only: a snapshot does not reconstruct lost
 user-part indications or Concerned Destination history. Current SGP peer
 congestion is retained separately in `SSNMSnapshot.PeerCongestion`. Events are
 deltas applied to that snapshot: a report
-event's `Updated` names only the destinations it wrote. Handle
+event's `DestinationUpdates` names only the destinations it wrote. Handle
 `SSNMContinuityLostEvent` with `SSNMSubscription.Resync` and account for
 event-only information that remains unknown. Closing one
 association does not close an Endpoint subscription; observe binding/partition
@@ -858,13 +860,14 @@ v1.2.0.
 
 `SSNMEvent.States` carried the whole partition's retained knowledge after every
 event, so a one-destination report cost the size of the partition once per
-subscriber. It is replaced by `SSNMEvent.Updated`, which carries only what the
-event changed:
+subscriber. Complete replacements now use `SSNMEvent.DestinationUpdates`;
+large reports use a separate patch shape:
 
 | Event | v1.2.0 `States` | Now |
 | --- | --- | --- |
-| `SSNMReportEvent`, retained | every destination of the partition | `Updated`: the destinations the report wrote, each with both dimensions as retained after it, in point-code then mask order |
-| `SSNMReportEvent`, retained by nobody (unbound partition, DUPU, DAUD, peer SCON) | empty | empty |
+| `SSNMReportObservedEvent`, retained | every destination of the partition | complete `DestinationUpdates` in point-code/mask order, or no updates before patches |
+| `SSNMReportPatchEvent` | no equivalent | `ReportPatch`: one replacement or source-history continuation; use `ApplyReport` |
+| `SSNMReportObservedEvent`, retained by nobody (unbound partition, DUPU, DAUD, peer SCON) | empty | empty |
 | `SSNMBindingAdmittedEvent`, `SSNMBindingActivatedEvent`, `SSNMBindingRetiredEvent` | every destination of the partition | empty: bindings change no destination knowledge |
 | `SSNMPartitionRetiredEvent` | empty | empty: the kind discards the partition |
 | `SSNMDestinationsInvalidatedEvent` | empty | `Invalidated`: exact destination keys/removal flags, routed by `Epoch` |
@@ -873,44 +876,42 @@ The field is renamed rather than redefined so that code relying on the old
 meaning stops compiling instead of silently dropping destinations. A consumer
 that replaced its view of a partition with each event's `States`:
 
-```go
+```text
+// Former consumer (removed API):
 // view map[m3ua.SSNMPartition][]m3ua.SSNMDestinationKnowledge
 if event.Kind == m3ua.SSNMReportEvent && event.States != nil {
     view[event.Partition] = event.States
 }
 ```
 
-patches it instead, starting from the snapshot's `Destinations` keyed by
-`Destination`:
+applies the explicit report shapes instead, starting from owned partition
+knowledge returned by the snapshot. Both report kinds use the same helper;
+this excerpt shows destination and partition changes:
 
 ```go
-// view map[m3ua.SSNMPartition]map[m3ua.PointCodeRange]m3ua.SSNMDestinationKnowledge
+// view map[m3ua.SSNMPartition]*m3ua.SSNMPartitionKnowledge
 // epochs map[uint64]m3ua.SSNMPartition, initialized from snapshot.Partitions.
 switch event.Kind {
 case m3ua.SSNMBindingAdmittedEvent:
     epochs[event.Epoch] = event.Partition
     if view[event.Partition] == nil {
-        view[event.Partition] = make(map[m3ua.PointCodeRange]m3ua.SSNMDestinationKnowledge)
+        view[event.Partition] = &m3ua.SSNMPartitionKnowledge{
+            Partition: event.Partition, Epoch: event.Epoch,
+        }
     }
-case m3ua.SSNMReportEvent:
-    for _, update := range event.Updated {
-        view[event.Partition][update.Destination] = update
+case m3ua.SSNMReportObservedEvent, m3ua.SSNMReportPatchEvent:
+    if event.Epoch == 0 {
+        break // Event-only report with no retained partition.
     }
+    if !event.ApplyReport(view[event.Partition]) {
+        // Stop applying deltas and call subscription.Resync.
+        return
+    }
+    // Expose the completed report only when !event.ReportContinues.
 case m3ua.SSNMDestinationsInvalidatedEvent:
-    partition := epochs[event.Epoch] // event.Partition is empty
-    for _, removed := range event.Invalidated {
-        entry := view[partition][removed.Destination]
-        if removed.AvailabilityRemoved {
-            entry.Availability, entry.AvailabilitySet = m3ua.SSNMAvailability{}, false
-        }
-        if removed.CongestionRemoved {
-            entry.Congestion, entry.CongestionSet = m3ua.SSNMCongestion{}, false
-        }
-        if !entry.AvailabilitySet && !entry.CongestionSet {
-            delete(view[partition], removed.Destination)
-        } else {
-            view[partition][removed.Destination] = entry
-        }
+    if !event.ApplyInvalidation(view[epochs[event.Epoch]]) {
+        // Stop applying deltas and call subscription.Resync.
+        return
     }
 case m3ua.SSNMPartitionRetiredEvent:
     delete(view, event.Partition)
@@ -921,7 +922,7 @@ case m3ua.SSNMPartitionRetiredEvent:
 Successfully retained DAVA and level-zero SCON reports remain knowledge.
 Oversized reports can remove individual dimensions through `Invalidated`. The whole retained
 state still comes only from `SubscribeSSNM`, `Resync` and `SSNMKnowledge`,
-unchanged. `SubscriptionQueueBytes` now charges 320 fixed bytes per `Updated`
+unchanged. `SubscriptionQueueBytes` now charges 320 fixed bytes per `DestinationUpdates`
 entry; the former charge was 256. Individual peer/source rows remain 256 bytes
 plus Routing Context storage. The snapshot-to-delta change still avoids
 repeating the whole partition, but custom byte budgets must allow for the
@@ -1136,8 +1137,11 @@ the lifetime count and latest owned diagnostic without per-message primitive
 flooding. Consumers with exhaustive management-kind switches must handle the new
 kind. Added exported struct fields require positional literals to become keyed.
 
-National queue overflow now emits a numeric MaxLevel onset and a best-effort
-level-zero clear after drain; International retains omitted-level onset without a numeric clear.
+National queue overflow contributes numeric MaxLevel; the bounded optional
+scheduler retains its current report across full-buffer refusals and reserves a
+submitted onset's capacity for its eventual level-zero clear. Other local
+sources can delay that clear after queue drain. International retains
+omitted-level onset without a numeric clear.
 Deferred SCON, including queue onset and recovery, belongs to the binding that
 created it. Retirement or replacement completed before transport admission
 prevents its old publication even if the same Routing Context is active again.
@@ -1237,13 +1241,16 @@ Oversized DAUD preserves all knowledge; non-peer reports preserve peer records.
 SS7 destination invalidation is scoped as described below. Apply peer removal deltas
 independently of the destination-only partition-invalidated event.
 
-Use `Endpoint.CongestionInputs(as)` for copied AS membership, peer state and
-independent transport inputs. Honor `Consistent` and component versions: one
+Use `Endpoint.CongestionInputs(as)` for copied AS membership, peer state, local
+contributions and independent transport inputs. Honor `Consistent` and component versions: one
 retry bounds collection, and `Revision` covers SSNM only. Inspect
 `VersionsBefore` and `VersionsAfter` for membership/SSNM versions and each peer
-binding generation, transport observation and `TransportPresent`. No `Local` contribution
-field exists in this batch; queue overload keeps its independent management
-stream. Missing AS returns `ErrNoConfiguredAS`.
+binding generation, opaque `LocalGeneration`, transport observation and
+`TransportPresent`. `LocalGeneration` versions local lifetime/queue evidence;
+compare it without interpreting its numeric value. `Local` now
+keeps queue/application contributions separately inspectable; queue overload
+also keeps its management stream and continuity contract. Missing AS returns
+`ErrNoConfiguredAS`.
 
 An optional `SGPConfig.CongestionPolicy` (`SGPCongestionPolicy`) veto runs
 outside Endpoint, AS and delivery
@@ -1414,8 +1421,8 @@ original reporter and scope; a shared route view does not widen them.
 New fields in `CongestionConfig`, `SSNMAvailability`, `SSNMCongestion`,
 `PeerCongestionState`, `SSNMDestinationKnowledge`, `MTPDestinationStatus` and
 `SSNMEvent` break unkeyed struct literals; use keyed fields. Extend event
-switches for `SSNMCongestionExpiredEvent` and `SSNMAuditOutcomeEvent`. Expiry
-consumers must replace the previous `Updated`/`PeerCongestion` replacement logic
+switches for `SSNMCongestionExpiredEvent` and `SSNMPublicationOutcomeEvent`. Expiry
+consumers must replace the previous `DestinationUpdates`/`PeerCongestion` replacement logic
 with `event.ApplyExpiry(&snapshot)` or equivalent version-matched freshness
 updates. `SSNMEvent.Expired` carries owned `SSNMCongestionExpiry` identities
 with partition `Epoch`, `Destination`, `AS`, original statement `Revision` and
@@ -1431,7 +1438,7 @@ bytes. Other SSNM events and bursts retain their independent limits and real
 overflow still requires `Resync`. This bound does not limit the separate MTP
 indication queue or compare expiry with receipt.
 
-Queued `Updated` destinations now charge 320 fixed bytes, reflecting the
+Queued `DestinationUpdates` destinations now charge 320 fixed bytes, reflecting the
 larger public destination shape. Each individual peer or availability/congestion
 source row still charges 256 bytes, plus its Routing Context storage. Review
 custom subscription byte budgets: report updates can reach them sooner. This
@@ -1470,7 +1477,8 @@ invalidation. Custom queues and bursts can still require `Resync`. Keep the
 earlier scoped-dimension and congestion-source migrations alongside this
 additional availability-source migration.
 
-`SSNMEvent.AuditCount` on `SSNMAuditOutcomeEvent` counts each completed job
+For `PublicationKind=CongestionPublicationDAUD`, `SSNMEvent.PublicationCount`
+on `SSNMPublicationOutcomeEvent` counts each completed job
 outcome for `submitted`, `send-failed` and transport `send-deferred`, including consecutive equal reasons
 and same-key refresh during transport. The refreshed successor preserves its
 newer causes and deadlines. Every removed job contributes exactly once to
@@ -1483,12 +1491,12 @@ send-deferred, contended, send-failed and submitted. Each report, pass or
 retirement batch emits at most one event per reason. Repeated contention and rate
 deferrals of a retained job are suppressed. `ReportSet` is false; a homogeneous source is
 in `Report.Association`, with zero denoting mixed sources. A homogeneous original
-scope of at most 64 raw RCs is in `Report.Scope`; otherwise `AuditScopeOmitted`
+scope of at most 64 raw RCs is in `Report.Scope`; otherwise `PublicationScopeOmitted`
 is true and scope is empty. No APC list, Info String or configured names are
 carried. Diagnostic payloads are at most 928 conservative accounted bytes
-(actual fixed reasons at most 784). Seven diagnostics plus a report use at most
-eight queue slots; 7,424 bytes is the comparison for eight diagnostic-sized
-events, not a bound for a full retained-report payload. Reports keep separate
+(actual fixed reasons at most 784). Seven diagnostics use at most seven slots
+and 6,496 conservative bytes, plus the actual report-observation and report-patch
+events. Only an unfragmented observation adds one slot. Reports keep separate
 accounting. A submitted outcome/local report proves neither peer receipt nor
 response correlation.
 
@@ -1543,16 +1551,16 @@ validity period.
 wait after Association closure, outside locks needed for completion. Association
 withdrawal/teardown do not join it. Late REG/DEREG dispatcher/request handling
 can retain RKM correlation/lifecycle locks while joining a cancelled tracked
-optional DAUD; completion takes only the tracker and optional submission never
+optional SCON/DAUD; completion takes only the tracker and optional submission never
 takes either RKM lock. One `NoWait` attempt retains the pinned transport's
 internal mutex/application-deadline limits (RFC 6458 §5.3.4; Errata 6111).
 
-Restart and `ForgetDestinations` now exclude new optional DAUD admission,
+Restart and `ForgetDestinations` now exclude new optional SCON/DAUD admission,
 cancel an admitted optional attempt and settle it before changing the epoch or
 reclaiming knowledge. Concurrent lifetime changes share admission closure without joining each
 other’s cleanup. Activation reconciliation leaves its bookkeeping untouched
 while admission is closed, so the final owner can schedule configured work. Completion joins occur outside transport, destination, store and
-procedure locks and settle only optional DAUD, never DATA or ordinary SCON.
+procedure locks and settle only optional SCON/DAUD, never DATA or synchronous SCON.
 At most one optional attempt holds the Association writer lock. This introduces
 a cancellation-completion wait reachable from restart receive handling and the
 state monitor; ordinary received status processing rejects a changing or stale
@@ -1717,8 +1725,9 @@ For IPSP or application-owned routing, use `NewMTPStatusProcedure(profile)`
 once per destination and local MTP3 boundary. It is safe for concurrent calls,
 has no hidden destination map and must not be copied after use. Call
 `Offered(status)` once per original validated offer with your effective
-aggregate status; a non-nil return is the primitive to distribute. It returns
-nil when nothing is due, including under national-with-priorities. A changed
+aggregate status; it returns `(indication, error)`. Handle the error before
+distributing a non-nil indication. `(nil, nil)` means nothing is due, including
+under national-with-priorities. A changed
 `Destination` resets automatically; supplying clear or uncertain status to
 `Offered` also resets the interval. The helper sees snapshots only. Call
 `Reset()` on known clear, uncertainty, expiry or local lifecycle/method
@@ -1739,3 +1748,259 @@ than multicast them. Level-4 users still decide when to resume transmission
 (Q.704 (07/96) §11.2.3.3). RFC 4666 §1.4.6 describes this current-MTP3-procedure
 service without an uppercase MUST; it does not turn optional SCON/TFC into a
 mandatory report.
+
+## Local congestion publication and DATA admission
+
+Automatic local SCON now uses bounded retry instead of a one-shot overflow
+attempt. Explicit `Association.SignallingCongestion`, `Endpoint.SignallingCongestion`
+and `Association.DestinationStateAudit` remain synchronous and return actual
+submission errors; they do not acquire retries. A national clear can be delayed,
+and an onset superseded before submission may never appear on the wire. Local
+observability survives failed publication. A successful submission proves
+neither peer receipt nor delivery of abatement.
+
+Update unkeyed literals and exhaustive management-kind/publication-kind switches
+for the following additions. There are no compatibility aliases.
+
+| New API or field | Migration contract |
+| --- | --- |
+| `CongestionConfig.Publication` | `*CongestionPublicationConfig`; nil and zero fields select the defaults below. |
+| `CongestionPublicationConfig.MaxPending`, `MaxPendingPerAssociation`, `MaxBytes` | Endpoint-wide slot/metadata ceilings of 64, 32 per association and 64 KiB by default. Negative values are invalid; per-association capacity must not exceed `MaxPending`. |
+| `CongestionPublicationConfig.RetryInterval`, `MinReportInterval` | Zero selects 100 ms retry and a 1 s interval after successful submission. Negative durations are invalid. These are engineering choices, not peer-negotiated timers. |
+| `LocalCongestionRequest.Source`, `Association`, `Epoch`, `AS`, `Destination`, `Congestion` | A source identifier of 1–64 UTF-8 bytes of Unicode letters/digits or `_`, `-`, `.`, `:`, `/`, current association epoch, active association member/binding of the exact AS, exact 24-bit DPC and method-consistent `CongestionState`. The `$` namespace is reserved; queue records use `$queue:<OPC>`. |
+| `LocalCongestionContribution.Request`, `Scope`, `Revision` | Copied source request and wire scope with a library-assigned revision. No caller revision or TTL is accepted. |
+| `Endpoint.ReportLocalCongestion` | Declares or replaces one source's state. National numeric level must agree with `Congested`; omitted national levels represent unknown congestion. International input has `LevelSet=false`, `Level=0`; `Congested=false` declares local clear. Contradictions return `ErrInvalidParameterValue`; contention or changing admission can return `ErrCongestionDecisionStale`, requiring a complete retry with current scope. |
+| `Endpoint.WithdrawLocalCongestion` | Takes association, epoch, AS, destination and source; removes only that contribution. Explicit zero declares only that source clear; withdrawal removes it. Absence is an idempotent success only with a current active association member/binding; contention can return `ErrCongestionDecisionStale`. |
+| `PeerCongestionVersion.LocalGeneration` | New opaque component for local lifetime/queue transitions. Compare it with the other version components; do not interpret the numeric value. Update unkeyed literals. |
+| `CongestionInputSnapshot.Local` | Owned queue/application contribution values, separately inspectable. Shared `SSNMStateConfig` record/byte/per-partition limits can refuse retention with typed `ErrSSNMResourceLoss` and loss events. |
+| `CongestionPublicationKind`, `CongestionPublicationLocalSCON`, `CongestionPublicationDAUD` | Distinguish optional local reports and automatic audits. |
+| `CongestionPublicationState.Association`, `Epoch`, `Scope`, `Destinations`, `Kind` | Identify the optional publication scope; snapshot slices and scopes belong to the caller. |
+| `CongestionPublicationState.ConcernedDestination`, `ConcernedDestinationSet` | Preserve a triggering origin separately from omitted CD; different origins do not merge. A clear retains its reservation identity but omits CD on the wire because recovery has no fresh trigger. |
+| `CongestionPublicationState.DesiredCongestion`, `DesiredRevision`, `SubmittedRevision`, `Pending` | Separate current local intent from last submitted revision; congestion is meaningful only for local SCON. Same-state coalescing can leave desired revision ahead with `Pending=false`. Do not infer peer delivery from `SubmittedRevision`. |
+| `CongestionPublicationState.Attempts`, `LastAttempt`, `LastError` | Attempt diagnostics. Local SCON attempts belong to the reservation; DAUD attempts describe the transient batch, not cumulative audit history. `LastError` is at most 256 bytes and is not an error-identity contract. |
+| `Endpoint.CongestionPublications` | Returns bounded owned publication snapshots: at most `MaxPending`; completed clears leave the snapshot. |
+| `CongestionPublicationCounters` and `Endpoint.CongestionPublicationCounters` | Lifetime `Queued`, `Submitted`, `Coalesced`, `Deferred`, `Refused` and `Failed` counters. `Queued` counts reservation/transient admissions, not unique audit jobs; deferral decisions can recur. `Failed` includes actual EAGAIN transport refusals. |
+| `ManagementCongestionPublication`, `ManagementIndication.CongestionPublication` | Bounded publication state on the existing management channel, independent of logging: new reservations, visible refusals, changed desired state for the updated key, and each actual attempt. Same-state coalescing adds no state-change observation. Apply its existing queue-continuity contract. |
+| `SSNMPublicationOutcomeEvent` | Replaces and removes `SSNMAuditOutcomeEvent`; handle both `CongestionPublicationDAUD` and `CongestionPublicationLocalSCON` through `SSNMEvent.PublicationKind`. No compatibility alias remains. |
+| `SSNMEvent.PublicationCount`, `PublicationScopeOmitted` | Replace and remove `AuditCount`, `AuditScopeOmitted`. Counts are logical job outcomes, not transport packets. Existing audit aggregation and scope-omission semantics apply when `PublicationKind` is DAUD. |
+| `SSNMEvent.CongestionPublication` | Owned exact state for a single local SCON outcome; nil for aggregated audit diagnostics. |
+| `AssociationConfig.CongestionAdmission` | `*CongestionAdmissionConfig`; nil preserves disabled DATA backpressure. Requires the backlog monitor when enabled. |
+| `CongestionAdmissionConfig.ChargedRatioLimit` | Zero selects 0.9. Require a finite ratio strictly between zero and one. |
+| `ErrDataCongestionRefused` | Sentinel wrapped by the existing typed known-not-sent DATA error. Inspect with `errors.Is`; treat it as an ordinary send failure whose DATA was not submitted. No new wire Error code is assigned. |
+
+Queue and application sources aggregate maximum or unknown congestion only
+within one association, AS and local DPC. Queue drain does not remove an
+application source; received SCON, local overload and outbound transport remain
+independent. Contributions persist until explicit withdrawal, `ForgetDestinations` or
+lifecycle retirement. Local input does not prove aggregate AS readiness or authorize DATA/SPMC delivery;
+optional wire admission checks applicable delivery readiness separately. The AS
+has no authoritative local-destination inventory;
+admission validates the numeric destination and current binding. Each retained
+local source costs one record and `320 + len(Source) + 8*wireRC` portable
+accounted bytes, not a heap-size bound. SGP local contributions are NIF/application inputs and do not
+originate SGP-to-ASP SS7 SCON. There is no host/CPU detector.
+
+A slot is reserved before onset submission. A submitted national onset retains
+its slot and byte reservation until clear submission or scope retirement;
+audits use only unreserved transient slots while waiting in their own bounded
+deadline store. An unsent onset is cancelled on local clear; repeated desired
+states coalesce. An already pending clear can be superseded in place by a newer
+onset. If blocked clears exhaust capacity, new onsets are visibly refused or
+deferred rather than evicting a clear or exceeding the limits. International
+recovery retires work without numeric zero. No periodic local SCON reassertion
+is installed.
+
+One worker tries the existing barriers and rechecks live state, epoch and
+revision, then makes one `NoWait` attempt. Contention, EAGAIN and pending mandatory
+control defer work. Each pass permits at most one optional attempt per association
+across both kinds, subject to rate limits. The existing global audit
+`MaxMessagesPerSecond` ceiling is additional to the shared per-association
+`MinReportInterval` after successful submission; it is not a promised cadence. An
+optional attempt already admitted
+can race a newly starting mandatory write; there is no preemption or absolute
+fairness guarantee. No tracker/state lock crosses transport. Retirement fences
+old work without activating an AS. `Endpoint.Close` cancels and joins the worker;
+association teardown does not join it.
+
+The former audit-only outcome event and field names are removed. Consume
+`SSNMPublicationOutcomeEvent` using `PublicationKind`, `PublicationCount` and
+`PublicationScopeOmitted`. DAUD retains per-reason aggregation of logical jobs;
+one DAUD packet can complete several jobs. Local SCON can carry an exact owned
+`CongestionPublication` state. The management channel also reports new reservations, visible capacity refusals
+and changed desired state for the updated key, plus one
+`ManagementCongestionPublication` state per actual attempted transport batch;
+SSNM diagnostics describe logical job outcomes. Each channel reports its own
+outcome once, rather than adding a second audit-only outcome alongside the
+common one. A successful local DAUD report remains a separate submission
+observation, now once per wire batch rather than once per canonical partition.
+Its `Partition` and `Epoch` are empty; `Scope` and `Destinations` identify the
+submitted batch. Consumers must stop using raw automatic DAUD observation count
+as a canonical-owner count; logical-job `PublicationCount` remains separate.
+This cardinality change has no compatibility alias. Publication observations
+share the existing 64-slot association management queue; subscribed consumers
+must drain it for the association lifetime. Repeated source intent coalesces,
+while actual retry attempts still produce observations.
+Transient admitted audits appear in the common publication snapshot;
+waiting deadlines stay in the separately bounded audit store. Completed clear
+reservations leave the snapshot; consume indications/events for the final
+observation. Lifecycle or pre-transport retirement of local SCON does not promise
+a separate publication outcome notification. Neither channel nor counter proves
+peer receipt.
+
+DAUD completion reconciles `Pending` with surviving deadline jobs. An EAGAIN
+after a covering DAVA removed the last cause reports the actual failed attempt
+once with `Pending=false`; a surviving or renewed cause retains its deadline.
+An endpoint cancelled before completion has no pending retry.
+The flag describes the completion observation and can become obsolete after
+later lifecycle changes. Consumers must not infer retry work from `LastError`
+alone.
+
+The opt-in DATA gate reads cached charged/limit evidence under send serialization
+for every typed, raw and distributed DATA send. It adds no socket query. At or
+above the ratio, before the first valid sample, or with invalid/stale evidence,
+it returns the known-not-sent refusal. Control bypasses the gate. This adds no
+kernel-memory reservation: a single large message, retransmissions or direct
+descriptor users may consume remaining charge. It gives control no delivery
+guarantee, and `ControlWriteTimeout` retains close-on-expiry for permanent stalls.
+This resource gate is separate from national Message Priority admission and does
+not manufacture SCON or DUNA (RFC 4666 §§1.4.6–1.4.7; RFC 6458 §5.3.4; Errata 6111).
+
+SSNM subscriptions keep their existing bounded continuity-loss/`Resync` contract.
+A legal multi-AS report or a combined report/expiry burst can overflow an unread
+default queue; optional scheduling supplies no whole-burst-fit guarantee.
+
+
+### Individual event bounds and burst recovery
+
+- `SignallingGatewayID` and `RemoteASID` configuration values now have a
+  255-octet ceiling, rejected through `ErrInvalidASPConfig`. ASP and IPSP
+  destination `MTPRouteID` values now have the same ceiling; IPSP failures use
+  `ErrInvalidRoleConfiguration`. These are byte limits on local names, not
+  wire-format limits or character counts. RFC 4666 §3.4.1's INFO String ceiling
+  motivates the engineering value; it does not prescribe a local-name limit.
+  SGP/path IDs are not included in these event payloads and receive no new cap.
+  Local source IDs keep the existing stricter 64-octet limit.
+- Explicit SSNM and activation-audit requests now reject RC/APC lists exceeding
+  16,382 entries, and nonempty RC lists with `RoutingContextSet=false`, using
+  `ErrInvalidParameterValue`. Set the presence flag or supply an empty list.
+  The parameter count follows RFC 4666 §3.2's 16-bit length/header format.
+- `SSNMEvent.ReportContinues`, `ReportPatch.SourcesContinued` and `ApplyReport` describe
+  oversized report fragments. Only the first fragment carries the raw report;
+  later fragments replace destinations or append their source histories. All
+  events have distinct increasing revisions; statement revisions stay intact.
+  Replace manual unconditional `DestinationUpdates` replacement with `ApplyReport` and
+  finish through `ReportContinues=false` before exposing a complete report.
+  Apply once in order. A missing/out-of-order stream requires `Resync`; the
+  helper does not validate arbitrary fragment reordering. Existing reports
+  that fit the ceiling keep their shape. Consumers must handle the new fields;
+  no alias or silent source truncation is supplied.
+
+Defaults remain **256 slots and 1 MiB**. Each individual event fits this byte
+budget, including names, source history patches and diagnostic strings; each
+individual MTP indication fits its count-only channel. A whole legal report
+plus one pass may exceed either subscription bound. Queued deltas precede one
+continuity-loss marker; subsequent deltas remain suppressed until successful
+`Resync` replaces the replica with exact retained state and restarts the stream.
+The gap is visible; raw report/diagnostic history discarded in it is not replayed.
+MTP still emits at most one indication per changed destination and uses
+`ResyncRequired` on overflow.
+
+For sizing with validity, auditing and publication enabled, use the accounting
+weights and exact `sum_E A(E)` plus event count for the admitted fan-out/history,
+including initial queue occupancy. A conservative budget formula uses
+`N=MaxRecords`, `p=min(N,MaxRecordsPerPartition,MaxRecordsPerPeer)`, captured
+fan-out `F<=16382`, `I=min(N,F*ceil(p/2048))`, publication `Q=MaxPending` and
+`B=MaxBytes`:
+
+```
+reportSlots <= F*(2+p)+3*N+I+8
+reportBytes <= F*(1022+1048575+262144*p)+3*N*66806+672*I+48*N+6160
+passSlots   <= ceil(N/256)+Q+7
+passBytes   <= 512*ceil(N/256)+56*N+B+272*Q+5488
+```
+
+Add report and pass capacities for a conservative lossless burst queue, and
+separately include concurrent unrelated producers. These are loose upper bounds,
+not jointly attained maxima; the design document derives every component and
+per-event ceiling. With defaults the pass-only envelope is 135 events / 1,038,704
+bytes, leaving little space for a preceding report. Raising either queue limit
+alone is insufficient when the other binds. Keeping defaults and recovering
+through `Resync` is supported; no whole-report-plus-pass default-fit guarantee
+remains.
+
+### Explicit report patches and complete identity admission
+
+`SSNMReportEvent` is removed, with no alias. Use `SSNMReportObservedEvent`
+(`String()` is `report-observed`) for the single raw observation and any
+complete `DestinationUpdates`. `SSNMEvent.Updated` is removed, also without an
+alias. A consumer of the old whole-destination contract must change its source;
+mechanically treating partial history as a replacement is no longer possible
+through that field.
+
+Partial replacements and tails use `SSNMReportPatchEvent` (`report-patch`) and
+`SSNMEvent.ReportPatch *SSNMReportPatch`, never `DestinationUpdates`.
+`ReportPatch.State` contains one destination patch;
+`ReportPatch.SourcesContinued` appends only history. The former top-level
+`SSNMEvent.SourcesContinued` is removed. `ApplyReport` accepts the observation
+and patch kinds, rejects mixed shapes, and applies owned data once in order.
+Continue through `ReportContinues=false` before exposing the whole report.
+Update switches, unkeyed literals, replicas and event-name telemetry. No
+compatibility alias or hidden fallback keeps the former contract compiling.
+The 512-byte base, 320-byte destination/patch charge and other accounting
+weights are unchanged; queue defaults remain 256 slots and 1 MiB.
+
+Local SCON completion now retires its work when the endpoint has cancelled,
+the store is closed or the current submission job is no longer live. Actual
+transport results still populate counters and final observations; a failed or
+superseded attempt cannot advertise a retry on the cancelled worker. The flag
+is an observation at completion reconciliation, not an immutable future promise.
+
+`IdentityLengthError` exposes `Field`, `Length` and `Limit` without retaining
+the offending name, and unwraps to `ErrInvalidParameterValue`. Configuration
+wrappers additionally preserve `ErrInvalidASPConfig` or
+`ErrInvalidRoleConfiguration`. The 255-octet caps now cover registration
+requests (ASP and both IPSP directions), saved response metadata, result-batch
+installation, the canonical binding setter, unprovisioned
+`AssociationConfig.PeerSGP.SignallingGateway`, route references/selections,
+congestion peer selectors and transfer route requests. An invalid registration
+batch sends and installs nothing; a valid 255-octet name is returned unchanged.
+REG RSP carries no name: results use validated local request metadata.
+Read-only bool lookups still return false for unknown names and insert nothing.
+Local contribution report/withdrawal retain their stricter 64-octet limit and
+now return the same typed length details when exceeded. SGP process and route
+path IDs are outside these charged identity classes and receive no new cap.
+
+### Integrated publication lifetimes and application status identities
+
+`MTPStatusProcedure.Offered` now returns `(*MTPIndication, error)` rather than
+only `*MTPIndication`, without an alias or wrapper for the former signature.
+Handle the error before using the indication. Its caller-supplied
+`MTPDestinationStatus.Destination.MTPRoute` now has the same 255-octet cap as
+configured route names; 256 octets return `IdentityLengthError` wrapping
+`ErrInvalidParameterValue` without retaining the name, advancing the count or
+resetting the destination. This applies even to clear/unknown inputs and the
+national-priority method. Valid offers retain their prior cadence and resets.
+The cap is local engineering policy, not an RFC limit on local names.
+
+SCON and DAUD completion now retire retry work when the association lifetime
+has ended, including the interval between `Done` and transport/store cleanup.
+The endpoint may still be live. Actual admitted attempts keep their result and
+counters; `Pending` is a live-work observation at reconciliation, not a promise
+against a later lifecycle change. A successful admitted DAUD can still produce
+its actual local submission observation; it does not authorize another retry.
+
+Registration and partition retirement apply the admitted/selected set once to
+local input and publication work. A submitted national clear remains reserved
+until submission or scope retirement; grouped retirement now releases those
+reservations at the same event boundary. Stale registration versions and the
+other IPSP Double Exchange direction preserve unrelated local inputs. Received
+history/audit retirement keeps the existing shared batch and source indexes.
+
+Cached DATA refusal remains an ordinary known-not-sent routed send failure.
+The original validated request counts as an offer before target selection, so
+refusal counts once, including broadcast; no candidate/copy adds another offer.
+Local SPMC contributions and publication outcomes remain separate from outbound
+received SS7/transport congestion. They do not reset an unchanged routed
+interval. Effective received/transport/eligibility changes retain commit-time
+restart marks. Neither cached admission nor optional publication reserves kernel
+memory or guarantees mandatory-control delivery.

@@ -62,7 +62,9 @@ func newMixedNetworkScopeAssociation(test *testing.T, appearance uint32, dynamic
 	if dynamic {
 		for _, entry := range config.SignallingGateways[0].SGPs[0].ApplicationServers {
 			association.addDynamicASKey(*entry.ASKey, RoutingKey{}, false)
-			association.noteCanonicalRemoteAS(entry.ASKey.RoutingContext, entry.ID)
+			if err := association.noteCanonicalRemoteAS(entry.ASKey.RoutingContext, entry.ID); err != nil {
+				test.Fatal(err)
+			}
 		}
 	}
 	association.noteRoutingContextsAcked(params.NewRoutingContext(1, 3, 5))
@@ -192,7 +194,7 @@ func TestMTPTransferHonorsDUNAWithOmittedNetworkAppearance(test *testing.T) {
 		if err != nil {
 			test.Fatalf("DUNA did not publish an SSNM report: %v", err)
 		}
-		if event.Kind != SSNMReportEvent || !event.ReportSet {
+		if event.Kind != SSNMReportObservedEvent || !event.ReportSet {
 			continue
 		}
 		scope := event.Report.Scope

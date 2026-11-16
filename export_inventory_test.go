@@ -695,7 +695,7 @@ func TestApprovedExportsCompile(t *testing.T) {
 	_ = m3ua.SSNMDestinationKnowledge{}
 	_ = m3ua.SSNMAvailability{}
 	_ = m3ua.SSNMCongestion{}
-	_ = m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent}
+	_ = m3ua.SSNMEvent{Kind: m3ua.SSNMReportObservedEvent}
 	_ = m3ua.SSNMBinding{}
 	_ = m3ua.SSNMStateConfig{}
 

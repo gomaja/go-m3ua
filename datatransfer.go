@@ -178,6 +178,9 @@ func (c *Association) submitDataContext(ctx context.Context, frame []byte, key A
 	if mismatch != nil {
 		c.recordDataProfileMismatch(*mismatch)
 	}
+	if err := c.checkCachedDataCongestionAdmission(); err != nil {
+		return newDataNotSent(key, stream, err)
+	}
 	// Copied by value: the template is shared by every send on this
 	// association, and only the stream varies per message.
 	info := *c.sctpInfo
@@ -385,11 +388,21 @@ func (c *Association) writeRawData(
 		}
 		// The decoded-message seam preserves the same final decision fence.
 		if c.signalWriter != nil {
+			// Preserve per-AS recorder concurrency when the gate is disabled.
+			// A configured gate uses the production serialization boundary
+			// before reading its cached sample.
+			if c.cfg.CongestionAdmission != nil {
+				c.sendMu.Lock()
+				defer c.sendMu.Unlock()
+			}
 			if err := c.checkSGPCongestionDecision(scope, stream, decision); err != nil {
 				return err
 			}
 			if mismatch != nil {
 				c.recordDataProfileMismatch(*mismatch)
+			}
+			if err := c.checkCachedDataCongestionAdmission(); err != nil {
+				return newDataNotSent(scope, stream, err)
 			}
 			var writeErr error
 			written, writeErr = c.signalWriter(message)

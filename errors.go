@@ -24,6 +24,10 @@ var ErrMTPManagementData = errors.New("MTP3 management SI 0 cannot be carried as
 // the refused association. Match with errors.Is.
 var ErrCongestionDecisionStale = errors.New("congestion decision changed during admission")
 
+// ErrDataCongestionRefused reports an opt-in cached DATA resource refusal.
+// DATA errors wrap it with DataNotSent; no transport submission was attempted.
+var ErrDataCongestionRefused = errors.New("DATA refused by cached congestion admission")
+
 // mtpManagementDataError owns the received bytes for RFC 4666 §3.8.1
 // Diagnostic Information without re-encoding received DATA.
 type mtpManagementDataError struct{ raw []byte }
@@ -905,14 +909,8 @@ func (c *Association) handleErrors(e error) error {
 		if c.role != RoleASP && c.role != RoleIPSP {
 			return nil
 		}
-		// The inbound scope was already validated. Preserve it exactly rather
-		// than substituting the outbound configured NA. The normal live RC/state
-		// checks and withdrawal barrier still apply at publication.
-		// Preserve the existing best-effort send: optional onset must not enter
-		// mandatory-control backpressure handling and close a healthy association.
-		if err := c.writeOverflowSCON(overflow); err != nil {
-			logf("m3ua: failed to send SCON for local congestion: %v", err)
-		}
+		// Detection already admitted bounded optional work. Error consumption
+		// does not submit another report or wait for transport progress.
 		return nil
 	}
 	if errors.Is(e, ErrDataQueueFull) {

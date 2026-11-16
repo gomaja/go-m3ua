@@ -8,7 +8,7 @@ import (
 
 func TestSSNMCongestionSourcesAccountedBytes(t *testing.T) {
 	scope := m3ua.WireScope{RoutingContextSet: true, RoutingContexts: []uint32{1, 2}}
-	event := m3ua.SSNMEvent{Kind: m3ua.SSNMCongestionExpiredEvent, Updated: []m3ua.SSNMDestinationKnowledge{{CongestionSources: []m3ua.SSNMCongestion{{Scope: scope}, {Scope: scope}}}}}
+	event := m3ua.SSNMEvent{Kind: m3ua.SSNMCongestionExpiredEvent, DestinationUpdates: []m3ua.SSNMDestinationKnowledge{{CongestionSources: []m3ua.SSNMCongestion{{Scope: scope}, {Scope: scope}}}}}
 	if got, want := ssnmEventBytes(event), 512+320+2*(256+8); got != want {
 		t.Fatalf("source history accounted bytes = %d, want %d", got, want)
 	}
@@ -30,7 +30,7 @@ func TestSSNMExpiryIdentitiesAccountedIndependently(t *testing.T) {
 
 func TestSSNMAvailabilitySourcesAccountedIndependently(t *testing.T) {
 	scope := m3ua.WireScope{RoutingContextSet: true, RoutingContexts: []uint32{1, 2}}
-	event := m3ua.SSNMEvent{Updated: []m3ua.SSNMDestinationKnowledge{{AvailabilitySources: []m3ua.SSNMAvailability{{Scope: scope}, {Scope: scope}}}}, AvailabilitySourcesInvalidated: make([]m3ua.SSNMAvailabilitySourceInvalidation, 3)}
+	event := m3ua.SSNMEvent{DestinationUpdates: []m3ua.SSNMDestinationKnowledge{{AvailabilitySources: []m3ua.SSNMAvailability{{Scope: scope}, {Scope: scope}}}}, AvailabilitySourcesInvalidated: make([]m3ua.SSNMAvailabilitySourceInvalidation, 3)}
 	if got, want := ssnmEventBytes(event), 512+320+2*(256+8)+3*48; got != want {
 		t.Fatal("availability source accounting disagrees", got, want)
 	}

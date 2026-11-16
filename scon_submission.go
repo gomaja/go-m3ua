@@ -189,6 +189,19 @@ func (c *Association) beginSCONBindingChanges(changes []sconBindingChange) (func
 		for _, submission := range pending {
 			<-submission.done
 		}
+		// Local overload follows only the outbound registration direction. The
+		// whole admitted set is fenced once, including when an event also names
+		// the other DE direction or a stale version that was not admitted.
+		localDirection := c.isIPSPDoubleExchange()
+		localChange := false
+		for id := range admitted {
+			localChange = localChange || id.local == localDirection
+		}
+		if localChange {
+			c.retireLocalCongestionInputs(func(key ASKey) bool {
+				return key.RoutingContextSet && admitted[sconBindingID{key.RoutingContext, localDirection}]
+			}, false)
+		}
 		changedPartitions := c.retireReceivedRegistrations(received)
 		peerChange := c.role == RoleSGP && len(received) > 0
 		if peerChange {

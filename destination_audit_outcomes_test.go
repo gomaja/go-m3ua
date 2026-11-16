@@ -45,14 +45,14 @@ func TestAuditQueueFullDiagnosticsCountMaximumReportRefusals(t *testing.T) {
 	}
 	count, diagnostics := uint64(0), 0
 	for _, event := range events {
-		if event.Kind != SSNMAuditOutcomeEvent {
+		if event.Kind != SSNMPublicationOutcomeEvent {
 			continue
 		}
 		diagnostics++
 		if event.Reason != "queue-full" || event.ReportSet || len(event.Report.Destinations) != 0 {
 			t.Errorf("unexpected report diagnostic: %+v", event)
 		}
-		count += event.AuditCount
+		count += event.PublicationCount
 	}
 	if diagnostics != 1 || count != 768 {
 		t.Fatalf("queue-full diagnostics=%d refused-job transitions=%d, want 1 and 768", diagnostics, count)
@@ -84,7 +84,7 @@ func TestAuditOutcomeBatchBoundsEveryReasonAndCountsTransitions(t *testing.T) {
 		t.Fatalf("outcome bounds: lost=%v slots=%d bytes=%d", lost, len(events), bytes)
 	}
 	for i, event := range events {
-		if event.Kind != SSNMAuditOutcomeEvent || event.Reason != reasons[i] || event.AuditCount != 1000 || event.ReportSet || event.AuditScopeOmitted || event.Report.Association != 9 || !reflect.DeepEqual(event.Report.Scope, scope) {
+		if event.Kind != SSNMPublicationOutcomeEvent || event.Reason != reasons[i] || event.PublicationCount != 1000 || event.ReportSet || event.PublicationScopeOmitted || event.Report.Association != 9 || !reflect.DeepEqual(event.Report.Scope, scope) {
 			t.Errorf("reason %s summary: %+v", reasons[i], event)
 		}
 		if len(event.Report.Destinations) != 0 || event.Partition != (SSNMPartition{}) || event.Report.Partition != (SSNMPartition{}) {
@@ -136,14 +136,14 @@ func TestAuditOutcomeBatchOmitsHeterogeneousOrOversizedScope(t *testing.T) {
 				t.Fatalf("summary lost=%v events=%d", lost, len(events))
 			}
 			event := events[0]
-			if event.AuditCount != 2 {
-				t.Errorf("transition count=%d", event.AuditCount)
+			if event.PublicationCount != 2 {
+				t.Errorf("transition count=%d", event.PublicationCount)
 			}
 			if kind == "association" {
-				if event.Report.Association != 0 || event.AuditScopeOmitted || !reflect.DeepEqual(event.Report.Scope, base) {
+				if event.Report.Association != 0 || event.PublicationScopeOmitted || !reflect.DeepEqual(event.Report.Scope, base) {
 					t.Errorf("mixed association summary: %+v", event)
 				}
-			} else if !event.AuditScopeOmitted || !reflect.DeepEqual(event.Report.Scope, WireScope{}) || event.Report.Association != 9 {
+			} else if !event.PublicationScopeOmitted || !reflect.DeepEqual(event.Report.Scope, WireScope{}) || event.Report.Association != 9 {
 				t.Errorf("scope not explicitly omitted: %+v", event)
 			}
 		})

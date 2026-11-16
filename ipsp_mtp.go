@@ -39,6 +39,9 @@ func newIPSPMTPState(role Role, config []IPSPDestinationConfig) (*ipspMTPState, 
 	stream.config.mtpRouteByID = make(map[MTPRouteID]int, len(config))
 	for index, c := range state.config {
 		d := c.Destination
+		if err := validateIdentityLength("IPSPDestination.MTPRoute", string(d.MTPRoute), maxObservationIdentityBytes); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidRoleConfiguration, err)
+		}
 		if _, duplicate := stream.config.mtpRouteByID[d.MTPRoute]; duplicate || d.MTPRoute == "" || d.PointCode > 0xffffff || d.Mask > 24 || destinationRangePrefix(d.PointCode, d.Mask) != d.PointCode || normalizeOutboundASKey(c.AS) != c.AS {
 			return nil, fmt.Errorf("%w: invalid or duplicate IPSP destination", ErrInvalidRoleConfiguration)
 		}

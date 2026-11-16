@@ -33,25 +33,25 @@ func TestSSNMEventBytesFollowsTheDocumentedFormula(testContext *testing.T) {
 		{"retained peer delta", m3ua.SSNMEvent{Kind: m3ua.SSNMPeerCongestionEvent,
 			PeerCongestion: &m3ua.PeerCongestionState{Scope: scope(100, 101)}}, 512 + 256 + 8},
 		// 512 + 8.
-		{"report naming one destination and updating none", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
+		{"report naming one destination and updating none", m3ua.SSNMEvent{Kind: m3ua.SSNMReportObservedEvent,
 			Report: m3ua.SSNMReport{Destinations: make([]m3ua.PointCodeRange, 1)}}, 520},
 		// 512 + 8 + 320 + 4 (report) + 4 (availability): the one-APC F3 event.
-		{"one-APC workload report", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
-			Report:  m3ua.SSNMReport{Scope: scope(100), Destinations: make([]m3ua.PointCodeRange, 1)},
-			Updated: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 848},
+		{"one-APC workload report", m3ua.SSNMEvent{Kind: m3ua.SSNMReportObservedEvent,
+			Report:             m3ua.SSNMReport{Scope: scope(100), Destinations: make([]m3ua.PointCodeRange, 1)},
+			DestinationUpdates: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 848},
 		// 512 + 3*8 + 2*320 + 4*(2 report + 2+1 first update + 0+3 second).
-		{"routing contexts in the report and both dimensions", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
+		{"routing contexts in the report and both dimensions", m3ua.SSNMEvent{Kind: m3ua.SSNMReportObservedEvent,
 			Report: m3ua.SSNMReport{Scope: scope(100, 101), Destinations: make([]m3ua.PointCodeRange, 3)},
-			Updated: []m3ua.SSNMDestinationKnowledge{
+			DestinationUpdates: []m3ua.SSNMDestinationKnowledge{
 				update(scope(100, 101), scope(7)),
 				update(scope(), scope(1, 2, 3)),
 			}}, 512 + 24 + 640 + 32},
 		// 848 + 2*(len("sg-a") + len("as-core")) = 848 + 22.
-		{"canonical partition on the event and its report", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent, Partition: canonical,
-			Report:  m3ua.SSNMReport{Scope: scope(100), Partition: canonical, Destinations: make([]m3ua.PointCodeRange, 1)},
-			Updated: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 870},
+		{"canonical partition on the event and its report", m3ua.SSNMEvent{Kind: m3ua.SSNMReportObservedEvent, Partition: canonical,
+			Report:             m3ua.SSNMReport{Scope: scope(100), Partition: canonical, Destinations: make([]m3ua.PointCodeRange, 1)},
+			DestinationUpdates: []m3ua.SSNMDestinationKnowledge{update(scope(100), scope())}}, 870},
 		// 512 + len("sg-b") + len("sg-longer-name") + len("x") = 512 + 4 + 14 + 1.
-		{"event and report partitions counted separately", m3ua.SSNMEvent{Kind: m3ua.SSNMReportEvent,
+		{"event and report partitions counted separately", m3ua.SSNMEvent{Kind: m3ua.SSNMReportObservedEvent,
 			Partition: m3ua.SSNMPartition{SignallingGateway: "sg-b"},
 			Report:    m3ua.SSNMReport{Partition: m3ua.SSNMPartition{SignallingGateway: "sg-longer-name", ApplicationServer: "x"}}}, 531},
 		// 512 + len("record budget exhausted") = 512 + 23.
@@ -211,7 +211,7 @@ func deliveredAssociationEvent(plan ssnmPlan, association int, position uint64) 
 	event := associationEvent(plan, testPartitionOf(association), association, position)
 	event.Report.Scope = ssnmScope()
 	for _, destination := range event.Report.Destinations {
-		event.Updated = append(event.Updated, m3ua.SSNMDestinationKnowledge{
+		event.DestinationUpdates = append(event.DestinationUpdates, m3ua.SSNMDestinationKnowledge{
 			Destination: destination, AvailabilitySet: true, Availability: m3ua.SSNMAvailability{Scope: ssnmScope()},
 		})
 	}
@@ -317,5 +317,13 @@ func TestSSNMPauseDrainAccountsRetainedBytes(testContext *testing.T) {
 				testContext.Fatalf("the retained queue did not follow the plan: %+v", counts)
 			}
 		})
+	}
+}
+
+func TestSSNMCapsAccountsReportPatch(t *testing.T) {
+	scope := m3ua.WireScope{RoutingContextSet: true, RoutingContexts: []uint32{1}}
+	event := m3ua.SSNMEvent{Kind: m3ua.SSNMReportPatchEvent, ReportPatch: &m3ua.SSNMReportPatch{State: m3ua.SSNMDestinationKnowledge{Congestion: m3ua.SSNMCongestion{Scope: scope}, CongestionSources: []m3ua.SSNMCongestion{{Scope: scope}}}, SourcesContinued: true}}
+	if got := ssnmEventBytes(event); got != 1096 {
+		t.Fatalf("patch bytes=%d, want 1096", got)
 	}
 }

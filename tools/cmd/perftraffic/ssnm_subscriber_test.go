@@ -41,7 +41,7 @@ func associationEvent(plan ssnmPlan, partition m3ua.SSNMPartition, association i
 		destinations[index] = m3ua.PointCodeRange{PointCode: plan.pointCode(association, chunk.first+index)}
 	}
 	return m3ua.SSNMEvent{
-		Kind:      m3ua.SSNMReportEvent,
+		Kind:      m3ua.SSNMReportObservedEvent,
 		Partition: partition,
 		ReportSet: true,
 		Report:    m3ua.SSNMReport{Kind: kind, Partition: partition, Destinations: destinations},

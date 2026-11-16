@@ -179,14 +179,20 @@ type Association struct {
 	// sconSubmissions guards only short binding admission/change bookkeeping.
 	// A binding change cancels matching submissions before waiting for their
 	// completion; neither this mutex nor a short state lock spans that join.
-	sconSubmissions           sconSubmissionTracker
-	dynamicPeerASKeys         map[uint32]ASKey
-	dynamicLocalASKeys        map[uint32]ASKey
-	dynamicPeerASKeyVersions  map[uint32]uint64
-	dynamicLocalASKeyVersions map[uint32]uint64
-	dynamicASKeyVersion       uint64
-	dynamicPeerTrafficModes   map[uint32]uint32
-	dynamicLocalTrafficModes  map[uint32]uint32
+	sconSubmissions            sconSubmissionTracker
+	dataOverflowEpisode        *localQueueEpisode // guarded by muDataOverflow; live flag is atomic.
+	localQueueLifetimes        atomic.Pointer[localQueueLifetimeIndex]
+	localQueueLifetimeRevision atomic.Uint64
+	localInputGeneration       atomic.Uint64
+	localInputChanges          atomic.Int64
+	localQueueLifetimeMu       sync.Mutex
+	dynamicPeerASKeys          map[uint32]ASKey
+	dynamicLocalASKeys         map[uint32]ASKey
+	dynamicPeerASKeyVersions   map[uint32]uint64
+	dynamicLocalASKeyVersions  map[uint32]uint64
+	dynamicASKeyVersion        uint64
+	dynamicPeerTrafficModes    map[uint32]uint32
+	dynamicLocalTrafficModes   map[uint32]uint32
 	// canonicalRemoteAS resolves a dynamically registered Routing Context back
 	// to the canonical Application Server the registration named. A static
 	// binding is answered from the provisioned inventory instead, which cannot
@@ -430,8 +436,10 @@ type Association struct {
 	controlTransport controlSender
 	// controlWriteWaits counts library writes that met a full send buffer and
 	// had to wait; controlWritesWaiting is how many are waiting now.
-	controlWriteWaits    atomic.Uint64
-	controlWritesWaiting atomic.Int32
+	optionalPublicationNext time.Time // SSNM store mutex guards scheduler cadence.
+	controlWritesPending    atomic.Int32
+	controlWriteWaits       atomic.Uint64
+	controlWritesWaiting    atomic.Int32
 	// transportCloser and transportAborter are the test seams for the two
 	// SCTP releases, SHUTDOWN and ABORT. Production leaves them nil and
 	// releases sctpConn.
@@ -504,6 +512,7 @@ var netMap = map[string]string{
 const defaultNotificationQueueSize = 64
 
 type mandatoryControl struct {
+	pendingCounted      bool
 	applicationServer   *applicationServer
 	messages            []messages.M3UA
 	enforceTrafficScope bool
@@ -748,6 +757,12 @@ func (c *Association) commitLocalIPSPState(state State) bool {
 	default:
 	}
 	changed := c.localIPSPState != state
+	if state != StateASPActive {
+		c.retireLocalCongestionScopes(nil)
+	}
+	if changed && state == StateASPActive {
+		c.localQueueLifetimeRevision.Add(1)
+	}
 	c.localIPSPState = state
 	c.muState.Unlock()
 	unlockTransfer()
@@ -1163,6 +1178,16 @@ func (c *Association) writeMandatoryASControls(control []messages.M3UA, enforceT
 		entry.result = make(chan error, 1)
 	}
 	c.notificationOnce.Do(func() { go c.writeNotifications() })
+	// Count queued ownership before enqueue, so dequeue cannot expose a gap
+	// while the writer waits for its AS/retirement barrier.
+	entry.pendingCounted = true
+	c.controlWritesPending.Add(1)
+	queued := false
+	defer func() {
+		if !queued {
+			c.controlWritesPending.Add(-1)
+		}
+	}()
 	c.peerRelease.mu.Lock()
 	select {
 	case <-c.done:
@@ -1179,6 +1204,7 @@ func (c *Association) writeMandatoryASControls(control []messages.M3UA, enforceT
 	}
 	select {
 	case c.notificationQueue <- entry:
+		queued = true
 		c.peerRelease.mu.Unlock()
 	case <-c.done:
 		c.peerRelease.mu.Unlock()
@@ -1214,6 +1240,10 @@ func (c *Association) writeMandatoryASControls(control []messages.M3UA, enforceT
 // members outside ASP-DOWN. Check here, after both notification queues, and
 // hold the peer's retirement barrier until the transport submission returns.
 func (c *Association) writeMandatoryControl(control mandatoryControl, queued bool) error {
+	if !control.pendingCounted {
+		c.controlWritesPending.Add(1)
+	}
+	defer c.controlWritesPending.Add(-1)
 	if owner := control.applicationServer; owner != nil {
 		c.asStateNotifyMu.RLock()
 		defer c.asStateNotifyMu.RUnlock()
@@ -1258,6 +1288,10 @@ func sconProfileRefusal(err error) bool {
 }
 
 func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, bindings ...queueCongestionBinding) (n int, err error) {
+	if origin == libraryWrite {
+		c.controlWritesPending.Add(1)
+		defer c.controlWritesPending.Add(-1)
+	}
 	transportAttempted := false
 	profileRefused := false
 	defer func() {
@@ -1994,6 +2028,7 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 		// path waits for a subscriber; muStateEvent never acquires muState.
 		c.muStateEvent.Lock()
 		c.closeMTPStatusDone()
+		c.retireQueueCongestionLifetimes(nil)
 		c.muStateEvent.Unlock()
 		// Retransmitters check done before each resend, and are cancelled here
 		// as well so none starts another. stopAllTAck does not take the retry
@@ -3111,6 +3146,12 @@ func (c *Association) setState(s State) {
 	c.muState.Lock()
 	wasActive := c.state == StateASPActive
 	changed := c.state != s
+	if s != StateASPActive && !c.isIPSPDoubleExchange() {
+		c.retireLocalCongestionScopes(nil)
+	}
+	if s == StateASPActive && c.state != s && !c.isIPSPDoubleExchange() {
+		c.localQueueLifetimeRevision.Add(1)
+	}
 	c.state = s
 	if changed && (wasActive || s == StateASPActive) {
 		c.invalidateMTPStatusState()
@@ -3159,6 +3200,9 @@ func (c *Association) noteRoutingContextsAcked(acked *params.Param) {
 		c.ackedRCs[rc] = struct{}{}
 		delete(c.overriddenRCs, rc)
 	}
+	if changed {
+		c.localQueueLifetimeRevision.Add(1)
+	}
 	finishStatusChange()
 	c.muAckedRCs.Unlock()
 	unlockTransfer()
@@ -3198,6 +3242,11 @@ func (c *Association) forgetAckedRoutingContexts() {
 
 func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 	c.muAckedRCs.Lock()
+	// Retire before the mark span: receive commits acquire store before marks.
+	// The ACK writer still spans retirement and the permission commit, so local
+	// admission cannot validate the old scope between them. Previously admitted
+	// attempts retain their existing lifetime/completion semantics.
+	c.retireLocalCongestionScopes(nil)
 	finishStatusChange := c.beginMTPStatusScopeChangeLocked()
 	c.ackedRCs = nil
 	c.ackedRCsScoped = false
@@ -3229,6 +3278,11 @@ func (c *Association) forgetAckedRoutingContextsWithoutTransferBarrier() {
 func (c *Association) noteRoutingContextsOverridden(rcs []uint32) {
 	unlockTransfer := c.lockASPTransferMutation()
 	c.muAckedRCs.Lock()
+	// Keep store retirement outside the mark/dynamic/canonical span. The ACK
+	// writer remains held through both retirement and override publication:
+	// old local lifetimes end before the changed permission becomes visible,
+	// and new local admission must recheck that permission after this writer.
+	c.retireLocalCongestionContexts(rcs)
 	finishStatusChange := c.beginMTPStatusScopeChangeLocked()
 	if c.role == RoleIPSP && !c.isIPSPDoubleExchange() {
 		// Single Exchange uses the same per-AS state in both directions. An
@@ -3274,6 +3328,7 @@ func (c *Association) notifyASPRouteStateChanged() {
 // for.
 func (c *Association) noteRoutingContextsActive(rcs []uint32) {
 	c.muAckedRCs.Lock()
+	c.localQueueLifetimeRevision.Add(1)
 	c.noteRoutingContextsActiveLocked(rcs)
 	c.muAckedRCs.Unlock()
 	c.syncSSNMBindings()
@@ -3326,6 +3381,7 @@ func (c *Association) commitPeerRoutingContextsActive(rcs []uint32) bool {
 	default:
 	}
 	c.muAckedRCs.Lock()
+	c.localQueueLifetimeRevision.Add(1)
 	c.noteRoutingContextsActiveLocked(rcs)
 	c.muAckedRCs.Unlock()
 	stateChanged := c.state != StateASPActive
@@ -3365,6 +3421,7 @@ func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
 	// reads the very state this function is writing.
 	defer c.syncSSNMBindings()
 	c.muAckedRCs.Lock()
+	c.retireLocalCongestionContexts(rcs)
 	defer c.muAckedRCs.Unlock()
 
 	if len(rcs) == 0 {
@@ -3393,6 +3450,9 @@ func (c *Association) noteRoutingContextsInactive(rcs []uint32) {
 // ASP-INACTIVE or ASP-DOWN starts again from nothing.
 func (c *Association) forgetActiveRoutingContexts() {
 	c.muAckedRCs.Lock()
+	if !c.isIPSPDoubleExchange() {
+		c.retireLocalCongestionScopes(nil)
+	}
 	c.activeRCs, c.activeRCsScoped = nil, false
 	c.activeScopeInitialized = false
 	c.contextlessASActive = false
@@ -4009,12 +4069,16 @@ const (
 	// ManagementCongestionProfileMismatch reports the first accepted DATA profile mismatch.
 	// Subsequent mismatches update CongestionProfileDiagnostics without another primitive.
 	ManagementCongestionProfileMismatch
+	// ManagementCongestionPublication reports automatic optional submission state.
+	ManagementCongestionPublication
 )
 
 // String names the indication as RFC 4666 Section 1.6.3 does, or uses an
 // implementation-specific name for local reports.
 func (k ManagementIndicationKind) String() string {
 	switch k {
+	case ManagementCongestionPublication:
+		return "CONGESTION-PUBLICATION"
 	case ManagementNotify:
 		return "M-NOTIFY"
 	case ManagementError:
@@ -4053,7 +4117,9 @@ func causeDescription(cause error) string {
 // always set. Standard indications use RFC names; local congestion reports use
 // implementation names, so an indication can be logged without a lookup table.
 type ManagementIndication struct {
-	Kind ManagementIndicationKind
+	// CongestionPublication is an owned automatic submission observation.
+	CongestionPublication *CongestionPublicationState
+	Kind                  ManagementIndicationKind
 	// PreviousState is the local ASP procedure state before an unsolicited
 	// ASP Up, Down, Active or Inactive acknowledgement report. For IPSP DE it
 	// is the TrafficToLocal state, not the independently controlled peer state.
@@ -4154,7 +4220,8 @@ type ManagementIndication struct {
 	// owned by the indication.
 	AffectedDestinations []AffectedDestination
 
-	// Cause is the local failure reported by M-ERROR or M-SCTP_RELEASE. A peer
+	// Cause is the local failure reported by M-ERROR, M-SCTP_RELEASE or an
+	// automatic publication attempt. A peer
 	// Error message has ErrorCode instead and leaves Cause nil.
 	Cause error
 
@@ -4236,6 +4303,10 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 		return
 	}
 	snapshot := *ind
+	if ind.CongestionPublication != nil {
+		p := clonePublicationState(*ind.CongestionPublication)
+		snapshot.CongestionPublication = &p
+	}
 	snapshot.DiagnosticInformation = bytes.Clone(ind.DiagnosticInformation)
 	snapshot.InfoString = bytes.Clone(ind.InfoString)
 	if ind.CongestionProfileMismatch != nil {

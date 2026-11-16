@@ -59,8 +59,8 @@ model or show examples without creating a separate implementation requirement.
 | [1.4.3.4 IPSP considerations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.3.4) | Mandatory when IPSP is used | Implemented | `RoleIPSP` requires an explicit Association-level exchange model. Single Exchange and Double Exchange are implemented independently from SCTP association initiation. |
 | [1.4.4 Redundancy models](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.4) | Optional models | Implemented | Override, Loadshare, Broadcast, configurable n+k activation, explicit smooth start, recovery, shortage notification, restoration, and failover are implemented per exact ASKey. |
 | [1.4.5 Flow control](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.5) | Optional | Implemented | Association traffic can be stopped through the ASP Inactive and ASP Down procedures; bounded queues and explicit overflow prevent silent mandatory-event loss. |
-| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Mandatory/Optional | Partial | Periodic SCTP charged-memory detection and ASP/IPSP MTP-STATUS are implemented. Independent implementation indications ManagementTransportCongestion (TRANSPORT-CONGESTION) and ManagementDataQueueCongestion (DATA-QUEUE-CONGESTION) report outbound transport pressure and scoped inbound overflow to Layer Management. Inbound overflow recovers after sustained drain; international-form SCON has no wire clear. Received SCON stays independent. Transport route preference is opt-in because rerouting may missequence SLS traffic. SGP peer reports have independent bounded retention and loss/resync; CongestionInputs supplies membership/peer/transport component versions with bounded retry and a Consistent flag, not an atomic SPMC verdict. SGP policy is a veto outside Endpoint/AS/delivery locks; still-stale decisions return known-not-sent ErrCongestionDecisionStale. SGP SS7 TFC/SPMC actions belong to the application/NIF: §1.4.6 uses MAY and makes triggering implementation dependent. Explicit congestion-method profiles, local-user priority admission and routed ASP offered-traffic status are implemented. International and national-without-priorities status follows Q.704 (07/96) §§11.2.3.1/11.2.5; IPSP/application-owned routing uses NewMTPStatusProcedure. Applications fan out each primitive to each registered MTP3-User; see [continued status](#continued-mtp-status). Optional local validity and ASP audit policies are available through CongestionConfig.Validity/Auditing; see [validity and audit policy](#received-congestion-validity-and-audits). |
-| [1.4.7 SCTP stream mapping](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.7) | Mandatory/Recommended | Implemented | Management and SSNM use stream 0; DATA uses an SLS-derived nonzero stream while preserving same-flow order. |
+| [1.4.6 Congestion management](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.6) | Service prose; local SCON and SG TFC MAY | Partial | Periodic SCTP charged-memory detection, ASP/IPSP MTP-STATUS, independent local queue indications, explicit method profiles and local-user priority admission are implemented. Received SS7 congestion, peer reports, transport pressure and local sources remain distinct. `CongestionInputSnapshot.Local` exposes queue/application contributions; optional local SCON and automatic DAUD share bounded retries, national clear reservations and lifecycle fences. `CongestionConfig.Publication` bounds optional capacity; failed publication never clears local evidence. `AssociationConfig.CongestionAdmission` optionally refuses DATA from cached pressure without querying the socket or generating SCON. SGP SPMC capacity and SS7 TFC remain application/NIF decisions: the section makes triggering implementation-dependent and uses MAY. No host detector, kernel-memory reservation or unconditional control-delivery guarantee is claimed. Routed ASP offered-traffic status and NewMTPStatusProcedure follow Q.704 (07/96) §§11.2.3.1/11.2.5/11.2.4 as applicable; applications fan out each primitive to each MTP3-User. See [continued status](#continued-mtp-status) and optional [validity/audit policy](#received-congestion-validity-and-audits). |
+| [1.4.7 SCTP stream mapping](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.7) | DATA MUST NOT stream 0; sequenced traffic and ASPSM/MGMT/RKM SHOULD; listed exceptions permissive | Implemented | DATA uses an SLS-derived nonzero stream while preserving same-flow order. Library management and SSNM use stream 0. The RFC permits SSNM, ASPTM, BEAT, BEAT ACK and NTFY on any stream; that permission does not reserve send-buffer space. Optional publication defers pending mandatory control and uses one NoWait attempt per association per pass; `ControlWriteTimeout` still closes a stalled association. A different stream or cached DATA ratio gives no control delivery guarantee. |
 | [1.4.8 SCTP initiation model](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.8) | Recommended | Implemented | ASP and SGP Endpoints can each initiate or accept SCTP Associations. `Dial`, `Listen`, and `Accept` never select the M3UA role. |
 | [1.5 Sample configurations](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.5) | Descriptive | Informative | ASP/SGP examples exist, and IPSP Single and Double Exchange configurations and bidirectional transfer matrices are covered. |
 | [1.6 M3UA boundaries](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.6) | Descriptive primitives | Implemented | Typed MTP-TRANSFER, Layer Management queries, ASP procedures, and SSNM operations expose the RFC boundaries. For SSNM, §4.5.2.1 says, "Local management is informed." `SubscribeSSNM` supplies raw reports, including DUPU User/Cause; derived destination indications require provisioned routes or IPSP destination mappings. Applications without ASP routes own the MTP3-User mapping. |
@@ -223,12 +223,15 @@ A refill above 50% or another discard cancels the drain dwell.
 Overflow SCON follows the explicitly configured congestion method (RFC 4666
 Section 3.4.4). International onset omits Congestion Indications, and local end
 clears local state and reports to management without a wire clear. A national
-profile uses its configured maximum level at onset and level zero on recovery.
-These are best-effort publications, fenced against a retired or replaced binding
-and a superseded queue episode; recovery does not promise complete automatic
-peer recovery. The peer also relies on its congestion-notification validity
-timer or audit/current MTP procedure. This detector covers inbound queue loss
-only, not SCTP send backlog, host overload or application-reported overload.
+profile contributes its configured maximum level at onset; a numeric-zero clear
+can follow recovery once other same-scope local sources clear. The bounded
+optional scheduler retains current work across full-buffer refusals and reserves
+a submitted national onset's capacity for clear. A superseded unsent onset is
+cancelled. Reports are fenced against retired/replaced bindings and epochs.
+Local recovery promises neither clear submission at a fixed time nor peer
+receipt. The peer also relies on its validity timer or audit/current MTP
+procedure. The queue detector covers inbound loss; application overload enters
+through explicit local contributions, and SCTP send pressure alone emits no SCON.
 
 ## DAUD congestion profile deviation
 
@@ -322,7 +325,7 @@ values in `SSNMEvent.CongestionSourcesInvalidated` independently remove
 congestion history. `SSNMAvailability.AS` identifies resolved availability
 applicability. `SSNMDestinationKnowledge.AvailabilitySources` carries the
 independent statements retained when auditing is enabled; `CongestionSources` is
-retained when validity or auditing is enabled. Updated snapshot entries own both
+retained when validity or auditing is enabled. DestinationUpdates snapshot entries own both
 histories. `SSNMEvent.AvailabilitySourcesInvalidated` adds independent
 `SSNMAvailabilitySourceInvalidation{Destination, AS, Revision}` removal IDs.
 Consumers must apply scalar dimension IDs and both source arrays, or use
@@ -369,20 +372,21 @@ a one-binding/one-partition audit job adds 472 before Info String, totaling
 measured heap/RSS limits.
 
 Audit outcomes aggregate at most one event for each of seven fixed reasons per report,
-pass or retirement batch. `AuditCount` counts each completed job outcome
+pass or retirement batch. `PublicationCount` counts each completed job outcome
 for `submitted`, `send-failed` and transport `send-deferred`, including consecutive equal reasons and a
 same-key refresh during transport; each removed job contributes exactly once to
 `reporter-retired` regardless of retirement-pass order. Deferred and contended
 work still counts outcome transitions. Counts remain per job: one batched DAUD
 can contribute several completed outcomes;
-`AuditScopeOmitted` marks mixed original scopes or more than 64 raw RCs, and zero
+`PublicationScopeOmitted` marks mixed original scopes or more than 64 raw RCs, and zero
 `Report.Association` marks mixed sources. No APC lists, Info Strings or names
 are replayed. Repeated contention and rate deferrals are suppressed. A refreshed successor
 keeps its newer causes and deadlines when the prior attempt completes. One event
 costs at most 928 conservative bytes (784 with actual reasons). Seven diagnostics
-plus a separately accounted report consume at most eight slots; eight
-diagnostic-sized events cost 7,424 bytes against defaults of 256 slots/1 MiB.
-Full retained-report payloads and aggregate bursts retain their separate limits.
+consume at most seven slots and 6,496 conservative bytes, in addition to the
+actual report-observation and report-patch events. Only an unfragmented
+observation adds one slot. Report payloads and aggregate bursts retain their
+separate limits against defaults of 256 slots/1 MiB.
 
 Expiry events carry owned `SSNMEvent.Expired` identities of type
 `SSNMCongestionExpiry{Epoch, Destination, AS, Revision, Peer}`. Call
@@ -391,7 +395,7 @@ the Endpoint-unique partition epoch and original statement version; only
 matching source records, their matching scalar copy, or the identified peer
 record become `CongestionExpired`. Values, severity, timestamps, provenance and
 the snapshot's stream revision remain unchanged. The caller orders the event
-stream. Expiry uses neither `Updated` nor `PeerCongestion`; top-level
+stream. Expiry uses neither `DestinationUpdates` nor `PeerCongestion`; top-level
 `Partition` and `Epoch` are empty because one event may span partitions. Each
 commit rechecks at most 256 candidates and publishes their freshness changes
 atomically under the store lock, then releases it before the next chunk and
@@ -401,7 +405,7 @@ and 950,272 bytes in the default SSNM subscription. This bound excludes reports,
 other queued bursts and the separate derived MTP indication channel; SSNM
 subscription overflow still requires `Resync`.
 
-Queued `Updated` destinations now charge 320 fixed bytes, reflecting the
+Queued `DestinationUpdates` destinations now charge 320 fixed bytes, reflecting the
 larger public destination shape. Each individual peer or availability/congestion
 source row still charges 256 bytes, plus its Routing Context storage. Review
 custom subscription byte budgets: report updates can reach them sooner. This
@@ -427,12 +431,12 @@ tracked optional send. Completion needs only the tracker; optional submission
 never takes those RKM locks. The single `NoWait` attempt keeps the pinned
 transport's internal mutex/deadline limitations (RFC 6458 §5.3.4; Errata 6111).
 
-Restart and `ForgetDestinations` now exclude new optional DAUD admission,
+Restart and `ForgetDestinations` now exclude new optional SCON/DAUD admission,
 cancel an admitted optional attempt and settle it before changing the epoch or
 reclaiming knowledge. Concurrent lifetime changes share admission closure without joining each
 other’s cleanup. Activation reconciliation leaves its bookkeeping untouched
 while admission is closed, so the final owner can schedule configured work. Completion joins occur outside transport, destination, store and
-procedure locks and settle only optional DAUD, never DATA or ordinary SCON.
+procedure locks and settle only optional SCON/DAUD, never DATA or synchronous SCON.
 At most one optional attempt holds the Association writer lock. This introduces
 a cancellation-completion wait reachable from restart receive handling and the
 state monitor; ordinary received status processing rejects a changing or stale
@@ -572,3 +576,26 @@ Level-4 transmission resumption remains the user's decision (§11.2.3.3).
 Q.Imp704 (12/00) changes none of these clauses; the separately advertised
 17 September 1999 covering note remains unassessed. This is not a claim of
 complete corrected-Q.704, ANSI or TTC compliance.
+
+SSNM subscriptions keep their existing bounded continuity-loss/`Resync` contract.
+Every individual event fits the default subscription byte budget: configured
+SG/AS and ASP/IPSP destination route names are capped at 255 octets, and oversized
+report histories use explicit bounded fragments (`ApplyReport`, `ReportContinues`
+and `ReportPatch.SourcesContinued`). The stricter local-source limit remains 64 octets.
+A legal multi-AS report or a combined report/expiry burst can still overflow an
+unread default queue. Queued deltas precede an explicit continuity-loss marker;
+`Resync` recovers exact retained state and resumes the stream, without replaying
+discarded raw observations or diagnostics. Defaults remain 256 slots / 1 MiB;
+there is no whole-report-plus-pass default-fit guarantee. MTP indication overflow
+continues to use `ResyncRequired`, with at most one indication per changed
+destination. See the endpoint-management design for per-event ceilings and queue
+sizing with validity, auditing and publication enabled.
+
+The application-owned `MTPStatusProcedure.Offered` returns `(indication, error)`.
+It rejects route names above 255 octets with `IdentityLengthError` wrapping
+`ErrInvalidParameterValue`, before retaining the name or changing cadence. This
+local-name bound is engineering policy. Routed cached-DATA refusal still counts
+as one original offer and stays known not sent. Local SPMC contributions and
+publication results do not change outbound SS7/transport congestion by themselves.
+Completion never retains a retry after association `Done` is observed; an actual
+admitted result remains observable without implying a live retry.

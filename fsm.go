@@ -228,6 +228,12 @@ func (c *Association) applyStateUpdateLocked(current State) error {
 	// Still written here as well as in sendState: applyStateUpdate is reached
 	// directly, without a publish, by callers that place an Association in a state
 	// outright, and it must remain correct for them.
+	if current != StateASPActive && !c.isIPSPDoubleExchange() {
+		c.retireLocalCongestionScopes(nil)
+	}
+	if current == StateASPActive && c.state != current && !c.isIPSPDoubleExchange() {
+		c.localQueueLifetimeRevision.Add(1)
+	}
 	c.state = current
 	if stateChanged && (wasActive || current == StateASPActive) {
 		c.invalidateMTPStatusState()
@@ -643,6 +649,12 @@ func (c *Association) commitStateGuarded(s State, peerDown, override, inactiveAc
 	}
 	wasActive := c.state == StateASPActive
 	stateChanged := c.state != s
+	if stateChanged && s == StateASPActive && !c.isIPSPDoubleExchange() {
+		c.localQueueLifetimeRevision.Add(1)
+	}
+	if s != StateASPActive && !c.isIPSPDoubleExchange() {
+		c.retireLocalCongestionScopes(nil)
+	}
 	c.state = s
 	if inactiveAck && s == StateASPInactive {
 		c.appliedState = s

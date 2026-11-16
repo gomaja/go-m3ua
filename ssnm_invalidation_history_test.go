@@ -20,7 +20,9 @@ func TestSSNMInvalidationUsesAdmissionScopeAfterRCReuse(t *testing.T) {
 	first := attachSSNMAssociation(t, endpoint, SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}, 7, 1)
 	sibling := attachSSNMAssociation(t, endpoint, SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a2"}, 7, 2)
 	sibling.addDynamicASKey(*staticASKey(7, 2), RoutingKey{}, false)
-	sibling.noteCanonicalRemoteAS(2, "as-core")
+	if err := sibling.noteCanonicalRemoteAS(2, "as-core"); err != nil {
+		t.Fatal(err)
+	}
 	if err := sibling.handleDestinationAvailable(messages.NewDestinationAvailable(nil, params.NewRoutingContext(2), params.NewAffectedPointCode(123), nil)); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +36,9 @@ func TestSSNMInvalidationUsesAdmissionScopeAfterRCReuse(t *testing.T) {
 	sibling.forgetCanonicalRemoteAS(2)
 	sibling.removeDynamicASKey(2, false)
 	sibling.addDynamicASKey(*staticASKey(8, 2), RoutingKey{}, false)
-	sibling.noteCanonicalRemoteAS(2, "as-edge")
+	if err := sibling.noteCanonicalRemoteAS(2, "as-edge"); err != nil {
+		t.Fatal(err)
+	}
 	if err := sibling.handleDestinationAvailable(messages.NewDestinationAvailable(nil, params.NewRoutingContext(2), params.NewAffectedPointCode(456), nil)); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +143,9 @@ func TestSSNMInvalidationPreservesOriginalDisjointNetwork(t *testing.T) {
 	first := attachSSNMAssociation(t, endpoint, SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}, 7, 1)
 	sibling := attachSSNMAssociation(t, endpoint, SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a2"}, 7, 2)
 	sibling.addDynamicASKey(*staticASKey(8, 2), RoutingKey{}, false)
-	sibling.noteCanonicalRemoteAS(2, "as-core")
+	if err := sibling.noteCanonicalRemoteAS(2, "as-core"); err != nil {
+		t.Fatal(err)
+	}
 	if err := sibling.handleDestinationAvailable(messages.NewDestinationAvailable(nil, params.NewRoutingContext(2), params.NewAffectedPointCode(123), nil)); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +154,9 @@ func TestSSNMInvalidationPreservesOriginalDisjointNetwork(t *testing.T) {
 	endpoint.ssnm.retire(partition, sibling.ID())
 	sibling.removeDynamicASKey(2, false)
 	sibling.addDynamicASKey(*staticASKey(7, 2), RoutingKey{}, false)
-	sibling.noteCanonicalRemoteAS(2, "as-edge")
+	if err := sibling.noteCanonicalRemoteAS(2, "as-edge"); err != nil {
+		t.Fatal(err)
+	}
 	if err := first.handleDestinationUnavailable(messages.NewDestinationUnavailable(params.NewNetworkAppearance(7), params.NewRoutingContext(1), params.NewAffectedPointCode(123, 124), nil)); !errors.Is(err, ErrSSNMOversizedReport) {
 		t.Fatal(err)
 	}
@@ -268,10 +276,10 @@ func TestSSNMCompactInvalidationApplyPreservesOtherDimensions(t *testing.T) {
 }
 
 func TestSSNMUpdatedCongestionScopeOwnership(t *testing.T) {
-	event := SSNMEvent{Updated: []SSNMDestinationKnowledge{{CongestionSet: true, Congestion: SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{1, 2}, RoutingContextSet: true}}}}}
+	event := SSNMEvent{DestinationUpdates: []SSNMDestinationKnowledge{{CongestionSet: true, Congestion: SSNMCongestion{Scope: WireScope{RoutingContexts: []uint32{1, 2}, RoutingContextSet: true}}}}}
 	clone := event.clone()
-	clone.Updated[0].Congestion.Scope.RoutingContexts[0] = 99
-	if event.Updated[0].Congestion.Scope.RoutingContexts[0] != 1 {
+	clone.DestinationUpdates[0].Congestion.Scope.RoutingContexts[0] = 99
+	if event.DestinationUpdates[0].Congestion.Scope.RoutingContexts[0] != 1 {
 		t.Fatal("updated congestion scope shares caller storage")
 	}
 }
@@ -299,9 +307,13 @@ func TestSSNMInvalidationResolvesCanonicalPartitionsIndependently(t *testing.T) 
 	first := attachSSNMAssociation(t, endpoint, SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a1"}, 7, 1, 3)
 	sibling := attachSSNMAssociation(t, endpoint, SGPIdentity{SignallingGateway: "sg-a", SignallingGatewayProcess: "sgp-a2"}, 7, 2)
 	first.addDynamicASKey(*staticASKey(8, 3), RoutingKey{}, false)
-	first.noteCanonicalRemoteAS(3, "as-edge")
+	if err := first.noteCanonicalRemoteAS(3, "as-edge"); err != nil {
+		t.Fatal(err)
+	}
 	sibling.addDynamicASKey(*staticASKey(8, 2), RoutingKey{}, false)
-	sibling.noteCanonicalRemoteAS(2, "as-core")
+	if err := sibling.noteCanonicalRemoteAS(2, "as-core"); err != nil {
+		t.Fatal(err)
+	}
 	sendDUNA(t, sibling, 8, 2, 101)
 	if err := first.handleDestinationUnavailable(messages.NewDestinationUnavailable(nil, params.NewRoutingContext(3), params.NewAffectedPointCode(102), nil)); err != nil {
 		t.Fatal(err)

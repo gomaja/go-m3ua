@@ -2,10 +2,12 @@ package m3ua
 
 import (
 	"context"
-	"github.com/gomaja/go-sctp"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gomaja/go-m3ua/messages"
+	"github.com/gomaja/go-sctp"
 )
 
 func TestLocalCongestionReportsUseImplementationNames(t *testing.T) {
@@ -23,16 +25,8 @@ func TestLocalCongestionReportsUseImplementationNames(t *testing.T) {
 }
 
 func TestCongestionManagementSourcesRemainIndependent(t *testing.T) {
-	e, err := NewEndpoint(EndpointConfig{Role: RoleASP, Congestion: &CongestionConfig{Default: CongestionProfile{Method: CongestionInternational}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = e.Close() })
 	c, sent := overflowAssociation(t)
-	c.endpoint = nil
-	if !e.trackAssociation(c) {
-		t.Fatal("track")
-	}
+	e := c.endpoint // The tracked fixture owns a manually driven scheduler.
 	management := c.ManagementIndications()
 	producer := &TransportCongestionState{Association: c.ID(), Epoch: c.Epoch(), Level: 2, Known: true}
 	c.notifyManagement(&ManagementIndication{Kind: ManagementTransportCongestion, TransportCongestion: producer})
@@ -56,13 +50,34 @@ func TestCongestionManagementSourcesRemainIndependent(t *testing.T) {
 	e.transport.read = func(*Association) (*sctp.SendBacklog, error) {
 		return &sctp.SendBacklog{Charged: charged, Limit: 100}, nil
 	}
-	job := transportCongestionJob{c, c.ID(), c.Epoch()}
+	job := transportCongestionJob{association: c, id: c.ID(), epoch: c.Epoch()}
 	e.transport.sample(e, job)
-	deliver(t, c, 1, inboundData(1, "discarded"))
 	for range 3 {
 		now = now.Add(100 * time.Millisecond)
 		e.transport.sample(e, job)
 	}
+	if state := c.TransportCongestion(); state.Level != 3 {
+		t.Fatalf("transport onset was not established: %+v", state)
+	}
+	if len(*sent) != 0 || len(e.CongestionPublications()) != 0 {
+		t.Fatal("transport-only pressure originated or queued an optional SSNM report")
+	}
+
+	sendSCON(t, c, 7, 1, nil, 0x222222)
+	peerScope := destinationKey{networkAppearance: 7, networkAppearanceSet: true, routingContext: 1, routingContextSet: true, pointCode: 0x222222}
+	assertPeerCongestion := func() {
+		t.Helper()
+		state, known := c.destinations.lookup(peerScope)
+		if !known || !state.Congestion.Congested || state.Congestion.LevelSet {
+			t.Fatalf("local source changed received international SCON: %+v, known=%t", state, known)
+		}
+	}
+	assertPeerCongestion()
+	if c.DataQueueStats().Congested || c.TransportCongestion().Level != 3 || len(*sent) != 0 {
+		t.Fatal("received SCON changed local queue/transport inputs or was echoed")
+	}
+
+	deliver(t, c, 1, inboundData(1, "discarded"))
 	queueOnset, transportOnset := false, false
 	for len(management) > 0 {
 		ind := <-management
@@ -88,6 +103,15 @@ func TestCongestionManagementSourcesRemainIndependent(t *testing.T) {
 	if !queueOnset || !transportOnset {
 		t.Fatalf("management onset queue=%v transport=%v", queueOnset, transportOnset)
 	}
+	handleOverflowReports(t, c)
+	if len(*sent) != 1 {
+		t.Fatalf("settled queue onset submitted %d messages, want one SCON", len(*sent))
+	}
+	scon, ok := (*sent)[0].(*messages.SignallingCongestion)
+	if !ok || scon.ConcernedDestination == nil || scon.ConcernedDestination.ConcernedDestination() != 0x111111 || scon.CongestionIndications != nil {
+		t.Fatalf("queue onset did not identify its international trigger: %v", typeNames(*sent))
+	}
+
 	charged = 0
 	for range 11 {
 		now = now.Add(100 * time.Millisecond)
@@ -95,6 +119,11 @@ func TestCongestionManagementSourcesRemainIndependent(t *testing.T) {
 	}
 	if c.TransportCongestion().Level != 0 || !c.DataQueueStats().Congested {
 		t.Fatal("transport recovery ended inbound queue congestion")
+	}
+	assertPeerCongestion()
+	runOverflowPublicationsForTest(c)
+	if len(*sent) != 1 {
+		t.Fatal("transport recovery originated a wire report after queue publication settled")
 	}
 	for len(management) > 0 {
 		<-management
@@ -108,17 +137,31 @@ func TestCongestionManagementSourcesRemainIndependent(t *testing.T) {
 		t.Fatal("queue did not recover")
 	}
 	queueEnd := false
-	for len(management) > 0 {
-		ind := <-management
-		if ind.Kind == ManagementDataQueueCongestion && ind.DataQueueCongestion != nil && !ind.DataQueueCongestion.Congested {
-			queueEnd = true
+	// The queue flag changes before the observer publishes its indication.
+	// Wait for that separate publication instead of assuming the state read
+	// also joined management delivery.
+	recovery := time.NewTimer(2 * time.Second)
+	defer recovery.Stop()
+	for !queueEnd {
+		select {
+		case ind, ok := <-management:
+			if !ok {
+				t.Fatal("management indications closed before queue recovery")
+			}
+			if ind.Kind == ManagementDataQueueCongestion && ind.DataQueueCongestion != nil && !ind.DataQueueCongestion.Congested {
+				queueEnd = true
+			}
+		case <-recovery.C:
+			t.Fatal("queue recovery management indication was not published")
 		}
 	}
-	if !queueEnd || c.TransportCongestion().Level != 0 {
-		t.Fatal("queue recovery changed or failed to report its independent state")
+	if c.TransportCongestion().Level != 0 {
+		t.Fatal("queue recovery changed its independent transport state")
 	}
-	if len(*sent) != 0 {
-		t.Fatal("transport detector originated SCON")
+	assertPeerCongestion()
+	runOverflowPublicationsForTest(c)
+	if len(*sent) != 1 {
+		t.Fatal("international queue recovery or transport detector originated an additional wire report")
 	}
 }
 

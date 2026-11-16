@@ -10,7 +10,9 @@ import (
 func TestOfferedStatusRenewalAfterPartlyExpiredCanonicalAliases(t *testing.T) {
 	e, a := newStatusReassertionFixture(t, true)
 	a.addDynamicASKey(*staticASKey(7, 8), RoutingKey{}, false)
-	a.noteCanonicalRemoteAS(8, "as-core")
+	if err := a.noteCanonicalRemoteAS(8, "as-core"); err != nil {
+		t.Fatal(err)
+	}
 	a.noteRoutingContextsAcked(params.NewRoutingContext(1, 2, 8))
 	a.notifyASPRouteStateChanged()
 	drainMTPIndications(e.MTPIndications())
@@ -130,7 +132,9 @@ func TestOfferedStatusRenewalAfterPartlyExpiredOverlappingRanges(t *testing.T) {
 func TestOfferedStatusRemovingExpiredAliasPreservesFreshRenewalCadence(t *testing.T) {
 	e, a := newStatusReassertionFixture(t, true)
 	a.addDynamicASKey(*staticASKey(7, 8), RoutingKey{}, false)
-	a.noteCanonicalRemoteAS(8, "as-core")
+	if err := a.noteCanonicalRemoteAS(8, "as-core"); err != nil {
+		t.Fatal(err)
+	}
 	a.noteRoutingContextsAcked(params.NewRoutingContext(1, 2, 8))
 	a.notifyASPRouteStateChanged()
 	drainMTPIndications(e.MTPIndications())

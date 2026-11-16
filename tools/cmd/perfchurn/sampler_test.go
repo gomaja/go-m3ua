@@ -34,6 +34,9 @@ const endpointsFixture = ` ENDPT     SOCK   STY SST HBKT LPORT   UID INODE LADDR
 func fakeProc(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	if err := os.Symlink("missing", filepath.Join(root, "symlink-probe")); err != nil {
+		t.Skipf("requires symbolic-link support and permission: %v", err)
+	}
 	for _, directory := range []string{"self/fd", "net/sctp"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
 			t.Fatal(err)
@@ -98,6 +101,9 @@ func TestParseSmapsRollupReadsAnonymousHugePages(t *testing.T) {
 	if _, err := parseAnonHugePages([]byte("Rss: 1 kB\n")); err == nil {
 		t.Fatal("rollup without AnonHugePages accepted")
 	}
+}
+
+func TestProcSourceReadsAnonymousHugePages(t *testing.T) {
 	source := procSource{root: fakeProc(t)}
 	if huge, err := source.anonHugePages(); err != nil || huge != 18432*1024 {
 		t.Fatalf("source anonymous huge pages %d, %v", huge, err)

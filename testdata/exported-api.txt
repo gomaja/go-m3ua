@@ -9,6 +9,8 @@ const CongestionFresh
 const CongestionInternational
 const CongestionNationalWithPriorities
 const CongestionNationalWithoutPriorities
+const CongestionPublicationDAUD
+const CongestionPublicationLocalSCON
 const DataNotSent
 const DataSendIndeterminate
 const DefaultBroadcastFlowCacheEntries
@@ -70,6 +72,7 @@ const MTPStatusValidityExpired
 const ManagementASPActivation
 const ManagementASPWithdrawal
 const ManagementCongestionProfileMismatch
+const ManagementCongestionPublication
 const ManagementDataQueueCongestion
 const ManagementError
 const ManagementNotify
@@ -100,7 +103,6 @@ const RoleSGP
 const RouteSelectionBroadcast
 const RouteSelectionLoadshare
 const RouteSelectionPrimaryBackup
-const SSNMAuditOutcomeEvent
 const SSNMBindingActivatedEvent
 const SSNMBindingAdmittedEvent
 const SSNMBindingRetiredEvent
@@ -117,7 +119,9 @@ const SSNMLocalReport
 const SSNMPartitionRetiredEvent
 const SSNMPeerCongestionEvent
 const SSNMPeerReport
-const SSNMReportEvent
+const SSNMPublicationOutcomeEvent
+const SSNMReportObservedEvent
+const SSNMReportPatchEvent
 const SSNMResourceLossEvent
 const SSNMSignallingCongestionReport
 const SSNMStandalonePartition
@@ -192,6 +196,7 @@ field AssociationConfig.ASPProcedures
 field AssociationConfig.ApplicationServers
 field AssociationConfig.AuthorizeASP
 field AssociationConfig.Compatibility
+field AssociationConfig.CongestionAdmission
 field AssociationConfig.CongestionProfiles
 field AssociationConfig.ControlWriteTimeout
 field AssociationConfig.DataQueueSize
@@ -229,13 +234,16 @@ field AssociationStatus.State
 field AssociationStatus.TransportCongestion
 field AssociationStatus.UnackedDataChunks
 field CompatibilityPolicy.Tolerator
+field CongestionAdmissionConfig.ChargedRatioLimit
 field CongestionConfig.Auditing
 field CongestionConfig.Default
 field CongestionConfig.MaxStatusDestinations
 field CongestionConfig.Networks
+field CongestionConfig.Publication
 field CongestionConfig.Validity
 field CongestionInputSnapshot.AS
 field CongestionInputSnapshot.Consistent
+field CongestionInputSnapshot.Local
 field CongestionInputSnapshot.MembershipGeneration
 field CongestionInputSnapshot.Peers
 field CongestionInputSnapshot.Revision
@@ -251,6 +259,31 @@ field CongestionProfileDiagnostics.LastDataMismatch
 field CongestionProfileDiagnostics.ReceivedDataMismatches
 field CongestionProfileMismatch.AS
 field CongestionProfileMismatch.Profile
+field CongestionPublicationConfig.MaxBytes
+field CongestionPublicationConfig.MaxPending
+field CongestionPublicationConfig.MaxPendingPerAssociation
+field CongestionPublicationConfig.MinReportInterval
+field CongestionPublicationConfig.RetryInterval
+field CongestionPublicationCounters.Coalesced
+field CongestionPublicationCounters.Deferred
+field CongestionPublicationCounters.Failed
+field CongestionPublicationCounters.Queued
+field CongestionPublicationCounters.Refused
+field CongestionPublicationCounters.Submitted
+field CongestionPublicationState.Association
+field CongestionPublicationState.Attempts
+field CongestionPublicationState.ConcernedDestination
+field CongestionPublicationState.ConcernedDestinationSet
+field CongestionPublicationState.DesiredCongestion
+field CongestionPublicationState.DesiredRevision
+field CongestionPublicationState.Destinations
+field CongestionPublicationState.Epoch
+field CongestionPublicationState.Kind
+field CongestionPublicationState.LastAttempt
+field CongestionPublicationState.LastError
+field CongestionPublicationState.Pending
+field CongestionPublicationState.Scope
+field CongestionPublicationState.SubmittedRevision
 field CongestionState.Congested
 field CongestionState.Level
 field CongestionState.LevelSet
@@ -342,11 +375,23 @@ field IPSPDestinationConfig.Selection
 field IPSPState.TrafficToLocal
 field IPSPState.TrafficToPeer
 field IPSPTrafficConfig.ApplicationServers
+field IdentityLengthError.Field
+field IdentityLengthError.Length
+field IdentityLengthError.Limit
 field InvalidSCTPStreamIDError.ID
 field InvalidVersionError.Ver
 field Listener.<embedded *AssociationConfig>
 field ListenerConfig.DefaultAssociationConfig
 field ListenerConfig.SelectAssociationConfig
+field LocalCongestionContribution.Request
+field LocalCongestionContribution.Revision
+field LocalCongestionContribution.Scope
+field LocalCongestionRequest.AS
+field LocalCongestionRequest.Association
+field LocalCongestionRequest.Congestion
+field LocalCongestionRequest.Destination
+field LocalCongestionRequest.Epoch
+field LocalCongestionRequest.Source
 field MTPCandidateRejection.ApplicationServer
 field MTPCandidateRejection.Path
 field MTPCandidateRejection.Reason
@@ -404,6 +449,7 @@ field ManagementIndication.AffectedDestinations
 field ManagementIndication.Association
 field ManagementIndication.Cause
 field ManagementIndication.CongestionProfileMismatch
+field ManagementIndication.CongestionPublication
 field ManagementIndication.DataQueueCongestion
 field ManagementIndication.Description
 field ManagementIndication.DiagnosticInformation
@@ -446,6 +492,7 @@ field PeerCongestionVersion.Active
 field PeerCongestionVersion.Association
 field PeerCongestionVersion.BindingGeneration
 field PeerCongestionVersion.Epoch
+field PeerCongestionVersion.LocalGeneration
 field PeerCongestionVersion.Transport
 field PeerCongestionVersion.TransportPresent
 field PointCodeRange.Mask
@@ -583,12 +630,12 @@ field SSNMDestinationKnowledge.Congestion
 field SSNMDestinationKnowledge.CongestionSet
 field SSNMDestinationKnowledge.CongestionSources
 field SSNMDestinationKnowledge.Destination
-field SSNMEvent.AuditCount
-field SSNMEvent.AuditScopeOmitted
 field SSNMEvent.AvailabilitySourcesInvalidated
 field SSNMEvent.Binding
+field SSNMEvent.CongestionPublication
 field SSNMEvent.CongestionSourcesInvalidated
 field SSNMEvent.ContinuityLost
+field SSNMEvent.DestinationUpdates
 field SSNMEvent.Epoch
 field SSNMEvent.Expired
 field SSNMEvent.Invalidated
@@ -596,11 +643,15 @@ field SSNMEvent.Kind
 field SSNMEvent.Partition
 field SSNMEvent.PeerCongestion
 field SSNMEvent.PeerCongestionRemoved
+field SSNMEvent.PublicationCount
+field SSNMEvent.PublicationKind
+field SSNMEvent.PublicationScopeOmitted
 field SSNMEvent.Reason
 field SSNMEvent.Report
+field SSNMEvent.ReportContinues
+field SSNMEvent.ReportPatch
 field SSNMEvent.ReportSet
 field SSNMEvent.Revision
-field SSNMEvent.Updated
 field SSNMPartition.ApplicationServer
 field SSNMPartition.Association
 field SSNMPartition.Kind
@@ -627,6 +678,8 @@ field SSNMReport.Source
 field SSNMReport.UnmappedConcernedDestination
 field SSNMReport.UserCause
 field SSNMReport.UserCauseSet
+field SSNMReportPatch.SourcesContinued
+field SSNMReportPatch.State
 field SSNMSnapshot.LastResourceLoss
 field SSNMSnapshot.Partitions
 field SSNMSnapshot.PartitionsInvalidated
@@ -803,6 +856,8 @@ method Endpoint.AssociationStatuses
 method Endpoint.BeginMTP3Restart
 method Endpoint.Close
 method Endpoint.CongestionInputs
+method Endpoint.CongestionPublicationCounters
+method Endpoint.CongestionPublications
 method Endpoint.DestinationStatus
 method Endpoint.DestinationStatuses
 method Endpoint.DestinationUserPartUnavailable
@@ -817,10 +872,14 @@ method Endpoint.MTPRouteStatuses
 method Endpoint.MTPTransfer
 method Endpoint.MTPTransferContext
 method Endpoint.ReportDestinationAvailability
+method Endpoint.ReportLocalCongestion
 method Endpoint.Role
 method Endpoint.SSNMKnowledge
 method Endpoint.SignallingCongestion
 method Endpoint.SubscribeSSNM
+method Endpoint.WithdrawLocalCongestion
+method IdentityLengthError.Error
+method IdentityLengthError.Unwrap
 method InvalidSCTPStreamIDError.Error
 method InvalidVersionError.Error
 method Listener.ASPsForTraffic
@@ -861,6 +920,7 @@ method SSNMDeliveryError.Error
 method SSNMDeliveryError.Unwrap
 method SSNMEvent.ApplyExpiry
 method SSNMEvent.ApplyInvalidation
+method SSNMEvent.ApplyReport
 method SSNMEventKind.String
 method SSNMPartitionKind.String
 method SSNMReportKind.String
@@ -898,6 +958,7 @@ type AssociationSnapshot struct
 type AssociationStatus struct
 type BroadcastFlowIdentifier
 type CompatibilityPolicy struct
+type CongestionAdmissionConfig struct
 type CongestionConfig struct
 type CongestionFreshness
 type CongestionInputSnapshot struct
@@ -906,6 +967,10 @@ type CongestionMethod
 type CongestionProfile struct
 type CongestionProfileDiagnostics struct
 type CongestionProfileMismatch struct
+type CongestionPublicationConfig struct
+type CongestionPublicationCounters struct
+type CongestionPublicationKind
+type CongestionPublicationState struct
 type CongestionState struct
 type CongestionValidityConfig struct
 type DataCongestionProfileMismatch struct
@@ -934,10 +999,13 @@ type IPSPDestinationConfig struct
 type IPSPExchangeModel
 type IPSPState struct
 type IPSPTrafficConfig struct
+type IdentityLengthError struct
 type InvalidSCTPStreamIDError struct
 type InvalidVersionError struct
 type Listener struct
 type ListenerConfig struct
+type LocalCongestionContribution struct
+type LocalCongestionRequest struct
 type MTP3Restart struct
 type MTPCandidateRejection struct
 type MTPDestination struct
@@ -1016,6 +1084,7 @@ type SSNMPartitionKind
 type SSNMPartitionKnowledge struct
 type SSNMReport struct
 type SSNMReportKind
+type SSNMReportPatch struct
 type SSNMReportSource
 type SSNMSnapshot struct
 type SSNMStateConfig struct
@@ -1045,6 +1114,7 @@ var ErrCongestionDecisionStale
 var ErrCongestionMethodMismatch
 var ErrContextlessApplicationServer
 var ErrControlWriteTimeout
+var ErrDataCongestionRefused
 var ErrDataQueueFull
 var ErrDeregistrationOutcomeUnknown
 var ErrDestinationStateUnknown

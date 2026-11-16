@@ -128,13 +128,13 @@ func auditOutcomeTotals(t *testing.T, sub *SSNMSubscription, association Associa
 	}
 	totals := make(map[string]uint64)
 	for _, event := range events {
-		if event.Kind != SSNMAuditOutcomeEvent {
+		if event.Kind != SSNMPublicationOutcomeEvent {
 			continue
 		}
-		if event.Report.Association != association || event.ReportSet || event.AuditScopeOmitted || !reflect.DeepEqual(event.Report.Scope, scope) {
+		if event.Report.Association != association || event.ReportSet || event.PublicationScopeOmitted || !reflect.DeepEqual(event.Report.Scope, scope) {
 			t.Fatalf("misattributed audit outcome: %+v", event)
 		}
-		totals[event.Reason] += event.AuditCount
+		totals[event.Reason] += event.PublicationCount
 	}
 	return totals
 }
@@ -306,7 +306,7 @@ func TestOptionalAuditActualOutcomeSurvivesSameKeyRefresh(t *testing.T) {
 			events, _, _ := outcomeProbeEvents(sub)
 			local := 0
 			for _, event := range events {
-				if event.Kind == SSNMReportEvent && event.Report.Source == SSNMLocalReport && event.Report.Kind == SSNMDestinationStateAuditReport {
+				if event.Kind == SSNMReportObservedEvent && event.Report.Source == SSNMLocalReport && event.Report.Kind == SSNMDestinationStateAuditReport {
 					local++
 				}
 			}

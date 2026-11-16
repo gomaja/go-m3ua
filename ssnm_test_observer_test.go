@@ -188,7 +188,7 @@ func receiveSSNMReport(testContext *testing.T, ctx context.Context, association 
 		if err != nil {
 			testContext.Fatalf("SSNM report: %v", err)
 		}
-		if event.Kind == SSNMReportEvent && event.ReportSet {
+		if event.Kind == SSNMReportObservedEvent && event.ReportSet {
 			if event.Report.Association != association.ID() {
 				continue
 			}

@@ -111,11 +111,14 @@ func TestCongestionMethodQueueOnsetAndDrainUseOnlyQueueContribution(t *testing.T
 				max = 2
 			}
 			c.endpoint = methodEndpointForTest(t, RoleASP, method, max)
-			c.muDataOverflow.Lock()
-			overflow, _, _ := c.recordDataOverflowLocked(&DataMessage{AS: ASKey{RoutingContext: 1, RoutingContextSet: true}, Scope: WireScope{RoutingContexts: []uint32{1}, RoutingContextSet: true}, ProtocolData: transferProtocolData(100, 1, nil)})
-			c.muDataOverflow.Unlock()
-			if err := c.writeOverflowSCON(overflow); err != nil {
-				t.Fatal(err)
+			attachOverflowEndpointForTest(t, c)
+			c.dataOverflowWorker = true
+			if c.recordDataOverflow(&DataMessage{AS: ASKey{RoutingContext: 1, RoutingContextSet: true}, Scope: WireScope{RoutingContexts: []uint32{1}, RoutingContextSet: true}, ProtocolData: transferProtocolData(100, 1, nil)}) == nil {
+				t.Fatal("missing queue onset")
+			}
+			runOverflowPublicationsForTest(c)
+			if len(*sent) != 1 {
+				t.Fatalf("onset reports=%d, want one", len(*sent))
 			}
 			onset := (*sent)[0].(*messages.SignallingCongestion)
 			if method >= 2 {
@@ -129,6 +132,7 @@ func TestCongestionMethodQueueOnsetAndDrainUseOnlyQueueContribution(t *testing.T
 			c.dataOverflowLowSince = time.Now().Add(-2 * time.Second)
 			c.muDataOverflow.Unlock()
 			c.observeDataQueue()
+			runOverflowPublicationsForTest(c)
 			if method >= 2 {
 				if len(*sent) != 2 {
 					t.Fatalf("national drain omitted clear: %d reports", len(*sent))
@@ -222,16 +226,17 @@ func TestCongestionMethodInternationalQueueOmitsNumericOnsetAndClear(t *testing.
 	c, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	c.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	c.endpoint = methodEndpointForTest(t, RoleASP, uint8(CongestionInternational), 0)
-	c.muDataOverflow.Lock()
-	overflow, _, _ := c.recordDataOverflowLocked(&DataMessage{AS: ASKey{RoutingContext: 1, RoutingContextSet: true}, Scope: testWireScope(0, false, 1), ProtocolData: transferProtocolData(100, 1, nil)})
-	c.muDataOverflow.Unlock()
-	if err := c.writeOverflowSCON(overflow); err != nil {
-		t.Fatal(err)
+	attachOverflowEndpointForTest(t, c)
+	c.dataOverflowWorker = true
+	if c.recordDataOverflow(&DataMessage{AS: ASKey{RoutingContext: 1, RoutingContextSet: true}, Scope: testWireScope(0, false, 1), ProtocolData: transferProtocolData(100, 1, nil)}) == nil {
+		t.Fatal("missing queue onset")
 	}
+	runOverflowPublicationsForTest(c)
 	c.muDataOverflow.Lock()
 	c.dataOverflowLowSince = time.Now().Add(-2 * time.Second)
 	c.muDataOverflow.Unlock()
 	c.observeDataQueue()
+	runOverflowPublicationsForTest(c)
 	if len(*sent) != 1 || (*sent)[0].(*messages.SignallingCongestion).CongestionIndications != nil {
 		t.Fatalf("International queue format changed: %+v", *sent)
 	}
@@ -303,57 +308,50 @@ func TestCongestionMethodResolutionUsesBindingForOmittedWireAppearance(t *testin
 	}
 }
 
-func TestCongestionMethodRetiredQueueGenerationCannotSendClear(t *testing.T) {
+func TestCongestionMethodUnsubmittedEpisodesCannotSendClear(t *testing.T) {
 	c, sent := newTestConnWithContexts(t, StateASPActive, RoleASP, 1)
 	c.noteRoutingContextsAcked(params.NewRoutingContext(1))
 	c.endpoint = methodEndpointForTest(t, RoleASP, 2, 2)
-	msg := &DataMessage{Scope: testWireScope(0, false, 1), ProtocolData: transferProtocolData(100, 1, nil)}
-	episode := func() (*DataQueueOverflowError, dataOverflowScope) {
-		t.Helper()
-		c.muDataOverflow.Lock()
-		defer c.muDataOverflow.Unlock()
-		overflow, _, _ := c.recordDataOverflowLocked(msg)
-		c.dataOverflowLowSince = time.Now().Add(-2 * time.Second)
-		ended := c.observeDataQueueLocked(time.Now(), 0)
-		if len(ended) != 1 {
-			t.Fatal("fixture did not end")
+	attachOverflowEndpointForTest(t, c)
+	c.dataOverflowWorker = true
+	msg := &DataMessage{AS: routingContextASKey(1), Scope: testWireScope(0, false, 1), ProtocolData: transferProtocolData(100, 1, nil)}
+	for range 2 {
+		if c.recordDataOverflow(msg) == nil {
+			t.Fatal("missing new episode")
 		}
-		return overflow, ended[0]
-	}
-	old, ind := episode()
-	current, _ := episode()
-	if err := c.writeOverflowClear(ind, old.generation); err != nil {
-		t.Fatal(err)
+		if len(c.endpoint.CongestionPublications()) != 1 {
+			t.Fatal("onset not retained before drain")
+		}
+		c.muDataOverflow.Lock()
+		c.dataOverflowLowSince = time.Now().Add(-2 * time.Second)
+		c.muDataOverflow.Unlock()
+		c.observeDataQueue()
+		runOverflowPublicationsForTest(c)
+		if len(c.endpoint.CongestionPublications()) != 0 {
+			t.Fatal("unsubmitted episode retained publication")
+		}
 	}
 	if len(*sent) != 0 {
-		t.Fatal("old generation published clear")
-	}
-	if err := c.writeOverflowClear(ind, current.generation); err != nil {
-		t.Fatal(err)
-	}
-	if len(*sent) != 1 {
-		t.Fatal("current generation clear missing")
+		t.Fatal("unsubmitted episode manufactured onset or numeric clear")
 	}
 }
 
 func TestCongestionMethodQueueDrainLeavesReceivedAndTransportContributions(t *testing.T) {
 	c, _ := newDataWriteAssociation(t, 1)
 	c.endpoint = methodEndpointForTest(t, RoleASP, 2, 2)
-	if !c.endpoint.trackAssociation(c) {
-		t.Fatal("track")
-	}
+	attachOverflowEndpointForTest(t, c)
 	applyASPSCON(t, c, 7, 1, 100, 0, params.NewCongestionIndications(2))
 	c.transportSnapshot.Store(&TransportCongestionState{Known: true, Level: 3, Epoch: c.Epoch()})
-	c.muDataOverflow.Lock()
-	overflow, _, _ := c.recordDataOverflowLocked(&DataMessage{AS: writeScope(1), Scope: testWireScope(7, true, 1), ProtocolData: transferProtocolData(100, 1, nil)})
-	c.muDataOverflow.Unlock()
-	if err := c.writeOverflowSCON(overflow); err != nil {
-		t.Fatal(err)
+	c.dataOverflowWorker = true
+	if c.recordDataOverflow(&DataMessage{AS: writeScope(1), Scope: testWireScope(7, true, 1), ProtocolData: transferProtocolData(100, 1, nil)}) == nil {
+		t.Fatal("missing queue onset")
 	}
+	runOverflowPublicationsForTest(c)
 	c.muDataOverflow.Lock()
 	c.dataOverflowLowSince = time.Now().Add(-2 * time.Second)
 	c.muDataOverflow.Unlock()
 	c.observeDataQueue()
+	runOverflowPublicationsForTest(c)
 	state, known := c.destinations.lookupRange(destinationKey{networkAppearance: 7, networkAppearanceSet: true, routingContext: 1, routingContextSet: true}, 100, 0)
 	if !known || state.Congestion.Level != 2 || !state.Congestion.Congested || c.TransportCongestion().Level != 3 {
 		t.Fatal("queue drain cleared another contribution")

@@ -34,7 +34,11 @@ func ssnmEventBytes(event m3ua.SSNMEvent) int {
 		peerBytes = ssnmEventSourceBytes
 		contexts += len(event.PeerCongestion.Scope.RoutingContexts)
 	}
-	for _, update := range event.Updated {
+	updates := event.DestinationUpdates
+	if event.ReportPatch != nil {
+		updates = append(append([]m3ua.SSNMDestinationKnowledge(nil), updates...), event.ReportPatch.State)
+	}
+	for _, update := range updates {
 		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
 		sourceBytes += ssnmEventSourceBytes * (len(update.CongestionSources) + len(update.AvailabilitySources))
 		for _, source := range update.AvailabilitySources {
@@ -50,7 +54,7 @@ func ssnmEventBytes(event m3ua.SSNMEvent) int {
 	return ssnmEventBaseBytes +
 		peerBytes + sourceBytes +
 		ssnmEventDestinationBytes*len(event.Report.Destinations) +
-		ssnmEventUpdateBytes*len(event.Updated) + 16*len(event.Invalidated) + 48*(len(event.CongestionSourcesInvalidated)+len(event.AvailabilitySourcesInvalidated)) +
+		ssnmEventUpdateBytes*len(updates) + 16*len(event.Invalidated) + 48*(len(event.CongestionSourcesInvalidated)+len(event.AvailabilitySourcesInvalidated)) +
 		56*len(event.Expired) +
 		ssnmEventRoutingContextBytes*contexts +
 		len(event.Reason) + identities
@@ -66,14 +70,14 @@ func ssnmEventBytes(event m3ua.SSNMEvent) int {
 func ssnmWorkloadEventBytes(destinations int) int {
 	scope := ssnmScope()
 	event := m3ua.SSNMEvent{
-		Kind:      m3ua.SSNMReportEvent,
-		ReportSet: true,
-		Report:    m3ua.SSNMReport{Scope: scope, Destinations: make([]m3ua.PointCodeRange, destinations)},
-		Updated:   make([]m3ua.SSNMDestinationKnowledge, destinations),
+		Kind:               m3ua.SSNMReportObservedEvent,
+		ReportSet:          true,
+		Report:             m3ua.SSNMReport{Scope: scope, Destinations: make([]m3ua.PointCodeRange, destinations)},
+		DestinationUpdates: make([]m3ua.SSNMDestinationKnowledge, destinations),
 	}
-	for index := range event.Updated {
-		event.Updated[index].Availability.Scope = scope
-		event.Updated[index].AvailabilitySet = true
+	for index := range event.DestinationUpdates {
+		event.DestinationUpdates[index].Availability.Scope = scope
+		event.DestinationUpdates[index].AvailabilitySet = true
 	}
 	return ssnmEventBytes(event)
 }

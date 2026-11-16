@@ -219,6 +219,10 @@ func (c *Association) dynamicMTPStatusScopes(marks *mtpStatusMarks) bool {
 
 // The caller holds muAckedRCs through the completion. The mark mutex also
 // fences first interval registration, including when the registry is empty.
+// Store retirement must finish before this span. Neither its caller nor its
+// completion may acquire store, state, AS, traffic or registration locks while
+// holding marks; received commits acquire store before marks. The completion
+// releases marks and the optional dynamic/canonical read locks together.
 func (c *Association) beginMTPStatusScopeChangeLocked() func() {
 	marks := c.statusMarks()
 	if marks == nil {

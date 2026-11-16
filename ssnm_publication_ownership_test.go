@@ -118,23 +118,23 @@ func TestSSNMPublicationPreservesIndependentOwners(testContext *testing.T) {
 				mutateSSNMOwnershipReport(report)
 				firstEvent := nextSSNMOwnershipEvent(testContext, first)
 				requireSSNMOwnershipValue(testContext, "queued report after input mutation", firstEvent.Report, wantReport)
-				if firstEvent.Kind != SSNMReportEvent || !firstEvent.ReportSet || len(firstEvent.Updated) != count {
-					testContext.Fatalf("incomplete publication: kind=%v report=%v states=%d", firstEvent.Kind, firstEvent.ReportSet, len(firstEvent.Updated))
+				if firstEvent.Kind != SSNMReportObservedEvent || !firstEvent.ReportSet || len(firstEvent.DestinationUpdates) != count {
+					testContext.Fatalf("incomplete publication: kind=%v report=%v states=%d", firstEvent.Kind, firstEvent.ReportSet, len(firstEvent.DestinationUpdates))
 				}
 				wantEvent := ssnmOwnershipValue(testContext, firstEvent)
-				wantStates := ssnmOwnershipValue(testContext, firstEvent.Updated)
+				wantStates := ssnmOwnershipValue(testContext, firstEvent.DestinationUpdates)
 				mutateSSNMOwnershipReport(firstEvent.Report)
-				requireSSNMOwnershipValue(testContext, "event states after report mutation", firstEvent.Updated, wantStates)
-				wantCongestion := ssnmOwnershipValue(testContext, firstEvent.Updated[0].Congestion)
-				wantOtherStates := ssnmOwnershipValue(testContext, firstEvent.Updated[1:])
-				firstEvent.Updated[0].Availability.Scope.RoutingContexts[0] = 0xface0001
-				requireSSNMOwnershipValue(testContext, "other dimension", firstEvent.Updated[0].Congestion, wantCongestion)
-				requireSSNMOwnershipValue(testContext, "other destinations", firstEvent.Updated[1:], wantOtherStates)
+				requireSSNMOwnershipValue(testContext, "event states after report mutation", firstEvent.DestinationUpdates, wantStates)
+				wantCongestion := ssnmOwnershipValue(testContext, firstEvent.DestinationUpdates[0].Congestion)
+				wantOtherStates := ssnmOwnershipValue(testContext, firstEvent.DestinationUpdates[1:])
+				firstEvent.DestinationUpdates[0].Availability.Scope.RoutingContexts[0] = 0xface0001
+				requireSSNMOwnershipValue(testContext, "other dimension", firstEvent.DestinationUpdates[0].Congestion, wantCongestion)
+				requireSSNMOwnershipValue(testContext, "other destinations", firstEvent.DestinationUpdates[1:], wantOtherStates)
 				requireSSNMOwnershipValue(testContext, "retained state after one nested event mutation", endpoint.SSNMKnowledge(), wantSnapshot)
 				requireSSNMOwnershipValue(testContext, "existing snapshot after one nested event mutation", snapshot, wantSnapshot)
 				secondEvent := nextSSNMOwnershipEvent(testContext, second)
 				requireSSNMOwnershipValue(testContext, "second subscriber after one nested event mutation", secondEvent, wantEvent)
-				mutateSSNMOwnershipStates(firstEvent.Updated)
+				mutateSSNMOwnershipStates(firstEvent.DestinationUpdates)
 				requireSSNMOwnershipValue(testContext, "second subscriber", secondEvent, wantEvent)
 				requireSSNMOwnershipValue(testContext, "retained state", endpoint.SSNMKnowledge(), wantSnapshot)
 				otherSnapshot := endpoint.SSNMKnowledge()
@@ -189,8 +189,8 @@ func TestSSNMBindingPublicationPreservesIndependentOwners(testContext *testing.T
 				previousRevision = event.Revision
 				// Binding lifecycle changes no destination knowledge, so it
 				// carries none: the consumer keeps what it already holds.
-				if event.Updated != nil {
-					testContext.Fatalf("%v event carries %d destinations", step.kind, len(event.Updated))
+				if event.DestinationUpdates != nil {
+					testContext.Fatalf("%v event carries %d destinations", step.kind, len(event.DestinationUpdates))
 				}
 				if step.kind != SSNMPartitionRetiredEvent {
 					if held := len(endpoint.SSNMKnowledge().Partitions[0].Destinations); held != count {
@@ -225,7 +225,7 @@ func TestSSNMEventOnlyPublicationPreservesInputOwnership(testContext *testing.T)
 				}
 				mutateSSNMOwnershipReport(report)
 				event := nextSSNMOwnershipEvent(testContext, first)
-				if event.Kind != SSNMReportEvent || !event.ReportSet || len(event.Updated) != 0 {
+				if event.Kind != SSNMReportObservedEvent || !event.ReportSet || len(event.DestinationUpdates) != 0 {
 					testContext.Fatal("event-only report gained retained state or lost report metadata")
 				}
 				requireSSNMOwnershipValue(testContext, "event-only input", event.Report, wantReport)
@@ -256,7 +256,7 @@ func TestSSNMUnboundPublicationPreservesInputOwnership(testContext *testing.T) {
 			}
 			mutateSSNMOwnershipReport(report)
 			event := nextSSNMOwnershipEvent(testContext, first)
-			if event.Kind != SSNMReportEvent || !event.ReportSet || len(event.Updated) != 0 ||
+			if event.Kind != SSNMReportObservedEvent || !event.ReportSet || len(event.DestinationUpdates) != 0 ||
 				event.Epoch != expected.Epoch || event.Revision != expected.Revision {
 				testContext.Fatal("unbound publication changed metadata or invented retained state")
 			}
@@ -321,11 +321,11 @@ func TestSSNMPartitionPublicationOrdersPointCodeThenMask(testContext *testing.T)
 		if err := endpoint.ssnm.apply(availability); err != nil {
 			testContext.Fatal(err)
 		}
-		requireOrder(nextSSNMOwnershipEvent(testContext, subscription).Updated, expected[1:3])
+		requireOrder(nextSSNMOwnershipEvent(testContext, subscription).DestinationUpdates, expected[1:3])
 		if err := endpoint.ssnm.apply(congestion); err != nil {
 			testContext.Fatal(err)
 		}
-		requireOrder(nextSSNMOwnershipEvent(testContext, subscription).Updated,
+		requireOrder(nextSSNMOwnershipEvent(testContext, subscription).DestinationUpdates,
 			[]PointCodeRange{expected[0], expected[2], expected[3]})
 		requireOrder(endpoint.SSNMKnowledge().Partitions[0].Destinations, expected)
 	}
@@ -351,17 +351,17 @@ func TestSSNMPublicationOverflowAndResyncOwnership(testContext *testing.T) {
 						testContext.Fatal(err)
 					}
 					event := nextSSNMOwnershipEvent(testContext, healthy)
-					if event.Kind != SSNMReportEvent || event.Report.Kind != kind || len(event.Updated) != count {
+					if event.Kind != SSNMReportObservedEvent || event.Report.Kind != kind || len(event.DestinationUpdates) != count {
 						testContext.Fatal("healthy subscriber lost a complete report")
 					}
 					if firstEvent == "" {
 						firstEvent = ssnmOwnershipValue(testContext, event)
 					}
 					wantRetained := ssnmOwnershipValue(testContext, endpoint.SSNMKnowledge())
-					event.Updated[0].Availability.Scope.RoutingContexts[0] = 0xface0004
+					event.DestinationUpdates[0].Availability.Scope.RoutingContexts[0] = 0xface0004
 					requireSSNMOwnershipValue(testContext, "overflow store after one nested event mutation", endpoint.SSNMKnowledge(), wantRetained)
 					mutateSSNMOwnershipReport(event.Report)
-					mutateSSNMOwnershipStates(event.Updated)
+					mutateSSNMOwnershipStates(event.DestinationUpdates)
 				}
 				requireSSNMOwnershipValue(testContext, "queued before loss", nextSSNMOwnershipEvent(testContext, slow), firstEvent)
 				loss := nextSSNMOwnershipEvent(testContext, slow)
@@ -387,11 +387,11 @@ func TestSSNMPublicationOverflowAndResyncOwnership(testContext *testing.T) {
 					testContext.Fatal(err)
 				}
 				event := nextSSNMOwnershipEvent(testContext, slow)
-				if event.Revision != snapshot.Revision+1 || event.Kind != SSNMReportEvent {
+				if event.Revision != snapshot.Revision+1 || event.Kind != SSNMReportObservedEvent {
 					testContext.Fatal("Resync did not restore the next delta")
 				}
 				wantEvent := ssnmOwnershipValue(testContext, event)
-				mutateSSNMOwnershipStates(event.Updated)
+				mutateSSNMOwnershipStates(event.DestinationUpdates)
 				requireSSNMOwnershipValue(testContext, "post-Resync healthy subscriber", nextSSNMOwnershipEvent(testContext, healthy), wantEvent)
 			})
 		}
@@ -418,12 +418,12 @@ func TestSSNMPublicationConcurrentOwnedConsumers(testContext *testing.T) {
 					results <- err
 					return
 				}
-				if event.Kind != SSNMReportEvent || len(event.Updated) != count || event.Revision <= previousRevision {
+				if event.Kind != SSNMReportObservedEvent || len(event.DestinationUpdates) != count || event.Revision <= previousRevision {
 					results <- fmt.Errorf("incomplete or unordered concurrent publication")
 					return
 				}
 				previousRevision = event.Revision
-				for _, state := range event.Updated {
+				for _, state := range event.DestinationUpdates {
 					if !reflect.DeepEqual(state.Availability.Scope.RoutingContexts, []uint32{1, 2}) ||
 						!reflect.DeepEqual(state.Congestion.Scope.RoutingContexts, []uint32{1, 2}) {
 						results <- fmt.Errorf("another consumer mutated a retained scope")
@@ -431,7 +431,7 @@ func TestSSNMPublicationConcurrentOwnedConsumers(testContext *testing.T) {
 					}
 				}
 				mutateSSNMOwnershipReport(event.Report)
-				mutateSSNMOwnershipStates(event.Updated)
+				mutateSSNMOwnershipStates(event.DestinationUpdates)
 			}
 			results <- nil
 		}()

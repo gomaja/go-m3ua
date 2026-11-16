@@ -15,9 +15,10 @@ import (
 type SSNMEventKind uint8
 
 const (
-	// SSNMReportEvent carries one locally validated RFC 4666 Section 3.4
-	// report, together with the destination knowledge it wrote.
-	SSNMReportEvent SSNMEventKind = iota + 1
+	// SSNMReportObservedEvent carries a locally validated RFC 4666 Section 3.4
+	// report and any complete destination replacements. Partial state uses
+	// SSNMReportPatchEvent and ReportPatch instead.
+	SSNMReportObservedEvent SSNMEventKind = iota + 1
 	// SSNMBindingAdmittedEvent reports an Association admitted to a partition,
 	// active or pending activation.
 	SSNMBindingAdmittedEvent
@@ -47,20 +48,25 @@ const (
 	SSNMPeerCongestionEvent
 	// SSNMCongestionExpiredEvent marks local uncertainty, never measured abatement.
 	SSNMCongestionExpiredEvent
-	// SSNMAuditOutcomeEvent reports bounded optional audit submission outcomes.
-	SSNMAuditOutcomeEvent
+	// SSNMPublicationOutcomeEvent reports bounded optional SCON and audit outcomes.
+	SSNMPublicationOutcomeEvent
+	// SSNMReportPatchEvent carries one bounded replacement or continuation in
+	// ReportPatch. It never uses DestinationUpdates or repeats the raw report.
+	SSNMReportPatchEvent
 )
 
 func (k SSNMEventKind) String() string {
 	switch k {
 	case SSNMCongestionExpiredEvent:
 		return "congestion-expired"
-	case SSNMAuditOutcomeEvent:
-		return "audit-outcome"
+	case SSNMPublicationOutcomeEvent:
+		return "publication-outcome"
 	case SSNMPeerCongestionEvent:
 		return "peer-congestion"
-	case SSNMReportEvent:
-		return "report"
+	case SSNMReportObservedEvent:
+		return "report-observed"
+	case SSNMReportPatchEvent:
+		return "report-patch"
 	case SSNMBindingAdmittedEvent:
 		return "binding-admitted"
 	case SSNMBindingActivatedEvent:
@@ -100,14 +106,17 @@ type SSNMDestinationInvalidation struct {
 // the latest successful Resync), the events reproduce the store's
 // SSNMPartitionKnowledge exactly:
 //
-//   - SSNMReportEvent: for each entry of Updated, replace the partition's
-//     entry for that Destination. No other destination changed.
+//   - SSNMReportObservedEvent: DestinationUpdates replace complete retained
+//     destinations. Oversized reports have one raw observation with no updates.
+//   - SSNMReportPatchEvent: ApplyReport applies ReportPatch.State as a replacement
+//     or source continuation. Patches never populate DestinationUpdates. Finish
+//     through ReportContinues=false before exposing the complete report.
 //   - SSNMCongestionExpiredEvent: ApplyExpiry marks only the exact original
 //     records named by Expired as expired. Values and provenance stay intact;
 //     Partition and Epoch are empty because one chunk can cross partitions.
-//   - SSNMAuditOutcomeEvent: knowledge is unchanged. Reason gives the local
-//     outcome and AuditCount counts job transitions. Report attributes only a
-//     homogeneous source/scope; AuditScopeOmitted identifies omitted scope.
+//   - SSNMPublicationOutcomeEvent: knowledge is unchanged. Reason gives the local
+//     outcome and PublicationCount counts job transitions. Report attributes only a
+//     homogeneous source/scope; PublicationScopeOmitted identifies omitted scope.
 //   - SSNMBindingAdmittedEvent: set Binding in Partition, creating the
 //     partition with this Epoch and no destinations if it is not held.
 //   - SSNMBindingActivatedEvent: mark Binding no longer pending.
@@ -137,7 +146,20 @@ type SSNMDestinationInvalidation struct {
 // individually when their AS binding
 // or association epoch retires, through SSNMPeerCongestionEvent.
 type SSNMEvent struct {
-	Kind     SSNMEventKind
+	// ReportContinues marks a report fragment followed by more fragments of the
+	// same committed report. Apply all fragments before exposing a complete
+	// replica. Only the first fragment has ReportSet; each has its own Revision.
+	ReportContinues bool
+	Kind            SSNMEventKind
+	// PublicationKind identifies automatic SCON or DAUD diagnostic work.
+	PublicationKind CongestionPublicationKind
+	// ReportPatch holds one replacement or source continuation, only for
+	// SSNMReportPatchEvent. ApplyReport applies it to an owned replica.
+	ReportPatch *SSNMReportPatch
+	// CongestionPublication contains an owned individual submission state. It is
+	// nil for fixed-reason aggregates; PublicationCount counts logical jobs.
+	CongestionPublication *CongestionPublicationState
+
 	Revision uint64
 	// Partition identifies the affected partition except on
 	// SSNMDestinationsInvalidatedEvent, which uses Epoch alone, and
@@ -153,18 +175,13 @@ type SSNMEvent struct {
 	ReportSet bool
 	// Binding is set for the binding lifecycle events.
 	Binding SSNMBinding
-	// Updated is set for SSNMReportEvent only when the report was
-	// retained: the destinations the report wrote, each once, in point-code
-	// then mask order and keyed exactly as SSNMPartitionKnowledge.Destinations.
-	// Each entry carries both dimensions as retained after this event: the one
-	// the report wrote, with this Revision, and the other one unchanged, so an
-	// entry replaces the consumer's entry for its Destination whole. It is
-	// empty for a report retained by nobody -- an unbound partition, DUPU,
-	// DAUD, or a peer-reported SCON -- and for every other kind: binding
-	// lifecycle changes no destination knowledge, and retirement discards the
-	// partition. Invalidation removes only the dimensions in Invalidated.
-	// Owned by the caller.
-	Updated []SSNMDestinationKnowledge
+	// DestinationUpdates contains complete replacements only, on
+	// SSNMReportObservedEvent. Each entry has both retained scalar dimensions
+	// and full source histories, in point-code/mask order. It is empty on a
+	// fragmented raw observation, an observation retained by nobody, and every
+	// other event kind. Partial knowledge uses only ReportPatch instead.
+	// ApplyReport supports both kinds without sharing mutable event storage.
+	DestinationUpdates []SSNMDestinationKnowledge
 	// Invalidated identifies exact removed dimensions for
 	// SSNMDestinationsInvalidatedEvent, in point-code then mask order. It has
 	// at most 2048 entries, each charged 16 bytes, and contains no scope lists
@@ -184,15 +201,15 @@ type SSNMEvent struct {
 	// values, wire scope or provenance. Expiry events contain at most 256 owned
 	// identities, charged 56 bytes each. Use ApplyExpiry on the owned snapshot.
 	Expired []SSNMCongestionExpiry
-	// AuditCount counts completed transport job outcomes and other job outcome
+	// PublicationCount counts completed transport job outcomes and other job outcome
 	// transitions coalesced into one diagnostic. Each completed attempt counts,
 	// including repeated equal results, EAGAIN and a same-key refresh.
 	// Report attributes a homogeneous association/scope only; no APCs are replayed.
-	AuditCount uint64
-	// AuditScopeOmitted marks mixed scopes or scopes exceeding 64 wire RCs.
+	PublicationCount uint64
+	// PublicationScopeOmitted marks mixed scopes or scopes exceeding 64 wire RCs.
 	// A zero Report.Association marks mixed sources. ReportSet remains false.
-	AuditScopeOmitted bool
-	// Reason identifies invalidation, resource loss or local audit outcomes:
+	PublicationScopeOmitted bool
+	// Reason identifies invalidation, resource loss or optional publication outcomes:
 	// queue-full, rate-deferred, reporter-retired, send-deferred, contended,
 	// send-failed and submitted. Repeated contention and rate deferrals are
 	// suppressed; completed transport attempts are counted independently.
@@ -306,19 +323,21 @@ func (e SSNMEvent) ApplyInvalidation(partition *SSNMPartitionKnowledge) bool {
 // subscriber however many lists it carries.
 // An unmapped Concerned Destination diagnostic owns another scalar copy.
 func (e SSNMEvent) clone() SSNMEvent {
+	if e.CongestionPublication != nil {
+		p := clonePublicationState(*e.CongestionPublication)
+		e.CongestionPublication = &p
+	}
 	contexts := len(e.Report.Scope.RoutingContexts)
 	if e.PeerCongestion != nil {
 		contexts += len(e.PeerCongestion.Scope.RoutingContexts)
 	}
-	for _, update := range e.Updated {
-		contexts += len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
-		for _, source := range update.AvailabilitySources {
-			contexts += len(source.Scope.RoutingContexts)
-		}
-		for _, source := range update.CongestionSources {
-			contexts += len(source.Scope.RoutingContexts)
-		}
+	for _, update := range e.DestinationUpdates {
+		contexts += ssnmKnowledgeContexts(update)
 	}
+	if e.ReportPatch != nil {
+		contexts += ssnmKnowledgeContexts(e.ReportPatch.State)
+	}
+
 	var arena ssnmRoutingContextArena
 	if contexts > 0 {
 		arena.free = make([]uint32, contexts)
@@ -337,23 +356,19 @@ func (e SSNMEvent) clone() SSNMEvent {
 	if e.Report.Destinations != nil {
 		e.Report.Destinations = append([]PointCodeRange(nil), e.Report.Destinations...)
 	}
-	if e.Updated != nil {
-		updated := make([]SSNMDestinationKnowledge, len(e.Updated))
-		for index, update := range e.Updated {
-			update.Availability.Scope.RoutingContexts = arena.own(update.Availability.Scope.RoutingContexts)
-			update.Congestion.Scope.RoutingContexts = arena.own(update.Congestion.Scope.RoutingContexts)
-			update.AvailabilitySources = append([]SSNMAvailability(nil), update.AvailabilitySources...)
-			for i := range update.AvailabilitySources {
-				update.AvailabilitySources[i].Scope.RoutingContexts = arena.own(update.AvailabilitySources[i].Scope.RoutingContexts)
-			}
-			update.CongestionSources = append([]SSNMCongestion(nil), update.CongestionSources...)
-			for i := range update.CongestionSources {
-				update.CongestionSources[i].Scope.RoutingContexts = arena.own(update.CongestionSources[i].Scope.RoutingContexts)
-			}
-			updated[index] = update
+	if e.DestinationUpdates != nil {
+		updated := make([]SSNMDestinationKnowledge, len(e.DestinationUpdates))
+		for i, value := range e.DestinationUpdates {
+			updated[i] = arena.ownKnowledge(value)
 		}
-		e.Updated = updated
+		e.DestinationUpdates = updated
 	}
+	if e.ReportPatch != nil {
+		patch := *e.ReportPatch
+		patch.State = arena.ownKnowledge(patch.State)
+		e.ReportPatch = &patch
+	}
+
 	if e.AvailabilitySourcesInvalidated != nil {
 		e.AvailabilitySourcesInvalidated = append([]SSNMAvailabilitySourceInvalidation(nil), e.AvailabilitySourcesInvalidated...)
 	}
@@ -408,13 +423,19 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 	if !reserveSSNMEventBytes(&remaining, 1, ssnmEventBaseBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Destinations), ssnmEventDestinationBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.ProfileMismatches), ssnmEventProfileMismatchBytes) ||
-		!reserveSSNMEventBytes(&remaining, len(event.Updated), ssnmEventUpdateBytes) ||
+		!reserveSSNMEventBytes(&remaining, len(event.DestinationUpdates), ssnmEventUpdateBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Invalidated), ssnmEventInvalidationBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.CongestionSourcesInvalidated), ssnmEventSourceInvalidationBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.AvailabilitySourcesInvalidated), ssnmEventSourceInvalidationBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Expired), ssnmEventExpiryBytes) ||
 		!reserveSSNMEventBytes(&remaining, len(event.Report.Scope.RoutingContexts), ssnmRoutingContextBytes) {
 		return 0, false
+	}
+	if event.CongestionPublication != nil {
+		p := event.CongestionPublication
+		if !reserveSSNMEventBytes(&remaining, 1, 256) || !reserveSSNMEventBytes(&remaining, len(p.LastError), 1) || !reserveSSNMEventBytes(&remaining, len(p.Scope.RoutingContexts), 4) || !reserveSSNMEventBytes(&remaining, len(p.Destinations), 8) {
+			return 0, false
+		}
 	}
 	for _, value := range []string{
 		event.Reason,
@@ -433,21 +454,13 @@ func ssnmEventAccountedBytes(event SSNMEvent, limit int) (int, bool) {
 			return 0, false
 		}
 	}
-	for _, update := range event.Updated {
-		for _, source := range update.AvailabilitySources {
-			if !reserveSSNMEventBytes(&remaining, 1, ssnmEventStateBytes) || !reserveSSNMEventBytes(&remaining, len(source.Scope.RoutingContexts), ssnmRoutingContextBytes) {
-				return 0, false
-			}
-		}
-		for _, source := range update.CongestionSources {
-			if !reserveSSNMEventBytes(&remaining, 1, ssnmEventStateBytes) || !reserveSSNMEventBytes(&remaining, len(source.Scope.RoutingContexts), ssnmRoutingContextBytes) {
-				return 0, false
-			}
-		}
-		if !reserveSSNMEventBytes(&remaining, len(update.Availability.Scope.RoutingContexts), ssnmRoutingContextBytes) ||
-			!reserveSSNMEventBytes(&remaining, len(update.Congestion.Scope.RoutingContexts), ssnmRoutingContextBytes) {
+	for _, update := range event.DestinationUpdates {
+		if !ssnmKnowledgeFits(&remaining, update) {
 			return 0, false
 		}
+	}
+	if event.ReportPatch != nil && (!reserveSSNMEventBytes(&remaining, 1, ssnmEventUpdateBytes) || !ssnmKnowledgeFits(&remaining, event.ReportPatch.State)) {
+		return 0, false
 	}
 
 	return limit - remaining, true
@@ -537,6 +550,16 @@ func newSSNMSubscription(state *ssnmState, limit, byteLimit int) *SSNMSubscripti
 // lock, so the snapshot a subscription started from and the deltas that follow
 // it cannot interleave.
 func (s *ssnmState) publishLocked(event SSNMEvent) {
+	if event.Kind == SSNMReportObservedEvent && len(s.subscribers) > 0 {
+		if _, fits := ssnmEventAccountedBytes(event, ssnmReportEventByteLimit); !fits {
+			s.publishReportFragmentsLocked(event)
+			return
+		}
+	}
+	s.publishSingleEventLocked(event)
+}
+
+func (s *ssnmState) publishSingleEventLocked(event SSNMEvent) {
 	for subscription := range s.subscribers {
 		subscription.enqueue(event)
 	}
@@ -667,8 +690,9 @@ func (s *SSNMSubscription) take() (SSNMEvent, bool, error) {
 // Resync returns a fresh owned snapshot and resumes the delta stream from it.
 //
 // It is the only thing that clears continuity loss, and it clears it only on
-// success. Queued deltas are dropped because the snapshot already contains
-// them: keeping both would replay state the caller has just been given.
+// success. Queued deltas are dropped because their retained-state effects are
+// already represented by the snapshot. Discarded raw observations and diagnostic
+// history are not replayed; the continuity marker exposes that gap.
 func (s *SSNMSubscription) Resync() (SSNMSnapshot, error) {
 	if s == nil {
 		return SSNMSnapshot{}, ErrSSNMSubscriptionClosed
@@ -779,4 +803,41 @@ func (e *Endpoint) SSNMKnowledge() SSNMSnapshot {
 		return SSNMSnapshot{}
 	}
 	return e.ssnm.snapshot()
+}
+
+func ssnmKnowledgeContexts(update SSNMDestinationKnowledge) int {
+	total := len(update.Availability.Scope.RoutingContexts) + len(update.Congestion.Scope.RoutingContexts)
+	for _, source := range update.AvailabilitySources {
+		total += len(source.Scope.RoutingContexts)
+	}
+	for _, source := range update.CongestionSources {
+		total += len(source.Scope.RoutingContexts)
+	}
+	return total
+}
+func (a *ssnmRoutingContextArena) ownKnowledge(update SSNMDestinationKnowledge) SSNMDestinationKnowledge {
+	update.Availability.Scope.RoutingContexts = a.own(update.Availability.Scope.RoutingContexts)
+	update.Congestion.Scope.RoutingContexts = a.own(update.Congestion.Scope.RoutingContexts)
+	update.AvailabilitySources = append([]SSNMAvailability(nil), update.AvailabilitySources...)
+	for i := range update.AvailabilitySources {
+		update.AvailabilitySources[i].Scope.RoutingContexts = a.own(update.AvailabilitySources[i].Scope.RoutingContexts)
+	}
+	update.CongestionSources = append([]SSNMCongestion(nil), update.CongestionSources...)
+	for i := range update.CongestionSources {
+		update.CongestionSources[i].Scope.RoutingContexts = a.own(update.CongestionSources[i].Scope.RoutingContexts)
+	}
+	return update
+}
+func ssnmKnowledgeFits(remaining *int, update SSNMDestinationKnowledge) bool {
+	for _, source := range update.AvailabilitySources {
+		if !reserveSSNMEventBytes(remaining, 1, ssnmEventStateBytes) || !reserveSSNMEventBytes(remaining, len(source.Scope.RoutingContexts), 4) {
+			return false
+		}
+	}
+	for _, source := range update.CongestionSources {
+		if !reserveSSNMEventBytes(remaining, 1, ssnmEventStateBytes) || !reserveSSNMEventBytes(remaining, len(source.Scope.RoutingContexts), 4) {
+			return false
+		}
+	}
+	return reserveSSNMEventBytes(remaining, len(update.Availability.Scope.RoutingContexts), 4) && reserveSSNMEventBytes(remaining, len(update.Congestion.Scope.RoutingContexts), 4)
 }

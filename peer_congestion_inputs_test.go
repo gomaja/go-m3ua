@@ -6,7 +6,6 @@ package m3ua
 
 import (
 	"errors"
-	"reflect"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -58,9 +57,6 @@ func TestCongestionInputsOwnsCopiesAndDistinguishesUnknownClearAndInactive(t *te
 		if peer.Association == first.ID() && (peer.PeerCongestion[0].Scope.RoutingContexts[0] != 1 || peer.PeerCongestion[0].Congestion.Level != 0) {
 			t.Fatal("input snapshot aliases retained report")
 		}
-	}
-	if _, exists := reflect.TypeFor[CongestionInputSnapshot]().FieldByName("Local"); exists {
-		t.Fatal("future local contributor API leaked into this contract")
 	}
 }
 

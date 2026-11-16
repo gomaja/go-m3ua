@@ -167,7 +167,7 @@ func TestSSNMOperationAtomicOracleRejectsRegistrationGap(t *testing.T) {
 }
 
 func TestSSNMOperationOracleRejectsCorruption(testContext *testing.T) {
-	wantEvent := SSNMEvent{Kind: SSNMReportEvent, Revision: 9, ReportSet: true, Report: SSNMReport{Kind: SSNMDestinationUnavailableReport}, Updated: []SSNMDestinationKnowledge{{Destination: PointCodeRange{PointCode: 256, Mask: 8}, AvailabilitySet: true, Availability: SSNMAvailability{State: DestinationUnavailable}}}}
+	wantEvent := SSNMEvent{Kind: SSNMReportObservedEvent, Revision: 9, ReportSet: true, Report: SSNMReport{Kind: SSNMDestinationUnavailableReport}, DestinationUpdates: []SSNMDestinationKnowledge{{Destination: PointCodeRange{PointCode: 256, Mask: 8}, AvailabilitySet: true, Availability: SSNMAvailability{State: DestinationUnavailable}}}}
 	for _, name := range []string{"missing-typed", "wrong-dimension", "typed-loss", "duplicate-destination", "stale-revision", "wrong-scope", "wrong-association", "wrong-epoch"} {
 		testContext.Run(name, func(testContext *testing.T) {
 			event := wantEvent
@@ -175,11 +175,11 @@ func TestSSNMOperationOracleRejectsCorruption(testContext *testing.T) {
 			case "missing-typed":
 				event = SSNMEvent{}
 			case "wrong-dimension":
-				event.Updated = []SSNMDestinationKnowledge{{Destination: PointCodeRange{PointCode: 256, Mask: 8}, CongestionSet: true}}
+				event.DestinationUpdates = []SSNMDestinationKnowledge{{Destination: PointCodeRange{PointCode: 256, Mask: 8}, CongestionSet: true}}
 			case "typed-loss":
 				event.ContinuityLost = true
 			case "duplicate-destination":
-				event.Updated = append(append([]SSNMDestinationKnowledge(nil), event.Updated...), event.Updated[0])
+				event.DestinationUpdates = append(append([]SSNMDestinationKnowledge(nil), event.DestinationUpdates...), event.DestinationUpdates[0])
 			case "stale-revision":
 				event.Revision--
 			case "wrong-scope":

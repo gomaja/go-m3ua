@@ -293,7 +293,8 @@ const DefaultEstablishTimeout = 10 * time.Second
 
 // DefaultControlWriteTimeout bounds how long a message the library writes on its
 // own behalf may wait for SCTP send-buffer space; see
-// AssociationConfig.ControlWriteTimeout.
+// AssociationConfig.ControlWriteTimeout. Automatic optional SCON and DAUD
+// instead use the bounded publication scheduler and a single NoWait attempt.
 //
 // A full send buffer is ordinary transport behaviour, not a failure: it lasts
 // until the peer opens its receive window or a lost DATA chunk is retransmitted.
@@ -647,6 +648,8 @@ type ASConfig struct {
 // association uses an immutable AssociationConfig snapshot selected by
 // ListenerConfig before any M3UA message is parsed.
 type AssociationConfig struct {
+	// CongestionAdmission opts DATA into cached send-backlog admission. Nil disables it.
+	CongestionAdmission *CongestionAdmissionConfig
 	// CongestionProfiles overrides Endpoint profiles for resolved networks on this peer.
 	// Entries must choose a nonzero Method and omit PeerSGP; duplicate selectors are invalid.
 	CongestionProfiles []NetworkCongestionProfile
@@ -687,7 +690,7 @@ type AssociationConfig struct {
 	EstablishTimeout time.Duration
 	// ControlWriteTimeout bounds how long a message the library writes on its
 	// own behalf may wait for SCTP send-buffer space: acknowledgements, BEAT
-	// and BEAT Ack, Error, Notify, destination state replies and publications,
+	// and BEAT Ack, Error, Notify, mandatory destination state replies/publications,
 	// registration responses, ASP procedure requests and their T(ack)
 	// retransmissions. Such a message waits while the buffer is full rather
 	// than failing; if it is still waiting when the bound expires, the
@@ -699,8 +702,9 @@ type AssociationConfig struct {
 	// this bound: while one is in force, a library write waits only until the
 	// deadline.
 	//
-	// The Endpoint's destination state publications are the library's writes
-	// and wait. Writes the application asks for on one Association do not:
+	// Mandatory Endpoint destination-state publications wait. Automatic optional
+	// local SCON and DAUD instead use the bounded NoWait scheduler. Writes the
+	// application asks for on one Association report their actual result:
 	// WriteData, WriteSignal, DestinationStateAudit, SignallingCongestion,
 	// RegisterRoutingKeys and DeregisterApplicationServers report a full send
 	// buffer to the caller; see WriteSignal.
@@ -869,6 +873,10 @@ func snapshotAssociationConfig(config *AssociationConfig) *AssociationConfig {
 	}
 	snapshot := *config
 	snapshot.CongestionProfiles = snapshotCongestionProfiles(config.CongestionProfiles)
+	if config.CongestionAdmission != nil {
+		admission := *config.CongestionAdmission
+		snapshot.CongestionAdmission = &admission
+	}
 	if config.HeartbeatInfo != nil {
 		heartbeat := *config.HeartbeatInfo
 		snapshot.HeartbeatInfo = &heartbeat
@@ -918,6 +926,14 @@ func snapshotApplicationServers(servers []ASConfig) []ASConfig {
 func validateAssociationConfigForRole(role Role, config *AssociationConfig) error {
 	if config == nil {
 		return ErrNilAssociationConfig
+	}
+	if config.PeerSGP != nil {
+		if err := validateIdentityLength("PeerSGP.SignallingGateway", string(config.PeerSGP.SignallingGateway), maxObservationIdentityBytes); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidRoleConfiguration, err)
+		}
+	}
+	if err := validateCongestionAdmissionConfig(config.CongestionAdmission); err != nil {
+		return err
 	}
 	if err := validateCongestionProfiles(config.CongestionProfiles, role, nil, true); err != nil {
 		return err

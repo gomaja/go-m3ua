@@ -66,7 +66,7 @@ func TestPeerSCONSurvivesSubscriptionResync(t *testing.T) {
 	peerRetentionApply(t, store, report, 1, bindings)
 	changed := peerRetentionNext(t, subscription)
 	raw := peerRetentionNext(t, subscription)
-	if changed.Kind != SSNMPeerCongestionEvent || changed.PeerCongestion == nil || raw.Kind != SSNMReportEvent || !raw.Report.PeerReported || raw.Revision != changed.Revision+1 {
+	if changed.Kind != SSNMPeerCongestionEvent || changed.PeerCongestion == nil || raw.Kind != SSNMReportObservedEvent || !raw.Report.PeerReported || raw.Revision != changed.Revision+1 {
 		t.Fatalf("peer delta must precede raw report with successive revisions: %+v %+v", changed, raw)
 	}
 	snapshot, err := subscription.Resync()
