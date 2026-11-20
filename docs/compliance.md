@@ -15,6 +15,18 @@ obsolete security protocol references embedded in current RFC 3788 and keeps
 library conformance separate from deployment-provided peer authentication,
 integrity, confidentiality, and replay protection.
 
+## Inter-SGP deployment duty
+
+RFC 4666 §1.4.1 recommends coordinating MTP3 routeset, SPMC and remote AS/ASP
+states across the SGPs of one SG and leaves the inter-SGP protocol outside its
+scope. One SGP `Endpoint` shares state among the associations it serves. The
+library does not coordinate several SGP processes; the deployment must do so.
+Divergence can produce inconsistent SSNM or SS7 management actions and traffic
+offered through an SGP whose view is stale. The
+[inter-SGP coordination boundary](design/endpoint-management-and-ssnm.md#inter-sgp-coordination-boundary)
+lists the consequences and existing observation/control APIs for each state
+class, including the absence of aggregate SPMC and remote AS/ASP state setters.
+
 ## SCTP reliability
 
 `SCTPConfig.PartialReliability` defaults to false for Dial and Listen, preventing

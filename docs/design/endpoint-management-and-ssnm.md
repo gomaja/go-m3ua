@@ -37,6 +37,54 @@ Association owns procedures sent to one peer. SGP-originated SSNM operations
 that must reach all concerned ASPs remain Endpoint operations. Existing
 association indication streams remain fail-closed. This is the selected model.
 
+## Inter-SGP coordination boundary
+
+[RFC 4666 §1.4.1](https://www.rfc-editor.org/rfc/rfc4666.html#section-1.4.1)
+states:
+
+> Where an SG contains more than one SGP, the MTP3 routeset, SPMC, and remote AS/ASP states of each SGP SHOULD be coordinated across all the SGPs.
+
+The same section also states:
+
+> Inter-SGP protocol is outside of the scope of this document.
+
+One SGP `Endpoint` owns and shares AS, NIF, destination and MTP3 restart state
+among the associations it serves. The library does not coordinate several SGP
+processes belonging to one SG. The deployment must supply that coordination,
+including how state is exchanged, reconciled and applied at each SGP. Shared
+state within one Endpoint and ASP-side selection among several SGPs do not
+establish agreement between SGP processes.
+
+The coordinator can use the existing APIs below. Each observation describes
+one Endpoint; none is a cluster snapshot or a state replication protocol.
+
+| State named by RFC 4666 §1.4.1 | Consequence of divergence | Observe on each SGP | Drive on each SGP |
+| --- | --- | --- | --- |
+| MTP3 routeset: destination availability, restriction and congestion | SGPs can issue inconsistent DUNA/DAVA/DRST/SCON and DAUD replies. Traffic can be offered through an SGP whose stale view still reports an unavailable, restricted or congested destination as usable. | `Endpoint.DestinationStatus` queries an exact `DestinationStatusKey`; `Endpoint.DestinationStatuses` enumerates retained records. `DestinationNetworkState` keeps availability and congestion independent. | `Endpoint.ReportDestinationAvailability` with `DestinationAvailabilityRequest` records and publishes availability/restriction; `Endpoint.SignallingCongestion` with `SignallingCongestionRequest` records and publishes congestion to concerned active ASPs. Apply both dimensions as needed on each SGP, preserving the request's Network Appearance, Routing Context and point-code range. Neither operation updates another Endpoint. |
+| SPMC state | Disagreement about the represented signalling point's availability, congestion or user-part status can produce inconsistent SS7 management actions and leave traffic offered through an SGP whose represented capacity is stale. | There is no aggregate SPMC status API. `Endpoint.ApplicationServerStatuses` and `Endpoint.CongestionInputs` expose local AS membership and congestion inputs; `Endpoint.SSNMKnowledge` or `Endpoint.SubscribeSSNM` expose retained peer congestion. These are inputs to the deployment's SPMC assessment. | There is no SPMC state setter or automatic SS7 TFC API. `Endpoint.ReportLocalCongestion` and `Endpoint.WithdrawLocalCongestion` maintain local congestion contributions; `SGPConfig.CongestionPolicy` can veto a local transit candidate. Neither sets aggregate SPMC state or authorizes an inactive ASP. The deployment/NIF owns the aggregate decision and SS7 management action. |
+| Remote AS state | SGPs can disagree about AS readiness and AS-state Notify messages, offering traffic through an SGP whose stale AS view has no usable capacity. | `Endpoint.ApplicationServerStatus` and `Endpoint.ApplicationServerStatuses` report local AS state and active member associations by `ASKey`. | There is no exported AS-state setter. AS state follows local membership and recovery timers (RFC 4666 §4.3.2). A coordinator must reconcile deployment policy and peer procedures rather than copy an AS-state value into another SGP. |
+| Remote ASP state | SGPs can disagree about active membership and which ASPs receive DATA or SSNM, offering traffic through stale membership at one SGP. | `Endpoint.ASPStatus` and `Endpoint.ASPStatuses` report per-association, per-`ASKey` state; at an SGP, `ASPStatus.PeerStateSet` identifies the valid `ASPStatus.PeerState`. `Association.ManagementIndications` supplies association-scoped management events. | There is no exported remote-ASP-state setter. `Association.ASPUp`, `Association.ASPDown`, `Association.ASPActive` and `Association.ASPInactive` initiate procedures at an ASP or an eligible IPSP, not at an SGP. The coordinator must arrange the peer's procedures on each association. `Association.Close` can remove a local association when deployment policy requires teardown; it cannot install a sibling SGP's remote ASP state. |
+
+SPMC denotes the Application Servers represented under one signalling point in
+one Network Appearance (RFC 4666 §1.2). Its aggregate state is distinct from
+both an SS7 destination record and one AS's local membership. RFC 4666 §1.4.6
+leaves SS7 TFC triggering implementation-dependent. Congestion inputs and
+local contributions therefore do not supply a cluster capacity verdict.
+
+Destination queries and publication use the SGP's local wire scope; AS and ASP
+queries use `ASKey`, and `AssociationID` is local to one Endpoint lifetime.
+The coordinator must map deployment identities to each SGP's keys and labels;
+copying numeric Routing Contexts or association identifiers is insufficient.
+`Endpoint.SubscribeSSNM` returns an initial snapshot and a subscription;
+`SSNMSubscription.Next` consumes subsequent events and
+`SSNMSubscription.Resync` restores continuity when required. This SSNM stream
+does not replicate remote AS/ASP state or constitute an SPMC-state stream.
+
+`Endpoint.MTPDestinationStatuses` and `Endpoint.MTPIndications` expose derived
+ASP/IPSP status. `NewMTPStatusProcedure` supports continued MTP-STATUS for IPSP
+or application-owned routing. These MTP3-User APIs do not drive an SGP's
+authoritative SS7 destination state or coordinate sibling SGPs.
+
 ## Stable association identity
 
 Every association tracked by an Endpoint receives a monotonically increasing
