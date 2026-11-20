@@ -64,6 +64,43 @@ RFC 4666 Sections 1.4.4.1, 3.8.2, 4.3.2, 4.3.4.3, 4.3.4.5, 5.1.4, and 5.2.3:
 - Override is rejected unless the effective activation threshold is one,
   including provisioned and dynamically registered Routing Keys.
 
+## Managed IPSP DATA distribution
+
+`Listener.DistributeData` and `Association.DistributeData` use the Endpoint's
+peer Application Server registry for SGP and IPSP. IPSP traffic follows the same
+Override, SLS Loadshare, Broadcast synchronization, and bounded AS-PENDING
+recovery queue as SGP traffic (RFC 4666 §§4.3, 4.3.2 and 4.3.4.3).
+
+| IPSP model and side | Either distribution entry point |
+| --- | --- |
+| Single Exchange, ASP Active requester or acknowledger | Uses shared peer AS state; ASP Active Ack also activates peer state (§4.3.4.3.1). |
+| Double Exchange, either ASPSM agreement, with `TrafficToPeer` | Uses peer-directed AS state; `TrafficToLocal` is independent (§4.3). |
+| Double Exchange, Endpoint with only `TrafficToLocal` | Returns `ErrNoConfiguredAS`; local activation cannot authorize outbound distribution (§4.3). |
+| A local-only Association whose Endpoint has a sibling peer AS | Uses that Endpoint's peer registry, just as the Listener does. |
+
+`ASPProcedures` and the SCTP initiator do not change this ownership (§1.4.8).
+A configured inactive AS returns `ErrNoActiveASP`; AS-PENDING queues until
+reactivation flushes it or T(r) expiry discards it (§4.3.2). Network Appearance
+and Routing Context select an exact ASKey; other Endpoints and the DE local
+direction cannot supply outbound members. Direct point-to-point DATA is unchanged.
+
+Every send path refuses SI 0, including both `DistributeData` entry points for
+SGP and IPSP, before selection or queuing, with `ErrMTPManagementData` wrapped
+in a `*DataWriteError` with `DataNotSent`. RFC 4666 §1.4.3.2 forbids MTP3
+management encapsulation between SG and ASP; §1.4.3.4 says SS7 and M3UA
+interworking is unnecessary for IPSP. M3UA DATA carries MTP3-User messages
+(§3.3.1). The library therefore excludes SI 0, MTP3's own management, consistently
+with direct sends and inbound DATA admission. This uniform admission policy is
+the library's application of those boundaries. Received peer congestion and
+transport pressure still participate in congestion-method admission, and the
+configured cached DATA gate remains effective (§§1.4.6 and 3.4.4). SGP-only
+transit veto/ranking settings do not become IPSP configuration. No SS7 route
+state, SPMC capacity verdict, or TFC generation is inferred. Automatic
+offered-traffic status at the ASP multi-SG routing boundary (§4.5.2) does not
+apply to this peer AS distributor; applications needing continued local-user
+status use `NewMTPStatusProcedure` with explicit status (§1.4.6).
+`Endpoint.MTPTransfer` and `MTPTransferContext` remain ASP routing APIs.
+
 ## ASP multi-SG routing
 
 The ASP Endpoint implements the route function described by RFC 4666 Sections
@@ -561,7 +598,8 @@ transport or lifecycle operations exposing already-expired knowledge retain
 claim measured congestion clear. RFC 4666 §3.4.4 permits a validity timer but
 does not prescribe these Go trigger values.
 
-IPSP/application-owned routing uses `NewMTPStatusProcedure` with actual
+IPSP AS selection and recovery use `DistributeData`. Applications needing
+continued local-user status use `NewMTPStatusProcedure` with actual
 aggregate status, once per destination/local MTP3 boundary. A changed
 destination resets automatically; clear or uncertain status supplied to `Offered`
 also resets it. The helper sees snapshots only. Call `Reset()` on known clear,

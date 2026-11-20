@@ -259,7 +259,7 @@ func TestRegisteredRoutingKeyOmittedSIExcludesManagement(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		key, err := resolveDistributionRoutingContext(newApplicationServers(time.Hour), registry, d, pd)
+		key, err := resolveDistributionRoutingContext(newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil), registry, d, pd)
 		if si == 0 {
 			if !errors.Is(err, ErrNoMatchingRoutingKey) {
 				t.Fatalf("SI 0 distribution selected %+v, err=%v", key, err)

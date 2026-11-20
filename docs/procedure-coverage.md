@@ -46,6 +46,11 @@ including parsing, dispatch and receive queue wait but excluding the kernel rece
 | Admission and authorization | ASP, SGP, SE, DE | local | INACTIVE→ACTIVE barrier | `TestScopedActivationAndDeactivationAPIsArmTAckBeforeWriting` |
 | Contextless Application Server | ASP, SGP, SE, DE | both | ASP-ACTIVE | `TestEncodedDataMatchesTheCodec` (scope), and the RKM and IPSP contextless rows below |
 | Epoch across SCTP restart | ASP, SGP | peer, local | any | `TestReadDataReportsTheEpochTheMessageArrivedIn`, `TestBroadcastActivationDropsThePreviousFlowEpoch` |
+| Managed peer AS distribution: Override, Loadshare, Broadcast (RFC 4666 §§4.3, 4.3.4.3) | SE, DE | local, both handles | AS-ACTIVE | `TestIPSPDistributionTrafficModes`, `TestIPSPDistributionBroadcastSynchronization`, `TestIPSPManagedDistributionSCTP` |
+| Managed recovery queue, T(r) discard and copied input (§4.3.2) | SE, DE | local | AS-PENDING, reactivation, expiry | `TestIPSPDistributionRecoveryAndExpiry`, `TestIPSPDistributionTimerExpiry`, `TestIPSPDistributionPeerDownExpiry`, `TestIPSPManagedDistributionSCTP` |
+| SE requester peer state, DE peer-only registry and Endpoint/NA/RC isolation (§§4.3, 4.3.4.3.1) | SE, DE | local, both handles | active, absent, inactive | `TestIPSPDistributionSingleExchangeInitiatorOwnsPeerState`, `TestIPSPDistributionRequiresPeerApplicationServer`, `TestIPSPDistributionSeparatesEndpointNetworkAndDirection` |
+| All send paths refuse SI 0, including both SGP/IPSP distribution handles (§§1.4.3.2, 1.4.3.4); MTP3-User DATA unchanged | SGP, SE, DE | local | AS-ACTIVE, AS-PENDING, AS-INACTIVE | `TestIPSPDistributionRefusesManagementData`, `TestIPSPManagedRawDataRefusesManagementData`, `TestIPSPDistributionLeavesDirectDataUnchanged`, `TestDistributionPolicyZeroValueKeepsAdmission` |
+| Managed IPSP peer congestion and configured cached DATA admission (§1.4.6) | DE | local, both handles | ASP-ACTIVE | `TestIPSPDistributionKeepsCongestionAdmission` |
 
 What the library checks on a direct `WriteData`, in order: association state
 (Section 4.3.1 ASP-ACTIVE), message structure, the Section 1.4.7 stream
@@ -463,8 +468,10 @@ current retained knowledge, never historical Concerned Destination triggers.
 
 These are the places where the codec exists and the procedure does not, or where
 the capability is out of the library's scope. Congestion-method profiles and Message Priority admission are implemented.
-Routed ASP continued status is automatic; IPSP/application-owned routing uses
-`NewMTPStatusProcedure`, and the application fans out indications to each user. Optional
+Routed ASP continued status is automatic. IPSP AS selection and recovery use
+`DistributeData`; applications needing continued status at an explicit local-user
+boundary use `NewMTPStatusProcedure` (RFC 4666 §§1.4.3.4 and 1.4.6), and fan out
+indications to each user. Optional
 received-SCON validity and automatic ASP audits are configured independently
 through `CongestionConfig.Validity` and `Auditing`; see
 [validity and audit policy](#received-congestion-validity-and-audits). Transport route

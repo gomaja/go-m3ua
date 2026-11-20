@@ -2353,7 +2353,7 @@ func TestRKMLateSuccessfulDeregistrationPreservesReregisteredDynamicKey(t *testi
 	association.notificationWriter = func(message messages.M3UA) (int, error) {
 		return message.MarshalLen(), nil
 	}
-	association.as = newApplicationServers(time.Hour)
+	association.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -2437,7 +2437,7 @@ func TestRKMLateDeregistrationCleanupSerializesWithRegistrationPublication(t *te
 	association.notificationWriter = func(message messages.M3UA) (int, error) {
 		return message.MarshalLen(), nil
 	}
-	association.as = newApplicationServers(time.Hour)
+	association.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	association.muState.Lock()
 	association.state = StateASPInactive
 	association.muState.Unlock()
@@ -3057,7 +3057,7 @@ func TestDynamicRoutingKeyNetworkAppearanceScopesMultiContextSSNM(t *testing.T) 
 	if err := association.validateSSNMNetworkAppearance(params.NewNetworkAppearance(7), contexts); !errors.Is(err, ErrInvalidNetworkAppearance) {
 		t.Fatalf("static Network Appearance for multi-context dynamic Routing Keys error = %v, want ErrInvalidNetworkAppearance", err)
 	}
-	association.as = newApplicationServers(time.Hour)
+	association.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	association.signalWriter = func(message messages.M3UA) (int, error) {
 		return message.MarshalLen(), nil
 	}
@@ -4063,7 +4063,7 @@ func TestRKMResponderDeregistrationPreservesStaticApplicationServerMembership(t 
 }
 
 func TestRKMRequesterDeregistrationPreservesStaticApplicationServerMembership(t *testing.T) {
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	config := NewAssociationConfig()
 	setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
 	setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(7))

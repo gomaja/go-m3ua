@@ -108,7 +108,7 @@ func TestSharedIPSPDownReportFollowsPerASDownCommit(t *testing.T) {
 		t.Run(model, func(t *testing.T) {
 			c, _ := recoveryIPSP(t, model, StateASPActive, StateASPActive)
 			c.signalWriter = func(m messages.M3UA) (int, error) { return m.MarshalLen(), nil }
-			c.as = newApplicationServers(time.Hour)
+			c.as = newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 			t.Cleanup(c.as.close)
 			for _, key := range c.configuredASKeys() {
 				c.as.get(key).setASPState(c, StateASPActive, time.Hour)
@@ -206,7 +206,11 @@ func TestAcknowledgementReportsFollowEveryStatusView(t *testing.T) {
 					c, _ = recoveryIPSP(t, model, state, state)
 				}
 				c.signalWriter = func(m messages.M3UA) (int, error) { return m.MarshalLen(), nil }
-				c.as = newApplicationServers(time.Hour)
+				if model == "ASP" {
+					c.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
+				} else {
+					c.as = newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
+				}
 				t.Cleanup(c.as.close)
 				local, peer := routingContextASKey(1), routingContextASKey(1)
 				if model != "ASP" {
@@ -323,7 +327,7 @@ func TestSingleExchangePartialWithdrawalStatusUsesTrafficLedger(t *testing.T) {
 	c.noteNoRoutingContextsAcked()
 	c.noteRoutingContextsActive([]uint32{1, 2})
 	c.signalWriter = func(m messages.M3UA) (int, error) { return m.MarshalLen(), nil }
-	c.as = newApplicationServers(time.Hour)
+	c.as = newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	t.Cleanup(c.as.close)
 	for _, key := range c.configuredASKeys() {
 		c.as.get(key).setASPState(c, StateASPActive, time.Hour)
@@ -377,7 +381,7 @@ func TestSharedWithdrawalCommitsContextlessAndDynamicMemberships(t *testing.T) {
 			c.addDynamicASKey(routingContextASKey(2), RoutingKey{}, false)
 			c.noteRoutingContextsActive(nil)
 			c.signalWriter = func(m messages.M3UA) (int, error) { return m.MarshalLen(), nil }
-			c.as = newApplicationServers(time.Hour)
+			c.as = newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 			t.Cleanup(c.as.close)
 			keys := c.configuredASKeys()
 			if len(keys) != 2 {
@@ -420,7 +424,7 @@ func TestUnsolicitedSingleExchangeGrantReportsOnlyCommittedMemberships(t *testin
 	setInventoryRoutingContexts(&c.cfg.ApplicationServers, nil)
 	c.addDynamicASKey(routingContextASKey(2), RoutingKey{}, false)
 	c.signalWriter = func(m messages.M3UA) (int, error) { return m.MarshalLen(), nil }
-	c.as = newApplicationServers(time.Hour)
+	c.as = newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	t.Cleanup(c.as.close)
 	for _, key := range c.configuredASKeys() {
 		c.as.get(key).setASPState(c, StateASPInactive, time.Hour)

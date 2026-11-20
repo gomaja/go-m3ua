@@ -499,7 +499,7 @@ func TestASPDownAckWaitsForEveryDirectDataWriteAPI(t *testing.T) {
 func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
 	asp.cfg.CongestionProfiles = []NetworkCongestionProfile{{Profile: CongestionProfile{Method: CongestionNationalWithoutPriorities, MaxLevel: 3}}}
-	asp.as = newApplicationServers(time.Hour)
+	asp.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp.as.aspStateChanged(asp, StateASPActive)
 	asp.maxMessageStreamID = 4
 	asp.recvStream.Store(0)
@@ -560,7 +560,7 @@ func TestASPDownAckWaitsForUnscopedDirectData(t *testing.T) {
 
 func TestASPDownAckWaitsForUnscopedSSNM(t *testing.T) {
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP)
-	asp.as = newApplicationServers(time.Hour)
+	asp.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp.as.aspStateChanged(asp, StateASPActive)
 	asp.recvStream.Store(0)
 	writeStarted := make(chan struct{})

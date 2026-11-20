@@ -1157,7 +1157,7 @@ func TestIPSPSingleASPSMDownAckDefersASNotifyUntilTrafficDrains(t *testing.T) {
 	association.noteRoutingContextsActive([]uint32{22})
 	association.maxMessageStreamID = 4
 
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	association.as = registry
 	observer, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP, 22)
 	observer.as = registry

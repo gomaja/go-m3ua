@@ -250,7 +250,7 @@ func TestIPSPPeerUpDoesNotTurnUnsolicitedDownAckIntoStartup(t *testing.T) {
 }
 
 func TestIPSPPeerDownSuppressesASPUpDuringConcurrentOverride(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	incumbent, _ := newIPSPDownAssociationForTest(t, IPSPExchangeSingle, 0, StateASPActive)
 	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	for _, association := range []*Association{incumbent, challenger} {

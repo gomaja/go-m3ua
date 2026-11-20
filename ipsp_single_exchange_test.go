@@ -262,7 +262,7 @@ func TestIPSPEndpointSharesApplicationServerStateAcrossAssociations(t *testing.T
 }
 
 func TestIPSPSingleExchangeActiveAckAppliesSharedASOverride(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	incumbent, incumbentSent := newSingleExchangeIPSPForTest(t, StateASPActive)
 	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	for _, association := range []*Association{incumbent, challenger} {
@@ -306,7 +306,7 @@ func TestIPSPSingleExchangeActiveAckAppliesSharedASOverride(t *testing.T) {
 }
 
 func TestIPSPSingleExchangeOverrideDrainsDisplacedDirectTrafficBeforeNotify(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	incumbent, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	challenger, _ := newSingleExchangeIPSPForTest(t, StateASPInactive)
 	for _, association := range []*Association{incumbent, challenger} {
@@ -407,7 +407,7 @@ func TestIPSPSingleExchangeOverrideDrainsDisplacedDirectTrafficBeforeNotify(t *t
 }
 
 func TestConcurrentIPSPSingleExchangeOverrideKeepsWinningAssociationActive(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	first, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	second, _ := newSingleExchangeIPSPForTest(t, StateASPActive)
 	for _, association := range []*Association{first, second} {
@@ -578,7 +578,7 @@ func TestIPSPSingleExchangeReceivedASPUpAckQuiescesActiveTraffic(t *testing.T) {
 	association.recvStream.Store(0)
 	setInventoryNetworkAppearance(&association.cfg.ApplicationServers, params.NewNetworkAppearance(0))
 	association.noteRoutingContextsActive([]uint32{1})
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	t.Cleanup(registry.close)
 	association.as = registry
 	applicationServer := registry.get(associationConfigASKey(association.cfg, 1))
@@ -1335,7 +1335,7 @@ func TestIPSPSingleExchangeInactiveAckExcludesOverriddenContextsFromState(t *tes
 	setInventoryRoutingContexts(&association.cfg.ApplicationServers, params.NewRoutingContext(1, 2))
 	setInventoryTrafficModeType(&association.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	association.noteRoutingContextsActive([]uint32{1, 2})
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 	t.Cleanup(registry.close)
 	association.as = registry
 	servers := map[uint32]*applicationServer{}
@@ -1514,7 +1514,7 @@ func TestIPSPSingleExchangeRejectsDuplicatePeerIdentifiersInCommonAS(t *testing.
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			registry := newApplicationServers(time.Hour)
+			registry := newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: time.Hour})
 			t.Cleanup(registry.close)
 			first, _ := newSingleExchangeIPSPForTest(t, StateASPDown)
 			second, _ := newSingleExchangeIPSPForTest(t, StateASPDown)

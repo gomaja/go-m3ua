@@ -134,7 +134,7 @@ func TestSGPDistributionFallsBackToStaticApplicationServerAfterRoutingKeyMiss(t 
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	staticKey := ASKey{RoutingContext: 1, RoutingContextSet: true}
 	applicationServers.register([]ASKey{staticKey})
 
@@ -169,7 +169,7 @@ func TestSGPDistributionFallsBackToStaticApplicationServerAfterDynamicOwnerDereg
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	staticKey := ASKey{RoutingContext: 1, RoutingContextSet: true}
 	dynamicAssociation, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
 	applicationServers.registerDynamicASP(dynamicAssociation, staticKey)
@@ -209,7 +209,7 @@ func TestSGPDistributionRoutingKeySelectionRequiresNetworkAppearanceWhenAmbiguou
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	for _, provisionedKey := range provisioned {
 		applicationServers.register([]ASKey{{
 			NetworkAppearance:    provisionedKey.RoutingKey.NetworkAppearance,
@@ -256,7 +256,7 @@ func TestSGPDistributionExplicitRoutingContextMatchesAllNetworkAppearancesRoutin
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	wildcard := ASKey{RoutingContext: 7, RoutingContextSet: true}
 	applicationServers.register([]ASKey{wildcard})
 	data := messages.NewData(
@@ -372,7 +372,7 @@ func TestSGPDistributionExplicitRoutingContextDoesNotReclassifyProtocolData(t *t
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	applicationServers.register([]ASKey{{
 		NetworkAppearance:    10,
 		NetworkAppearanceSet: true,

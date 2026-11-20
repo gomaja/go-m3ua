@@ -698,7 +698,7 @@ func TestContextlessConfiguredASInactivatesWithoutRoutingContext(t *testing.T) {
 }
 
 func TestContextlessASPInactiveQuiescesApplicationServerBeforeAck(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	association, _ := newTestConn(t, StateASPActive, RoleSGP)
 	setInventoryRoutingContexts(&association.cfg.ApplicationServers, nil)
 	association.as = registry

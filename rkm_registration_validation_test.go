@@ -165,7 +165,7 @@ func TestAllNetworkAppearancesRegistrationCountsStaticMembership(t *testing.T) {
 				{ASKey: ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 8, RoutingContextSet: true}},
 			}
 			c := newAssociation(RoleSGP, cfg)
-			c.as = newApplicationServers(time.Hour)
+			c.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 			defer c.as.close()
 			c.as.register(c.staticallyConfiguredASKeys())
 			c.as.aspStateChanged(c, StateASPInactive)
@@ -204,7 +204,7 @@ func TestRegistrationOmittedAppearanceUsesSingleStaticAppearance(t *testing.T) {
 		{ASKey: ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 7, RoutingContextSet: true}},
 		{ASKey: ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 8, RoutingContextSet: true}},
 	}
-	c.as = newApplicationServers(time.Hour)
+	c.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	defer c.as.close()
 	c.as.register(c.staticallyConfiguredASKeys())
 	c.as.aspStateChanged(c, StateASPInactive)
@@ -307,7 +307,7 @@ func TestAllNetworkAppearancesRegistrationCountsExplicitContextlessMembership(t 
 				cfg.ApplicationServers = []ASConfig{{TrafficMode: params.TrafficModeOverride}}
 			}
 			c := newAssociation(RoleSGP, cfg)
-			c.as = newApplicationServers(time.Hour)
+			c.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 			defer c.as.close()
 			c.as.register(c.configuredASKeys())
 			c.as.aspStateChanged(c, StateASPInactive)

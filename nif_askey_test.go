@@ -97,7 +97,7 @@ func TestSetASAvailableIgnoresLegacyRoutingContextWhenRegistryAndTrackedDisagree
 func TestDialingSGPAssociationControlsNIFAvailability(t *testing.T) {
 	association, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	association.nif = &nifAvailability{}
-	association.as = newApplicationServers(time.Hour)
+	association.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	association.noteRoutingContextsActive([]uint32{1})
 	association.as.get(associationConfigASKey(association.cfg, 1)).setASPState(association, StateASPActive, time.Hour)
 
@@ -153,7 +153,7 @@ func TestSGPEndpointNIFIsolationQuiescesEveryAssociation(t *testing.T) {
 func TestDialingSGPAssociationControlsASAvailability(t *testing.T) {
 	association, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	association.nif = &nifAvailability{}
-	association.as = newApplicationServers(time.Hour)
+	association.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	association.noteRoutingContextsActive([]uint32{1})
 	key := routingContextASKey(1)
 	association.as.get(key).setASPState(association, StateASPActive, time.Hour)
