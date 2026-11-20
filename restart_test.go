@@ -103,7 +103,7 @@ func TestSCTPRestartMovesRemoteASPDownInEveryApplicationServer(t *testing.T) {
 		t.Fatal("applying the seeded ASP-ACTIVE reported a transition")
 	}
 
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	t.Cleanup(func() {
 		for _, rtCtx := range []uint32{1, 2} {
 			as := registry.get(rtCtx)

@@ -183,7 +183,7 @@ type applicationServer struct {
 	// nextCorrelationID allocates identifiers unique within this AS until the
 	// 32-bit wire field necessarily wraps.
 	nextCorrelationID uint32
-	// recoveryBudget is shared by every AS owned by the SGP Endpoint.
+	// recoveryBudget is shared by every AS owned by the Endpoint.
 	recoveryBudget *recoveryBudget
 }
 
@@ -281,7 +281,7 @@ type applicationServers struct {
 	// distribution is immutable after construction, so DistributeData never
 	// races an application mutating its SGPConfig after the Endpoint starts.
 	distribution distributionPolicy
-	// recoveryBudget bounds retained DATA across the entire SGP Endpoint, in
+	// recoveryBudget bounds retained DATA across the entire Endpoint, in
 	// addition to each AS's own distributionPolicy limits.
 	recoveryBudget *recoveryBudget
 }
@@ -310,16 +310,16 @@ type activeSSNMTarget struct {
 	contextless     bool
 }
 
-func newApplicationServers(recovery time.Duration) *applicationServers {
-	return newApplicationServersForIPSP(&ApplicationServerConfig{RecoveryTimer: recovery})
-}
-
 func newApplicationServersForSGP(applicationServerConfig *ApplicationServerConfig, config *SGPConfig) *applicationServers {
 	return newApplicationServersForEndpoint(applicationServerConfig, config)
 }
 
 func newApplicationServersForIPSP(config *ApplicationServerConfig) *applicationServers {
-	return newApplicationServersForEndpoint(config, nil)
+	registry := newApplicationServersForEndpoint(config, nil)
+	// RFC 4666 §4.3: a DE local-only Endpoint has no peer-directed AS.
+	// Keep the zero policy on every other construction path.
+	registry.distribution.requirePeerAS = true
+	return registry
 }
 
 func newApplicationServersForEndpoint(applicationServerConfig *ApplicationServerConfig, sgpConfig *SGPConfig) *applicationServers {

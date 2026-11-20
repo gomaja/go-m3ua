@@ -16,6 +16,8 @@ import (
 
 // ErrMTPManagementData reports MTP3 management (SI 0) offered as DATA.
 // RFC 4666 §1.4.3.2 requires SG termination and appropriate SSNM instead.
+// IPSP needs no SS7 interworking (§1.4.3.4). All send paths, including both
+// SGP and IPSP DistributeData entry points, refuse SI 0; inbound DATA does too.
 // Match with errors.Is; send refusals wrap it in a *DataWriteError with DataNotSent.
 var ErrMTPManagementData = errors.New("MTP3 management SI 0 cannot be carried as DATA")
 
@@ -330,6 +332,9 @@ var (
 	// message with the Error Code 'No configured AS for ASP'."
 	// RoutingContextError matches it through errors.Is.
 	// CongestionInputs also returns it for an absent ASKey.
+	// IPSP DistributeData returns it when the Endpoint has no configured peer
+	// Application Server, including Double Exchange TrafficToLocal-only setups
+	// (RFC 4666 §4.3).
 	ErrNoConfiguredAS = errors.New("no configured AS for ASP")
 
 	// ErrTAckExpired is used when an ASPSM/ASPTM request went unacknowledged
@@ -340,6 +345,8 @@ var (
 	// operation has no protocol procedures. IPSP roles require an explicit
 	// Single Exchange model or Double Exchange model and are enabled by the
 	// IPSP API rather than guessed.
+	// DistributeData supports SGP and IPSP, and rejects ASP. An IPSP without
+	// configured peer AS state returns ErrNoConfiguredAS instead.
 	ErrUnsupportedRole = errors.New("unsupported M3UA role")
 	// ErrUnsupportedIPSPExchangeModel reports an IPSP Association configured
 	// with an exchange model this implementation does not provide.

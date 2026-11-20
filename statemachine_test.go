@@ -279,7 +279,7 @@ func TestUnchangedStateDoesNotRerunAnEntryAction(t *testing.T) {
 // The same value must not be reported into the Application Server either: it is
 // not an ASP state, so an AS derived from it would be nonsense.
 func TestUnchangedStateIsNotReportedToTheApplicationServer(t *testing.T) {
-	reg := newApplicationServers(time.Hour)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	as := reg.get(1)
 
 	conn, _ := newTestConn(t, StateASPInactive, RoleSGP)

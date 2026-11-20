@@ -72,7 +72,7 @@ func TestRoutingKeyRegistryReportsStaticMembershipAlreadyRegistered(t *testing.T
 			setInventoryNetworkAppearance(&config.ApplicationServers, params.NewNetworkAppearance(10))
 			setInventoryRoutingContexts(&config.ApplicationServers, params.NewRoutingContext(7))
 			association := newAssociation(RoleSGP, config)
-			applicationServers := newApplicationServers(time.Hour)
+			applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 			association.as = applicationServers
 			applicationServers.register(association.staticallyConfiguredASKeys())
 			applicationServers.aspStateChanged(association, StateASPInactive)
@@ -376,7 +376,7 @@ func TestRoutingKeyRegistryRejectsTrafficModeConflictingWithLiveApplicationServe
 	if err != nil {
 		t.Fatalf("newRoutingKeyRegistry: %v", err)
 	}
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	incumbent := newAssociation(RoleSGP, NewAssociationConfig())
 	incumbent.as = applicationServers
 	registered := registry.register(incumbent, []RoutingKeyRegistrationRequest{{
@@ -427,7 +427,7 @@ func TestRoutingKeyRegistryAdoptsTrafficModeIntoLiveApplicationServer(t *testing
 	if !ok {
 		t.Fatal("Routing Context 7 has no ASKey")
 	}
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	applicationServer := applicationServers.get(key)
 	association := newAssociation(RoleSGP, NewAssociationConfig())
 	association.as = applicationServers
@@ -464,7 +464,7 @@ func TestRoutingKeyRegistryIsolatesLiveTrafficModeConflictWithinBatch(t *testing
 			if !ok {
 				t.Fatal("Routing Context 7 has no ASKey")
 			}
-			applicationServers := newApplicationServers(time.Hour)
+			applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 			applicationServers.get(key).setTrafficMode(params.TrafficModeLoadshare)
 			association := newAssociation(RoleSGP, NewAssociationConfig())
 			association.as = applicationServers
@@ -727,7 +727,7 @@ func TestRoutingKeyRegistryReplaysSuccessfulProvisionedDeregistration(t *testing
 }
 
 func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierWhenScopesConverge(t *testing.T) {
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	newPeer := func(routingContext, identifier uint32) *Association {
 		association := newAssociation(RoleSGP, NewAssociationConfig())
 		association.as = applicationServers
@@ -782,7 +782,7 @@ func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierWhenScopesConverge(t *te
 }
 
 func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierFromStaticApplicationServerMember(t *testing.T) {
-	applicationServers := newApplicationServers(time.Hour)
+	applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	newStaticPeer := func(routingContext, identifier uint32) *Association {
 		association := newAssociation(RoleSGP, NewAssociationConfig())
 		association.as = applicationServers
@@ -827,7 +827,7 @@ func TestRoutingKeyRegistryRejectsDuplicateASPIdentifierFromStaticApplicationSer
 func TestRoutingKeyRegistrySerializesASPIdentifierClaimsWithRegistration(t *testing.T) {
 	newFixture := func(t *testing.T, authorize RoutingKeyRegistrationAuthorizer) (*applicationServers, *routingKeyRegistry, *Association, *Association, RoutingKey) {
 		t.Helper()
-		applicationServers := newApplicationServers(time.Hour)
+		applicationServers := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		provisionedKey := testRoutingKey(10, 100, params.ServiceIndSCCP)
 		registry, err := newRoutingKeyRegistry(&RoutingKeyManagementConfig{
 			AuthorizeRegistration:  authorize,

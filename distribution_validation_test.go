@@ -644,7 +644,8 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 		if len(value) > int(^uint16(0)) {
 			t.Skip()
 		}
-		registry := newApplicationServers(time.Hour)
+		// Exercise SI-0 send admission (RFC 4666 §§1.4.3.2, 1.4.3.4).
+		registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		registry.get(ASKey{
 			NetworkAppearance:    0,
 			RoutingContext:       1,
@@ -746,4 +747,25 @@ func FuzzPrepareDistributionDataKnownParameterLengths(f *testing.F) {
 			}
 		}
 	})
+}
+
+func TestDistributionPolicyZeroValueKeepsAdmission(t *testing.T) {
+	for _, construction := range []string{"endpoint", "zero policy"} {
+		t.Run(construction, func(t *testing.T) {
+			registry := newApplicationServersForEndpoint(nil, nil)
+			if construction == "zero policy" {
+				registry.distribution = distributionPolicy{}
+			}
+			defer registry.close()
+			management := distributionData(1, 0, "management")
+			management.ProtocolData = params.NewProtocolData(1, 2, 0, 0, 0, 0, []byte("management"))
+			_, _, _, _, err := prepareDistributionData(registry, nil, management)
+			requireDataWriteError(t, err, DataNotSent, ErrMTPManagementData)
+			user := distributionData(1, 0, "user")
+			user.NetworkAppearance, user.RoutingContext = nil, nil
+			if result, err := distributeData(registry, nil, user); !errors.Is(err, ErrNoActiveASP) || result != (TrafficDistribution{}) {
+				t.Fatalf("neutral empty registry = %+v, %v; want ErrNoActiveASP", result, err)
+			}
+		})
+	}
 }

@@ -10,7 +10,7 @@ import (
 )
 
 func TestASPAuthorizationRestrictsEveryRoutingContextProcedure(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	allowed := []uint32{1}
 	authorizations := 0
@@ -72,7 +72,7 @@ func TestASPAuthorizationRestrictsEveryRoutingContextProcedure(t *testing.T) {
 }
 
 func TestOmittedASPActiveExpandsOnlyToAuthorizedApplicationServers(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	asp.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{1} }
 	if err := asp.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); err != nil {
@@ -104,7 +104,7 @@ func TestOmittedASPActiveExpandsOnlyToAuthorizedApplicationServers(t *testing.T)
 }
 
 func TestEmptyASPAuthorizationCannotActivateAnyApplicationServer(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	asp.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
 	if err := asp.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); err != nil {
@@ -125,7 +125,7 @@ func TestEmptyASPAuthorizationCannotActivateAnyApplicationServer(t *testing.T) {
 }
 
 func TestEmptyASPAuthorizationDoesNotJoinContextlessApplicationServer(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	empty, _ := asTestConn(t, registry, StateASPDown, 1)
 	empty.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
 	if err := empty.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(100), nil)); err != nil {
@@ -162,7 +162,7 @@ func TestEmptyASPAuthorizationDoesNotJoinContextlessApplicationServer(t *testing
 }
 
 func TestDuplicateASPIdentifierUniquenessUsesAuthorizedApplicationServers(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPDown, 1, 2)
 	second, _ := asTestConn(t, registry, StateASPDown, 1, 2)
 	first.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{1} }
@@ -190,7 +190,7 @@ func TestEmptyASPAuthorizationDoesNotClaimAnASPIdentifier(t *testing.T) {
 		{name: "authorized ASP connects first", emptyFirst: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			registry := newApplicationServers(time.Hour)
+			registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 			empty, _ := asTestConn(t, registry, StateASPDown, 1)
 			empty.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return nil }
 			authorized, _ := asTestConn(t, registry, StateASPDown, 1)
@@ -210,7 +210,7 @@ func TestEmptyASPAuthorizationDoesNotClaimAnASPIdentifier(t *testing.T) {
 }
 
 func TestASPAuthorizationCannotInventAListenerRoutingContext(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, sent := asTestConn(t, registry, StateASPDown, 1, 2)
 	asp.cfg.AuthorizeASP = func(ASPIdentity) []uint32 { return []uint32{99} }
 

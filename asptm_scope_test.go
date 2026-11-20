@@ -60,7 +60,7 @@ func aspInactiveAckContexts(t *testing.T, sent []messages.M3UA) []uint32 {
 }
 
 func TestDispatcherKeepsUnaffectedApplicationServerActive(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
@@ -87,7 +87,7 @@ func TestDispatcherKeepsUnaffectedApplicationServerActive(t *testing.T) {
 }
 
 func TestDispatcherMovesInactiveAfterTheLastApplicationServer(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
@@ -118,7 +118,7 @@ func TestDispatcherMovesInactiveAfterTheLastApplicationServer(t *testing.T) {
 }
 
 func TestScopedDuplicateASPInactiveDoesNotActivateAnotherContext(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspInactive(
@@ -207,7 +207,7 @@ func TestASPInactiveAckScopesAnUnrecordedActiveFallback(t *testing.T) {
 }
 
 func TestMixedASPActiveAppliesServedSubset(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, sent := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
@@ -232,7 +232,7 @@ func TestMixedASPActiveAppliesServedSubset(t *testing.T) {
 }
 
 func TestMixedASPInactiveAppliesServedSubset(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, sent := asTestConn(t, registry, StateASPInactive, 1, 2)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
@@ -302,7 +302,7 @@ func TestIdempotentASPTMRequestsAreAcknowledgedWithoutError(t *testing.T) {
 }
 
 func TestMixedASPInactiveCanDeactivateTheLastServedContext(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, _ := asTestConn(t, registry, StateASPInactive, 1)
 
 	asp.handleSignals(context.Background(), messages.NewAspActive(
@@ -324,7 +324,7 @@ func TestMixedASPInactiveCanDeactivateTheLastServedContext(t *testing.T) {
 }
 
 func TestOverrideIsScopedToSuccessfullyActivatedContexts(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	incumbent, incumbentSent := asTestConn(t, registry, StateASPInactive, 1, 2)
 	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	incumbent.noteRoutingContextsActive(nil)
@@ -369,7 +369,7 @@ func TestOverrideIsScopedToSuccessfullyActivatedContexts(t *testing.T) {
 }
 
 func TestOverrideMovesIncumbentInactiveAfterItsLastContext(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	incumbent, _ := asTestConn(t, registry, StateASPActive, 1)
 	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 	incumbent.noteRoutingContextsActive(nil)
@@ -395,7 +395,7 @@ func TestOverrideMovesIncumbentInactiveAfterItsLastContext(t *testing.T) {
 }
 
 func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 	second, _ := asTestConn(t, registry, StateASPInactive, 1, 2)
 	for _, connection := range []*Association{first, second} {
@@ -440,7 +440,7 @@ func TestConcurrentOverrideActivationsLeaveExactlyOneActiveASP(t *testing.T) {
 }
 
 func TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, firstSent := asTestConn(t, registry, StateASPInactive, 1)
 	setInventoryTrafficModeType(&first.cfg.ApplicationServers, nil)
 	if err := first.handleAspActive(messages.NewAspActive(
@@ -478,7 +478,7 @@ func TestDynamicTrafficModeIsEchoedAndCannotChangeAfterAgreement(t *testing.T) {
 }
 
 func TestConcurrentFirstTrafficModeAgreementHasOneWinner(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, firstSent := asTestConn(t, registry, StateASPInactive, 1)
 	second, secondSent := asTestConn(t, registry, StateASPInactive, 1)
 	setInventoryTrafficModeType(&first.cfg.ApplicationServers, nil)
@@ -533,7 +533,7 @@ func TestConcurrentFirstTrafficModeAgreementHasOneWinner(t *testing.T) {
 }
 
 func TestTrafficModeCanBeConfiguredPerApplicationServer(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	connection, sent := asTestConn(t, registry, StateASPInactive, 1, 2)
 	setInventoryTrafficModeType(&connection.cfg.ApplicationServers, nil)
 	setInventoryTrafficModes(&connection.cfg.ApplicationServers, map[uint32]uint32{

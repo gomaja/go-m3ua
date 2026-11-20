@@ -70,7 +70,7 @@ func TestAssociationTrafficModePolicyIsFrozenBeforeRegistryAgreement(t *testing.
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeOverride})
 	policy := newTrafficModePolicy(config)
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 
 	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeBroadcast})
 
@@ -119,7 +119,7 @@ func TestPerRoutingContextTrafficModePrecedesConfiguredDefault(t *testing.T) {
 	setInventoryTrafficModes(&connection.cfg.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeOverride,
 	})
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	connection.as = registry
 	registry.aspStateChanged(connection, StateASPInactive)
 
@@ -156,7 +156,7 @@ func TestTrafficModeAgreementRejectsMixedScopeAtomically(t *testing.T) {
 	setInventoryTrafficModes(&connection.cfg.ApplicationServers, map[uint32]uint32{
 		1: params.TrafficModeOverride,
 	})
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	_, agreementErr := registry.agreeTrafficModeForKeys(
 		connection.asKeysForRoutingContexts([]uint32{1, 2}), connection.trafficModePolicy(),
 		params.NewTrafficModeType(params.TrafficModeOverride),
@@ -199,7 +199,7 @@ func TestTrafficModePolicyIgnoresConcurrentConfigMutation(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, params.TrafficModeLoadshare, 0, []uint32{1})
 	setInventoryTrafficModes(&config.ApplicationServers, map[uint32]uint32{1: params.TrafficModeOverride})
 	connection := newAssociation(RoleASP, config)
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	ack := messages.NewAspActiveAck(
 		params.NewTrafficModeType(params.TrafficModeOverride),
 		params.NewRoutingContext(1),

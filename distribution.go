@@ -29,6 +29,9 @@ type TrafficDistribution struct {
 }
 
 type distributionPolicy struct {
+	// requirePeerAS selects the IPSP missing-inventory error. Its zero value
+	// preserves SGP validation and scope resolution; SI-0 refusal is unconditional.
+	requirePeerAS                bool
 	congestionPolicy             SGPCongestionPolicy
 	preferUncongestedPeers       bool
 	messageLimit                 int
@@ -56,16 +59,39 @@ type broadcastFlowKey struct {
 	applicationFlow      string
 }
 
-// DistributeData sends one DATA message from an SGP Listener to the ASPs
-// serving its Application Server. It applies Override, Loadshare, and Broadcast
+// DistributeData sends one DATA message from an SGP or IPSP Listener to the
+// peers serving its Application Server. It applies Override, Loadshare, and Broadcast
 // traffic modes, retains traffic while the AS is AS-PENDING, and adds the
 // Broadcast synchronization marker RFC 4666 Section 4.3.4.3 requires after an
 // ASP becomes active.
 //
-// SI 0 is refused with ErrMTPManagementData wrapped in a *DataWriteError
-// with DataNotSent before selection or queuing;
-// the SG/NIF must terminate management and reflect it through SSNM
-// (RFC 4666 §1.4.3.2).
+// This implementation maintains peer AS state on both Single Exchange sides,
+// as permitted by RFC 4666 §§4.3 and 4.3.4.3.1: receiving ASP Active or ASP
+// Active Ack activates the shared traffic scope.
+// In Double Exchange, with either ASPSM exchange agreement, only TrafficToPeer
+// supplies the remote AS; TrafficToLocal does not authorize outbound traffic.
+// Both Listener and Association entry points use the Endpoint's peer registry,
+// including sibling associations. An IPSP Endpoint with no configured peer AS
+// returns ErrNoConfiguredAS. A configured AS without active peers returns
+// ErrNoActiveASP, except that AS-PENDING retains traffic until recovery or T(r).
+// ASPProcedures controls initiation, not AS ownership, and SCTP initiation does
+// not change these rules (RFC 4666 §1.4.8). An ASP returns ErrUnsupportedRole.
+//
+// The IPSP case table applies to both entry points:
+//
+//	Mode/side                         Listener and Association
+//	SE requester or acknowledger      Endpoint peer AS registry
+//	DE, either ASPSM, TrafficToPeer    Endpoint peer AS registry
+//	DE, Endpoint has only local ASes   ErrNoConfiguredAS
+//	Local-only handle, sibling peer AS Endpoint peer AS registry
+//
+// Every send path, including both SGP and IPSP distribution entry points,
+// refuses SI 0 with ErrMTPManagementData wrapped in a *DataWriteError with
+// DataNotSent before selection or queuing. RFC 4666 §1.4.3.2 forbids SG/ASP
+// management encapsulation; §1.4.3.4 says IPSP needs no SS7 interworking.
+// The library consistently excludes MTP3 management from MTP3-User DATA (§3.3.1).
+// Peer/transport congestion method admission and configured cached DATA
+// admission still apply at each selected association (RFC 4666 §1.4.6).
 //
 // The message is copied before the call returns. The caller may reuse or mutate
 // it immediately, including when the result says it was queued.
@@ -73,7 +99,7 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 	if l == nil {
 		return TrafficDistribution{}, errors.New("cannot distribute DATA through a nil Listener")
 	}
-	if l.Role() != RoleSGP {
+	if l.Role() != RoleSGP && l.Role() != RoleIPSP {
 		return TrafficDistribution{}, ErrUnsupportedRole
 	}
 
@@ -85,6 +111,9 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 	registry := l.as
 	l.muConns.Unlock()
 	if registry == nil {
+		if l.Role() == RoleIPSP {
+			return TrafficDistribution{}, ErrNoConfiguredAS
+		}
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
 	var routingKeys *routingKeyRegistry
@@ -95,19 +124,43 @@ func (l *Listener) DistributeData(data *messages.Data) (TrafficDistribution, err
 }
 
 // DistributeData sends one DATA message through the Application Server
-// registry owned by the Association's SGP Endpoint. This is the distribution
-// entry point for an SGP that initiated its SCTP association, as permitted by
+// registry owned by the Association's SGP or IPSP Endpoint. This is also the
+// distribution entry point for an Endpoint that initiated SCTP, as permitted by
 // RFC 4666 Section 1.4.8. Accepted and SCTP-initiating SGP Associations use the
 // same Endpoint-owned registry, so either entry point applies the same AS state
 // and traffic-mode decisions.
-// SI 0 is refused with ErrMTPManagementData wrapped in a *DataWriteError
-// with DataNotSent before selection or queuing
-// (RFC 4666 §1.4.3.2).
+//
+// In IPSP Single Exchange, both the ASP Active sender and acknowledger have
+// peer AS state. In Double Exchange, under either ASPSM agreement, TrafficToPeer
+// defines outbound AS state; TrafficToLocal alone does not. Both entry points
+// use the Endpoint-wide peer registry, including sibling associations, and
+// return ErrNoConfiguredAS if the Endpoint has no configured peer AS.
+// ASPProcedures and SCTP initiation do not change ownership (RFC 4666 §§4.3,
+// 4.3.4.3.1 and 1.4.8). An inactive configured AS returns ErrNoActiveASP;
+// AS-PENDING queues until reactivation or T(r) expiry (RFC 4666 §4.3.2).
+// An ASP returns ErrUnsupportedRole.
+//
+// The IPSP case table applies to both entry points:
+//
+//	Mode/side                         Association and Listener
+//	SE requester or acknowledger      Endpoint peer AS registry
+//	DE, either ASPSM, TrafficToPeer    Endpoint peer AS registry
+//	DE, Endpoint has only local ASes   ErrNoConfiguredAS
+//	Local-only handle, sibling peer AS Endpoint peer AS registry
+//
+// Every send path, including both SGP and IPSP distribution entry points,
+// refuses SI 0 with ErrMTPManagementData wrapped in a *DataWriteError with
+// DataNotSent before selection or queuing. RFC 4666 §1.4.3.2 forbids SG/ASP
+// management encapsulation; §1.4.3.4 says IPSP needs no SS7 interworking.
+// The library consistently excludes MTP3 management from MTP3-User DATA (§3.3.1).
+// Peer/transport congestion method admission and configured cached DATA
+// admission still apply to each selected association (RFC 4666 §1.4.6).
+// The message is copied before return, including when it is queued.
 func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, error) {
 	if c == nil {
 		return TrafficDistribution{}, errors.New("cannot distribute DATA through a nil Association")
 	}
-	if c.Role() != RoleSGP {
+	if c.Role() != RoleSGP && c.Role() != RoleIPSP {
 		return TrafficDistribution{}, ErrUnsupportedRole
 	}
 	select {
@@ -116,6 +169,9 @@ func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, 
 	default:
 	}
 	if c.as == nil {
+		if c.Role() == RoleIPSP {
+			return TrafficDistribution{}, ErrNoConfiguredAS
+		}
 		return TrafficDistribution{}, ErrNoActiveASP
 	}
 	return distributeData(c.as, c.routingKeyRegistry(), data)
@@ -123,6 +179,20 @@ func (c *Association) DistributeData(data *messages.Data) (TrafficDistribution, 
 
 func distributeData(registry *applicationServers, routingKeys *routingKeyRegistry, data *messages.Data) (TrafficDistribution, error) {
 	policy := registry.distribution
+	// RFC 4666 §4.3: DE TrafficToLocal alone provides no remote AS state.
+	// Snapshot the inventory without holding the registry lock across AS or
+	// Association locks. Listener.muConns was released by the entry point.
+	// This adds only an unnested registry.mu acquisition. The existing
+	// deliveryMu -> AS.mu edge is unchanged; AS.mu is released before writing
+	// through an Association, including its congestion and send locks.
+	if policy.requirePeerAS {
+		registry.mu.Lock()
+		empty := registry.closed || len(registry.as) == 0
+		registry.mu.Unlock()
+		if empty {
+			return TrafficDistribution{}, ErrNoConfiguredAS
+		}
+	}
 	owned, protocolData, encodedSize, key, err := prepareDistributionData(registry, routingKeys, data)
 	if err != nil {
 		return TrafficDistribution{}, err
@@ -177,8 +247,9 @@ func prepareDistributionData(registry *applicationServers, routingKeys *routingK
 	if err != nil {
 		return nil, nil, 0, ASKey{}, fmt.Errorf("invalid DATA Protocol Data: %w", err)
 	}
-	// RFC 4666 §1.4.3.2: neither static nor registered AS distribution may
-	// queue or forward management as DATA, even with an explicit context.
+	// RFC 4666 §1.4.3.2 forbids SG/ASP management encapsulation; IPSP needs
+	// no SS7 interworking (§1.4.3.4). M3UA carries MTP3-User traffic (§3.3.1).
+	// Refuse SI 0 (MTP3 management) consistently with every other send path.
 	if protocolData.ServiceIndicator == 0 {
 		return nil, nil, 0, ASKey{}, newDataNotSent(ASKey{}, 0, ErrMTPManagementData)
 	}

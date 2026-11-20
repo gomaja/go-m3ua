@@ -335,8 +335,8 @@ func putUint32Parameter(b []byte, tag uint16, value uint32) int {
 // the same admission and the same outcome classification as WriteData, and
 // keeps WriteSignal's own return convention: the encoded message length.
 //
-// enforceTrafficScope is false only for the SGP distribution engine, which has
-// already selected the Application Server and holds its delivery barrier;
+// enforceTrafficScope is false for managed SGP and IPSP distribution, including
+// recovery drains: the distributor has resolved the AS and owns its delivery barrier;
 // re-entering the barrier there would deadlock against itself.
 func (c *Association) writeRawData(
 	message messages.M3UA,
@@ -460,7 +460,8 @@ func (c *Association) outboundDataStream(data *messages.Data) (uint16, error) {
 		return 0, err
 	}
 	// Built-in and custom codecs preserve received octets for inspection.
-	// RFC 4666 §1.4.3.2 is enforced here when DATA is offered for sending.
+	// Keep SI-0 send admission uniform across roles: RFC 4666 §1.4.3.2
+	// forbids SG/ASP encapsulation, and IPSP needs no SS7 interworking (§1.4.3.4).
 	if payload.ServiceIndicator == 0 {
 		return 0, ErrMTPManagementData
 	}

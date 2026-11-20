@@ -71,7 +71,7 @@ func TestAnASPIsActiveOnlyInTheApplicationServersItActivatedFor(t *testing.T) {
 
 func TestSGPAssociationExposesApplicationServerState(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
-	association.as = newApplicationServers(time.Hour)
+	association.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	key := routingContextASKey(1)
 	association.as.get(key).setASPState(association, StateASPActive, time.Hour)
 
@@ -88,7 +88,7 @@ func TestSGPAssociationExposesApplicationServerState(t *testing.T) {
 
 func TestSGPAssociationRoutingContextStateRejectsAmbiguousNetworkAppearances(t *testing.T) {
 	association, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
-	association.as = newApplicationServers(time.Hour)
+	association.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	key10 := ASKey{NetworkAppearance: 10, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	key20 := ASKey{NetworkAppearance: 20, NetworkAppearanceSet: true, RoutingContext: 1, RoutingContextSet: true}
 	association.as.get(key10).setASPState(association, StateASPActive, time.Hour)

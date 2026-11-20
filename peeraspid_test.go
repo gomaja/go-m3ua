@@ -15,7 +15,7 @@ import (
 )
 
 func TestSGPSavesThePeerASPIdentifier(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	conn, _ := asTestConn(t, registry, StateASPDown, 1)
 	conn.cfg.ASPIdentifier = params.NewAspIdentifier(0xaaaa)
 
@@ -28,7 +28,7 @@ func TestSGPSavesThePeerASPIdentifier(t *testing.T) {
 }
 
 func TestDuplicatePeerASPIdentifierIsRejected(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPDown, 1)
 	second, secondSent := asTestConn(t, registry, StateASPDown, 1)
 
@@ -54,7 +54,7 @@ func TestDuplicatePeerASPIdentifierIsRejected(t *testing.T) {
 }
 
 func TestASPIdentifierNeedOnlyBeUniqueWithinAnAS(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPDown, 1)
 	second, _ := asTestConn(t, registry, StateASPDown, 2)
 
@@ -66,7 +66,7 @@ func TestASPIdentifierNeedOnlyBeUniqueWithinAnAS(t *testing.T) {
 }
 
 func TestDedicatedAssociationsStillRequireUniqueASPIdentifiers(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPDown)
 	second, _ := asTestConn(t, registry, StateASPDown)
 
@@ -79,7 +79,7 @@ func TestDedicatedAssociationsStillRequireUniqueASPIdentifiers(t *testing.T) {
 }
 
 func TestConcurrentDuplicateASPIdentifierClaimsHaveOneWinner(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPDown, 1)
 	second, _ := asTestConn(t, registry, StateASPDown, 1)
 	first.signalWriter = func(message messages.M3UA) (int, error) { return message.MarshalLen(), nil }
@@ -117,7 +117,7 @@ func TestConcurrentDuplicateASPIdentifierClaimsHaveOneWinner(t *testing.T) {
 }
 
 func TestClosedRegistryRejectsNewASPIdentifierClaims(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	conn, _ := asTestConn(t, registry, StateASPDown, 1)
 	registry.close()
 
@@ -132,7 +132,7 @@ func TestClosedRegistryRejectsNewASPIdentifierClaims(t *testing.T) {
 }
 
 func TestOverrideNotifyNamesTheRemoteOverridingASP(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	incumbent, incumbentSent := asTestConn(t, registry, StateASPActive, 1)
 	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
 
@@ -161,7 +161,7 @@ func TestOverrideNotifyNamesTheRemoteOverridingASP(t *testing.T) {
 }
 
 func TestActiveASPsAreOrderedBySavedPeerIdentifier(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPInactive, 1)
 	second, _ := asTestConn(t, registry, StateASPInactive, 1)
 
@@ -182,7 +182,7 @@ func TestActiveASPsAreOrderedBySavedPeerIdentifier(t *testing.T) {
 }
 
 func TestRemovingAnASPNotifiesItsSurvivingPeersOfFailure(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	failed, _ := asTestConn(t, registry, StateASPInactive, 1)
 	_, survivorSent := asTestConn(t, registry, StateASPActive, 1)
 	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err != nil {
@@ -218,7 +218,7 @@ func TestRemovingAnASPNotifiesItsSurvivingPeersOfFailure(t *testing.T) {
 }
 
 func TestFailureDrivenASStateNotifyNamesTheFailedASP(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	failed, _ := asTestConn(t, registry, StateASPInactive, 1)
 	_, survivorSent := asTestConn(t, registry, StateASPInactive, 1)
 	if err := failed.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(0x55), nil)); err != nil {
@@ -243,7 +243,7 @@ func TestFailureDrivenASStateNotifyNamesTheFailedASP(t *testing.T) {
 }
 
 func TestRemovingAnASPDownPeerDoesNotReportASPFailure(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	failed, _ := asTestConn(t, registry, StateASPDown, 1)
 	_, survivorSent := asTestConn(t, registry, StateASPActive, 1)
 
@@ -258,7 +258,7 @@ func TestRemovingAnASPDownPeerDoesNotReportASPFailure(t *testing.T) {
 }
 
 func TestForgottenASPIdentifierCanBeReused(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	first, _ := asTestConn(t, registry, StateASPDown, 1)
 	if err := first.handleAspUp(messages.NewAspUp(params.NewAspIdentifier(7), nil)); err != nil {
 		t.Fatal(err)
@@ -272,7 +272,7 @@ func TestForgottenASPIdentifierCanBeReused(t *testing.T) {
 }
 
 func TestASStateNotifyDoesNotInventAnASPIdentifier(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	conn, sent := asTestConn(t, registry, StateASPInactive, 1)
 	conn.cfg.ASPIdentifier = params.NewAspIdentifier(0xaaaa)
 

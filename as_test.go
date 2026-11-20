@@ -46,7 +46,7 @@ func asTestConn(t *testing.T, reg *applicationServers, state State, rtCtxs ...ui
 }
 
 func TestApplicationServerReservationRollsBackAfterLastFailedOwner(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
 	first := registry.reserve([]ASKey{key})
 	second := registry.reserve([]ASKey{key})
@@ -65,7 +65,7 @@ func TestApplicationServerReservationPreservesExistingAndCommittedScopes(t *test
 	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
 
 	t.Run("existing", func(t *testing.T) {
-		registry := newApplicationServers(time.Hour)
+		registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		registry.register([]ASKey{key})
 		reservation := registry.reserve([]ASKey{key})
 		reservation.rollback()
@@ -75,7 +75,7 @@ func TestApplicationServerReservationPreservesExistingAndCommittedScopes(t *test
 	})
 
 	t.Run("committed", func(t *testing.T) {
-		registry := newApplicationServers(time.Hour)
+		registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		reservation := registry.reserve([]ASKey{key})
 		reservation.commit()
 		reservation.rollback()
@@ -86,7 +86,7 @@ func TestApplicationServerReservationPreservesExistingAndCommittedScopes(t *test
 }
 
 func TestDynamicApplicationServerCreatedByStateLookupRemainsRemovable(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
 	association, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
 
@@ -103,7 +103,7 @@ func TestDynamicApplicationServerCreatedByStateLookupRemainsRemovable(t *testing
 }
 
 func TestDynamicApplicationServerSurvivesProvisionalStaticCommit(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
 	dynamicAssociation, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
 
@@ -124,7 +124,7 @@ func TestDynamicApplicationServerSurvivesProvisionalStaticCommit(t *testing.T) {
 }
 
 func TestDynamicApplicationServerSurvivesProvisionalStaticRollback(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	key := ASKey{RoutingContext: 1, RoutingContextSet: true}
 	dynamicAssociation, _ := newTestConnWithContexts(t, StateASPInactive, RoleSGP)
 
@@ -154,7 +154,7 @@ func TestDynamicApplicationServerSurvivesProvisionalStaticRollback(t *testing.T)
 //	AS-PENDING: An active ASP has transitioned to ASP-INACTIVE or ASP
 //	DOWN and it was the last remaining active ASP in the AS.
 func TestASStateFollowsItsASPs(t *testing.T) {
-	reg := newApplicationServers(time.Hour) // T(r) long enough not to fire here
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil) // T(r) long enough not to fire here
 	as := reg.get(1)
 
 	first, _ := asTestConn(t, reg, StateASPInactive, 1)
@@ -190,7 +190,7 @@ func TestASStateFollowsItsASPs(t *testing.T) {
 }
 
 func TestRemovingASPDoesNotBlockOnNonReadingSibling(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	blocked, _ := asTestConn(t, registry, StateASPInactive, 1)
 	failed, _ := asTestConn(t, registry, StateASPActive, 1)
 
@@ -264,7 +264,7 @@ func TestFullMandatoryNotifyQueueClosesAssociation(t *testing.T) {
 // No Notify was ever constructed by non-test code, so this MUST was
 // unimplemented in both of its halves: the message and the AS state behind it.
 func TestNotifyIsSentOnASStateChange(t *testing.T) {
-	reg := newApplicationServers(time.Hour)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 
 	conn, sent := asTestConn(t, reg, StateASPInactive, 1)
 	// Entering the AS at all is a change from AS-DOWN to AS-INACTIVE.
@@ -348,7 +348,7 @@ func TestASStateNotificationReleaseWaitsForHeadRetirement(t *testing.T) {
 
 // An ASP in ASP-DOWN is excluded, exactly as the sentence says.
 func TestNotifyIsNotSentToAnAspDownPeer(t *testing.T) {
-	reg := newApplicationServers(time.Hour)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 
 	active, _ := asTestConn(t, reg, StateASPInactive, 1)
 	_, downSent := asTestConn(t, reg, StateASPDown, 1)
@@ -365,7 +365,7 @@ func TestNotifyIsNotSentToAnAspDownPeer(t *testing.T) {
 // TestLastActiveASPLeavingSendsASPending covers the same rule for the state the
 // audit found most conspicuously missing.
 func TestLastActiveASPLeavingSendsASPending(t *testing.T) {
-	reg := newApplicationServers(time.Hour)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 
 	conn, sent := asTestConn(t, reg, StateASPInactive, 1)
 	reg.aspStateChanged(conn, StateASPActive)
@@ -409,7 +409,7 @@ func TestLastActiveASPLeavingSendsASPending(t *testing.T) {
 //	state if at least one ASP is in ASP-INACTIVE; otherwise, it will move
 //	to AS-DOWN state.
 func TestRecoveryTimerResolvesPending(t *testing.T) {
-	reg := newApplicationServers(50 * time.Millisecond)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: 50 * time.Millisecond}, nil)
 	as := reg.get(1)
 
 	conn, _ := asTestConn(t, reg, StateASPInactive, 1)
@@ -429,7 +429,7 @@ func TestRecoveryTimerResolvesPending(t *testing.T) {
 // AS-ACTIVE: "If an ASP becomes ASP-ACTIVE before T(r) expires, the AS is moved
 // to the AS-ACTIVE state, and all the queued messages will be sent to the ASP."
 func TestASPActiveBeforeRecoveryTimerRestoresActive(t *testing.T) {
-	reg := newApplicationServers(2 * time.Second)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: 2 * time.Second}, nil)
 	as := reg.get(1)
 
 	conn, _ := asTestConn(t, reg, StateASPInactive, 1)
@@ -460,7 +460,7 @@ func TestASPActiveBeforeRecoveryTimerRestoresActive(t *testing.T) {
 // None of it happened: handleAspActive treated each association in isolation,
 // so an Override-mode AS quietly ran two active ASPs.
 func TestOverrideDisplacesThePreviousASP(t *testing.T) {
-	reg := newApplicationServers(time.Hour)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 
 	incumbent, incumbentSent := asTestConn(t, reg, StateASPInactive, 1)
 	setInventoryTrafficModeType(&incumbent.cfg.ApplicationServers, params.NewTrafficModeType(params.TrafficModeOverride))
@@ -506,7 +506,7 @@ func TestOverrideDisplacesThePreviousASP(t *testing.T) {
 // an SGP or IPSP causes direction of traffic to the ASP sending the ASP Active
 // message, in addition to all the other ASPs that are active".
 func TestLoadshareDoesNotDisplaceAnyASP(t *testing.T) {
-	reg := newApplicationServers(time.Hour)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 
 	incumbent, incumbentSent := asTestConn(t, reg, StateASPInactive, 1)
 	reg.aspStateChanged(incumbent, StateASPActive)
@@ -535,7 +535,7 @@ func TestLoadshareDoesNotDisplaceAnyASP(t *testing.T) {
 // Without this, every other AS test would still pass while the registry never
 // heard from a real association.
 func TestASPStateChangesReachTheApplicationServer(t *testing.T) {
-	reg := newApplicationServers(time.Hour)
+	reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	as := reg.get(1)
 
 	conn, _ := newTestConn(t, StateASPDown, RoleSGP)
@@ -592,7 +592,7 @@ func TestASPStateChangesReachTheApplicationServer(t *testing.T) {
 // asserted too.
 func TestFigure4TransitionsCellByCell(t *testing.T) {
 	t.Run("DN2IA", func(t *testing.T) {
-		reg := newApplicationServers(time.Hour)
+		reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		as := reg.get(1)
 		c, _ := asTestConn(t, reg, StateASPDown, 1)
 		if got := as.State(); got != ASDown {
@@ -605,7 +605,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	})
 
 	t.Run("IA2DN", func(t *testing.T) {
-		reg := newApplicationServers(time.Hour)
+		reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		as := reg.get(1)
 		c, _ := asTestConn(t, reg, StateASPInactive, 1)
 		reg.aspStateChanged(c, StateASPDown)
@@ -616,7 +616,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	})
 
 	t.Run("IA2AC", func(t *testing.T) {
-		reg := newApplicationServers(time.Hour)
+		reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		as := reg.get(1)
 		c, _ := asTestConn(t, reg, StateASPInactive, 1)
 		reg.aspStateChanged(c, StateASPActive)
@@ -634,7 +634,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 		{"AC2PN via ASP-DOWN", StateASPDown},
 	} {
 		t.Run(leaving.name, func(t *testing.T) {
-			reg := newApplicationServers(time.Hour)
+			reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 			as := reg.get(1)
 			c, _ := asTestConn(t, reg, StateASPInactive, 1)
 			reg.aspStateChanged(c, StateASPActive)
@@ -646,7 +646,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	}
 
 	t.Run("PN2AC", func(t *testing.T) {
-		reg := newApplicationServers(time.Hour)
+		reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		as := reg.get(1)
 		c, _ := asTestConn(t, reg, StateASPInactive, 1)
 		reg.aspStateChanged(c, StateASPActive)
@@ -661,7 +661,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	})
 
 	t.Run("PN2IA", func(t *testing.T) {
-		reg := newApplicationServers(40 * time.Millisecond)
+		reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: 40 * time.Millisecond}, nil)
 		as := reg.get(1)
 		c, _ := asTestConn(t, reg, StateASPInactive, 1)
 		reg.aspStateChanged(c, StateASPActive)
@@ -673,7 +673,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	})
 
 	t.Run("PN2DN", func(t *testing.T) {
-		reg := newApplicationServers(40 * time.Millisecond)
+		reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: 40 * time.Millisecond}, nil)
 		as := reg.get(1)
 		c, _ := asTestConn(t, reg, StateASPInactive, 1)
 		reg.aspStateChanged(c, StateASPActive)
@@ -685,7 +685,7 @@ func TestFigure4TransitionsCellByCell(t *testing.T) {
 	})
 
 	t.Run("AS-ACTIVE never leaves except through AS-PENDING", func(t *testing.T) {
-		reg := newApplicationServers(time.Hour)
+		reg := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		as := reg.get(1)
 		first, _ := asTestConn(t, reg, StateASPInactive, 1)
 		second, _ := asTestConn(t, reg, StateASPInactive, 1)
@@ -722,7 +722,7 @@ func TestASPsForTrafficAppliesTheTrafficMode(t *testing.T) {
 	setup := func(t *testing.T, mode uint32, n int) (*Listener, []*Association) {
 		t.Helper()
 		l := newSGPListener(NewListenerConfig(newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 1, mode, 0, []uint32{1})))
-		l.as = newApplicationServers(time.Hour)
+		l.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 		l.as.get(1).setTrafficMode(mode)
 
 		conns := make([]*Association, 0, n)

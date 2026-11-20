@@ -13,7 +13,7 @@ import (
 )
 
 func TestASPDownCommitsAssociationAndMembershipBeforeAck(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	asp.recvStream.Store(0)
 	asp.as = registry
@@ -53,7 +53,7 @@ func TestASPDownCommitsAssociationAndMembershipBeforeAck(t *testing.T) {
 }
 
 func TestASPDownRejectsEarlierActivePublicationAfterAck(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, _ := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1)
 	asp.recvStream.Store(0)
 	asp.as = registry
@@ -91,7 +91,7 @@ func TestASPDownRejectsEarlierActivePublicationAfterAck(t *testing.T) {
 func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
 	config := newSGPAssociationConfigForTest(&HeartbeatInfo{Enabled: false}, 0, params.TrafficModeLoadshare, 0, []uint32{1, 2})
 	listener := newSGPListener(NewListenerConfig(config))
-	listener.as = newApplicationServers(time.Hour)
+	listener.as = newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 
 	asp, _ := addDistributionASP(t, listener, StateASPActive, 1, 2)
 	observer, _ := addDistributionASP(t, listener, StateASPInactive, 1, 2)
@@ -269,7 +269,7 @@ func TestASPDownAckWaitsForAllApplicationServerTraffic(t *testing.T) {
 }
 
 func TestASPDownMarksActiveAndInactiveMembershipsDown(t *testing.T) {
-	registry := newApplicationServers(time.Hour)
+	registry := newApplicationServersForSGP(&ApplicationServerConfig{RecoveryTimer: time.Hour}, nil)
 	asp, sent := newTestConnWithContexts(t, StateASPActive, RoleSGP, 1, 2)
 	asp.recvStream.Store(0)
 	asp.as = registry

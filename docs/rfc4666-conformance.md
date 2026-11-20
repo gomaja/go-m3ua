@@ -110,7 +110,7 @@ on valid received results. Other unsuccessful results still require zero.
 | [4.1 M3UA-User primitives](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.1) | Mandatory | Implemented | Endpoint MTP-TRANSFER and bounded destination indications expose a resynchronizable boundary for provisioned destinations. RFC 4666 §4.5.2.1 says, "Local management is informed." Raw SSNM, including DUPU `SSNMReport.UserCause`, is delivered through `SubscribeSSNM`; an ASP without configured routes owns its MTP3-User mapping. |
 | [4.2 Layer Management primitives](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.2) | Mandatory | Implemented | Keyed local status queries, explicit ASP procedures, and bounded M-NOTIFY, M-ERROR, M-SCTP_RELEASE, and M-SCTP_RESTART indications retain Association, ASKey, destination, and cause scope. `AssociationConfig.Subscribe` installs independent readers before the handshake, including its M-ASP_UP and M-ASP_ACTIVE state confirms and peer NTFY/ERR indications. |
 | [4.3.1 ASP/IPSP states](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.1) | Mandatory | Implemented | ASP state is implemented per Association and per ASKey. IPSP Double Exchange maintains independent `TrafficToLocal` and `TrafficToPeer` state, including partial Routing Context activation. |
-| [4.3.2 AS states](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.2) | Mandatory | Implemented | AS-DOWN, AS-INACTIVE, AS-ACTIVE, AS-PENDING, configurable n+k thresholds, strict startup, explicit smooth start, T(r), recovery below n, and traffic gating are implemented. |
+| [4.3.2 AS states](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.2) | Mandatory | Implemented | AS-DOWN, AS-INACTIVE, AS-ACTIVE, AS-PENDING, configurable n+k thresholds, strict startup, explicit smooth start, T(r), recovery below n, and traffic gating are implemented. Both DistributeData handles use the Endpoint peer AS registry for SGP and IPSP (§4.3), including bounded recovery, expiry discard and Broadcast synchronization (§4.3.4.3). SE requests and acknowledgements establish shared state; DE uses TrafficToPeer under either ASPSM agreement. An IPSP Endpoint with no peer AS returns ErrNoConfiguredAS. See [managed IPSP distribution](compliance.md#managed-ipsp-data-distribution). |
 | [4.3.3 Management procedures](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.3) | Mandatory | Implemented | SCTP establishment/loss/restart, per-procedure automatic or explicit ASP policy, context-bounded acknowledgement waits, local failure indications, and policy-aware shutdown are implemented independently from SCTP initiation. Automatic ASP policy applies to startup and orderly shutdown; unsolicited acknowledgement recovery belongs to Layer Management. |
 | [4.3.4.1 ASP Up](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.4.1) | Mandatory | Implemented with declared SHOULD exception | ASP/SGP and both IPSP exchange models cover version, identifier, independent and simplified ASPSM, duplicates, simultaneous messages, retry, timeout, and restart. At an SGP, ASP Up while active retires dynamic registrations before the Ack, through the successful DEREG path (§4.3.4.1; §4.4.2). AS-state Notify checks membership at the transport write, across both queues; retirement notifications follow the Ack (§4.3.4.5). An unowed Up Ack while ACTIVE or DOWN submits Error, adopts INACTIVE and reports exact prior active keys through `ManagementASPWithdrawal`; an inactive recipient absorbs it. The uppercase "SHOULD send an Error message and then initiate procedures to return itself to its previous state" (§4.3.4.1) has a declared exception: the Error is sent, and Layer Management decides the return (§4.3.4.3). Re-register affected dynamic Routing Keys before activating approved reported memberships. Owed library-copy duplicates remain inert. |
 | [4.3.4.2 ASP Down](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.3.4.2) | Mandatory | Implemented | ASP/SGP and both IPSP exchange models cover directional quiescence, acknowledgement, timeout, restart, repeated procedures, and shutdown ordering. At an SGP, ASP Down retires dynamic registrations before the Ack (§4.3.4.2), preserving static membership, provisioned keys, and other ASPs. Every AS-state Notify checks current membership when written, including ready events behind a stalled Ack (§4.3.4.5). An unsolicited Down Ack adopts DOWN and reports prior state and exact active keys, with no Error or automatic Up/Active. The lowercase "should" return (§4.3.4.2) is application policy; Unexpected Message Error "MAY be sent" (§3.8.1), and this library sends none. Solicited Down handling is unchanged. |
@@ -177,11 +177,16 @@ Function maps MTP-PAUSE, MTP-RESUME and MTP-STATUS indications to SSNM; the libr
 never forwards SI 0 management as DATA. DATA carries MTP3-User traffic (§3.3.1).
 
 `Association.WriteData`, `WriteDataContext`, `WriteSignal` (including custom raw
-encoders), `Endpoint.MTPTransfer`, `MTPTransferContext`, and Listener/Association
-`DistributeData` refuse SI 0 with an error matching `ErrMTPManagementData` through
+encoders), `Endpoint.MTPTransfer`, `MTPTransferContext`, and both SGP and IPSP
+Listener/Association `DistributeData` refuse SI 0 with an error matching `ErrMTPManagementData` through
 `errors.Is`, before submission or queuing. These management refusals are
 `*DataWriteError` values with `DataNotSent`, including both distribution entry
-points and built-in or custom messages passed to `WriteSignal`.
+points for SGP and IPSP and built-in or custom messages passed to `WriteSignal`.
+RFC 4666 §1.4.3.2 states the management prohibition for SG/ASP interworking;
+§1.4.3.4 says that SS7 and M3UA interworking is unnecessary for IPSP. Since DATA
+carries MTP3-User messages (§3.3.1), the library also excludes SI 0, MTP3's own
+management, on managed IPSP sends. This uniform library admission policy keeps
+every send path consistent with its direct-send and inbound SI-0 refusal.
 
 The message and parameter codecs remain general-purpose serializers. They
 preserve SI 0 when decoding and re-encoding captures for inspection or negative
@@ -552,7 +557,12 @@ knowledge retain `MTPStatusTransition`; an uncertain noncongested result uses
 `MTPStatusCauseNone` and cannot indicate measured congestion clear. The RFC's
 optional validity timer (§3.4.4) does not prescribe these Go trigger values.
 
-`MTPStatusProcedure` exposes that boundary to IPSP/application-owned routing.
+IPSP AS selection and recovery use `DistributeData`. `MTPStatusProcedure`
+exposes continued local-user status to applications supplying explicit status
+at their own boundary. The managed peer AS distributor infers no SS7 routes
+(RFC 4666 §1.4.3.4); the ASP offered-route procedure (§4.5.2) does not apply.
+Peer/transport method admission and configured cached DATA admission still
+apply to each selected IPSP (§1.4.6); SGP transit policy is SGP-only.
 A changed destination resets automatically; clear or uncertain status supplied
 to `Offered` also resets the interval. The helper sees snapshots only. Call
 `Reset()` on known clear, uncertainty, expiry or local lifecycle/method
