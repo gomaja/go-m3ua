@@ -77,6 +77,14 @@ and optional ASP-to-SGP SCON procedures. Endpoint exposes SGP-originated SCON
 and DUPU fan-out to the concerned active ASPs. ManagementIndications preserves
 the exact Association, ASKey, destination, and local failure scope.
 
+One SGP Endpoint owns and shares AS, NIF, destination and MTP3 restart state
+among the associations it serves. RFC 4666 §1.4.1 recommends coordinating MTP3
+routeset, SPMC and remote AS/ASP states across all SGPs of one SG and leaves the
+inter-SGP protocol outside its scope. The library does not coordinate several
+SGP processes; the deployment must supply that coordination. Divergent views
+can produce inconsistent SSNM and traffic offered through an SGP whose view is
+stale.
+
 StateChanges and ManagementIndications are independent optional subscriptions.
 Calling either starts delivery of future events, without replaying earlier
 ones; State gives the current ASP/IPSP state. To see the handshake, call them

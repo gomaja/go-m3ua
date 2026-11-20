@@ -14,6 +14,14 @@ it; `TestEveryProcedureCoverageCitationExists` in `export_inventory_test.go`
 fails if a name in this file stops existing, so the citations cannot rot
 silently.
 
+RFC 4666 §1.4.1 inter-SGP coordination is a deployment duty rather than an
+implemented library procedure. One SGP Endpoint shares state among its own
+associations; no inter-process coordination protocol is implemented or claimed
+by the procedure tests below. The
+[inter-SGP coordination boundary](design/endpoint-management-and-ssnm.md#inter-sgp-coordination-boundary)
+maps MTP3 routeset, SPMC and remote AS/ASP state to the existing local APIs and
+states where no observation or control API exists.
+
 Role shorthand: **ASP**, **SGP**, **SE** = IPSP Single Exchange, **DE** = IPSP
 Double Exchange. "Local" is a procedure this node originates; "peer" is one it
 receives and acts on.
