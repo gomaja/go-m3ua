@@ -845,24 +845,6 @@ func TestWriteSignalOfDataUsesTheSameAdmissionAndOutcomeRules(t *testing.T) {
 			t.Errorf("submissions = %d, want exactly 1", capture.submissions())
 		}
 	})
-
-	// Raw control messages keep their own return and acquire no procedure
-	// acknowledgement wait: T(ack) belongs to the ASPSM and ASPTM procedures of
-	// RFC 4666 Sections 4.3.4.1 to 4.3.4.4, which a raw write does not run.
-	t.Run("a raw control write starts no acknowledgement wait", func(t *testing.T) {
-		conn, _ := newTestConn(t, StateASPInactive, RoleASP)
-		message := messages.NewAspActive(params.NewTrafficModeType(params.TrafficModeLoadshare), nil, nil)
-		n, err := conn.WriteSignal(message)
-		if err != nil {
-			t.Fatalf("WriteSignal(ASP Active): %v", err)
-		}
-		if n != message.MarshalLen() {
-			t.Errorf("WriteSignal = %d, want the encoded length %d", n, message.MarshalLen())
-		}
-		if got := pendingAcknowledgements(conn); got != 0 {
-			t.Errorf("a raw ASP Active write left %d tracked acknowledgement waits", got)
-		}
-	})
 }
 
 // The typed send path encodes the DATA itself rather than building the four

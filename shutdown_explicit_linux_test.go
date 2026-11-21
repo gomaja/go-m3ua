@@ -104,6 +104,14 @@ func shutdownAcknowledgement(message messages.M3UA) (messages.M3UA, bool, bool, 
 		return messages.NewAspActiveAck(msg.TrafficModeType, msg.RoutingContext, nil), false, true, nil
 	case *messages.AspInactive:
 		return messages.NewAspInactiveAck(msg.RoutingContext, nil), true, false, nil
+	case *messages.RegistrationRequest:
+		key, err := msg.RoutingKeys[0].RoutingKey()
+		if err != nil {
+			return nil, false, true, err
+		}
+		return messages.NewRegistrationResponse(params.NewRegistrationResult(params.NewRegistrationResultPayload(
+			key.LocalRoutingKeyIdentifier.Copy(), params.NewRegistrationStatus(params.SuccessfullyRegistered), params.NewRoutingContext(380),
+		))), false, true, nil
 	case *messages.AspDown:
 		return messages.NewAspDownAck(nil), true, false, nil
 	default:
@@ -207,7 +215,7 @@ func shutdownStartPeer(t *testing.T, ctx context.Context) (*shutdownRecordingPee
 // first withdrawal has reached the peer. The expected contract is refusal and
 // no later Up/Active on the wire, even if the admitted caller eventually errors.
 func TestShutdownRefusesExplicitUpwardProceduresOnWire(t *testing.T) {
-	for _, operation := range []string{"ASPUp", "ASPActive"} {
+	for _, operation := range []string{"ASPUp", "ASPActive", "raw-ASPUP", "raw-ASPAC", "RegisterRoutingKeys"} {
 		t.Run(operation, func(t *testing.T) {
 			for _, inactive := range []bool{true, false} {
 				name := "inactive-first"
@@ -250,10 +258,24 @@ func TestShutdownRefusesExplicitUpwardProceduresOnWire(t *testing.T) {
 
 					active := make(chan error, 1)
 					go func() {
-						if operation == "ASPUp" {
+						switch operation {
+						case "ASPUp":
 							active <- association.ASPUp(ctx)
-						} else {
+						case "ASPActive":
 							active <- association.ASPActive(ctx)
+						case "raw-ASPUP", "raw-ASPAC":
+							var message messages.M3UA = messages.NewAspUp(nil, nil)
+							if operation == "raw-ASPAC" {
+								message = messages.NewAspActive(nil, params.NewRoutingContext(379), nil)
+							}
+							n, err := association.WriteSignal(message)
+							if n != 0 {
+								t.Errorf("refused raw write returned %d bytes", n)
+							}
+							active <- err
+						case "RegisterRoutingKeys":
+							_, err := association.RegisterRoutingKeys(ctx, m3ua.RoutingKeyRegistration{RoutingKey: m3ua.RoutingKey{Groups: []m3ua.RoutingKeyGroup{{DestinationPointCode: 100}}}})
+							active <- err
 						}
 					}()
 					var activeErr error
@@ -307,7 +329,7 @@ func TestShutdownRefusesExplicitUpwardProceduresOnWire(t *testing.T) {
 						}
 						withdrawn = withdrawn || message.Withdrawal
 					}
-					if !withdrawn || lateUpward || !errors.Is(activeErr, m3ua.ErrASPProcedureSuperseded) || ctx.Err() != nil {
+					if !withdrawn || lateUpward || !errors.Is(activeErr, expectedShutdownRefusal(operation)) || ctx.Err() != nil {
 						t.Fatalf("shutdown ordering violated: sequence=%+v; %s err=%v; context err=%v",
 							sequence, operation, activeErr, ctx.Err())
 					}
@@ -315,4 +337,11 @@ func TestShutdownRefusesExplicitUpwardProceduresOnWire(t *testing.T) {
 			}
 		})
 	}
+}
+
+func expectedShutdownRefusal(operation string) error {
+	if operation == "raw-ASPUP" || operation == "raw-ASPAC" {
+		return m3ua.ErrProcedureMessage
+	}
+	return m3ua.ErrASPProcedureSuperseded
 }

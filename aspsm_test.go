@@ -1431,7 +1431,7 @@ func TestConcurrentSendsDoNotShareConfigParams(t *testing.T) {
 			// goroutine and a signal carrying the same config Params.
 			_ = conn.handleErrors(NewUnexpectedMessageError(
 				messages.NewAspUp(nil, nil)))
-			_, _ = conn.WriteSignal(messages.NewAspActiveAck(
+			_, _ = conn.writeControl(messages.NewAspActiveAck(
 				inventoryTrafficModeParam(conn.cfg.ApplicationServers), asConfigRoutingContextParam(conn.cfg.ApplicationServers), nil))
 		}()
 	}

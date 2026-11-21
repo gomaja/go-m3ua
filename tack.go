@@ -366,9 +366,10 @@ func (c *Association) submitPendingControl(request *pendingRequest, message mess
 // writeTAckControl runs under retryMu. Only the library's Up procedure earns
 // duplicate credit. RFC 4666 §4.3.4.1 says that on Up while ACTIVE "the remote
 // ASP state is changed to ASP-INACTIVE in all relevant Application Servers,
-// and all registered Routing Keys are considered deregistered." An application
-// WriteSignal(ASP Up) can cause that withdrawal after activation; its Ack must
-// retain the ordinary handling rather than leave traffic falsely active.
+// and all registered Routing Keys are considered deregistered." Untracked
+// internal Up copies must not earn credit: their Acks retain ordinary
+// handling rather than leave traffic falsely active. Public WriteSignal refuses
+// procedure messages with ErrProcedureMessage before submission.
 func (c *Association) writeTAckControl(req *pendingRequest, message messages.M3UA) (n int, err error) {
 	if req.kind == requestAspUp {
 		c.tack.mu.Lock()

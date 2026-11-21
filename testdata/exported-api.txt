@@ -1159,6 +1159,7 @@ var ErrNoMatchingRoutingKey
 var ErrNotEstablished
 var ErrNotificationQueueFull
 var ErrPartialDataWrite
+var ErrProcedureMessage
 var ErrProtocolDataTooLarge
 var ErrRKMOutcomeLimit
 var ErrRecoveryQueueFull
