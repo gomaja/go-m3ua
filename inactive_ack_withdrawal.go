@@ -99,6 +99,11 @@ func (c *Association) stopASPActivations(affected []ASKey, reason string) []*pen
 		return nil
 	}
 	c.tack.mu.Lock()
+	defer c.tack.mu.Unlock()
+	return c.stopASPActivationsLocked(affected, reason)
+}
+
+func (c *Association) stopASPActivationsLocked(affected []ASKey, reason string) []*pendingRequest {
 	var cancelled []*pendingRequest
 	for message, request := range c.tack.pending {
 		if request.kind != requestAspActive {
@@ -120,7 +125,6 @@ func (c *Association) stopASPActivations(affected []ASKey, reason string) []*pen
 			delete(c.tack.pending, message)
 		}
 	}
-	c.tack.mu.Unlock()
 	return cancelled
 }
 

@@ -367,7 +367,10 @@ func TestShutdownWriteFailureStopsTAckAndCloses(t *testing.T) {
 func TestShutdownDownEntryDoesNotRestartAspUp(t *testing.T) {
 	conn, sent := newTestConn(t, StateASPInactive, RoleASP)
 	conn.terminating.Store(true)
-	conn.startTAck(messages.NewAspDown(nil), requestAspDown)
+	conn.startTAckRequest(messages.NewAspDown(nil), requestAspDown, true)
+	if conn.pendingTAck() != 1 {
+		t.Fatal("shutdown-owned Down was not registered")
+	}
 	conn.handleSignals(context.Background(), messages.NewAspDownAck(nil))
 
 	if err := conn.handleStateUpdate(StateASPDown); err != nil {

@@ -104,6 +104,8 @@ func (c *Association) aspProcedureMode(procedure aspProcedure) ASPProcedureMode 
 // exchange.
 // Success follows the confirmed state commit, visible through State,
 // IPSPState and Endpoint.AssociationStatus before the next procedure starts.
+// While ShutdownContext is withdrawing, this method refuses new procedures with
+// ErrASPProcedureSuperseded and publishes the usual ManagementError.
 func (c *Association) ASPUp(ctx context.Context) (err error) {
 	defer func() { c.notifyASPProcedureFailure("ASP Up", nil, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
@@ -127,7 +129,7 @@ func (c *Association) ASPUp(ctx context.Context) (err error) {
 	}
 	if state != StateASPDown {
 		c.muState.RUnlock()
-		return ErrInvalidState
+		return c.explicitASPProcedureStateError()
 	}
 	request, cancelled := c.startASPSM()
 	c.muState.RUnlock()
@@ -141,6 +143,8 @@ func (c *Association) ASPUp(ctx context.Context) (err error) {
 
 // ASPDown initiates the RFC 4666 Section 4.3.4.2 ASP Down procedure and waits
 // for ASP Down Ack.
+// While ShutdownContext is withdrawing, this method refuses new procedures with
+// ErrASPProcedureSuperseded and publishes the usual ManagementError.
 func (c *Association) ASPDown(ctx context.Context) (err error) {
 	defer func() { c.notifyASPProcedureFailure("ASP Down", nil, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
@@ -157,7 +161,7 @@ func (c *Association) ASPDown(ctx context.Context) (err error) {
 	switch c.localASPProcedureState() {
 	case StateASPInactive, StateASPActive:
 	default:
-		return ErrInvalidState
+		return c.explicitASPProcedureStateError()
 	}
 	request, err := c.initiateASPDown()
 	if err != nil {
@@ -176,6 +180,8 @@ func (c *Association) ASPDown(ctx context.Context) (err error) {
 // received by the peer (RFC 4666 §4.3.4.3). A later accepted ASP Active Ack can
 // activate its scopes and produces ManagementASPActivation when no request is
 // outstanding. The application may retain the grant or call ASPInactive.
+// While ShutdownContext is withdrawing, this method refuses new procedures with
+// ErrASPProcedureSuperseded and publishes the usual ManagementError.
 func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) {
 	defer func() { c.notifyASPProcedureFailure("ASP Active", keys, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
@@ -192,7 +198,7 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 	switch c.localASPProcedureState() {
 	case StateASPInactive, StateASPActive:
 	default:
-		return ErrInvalidState
+		return c.explicitASPProcedureStateError()
 	}
 	routingContext, err := c.routingContextParamForASPProcedure(keys)
 	if err != nil {
@@ -211,6 +217,8 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 // ASPInactive initiates the RFC 4666 Section 4.3.4.4 ASP Inactive procedure
 // for the exact Application Servers and waits for ASP Inactive Ack. With no
 // keys it requests every configured local AS.
+// While ShutdownContext is withdrawing, this method refuses new procedures with
+// ErrASPProcedureSuperseded and publishes the usual ManagementError.
 func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error) {
 	defer func() { c.notifyASPProcedureFailure("ASP Inactive", keys, err) }()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
@@ -225,7 +233,7 @@ func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error
 		return ErrNoConfiguredAS
 	}
 	if c.localASPProcedureState() != StateASPActive {
-		return ErrInvalidState
+		return c.explicitASPProcedureStateError()
 	}
 	routingContext, err := c.routingContextParamForASPProcedure(keys)
 	if err != nil {
@@ -236,6 +244,20 @@ func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error
 		return err
 	}
 	return c.waitTAck(ctx, request)
+}
+
+// explicitASPProcedureStateError preserves shutdown's refusal if withdrawal
+// changed state after initial admission validation (RFC 4666 §4.9). Completed
+// teardown and ordinary state errors retain their existing behavior.
+func (c *Association) explicitASPProcedureStateError() error {
+	if c.terminating.Load() {
+		select {
+		case <-c.done:
+		default:
+			return errASPProcedureShutdown
+		}
+	}
+	return ErrInvalidState
 }
 
 func (c *Association) validateExplicitASPProcedure(ctx context.Context) error {
@@ -258,8 +280,11 @@ func (c *Association) validateExplicitASPProcedure(ctx context.Context) error {
 		}
 		return ErrAssociationClosed
 	default:
-		return nil
 	}
+	if c.terminating.Load() {
+		return errASPProcedureShutdown
+	}
+	return nil
 }
 
 func (c *Association) acquireExplicitASPProcedure(ctx context.Context) (func(), error) {
@@ -268,7 +293,12 @@ func (c *Association) acquireExplicitASPProcedure(ctx context.Context) (func(), 
 	})
 	select {
 	case c.aspProcedureGate <- struct{}{}:
-		return func() { <-c.aspProcedureGate }, nil
+		release := func() { <-c.aspProcedureGate }
+		if err := c.validateExplicitASPProcedure(ctx); err != nil {
+			release()
+			return nil, err
+		}
+		return release, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-c.done:

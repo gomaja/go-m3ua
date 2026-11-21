@@ -56,7 +56,7 @@ func (c *Association) startGuardedASPActive(routingContext *params.Param) ([]*pe
 		state = c.localIPSPState
 	}
 	if state != StateASPInactive && state != StateASPActive {
-		return nil, ErrInvalidState
+		return nil, c.explicitASPProcedureStateError()
 	}
 	return c.startASPActive(routingContext)
 }
@@ -66,17 +66,47 @@ func (c *Association) startASPActive(routingContext *params.Param) ([]*pendingRe
 	if err != nil {
 		return nil, err
 	}
-	// A public Active may observe INACTIVE before the Up handler's final
-	// reclaim. Retire that racing Up before entering the retryMu write fence.
-	// RFC 4666 §4.3.4.3 permits Active "after the ASP has received an ASP Up
-	// Ack"; §4.3.4.1.2 also permits peer Up to complete a shared IPSP exchange.
-	c.claimASPUpCompletion().complete()
+	// Prepare every traffic-mode group before one admission decision. Otherwise
+	// shutdown could refuse a later group after an earlier group was armed.
 	pending := make([]*pendingRequest, 0, len(requests))
+	outbound := make([]messages.M3UA, 0, len(requests))
 	for _, activeRequest := range requests {
-		aspActive := messages.NewAspActive(
-			activeRequest.trafficMode.Copy(), activeRequest.routingContext.Copy(), nil,
-		)
-		pending = append(pending, c.startTAck(aspActive, requestAspActive))
+		message := messages.NewAspActive(activeRequest.trafficMode.Copy(), activeRequest.routingContext.Copy(), nil)
+		outbound = append(outbound, message)
+		pending = append(pending, c.prepareTAckRequest(message, requestAspActive, false))
+	}
+	for _, request := range pending {
+		if failure := request.failure.Load(); failure != nil {
+			for _, prepared := range pending {
+				prepared.finish(*failure)
+			}
+			return pending, nil
+		}
+	}
+	c.tack.mu.Lock()
+	admissionErr := c.tackRegistrationErrorLocked(requestAspActive, false)
+	registered := admissionErr == nil
+	for i, request := range pending {
+		if registered {
+			c.registerAcceptedTAckLocked(outbound[i], request, requestAspActive)
+		} else {
+			request.finish(admissionErr)
+		}
+	}
+	var acknowledgement pendingTAckAcknowledgement
+	if registered {
+		// A public Active may observe INACTIVE before the Up handler's final
+		// reclaim. Retire that Up only after admission, before the write fence.
+		// RFC 4666 §4.3.4.3 permits Active after Up Ack; §4.3.4.1.2 also
+		// permits peer Up to complete a shared IPSP exchange.
+		acknowledgement = c.claimASPUpCompletionLocked()
+	}
+	c.tack.mu.Unlock()
+	acknowledgement.complete()
+	if registered {
+		for _, request := range pending {
+			go c.runTAck(request, requestAspActive)
+		}
 	}
 	return pending, nil
 }
@@ -165,8 +195,12 @@ func (c *Association) initiateASPInactive(routingContext *params.Param) error {
 }
 
 func (c *Association) beginASPInactive(ctx context.Context, routingContext *params.Param) (*pendingRequest, error) {
+	return c.beginASPInactiveRequest(ctx, routingContext, false)
+}
+
+func (c *Association) beginASPInactiveRequest(ctx context.Context, routingContext *params.Param, shutdownOwned bool) (*pendingRequest, error) {
 	aspInactive := messages.NewAspInactive(routingContext.Copy(), nil)
-	request := c.startTAck(aspInactive, requestAspInactive)
+	request := c.startTAckRequest(aspInactive, requestAspInactive, shutdownOwned)
 	if _, err := c.writePendingControl(ctx, request, aspInactive); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
@@ -177,9 +211,19 @@ func (c *Association) beginASPInactive(ctx context.Context, routingContext *para
 // ActivateRoutingContexts starts the ASP Active procedure for the named
 // Application Servers. With no arguments it requests every configured Routing
 // Context. The request remains protected by T(ack) until all scoped Acks arrive.
+// While ShutdownContext is withdrawing, it returns ErrASPProcedureSuperseded without
+// writing a request. Like other immediate refusals from this method, it does
+// not publish a procedure-failure ManagementError.
 func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
+	}
+	if c.terminating.Load() {
+		select {
+		case <-c.done:
+		default:
+			return errASPProcedureShutdown
+		}
 	}
 	if c.isIPSPDoubleExchange() && !c.hasLocalIPSPTrafficDirection() {
 		return ErrNoConfiguredAS
@@ -189,7 +233,7 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 		state = c.localIPSPStateValue()
 	}
 	if state != StateASPInactive && state != StateASPActive {
-		return ErrInvalidState
+		return c.explicitASPProcedureStateError()
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
 	if err != nil {
@@ -206,9 +250,19 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 // DeactivateRoutingContexts starts the ASP Inactive procedure for the named
 // Application Servers. With no arguments it requests every configured Routing
 // Context. Local traffic eligibility changes only as the scoped Acks arrive.
+// While ShutdownContext is withdrawing, it returns ErrASPProcedureSuperseded without
+// writing a request. Like other immediate refusals from this method, it does
+// not publish a procedure-failure ManagementError.
 func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error {
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
+	}
+	if c.terminating.Load() {
+		select {
+		case <-c.done:
+		default:
+			return errASPProcedureShutdown
+		}
 	}
 	if c.isIPSPDoubleExchange() && !c.hasLocalIPSPTrafficDirection() {
 		return ErrNoConfiguredAS
@@ -218,7 +272,7 @@ func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error
 		state = c.localIPSPStateValue()
 	}
 	if state != StateASPActive {
-		return ErrInvalidState
+		return c.explicitASPProcedureStateError()
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
 	if err != nil {

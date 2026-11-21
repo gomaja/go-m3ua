@@ -97,7 +97,7 @@ func TestIPSPSharedASPSMDownAckHonorsRequestOwnership(t *testing.T) {
 					}
 					association.terminating.Store(test.terminating)
 					if test.requested {
-						if _, err := association.initiateASPDown(); err != nil {
+						if _, err := association.beginASPDown(context.Background(), test.terminating); err != nil {
 							t.Fatalf("local ASP Down: %v", err)
 						}
 					}

@@ -65,9 +65,10 @@ func (e *AssociationEstablishmentError) Unwrap() error {
 
 // Error definitions.
 var (
-	// ErrASPProcedureSuperseded reports that a local replacement or peer
-	// withdrawal ended an outstanding ASP procedure before it completed. Causes
-	// include a newer ASP Up/Down, orderly shutdown, a peer ASP Down, an unowed
+	// ErrASPProcedureSuperseded reports that local replacement, peer withdrawal
+	// or orderly shutdown superseded or refused an ASP procedure. Causes
+	// include a newer ASP Up/Down, orderly shutdown (also refusing new explicit
+	// procedures once ShutdownContext begins), a peer ASP Down, an unowed
 	// Up/Down Ack, an ASP Inactive Ack for the same scopes (a confirmation or
 	// unsolicited withdrawal), and the Ack confirming this ASP's own ASP Down.
 	// The wrapped error names the cause; local replacement does not close a
@@ -375,6 +376,10 @@ var (
 	// user message.
 	ErrPartialDataWrite = errors.New("transport accepted only part of the message")
 )
+
+// errASPProcedureShutdown is shared by admission refusal and pending-request
+// cancellation during the RFC 4666 §4.9 orderly withdrawal.
+var errASPProcedureShutdown = fmt.Errorf("%w by orderly shutdown", ErrASPProcedureSuperseded)
 
 // InvalidVersionError is used if a message with an unsupported version is received.
 type InvalidVersionError struct {

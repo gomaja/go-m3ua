@@ -42,8 +42,22 @@ func (c *Association) startASPSM() (*pendingRequest, []*pendingRequest) {
 	// A new Up cannot inherit an old Active retry across DOWN. RFC 4666
 	// §4.3.4.3 permits Active "after the ASP has received an ASP Up Ack";
 	// retire previous-cycle activations before starting this Up's timer.
-	cancelled := c.stopASPActivations(nil, "ASP Up")
-	return c.startTAck(messages.NewAspUp(c.cfg.ASPIdentifier.Copy(), nil), requestAspUp), cancelled
+	if c.tack == nil {
+		return nil, nil
+	}
+	message := messages.NewAspUp(c.cfg.ASPIdentifier.Copy(), nil)
+	request := c.prepareTAckRequest(message, requestAspUp, false)
+	c.tack.mu.Lock()
+	registered := c.registerTAckLocked(message, request, requestAspUp, false)
+	var cancelled []*pendingRequest
+	if registered {
+		cancelled = c.stopASPActivationsLocked(nil, "ASP Up")
+	}
+	c.tack.mu.Unlock()
+	if registered {
+		go c.runTAck(request, requestAspUp)
+	}
+	return request, cancelled
 }
 
 func (c *Association) writeASPSM(ctx context.Context, request *pendingRequest) (*pendingRequest, error) {
@@ -500,9 +514,13 @@ func (c *Association) handleAspDownAck(aspDownAck *messages.AspDownAck) error {
 }
 
 func (c *Association) initiateASPDown() (*pendingRequest, error) {
+	return c.beginASPDown(context.Background(), false)
+}
+
+func (c *Association) beginASPDown(ctx context.Context, shutdownOwned bool) (*pendingRequest, error) {
 	aspDown := messages.NewAspDown(nil)
-	request := c.startTAck(aspDown, requestAspDown)
-	if _, err := c.writeControl(aspDown); err != nil {
+	request := c.startTAckRequest(aspDown, requestAspDown, shutdownOwned)
+	if _, err := c.writePendingControl(ctx, request, aspDown); err != nil {
 		c.cancelTAckRequest(request)
 		return nil, err
 	}

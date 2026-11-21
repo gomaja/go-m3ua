@@ -9,7 +9,7 @@ errata, IANA, and security decisions are defined in the
 procedure, and the concrete optional-procedure exclusions, are in
 [procedure coverage](procedure-coverage.md).
 
-RFC 4666 status was checked on 2026-11-15 against the
+RFC 4666 status was checked on 2026-11-21 against the
 [RFC Editor relationship record](https://www.rfc-editor.org/rfc/rfc4666.json),
 [Datatracker RFC page](https://datatracker.ietf.org/doc/rfc4666/), its
 [document API](https://datatracker.ietf.org/api/v1/doc/document/rfc4666/?format=json)
@@ -125,7 +125,7 @@ on valid received results. Other unsuccessful results still require zero.
 | [4.6 MTP3 restart](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.6) | Mandatory | Implemented | SGP managed restart, ASP reception, SCTP_RESTART, state reset, ordered recovery, and affected destinations are covered. The library's endpoint-only IPSP model excludes the SS7-connected variant: "In the IPSP case, MTP restart could be considered if the IPSP also has connection to an SS7 network." (§4.6). |
 | [4.7 NIF not available](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.7) | Mandatory | Implemented | Endpoint-wide and per-AS NIF availability, ASP Inactive, Notify, partial failure, and recovery are covered. |
 | [4.8 Version control](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.8) | Mandatory | Implemented | Version `1`, ASP Up negotiation, unsupported version Error, and state preservation are covered. |
-| [4.9 M3UA termination](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.9) | Mandatory | Implemented | Graceful shutdown, timeout, cancellation, transport closure, and resource release are covered. Peer release causes are retained when a control write notices transport failure before the reader. |
+| [4.9 M3UA termination](https://www.rfc-editor.org/rfc/rfc4666.html#section-4.9) | Mandatory | Implemented | Graceful shutdown, timeout, cancellation, transport closure, and resource release are covered. Once ShutdownContext claims withdrawal, all six explicit ASPSM/ASPTM procedure entry points are refused with ErrASPProcedureSuperseded; queued and pre-registration callers cannot send late requests. Shutdown-owned ASPIA/ASPDN still complete for ASP and both IPSP exchange models. `TestShutdownRefusesExplicitUpwardProceduresOnWire` covers both withdrawal policies against a raw Linux SCTP peer through orderly EOF. Peer release causes are retained when a control write notices transport failure before the reader. |
 
 `Association.Err()` and the `ManagementSCTPRelease` indication retain the same
 terminal cause. A peer ABORT matches `ErrSCTPNotAlive` and includes the cause
