@@ -48,10 +48,10 @@ func assertUnowedUpAckWithdrawal(t *testing.T, c *Association) {
 	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1)}, StateASPActive)
 }
 
-func TestApplicationUpDoesNotEarnDuplicateCredit(t *testing.T) {
+func TestUntrackedLibraryUpDoesNotEarnDuplicateCredit(t *testing.T) {
 	c, _ := newTestConnWithContexts(t, StateASPDown, RoleASP, 1)
 	completeUpAndRCOne(t, c)
-	if _, err := c.WriteSignal(messages.NewAspUp(nil, nil)); err != nil {
+	if _, err := c.writeControl(messages.NewAspUp(nil, nil)); err != nil {
 		t.Fatal(err)
 	}
 	c.handleSignals(context.Background(), messages.NewAspUpAck(nil, nil))

@@ -919,7 +919,25 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 	return asConfigNetworkAppearance(c.applicationServerInventory(true))
 }
 
-// WriteSignal writes an M3UA message on the SCTP association.
+// WriteSignal writes a non-procedure M3UA message on the SCTP association.
+// ASPUP, ASPDN, ASPAC, ASPIA and their Acks, REG REQ/RSP and DEREG REQ/RSP
+// return (0, ErrProcedureMessage) in every role and state, including shutdown.
+// The encoded class and type are checked after marshalling, before scope locks
+// or transport submission, including for generic messages and custom encoders.
+// Refusal starts no T(ack), publishes no ManagementError and leaves the
+// association usable. BEAT, BEAT Ack, ERR, NTFY, DATA and SSNM retain their
+// existing admission and write behaviour.
+//
+// Use ASPUp, ASPDown, ASPActive or ASPInactive; scoped activation uses
+// ActivateRoutingContexts or DeactivateRoutingContexts. Use RegisterRoutingKeys
+// and DeregisterApplicationServers for RKM. The library owns replies and Acks;
+// SGP unsolicited withdrawal uses SetNIFAvailable, SetASAvailable or
+// SetASAvailableForAS (RFC 4666 §4.7). RFC 4666 §4.3.4.1–§4.3.4.4 assign
+// T(ack) to the request sender. Raw per-call INFO String and Traffic Mode Type
+// are no longer available for these messages: typed ASP procedures omit INFO
+// String and derive traffic mode from Application Server configuration.
+// RegisterRoutingKeys also uses its RoutingKey traffic-mode configuration.
+//
 // DATA with SI 0 is refused with a *DataWriteError whose Outcome is
 // DataNotSent and whose cause matches ErrMTPManagementData, including messages
 // supplied by built-in and custom encoders (RFC 4666 §1.4.3.2).
@@ -936,7 +954,18 @@ func (c *Association) localNetworkAppearance() (uint32, bool) {
 // WriteSignal or WriteData on the same association waits behind it for the
 // socket.
 func (c *Association) WriteSignal(m3 messages.M3UA) (n int, err error) {
-	return c.writeSignal(m3, true, applicationWrite, nil, nil, nil)
+	buf, err := marshalSignal(m3)
+	if err != nil {
+		return 0, err
+	}
+	// RFC 4666 §4.3.4.1–§4.3.4.4 assign T(ack) to the request sender;
+	// §4.7 unsolicited Acks also need the library's state changes. Classify
+	// the encoded header so generic messages and custom encoders cannot
+	// bypass procedure ownership. No scope or transport lock is taken here.
+	if isProcedureMessage(buf) {
+		return 0, ErrProcedureMessage
+	}
+	return c.writeSignalFrame(m3, buf, true, applicationWrite, nil, nil, nil)
 }
 
 // writeControl writes a message the library sends on its own behalf. It waits
@@ -1290,7 +1319,55 @@ func sconProfileRefusal(err error) bool {
 	return errors.As(err, &refusal) && refusal.sconProfile
 }
 
-func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, bindings ...queueCongestionBinding) (n int, err error) {
+// marshalSignal is shared by public admission and the internal writers. A
+// public WriteSignal marshals once, before any procedure or transport admission.
+func marshalSignal(m3 messages.M3UA) ([]byte, error) {
+	if m3 == nil {
+		return nil, errors.New("cannot write a nil M3UA signal")
+	}
+	if data, ok := m3.(*messages.Data); ok && (data.ProtocolData == nil || data.ProtocolData.Tag != params.ProtocolData) {
+		return nil, ErrMissingProtocolData
+	}
+	n := m3.MarshalLen()
+	if n < 0 {
+		return nil, fmt.Errorf("invalid encoded length %d for %T", n, m3)
+	}
+	buf := make([]byte, n)
+	if err := m3.MarshalTo(buf); err != nil {
+		return nil, fmt.Errorf("failed to create %T: %w", m3, err)
+	}
+	return buf, nil
+}
+
+func isProcedureMessage(buf []byte) bool {
+	if len(buf) < 4 {
+		return false
+	}
+	switch buf[2] {
+	case messages.MsgClassASPSM:
+		switch buf[3] {
+		case messages.MsgTypeAspUp, messages.MsgTypeAspDown, messages.MsgTypeAspUpAck, messages.MsgTypeAspDownAck:
+			return true
+		}
+	case messages.MsgClassASPTM:
+		switch buf[3] {
+		case messages.MsgTypeAspActive, messages.MsgTypeAspInactive, messages.MsgTypeAspActiveAck, messages.MsgTypeAspInactiveAck:
+			return true
+		}
+	case messages.MsgClassRKM:
+		switch buf[3] {
+		case messages.MsgTypeRegistrationRequest, messages.MsgTypeRegistrationResponse, messages.MsgTypeDeregistrationRequest, messages.MsgTypeDeregistrationResponse:
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, bindings ...queueCongestionBinding) (int, error) {
+	return c.writeSignalFrame(m3, nil, enforceTrafficScope, origin, stopped, request, resolvedDataScope, bindings...)
+}
+
+func (c *Association) writeSignalFrame(m3 messages.M3UA, buf []byte, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, bindings ...queueCongestionBinding) (n int, err error) {
 	if origin == libraryWrite {
 		c.controlWritesPending.Add(1)
 		defer c.controlWritesPending.Add(-1)
@@ -1302,22 +1379,13 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 			err = &controlAdmissionError{error: err, sconProfile: profileRefused}
 		}
 	}()
-	if m3 == nil {
-		return 0, errors.New("cannot write a nil M3UA signal")
+	if buf == nil {
+		buf, err = marshalSignal(m3)
+		if err != nil {
+			return 0, err
+		}
 	}
-	if data, ok := m3.(*messages.Data); ok &&
-		(data.ProtocolData == nil || data.ProtocolData.Tag != params.ProtocolData) {
-		return 0, ErrMissingProtocolData
-	}
-
-	n = m3.MarshalLen()
-	if n < 0 {
-		return 0, fmt.Errorf("invalid encoded length %d for %T", n, m3)
-	}
-	buf := make([]byte, n)
-	if err := m3.MarshalTo(buf); err != nil {
-		return 0, fmt.Errorf("failed to create %T: %w", m3, err)
-	}
+	n = len(buf)
 	// A caller-built DATA is admitted and classified exactly as WriteData's
 	// own messages are; only the reported count differs.
 	if isPayloadData(buf) {
@@ -1374,6 +1442,9 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	}
 
 	if c.signalWriter != nil {
+		if err := c.validateRKMRegistrationFrame(buf); err != nil {
+			return 0, err
+		}
 		select {
 		case <-stopped:
 			return 0, nil
@@ -1405,7 +1476,13 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 		}
 	} else {
 		c.sendMu.Lock()
-		err = c.validateIPSPCongestionFrame(buf)
+		// ShutdownContext claims terminating before its first sendMu acquisition.
+		// RFC 4666 §4.9(a) withdraws ASPIA, optional DEREG, then ASPDN. A REG
+		// that passed entry admission cannot follow a withdrawal on stream 0.
+		err = c.validateRKMRegistrationFrame(buf)
+		if err == nil {
+			err = c.validateIPSPCongestionFrame(buf)
+		}
 		if err == nil {
 			var submission *sconSubmission
 			submission, err = c.beginSCONSubmission(bindings)

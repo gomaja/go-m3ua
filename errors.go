@@ -21,6 +21,15 @@ import (
 // Match with errors.Is; send refusals wrap it in a *DataWriteError with DataNotSent.
 var ErrMTPManagementData = errors.New("MTP3 management SI 0 cannot be carried as DATA")
 
+// ErrProcedureMessage reports a procedure-owned message offered to WriteSignal.
+// ASPUP, ASPDN, ASPAC, ASPIA and their Acks, REG REQ/RSP and DEREG REQ/RSP
+// are refused in every role and state, before transport submission. Match with
+// errors.Is. Use ASPUp, ASPDown, ASPActive, ASPInactive, ActivateRoutingContexts,
+// DeactivateRoutingContexts, RegisterRoutingKeys or DeregisterApplicationServers.
+// Acks belong to the library's procedures; for RFC 4666 §4.7 unsolicited
+// withdrawal use SetNIFAvailable, SetASAvailable or SetASAvailableForAS on an SGP.
+var ErrProcedureMessage = errors.New("procedure-owned message cannot be written through WriteSignal")
+
 // ErrCongestionDecisionStale means the inputs changed again after one policy
 // reevaluation. DATA errors wrap it with DataNotSent; no copy was submitted on
 // the refused association. Match with errors.Is.
@@ -68,8 +77,8 @@ var (
 	// ErrASPProcedureSuperseded reports that local replacement, peer withdrawal
 	// or orderly shutdown superseded or refused an ASP procedure. Causes
 	// include a newer ASP Up/Down, orderly shutdown (also refusing new explicit
-	// procedures once ShutdownContext begins), a peer ASP Down, an unowed
-	// Up/Down Ack, an ASP Inactive Ack for the same scopes (a confirmation or
+	// ASP procedures and routing-key registration once ShutdownContext begins),
+	// a peer ASP Down, an unowed Up/Down Ack, an ASP Inactive Ack for the same scopes (a confirmation or
 	// unsolicited withdrawal), and the Ack confirming this ASP's own ASP Down.
 	// The wrapped error names the cause; local replacement does not close a
 	// live association.

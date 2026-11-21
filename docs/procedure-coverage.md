@@ -590,7 +590,53 @@ IPSP Double Exchange. The Linux raw-peer test
 `TestShutdownRefusesExplicitUpwardProceduresOnWire` holds the first withdrawal
 Ack for both inactive-first and down-first policies, checks Up/Active refusal,
 no later upward messages, successful shutdown and orderly transport EOF.
-`WriteSignal` is raw message submission and does not register a T(ack) request.
+`TestWriteSignalRefusesProcedureMessages` checks all twelve procedure messages
+in ASP, SGP and both IPSP models, all ASP states and shutdown settings, using
+typed, generic and custom encoders. `TestWriteSignalAllowsNonProcedureMessages`
+checks BEAT, BEAT Ack, ERR, NTFY, DATA and SSNM.
+`TestRegisterRoutingKeysRefusedAfterShutdownClaim` covers early refusal;
+`TestRegisterRoutingKeysRechecksShutdownAtSend` pauses an admitted registration
+while shutdown submits its first withdrawal through the serialized transport.
+`TestDeregisterApplicationServersAllowedDuringShutdown` preserves DEREG;
+`TestPendingRegistrationWaitersEndOnShutdownClose` covers outstanding and queued
+REG waiters; `TestRKMRequestsRetainApplicationBackpressure` checks full-buffer
+refusal without library retry or association closure. The Linux wire test also
+attempts raw ASPUP, raw ASPAC and registration after withdrawal and drains to
+orderly EOF to check absence from the complete received sequence.
+
+Breaking change: `WriteSignal` refuses ASPUP, ASPDN, ASPAC and ASPIA with
+`ErrProcedureMessage`; use `ASPUp`, `ASPDown`, `ASPActive` and `ASPInactive`,
+or `ActivateRoutingContexts` / `DeactivateRoutingContexts` for scoped traffic
+procedures. ASPUP Ack, ASPDN Ack, ASPAC Ack and ASPIA Ack belong to the library's
+procedures. For unsolicited ASPDN Ack use `SetNIFAvailable(false)`; for
+unsolicited ASPIA Ack use `SetASAvailable(rc, false)` or
+`SetASAvailableForAS(key, false)` on an SGP (RFC 4666 §4.7). REG REQ uses
+`RegisterRoutingKeys`, DEREG REQ uses `DeregisterApplicationServers`; REG RSP
+and DEREG RSP belong to the configured library RKM responder. All twelve raw
+messages are refused in every role and state, including during shutdown, after
+marshalling and before scope locks or transport submission. Refusal returns
+zero, starts no T(ack), publishes no ManagementError and leaves the association
+usable. BEAT, BEAT Ack, ERR, NTFY, DATA and SSNM retain their existing behaviour.
+RFC 4666 §4.3.4.1–§4.3.4.4 put T(ack) with the request sender.
+
+Raw per-call INFO String and Traffic Mode Type customization for these requests
+is lost. The typed ASP procedures currently omit INFO String; they have no
+per-call or configuration setting for it. Traffic mode comes from the existing
+Application Server configuration (`ASConfig.TrafficMode`), or
+`RoutingKey.TrafficMode` / `TrafficModeSet` for registration. Codecs remain
+available for encoding and decoding messages independently of an Association.
+
+`RegisterRoutingKeys` also refuses new registration once `ShutdownContext`
+claims withdrawal, with `ErrASPProcedureSuperseded` wrapping the shared orderly
+shutdown cause. Its final admission check runs under the control send lock, so
+a call admitted earlier cannot send REG REQ after shutdown's first withdrawal.
+Already outstanding REG waiters still await a response, caller cancellation or
+association closure; shutdown's claim alone does not cancel them.
+`DeregisterApplicationServers` stays allowed during withdrawal. RFC 4666 §4.9(a)
+specifies "ASP-INACTIVE, DEREG (optionally whenever dynamic registration is
+used), and ASP-DOWN" before SCTP Shutdown. Both typed RKM calls retain their
+existing application write backpressure.
+
 `TestCloseRejectsLatePendingProcedureRegistration`
 prevents registration after teardown has swept pending requests. `TestSharedIPSPDownReportFollowsPerASDownCommit` checks shared
 IPSP DOWN memberships and T(r) before monitor publication.

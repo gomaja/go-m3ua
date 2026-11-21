@@ -26,6 +26,41 @@ contain no Verified correction: Held 2065 (Notify Routing Context) and 4475
 (SI alignment), and Rejected 2518 (RKM tags), are reported without applying a
 new interpretation in this change.
 
+## Procedure message ownership and shutdown registration
+
+Breaking change: `WriteSignal` refuses ASPUP, ASPDN, ASPAC and ASPIA with
+`ErrProcedureMessage`; use `ASPUp`, `ASPDown`, `ASPActive` and `ASPInactive`,
+or `ActivateRoutingContexts` / `DeactivateRoutingContexts` for scoped traffic
+procedures. ASPUP Ack, ASPDN Ack, ASPAC Ack and ASPIA Ack belong to the library's
+procedures. For unsolicited ASPDN Ack use `SetNIFAvailable(false)`; for
+unsolicited ASPIA Ack use `SetASAvailable(rc, false)` or
+`SetASAvailableForAS(key, false)` on an SGP (RFC 4666 §4.7). REG REQ uses
+`RegisterRoutingKeys`, DEREG REQ uses `DeregisterApplicationServers`; REG RSP
+and DEREG RSP belong to the configured library RKM responder. All twelve raw
+messages are refused in every role and state, including during shutdown, after
+marshalling and before scope locks or transport submission. Refusal returns
+zero, starts no T(ack), publishes no ManagementError and leaves the association
+usable. BEAT, BEAT Ack, ERR, NTFY, DATA and SSNM retain their existing behaviour.
+RFC 4666 §4.3.4.1–§4.3.4.4 put T(ack) with the request sender.
+
+Raw per-call INFO String and Traffic Mode Type customization for these requests
+is lost. The typed ASP procedures currently omit INFO String; they have no
+per-call or configuration setting for it. Traffic mode comes from the existing
+Application Server configuration (`ASConfig.TrafficMode`), or
+`RoutingKey.TrafficMode` / `TrafficModeSet` for registration. Codecs remain
+available for encoding and decoding messages independently of an Association.
+
+`RegisterRoutingKeys` also refuses new registration once `ShutdownContext`
+claims withdrawal, with `ErrASPProcedureSuperseded` wrapping the shared orderly
+shutdown cause. Its final admission check runs under the control send lock, so
+a call admitted earlier cannot send REG REQ after shutdown's first withdrawal.
+Already outstanding REG waiters still await a response, caller cancellation or
+association closure; shutdown's claim alone does not cancel them.
+`DeregisterApplicationServers` stays allowed during withdrawal. RFC 4666 §4.9(a)
+specifies "ASP-INACTIVE, DEREG (optionally whenever dynamic registration is
+used), and ASP-DOWN" before SCTP Shutdown. Both typed RKM calls retain their
+existing application write backpressure.
+
 ## Status vocabulary
 
 - **Implemented**: the public behavior and negative cases are present and

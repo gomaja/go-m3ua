@@ -399,7 +399,7 @@ func TestTAckRetransmissionDoesNotReuseTheInitiatingMessage(t *testing.T) {
 
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := conn.WriteSignal(probe)
+		_, err := conn.writeControl(probe)
 		writeDone <- err
 	}()
 

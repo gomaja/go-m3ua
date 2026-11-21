@@ -413,10 +413,6 @@ func TestFreshUpDuplicateBudgetAfterRestart(t *testing.T) {
 func TestFirstUnowedUpAckReportsApplicationRecovery(t *testing.T) {
 	c, sent := newTestConn(t, StateASPActive, RoleASP)
 	c.cfg.TAck = time.Hour
-	if _, err := c.WriteSignal(messages.NewAspUp(nil, nil)); err != nil {
-		t.Fatal(err)
-	}
-	*sent = nil
 	dispatchRecoveryAck(t, c, messages.NewAspUpAck(nil, nil))
 	if c.State() != StateASPInactive || countType(*sent, "Error") != 1 || countType(*sent, "ASP Active") != 0 {
 		t.Fatalf("first unowed Ack: state=%v sent=%v", c.State(), typeNames(*sent))
@@ -424,7 +420,7 @@ func TestFirstUnowedUpAckReportsApplicationRecovery(t *testing.T) {
 	recoveryIndication(t, c, "ASP-WITHDRAWAL", []ASKey{routingContextASKey(1), routingContextASKey(2)}, StateASPActive)
 }
 
-func TestFirstUpAckClassificationDoesNotWaitForApplicationSend(t *testing.T) {
+func TestFirstUpAckClassificationDoesNotWaitForUntrackedLibrarySend(t *testing.T) {
 	c, _ := newTestConn(t, StateASPActive, RoleASP)
 	c.cfg.TAck = time.Hour
 
@@ -437,28 +433,28 @@ func TestFirstUpAckClassificationDoesNotWaitForApplicationSend(t *testing.T) {
 		}
 		return m.MarshalLen(), nil
 	}
-	sent := startASPTestCall(func() error { _, err := c.WriteSignal(messages.NewAspUp(nil, nil)); return err })
-	awaitASPTestSend(t, entered, sent, "application Up")
+	sent := startASPTestCall(func() error { _, err := c.writeControl(messages.NewAspUp(nil, nil)); return err })
+	awaitASPTestSend(t, entered, sent, "untracked library Up")
 	acked := startASPTestCall(func() error {
 		ack, duplicate, repeated, err := c.claimASPUpAcknowledgement(func() error { return nil })
 		if err != nil {
 			return err
 		}
 		if ack.solicited || duplicate || repeated != false {
-			return errors.New("application copy changed Up Ack classification")
+			return errors.New("untracked library copy changed Up Ack classification")
 		}
 		return nil
 	})
-	if err := finishASPTestAck(t, acked, "Ack classification waited for an application send"); err != nil {
+	if err := finishASPTestAck(t, acked, "Ack classification waited for an untracked library send"); err != nil {
 		t.Fatal(err)
 	}
 	open()
-	if err := sent.wait(t, "application Up release"); err != nil {
+	if err := sent.wait(t, "untracked library Up release"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestCompletedUpAckClassificationDoesNotWaitForApplicationSend(t *testing.T) {
+func TestCompletedUpAckClassificationDoesNotWaitForUntrackedLibrarySend(t *testing.T) {
 	c, _ := newTestConn(t, StateASPDown, RoleASP)
 	c.cfg.TAck = time.Hour
 	if _, err := c.beginASPSM(); err != nil {
@@ -477,23 +473,23 @@ func TestCompletedUpAckClassificationDoesNotWaitForApplicationSend(t *testing.T)
 		}
 		return m.MarshalLen(), nil
 	}
-	sent := startASPTestCall(func() error { _, err := c.WriteSignal(messages.NewAspUp(nil, nil)); return err })
-	awaitASPTestSend(t, entered, sent, "application Up")
+	sent := startASPTestCall(func() error { _, err := c.writeControl(messages.NewAspUp(nil, nil)); return err })
+	awaitASPTestSend(t, entered, sent, "untracked library Up")
 	acked := startASPTestCall(func() error {
 		ack, duplicate, repeated, err := c.claimASPUpAcknowledgement(func() error { return nil })
 		if err != nil {
 			return err
 		}
 		if ack.solicited || duplicate || repeated != true {
-			return errors.New("application copy changed Up Ack classification")
+			return errors.New("untracked library copy changed Up Ack classification")
 		}
 		return nil
 	})
-	if err := finishASPTestAck(t, acked, "Ack classification waited for an application send"); err != nil {
+	if err := finishASPTestAck(t, acked, "Ack classification waited for an untracked library send"); err != nil {
 		t.Fatal(err)
 	}
 	open()
-	if err := sent.wait(t, "application Up release"); err != nil {
+	if err := sent.wait(t, "untracked library Up release"); err != nil {
 		t.Fatal(err)
 	}
 }

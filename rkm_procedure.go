@@ -39,9 +39,17 @@ type RoutingKeyRegistration struct {
 // On a provisioned ASP Endpoint, a Routing Context cannot be assigned to two
 // canonical Application Servers, even with matching Network Appearance.
 // Conflicting results are refused before installing any result in the batch.
+// Once ShutdownContext claims withdrawal, new registration returns an error
+// matching ErrASPProcedureSuperseded with the orderly-shutdown cause, before
+// transport submission (RFC 4666 §4.9). Already outstanding requests keep
+// waiting for a response, context cancellation or association closure.
+// Send-buffer backpressure remains application-owned, as with WriteSignal.
 func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...RoutingKeyRegistration) ([]RoutingKeyRegistrationResult, error) {
 	if c == nil || (c.role != RoleASP && c.role != RoleIPSP) {
 		return nil, ErrUnsupportedRole
+	}
+	if c.terminating.Load() {
+		return nil, errASPProcedureShutdown
 	}
 	if len(registrations) == 0 {
 		return nil, fmt.Errorf("registration request requires at least one routing key")
@@ -112,7 +120,7 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 	requestWritten := false
 	completed := false
 	defer func() { c.endRegistrationResponseCorrelation(requestWritten, completed) }()
-	if _, err := c.WriteSignal(messages.NewRegistrationRequest(parameters...)); err != nil {
+	if _, err := c.writeSignal(messages.NewRegistrationRequest(parameters...), true, applicationWrite, nil, nil, nil); err != nil {
 		return nil, err
 	}
 	requestWritten = true
@@ -164,7 +172,10 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 
 // DeregisterApplicationServers performs the RFC 4666 Section 4.4.2
 // Deregistration procedure for the named Application Servers and returns one
-// result in input order.
+// result in input order. It remains allowed during ShutdownContext withdrawal:
+// RFC 4666 §4.9(a) specifies "ASP-INACTIVE, DEREG (optionally whenever dynamic
+// registration is used), and ASP-DOWN". Send-buffer backpressure remains
+// application-owned, as with WriteSignal.
 //
 // Each ASKey names the Application Server to deregister by the wire scope its
 // registration confirmed. A scope without a Routing Context, a scope that
@@ -216,7 +227,7 @@ func (c *Association) DeregisterApplicationServers(ctx context.Context, keys ...
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if _, err := c.WriteSignal(messages.NewDeregistrationRequest(params.NewRoutingContext(routingContexts...))); err != nil {
+	if _, err := c.writeSignal(messages.NewDeregistrationRequest(params.NewRoutingContext(routingContexts...)), true, applicationWrite, nil, nil, nil); err != nil {
 		return nil, err
 	}
 	requestWritten = true
@@ -1304,4 +1315,14 @@ func (c *Association) conflictingApplicationServerScope(key ASKey) (bool, ASKey)
 		}
 	}
 	return false, ASKey{}
+}
+
+// validateRKMRegistrationFrame checks shutdown admission. The production
+// transport caller holds sendMu. RFC 4666 §4.9(a) includes optional DEREG in
+// the withdrawal sequence; only new REG requests are refused here.
+func (c *Association) validateRKMRegistrationFrame(buf []byte) error {
+	if len(buf) >= 4 && buf[2] == messages.MsgClassRKM && buf[3] == messages.MsgTypeRegistrationRequest && c.terminating.Load() {
+		return errASPProcedureShutdown
+	}
+	return nil
 }
