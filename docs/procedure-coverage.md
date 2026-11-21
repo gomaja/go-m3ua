@@ -561,6 +561,82 @@ while public Up, Active and Inactive initial writers resume.
 `TestInternalSubmissionDoesNotJoinWithdrawalPublication` keeps internal
 submission independent while its request result waits for the commit and report.
 `TestShutdownInitialInactiveWaitsForWithdrawalPublication` covers orderly shutdown.
+Let `B` be a call's baseline `errors.Is` match set and
+`L = {ErrASPProcedureSuperseded, ErrOrderlyShutdown}`. The new match set is
+exactly `B ∪ L` when shutdown caused that call's outcome, and exactly `B`
+otherwise. The same rule applies to any published `ManagementError` Cause.
+`ErrOrderlyShutdown` identifies the expected end of orderly withdrawal
+(RFC 4666 §§4.3.4.2, 4.3.4.4, 4.9), so no follow-up is required.
+
+Causation belongs to the call: its request was refused or cancelled with the
+shared shutdown cause, or its selected outcome observed release and
+`ShutdownContext` won that release. A send failure counts as release-caused
+only when release had begun when the send failed, as observed by the write
+path. Its error text is irrelevant. Later association shutdown cannot label
+an earlier validation or independent send failure. The caller's own context
+error is not labelled. Independent Close, Abort, peer/transport failure,
+lifetime cancellation and failed withdrawal do not label requests that
+shutdown had not already cancelled.
+
+| Original outcome | Shutdown-labelled outcome |
+| --- | --- |
+| Live refusal or cancel-all: `ASP procedure superseded by orderly shutdown` | Same text; matches L without closure matching |
+| Any other shutdown-caused original error | `ASP procedure superseded by orderly shutdown: <original>`; matches exactly B ∪ L |
+
+A cancellation consumed after teardown retains the original terminal error's
+precedence and matches, including `ErrAssociationAborted` when Abort won. Its
+recorded shutdown label survives that teardown. State and write chains retain
+their existing matches; closure matching is present only where B contained it.
+The `feat:` change loses no previous `errors.Is` match. Error text changes on
+labelled paths other than the existing live shutdown refusal.
+
+`ShutdownContext` preserves its baseline context checks. Cancellation observed
+by an existing check or a failed withdrawal remains the termination cause.
+If cancellation arrives after the last such check and baseline would release
+with `ErrAssociationClosed`, it remains shutdown's own orderly release: affected
+calls match `B ∪ L`. No extra context check runs during final release, and no
+caller context method runs under release arbitration. `Association.Err()` keeps
+`ErrAssociationClosed` after that release and does not acquire L.
+
+
+`TestShutdownRefusesEveryExplicitASPEntryPoint` and
+`TestShutdownCancellationPublishesOrderlyCause` check the returned errors and
+published `ManagementError` causes. Peer withdrawal still supersedes procedures
+without matching `ErrOrderlyShutdown`.
+
+`TestShutdownErrorCompatibility` covers every shutdown boundary against explicit
+baseline match sets, including all six ASP APIs, REG and DEREG. It checks live
+refusal, cancel-all before and after teardown, pending and queued requests,
+late registration, state checks, interrupted initial writes and terminal
+precedence. Close and Abort controls verify that independent release does not
+acquire the label; caller cancellation, lifetime and peer/transport endings
+retain their original matches. Deferred `ManagementError` Causes use the same
+checks. The same table, without the new-label checks, is run against baseline
+sources with observation-only test seams.
+
+`TestOrderlyReleaseFirstWinnerClassifiesRequests` orders competing releases.
+`TestShutdownContextDoesNotRecheckContextAtRelease` preserves the baseline final
+release without an extra context check.
+`TestFailedShutdownDoesNotRelabelRegistration` retains real withdrawal failures.
+`TestShutdownContextErrCanReenterClose` exercises a reentrant context with a
+bounded timeout. The initial context check can re-enter Close; no context
+recheck occurs at final release.
+
+| State | Writer / guard | Reader / order |
+| --- | --- | --- |
+| `orderlyRelease` | Only the `closeOnce` winner; only the existing baseline checks determine whether the orderly release is reached. Store precedes `Done` and `stopAllTAck`. | Atomic loads at public boundaries; no new lock or wait. Close, Abort and failed withdrawal do not store it. |
+| `pendingRequest.shutdownCancelled` | `resultOnce` in `finish`; store precedes failure/stop/result publication and acquires no new lock. | Atomic loads at public boundaries; terminal error selection stays unchanged. |
+| `aspRequestContext.requests`, `releaseObserved`, `callerContextError` | The caller observes requests and records release at Done/state selection or immediately after a failed transport send. No caller callback is invoked for observation. ASP Down retains its background write context. | Same goroutine reads after internal calls return and procedure gates are released. No mutex or context callback is needed for observation. |
+| `aspProcedureReports`, `mgmtClosing`, `mgmtClosed` | `muMgmt`; admission increments, deferred reporting decrements, teardown requests closure. | No state, retry or T(ack) lock is acquired while retaining/releasing a report. Teardown never waits for a caller. |
+
+The labelling helper runs at public return boundaries, after internal deferred
+locks and gates are released. Caller-context outcomes are recorded at their
+original branches; the helper calls no context method. The helper and deferred
+report formatting query error chains outside locks. Release arbitration invokes
+no context method. The matrix also covers late shutdown-context cancellation,
+unsupported roles, bad arguments and independent full-buffer sends selected
+before a later orderly release.
+
 `TestAutomaticEntrySerializesStateThroughSubmission` preserves automatic
 registration and submission under the state lock.
 `TestConcurrentASPUpDoesNotCloseOpeningAssociation` covers replacement during
@@ -598,7 +674,7 @@ checks BEAT, BEAT Ack, ERR, NTFY, DATA and SSNM.
 `TestRegisterRoutingKeysRechecksShutdownAtSend` pauses an admitted registration
 while shutdown submits its first withdrawal through the serialized transport.
 `TestDeregisterApplicationServersAllowedDuringShutdown` preserves DEREG;
-`TestPendingRegistrationWaitersEndOnShutdownClose` covers outstanding and queued
+`TestShutdownErrorCompatibility` covers outstanding and queued
 REG waiters; `TestRKMRequestsRetainApplicationBackpressure` checks full-buffer
 refusal without library retry or association closure. The Linux wire test also
 attempts raw ASPUP, raw ASPAC and registration after withdrawal and drains to
@@ -627,11 +703,15 @@ Application Server configuration (`ASConfig.TrafficMode`), or
 available for encoding and decoding messages independently of an Association.
 
 `RegisterRoutingKeys` also refuses new registration once `ShutdownContext`
-claims withdrawal, with `ErrASPProcedureSuperseded` wrapping the shared orderly
-shutdown cause. Its final admission check runs under the control send lock, so
-a call admitted earlier cannot send REG REQ after shutdown's first withdrawal.
+claims withdrawal, with an error matching both `ErrOrderlyShutdown` and
+`ErrASPProcedureSuperseded`. Its final admission check runs under the control
+send lock, so a call admitted earlier cannot send REG REQ after shutdown's
+first withdrawal.
 Already outstanding REG waiters still await a response, caller cancellation or
-association closure; shutdown's claim alone does not cancel them.
+association closure; shutdown's claim alone does not cancel them. If shutdown's
+own orderly release ends a request, its error retains every original match and
+adds `ErrOrderlyShutdown` with `ErrASPProcedureSuperseded`. Independent Close,
+Abort and failures do not label a request that shutdown had not already cancelled.
 `DeregisterApplicationServers` stays allowed during withdrawal. RFC 4666 §4.9(a)
 specifies "ASP-INACTIVE, DEREG (optionally whenever dynamic registration is
 used), and ASP-DOWN" before SCTP Shutdown. Both typed RKM calls retain their

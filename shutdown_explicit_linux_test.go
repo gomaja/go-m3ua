@@ -329,6 +329,9 @@ func TestShutdownRefusesExplicitUpwardProceduresOnWire(t *testing.T) {
 						}
 						withdrawn = withdrawn || message.Withdrawal
 					}
+					if expectedShutdownRefusal(operation) == m3ua.ErrOrderlyShutdown && !errors.Is(activeErr, m3ua.ErrASPProcedureSuperseded) {
+						t.Errorf("%s err=%v, want ErrASPProcedureSuperseded", operation, activeErr)
+					}
 					if !withdrawn || lateUpward || !errors.Is(activeErr, expectedShutdownRefusal(operation)) || ctx.Err() != nil {
 						t.Fatalf("shutdown ordering violated: sequence=%+v; %s err=%v; context err=%v",
 							sequence, operation, activeErr, ctx.Err())
@@ -343,5 +346,5 @@ func expectedShutdownRefusal(operation string) error {
 	if operation == "raw-ASPUP" || operation == "raw-ASPAC" {
 		return m3ua.ErrProcedureMessage
 	}
-	return m3ua.ErrASPProcedureSuperseded
+	return m3ua.ErrOrderlyShutdown
 }

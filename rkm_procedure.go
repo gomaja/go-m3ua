@@ -39,12 +39,19 @@ type RoutingKeyRegistration struct {
 // On a provisioned ASP Endpoint, a Routing Context cannot be assigned to two
 // canonical Application Servers, even with matching Network Appearance.
 // Conflicting results are refused before installing any result in the batch.
-// Once ShutdownContext claims withdrawal, new registration returns an error
-// matching ErrASPProcedureSuperseded with the orderly-shutdown cause, before
-// transport submission (RFC 4666 §4.9). Already outstanding requests keep
-// waiting for a response, context cancellation or association closure.
+// Once ShutdownContext claims withdrawal, new registration is refused before
+// transport submission (RFC 4666 §4.9). A shutdown-caused ending additionally
+// matches ErrOrderlyShutdown and ErrASPProcedureSuperseded while preserving
+// every original error-chain match. See ErrOrderlyShutdown for the cause rules
+// and caller-context exception. Outstanding requests otherwise keep waiting
+// for a response, context cancellation or association closure.
 // Send-buffer backpressure remains application-owned, as with WriteSignal.
-func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...RoutingKeyRegistration) ([]RoutingKeyRegistrationResult, error) {
+func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...RoutingKeyRegistration) (resultsOut []RoutingKeyRegistrationResult, err error) {
+	tracking := &aspRequestContext{Context: ctx}
+	if ctx != nil {
+		ctx = tracking
+	}
+	defer func() { err = c.labelShutdownError(err, tracking) }()
 	if c == nil || (c.role != RoleASP && c.role != RoleIPSP) {
 		return nil, ErrUnsupportedRole
 	}
@@ -55,9 +62,11 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 		return nil, fmt.Errorf("registration request requires at least one routing key")
 	}
 	if c.rkmRequesterState() == StateASPDown {
+		tracking.observeRelease(c)
 		return nil, ErrNotEstablished
 	}
 	if err := ctx.Err(); err != nil {
+		tracking.callerContextError = true
 		return nil, err
 	}
 
@@ -66,9 +75,11 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 	}
 	defer c.releaseRKMRequest()
 	if err := ctx.Err(); err != nil {
+		tracking.callerContextError = true
 		return nil, err
 	}
 	if c.rkmRequesterState() == StateASPDown {
+		tracking.observeRelease(c)
 		return nil, ErrNotEstablished
 	}
 	requests := make([]RoutingKeyRegistrationRequest, len(registrations))
@@ -120,7 +131,7 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 	requestWritten := false
 	completed := false
 	defer func() { c.endRegistrationResponseCorrelation(requestWritten, completed) }()
-	if _, err := c.writeSignal(messages.NewRegistrationRequest(parameters...), true, applicationWrite, nil, nil, nil); err != nil {
+	if _, err := c.writeSignalFrameObserved(messages.NewRegistrationRequest(parameters...), nil, true, applicationWrite, nil, nil, nil, tracking); err != nil {
 		return nil, err
 	}
 	requestWritten = true
@@ -175,7 +186,10 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 // result in input order. It remains allowed during ShutdownContext withdrawal:
 // RFC 4666 §4.9(a) specifies "ASP-INACTIVE, DEREG (optionally whenever dynamic
 // registration is used), and ASP-DOWN". Send-buffer backpressure remains
-// application-owned, as with WriteSignal.
+// application-owned, as with WriteSignal. A shutdown-caused ending additionally
+// matches ErrOrderlyShutdown and ErrASPProcedureSuperseded while preserving
+// every original error-chain match. See ErrOrderlyShutdown for the cause rules
+// and caller-context exception.
 //
 // Each ASKey names the Application Server to deregister by the wire scope its
 // registration confirmed. A scope without a Routing Context, a scope that
@@ -185,7 +199,12 @@ func (c *Association) RegisterRoutingKeys(ctx context.Context, registrations ...
 // Context in DEREG REQ, so the peer would act on the Routing Context whatever
 // Application Server the caller believed it was naming, and a submitted
 // request cannot be taken back.
-func (c *Association) DeregisterApplicationServers(ctx context.Context, keys ...ASKey) ([]RoutingKeyDeregistrationResult, error) {
+func (c *Association) DeregisterApplicationServers(ctx context.Context, keys ...ASKey) (resultsOut []RoutingKeyDeregistrationResult, err error) {
+	tracking := &aspRequestContext{Context: ctx}
+	if ctx != nil {
+		ctx = tracking
+	}
+	defer func() { err = c.labelShutdownError(err, tracking) }()
 	if c == nil || (c.role != RoleASP && c.role != RoleIPSP) {
 		return nil, ErrUnsupportedRole
 	}
@@ -197,9 +216,11 @@ func (c *Association) DeregisterApplicationServers(ctx context.Context, keys ...
 		return nil, err
 	}
 	if c.rkmRequesterState() == StateASPDown {
+		tracking.observeRelease(c)
 		return nil, ErrNotEstablished
 	}
 	if err := ctx.Err(); err != nil {
+		tracking.callerContextError = true
 		return nil, err
 	}
 
@@ -208,9 +229,11 @@ func (c *Association) DeregisterApplicationServers(ctx context.Context, keys ...
 	}
 	defer c.releaseRKMRequest()
 	if err := ctx.Err(); err != nil {
+		tracking.callerContextError = true
 		return nil, err
 	}
 	if c.rkmRequesterState() == StateASPDown {
+		tracking.observeRelease(c)
 		return nil, ErrNotEstablished
 	}
 	pending := make(map[uint32]int, len(routingContexts))
@@ -225,9 +248,10 @@ func (c *Association) DeregisterApplicationServers(ctx context.Context, keys ...
 	requestWritten := false
 	defer func() { c.endDeregistrationResponseCorrelation(requestWritten) }()
 	if err := ctx.Err(); err != nil {
+		tracking.callerContextError = true
 		return nil, err
 	}
-	if _, err := c.writeSignal(messages.NewDeregistrationRequest(params.NewRoutingContext(routingContexts...)), true, applicationWrite, nil, nil, nil); err != nil {
+	if _, err := c.writeSignalFrameObserved(messages.NewDeregistrationRequest(params.NewRoutingContext(routingContexts...)), nil, true, applicationWrite, nil, nil, nil, tracking); err != nil {
 		return nil, err
 	}
 	requestWritten = true
@@ -744,8 +768,12 @@ func (c *Association) waitForRKMResponse(
 		}
 		return response, nil
 	case <-ctx.Done():
+		if tracking := procedureObservation(ctx); tracking != nil {
+			tracking.callerContextError = true
+		}
 		return nil, ctx.Err()
 	case <-c.done:
+		procedureObservation(ctx).observeRelease(c)
 		if err := c.Err(); err != nil {
 			return nil, err
 		}
@@ -758,8 +786,12 @@ func (c *Association) acquireRKMRequest(ctx context.Context) error {
 	case c.rkmRequestGate <- struct{}{}:
 		return nil
 	case <-ctx.Done():
+		if tracking := procedureObservation(ctx); tracking != nil {
+			tracking.callerContextError = true
+		}
 		return ctx.Err()
 	case <-c.done:
+		procedureObservation(ctx).observeRelease(c)
 		if err := c.Err(); err != nil {
 			return err
 		}

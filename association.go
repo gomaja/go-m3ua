@@ -161,6 +161,10 @@ type Association struct {
 	// once, inside closeOnce, so a later Close cannot replace the committed
 	// terminal cause.
 	closeErr atomic.Value
+	// orderlyRelease records ShutdownContext's own successful release claim.
+	// Only the closeOnce winner stores it, before Done or stopAllTAck.
+	// Atomic readers never take a teardown lock. Err keeps the terminal cause.
+	orderlyRelease atomic.Bool
 	// peerRelease arbitrates a failed control send against the receive-side
 	// SCTP end indication before closeOnce makes Err immutable.
 	peerRelease peerRelease
@@ -391,6 +395,11 @@ type Association struct {
 	muMgmt   sync.Mutex
 	// mgmtClosed records that mgmtChan has been closed.
 	mgmtClosed bool
+	// mgmtClosing and aspProcedureReports share muMgmt. Teardown requests closure
+	// without waiting for admitted ASP callers; their deferred reports release
+	// the channel after the last caller has published its failure.
+	mgmtClosing         bool
+	aspProcedureReports uint64
 	// mgmtSubscribed is protected by muMgmt; indications are not queued until
 	// ManagementIndications subscribes.
 	mgmtSubscribed bool
@@ -413,6 +422,8 @@ type Association struct {
 	signalWriter func(m3 messages.M3UA) (int, error)
 	// beforeASPProcedureRegistration is a test seam; production leaves it nil.
 	beforeASPProcedureRegistration func()
+	// beforeTAckWait pauses a caller before selecting its completed result in tests.
+	beforeTAckWait func(*pendingRequest)
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
 	dataWriter func([]byte, *sctp.SndInfo) (int, error)
@@ -976,13 +987,17 @@ func (c *Association) writeControl(m3 messages.M3UA) (n int, err error) {
 
 // writeControlUntilStopped carries a pending procedure's stop signal to the
 // serialized transport boundary (RFC 4666 §4.3.4.1–§4.3.4.4).
-func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan struct{}, request *pendingRequest) (n int, err error) {
+func (c *Association) writeControlUntilStopped(m3 messages.M3UA, stopped <-chan struct{}, request *pendingRequest, observation ...*aspRequestContext) (n int, err error) {
+	var tracking *aspRequestContext
+	if len(observation) != 0 {
+		tracking = observation[0]
+	}
 	if _, isASPDown := m3.(*messages.AspDown); !isASPDown || c.tack == nil || !c.isIPSPDoubleExchange() {
-		return c.writeSignal(m3, true, libraryWrite, stopped, request, nil)
+		return c.writeSignalFrameObserved(m3, nil, true, libraryWrite, stopped, request, nil, tracking)
 	}
 	c.tack.aspDownDeliveryMu.Lock()
 	defer c.tack.aspDownDeliveryMu.Unlock()
-	n, err = c.writeSignal(m3, true, libraryWrite, stopped, request, nil)
+	n, err = c.writeSignalFrameObserved(m3, nil, true, libraryWrite, stopped, request, nil, tracking)
 	if err == nil && n > 0 {
 		c.tack.mu.Lock()
 		c.tack.aspDownAcksOutstanding++
@@ -1072,7 +1087,11 @@ const (
 // When the bound expires the association is closed, and that also ends the
 // wait: closing the SCTP association releases any write parked in the poller
 // before the descriptor goes.
-func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}, request *pendingRequest, bindings ...queueCongestionBinding) (submitted bool, resultErr error) {
+func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}, request *pendingRequest, bindings ...queueCongestionBinding) (bool, error) {
+	return c.writeControlFrameObserved(frame, info, stopped, request, nil, bindings...)
+}
+
+func (c *Association) writeControlFrameObserved(frame []byte, info *sctp.SndInfo, stopped <-chan struct{}, request *pendingRequest, tracking *aspRequestContext, bindings ...queueCongestionBinding) (submitted bool, resultErr error) {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
 	// Entry and cancellation share the request's short lock. The completion
@@ -1131,6 +1150,9 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 		}
 	}
 	_, err = send(frame, sctp.SendOptions{Info: info, NoWait: true})
+	if err != nil {
+		tracking.observeRelease(c)
+	}
 	if sconSubmissionCancelled(submission, err) {
 		return false, ErrRoutingContextNotActive
 	}
@@ -1158,6 +1180,9 @@ func (c *Association) writeControlFrame(frame []byte, info *sctp.SndInfo, stoppe
 		}
 	})
 	_, err = send(frame, sctp.SendOptions{Info: info})
+	if err != nil {
+		tracking.observeRelease(c)
+	}
 	bindingCancelled := sconSubmissionCancelled(submission, err)
 	cancelled := cancelledSend(err)
 	if cancelled {
@@ -1367,7 +1392,11 @@ func (c *Association) writeSignal(m3 messages.M3UA, enforceTrafficScope bool, or
 	return c.writeSignalFrame(m3, nil, enforceTrafficScope, origin, stopped, request, resolvedDataScope, bindings...)
 }
 
-func (c *Association) writeSignalFrame(m3 messages.M3UA, buf []byte, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, bindings ...queueCongestionBinding) (n int, err error) {
+func (c *Association) writeSignalFrame(m3 messages.M3UA, buf []byte, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, bindings ...queueCongestionBinding) (int, error) {
+	return c.writeSignalFrameObserved(m3, buf, enforceTrafficScope, origin, stopped, request, resolvedDataScope, nil, bindings...)
+}
+
+func (c *Association) writeSignalFrameObserved(m3 messages.M3UA, buf []byte, enforceTrafficScope bool, origin writeOrigin, stopped <-chan struct{}, request *pendingRequest, resolvedDataScope *ASKey, tracking *aspRequestContext, bindings ...queueCongestionBinding) (n int, err error) {
 	if origin == libraryWrite {
 		c.controlWritesPending.Add(1)
 		defer c.controlWritesPending.Add(-1)
@@ -1456,7 +1485,11 @@ func (c *Association) writeSignalFrame(m3 messages.M3UA, buf []byte, enforceTraf
 		}
 		defer c.finishSCONSubmission(submission)
 		transportAttempted = true
-		return c.signalWriter(m3)
+		n, err := c.signalWriter(m3)
+		if err != nil {
+			tracking.observeRelease(c)
+		}
+		return n, err
 	}
 
 	// taken by value to avoid race condition on the stream id. Stream 0 is the
@@ -1469,7 +1502,7 @@ func (c *Association) writeSignalFrame(m3 messages.M3UA, buf []byte, enforceTraf
 
 	if origin == libraryWrite {
 		var submitted bool
-		submitted, err = c.writeControlFrame(buf, &sctpInfo, stopped, request, bindings...)
+		submitted, err = c.writeControlFrameObserved(buf, &sctpInfo, stopped, request, tracking, bindings...)
 		transportAttempted = submitted
 		if !submitted && err == nil {
 			return 0, nil
@@ -1491,8 +1524,14 @@ func (c *Association) writeSignalFrame(m3 messages.M3UA, buf []byte, enforceTraf
 				options := sctp.SendOptions{Info: &sctpInfo, NoWait: c.applicationWriteDeadline.Load() == nil}
 				if submission == nil {
 					_, err = c.controlSender().SendMsg(buf, options)
+					if err != nil {
+						tracking.observeRelease(c)
+					}
 				} else {
 					_, err = c.controlSender().SendMsgContext(submission.ctx, buf, options)
+					if err != nil {
+						tracking.observeRelease(c)
+					}
 					err = sconSubmissionError(submission, err)
 				}
 				c.finishSCONSubmission(submission)
@@ -2034,7 +2073,8 @@ func (c *Association) Abort() error {
 // being handled can move the state. The SCTP release follows, then StateChanges
 // reports the final transition. Both indication channels close only after the
 // affected destinations have been paused; ManagementIndications reports the
-// release before closing.
+// release before closing. Admitted ASP callers retain management delivery until
+// their deferred failure reports finish; teardown does not wait for them.
 // A failed control send can await the receive-side SCTP end before this
 // publication; Err describes how the terminal cause is selected.
 func (c *Association) Done() <-chan struct{} {
@@ -2079,6 +2119,13 @@ func (c *Association) closeWith(cause error) error {
 // performed the teardown, rather than finding it already done or waiting out
 // another's, and err is the transport release's error if it did.
 func (c *Association) endWith(cause error, abortive bool) (ended bool, err error) {
+	return c.endWithRequestCause(cause, abortive, false)
+}
+
+// endWithRequestCause records the request cause only inside the winning teardown.
+// The caller reaches orderly release only after the baseline checks succeed;
+// this function receives values and never calls a context method under closeOnce.
+func (c *Association) endWithRequestCause(cause error, abortive bool, orderly bool) (ended bool, err error) {
 	if !localEndCause(cause) {
 		var waitForReader bool
 		cause, waitForReader = c.peerRelease.endCause(cause)
@@ -2095,6 +2142,9 @@ func (c *Association) endWith(cause error, abortive bool) (ended bool, err error
 	}
 	c.closeOnce.Do(func() {
 		ended = true
+		if orderly {
+			c.orderlyRelease.Store(true)
+		}
 		c.closingAbortive.Store(abortive)
 		if cause != nil {
 			c.closeErr.Store(cause)
@@ -3669,18 +3719,33 @@ func (c *Association) Shutdown() error {
 // It performs only the procedures AssociationConfig.ASPProcedures configures as
 // ASPProcedureAutomatic, because an explicitly managed application owns the
 // order and the timing of its own withdrawal. With an all-explicit policy,
-// ShutdownContext is Close. An SGP Association has no withdrawal procedures to
-// run and closes immediately.
+// ShutdownContext directly releases SCTP. An SGP Association has no withdrawal
+// procedures to run and also releases immediately.
 //
 // From the moment this call claims shutdown, new ASPUp, ASPActive, ASPInactive,
-// ASPDown, ActivateRoutingContexts and DeactivateRoutingContexts procedures are
-// refused with ErrASPProcedureSuperseded, including queued callers and those
-// awaiting registration or observing a withdrawn state after validation.
-// No refused request is written. Only this shutdown's
-// own withdrawal can register. Existing requests are superseded before its
-// first withdrawal; the four waiting ASP methods publish their usual
-// procedure-failure ManagementError, while the routing-context methods retain
-// their immediate-error reporting contract.
+// ASPDown, ActivateRoutingContexts, DeactivateRoutingContexts and
+// RegisterRoutingKeys requests are refused before submission. Only this
+// shutdown's withdrawal procedures can register new T(ack) requests; existing
+// ones are cancelled before the first withdrawal. DeregisterApplicationServers
+// remains allowed during live withdrawal (RFC 4666 §4.9).
+//
+// A call's errors.Is match set becomes its baseline set union
+// {ErrASPProcedureSuperseded, ErrOrderlyShutdown} exactly when that call observed
+// shutdown refusal/cancellation, or selected a release-affected outcome and this
+// call won that release. Other outcomes retain exactly their baseline matches,
+// including validation failures, independent sends and the caller's context
+// error. Published ManagementError Causes follow the same rule. A request's
+// recorded shutdown cancellation survives later teardown; the original terminal
+// error retains its usual precedence. See ErrOrderlyShutdown for the contract.
+//
+// Context checks and withdrawal failures keep their baseline precedence. A
+// cancellation after the last baseline check does not replace the final
+// ErrAssociationClosed: that remains this call's orderly release and labels
+// affected requests. No extra context check runs at release arbitration. The
+// first release wins; Err still reports
+// ErrAssociationClosed after an orderly release. The four waiting ASP methods
+// retain their usual procedure-failure ManagementError; immediate routing-context
+// refusals do not publish one.
 //
 // Neither Listener.Close nor Endpoint.Close calls it. An application that wants
 // RFC 4666 Section 4.9 option (a) on every association calls ShutdownContext on
@@ -3757,7 +3822,7 @@ func (c *Association) claimShutdown() bool {
 // what ShutdownContext reports, as Err does, rather than the nil a Close of an
 // association already closed returns.
 func (c *Association) releaseAfterWithdrawal() error {
-	ended, err := c.endWith(ErrAssociationClosed, false)
+	ended, err := c.endWithRequestCause(ErrAssociationClosed, false, true)
 	if !ended {
 		if cause := c.Err(); cause != nil {
 			return cause
@@ -4369,7 +4434,9 @@ func uint32ParamOf(p *params.Param, tag uint16, read func(*params.Param) uint32)
 // the peer's handshake-time NTFY and ERR indications. Use State for the current
 // ASP/IPSP state. Repeated calls return the same channel. Until the first call,
 // management indications cannot fill a queue or close the association. This
-// subscription is independent of StateChanges.
+// subscription is independent of StateChanges. Admitted ASP callers retain
+// delivery for their deferred failure reports after teardown; the last such
+// caller closes the channel. Teardown does not wait for those callers.
 //
 // SCTP path indications keep the reader's order among M3UA messages and SCTP
 // restarts. The reader may wait for the ordered dispatcher handoff; indication
@@ -4442,13 +4509,18 @@ func (c *Association) notifyManagement(ind *ManagementIndication) {
 	}
 }
 
-// closeManagement closes mgmtChan exactly once, so a caller ranging over
-// ManagementIndications() sees the association end.
+// closeManagement requests mgmtChan closure. Admitted ASP callers publish
+// their deferred reports before the channel closes; teardown never waits on them.
 func (c *Association) closeManagement() {
 	c.muMgmt.Lock()
 	defer c.muMgmt.Unlock()
 
-	if c.mgmtClosed {
+	c.mgmtClosing = true
+	c.closeManagementIfIdleLocked()
+}
+
+func (c *Association) closeManagementIfIdleLocked() {
+	if c.mgmtClosed || !c.mgmtClosing || c.aspProcedureReports != 0 {
 		return
 	}
 	c.mgmtClosed = true

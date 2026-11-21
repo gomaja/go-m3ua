@@ -92,6 +92,8 @@ type pendingRequest struct {
 	// failure is visible before stop closes, including to an initial write
 	// that cancellation prevents from being submitted.
 	failure atomic.Pointer[error]
+	// shutdownCancelled records the request outcome independently of later teardown.
+	shutdownCancelled atomic.Bool
 }
 
 // tackRetransmitter resends unacknowledged ASPSM/ASPTM requests until their Ack
@@ -332,10 +334,14 @@ func (p *pendingRequest) cancel() {
 // timer. A superseded request returns its result through waitTAck; it must not
 // put its initial message on the wire after the peer's Down Ack (§4.3.4.2).
 func (c *Association) writePendingControl(ctx context.Context, request *pendingRequest, message messages.M3UA) (int, error) {
-	if c.tack == nil || request == nil {
-		return c.writeControl(message)
+	tracking := procedureObservation(ctx)
+	if tracking != nil && request != nil {
+		tracking.requests = append(tracking.requests, request)
 	}
-	n, err := c.submitPendingControl(request, message)
+	if c.tack == nil || request == nil {
+		return c.writeControlUntilStopped(message, nil, nil, tracking)
+	}
+	n, err := c.submitPendingControl(request, message, tracking)
 	// failure is private until the retiring handler completes publication.
 	// Join outside retryMu: the handler needs that fence before committing.
 	if err == nil && request.failure.Load() != nil {
@@ -347,7 +353,7 @@ func (c *Association) writePendingControl(ctx context.Context, request *pendingR
 // submitPendingControl only submits transport work. Internal entry actions may
 // hold muState, and the dispatcher may be committing a withdrawal; neither may
 // join its publication. The request's result remains private until completion.
-func (c *Association) submitPendingControl(request *pendingRequest, message messages.M3UA) (int, error) {
+func (c *Association) submitPendingControl(request *pendingRequest, message messages.M3UA, observation ...*aspRequestContext) (int, error) {
 	if c.tack == nil || request == nil {
 		return c.writeControl(message)
 	}
@@ -357,7 +363,7 @@ func (c *Association) submitPendingControl(request *pendingRequest, message mess
 	select {
 	case <-request.stop:
 	default:
-		n, err = c.writeTAckControl(request, message)
+		n, err = c.writeTAckControl(request, message, observation...)
 	}
 	c.tack.retryMu.Unlock()
 	return n, err
@@ -370,7 +376,7 @@ func (c *Association) submitPendingControl(request *pendingRequest, message mess
 // internal Up copies must not earn credit: their Acks retain ordinary
 // handling rather than leave traffic falsely active. Public WriteSignal refuses
 // procedure messages with ErrProcedureMessage before submission.
-func (c *Association) writeTAckControl(req *pendingRequest, message messages.M3UA) (n int, err error) {
+func (c *Association) writeTAckControl(req *pendingRequest, message messages.M3UA, observation ...*aspRequestContext) (n int, err error) {
 	if req.kind == requestAspUp {
 		c.tack.mu.Lock()
 		current := req.aspUpEpoch == c.tack.aspUpEpoch
@@ -388,7 +394,7 @@ func (c *Association) writeTAckControl(req *pendingRequest, message messages.M3U
 			c.tack.mu.Unlock()
 		}()
 	}
-	return c.writeControlUntilStopped(message, req.stop, req)
+	return c.writeControlUntilStopped(message, req.stop, req, observation...)
 }
 
 func (p *pendingRequest) acknowledge() {
@@ -401,6 +407,9 @@ func (p *pendingRequest) stopRetries() {
 
 func (p *pendingRequest) finish(err error) {
 	p.resultOnce.Do(func() {
+		if err == errASPProcedureShutdown {
+			p.shutdownCancelled.Store(true)
+		}
 		if err != nil {
 			p.failure.Store(&err)
 		}
@@ -1024,6 +1033,9 @@ func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 	if req == nil {
 		return nil
 	}
+	if c.beforeTAckWait != nil {
+		c.beforeTAckWait(req)
+	}
 	select {
 	case err := <-req.result:
 		// Teardown can win after the handler claims the Ack but before its
@@ -1031,6 +1043,7 @@ func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 		// procedure success (RFC 4666 §4.2: "Upon successful completion").
 		select {
 		case <-c.done:
+			procedureObservation(ctx).observeRelease(c)
 			if terminal := c.Err(); terminal != nil {
 				return terminal
 			}
@@ -1042,11 +1055,15 @@ func (c *Association) waitTAck(ctx context.Context, req *pendingRequest) error {
 			return err
 		}
 	case <-ctx.Done():
+		if tracking := procedureObservation(ctx); tracking != nil {
+			tracking.callerContextError = true
+		}
 		c.cancelTAckRequest(req)
 		// Cancellation is an independent caller outcome. A stored retirement
 		// cause is not observable until result publishes the committed state.
 		return ctx.Err()
 	case <-c.done:
+		procedureObservation(ctx).observeRelease(c)
 		if err := c.Err(); err != nil {
 			return err
 		}

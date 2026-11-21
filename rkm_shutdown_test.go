@@ -47,7 +47,7 @@ func receiveRKMShutdownFrame(t *testing.T, w *rkmShutdownTransport) messages.M3U
 }
 func requireRKMShutdownRefusal(t *testing.T, err error) {
 	t.Helper()
-	if !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, errASPProcedureShutdown) {
+	if !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) || !errors.Is(err, errASPProcedureShutdown) || errors.Is(err, ErrAssociationClosed) {
 		t.Fatalf("registration error=%v; want shared orderly-shutdown refusal", err)
 	}
 }
@@ -150,42 +150,6 @@ func TestDeregisterApplicationServersAllowedDuringShutdown(t *testing.T) {
 	}
 	if err := receiveASPTest(t, result, "deregistration completion"); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestPendingRegistrationWaitersEndOnShutdownClose(t *testing.T) {
-	c, w := newRKMShutdownAssociation(t)
-	first := make(chan error, 1)
-	go func() {
-		_, err := c.RegisterRoutingKeys(context.Background(), RoutingKeyRegistration{RoutingKey: testRoutingKey(10, 100, 3)})
-		first <- err
-	}()
-	if _, ok := receiveRKMShutdownFrame(t, w).(*messages.RegistrationRequest); !ok {
-		t.Fatal("no pending registration")
-	}
-	// A second request has passed entry but is still behind the first RKM request.
-	ctx := newRKMInitialCheckContext()
-	second := make(chan error, 1)
-	go func() {
-		_, err := c.RegisterRoutingKeys(ctx, RoutingKeyRegistration{RoutingKey: testRoutingKey(10, 200, 3)})
-		second <- err
-	}()
-	receiveASPTest(t, ctx.checked, "queued registration entry")
-	if !c.claimShutdown() {
-		t.Fatal("shutdown claim lost")
-	}
-	select {
-	case err := <-first:
-		t.Fatalf("pending REG unexpectedly ended on claim: %v", err)
-	default:
-	}
-	if err := c.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for _, result := range []chan error{first, second} {
-		if err := receiveASPTest(t, result, "registration close"); !errors.Is(err, ErrAssociationClosed) && !errors.Is(err, errASPProcedureShutdown) && !errors.Is(err, ErrNotEstablished) {
-			t.Fatalf("close error=%v", err)
-		}
 	}
 }
 

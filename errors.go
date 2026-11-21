@@ -76,13 +76,48 @@ func (e *AssociationEstablishmentError) Unwrap() error {
 var (
 	// ErrASPProcedureSuperseded reports that local replacement, peer withdrawal
 	// or orderly shutdown superseded or refused an ASP procedure. Causes
-	// include a newer ASP Up/Down, orderly shutdown (also refusing new explicit
+	// include a newer ASP Up/Down, ErrOrderlyShutdown (also refusing new explicit
 	// ASP procedures and routing-key registration once ShutdownContext begins),
 	// a peer ASP Down, an unowed Up/Down Ack, an ASP Inactive Ack for the same scopes (a confirmation or
 	// unsolicited withdrawal), and the Ack confirming this ASP's own ASP Down.
 	// The wrapped error names the cause; local replacement does not close a
 	// live association.
 	ErrASPProcedureSuperseded = errors.New("ASP procedure superseded")
+
+	// ErrOrderlyShutdown identifies a request ended by ShutdownContext's orderly
+	// withdrawal (RFC 4666 §§4.3.4.2, 4.3.4.4, 4.9). It is the expected end of
+	// the procedure, so no follow-up is required. It is always wrapped together
+	// with ErrASPProcedureSuperseded. Use errors.Is to match these sentinels.
+	//
+	// Let B be the call's baseline errors.Is match set, and let L be
+	// {ErrASPProcedureSuperseded, ErrOrderlyShutdown}. The new match set is
+	// exactly B union L when shutdown caused that call's outcome, and exactly
+	// B otherwise. This also holds for any published ManagementError Cause.
+	//
+	// A call observes shutdown when its request was refused or cancelled with
+	// the shared shutdown cause, or its selected outcome observed release and
+	// ShutdownContext won that release. A send error observes release only if
+	// release had begun when the send failed, independently of its error text.
+	// Association state at the later public return cannot label an unrelated
+	// validation or send failure. A caller's own context error is not labelled.
+	// Independent Close, Abort, peer/transport failure, lifetime cancellation
+	// and failed withdrawal do not label requests shutdown had not cancelled.
+	//
+	// Live refusals and cancel-all results retain the shared text "ASP procedure
+	// superseded by orderly shutdown", without closure matching. Other labelled
+	// errors have text "ASP procedure superseded by orderly shutdown: <original>"
+	// and retain the complete original state, write or terminal error chain.
+	// A recorded shutdown cancellation survives later teardown, including Abort,
+	// while the original terminal error retains its usual precedence.
+	//
+	// ShutdownContext retains its baseline context checks. If cancellation is
+	// noticed by one of those checks or a withdrawal step fails, that failure
+	// remains the termination cause. Cancellation arriving after the last such
+	// check does not replace ErrAssociationClosed on the final orderly release;
+	// release-affected calls still acquire L. There is no extra context check
+	// at release arbitration. Association.Err retains ErrAssociationClosed
+	// after that release and does not acquire the request label.
+	ErrOrderlyShutdown = errors.New("orderly shutdown")
 
 	ErrSCTPNotAlive      = errors.New("SCTP is no longer alive")
 	ErrInvalidState      = errors.New("invalid state")
@@ -388,7 +423,7 @@ var (
 
 // errASPProcedureShutdown is shared by admission refusal and pending-request
 // cancellation during the RFC 4666 §4.9 orderly withdrawal.
-var errASPProcedureShutdown = fmt.Errorf("%w by orderly shutdown", ErrASPProcedureSuperseded)
+var errASPProcedureShutdown = fmt.Errorf("%w by %w", ErrASPProcedureSuperseded, ErrOrderlyShutdown)
 
 // InvalidVersionError is used if a message with an unsupported version is received.
 type InvalidVersionError struct {

@@ -48,7 +48,7 @@ func (c *Association) beginASPActive(routingContext *params.Param) ([]*pendingRe
 // startGuardedASPActive rechecks and registers public activation atomically
 // with state changes. Confirmation follows the state commit (RFC 4666 §4.2);
 // callers perform transport writes only after this read lock is released.
-func (c *Association) startGuardedASPActive(routingContext *params.Param) ([]*pendingRequest, error) {
+func (c *Association) startGuardedASPActive(routingContext *params.Param, tracking ...*aspRequestContext) ([]*pendingRequest, error) {
 	c.muState.RLock()
 	defer c.muState.RUnlock()
 	state := c.state
@@ -56,7 +56,7 @@ func (c *Association) startGuardedASPActive(routingContext *params.Param) ([]*pe
 		state = c.localIPSPState
 	}
 	if state != StateASPInactive && state != StateASPActive {
-		return nil, c.explicitASPProcedureStateError()
+		return nil, c.explicitASPProcedureStateError(tracking...)
 	}
 	return c.startASPActive(routingContext)
 }
@@ -211,10 +211,14 @@ func (c *Association) beginASPInactiveRequest(ctx context.Context, routingContex
 // ActivateRoutingContexts starts the ASP Active procedure for the named
 // Application Servers. With no arguments it requests every configured Routing
 // Context. The request remains protected by T(ack) until all scoped Acks arrive.
-// While ShutdownContext is withdrawing, it returns ErrASPProcedureSuperseded without
-// writing a request. Like other immediate refusals from this method, it does
-// not publish a procedure-failure ManagementError.
-func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
+// A shutdown-caused ending additionally matches ErrOrderlyShutdown and
+// ErrASPProcedureSuperseded while preserving every original error-chain match.
+// See ErrOrderlyShutdown for the cause rules. A live refusal writes no request.
+// Like other immediate refusals from this method, it does not publish a
+// procedure-failure ManagementError.
+func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) (err error) {
+	tracking := &aspRequestContext{Context: context.Background()}
+	defer func() { err = c.labelShutdownError(err, tracking) }()
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
@@ -233,27 +237,31 @@ func (c *Association) ActivateRoutingContexts(routingContexts ...uint32) error {
 		state = c.localIPSPStateValue()
 	}
 	if state != StateASPInactive && state != StateASPActive {
-		return c.explicitASPProcedureStateError()
+		return c.explicitASPProcedureStateError(tracking)
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
 	if err != nil {
 		return err
 	}
-	pending, err := c.startGuardedASPActive(routingContext)
+	pending, err := c.startGuardedASPActive(routingContext, tracking)
 	if err != nil {
 		return err
 	}
-	_, err = c.writeASPActive(context.Background(), pending)
+	_, err = c.writeASPActive(tracking, pending)
 	return err
 }
 
 // DeactivateRoutingContexts starts the ASP Inactive procedure for the named
 // Application Servers. With no arguments it requests every configured Routing
 // Context. Local traffic eligibility changes only as the scoped Acks arrive.
-// While ShutdownContext is withdrawing, it returns ErrASPProcedureSuperseded without
-// writing a request. Like other immediate refusals from this method, it does
-// not publish a procedure-failure ManagementError.
-func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error {
+// A shutdown-caused ending additionally matches ErrOrderlyShutdown and
+// ErrASPProcedureSuperseded while preserving every original error-chain match.
+// See ErrOrderlyShutdown for the cause rules. A live refusal writes no request.
+// Like other immediate refusals from this method, it does not publish a
+// procedure-failure ManagementError.
+func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) (err error) {
+	tracking := &aspRequestContext{Context: context.Background()}
+	defer func() { err = c.labelShutdownError(err, tracking) }()
 	if c.role != RoleASP && c.role != RoleIPSP {
 		return ErrUnsupportedRole
 	}
@@ -272,13 +280,14 @@ func (c *Association) DeactivateRoutingContexts(routingContexts ...uint32) error
 		state = c.localIPSPStateValue()
 	}
 	if state != StateASPActive {
-		return c.explicitASPProcedureStateError()
+		return c.explicitASPProcedureStateError(tracking)
 	}
 	routingContext, err := c.outboundRoutingContexts(routingContexts)
 	if err != nil {
 		return err
 	}
-	return c.initiateASPInactive(routingContext)
+	_, err = c.beginASPInactive(tracking, routingContext)
+	return err
 }
 
 func (c *Association) outboundRoutingContexts(routingContexts []uint32) (*params.Param, error) {
