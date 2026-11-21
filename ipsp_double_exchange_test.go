@@ -495,7 +495,7 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateInactiveAck(t *testing.T) {
 	association.noteRoutingContextsAcked(params.NewRoutingContext(11))
 	association.terminating.Store(true)
 
-	request, err := association.beginASPInactive(context.Background(), params.NewRoutingContext(11))
+	request, err := association.beginASPInactiveRequest(context.Background(), params.NewRoutingContext(11), true)
 	if err != nil {
 		t.Fatalf("begin ASP Inactive: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateInactiveAck(t *testing.T) {
 	if err := association.waitTAck(context.Background(), request); err != nil {
 		t.Fatalf("wait for ASP Inactive Ack: %v", err)
 	}
-	if _, err := association.initiateASPDown(); err != nil {
+	if _, err := association.beginASPDown(context.Background(), true); err != nil {
 		t.Fatalf("initiate ASP Down: %v", err)
 	}
 
@@ -545,7 +545,7 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateActiveAck(t *testing.T) {
 	}
 
 	association.terminating.Store(true)
-	inactiveRequest, err := association.beginASPInactive(context.Background(), params.NewRoutingContext(11))
+	inactiveRequest, err := association.beginASPInactiveRequest(context.Background(), params.NewRoutingContext(11), true)
 	if err != nil {
 		t.Fatalf("begin ASP Inactive: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestIPSPDoubleExchangeShutdownIgnoresDuplicateActiveAck(t *testing.T) {
 	if err := waitASPTestAck(t, association, inactiveRequest); err != nil {
 		t.Fatalf("wait for ASP Inactive Ack: %v", err)
 	}
-	if _, err := association.initiateASPDown(); err != nil {
+	if _, err := association.beginASPDown(context.Background(), true); err != nil {
 		t.Fatalf("initiate ASP Down: %v", err)
 	}
 
@@ -977,7 +977,7 @@ func TestIPSPSingleASPSMDownAckReceivePathAfterLocalASPUp(t *testing.T) {
 	association.muState.Unlock()
 	association.terminating.Store(true)
 
-	request, err := association.initiateASPDown()
+	request, err := association.beginASPDown(context.Background(), true)
 	if err != nil {
 		t.Fatalf("send ASP Down: %v", err)
 	}
@@ -990,6 +990,7 @@ func TestIPSPSingleASPSMDownAckReceivePathAfterLocalASPUp(t *testing.T) {
 		TrafficToPeer:  StateASPDown,
 	})
 
+	association.terminating.Store(false)
 	if err := association.initiateASPSM(); err != nil {
 		t.Fatalf("start local ASP Up: %v", err)
 	}
@@ -1120,7 +1121,7 @@ func singleASPSMWithCompletedDownForTest(t *testing.T, retransmissions int) *Ass
 		TrafficToPeer:  StateASPActive,
 	})
 	association.terminating.Store(true)
-	request, err := association.initiateASPDown()
+	request, err := association.beginASPDown(context.Background(), true)
 	if err != nil {
 		t.Fatalf("send initial ASP Down: %v", err)
 	}
@@ -1144,6 +1145,7 @@ func singleASPSMWithCompletedDownForTest(t *testing.T, retransmissions int) *Ass
 	}) {
 		t.Fatalf("state after peer ASP Up = %+v, want both directions ASP-INACTIVE", got)
 	}
+	association.terminating.Store(false)
 	return association
 }
 

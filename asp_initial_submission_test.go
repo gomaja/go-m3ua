@@ -266,7 +266,7 @@ func TestShutdownSupersedesPendingProceduresAccurately(t *testing.T) {
 		c.startTAck(messages.NewAspDown(nil), requestAspDown),
 	}
 	c.terminating.Store(true)
-	c.startTAck(messages.NewAspDown(nil), requestAspDown)
+	c.startTAckRequest(messages.NewAspDown(nil), requestAspDown, true)
 	for _, request := range pending {
 		if err := receiveASPTest(t, request.result, "shutdown supersession"); !errors.Is(err, ErrASPProcedureSuperseded) {
 			t.Errorf("shutdown superseded %s on live association = %v", request.msg.MessageTypeName(), err)

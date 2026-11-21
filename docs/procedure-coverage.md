@@ -568,7 +568,30 @@ startup in all ASP/IPSP exchange models.
 `TestAutomaticActivationPrecedesConcurrentASPDown` checks automatic Active before
 concurrent Down. `TestAutomaticASPUpSupersedesExplicitCallerAccurately` and
 `TestShutdownSupersedesPendingProceduresAccurately` distinguish local replacement
-from association closure. `TestCloseRejectsLatePendingProcedureRegistration`
+from association closure.
+`TestShutdownRefusesEveryExplicitASPEntryPoint` covers all six public
+ASPSM/ASPTM request-registering methods and their existing failure-indication
+contracts. `TestShutdownRefusesExplicitASPBeforeWaitingOnGate`,
+`TestShutdownRefusesExplicitASPProcedureWaitingOnGate`,
+`TestShutdownRefusesASPProcedurePausedBeforeRegistration` and
+`TestShutdownRefusesASPUpPausedBeforeRegistration` check admission before the
+gate, after queuing, and after validation. Shutdown owns withdrawal from its
+terminating claim (RFC 4666 §4.9); `TestShutdownClaimOrdersWithRequestRegistration`
+checks that claim against request registration.
+`TestShutdownRefusalWinsStateCheckAfterValidation` preserves shutdown refusal
+when a later state check observes a concurrent withdrawal.
+`TestShutdownRefusesWholeMixedModeActivation` keeps a multi-message activation
+batch on one side of the shutdown claim.
+`TestShutdownRefusalPreservesExistingProcedureOwnership` prevents refused calls
+from completing an Up or retiring an activation.
+`TestShutdownOwnsWithdrawalForASPAndIPSP` checks acknowledged shutdown-owned
+ASPIA/ASPDN and refusal of competing procedures in ASP, IPSP Single Exchange and
+IPSP Double Exchange. The Linux raw-peer test
+`TestShutdownRefusesExplicitUpwardProceduresOnWire` holds the first withdrawal
+Ack for both inactive-first and down-first policies, checks Up/Active refusal,
+no later upward messages, successful shutdown and orderly transport EOF.
+`WriteSignal` is raw message submission and does not register a T(ack) request.
+`TestCloseRejectsLatePendingProcedureRegistration`
 prevents registration after teardown has swept pending requests. `TestSharedIPSPDownReportFollowsPerASDownCommit` checks shared
 IPSP DOWN memberships and T(r) before monitor publication.
 `TestAcknowledgementReportsFollowEveryStatusView` checks Up, Down, Active and

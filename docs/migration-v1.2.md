@@ -1066,6 +1066,21 @@ procedures, callers now receive `ErrASPProcedureSuperseded` instead of
 `ErrAssociationClosed` on a live association. The association stays open for
 local replacement; shutdown still closes it after its withdrawal sequence.
 
+Once `ShutdownContext` claims the association, it also refuses every new
+`ASPUp`, `ASPActive`, `ASPInactive`, `ASPDown`, `ActivateRoutingContexts` and
+`DeactivateRoutingContexts` request with an `"ASP procedure superseded by orderly shutdown"` error wrapping
+`ErrASPProcedureSuperseded`. This is a breaking change: finish explicit procedures
+before starting shutdown. Queued callers are checked again after acquiring the
+procedure gate, and registration is ordered with the shutdown claim so callers
+that passed validation cannot send a late request. A state change during
+withdrawal also retains the shutdown refusal for an already validated caller.
+Only shutdown's own
+ASPIA/ASPDN may register during withdrawal (RFC 4666 §§4.3.4.4, 4.3.4.2, 4.9).
+The four waiting ASP methods retain their procedure-failure `ManagementError`;
+the routing-context methods return immediate refusals without adding an
+indication. With an all-explicit policy, shutdown still just closes the
+association.
+
 No acknowledgement evidence is retained for a cancelled send. Later Active
 Acks use the ordinary duplicate and validation rules; M3UA has no request
 identifier that correlates one with the cancelled message. A later valid Active

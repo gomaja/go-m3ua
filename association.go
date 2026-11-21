@@ -215,8 +215,9 @@ type Association struct {
 	// beatData is the Heartbeat Data of the BEAT awaiting its Ack; empty
 	// when no BEAT is outstanding.
 	beatData []byte
-	// terminating suppresses the automatic ASP Up climb while Shutdown is
-	// completing the ASP Inactive/ASP Down sequence.
+	// terminating refuses new explicit ASP procedures and suppresses the
+	// automatic ASP Up climb while Shutdown owns withdrawal (RFC 4666 §4.9).
+	// Its CAS is ordered with request registration under tack.mu.
 	terminating atomic.Bool
 
 	// ackedRCs is the set of Routing Contexts the peer has acknowledged in an
@@ -410,6 +411,8 @@ type Association struct {
 	// WriteSignal. It is only set in tests, where the M3UA state machine is
 	// exercised without an SCTP association.
 	signalWriter func(m3 messages.M3UA) (int, error)
+	// beforeASPProcedureRegistration is a test seam; production leaves it nil.
+	beforeASPProcedureRegistration func()
 	// dataWriter is the raw DATA write test seam. Production leaves it nil and
 	// writes through sctpConn.
 	dataWriter func([]byte, *sctp.SndInfo) (int, error)
@@ -3592,6 +3595,16 @@ func (c *Association) Shutdown() error {
 // ShutdownContext is Close. An SGP Association has no withdrawal procedures to
 // run and closes immediately.
 //
+// From the moment this call claims shutdown, new ASPUp, ASPActive, ASPInactive,
+// ASPDown, ActivateRoutingContexts and DeactivateRoutingContexts procedures are
+// refused with ErrASPProcedureSuperseded, including queued callers and those
+// awaiting registration or observing a withdrawn state after validation.
+// No refused request is written. Only this shutdown's
+// own withdrawal can register. Existing requests are superseded before its
+// first withdrawal; the four waiting ASP methods publish their usual
+// procedure-failure ManagementError, while the routing-context methods retain
+// their immediate-error reporting contract.
+//
 // Neither Listener.Close nor Endpoint.Close calls it. An application that wants
 // RFC 4666 Section 4.9 option (a) on every association calls ShutdownContext on
 // each of them before closing their owner.
@@ -3599,7 +3612,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("nil shutdown context")
 	}
-	if !c.terminating.CompareAndSwap(false, true) {
+	if !c.claimShutdown() {
 		select {
 		case <-c.done:
 			return nil
@@ -3628,7 +3641,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 		if c.isIPSPDoubleExchange() {
 			routingContext = c.configuredLocalRoutingContextParam()
 		}
-		request, err := c.beginASPInactive(ctx, routingContext)
+		request, err := c.beginASPInactiveRequest(ctx, routingContext, true)
 		if err == nil {
 			err = c.waitTAck(ctx, request)
 		}
@@ -3639,7 +3652,7 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 
 	if (state == StateASPActive || state == StateASPInactive) &&
 		c.aspProcedureMode(aspProcedureDown) == ASPProcedureAutomatic {
-		request, err := c.initiateASPDown()
+		request, err := c.beginASPDown(ctx, true)
 		if err == nil {
 			err = c.waitTAck(ctx, request)
 		}
@@ -3649,6 +3662,17 @@ func (c *Association) ShutdownContext(ctx context.Context) error {
 	}
 
 	return c.releaseAfterWithdrawal()
+}
+
+// claimShutdown orders the terminating CAS with T(ack) registration. Do not
+// acquire muState or retryMu while holding tack.mu: registration can already
+// hold muState, and the existing withdrawal fence orders retryMu before tack.mu.
+func (c *Association) claimShutdown() bool {
+	if c.tack != nil {
+		c.tack.mu.Lock()
+		defer c.tack.mu.Unlock()
+	}
+	return c.terminating.CompareAndSwap(false, true)
 }
 
 // releaseAfterWithdrawal is ShutdownContext's release once nothing is left to

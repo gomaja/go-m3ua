@@ -477,7 +477,7 @@ func TestASPActiveRegistersBeforeDownCanBeCommitted(t *testing.T) {
 				}
 				return c.ActivateRoutingContexts()
 			})
-			if !awaitASPTestStack(t, call, "(*Association).claimASPUpCompletion(") {
+			if !awaitASPTestStack(t, call, "(*Association).startASPActive(", "lockSlow(") {
 				t.Fatalf("Active returned before registration: %v", call.err)
 			}
 			if c.muState.TryLock() {

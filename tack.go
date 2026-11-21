@@ -183,10 +183,34 @@ func (c *Association) tackInterval() time.Duration {
 // answer just adds load to a network already in trouble; the budget converts a
 // silent hang into a reportable failure. TAckRetries configures it.
 func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingRequest {
+	return c.startTAckRequest(msg, ackFor, false)
+}
+
+// startTAckRequest distinguishes ShutdownContext's own withdrawal from every
+// other registration, including explicit Down/Inactive requests of the same type.
+func (c *Association) startTAckRequest(msg messages.M3UA, ackFor requestKind, shutdownOwned bool) *pendingRequest {
 	if c.tack == nil {
 		return nil
 	}
+	req := c.prepareTAckRequest(msg, ackFor, shutdownOwned)
+	if shutdownOwned {
+		c.tack.retryMu.Lock()
+	}
+	c.tack.mu.Lock()
+	registered := c.registerTAckLocked(msg, req, ackFor, shutdownOwned)
+	c.tack.mu.Unlock()
+	if shutdownOwned {
+		c.tack.retryMu.Unlock()
+	}
+	if registered {
+		go c.runTAck(req, ackFor)
+	}
+	return req
+}
 
+// prepareTAckRequest snapshots a request before admission without holding any
+// T(ack) lock. A batch prepares every scope before its single registration claim.
+func (c *Association) prepareTAckRequest(msg messages.M3UA, ackFor requestKind, shutdownOwned bool) *pendingRequest {
 	retryMessage, err := cloneTAckMessage(msg)
 	req := &pendingRequest{
 		msg:    retryMessage,
@@ -222,38 +246,60 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 		}
 	}
 
-	// Only an orderly-termination boundary waits behind an in-flight retry.
-	// Ordinary request registration must remain independent: a newer ASP Up can
-	// supersede an old timer whose write is blocked, and waiting for that write
-	// here would deadlock the caller that owns the release/cancellation path.
-	terminationBoundary := c.terminating.Load() &&
-		(ackFor == requestAspInactive || ackFor == requestAspDown)
-	if terminationBoundary {
-		c.tack.retryMu.Lock()
+	if !shutdownOwned && c.beforeASPProcedureRegistration != nil {
+		c.beforeASPProcedureRegistration()
 	}
-	c.tack.mu.Lock()
+
+	return req
+}
+
+// registerTAckLocked runs under tack.mu, which also orders the terminating CAS.
+// Shutdown's owner additionally holds retryMu to drain old writes before its
+// cancel-all. This function neither sends nor waits nor invokes a callback.
+func (c *Association) registerTAckLocked(msg messages.M3UA, req *pendingRequest, ackFor requestKind, shutdownOwned bool) bool {
+	if req.failure.Load() != nil {
+		return false
+	}
+	if shutdownOwned {
+		// Preserve the withdrawal boundary even when a peer withdrawal also
+		// refuses this step: old requests must already be stopped (§4.9).
+		select {
+		case <-c.done:
+			req.finish(ErrAssociationClosed)
+			return false
+		default:
+		}
+		c.cancelAllTAckLocked(errASPProcedureShutdown)
+	}
+	if err := c.tackRegistrationErrorLocked(ackFor, shutdownOwned); err != nil {
+		req.finish(err)
+		return false
+	}
+	c.registerAcceptedTAckLocked(msg, req, ackFor)
+	return true
+}
+
+// tackRegistrationErrorLocked makes one admission decision for a request or
+// an entire homogeneous ASP Active batch. In particular, done can close
+// independently of tack.mu, so a batch must not recheck it between insertions.
+func (c *Association) tackRegistrationErrorLocked(ackFor requestKind, shutdownOwned bool) error {
 	select {
 	case <-c.done:
-		c.tack.mu.Unlock()
-		if terminationBoundary {
-			c.tack.retryMu.Unlock()
-		}
-		req.finish(ErrAssociationClosed)
-		return req
+		return ErrAssociationClosed
 	default:
 	}
-	if terminationBoundary {
-		c.cancelAllTAckLocked(fmt.Errorf("%w by orderly shutdown", ErrASPProcedureSuperseded))
+	// The same lock orders ShutdownContext's terminating CAS (RFC 4666 §4.9).
+	if c.terminating.Load() && !shutdownOwned {
+		return errASPProcedureShutdown
 	}
 	if c.tack.aspWithdrawalHandling && ackFor != requestAspDown ||
 		c.tack.peerDownSuperseded && (ackFor == requestAspActive || ackFor == requestAspInactive) {
-		c.tack.mu.Unlock()
-		if terminationBoundary {
-			c.tack.retryMu.Unlock()
-		}
-		req.finish(fmt.Errorf("%w by peer ASP withdrawal", ErrASPProcedureSuperseded))
-		return req
+		return fmt.Errorf("%w by peer ASP withdrawal", ErrASPProcedureSuperseded)
 	}
+	return nil
+}
+
+func (c *Association) registerAcceptedTAckLocked(msg messages.M3UA, req *pendingRequest, ackFor requestKind) {
 	if ackFor == requestAspUp {
 		c.tack.peerDownSuperseded = false
 		// A fresh procedure retires the previous completion and copy ledger.
@@ -275,13 +321,6 @@ func (c *Association) startTAck(msg messages.M3UA, ackFor requestKind) *pendingR
 		}
 	}
 	c.tack.pending[msg] = req
-	c.tack.mu.Unlock()
-	if terminationBoundary {
-		c.tack.retryMu.Unlock()
-	}
-
-	go c.runTAck(req, ackFor)
-	return req
 }
 
 func (p *pendingRequest) cancel() {
