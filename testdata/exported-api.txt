@@ -1158,6 +1158,7 @@ var ErrNoMatchingMTPRoute
 var ErrNoMatchingRoutingKey
 var ErrNotEstablished
 var ErrNotificationQueueFull
+var ErrOrderlyShutdown
 var ErrPartialDataWrite
 var ErrProcedureMessage
 var ErrProtocolDataTooLarge

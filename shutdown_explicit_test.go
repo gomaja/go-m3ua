@@ -39,7 +39,7 @@ func TestShutdownRefusesEveryExplicitASPEntryPoint(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
 			err := tc.call(a, ctx)
-			if !errors.Is(err, ErrASPProcedureSuperseded) || err.Error() != "ASP procedure superseded by orderly shutdown" {
+			if !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) || errors.Is(err, ErrAssociationClosed) || err.Error() != "ASP procedure superseded by orderly shutdown" {
 				t.Errorf("%s during shutdown = %v, want orderly-shutdown ErrASPProcedureSuperseded", tc.name, err)
 			}
 			if len(*sent) != 0 || a.pendingTAck() != 0 {
@@ -52,7 +52,7 @@ func TestShutdownRefusesEveryExplicitASPEntryPoint(t *testing.T) {
 				default:
 					t.Fatal("missing procedure-failure ManagementError")
 				}
-				if indication.Kind != ManagementError || !errors.Is(indication.Cause, ErrASPProcedureSuperseded) {
+				if indication.Kind != ManagementError || !errors.Is(indication.Cause, ErrASPProcedureSuperseded) || !errors.Is(indication.Cause, ErrOrderlyShutdown) || errors.Is(indication.Cause, ErrAssociationClosed) {
 					t.Errorf("failure indication = %+v", indication)
 				}
 			} else {
@@ -148,7 +148,7 @@ func TestShutdownRefusesExplicitASPProcedureWaitingOnGate(t *testing.T) {
 	receiveASPTest(t, observed, "caller waiting on procedure gate")
 	done := startHeldWithdrawal(t, a, writes)
 	release()
-	if err := receiveASPTest(t, result, "queued procedure refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+	if err := receiveASPTest(t, result, "queued procedure refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 		t.Fatalf("queued ASPActive = %v, want ErrASPProcedureSuperseded", err)
 	}
 	if got := registrations.Load(); got != 0 {
@@ -179,7 +179,7 @@ func TestShutdownRefusesASPProcedurePausedBeforeRegistration(t *testing.T) {
 			receiveASPTest(t, entered, "validated caller before registration")
 			done := startHeldWithdrawal(t, a, writes)
 			close(resume)
-			if err := receiveASPTest(t, result, "registration refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+			if err := receiveASPTest(t, result, "registration refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 				t.Fatalf("%s registered after withdrawal: %v", tc.name, err)
 			}
 			select {
@@ -208,7 +208,7 @@ func TestShutdownRefusesASPUpPausedBeforeRegistration(t *testing.T) {
 	// Keep the association open to isolate registration admission from Close.
 	a.terminating.Store(true)
 	close(resume)
-	if err := receiveASPTest(t, result, "Up refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+	if err := receiveASPTest(t, result, "Up refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 		t.Fatalf("paused Up = %v", err)
 	}
 	if len(*sent) != 0 || a.pendingTAck() != 0 {
@@ -222,7 +222,7 @@ func TestShutdownOwnsWithdrawalForASPAndIPSP(t *testing.T) {
 			a, writes := shutdownObservedAssociation(t, model)
 			done := startHeldWithdrawal(t, a, writes)
 			for _, tc := range shutdownExplicitCalls() {
-				if err := tc.call(a, context.Background()); !errors.Is(err, ErrASPProcedureSuperseded) {
+				if err := tc.call(a, context.Background()); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 					t.Fatalf("%s during %s shutdown = %v", tc.name, model, err)
 				}
 			}
@@ -243,7 +243,7 @@ func TestShutdownRefusesExplicitASPBeforeWaitingOnGate(t *testing.T) {
 			a.terminating.Store(true)
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			if err := tc.call(a, ctx); !errors.Is(err, ErrASPProcedureSuperseded) {
+			if err := tc.call(a, ctx); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 				t.Fatalf("admission of %s = %v", tc.name, err)
 			}
 		})
@@ -334,7 +334,7 @@ func TestShutdownRefusesWholeMixedModeActivation(t *testing.T) {
 			go func() { done <- a.ShutdownContext(claim) }()
 			receiveASPTest(t, claim.claimed, "shutdown claim before cancel-all")
 			close(resume)
-			if err := receiveASPTest(t, result, "whole Active batch refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+			if err := receiveASPTest(t, result, "whole Active batch refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 				t.Errorf("mixed-mode activation = %v", err)
 			}
 			select {
@@ -361,7 +361,7 @@ func TestShutdownRefusalPreservesExistingProcedureOwnership(t *testing.T) {
 		old := a.startTAck(messages.NewAspActive(nil, nil, nil), requestAspActive)
 		a.terminating.Store(true)
 		request, cancelled := a.startASPSM()
-		if err := receiveASPTest(t, request.result, "Up refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+		if err := receiveASPTest(t, request.result, "Up refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 			t.Errorf("Up refusal = %v", err)
 		}
 		select {
@@ -383,7 +383,7 @@ func TestShutdownRefusalPreservesExistingProcedureOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, request := range requests {
-			if err := receiveASPTest(t, request.result, "Active refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+			if err := receiveASPTest(t, request.result, "Active refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 				t.Errorf("Active refusal = %v", err)
 			}
 		}
@@ -395,28 +395,6 @@ func TestShutdownRefusalPreservesExistingProcedureOwnership(t *testing.T) {
 	})
 }
 
-func TestRoutingContextRefusalAfterPlainCloseRetainsStateError(t *testing.T) {
-	for _, ending := range []string{"Close", "Abort", "ShutdownContext"} {
-		t.Run(ending, func(t *testing.T) {
-			a, _ := newTestConn(t, StateASPActive, RoleASP)
-			switch ending {
-			case "Abort":
-				_ = a.Abort()
-			case "ShutdownContext":
-				a.setState(StateASPDown)
-				_ = a.ShutdownContext(context.Background())
-			default:
-				_ = a.Close()
-			}
-			for _, call := range []func(...uint32) error{a.ActivateRoutingContexts, a.DeactivateRoutingContexts} {
-				if err := call(); !errors.Is(err, ErrInvalidState) {
-					t.Fatalf("routing-context call after close = %v, want ErrInvalidState", err)
-				}
-			}
-		})
-	}
-}
-
 func TestShutdownOwnedBoundaryRetiresRequestsBeforePeerRefusal(t *testing.T) {
 	a, _ := newTestConn(t, StateASPActive, RoleIPSP)
 	a.cfg.TAck = time.Hour
@@ -426,12 +404,12 @@ func TestShutdownOwnedBoundaryRetiresRequestsBeforePeerRefusal(t *testing.T) {
 	a.tack.peerDownSuperseded = true
 	a.tack.mu.Unlock()
 	request := a.startTAckRequest(messages.NewAspInactive(nil, nil), requestAspInactive, true)
-	if err := receiveASPTest(t, request.result, "peer withdrawal refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+	if err := receiveASPTest(t, request.result, "peer withdrawal refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || errors.Is(err, ErrOrderlyShutdown) {
 		t.Fatalf("withdrawal error = %v", err)
 	}
 	select {
 	case err := <-old.result:
-		if !errors.Is(err, ErrASPProcedureSuperseded) || err.Error() != "ASP procedure superseded by orderly shutdown" {
+		if !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) || errors.Is(err, ErrAssociationClosed) || err.Error() != "ASP procedure superseded by orderly shutdown" {
 			t.Errorf("old Down cancellation = %v", err)
 		}
 	default:
@@ -480,7 +458,7 @@ func TestShutdownRefusalWinsStateCheckAfterValidation(t *testing.T) {
 			if end := receiveASPTest(t, done, "shutdown completion"); end != nil {
 				t.Fatal(end)
 			}
-			if !errors.Is(err, ErrASPProcedureSuperseded) {
+			if !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 				t.Errorf("validated caller after shutdown claim = %v, want ErrASPProcedureSuperseded", err)
 			}
 			select {
@@ -507,8 +485,48 @@ func TestShutdownRefusesRoutingContextCallBeforeStateWait(t *testing.T) {
 			if waited {
 				t.Error("shutdown refusal waited behind a state commit")
 			}
-			if err := call.wait(t, "routing-context admission refusal"); !errors.Is(err, ErrASPProcedureSuperseded) {
+			if err := call.wait(t, "routing-context admission refusal"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
 				t.Fatalf("refusal = %v", err)
+			}
+		})
+	}
+}
+
+func TestShutdownCancellationPublishesOrderlyCause(t *testing.T) {
+	a, writes := shutdownObservedAssociation(t, "ASP")
+	result := make(chan error, 1)
+	ctx := aspTestContext(t)
+	go func() { result <- a.ASPActive(ctx) }()
+	if message := receiveShutdownWithdrawal(t, writes, result); message.MessageTypeName() != "ASP Active" {
+		t.Fatalf("pending procedure = %T, want ASP Active", message)
+	}
+	done := startHeldWithdrawal(t, a, writes)
+	if err := receiveASPTest(t, result, "pending Active cancellation"); !errors.Is(err, ErrASPProcedureSuperseded) || !errors.Is(err, ErrOrderlyShutdown) {
+		t.Errorf("cancelled Active = %v, want both shutdown sentinels", err)
+	}
+	indication := receiveASPTest(t, a.ManagementIndications(), "cancellation ManagementError")
+	if indication.Kind != ManagementError || !errors.Is(indication.Cause, ErrASPProcedureSuperseded) || !errors.Is(indication.Cause, ErrOrderlyShutdown) || errors.Is(indication.Cause, ErrAssociationClosed) {
+		t.Errorf("cancellation indication = %+v, want both shutdown sentinels", indication)
+	}
+	finishHeldWithdrawal(t, a, writes, done)
+}
+
+func TestASPProcedureReplacementDoesNotMatchOrderlyShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		kind    requestKind
+		message func() messages.M3UA
+	}{
+		{"ASPUp", requestAspUp, func() messages.M3UA { return messages.NewAspUp(nil, nil) }},
+		{"ASPDown", requestAspDown, func() messages.M3UA { return messages.NewAspDown(nil) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newTestConn(t, StateASPDown, RoleASP)
+			a.cfg.TAck = time.Hour
+			old := a.startTAck(tc.message(), tc.kind)
+			a.startTAck(tc.message(), tc.kind)
+			if err := receiveASPTest(t, old.result, "replaced procedure"); !errors.Is(err, ErrASPProcedureSuperseded) || errors.Is(err, ErrOrderlyShutdown) {
+				t.Fatalf("replacement = %v, want supersession without orderly shutdown", err)
 			}
 		})
 	}

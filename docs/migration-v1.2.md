@@ -70,11 +70,15 @@ Application Server configuration (`ASConfig.TrafficMode`), or
 available for encoding and decoding messages independently of an Association.
 
 `RegisterRoutingKeys` also refuses new registration once `ShutdownContext`
-claims withdrawal, with `ErrASPProcedureSuperseded` wrapping the shared orderly
-shutdown cause. Its final admission check runs under the control send lock, so
-a call admitted earlier cannot send REG REQ after shutdown's first withdrawal.
+claims withdrawal, with an error matching both `ErrOrderlyShutdown` and
+`ErrASPProcedureSuperseded`. Its final admission check runs under the control
+send lock, so a call admitted earlier cannot send REG REQ after shutdown's
+first withdrawal.
 Already outstanding REG waiters still await a response, caller cancellation or
-association closure; shutdown's claim alone does not cancel them.
+association closure; shutdown's claim alone does not cancel them. If shutdown's
+own orderly release ends a request, its error retains every original match and
+adds `ErrOrderlyShutdown` with `ErrASPProcedureSuperseded`. Independent Close,
+Abort and failures do not label a request that shutdown had not already cancelled.
 `DeregisterApplicationServers` stays allowed during withdrawal. RFC 4666 §4.9(a)
 specifies "ASP-INACTIVE, DEREG (optionally whenever dynamic registration is
 used), and ASP-DOWN" before SCTP Shutdown. Both typed RKM calls retain their
@@ -1100,15 +1104,52 @@ Down replaces the same pending procedure, or orderly shutdown cancels pending
 procedures, callers now receive `ErrASPProcedureSuperseded` instead of
 `ErrAssociationClosed` on a live association. The association stays open for
 local replacement; shutdown still closes it after its withdrawal sequence.
+Let `B` be a call's baseline `errors.Is` match set and
+`L = {ErrASPProcedureSuperseded, ErrOrderlyShutdown}`. The new match set is
+exactly `B ∪ L` when shutdown caused that call's outcome, and exactly `B`
+otherwise. The same rule applies to any published `ManagementError` Cause.
+`ErrOrderlyShutdown` identifies the expected end of orderly withdrawal
+(RFC 4666 §§4.3.4.2, 4.3.4.4, 4.9), so no follow-up is required.
 
-Once `ShutdownContext` claims the association, it also refuses every new
-`ASPUp`, `ASPActive`, `ASPInactive`, `ASPDown`, `ActivateRoutingContexts` and
-`DeactivateRoutingContexts` request with an `"ASP procedure superseded by orderly shutdown"` error wrapping
-`ErrASPProcedureSuperseded`. This is a breaking change: finish explicit procedures
-before starting shutdown. Queued callers are checked again after acquiring the
-procedure gate, and registration is ordered with the shutdown claim so callers
-that passed validation cannot send a late request. A state change during
-withdrawal also retains the shutdown refusal for an already validated caller.
+Causation belongs to the call: its request was refused or cancelled with the
+shared shutdown cause, or its selected outcome observed release and
+`ShutdownContext` won that release. A send failure counts as release-caused
+only when release had begun when the send failed, as observed by the write
+path. Its error text is irrelevant. Later association shutdown cannot label
+an earlier validation or independent send failure. The caller's own context
+error is not labelled. Independent Close, Abort, peer/transport failure,
+lifetime cancellation and failed withdrawal do not label requests that
+shutdown had not already cancelled.
+
+| Original outcome | Shutdown-labelled outcome |
+| --- | --- |
+| Live refusal or cancel-all: `ASP procedure superseded by orderly shutdown` | Same text; matches L without closure matching |
+| Any other shutdown-caused original error | `ASP procedure superseded by orderly shutdown: <original>`; matches exactly B ∪ L |
+
+A cancellation consumed after teardown retains the original terminal error's
+precedence and matches, including `ErrAssociationAborted` when Abort won. Its
+recorded shutdown label survives that teardown. State and write chains retain
+their existing matches; closure matching is present only where B contained it.
+The `feat:` change loses no previous `errors.Is` match. Error text changes on
+labelled paths other than the existing live shutdown refusal.
+
+`ShutdownContext` preserves its baseline context checks. Cancellation observed
+by an existing check or a failed withdrawal remains the termination cause.
+If cancellation arrives after the last such check and baseline would release
+with `ErrAssociationClosed`, it remains shutdown's own orderly release: affected
+calls match `B ∪ L`. No extra context check runs during final release, and no
+caller context method runs under release arbitration. `Association.Err()` keeps
+`ErrAssociationClosed` after that release and does not acquire L.
+
+
+
+During live withdrawal, `ShutdownContext` refuses new `ASPUp`, `ASPActive`,
+`ASPInactive`, `ASPDown`, `ActivateRoutingContexts` and
+`DeactivateRoutingContexts` requests with the shared shutdown error above.
+Queued callers are checked again after acquiring the procedure gate, and
+registration is ordered with the shutdown claim so callers that passed
+validation cannot send a late request. After release, the original state,
+terminal or write error still determines the preserved matches.
 Only shutdown's own
 ASPIA/ASPDN may register during withdrawal (RFC 4666 §§4.3.4.4, 4.3.4.2, 4.9).
 The four waiting ASP methods retain their procedure-failure `ManagementError`;

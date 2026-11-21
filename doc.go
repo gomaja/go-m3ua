@@ -168,7 +168,16 @@ state lock before writing or waiting for an Ack. A pending ASP Up or ASP Down
 replaced by a newer local request of the same kind, and procedures cancelled by
 orderly shutdown, now return ErrASPProcedureSuperseded instead of
 ErrAssociationClosed on a live association. Local replacement leaves it open;
-shutdown still completes its withdrawal and closes it.
+shutdown still completes its withdrawal and closes it. A call's errors.Is match set
+becomes B union {ErrASPProcedureSuperseded, ErrOrderlyShutdown} exactly when
+shutdown caused that call's outcome, and remains B otherwise, where B is its
+baseline match set. This also applies to any ManagementError Cause. Terminal
+errors retain their usual precedence after teardown, and a recorded shutdown
+cancellation keeps its label even if Close or Abort later wins. The caller's own
+context error is not labelled. Other releases and failed withdrawals do not
+label a request that shutdown had not already cancelled. Association.Err still
+reports ErrAssociationClosed after an orderly release. These request outcomes
+require no follow-up; see ErrOrderlyShutdown for the full contract.
 
 ManagementASPActivation reports every scope in a validated Active Ack accepted
 without an outstanding request or duplicate history. It is ASP-ACTIVATION, not

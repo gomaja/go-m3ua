@@ -104,10 +104,21 @@ func (c *Association) aspProcedureMode(procedure aspProcedure) ASPProcedureMode 
 // exchange.
 // Success follows the confirmed state commit, visible through State,
 // IPSPState and Endpoint.AssociationStatus before the next procedure starts.
-// While ShutdownContext is withdrawing, this method refuses new procedures with
-// ErrASPProcedureSuperseded and publishes the usual ManagementError.
+// A shutdown-caused ending additionally matches ErrOrderlyShutdown and
+// ErrASPProcedureSuperseded while preserving every original error-chain match.
+// See ErrOrderlyShutdown for the cause rules and caller-context exception.
+// The usual ManagementError carries the same cause, including after teardown.
 func (c *Association) ASPUp(ctx context.Context) (err error) {
-	defer func() { c.notifyASPProcedureFailure("ASP Up", nil, err) }()
+	tracking := &aspRequestContext{Context: ctx}
+	if ctx != nil {
+		ctx = tracking
+	}
+	report := c.retainASPProcedureReport()
+	defer func() {
+		err = c.labelShutdownError(err, tracking)
+		c.notifyASPProcedureFailure("ASP Up", nil, err)
+		c.releaseASPProcedureReport(report)
+	}()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -129,7 +140,7 @@ func (c *Association) ASPUp(ctx context.Context) (err error) {
 	}
 	if state != StateASPDown {
 		c.muState.RUnlock()
-		return c.explicitASPProcedureStateError()
+		return c.explicitASPProcedureStateError(tracking)
 	}
 	request, cancelled := c.startASPSM()
 	c.muState.RUnlock()
@@ -143,10 +154,21 @@ func (c *Association) ASPUp(ctx context.Context) (err error) {
 
 // ASPDown initiates the RFC 4666 Section 4.3.4.2 ASP Down procedure and waits
 // for ASP Down Ack.
-// While ShutdownContext is withdrawing, this method refuses new procedures with
-// ErrASPProcedureSuperseded and publishes the usual ManagementError.
+// A shutdown-caused ending additionally matches ErrOrderlyShutdown and
+// ErrASPProcedureSuperseded while preserving every original error-chain match.
+// See ErrOrderlyShutdown for the cause rules and caller-context exception.
+// The usual ManagementError carries the same cause, including after teardown.
 func (c *Association) ASPDown(ctx context.Context) (err error) {
-	defer func() { c.notifyASPProcedureFailure("ASP Down", nil, err) }()
+	tracking := &aspRequestContext{Context: ctx}
+	if ctx != nil {
+		ctx = tracking
+	}
+	report := c.retainASPProcedureReport()
+	defer func() {
+		err = c.labelShutdownError(err, tracking)
+		c.notifyASPProcedureFailure("ASP Down", nil, err)
+		c.releaseASPProcedureReport(report)
+	}()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -161,9 +183,9 @@ func (c *Association) ASPDown(ctx context.Context) (err error) {
 	switch c.localASPProcedureState() {
 	case StateASPInactive, StateASPActive:
 	default:
-		return c.explicitASPProcedureStateError()
+		return c.explicitASPProcedureStateError(tracking)
 	}
-	request, err := c.initiateASPDown()
+	request, err := c.beginASPDown(&aspRequestContext{Context: context.Background(), owner: tracking}, false)
 	if err != nil {
 		return err
 	}
@@ -180,10 +202,21 @@ func (c *Association) ASPDown(ctx context.Context) (err error) {
 // received by the peer (RFC 4666 §4.3.4.3). A later accepted ASP Active Ack can
 // activate its scopes and produces ManagementASPActivation when no request is
 // outstanding. The application may retain the grant or call ASPInactive.
-// While ShutdownContext is withdrawing, this method refuses new procedures with
-// ErrASPProcedureSuperseded and publishes the usual ManagementError.
+// A shutdown-caused ending additionally matches ErrOrderlyShutdown and
+// ErrASPProcedureSuperseded while preserving every original error-chain match.
+// See ErrOrderlyShutdown for the cause rules and caller-context exception.
+// The usual ManagementError carries the same cause, including after teardown.
 func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) {
-	defer func() { c.notifyASPProcedureFailure("ASP Active", keys, err) }()
+	tracking := &aspRequestContext{Context: ctx}
+	if ctx != nil {
+		ctx = tracking
+	}
+	report := c.retainASPProcedureReport()
+	defer func() {
+		err = c.labelShutdownError(err, tracking)
+		c.notifyASPProcedureFailure("ASP Active", keys, err)
+		c.releaseASPProcedureReport(report)
+	}()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -198,13 +231,13 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 	switch c.localASPProcedureState() {
 	case StateASPInactive, StateASPActive:
 	default:
-		return c.explicitASPProcedureStateError()
+		return c.explicitASPProcedureStateError(tracking)
 	}
 	routingContext, err := c.routingContextParamForASPProcedure(keys)
 	if err != nil {
 		return err
 	}
-	requests, err := c.startGuardedASPActive(routingContext)
+	requests, err := c.startGuardedASPActive(routingContext, tracking)
 	if err == nil {
 		requests, err = c.writeASPActive(ctx, requests)
 	}
@@ -217,10 +250,21 @@ func (c *Association) ASPActive(ctx context.Context, keys ...ASKey) (err error) 
 // ASPInactive initiates the RFC 4666 Section 4.3.4.4 ASP Inactive procedure
 // for the exact Application Servers and waits for ASP Inactive Ack. With no
 // keys it requests every configured local AS.
-// While ShutdownContext is withdrawing, this method refuses new procedures with
-// ErrASPProcedureSuperseded and publishes the usual ManagementError.
+// A shutdown-caused ending additionally matches ErrOrderlyShutdown and
+// ErrASPProcedureSuperseded while preserving every original error-chain match.
+// See ErrOrderlyShutdown for the cause rules and caller-context exception.
+// The usual ManagementError carries the same cause, including after teardown.
 func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error) {
-	defer func() { c.notifyASPProcedureFailure("ASP Inactive", keys, err) }()
+	tracking := &aspRequestContext{Context: ctx}
+	if ctx != nil {
+		ctx = tracking
+	}
+	report := c.retainASPProcedureReport()
+	defer func() {
+		err = c.labelShutdownError(err, tracking)
+		c.notifyASPProcedureFailure("ASP Inactive", keys, err)
+		c.releaseASPProcedureReport(report)
+	}()
 	if err := c.validateExplicitASPProcedure(ctx); err != nil {
 		return err
 	}
@@ -233,7 +277,7 @@ func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error
 		return ErrNoConfiguredAS
 	}
 	if c.localASPProcedureState() != StateASPActive {
-		return c.explicitASPProcedureStateError()
+		return c.explicitASPProcedureStateError(tracking)
 	}
 	routingContext, err := c.routingContextParamForASPProcedure(keys)
 	if err != nil {
@@ -249,10 +293,13 @@ func (c *Association) ASPInactive(ctx context.Context, keys ...ASKey) (err error
 // explicitASPProcedureStateError preserves shutdown's refusal if withdrawal
 // changed state after initial admission validation (RFC 4666 §4.9). Completed
 // teardown and ordinary state errors retain their existing behavior.
-func (c *Association) explicitASPProcedureStateError() error {
+func (c *Association) explicitASPProcedureStateError(tracking ...*aspRequestContext) error {
 	if c.terminating.Load() {
 		select {
 		case <-c.done:
+			if len(tracking) != 0 {
+				tracking[0].observeRelease(c)
+			}
 		default:
 			return errASPProcedureShutdown
 		}
@@ -271,10 +318,14 @@ func (c *Association) validateExplicitASPProcedure(ctx context.Context) error {
 		return errors.New("nil ASP procedure context")
 	}
 	if err := ctx.Err(); err != nil {
+		if tracking := procedureObservation(ctx); tracking != nil {
+			tracking.callerContextError = true
+		}
 		return err
 	}
 	select {
 	case <-c.done:
+		procedureObservation(ctx).observeRelease(c)
 		if err := c.Err(); err != nil {
 			return err
 		}
@@ -300,8 +351,12 @@ func (c *Association) acquireExplicitASPProcedure(ctx context.Context) (func(), 
 		}
 		return release, nil
 	case <-ctx.Done():
+		if tracking := procedureObservation(ctx); tracking != nil {
+			tracking.callerContextError = true
+		}
 		return nil, ctx.Err()
 	case <-c.done:
+		procedureObservation(ctx).observeRelease(c)
 		if err := c.Err(); err != nil {
 			return nil, err
 		}
@@ -426,4 +481,29 @@ func (c *Association) waitASPProcedureRequests(ctx context.Context, requests []*
 		}
 	}
 	return nil
+}
+
+// retainASPProcedureReport keeps an admitted caller's deferred M-ERROR deliverable
+// after teardown. Neither teardown nor this count waits for the caller to run.
+func (c *Association) retainASPProcedureReport() bool {
+	if c == nil {
+		return false
+	}
+	c.muMgmt.Lock()
+	defer c.muMgmt.Unlock()
+	if c.mgmtClosing || c.mgmtClosed {
+		return false
+	}
+	c.aspProcedureReports++
+	return true
+}
+
+func (c *Association) releaseASPProcedureReport(retained bool) {
+	if !retained {
+		return
+	}
+	c.muMgmt.Lock()
+	defer c.muMgmt.Unlock()
+	c.aspProcedureReports--
+	c.closeManagementIfIdleLocked()
 }
